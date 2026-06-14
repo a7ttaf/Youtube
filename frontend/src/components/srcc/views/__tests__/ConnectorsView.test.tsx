@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import ConnectorsView from "@/components/srcc/views/ConnectorsView";
+import { ConnectorsView } from "@/components/srcc/views/ConnectorsView";
 import type {
   AdsensePaymentListResponse,
   ConnectorCredentialHealthResponse,
@@ -62,6 +62,7 @@ const HEALTH: ConnectorCredentialHealthResponse = {
       health_state: "healthy",
     },
   ],
+  pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
 };
 
 // Rich credential-health page exercising the auth_failed state + every telemetry
@@ -81,6 +82,7 @@ const HEALTH_AUTH_FAILED: ConnectorCredentialHealthResponse = {
       health_state: "auth_failed",
     },
   ],
+  pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
 };
 
 // Real-shaped AdSense payment list (AdSensePaymentEntry.to_api() + pagination).

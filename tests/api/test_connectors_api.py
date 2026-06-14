@@ -1628,6 +1628,10 @@ def test_credential_health_returns_telemetry_and_state_for_viewer(tmp_path):
     assert "token_expiry_at" in entry
     assert "last_refresh_error_class" in entry
     assert entry["health_state"] == "healthy"
+    assert body["pagination"]["limit"] == 50
+    assert body["pagination"]["offset"] == 0
+    assert body["pagination"]["returned"] == 1
+    assert body["pagination"]["has_more"] is False
 
 
 def test_credential_health_connector_scope_excludes_foreign_connector(tmp_path):
@@ -1863,5 +1867,45 @@ def test_derive_credential_health_state_unknown_without_telemetry():
         token_expiry_at=None,
         last_refresh_status=None,
         last_refresh_error_class=None,
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "unknown"
+
+
+def test_derive_credential_health_state_disabled_returns_unknown():
+    """A disabled credential with a prior success returns 'unknown', not 'healthy'."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="disabled",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "unknown"
+
+
+def test_derive_credential_health_state_revoked_returns_unknown():
+    """A revoked credential returns 'unknown', not 'healthy'."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="revoked",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="succeeded",
     )
     assert derive_credential_health_state(entry, as_of=as_of) == "unknown"

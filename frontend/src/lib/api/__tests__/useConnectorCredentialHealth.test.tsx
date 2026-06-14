@@ -36,6 +36,7 @@ const HEALTH: ConnectorCredentialHealthResponse = {
       health_state: "healthy",
     },
   ],
+  pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
 };
 
 function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067

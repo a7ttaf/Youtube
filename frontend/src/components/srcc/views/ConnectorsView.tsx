@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import type {
@@ -141,7 +141,7 @@ function formatDate(value: string): string { // skipcq: JS-0067
  * viewer sees the RESTRICTED_FINANCE_VALUE sentinel via the shared financeDisplay
  * gate rather than the real money value.
  */
-export default function ConnectorsView({ // skipcq: JS-0067
+export function ConnectorsView({ // skipcq: JS-0067
   canRunConnectors,
   canManageConnectors,
   canViewFinance,
@@ -202,6 +202,19 @@ export default function ConnectorsView({ // skipcq: JS-0067
   const credentialRows = credentials.data?.items ?? [];
   const paymentRows = payments.data?.items ?? [];
 
+  const handleReloadCredentials = useCallback(
+    () => credentials.reload(),
+    [credentials],
+  );
+  const handleReloadPayments = useCallback(
+    () => payments.reload(),
+    [payments],
+  );
+  const handleSynced = useCallback(
+    () => payments.reload(),
+    [payments],
+  );
+
   // ==========================================================================
   // Purpose: Run a connector pull for one credential row using the reason typed
   //   into the inline, always-visible "Sync reason" field (the button is already
@@ -256,7 +269,7 @@ export default function ConnectorsView({ // skipcq: JS-0067
           credentials={credentialRows}
           credentialsLoading={credentials.loading}
           credentialsError={credentials.error}
-          onReloadCredentials={() => credentials.reload()}
+          onReloadCredentials={handleReloadCredentials}
           canRunConnectors={canRunConnectors}
           canManageConnectors={canManageConnectors}
           reason={reason}
@@ -273,7 +286,7 @@ export default function ConnectorsView({ // skipcq: JS-0067
           payments={paymentRows}
           paymentsLoading={payments.loading}
           paymentsError={payments.error}
-          onReloadPayments={() => payments.reload()}
+          onReloadPayments={handleReloadPayments}
           canViewFinance={canViewFinance}
         />
 
@@ -282,7 +295,7 @@ export default function ConnectorsView({ // skipcq: JS-0067
           canRunConnectors={canRunConnectors}
           canViewConnectorHealth={canViewConnectorHealth}
           syncActions={syncActions}
-          onSynced={() => payments.reload()}
+          onSynced={handleSynced}
           reloadToken={reloadToken}
         />
       </div>
@@ -824,9 +837,14 @@ function TokenHealth({ // skipcq: JS-0067
   // capability so a non-permitted viewer mounts no hook and issues no
   // /connectors/credentials/health request (defense in depth alongside the
   // authoritative backend gate), mirroring the AuditTimeline -> feed gate.
-  if (!canViewConnectorHealth) return null;
+  if (!canViewConnectorHealth) {
+    return null;
+  }
   return (
-    <section className="panel" aria-labelledby="tokenHealthTitle">
+    <section
+      className="panel"
+      aria-labelledby="tokenHealthTitle"
+    >
       <div className="panel-header">
         <div className="panel-title">
           <strong id="tokenHealthTitle">Token Health</strong>
@@ -848,9 +866,15 @@ function TokenHealthFeed() { // skipcq: JS-0067
   const { data, loading, error } = useConnectorCredentialHealth();
   const rows = data ?? [];
 
-  if (error) return <TokenHealthError error={error} />;
-  if (loading && rows.length === 0) return <TokenHealthLoadingState />;
-  if (rows.length === 0) return <TokenHealthEmptyState />;
+  if (error) {
+    return <TokenHealthError error={error} />;
+  }
+  if (loading && rows.length === 0) {
+    return <TokenHealthLoadingState />;
+  }
+  if (rows.length === 0) {
+    return <TokenHealthEmptyState />;
+  }
   return <TokenHealthList credentials={rows} />;
 }
 

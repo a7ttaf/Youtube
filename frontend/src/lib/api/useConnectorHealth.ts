@@ -39,6 +39,12 @@ export type ConnectorCredentialHealthQuery = {
 //   - File: backend/ums_smart_revenue/api/connectors.py
 //       list_connector_credential_health() -> {credentials: [...]}.
 // ============================================================================
+/**
+ * Typed auto-fetch hook for the read-only connector credential health surface.
+ *
+ * @param query - Optional pagination: limit (1..100) and offset (>=0).
+ * @returns Shared async state with the credential health array.
+ */
 export function useConnectorCredentialHealth( // skipcq: JS-0067
   query: ConnectorCredentialHealthQuery = {},
 ): AsyncState<ConnectorCredentialHealth[]> {
@@ -47,8 +53,12 @@ export function useConnectorCredentialHealth( // skipcq: JS-0067
 
   const run = useCallback(() => {
     const params = new URLSearchParams();
-    if (limit != null) params.set("limit", String(limit));
-    if (offset != null) params.set("offset", String(offset));
+    if (limit !== undefined && limit !== null) {
+      params.set("limit", String(limit));
+    }
+    if (offset !== undefined && offset !== null) {
+      params.set("offset", String(offset));
+    }
     const qs = params.toString();
     return client
       .get<ConnectorCredentialHealthResponse>(

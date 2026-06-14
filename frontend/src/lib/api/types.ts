@@ -541,6 +541,7 @@ export type ConnectorCredentialHealth = ConnectorCredential & {
 // leak). Source: list_connector_credential_health() (connectors.py).
 export type ConnectorCredentialHealthResponse = {
   credentials: ConnectorCredentialHealth[];
+  pagination: PaginationMeta;
 };
 
 // GET /connectors/credentials. Source: list_connector_credentials() (connectors.py:73-81).

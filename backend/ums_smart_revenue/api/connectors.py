@@ -286,9 +286,19 @@ def list_connector_credential_health(
     credentials: list[dict[str, object]] = []
     for credential in page.items:
         record = credential.to_api()
-        record["health_state"] = derive_credential_health_state(credential, as_of=as_of)
+        record["health_state"] = derive_credential_health_state(
+            credential, as_of=as_of
+        )
         credentials.append(record)
-    return {"credentials": credentials}
+    return {
+        "credentials": credentials,
+        "pagination": {
+            "limit": page.limit,
+            "offset": page.offset,
+            "returned": len(credentials),
+            "has_more": page.has_more,
+        },
+    }
 
 
 @router.post("/credentials", status_code=status.HTTP_201_CREATED)
