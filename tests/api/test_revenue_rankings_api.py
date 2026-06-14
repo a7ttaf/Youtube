@@ -71,9 +71,7 @@ def _company_finance_principal() -> UserPrincipal:
         email="rankings@example.com",
         direct_permissions=(
             PermissionGrant(Permission.VIEW_REVENUE, AccessScope.company(str(COMPANY_ID))),
-            PermissionGrant(
-                Permission.VIEW_CONFIDENCE, AccessScope.company(str(COMPANY_ID))
-            ),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.company(str(COMPANY_ID))),
             PermissionGrant(
                 Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month("2026-03")
             ),
@@ -96,48 +94,78 @@ def seed_database(database_url: str) -> None:
         session.add_all(
             [
                 OrgUnitORM(
-                    id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV",
+                    id=SECTOR_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="TV",
                     active=True,
                 ),
                 OrgUnitORM(
-                    id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY",
-                    name="TV Company", active=True,
+                    id=COMPANY_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="TV Company",
+                    active=True,
                 ),
                 YouTubeChannelORM(
-                    id=CHANNEL_A_ROW_ID, youtube_channel_id="channel-tv-a",
-                    channel_name="TV A", primary_org_unit_id=COMPANY_ID,
-                    cms_status="INSIDE_CMS", revenue_required=True, active=True,
+                    id=CHANNEL_A_ROW_ID,
+                    youtube_channel_id="channel-tv-a",
+                    channel_name="TV A",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
                 ),
                 YouTubeChannelORM(
-                    id=CHANNEL_B_ROW_ID, youtube_channel_id="channel-tv-b",
-                    channel_name="TV B", primary_org_unit_id=COMPANY_ID,
-                    cms_status="INSIDE_CMS", revenue_required=True, active=True,
+                    id=CHANNEL_B_ROW_ID,
+                    youtube_channel_id="channel-tv-b",
+                    channel_name="TV B",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
                 ),
                 MonthlyChannelRevenueFactORM(
-                    id=uuid4(), month="2026-03", youtube_channel_id="channel-tv-a",
-                    source_kind="YOUTUBE_CMS", source_report_id="cms-report-2026-03",
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="YOUTUBE_CMS",
+                    source_report_id="cms-report-2026-03",
                     gross_revenue_usd=Decimal("1000.00"),
-                    net_revenue_usd=Decimal("880.00"), views=250000,
+                    net_revenue_usd=Decimal("880.00"),
+                    views=250000,
                     watch_time_minutes=Decimal("7200.50"),
-                    confidence_score=Decimal("0.9825"), imported_by=USER_ID,
+                    confidence_score=Decimal("0.9825"),
+                    imported_by=USER_ID,
                 ),
                 MonthlyChannelRevenueFactORM(
-                    id=uuid4(), month="2026-03", youtube_channel_id="channel-tv-b",
-                    source_kind="YOUTUBE_CMS", source_report_id="cms-report-2026-03",
-                    gross_revenue_usd=Decimal("200.00"), net_revenue_usd=None,
-                    views=50000, watch_time_minutes=Decimal("1400.00"),
-                    confidence_score=Decimal("0.9500"), imported_by=USER_ID,
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-b",
+                    source_kind="YOUTUBE_CMS",
+                    source_report_id="cms-report-2026-03",
+                    gross_revenue_usd=Decimal("200.00"),
+                    net_revenue_usd=None,
+                    views=50000,
+                    watch_time_minutes=Decimal("1400.00"),
+                    confidence_score=Decimal("0.9500"),
+                    imported_by=USER_ID,
                 ),
                 RevenueManualOverrideORM(
-                    id=uuid4(), month="2026-03", youtube_channel_id="channel-tv-a",
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
                     adjustment_revenue_usd=Decimal("50.00"),
-                    reason="Finance correction", status="APPROVED",
-                    created_by=USER_ID, approved_by=APPROVER_ID,
+                    reason="Finance correction",
+                    status="APPROVED",
+                    created_by=USER_ID,
+                    approved_by=APPROVER_ID,
                     approved_at=datetime(2026, 4, 25, tzinfo=UTC),
                     approval_reason="Approved correction",
                 ),
                 UserORM(
-                    id=USER_ID, email="rankings@example.com",
+                    id=USER_ID,
+                    email="rankings@example.com",
                     display_name="Rankings User",
                 ),
             ]
@@ -159,9 +187,7 @@ def test_finance_viewer_reads_month_rankings_with_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_kinds = {
-            row.event_type for row in session.scalars(select(AuditLogORM)).all()
-        }
+        audit_kinds = {row.event_type for row in session.scalars(select(AuditLogORM)).all()}
 
     assert response.status_code == 200
     body = response.json()
@@ -207,8 +233,7 @@ def test_rankings_metric_net_orders_by_net(tmp_path):
     client = TestClient(app)
 
     response = client.get(
-        f"/revenue/months/2026-03/rankings"
-        f"?scope_type=company&scope_id={COMPANY_ID}&metric=net",
+        f"/revenue/months/2026-03/rankings?scope_type=company&scope_id={COMPANY_ID}&metric=net",
     )
 
     assert response.status_code == 200
@@ -271,21 +296,33 @@ def _seed_out_of_scope_channel(database_url: str) -> None:
         session.add_all(
             [
                 OrgUnitORM(
-                    id=COMPANY_2_ID, parent_id=SECTOR_ID, type="COMPANY",
-                    name="Other Company", active=True,
+                    id=COMPANY_2_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="Other Company",
+                    active=True,
                 ),
                 YouTubeChannelORM(
-                    id=CHANNEL_C_ROW_ID, youtube_channel_id="channel-tv-c",
-                    channel_name="TV C", primary_org_unit_id=COMPANY_2_ID,
-                    cms_status="INSIDE_CMS", revenue_required=True, active=True,
+                    id=CHANNEL_C_ROW_ID,
+                    youtube_channel_id="channel-tv-c",
+                    channel_name="TV C",
+                    primary_org_unit_id=COMPANY_2_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
                 ),
                 MonthlyChannelRevenueFactORM(
-                    id=uuid4(), month="2026-03", youtube_channel_id="channel-tv-c",
-                    source_kind="YOUTUBE_CMS", source_report_id="cms-report-2026-03",
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-c",
+                    source_kind="YOUTUBE_CMS",
+                    source_report_id="cms-report-2026-03",
                     gross_revenue_usd=Decimal("9999.00"),
-                    net_revenue_usd=Decimal("9000.00"), views=80000,
+                    net_revenue_usd=Decimal("9000.00"),
+                    views=80000,
                     watch_time_minutes=Decimal("2000.00"),
-                    confidence_score=Decimal("0.9600"), imported_by=USER_ID,
+                    confidence_score=Decimal("0.9600"),
+                    imported_by=USER_ID,
                 ),
             ]
         )
@@ -325,9 +362,7 @@ def test_rankings_zero_channels_returns_empty_not_403(tmp_path):
         email="rankings@example.com",
         direct_permissions=(
             PermissionGrant(Permission.VIEW_REVENUE, AccessScope.company(empty_company)),
-            PermissionGrant(
-                Permission.VIEW_CONFIDENCE, AccessScope.company(empty_company)
-            ),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.company(empty_company)),
             PermissionGrant(
                 Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month("2026-03")
             ),
@@ -359,7 +394,9 @@ def _lock_month(database_url: str, month: str) -> None:
         if row is None:
             session.add(
                 FinanceMonthCloseORM(
-                    tenant_id=UUID(UMS_TENANT_ID), month=month, status="LOCKED",
+                    tenant_id=UUID(UMS_TENANT_ID),
+                    month=month,
+                    status="LOCKED",
                     allocation_rule_payload={},
                 )
             )
@@ -373,43 +410,73 @@ def _seed_in_scope_account_allocation(database_url: str) -> None:
     engine = create_engine(database_url)
     TenantBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add_all([
-            TenantORM(
-                id=UUID(UMS_TENANT_ID), slug="ums", display_name="UMS",
-                primary_currency="USD", status="ACTIVE",
-            ),
-            YouTubeChannelORM(
-                id=CHANNEL_D_ROW_ID, youtube_channel_id="channel-tv-d",
-                channel_name="TV D", primary_org_unit_id=COMPANY_ID,
-                cms_status="INSIDE_CMS", revenue_required=True, active=True,
-            ),
-            MonthlyChannelRevenueFactORM(
-                id=uuid4(), month="2026-03", youtube_channel_id="channel-tv-d",
-                source_kind="ADSENSE", source_report_id="adsense-report-2026-03",
-                gross_revenue_usd=Decimal("500.00"), net_revenue_usd=None,
-                views=80000, watch_time_minutes=Decimal("2000.00"),
-                confidence_score=Decimal("0.9600"), imported_by=USER_ID,
-            ),
-            AdsenseContentOwnerLinkORM(
-                id=uuid4(), adsense_account_id="pub-7", content_owner_id="owner-7",
-                verification_status="VERIFIED", provenance_kind="OPERATOR_ASSERTED",
-                provenance_payload={}, effective_month_start="2026-01",
-            ),
-            ContentOwnerChannelLinkORM(
-                id=uuid4(), content_owner_id="owner-7",
-                youtube_channel_id="channel-tv-d", provenance_kind="SOURCE_ROW",
-                active=True, effective_month_start="2026-01",
-            ),
-            DeductionComponentORM(
-                id=uuid4(), month="2026-03", component_kind="DEDUCTION",
-                scope_kind="ACCOUNT", scope_id="pub-7", amount_usd=Decimal("70.00"),
-                amount_native=None, currency_code="USD",
-                source_system="adsense_management",
-                source_table="google_revenue_source_rows", source_id=None,
-                source_key="k-7", source_report_id=None, raw_payload={"k": "v"},
-                component_key="srcrow:adsense_management:k-7",
-            ),
-        ])
+        session.add_all(
+            [
+                TenantORM(
+                    id=UUID(UMS_TENANT_ID),
+                    slug="ums",
+                    display_name="UMS",
+                    primary_currency="USD",
+                    status="ACTIVE",
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_D_ROW_ID,
+                    youtube_channel_id="channel-tv-d",
+                    channel_name="TV D",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-d",
+                    source_kind="ADSENSE",
+                    source_report_id="adsense-report-2026-03",
+                    gross_revenue_usd=Decimal("500.00"),
+                    net_revenue_usd=None,
+                    views=80000,
+                    watch_time_minutes=Decimal("2000.00"),
+                    confidence_score=Decimal("0.9600"),
+                    imported_by=USER_ID,
+                ),
+                AdsenseContentOwnerLinkORM(
+                    id=uuid4(),
+                    adsense_account_id="pub-7",
+                    content_owner_id="owner-7",
+                    verification_status="VERIFIED",
+                    provenance_kind="OPERATOR_ASSERTED",
+                    provenance_payload={},
+                    effective_month_start="2026-01",
+                ),
+                ContentOwnerChannelLinkORM(
+                    id=uuid4(),
+                    content_owner_id="owner-7",
+                    youtube_channel_id="channel-tv-d",
+                    provenance_kind="SOURCE_ROW",
+                    active=True,
+                    effective_month_start="2026-01",
+                ),
+                DeductionComponentORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    component_kind="DEDUCTION",
+                    scope_kind="ACCOUNT",
+                    scope_id="pub-7",
+                    amount_usd=Decimal("70.00"),
+                    amount_native=None,
+                    currency_code="USD",
+                    source_system="adsense_management",
+                    source_table="google_revenue_source_rows",
+                    source_id=None,
+                    source_key="k-7",
+                    source_report_id=None,
+                    raw_payload={"k": "v"},
+                    component_key="srcrow:adsense_management:k-7",
+                ),
+            ]
+        )
         session.commit()
 
 
@@ -423,8 +490,11 @@ def test_rankings_locked_month_serves_committed_snapshot(tmp_path):
     with Session(engine) as session:
         committed = SqlAlchemyCommittedAllocationRepository(session)
         committed.commit_allocation(
-            month="2026-03", allocation_method="gross_revenue_proportional",
-            idempotency_key="k1", request_fingerprint="fp1", reason="close",
+            month="2026-03",
+            allocation_method="gross_revenue_proportional",
+            idempotency_key="k1",
+            request_fingerprint="fp1",
+            reason="close",
             committed_by=UMS_TENANT_ID,
             deduction_repository=SqlAlchemyDeductionComponentRepository(session),
             revenue_repository=SqlAlchemyRevenueFactRepository(session),
@@ -494,13 +564,9 @@ def test_rankings_allocation_source_matches_net_revenue(tmp_path):
         f"/revenue/months/2026-03/rankings?scope_type=company&scope_id={COMPANY_ID}",
     )
     net_revenue = client.get(
-        f"/revenue/months/2026-03/net-revenue"
-        f"?scope_type=company&scope_id={COMPANY_ID}",
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
     )
 
     assert rankings.status_code == 200
     assert net_revenue.status_code == 200
-    assert (
-        rankings.json()["allocation_source"]
-        == net_revenue.json()["allocation_source"]
-    )
+    assert rankings.json()["allocation_source"] == net_revenue.json()["allocation_source"]

@@ -31,6 +31,7 @@ Assertions:
    sequence for each of the three runs, with the connector service
    principal recorded on every row.
 """
+
 from __future__ import annotations
 
 import json
@@ -383,11 +384,7 @@ def _connector_audit_events(session: Session) -> list[AuditLogORM]:
         session.scalars(
             select(AuditLogORM)
             .where(AuditLogORM.tenant_id == TENANT_ID)
-            .where(
-                AuditLogORM.event_type.in_(
-                    ["CONNECTOR_JOB_RUN", "REPORT_IMPORTED"]
-                )
-            )
+            .where(AuditLogORM.event_type.in_(["CONNECTOR_JOB_RUN", "REPORT_IMPORTED"]))
             .where(AuditLogORM.entity_type != "monthly_channel_revenue_fact")
             .order_by(AuditLogORM.created_at, AuditLogORM.id)
         )
@@ -426,20 +423,12 @@ def _group_events_by_run(
 #   - File: tests/connectors/google/test_orchestrator.py -> mirrors T37/T38
 #     patch surface so this test stays consistent with the per-connector tests.
 # ============================================================================
-def test_three_connectors_end_to_end_on_mocks(
-    session: Session, _stub_secret_resolver
-) -> None:
+def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_resolver) -> None:
     """Mock end-to-end ingestion gate -- B2.6 §9.3 closing assertion."""
     # ----- seed credentials for all three connectors -----
-    _make_credential_row(
-        session, connector_key=YT_REPORTING_KEY, account_id=YT_REPORTING_ACCOUNT
-    )
-    _make_credential_row(
-        session, connector_key=YT_ANALYTICS_KEY, account_id=YT_ANALYTICS_ACCOUNT
-    )
-    _make_credential_row(
-        session, connector_key=ADSENSE_KEY, account_id=ADSENSE_ACCOUNT
-    )
+    _make_credential_row(session, connector_key=YT_REPORTING_KEY, account_id=YT_REPORTING_ACCOUNT)
+    _make_credential_row(session, connector_key=YT_ANALYTICS_KEY, account_id=YT_ANALYTICS_ACCOUNT)
+    _make_credential_row(session, connector_key=ADSENSE_KEY, account_id=ADSENSE_ACCOUNT)
 
     # ----- seed one CMS-owned channel matching the YT runs -----
     # YT Reporting writes source rows keyed on the CSV's ``channel`` column;
@@ -465,15 +454,16 @@ def test_three_connectors_end_to_end_on_mocks(
     # Patched at orchestrator module scope so the runner instantiates the
     # mock instead of the live client; ``LocalFileStoreBackend`` is replaced
     # with an in-memory dict so no disk I/O fires.
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_rep_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls_rep, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh_rep, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls_rep:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_rep_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+        ) as local_cls_rep,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh_rep,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls_rep,
+    ):
         http_cls_rep.return_value.close.return_value = None
         refresh_rep.return_value = None
 
@@ -488,14 +478,10 @@ def test_three_connectors_end_to_end_on_mocks(
 
         store_rep: dict[str, bytes] = {}
         backend_rep = local_cls_rep.return_value
-        backend_rep.upload.side_effect = (
-            lambda *, storage_uri, content: store_rep.__setitem__(
-                storage_uri, content
-            )
+        backend_rep.upload.side_effect = lambda *, storage_uri, content: store_rep.__setitem__(
+            storage_uri, content
         )
-        backend_rep.get_bytes.side_effect = lambda *, storage_uri: store_rep[
-            storage_uri
-        ]
+        backend_rep.get_bytes.side_effect = lambda *, storage_uri: store_rep[storage_uri]
 
         outcome_reporting = run_one(
             session,
@@ -509,15 +495,14 @@ def test_three_connectors_end_to_end_on_mocks(
     assert outcome_reporting.run.status == "SUCCEEDED"
 
     # ----- run YT Analytics -----
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-    ) as yt_an_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls_an, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh_an, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls_an:
+    with (
+        patch("ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient") as yt_an_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+        ) as local_cls_an,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh_an,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls_an,
+    ):
         http_cls_an.return_value.close.return_value = None
         refresh_an.return_value = None
 
@@ -526,14 +511,10 @@ def test_three_connectors_end_to_end_on_mocks(
 
         store_an: dict[str, bytes] = {}
         backend_an = local_cls_an.return_value
-        backend_an.upload.side_effect = (
-            lambda *, storage_uri, content: store_an.__setitem__(
-                storage_uri, content
-            )
+        backend_an.upload.side_effect = lambda *, storage_uri, content: store_an.__setitem__(
+            storage_uri, content
         )
-        backend_an.get_bytes.side_effect = lambda *, storage_uri: store_an[
-            storage_uri
-        ]
+        backend_an.get_bytes.side_effect = lambda *, storage_uri: store_an[storage_uri]
 
         outcome_analytics = run_one(
             session,
@@ -547,15 +528,16 @@ def test_three_connectors_end_to_end_on_mocks(
     assert outcome_analytics.run.status == "SUCCEEDED"
 
     # ----- run AdSense -----
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
-    ) as adsense_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls_ads, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh_ads, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls_ads:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
+        ) as adsense_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+        ) as local_cls_ads,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh_ads,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls_ads,
+    ):
         http_cls_ads.return_value.close.return_value = None
         refresh_ads.return_value = None
 
@@ -564,14 +546,10 @@ def test_three_connectors_end_to_end_on_mocks(
 
         store_ads: dict[str, bytes] = {}
         backend_ads = local_cls_ads.return_value
-        backend_ads.upload.side_effect = (
-            lambda *, storage_uri, content: store_ads.__setitem__(
-                storage_uri, content
-            )
+        backend_ads.upload.side_effect = lambda *, storage_uri, content: store_ads.__setitem__(
+            storage_uri, content
         )
-        backend_ads.get_bytes.side_effect = lambda *, storage_uri: store_ads[
-            storage_uri
-        ]
+        backend_ads.get_bytes.side_effect = lambda *, storage_uri: store_ads[storage_uri]
 
         outcome_adsense = run_one(
             session,
@@ -599,10 +577,7 @@ def test_three_connectors_end_to_end_on_mocks(
         "youtube_reporting",
         "youtube_analytics",
         "adsense_management",
-    }, (
-        "expected source rows from all three mock connectors; "
-        f"got source_systems={source_systems!r}"
-    )
+    }, f"expected source rows from all three mock connectors; got source_systems={source_systems!r}"
     # FIX: strict row-count pin so a double-write regression (e.g., upsert ON
     # CONFLICT regression, or a per-report dedup skip that stops firing) is
     # caught by this gate -- set-equality alone would silently absorb
@@ -617,13 +592,10 @@ def test_three_connectors_end_to_end_on_mocks(
     )
 
     # AdSense rows must carry NULL youtube_channel_id (account-scoped).
-    adsense_source_rows = [
-        r for r in source_rows if r.source_system == "adsense_management"
-    ]
+    adsense_source_rows = [r for r in source_rows if r.source_system == "adsense_management"]
     assert adsense_source_rows, "AdSense run should have produced source rows"
     assert all(r.youtube_channel_id is None for r in adsense_source_rows), (
-        "AdSense source rows must be channel-less; channel allocation is a "
-        "future spec"
+        "AdSense source rows must be channel-less; channel allocation is a future spec"
     )
 
     # ============================================================================
@@ -663,7 +635,8 @@ def test_three_connectors_end_to_end_on_mocks(
     # re-run is idempotent against the facts the wiring already wrote — the two
     # YT facts come back UNCHANGED — so it does not perturb the count above.
     result = GoogleSourceNormalizer(session, tenant_id=TENANT_ID).normalize_month(
-        month=REPORT_MONTH, actor_user_id=ACTOR_USER_ID,
+        month=REPORT_MONTH,
+        actor_user_id=ACTOR_USER_ID,
     )
     assert not result.created, (
         "re-running normalize after the wiring must not create new facts; "
@@ -674,9 +647,7 @@ def test_three_connectors_end_to_end_on_mocks(
     )
     # The C1 normalizer flags the AdSense rows as MISSING_CHANNEL_ID because
     # the AdSense parser leaves ``youtube_channel_id=None``.
-    missing_channel_skips = [
-        s for s in result.skipped if s.reason == SkipReason.MISSING_CHANNEL_ID
-    ]
+    missing_channel_skips = [s for s in result.skipped if s.reason == SkipReason.MISSING_CHANNEL_ID]
     assert missing_channel_skips, (
         "AdSense source rows should have been skipped as MISSING_CHANNEL_ID; "
         f"result.skipped={result.skipped!r}"
@@ -687,8 +658,7 @@ def test_three_connectors_end_to_end_on_mocks(
     skipped_ids = {s.source_row_id for s in missing_channel_skips}
     expected_skipped_ids = {str(r.id) for r in adsense_source_rows}
     assert skipped_ids == expected_skipped_ids, (
-        "every AdSense source row must appear in result.skipped with "
-        "MISSING_CHANNEL_ID"
+        "every AdSense source row must appear in result.skipped with MISSING_CHANNEL_ID"
     )
 
     # ============================================================================
@@ -755,6 +725,5 @@ def test_three_connectors_end_to_end_on_mocks(
     )
     actor_user_ids = {event.details.get("actor_user_id") for event in events}
     assert actor_user_ids == {SERVICE_ACTOR_ID}, (
-        f"expected the connector service principal on all rows; got "
-        f"{actor_user_ids!r}"
+        f"expected the connector service principal on all rows; got {actor_user_ids!r}"
     )

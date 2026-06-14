@@ -248,18 +248,14 @@ def test_finance_admin_previews_finance_workbook_with_sensitive_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_events = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.event_type)
-        ).all()
+        audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["artifact_type"] == "FINANCE_EXCEL_WORKBOOK_PREVIEW"
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
     assert payload["executive_summary"]["payment_match_status"] == "PAYMENT_MATCHED"
-    assert payload["executive_summary"]["bank_reconciliation_status"] == (
-        "BANK_CONFIRMED"
-    )
+    assert payload["executive_summary"]["bank_reconciliation_status"] == ("BANK_CONFIRMED")
     assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "0"
     assert payload["executive_summary"]["total_account_allocated_deduction_amount_usd"] == "0"
     net_revenue_summary = payload["source_summaries"]["net_revenue"]
@@ -297,19 +293,13 @@ def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_p
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_events = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.event_type)
-        ).all()
+        audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
-    assert payload["executive_summary"]["payment_match_status"] == (
-        "MISSING_ADSENSE_PAYMENT"
-    )
-    assert payload["executive_summary"]["bank_reconciliation_status"] == (
-        "MISSING_ADSENSE_PAYMENT"
-    )
+    assert payload["executive_summary"]["payment_match_status"] == ("MISSING_ADSENSE_PAYMENT")
+    assert payload["executive_summary"]["bank_reconciliation_status"] == ("MISSING_ADSENSE_PAYMENT")
     # Scoped finance-artifact exports now emit PAYMENT_VIEWED alongside
     # REVENUE_VIEWED (export net consumes account allocations); month-wide cash
     # exposure (BANK_RECONCILIATION_VIEWED) stays global-only.
@@ -505,9 +495,7 @@ def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path)
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_events = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.event_type)
-        ).all()
+        audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
     assert response.headers["content-type"] == (
@@ -570,10 +558,7 @@ def test_finance_workbook_download_persists_artifact_and_completes_job(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert export_job.artifact_byte_size == len(response.content)
-    assert (
-        export_job.artifact_checksum_sha256
-        == hashlib.sha256(response.content).hexdigest()
-    )
+    assert export_job.artifact_checksum_sha256 == hashlib.sha256(response.content).hexdigest()
     assert export_job.failure_reason is None
     assert persisted_file.read_bytes() == response.content
 
@@ -686,6 +671,7 @@ def test_finance_workbook_download_returns_503_when_persisted_artifact_missing(
 
 def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_path):
     """Verify that artifacts are cleaned up when artifact completion fails."""
+
     class FailingCompleteRepository:
         """Repository that raises when artifact completion fails."""
 
@@ -890,12 +876,10 @@ def test_persisted_artifact_bytes_win_after_terminal_race(
 
     assert response is None
     assert export_job == completed_job
-    served_bytes, served_filename, served_content_type = (
-        _require_persisted_artifact_bytes(
-            export_job=export_job,
-            expected_export_type=export_type,
-            artifact_store=FileSystemExportArtifactStore(artifact_dir),
-        )
+    served_bytes, served_filename, served_content_type = _require_persisted_artifact_bytes(
+        export_job=export_job,
+        expected_export_type=export_type,
+        artifact_store=FileSystemExportArtifactStore(artifact_dir),
     )
     assert served_bytes == persisted_bytes
     assert served_bytes != generated_bytes
@@ -941,9 +925,7 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_events = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.event_type)
-        ).all()
+        audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pdf"
@@ -1010,9 +992,7 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_events = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.event_type)
-        ).all()
+        audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
     assert response.headers["content-type"] == (
@@ -1038,9 +1018,7 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
         database_url=database_url,
         artifact_dir=artifact_dir,
         filename="ums-branded-2026-03-global.pptx",
-        content_type=(
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        ),
+        content_type=("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         content=response.content,
     )
 

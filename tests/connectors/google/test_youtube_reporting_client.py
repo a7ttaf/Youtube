@@ -1,4 +1,5 @@
 """YouTube Reporting client tests (spec §5.4)."""
+
 from __future__ import annotations
 
 import json
@@ -30,11 +31,13 @@ def test_list_supported_jobs_filters_to_whitelist(mock_credentials) -> None:
             {"id": "job-c", "reportTypeId": "channel_demographics_a1"},  # not supported
         ]
     }
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=json.dumps(payload).encode())
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     jobs = client.list_supported_jobs(account_id="content-owner-1")
@@ -43,18 +46,22 @@ def test_list_supported_jobs_filters_to_whitelist(mock_credentials) -> None:
 
 
 def test_list_supported_jobs_paginates(mock_credentials) -> None:
-    pages = iter([
-        {
-            "jobs": [{"id": "j1", "reportTypeId": "content_owner_estimated_revenue_a1"}],
-            "nextPageToken": "tok-2",
-        },
-        {"jobs": [{"id": "j2", "reportTypeId": "content_owner_estimated_revenue_a1"}]},
-    ])
+    pages = iter(
+        [
+            {
+                "jobs": [{"id": "j1", "reportTypeId": "content_owner_estimated_revenue_a1"}],
+                "nextPageToken": "tok-2",
+            },
+            {"jobs": [{"id": "j2", "reportTypeId": "content_owner_estimated_revenue_a1"}]},
+        ]
+    )
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return _next_json_response(pages)
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     jobs = client.list_supported_jobs(account_id="acct")
@@ -69,7 +76,8 @@ def test_list_supported_jobs_sends_on_behalf_of_content_owner(mock_credentials) 
         return httpx.Response(200, content=b'{"jobs": []}')
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     client.list_supported_jobs(account_id="content-owner-42")
@@ -91,7 +99,8 @@ def test_list_supported_jobs_filters_out_jobs_with_missing_report_type_id(
         return httpx.Response(200, content=json.dumps(payload).encode())
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     jobs = client.list_supported_jobs(account_id="acct")
@@ -103,12 +112,11 @@ def test_list_supported_jobs_rejects_malformed_jobs_list(
     mock_credentials, jobs_payload: object
 ) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, content=json.dumps({"jobs": jobs_payload}).encode()
-        )
+        return httpx.Response(200, content=json.dumps({"jobs": jobs_payload}).encode())
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
 
@@ -128,7 +136,8 @@ def test_list_supported_jobs_treats_empty_next_page_token_as_terminal(
         return httpx.Response(200, content=json.dumps(payload).encode())
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     jobs = client.list_supported_jobs(account_id="acct")
@@ -162,7 +171,8 @@ def test_list_supported_jobs_rejects_malformed_next_page_token(
         )
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
 
@@ -173,15 +183,20 @@ def test_list_supported_jobs_rejects_malformed_next_page_token(
 
 def test_list_reports_for_month_passes_date_bounds(mock_credentials) -> None:
     captured = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
         captured.setdefault("queries", []).append(dict(request.url.params))
         return httpx.Response(200, content=json.dumps({"reports": []}).encode())
+
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     client.list_reports_for_month(
-        account_id="acct", job_id="job-1", report_month="2026-05",
+        account_id="acct",
+        job_id="job-1",
+        report_month="2026-05",
     )
     q = captured["queries"][0]
     assert q["startTimeAtOrAfter"] == "2026-05-01T00:00:00Z"
@@ -191,21 +206,26 @@ def test_list_reports_for_month_passes_date_bounds(mock_credentials) -> None:
 
 def test_list_reports_for_month_paginates(mock_credentials) -> None:
     captured: dict[str, list[dict[str, str]]] = {}
-    pages = iter([
-        {"reports": [{"id": "r1", "downloadUrl": "https://x/r1"}], "nextPageToken": "p2"},
-        {"reports": [{"id": "r2", "downloadUrl": "https://x/r2"}]},
-    ])
+    pages = iter(
+        [
+            {"reports": [{"id": "r1", "downloadUrl": "https://x/r1"}], "nextPageToken": "p2"},
+            {"reports": [{"id": "r2", "downloadUrl": "https://x/r2"}]},
+        ]
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.setdefault("queries", []).append(dict(request.url.params))
         return _next_json_response(pages)
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     reports = client.list_reports_for_month(
-        account_id="acct", job_id="job-1", report_month="2026-05",
+        account_id="acct",
+        job_id="job-1",
+        report_month="2026-05",
     )
     assert [r["id"] for r in reports] == ["r1", "r2"]
     # Page 2 must carry the pageToken from page 1's nextPageToken.
@@ -237,13 +257,16 @@ def test_list_reports_for_month_rejects_malformed_next_page_token(
         )
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
 
     with pytest.raises(GoogleApiResponseError, match="nextPageToken"):
         client.list_reports_for_month(
-            account_id="acct", job_id="job-1", report_month="2026-05",
+            account_id="acct",
+            job_id="job-1",
+            report_month="2026-05",
         )
     assert calls == 1
 
@@ -253,18 +276,19 @@ def test_list_reports_for_month_rejects_malformed_reports_list(
     mock_credentials, reports_payload: object
 ) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, content=json.dumps({"reports": reports_payload}).encode()
-        )
+        return httpx.Response(200, content=json.dumps({"reports": reports_payload}).encode())
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
 
     with pytest.raises(GoogleApiResponseError, match="reports"):
         client.list_reports_for_month(
-            account_id="acct", job_id="job-1", report_month="2026-05",
+            account_id="acct",
+            job_id="job-1",
+            report_month="2026-05",
         )
 
 
@@ -294,11 +318,14 @@ def test_list_reports_for_month_returns_oldest_create_time_first(
         return _next_json_response(pages)
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     reports = client.list_reports_for_month(
-        account_id="acct", job_id="job-1", report_month="2026-05",
+        account_id="acct",
+        job_id="job-1",
+        report_month="2026-05",
     )
 
     assert [report["id"] for report in reports] == ["older", "newer"]
@@ -341,11 +368,14 @@ def test_list_reports_for_month_keeps_newest_replacement_per_period(
         return _next_json_response(pages)
 
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     reports = client.list_reports_for_month(
-        account_id="acct", job_id="job-1", report_month="2026-05",
+        account_id="acct",
+        job_id="job-1",
+        report_month="2026-05",
     )
 
     assert [report["id"] for report in reports] == ["may-01-new", "may-02"]
@@ -353,15 +383,20 @@ def test_list_reports_for_month_keeps_newest_replacement_per_period(
 
 def test_list_reports_handles_december_boundary(mock_credentials) -> None:
     captured = {}
+
     def handler(request: httpx.Request) -> httpx.Response:
         captured["q"] = dict(request.url.params)
         return httpx.Response(200, content=json.dumps({"reports": []}).encode())
+
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
     client.list_reports_for_month(
-        account_id="acct", job_id="j", report_month="2026-12",
+        account_id="acct",
+        job_id="j",
+        report_month="2026-12",
     )
     assert captured["q"]["startTimeBefore"] == "2027-01-01T00:00:00Z"
 
@@ -371,13 +406,13 @@ def test_fetch_report_downloads_csv_bytes(mock_credentials) -> None:
         assert str(request.url) == "https://youtubereporting.googleapis.com/downloads/abc"
         assert request.headers.get("Authorization") == "Bearer fake-bearer"
         return httpx.Response(200, content=b"day,channel\n2026-05,xyz\n")
+
     http = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client = YouTubeReportingClient(http=http)
-    out = client.fetch_report(
-        download_url="https://youtubereporting.googleapis.com/downloads/abc"
-    )
+    out = client.fetch_report(download_url="https://youtubereporting.googleapis.com/downloads/abc")
     assert out == b"day,channel\n2026-05,xyz\n"
 
 

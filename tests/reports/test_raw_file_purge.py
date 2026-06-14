@@ -64,14 +64,10 @@ def test_repurge_raises_conflict():
     session = build_session()
     repo = SqlAlchemyRawReportFileRepository(session, tenant_id=DEFAULT_TENANT_UUID)
     registered = register_default(repo)
-    repo.purge_file(
-        raw_file_id=registered.id, actor_user_id=ACTOR_USER_ID, reason="first"
-    )
+    repo.purge_file(raw_file_id=registered.id, actor_user_id=ACTOR_USER_ID, reason="first")
 
     with pytest.raises(RawReportFilePurgeConflictError):
-        repo.purge_file(
-            raw_file_id=registered.id, actor_user_id=ACTOR_USER_ID, reason="second"
-        )
+        repo.purge_file(raw_file_id=registered.id, actor_user_id=ACTOR_USER_ID, reason="second")
 
 
 def test_purge_status_transition_is_conditional_under_stale_session(tmp_path):
@@ -80,15 +76,11 @@ def test_purge_status_transition_is_conditional_under_stale_session(tmp_path):
     ReportBase.metadata.create_all(engine)
 
     with Session(engine, expire_on_commit=False) as first_session:
-        first_repo = SqlAlchemyRawReportFileRepository(
-            first_session, tenant_id=DEFAULT_TENANT_UUID
-        )
+        first_repo = SqlAlchemyRawReportFileRepository(first_session, tenant_id=DEFAULT_TENANT_UUID)
         registered = register_default(first_repo)
         first_session.commit()
         first_session.scalars(
-            select(RawReportFileORM).where(
-                RawReportFileORM.id == UUID(registered.id)
-            )
+            select(RawReportFileORM).where(RawReportFileORM.id == UUID(registered.id))
         ).one()
         first_session.commit()
 

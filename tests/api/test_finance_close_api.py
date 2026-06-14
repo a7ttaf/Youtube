@@ -175,10 +175,7 @@ def test_finance_close_rejects_invalid_month_path(tmp_path):
     )
 
     assert response.status_code == 422
-    assert (
-        response.json()["detail"]
-        == "month must use YYYY-MM with a calendar month from 01 to 12"
-    )
+    assert response.json()["detail"] == "month must use YYYY-MM with a calendar month from 01 to 12"
 
 
 def test_get_finance_close_does_not_create_missing_month(tmp_path):
@@ -232,9 +229,7 @@ def test_finance_admin_cannot_lock_already_locked_month(tmp_path):
     seed_database(database_url)
     engine = create_engine(database_url)
     with Session(engine) as session:
-        session.add(
-            FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID)
-        )
+        session.add(FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID))
         session.commit()
     client = TestClient(create_app(database_url=database_url))
 
@@ -245,10 +240,7 @@ def test_finance_admin_cannot_lock_already_locked_month(tmp_path):
     )
 
     assert response.status_code == 409
-    assert (
-        response.json()["detail"]
-        == "Finance month cannot be locked from its current state"
-    )
+    assert response.json()["detail"] == "Finance month cannot be locked from its current state"
 
 
 def test_finance_admin_cannot_lock_month_with_pending_manual_override(tmp_path):
@@ -284,10 +276,7 @@ def test_finance_admin_cannot_lock_month_with_pending_manual_override(tmp_path):
                 "blocker_type": "PENDING_MANUAL_OVERRIDES",
                 "severity": "HIGH",
                 "count": 1,
-                "message": (
-                    "1 pending manual override requires approval before locking "
-                    "2026-03."
-                ),
+                "message": ("1 pending manual override requires approval before locking 2026-03."),
             }
         ],
     }
@@ -346,9 +335,7 @@ def test_finance_close_readiness_reports_reconciliation_variance(tmp_path):
                 "blocker_type": "RECONCILIATION_ISSUES",
                 "severity": "HIGH",
                 "count": 1,
-                "message": (
-                    "1 channel has unresolved reconciliation issues for 2026-03."
-                ),
+                "message": ("1 channel has unresolved reconciliation issues for 2026-03."),
             }
         ],
     }
@@ -444,9 +431,7 @@ def test_finance_close_readiness_counts_bulk_missing_required_revenue_facts(tmp_
             "blocker_type": "MISSING_REVENUE_FACTS",
             "severity": "HIGH",
             "count": 12,
-            "message": (
-                "12 revenue-required channels have no revenue facts for 2026-03."
-            ),
+            "message": ("12 revenue-required channels have no revenue facts for 2026-03."),
         }
     ]
 
@@ -595,9 +580,7 @@ def test_finance_approver_can_unlock_month_with_audit(tmp_path):
     seed_database(database_url)
     engine = create_engine(database_url)
     with Session(engine) as session:
-        session.add(
-            FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID)
-        )
+        session.add(FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID))
         session.commit()
     client = TestClient(create_app(database_url=database_url))
 
@@ -630,10 +613,7 @@ def test_finance_approver_cannot_unlock_open_month(tmp_path):
     )
 
     assert response.status_code == 409
-    assert (
-        response.json()["detail"]
-        == "Finance month cannot be unlocked from its current state"
-    )
+    assert response.json()["detail"] == "Finance month cannot be unlocked from its current state"
 
 
 def test_export_operator_cannot_change_allocation_rule(tmp_path):
@@ -653,10 +633,7 @@ def test_export_operator_cannot_change_allocation_rule(tmp_path):
     )
 
     assert response.status_code == 403
-    assert (
-        response.json()["detail"]
-        == "Missing permission: finance.change_allocation_rule"
-    )
+    assert response.json()["detail"] == "Missing permission: finance.change_allocation_rule"
 
 
 def test_finance_close_rejects_blank_allocation_method_before_state_change(tmp_path):
@@ -753,9 +730,7 @@ def test_finance_admin_cannot_change_allocation_rule_on_locked_month(tmp_path):
     seed_database(database_url)
     engine = create_engine(database_url)
     with Session(engine) as session:
-        session.add(
-            FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID)
-        )
+        session.add(FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID))
         session.commit()
     client = TestClient(create_app(database_url=database_url))
 

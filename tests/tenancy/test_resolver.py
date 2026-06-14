@@ -120,10 +120,12 @@ def _build_app(engine: Engine) -> FastAPI:
     @app.get("/stream")
     def stream() -> StreamingResponse:
         """Stream the tenant slug while response body iteration is active."""
+
         def _gen() -> Iterator[str]:
             """Yield the tenant slug from inside the streaming iterator."""
             tenant = get_current_tenant()
             yield tenant.slug if tenant is not None else "none"
+
         return StreamingResponse(_gen(), media_type="text/plain")
 
     return app
@@ -719,9 +721,7 @@ def test_sqlalchemy_lookup_errors_fail_closed_and_close_session(
     """SQLAlchemy errors from tenant lookup are logged and mapped to 503."""
     caplog.set_level(logging.ERROR, logger="ums_smart_revenue.tenancy.resolver")
     closed: list[bool] = []
-    client = TestClient(
-        _build_registry_failure_app(lambda: _BrokenDatabaseSession(closed))
-    )
+    client = TestClient(_build_registry_failure_app(lambda: _BrokenDatabaseSession(closed)))
 
     response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
 

@@ -12,7 +12,9 @@ def principal() -> UserPrincipal:
     return UserPrincipal(
         user_id="user-1",
         email="finance@example.com",
-        role_assignments=[RoleAssignment(role=RoleKey.FINANCE_ADMIN, scope=AccessScope.global_scope())],
+        role_assignments=[
+            RoleAssignment(role=RoleKey.FINANCE_ADMIN, scope=AccessScope.global_scope())
+        ],
     )
 
 
@@ -140,4 +142,3 @@ def test_record_audit_event_accepts_permission_override():
     # returned it), so a regression that constructs the record without writing
     # it would still fail this test.
     assert sink.records == [record]
-

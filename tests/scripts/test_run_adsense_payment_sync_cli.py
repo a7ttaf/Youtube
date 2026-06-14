@@ -4,6 +4,7 @@ Test suite for the run_adsense_payment_sync CLI script.
 Contains helper functions and pytest tests for various CLI behaviors,
 including live run, dry run, error handling, and argument validation.
 """
+
 import importlib.util
 from pathlib import Path
 
@@ -18,9 +19,7 @@ from ums_smart_revenue.finance.adsense_payments import (
     AdSensePaymentValidationError,
 )
 
-_CLI_PATH = (
-    Path(__file__).resolve().parents[2] / "scripts" / "run_adsense_payment_sync.py"
-)
+_CLI_PATH = Path(__file__).resolve().parents[2] / "scripts" / "run_adsense_payment_sync.py"
 TENANT = "00000000-0000-0000-0000-000000031001"
 BASE_ARGV = ["--tenant", TENANT, "--account", "pub-1", "--reason", "r"]
 
@@ -119,7 +118,7 @@ def _patch_common(monkeypatch, module, *, session, service, settings=None):
         "load_app_settings",
         lambda: settings if settings is not None else _FakeSettings(),
     )
-    monkeypatch.setattr(module, "build_session_factory", lambda _url: (lambda: session))
+    monkeypatch.setattr(module, "build_session_factory", lambda _url: lambda: session)
     monkeypatch.setattr(module, "build_connector_service_principal", _build_fake_actor)
     monkeypatch.setattr(module, "SqlAlchemyAuditSink", _build_fake_audit_sink)
     monkeypatch.setattr(module, "AdSensePaymentSyncService", service)
@@ -136,7 +135,7 @@ def test_cli_live_success_commits_and_returns_0(monkeypatch, capsys):
     _patch_common(monkeypatch, module, session=session, service=_FakeServiceOK)
     rc = module.main(BASE_ARGV)
     assert rc == 0
-    assert session.commits == 1                       # live mode commits
+    assert session.commits == 1  # live mode commits
     out = capsys.readouterr().out
     assert "SYNCED" in out
     assert "synced=1" in out
@@ -149,7 +148,7 @@ def test_cli_dry_run_does_not_commit(monkeypatch, capsys):
     _patch_common(monkeypatch, module, session=session, service=_FakeServiceOK)
     rc = module.main(BASE_ARGV + ["--dry-run"])
     assert rc == 0
-    assert session.commits == 0                       # dry-run never commits
+    assert session.commits == 0  # dry-run never commits
     assert "DRY-RUN" in capsys.readouterr().out
 
 
@@ -162,7 +161,10 @@ def test_cli_missing_db_config_returns_2(monkeypatch, capsys):
     module = _load_cli()
     session = _SpySession()
     _patch_common(
-        monkeypatch, module, session=session, service=_FakeServiceOK,
+        monkeypatch,
+        module,
+        session=session,
+        service=_FakeServiceOK,
         settings=_FakeSettings(database_url=""),
     )
     rc = module.main(BASE_ARGV)
@@ -192,12 +194,15 @@ def test_cli_malformed_settings_returns_2_before_db_session(monkeypatch, capsys)
     assert "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID" in err
 
 
-@pytest.mark.parametrize("error", [
-    GoogleConnectorError("boom"),
-    AdSensePaymentValidationError("bad batch"),
-    AdSensePaymentLockedMonthError("month locked"),
-    AdSensePaymentMappingError("$ ambiguous"),
-])
+@pytest.mark.parametrize(
+    "error",
+    [
+        GoogleConnectorError("boom"),
+        AdSensePaymentValidationError("bad batch"),
+        AdSensePaymentLockedMonthError("month locked"),
+        AdSensePaymentMappingError("$ ambiguous"),
+    ],
+)
 def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
     """
     Test that typed exceptions from the sync service result in exit code 2.
@@ -235,7 +240,7 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
     rc = module.main(BASE_ARGV)
     assert rc == 2
     assert type(error).__name__ in capsys.readouterr().err
-    assert session.commits == 0                       # no commit on failure
+    assert session.commits == 0  # no commit on failure
 
 
 def test_cli_missing_service_actor_returns_2(monkeypatch, capsys):
@@ -292,9 +297,7 @@ def test_cli_bad_tenant_uuid_is_argparse_error():
     """Reject malformed tenant UUID values before runtime setup."""
     module = _load_cli()
     with pytest.raises(SystemExit) as excinfo:
-        module.main(
-            ["--tenant", "not-a-uuid", "--account", "pub-1", "--reason", "r"]
-        )
+        module.main(["--tenant", "not-a-uuid", "--account", "pub-1", "--reason", "r"])
     assert excinfo.value.code != 0
 
 

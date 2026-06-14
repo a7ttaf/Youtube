@@ -120,9 +120,7 @@ def test_migration_adds_tenant_id_to_every_operational_table():
                 ),
                 None,
             )
-            assert tenant_fk is not None, (
-                f"{table} missing fk_{table}_tenant_id foreign key"
-            )
+            assert tenant_fk is not None, f"{table} missing fk_{table}_tenant_id foreign key"
             assert tenant_fk.get("constrained_columns") == ["tenant_id"], (
                 f"{table} FK constrained columns mismatch"
             )
@@ -147,9 +145,7 @@ def test_existing_rows_get_ums_tenant_id_via_default():
 
         _execute_migration(connection, _load_migration(TARGET_MIGRATION), "upgrade")
 
-        row = connection.execute(
-            text("SELECT tenant_id FROM users WHERE id = 'pre'")
-        ).one()
+        row = connection.execute(text("SELECT tenant_id FROM users WHERE id = 'pre'")).one()
 
     assert _strip_uuid(str(row.tenant_id)) == _strip_uuid(UMS_TENANT_ID)
 
@@ -162,9 +158,7 @@ def test_new_inserts_without_tenant_id_get_ums_default():
         _execute_migration(connection, _load_migration(TARGET_MIGRATION), "upgrade")
 
         connection.execute(text("INSERT INTO users (id) VALUES ('post')"))
-        row = connection.execute(
-            text("SELECT tenant_id FROM users WHERE id = 'post'")
-        ).one()
+        row = connection.execute(text("SELECT tenant_id FROM users WHERE id = 'post'")).one()
 
     assert _strip_uuid(str(row.tenant_id)) == _strip_uuid(UMS_TENANT_ID)
 
@@ -176,9 +170,7 @@ def test_tenant_scoped_constraints_are_rewritten():
         _setup_minimal_pre_state(connection)
         # Seed a row that must survive batch_alter_table with tenant_id backfilled.
         connection.execute(
-            text(
-                "INSERT INTO access_scopes (id, scope_type) VALUES ('as-pre', 'global')"
-            )
+            text("INSERT INTO access_scopes (id, scope_type) VALUES ('as-pre', 'global')")
         )
         _execute_migration(connection, _load_migration(TARGET_MIGRATION), "upgrade")
 
@@ -193,8 +185,7 @@ def test_tenant_scoped_constraints_are_rewritten():
         )
 
         access_scope_indexes = {
-            index["name"]: index["column_names"]
-            for index in inspector.get_indexes("access_scopes")
+            index["name"]: index["column_names"] for index in inspector.get_indexes("access_scopes")
         }
         assert access_scope_indexes["uq_access_scopes_scope_type_scope_id"] == [
             "tenant_id",
@@ -262,12 +253,9 @@ def test_tenant_scoped_constraints_are_rewritten():
             "scope_id",
         ]
         permission_grant_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("user_permission_grants")
+            fk["name"]: fk for fk in inspector.get_foreign_keys("user_permission_grants")
         }
-        permission_scope_fk = permission_grant_fks[
-            "fk_user_permission_grants_tenant_scope"
-        ]
+        permission_scope_fk = permission_grant_fks["fk_user_permission_grants_tenant_scope"]
         assert permission_scope_fk["constrained_columns"] == [
             "tenant_id",
             "scope_id",
@@ -295,9 +283,7 @@ def test_tenant_scoped_constraints_are_rewritten():
             index["name"]: index["column_names"]
             for index in inspector.get_indexes("api_connector_credentials")
         }
-        assert api_connector_indexes[
-            "uq_api_connector_credentials_connector_account"
-        ] == [
+        assert api_connector_indexes["uq_api_connector_credentials_connector_account"] == [
             "tenant_id",
             "connector_key",
             "account_id",
@@ -305,9 +291,7 @@ def test_tenant_scoped_constraints_are_rewritten():
 
         monthly_revenue_uniques = {
             constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints(
-                "monthly_channel_revenue_facts"
-            )
+            for constraint in inspector.get_unique_constraints("monthly_channel_revenue_facts")
         }
         assert monthly_revenue_uniques["uq_monthly_channel_revenue_source"] == [
             "tenant_id",
@@ -318,9 +302,7 @@ def test_tenant_scoped_constraints_are_rewritten():
 
         bank_uniques = {
             constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints(
-                "bank_reconciliation_entries"
-            )
+            for constraint in inspector.get_unique_constraints("bank_reconciliation_entries")
         }
         assert bank_uniques["uq_bank_reconciliation_month_reference"] == [
             "tenant_id",
@@ -365,9 +347,7 @@ def test_tenant_scoped_constraints_are_rewritten():
             "payment_name",
         ]
 
-        yt_channel_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("youtube_channels")
-        }
+        yt_channel_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("youtube_channels")}
         yt_org_fk = yt_channel_fks["fk_youtube_channels_tenant_org_unit"]
         assert yt_org_fk["constrained_columns"] == [
             "tenant_id",
@@ -418,9 +398,7 @@ def test_tenant_scoped_constraints_are_rewritten():
         }
         assert org_units_uniques["uq_org_units_tenant_id_id"] == ["tenant_id", "id"]
 
-        org_units_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("org_units")
-        }
+        org_units_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("org_units")}
         parent_fk = org_units_fks["fk_org_units_tenant_parent"]
         assert parent_fk["constrained_columns"] == ["tenant_id", "parent_id"]
         assert parent_fk["referred_table"] == "org_units"
@@ -447,8 +425,7 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert (ura_rb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
         perm_grant_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("user_permission_grants")
+            fk["name"]: fk for fk in inspector.get_foreign_keys("user_permission_grants")
         }
         upg_user_fk = perm_grant_fks["fk_user_permission_grants_tenant_user"]
         assert upg_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
@@ -474,8 +451,7 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert (al_user_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
         connector_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("api_connector_credentials")
+            fk["name"]: fk for fk in inspector.get_foreign_keys("api_connector_credentials")
         }
         acc_cb_fk = connector_fks["fk_api_connector_credentials_tenant_created_by"]
         assert acc_cb_fk["constrained_columns"] == ["tenant_id", "created_by"]
@@ -501,9 +477,7 @@ def test_downgrade_removes_tenant_id_from_every_table():
         inspector = inspect(connection)
         for table in EXPECTED_TABLES:
             columns = {c["name"] for c in inspector.get_columns(table)}
-            assert "tenant_id" not in columns, (
-                f"{table} still has tenant_id after downgrade"
-            )
+            assert "tenant_id" not in columns, f"{table} still has tenant_id after downgrade"
 
         # finance_month_close PK must be restored to (month,) only.
         fmc_pk = inspector.get_pk_constraint("finance_month_close")
@@ -511,15 +485,10 @@ def test_downgrade_removes_tenant_id_from_every_table():
 
         # access_scopes partial indexes must not include tenant_id after downgrade.
         access_scope_idx = {
-            idx["name"]: idx["column_names"]
-            for idx in inspector.get_indexes("access_scopes")
+            idx["name"]: idx["column_names"] for idx in inspector.get_indexes("access_scopes")
         }
-        assert "tenant_id" not in access_scope_idx.get(
-            "uq_access_scopes_scope_type_scope_id", []
-        )
-        assert "tenant_id" not in access_scope_idx.get(
-            "uq_access_scopes_global_singleton", []
-        )
+        assert "tenant_id" not in access_scope_idx.get("uq_access_scopes_scope_type_scope_id", [])
+        assert "tenant_id" not in access_scope_idx.get("uq_access_scopes_global_singleton", [])
 
         # Nullable actor/audit FKs must be restored with SET NULL (original semantics).
         # ON DELETE SET NULL is impossible on composite FKs that include a NOT NULL
@@ -527,40 +496,20 @@ def test_downgrade_removes_tenant_id_from_every_table():
         def _ondelete(fk_dict: dict) -> str | None:
             return (fk_dict.get("options") or {}).get("ondelete")
 
-        ura_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")
-        }
-        assert _ondelete(ura_fks["user_role_assignments_assigned_by_fkey"]) == (
-            "SET NULL"
-        )
-        assert _ondelete(ura_fks["user_role_assignments_revoked_by_fkey"]) == (
-            "SET NULL"
-        )
+        ura_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")}
+        assert _ondelete(ura_fks["user_role_assignments_assigned_by_fkey"]) == ("SET NULL")
+        assert _ondelete(ura_fks["user_role_assignments_revoked_by_fkey"]) == ("SET NULL")
 
-        upg_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("user_permission_grants")
-        }
-        assert _ondelete(upg_fks["user_permission_grants_granted_by_fkey"]) == (
-            "SET NULL"
-        )
-        assert _ondelete(upg_fks["user_permission_grants_revoked_by_fkey"]) == (
-            "SET NULL"
-        )
+        upg_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("user_permission_grants")}
+        assert _ondelete(upg_fks["user_permission_grants_granted_by_fkey"]) == ("SET NULL")
+        assert _ondelete(upg_fks["user_permission_grants_revoked_by_fkey"]) == ("SET NULL")
 
         audit_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")}
         assert _ondelete(audit_fks["audit_logs_user_id_fkey"]) == "SET NULL"
 
-        acc_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("api_connector_credentials")
-        }
-        assert _ondelete(acc_fks["api_connector_credentials_created_by_fkey"]) == (
-            "SET NULL"
-        )
-        assert _ondelete(acc_fks["api_connector_credentials_updated_by_fkey"]) == (
-            "SET NULL"
-        )
+        acc_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("api_connector_credentials")}
+        assert _ondelete(acc_fks["api_connector_credentials_created_by_fkey"]) == ("SET NULL")
+        assert _ondelete(acc_fks["api_connector_credentials_updated_by_fkey"]) == ("SET NULL")
 
 
 # ---------------------------------------------------------------------------

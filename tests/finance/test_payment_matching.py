@@ -1,4 +1,5 @@
 """Tests for monthly payment matching between revenue facts and AdSense."""
+
 from datetime import date
 from decimal import Decimal
 from importlib import import_module
@@ -96,10 +97,7 @@ def test_monthly_payment_match_summary_detects_payment_gap():
     assert summary.status == "PAYMENT_VARIANCE"
     assert summary.payment_gap_usd == Decimal("70.0000")
     assert summary.issues[0].issue_type == "PAYMENT_GAP"
-    assert (
-        "YouTube revenue and paid AdSense payments differ by 70"
-        in summary.issues[0].message
-    )
+    assert "YouTube revenue and paid AdSense payments differ by 70" in summary.issues[0].message
 
 
 def test_monthly_payment_match_summary_ignores_non_paid_adsense_payments_for_match():

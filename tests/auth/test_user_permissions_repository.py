@@ -161,9 +161,7 @@ def test_grant_permission_uses_ambient_tenant_context(tmp_path):
             TENANT_CTX.reset(token)
 
         row = session.scalars(
-            select(UserPermissionGrantORM).where(
-                UserPermissionGrantORM.id == UUID(entry.id)
-            )
+            select(UserPermissionGrantORM).where(UserPermissionGrantORM.id == UUID(entry.id))
         ).one()
         assert row.tenant_id == OTHER_TENANT_ID
 

@@ -8,6 +8,7 @@ test_committed_allocation_api.py because the write path needs deduction
 components + verified account->channel links + a close row that the legacy
 recalculation seed lacks.
 """
+
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -64,53 +65,94 @@ def _seed(database_url: str, *, mapped: bool = True, status: str = "OPEN") -> No
     SecurityBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add_all([
-            TenantORM(
-                id=TENANT, slug="ums", display_name="UMS",
-                primary_currency="USD", status="ACTIVE",
-            ),
-            OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="S", active=True),
-            OrgUnitORM(
-                id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="C", active=True,
-            ),
-            YouTubeChannelORM(
-                id=CHANNEL_ROW_ID, tenant_id=TENANT, youtube_channel_id="chA",
-                channel_name="A", primary_org_unit_id=COMPANY_ID,
-                cms_status="INSIDE_CMS", revenue_required=True, active=True,
-            ),
-            MonthlyChannelRevenueFactORM(
-                id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id="chA",
-                source_kind="ADSENSE", source_report_id=None,
-                gross_revenue_usd=Decimal("1000.00"), net_revenue_usd=None,
-                views=0, watch_time_minutes=Decimal("0"),
-                confidence_score=Decimal("0.95"), imported_by=USER_ID,
-            ),
-            DeductionComponentORM(
-                id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
-                scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("100.00"),
-                currency_code="USD", source_system="adsense_management",
-                source_table="google_revenue_source_rows", component_key="ad-1",
-                raw_payload={},
-            ),
-            UserORM(id=USER_ID, email="recalc@example.com", display_name="Recalc User"),
-            FinanceMonthCloseORM(
-                tenant_id=TENANT, month=MONTH, status=status, allocation_rule_payload={},
-            ),
-        ])
+        session.add_all(
+            [
+                TenantORM(
+                    id=TENANT,
+                    slug="ums",
+                    display_name="UMS",
+                    primary_currency="USD",
+                    status="ACTIVE",
+                ),
+                OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="S", active=True),
+                OrgUnitORM(
+                    id=COMPANY_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="C",
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_ROW_ID,
+                    tenant_id=TENANT,
+                    youtube_channel_id="chA",
+                    channel_name="A",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    month=MONTH,
+                    youtube_channel_id="chA",
+                    source_kind="ADSENSE",
+                    source_report_id=None,
+                    gross_revenue_usd=Decimal("1000.00"),
+                    net_revenue_usd=None,
+                    views=0,
+                    watch_time_minutes=Decimal("0"),
+                    confidence_score=Decimal("0.95"),
+                    imported_by=USER_ID,
+                ),
+                DeductionComponentORM(
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    month=MONTH,
+                    component_kind="DEDUCTION",
+                    scope_kind="ACCOUNT",
+                    scope_id="pub-1",
+                    amount_usd=Decimal("100.00"),
+                    currency_code="USD",
+                    source_system="adsense_management",
+                    source_table="google_revenue_source_rows",
+                    component_key="ad-1",
+                    raw_payload={},
+                ),
+                UserORM(id=USER_ID, email="recalc@example.com", display_name="Recalc User"),
+                FinanceMonthCloseORM(
+                    tenant_id=TENANT,
+                    month=MONTH,
+                    status=status,
+                    allocation_rule_payload={},
+                ),
+            ]
+        )
         if mapped:
-            session.add_all([
-                AdsenseContentOwnerLinkORM(
-                    id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-1",
-                    content_owner_id="owner-1", verification_status="VERIFIED",
-                    provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
-                    effective_month_start="2026-01",
-                ),
-                ContentOwnerChannelLinkORM(
-                    id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
-                    youtube_channel_id="chA", provenance_kind="SOURCE_ROW",
-                    active=True, effective_month_start="2026-01",
-                ),
-            ])
+            session.add_all(
+                [
+                    AdsenseContentOwnerLinkORM(
+                        id=uuid4(),
+                        tenant_id=TENANT,
+                        adsense_account_id="pub-1",
+                        content_owner_id="owner-1",
+                        verification_status="VERIFIED",
+                        provenance_kind="OPERATOR_ASSERTED",
+                        provenance_payload={},
+                        effective_month_start="2026-01",
+                    ),
+                    ContentOwnerChannelLinkORM(
+                        id=uuid4(),
+                        tenant_id=TENANT,
+                        content_owner_id="owner-1",
+                        youtube_channel_id="chA",
+                        provenance_kind="SOURCE_ROW",
+                        active=True,
+                        effective_month_start="2026-01",
+                    ),
+                ]
+            )
         session.commit()
 
 
@@ -147,7 +189,8 @@ def _principal(
             PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month))
         )
     return UserPrincipal(
-        user_id=str(USER_ID), email="recalc@example.com",
+        user_id=str(USER_ID),
+        email="recalc@example.com",
         direct_permissions=tuple(grants),
     )
 
@@ -398,8 +441,11 @@ def test_cross_endpoint_idempotency_commit_then_recalc_replays_same_run(tmp_path
     reason = "shared idempotency reason"
     commit = client.post(
         commit_path,
-        json={"idempotency_key": "shared-k", "reason": reason,
-              "allocation_method": "gross_revenue_proportional"},
+        json={
+            "idempotency_key": "shared-k",
+            "reason": reason,
+            "allocation_method": "gross_revenue_proportional",
+        },
     )
     assert commit.status_code == 201
     recalc = client.post(

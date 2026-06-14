@@ -79,9 +79,7 @@ def test_audit_repository_filters_to_explicit_tenant_id() -> None:
     session = build_session()
     seed_audit_rows(session)
 
-    page = SqlAlchemyAuditLogRepository(
-        session, tenant_id=SECOND_TENANT_ID
-    ).list_events(limit=10)
+    page = SqlAlchemyAuditLogRepository(session, tenant_id=SECOND_TENANT_ID).list_events(limit=10)
 
     assert [item.event_type for item in page.items] == ["SECOND_TENANT_EVENT"]
 
@@ -101,9 +99,7 @@ def test_audit_repository_returns_empty_page_for_empty_tenant() -> None:
     session = build_session()
     seed_audit_rows(session)
 
-    page = SqlAlchemyAuditLogRepository(session, tenant_id=uuid4()).list_events(
-        limit=10
-    )
+    page = SqlAlchemyAuditLogRepository(session, tenant_id=uuid4()).list_events(limit=10)
 
     assert page.items == []
     assert page.has_more is False
@@ -116,9 +112,9 @@ def test_audit_repository_explicit_tenant_overrides_request_context() -> None:
     seed_audit_rows(session)
     token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
     try:
-        page = SqlAlchemyAuditLogRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        ).list_events(limit=10)
+        page = SqlAlchemyAuditLogRepository(session, tenant_id=DEFAULT_TENANT_ID).list_events(
+            limit=10
+        )
     finally:
         TENANT_CTX.reset(token)
 
@@ -174,9 +170,7 @@ def test_audit_repository_rejects_page_size_above_boundary() -> None:
     session = build_session()
 
     with pytest.raises(AuditLogValidationError, match="limit must be between"):
-        SqlAlchemyAuditLogRepository(session).list_events(
-            limit=MAX_AUDIT_LOG_PAGE_SIZE + 1
-        )
+        SqlAlchemyAuditLogRepository(session).list_events(limit=MAX_AUDIT_LOG_PAGE_SIZE + 1)
 
 
 def test_sql_audit_sink_uses_request_tenant_context_by_default() -> None:

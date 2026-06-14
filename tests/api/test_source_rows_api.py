@@ -1,4 +1,5 @@
 """Integration tests for the read-only Google source-rows API."""
+
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -115,9 +116,7 @@ def test_requires_view_revenue(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
-    resp = client.get(
-        "/revenue/source-rows?month=2026-03", headers=auth_headers("connector_admin")
-    )
+    resp = client.get("/revenue/source-rows?month=2026-03", headers=auth_headers("connector_admin"))
     assert resp.status_code == 403
 
 
@@ -126,9 +125,7 @@ def test_lists_only_own_tenant_rows(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
-    resp = client.get(
-        "/revenue/source-rows?month=2026-03", headers=auth_headers("finance_viewer")
-    )
+    resp = client.get("/revenue/source-rows?month=2026-03", headers=auth_headers("finance_viewer"))
     assert resp.status_code == 200
     body = resp.json()
     # Tenant A has two 2026-03 rows; tenant B's 2026-03 row must be excluded.

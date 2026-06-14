@@ -1,4 +1,5 @@
 """API tests for POST /revenue/months/{month}/account-allocations/commit."""
+
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -62,53 +63,94 @@ def _seed(database_url: str, *, mapped: bool = True, status: str = "OPEN") -> No
     SecurityBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add_all([
-            TenantORM(
-                id=TENANT, slug="ums", display_name="UMS",
-                primary_currency="USD", status="ACTIVE",
-            ),
-            OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="S", active=True),
-            OrgUnitORM(
-                id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="C", active=True,
-            ),
-            YouTubeChannelORM(
-                id=CHANNEL_ROW_ID, tenant_id=TENANT, youtube_channel_id="chA",
-                channel_name="A", primary_org_unit_id=COMPANY_ID,
-                cms_status="INSIDE_CMS", revenue_required=True, active=True,
-            ),
-            MonthlyChannelRevenueFactORM(
-                id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id="chA",
-                source_kind="ADSENSE", source_report_id=None,
-                gross_revenue_usd=Decimal("1000.00"), net_revenue_usd=None,
-                views=0, watch_time_minutes=Decimal("0"),
-                confidence_score=Decimal("0.95"), imported_by=USER_ID,
-            ),
-            DeductionComponentORM(
-                id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
-                scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("100.00"),
-                currency_code="USD", source_system="adsense_management",
-                source_table="google_revenue_source_rows", component_key="ad-1",
-                raw_payload={},
-            ),
-            UserORM(id=USER_ID, email="commit@example.com", display_name="Commit User"),
-            FinanceMonthCloseORM(
-                tenant_id=TENANT, month=MONTH, status=status, allocation_rule_payload={},
-            ),
-        ])
+        session.add_all(
+            [
+                TenantORM(
+                    id=TENANT,
+                    slug="ums",
+                    display_name="UMS",
+                    primary_currency="USD",
+                    status="ACTIVE",
+                ),
+                OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="S", active=True),
+                OrgUnitORM(
+                    id=COMPANY_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="C",
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_ROW_ID,
+                    tenant_id=TENANT,
+                    youtube_channel_id="chA",
+                    channel_name="A",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    month=MONTH,
+                    youtube_channel_id="chA",
+                    source_kind="ADSENSE",
+                    source_report_id=None,
+                    gross_revenue_usd=Decimal("1000.00"),
+                    net_revenue_usd=None,
+                    views=0,
+                    watch_time_minutes=Decimal("0"),
+                    confidence_score=Decimal("0.95"),
+                    imported_by=USER_ID,
+                ),
+                DeductionComponentORM(
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    month=MONTH,
+                    component_kind="DEDUCTION",
+                    scope_kind="ACCOUNT",
+                    scope_id="pub-1",
+                    amount_usd=Decimal("100.00"),
+                    currency_code="USD",
+                    source_system="adsense_management",
+                    source_table="google_revenue_source_rows",
+                    component_key="ad-1",
+                    raw_payload={},
+                ),
+                UserORM(id=USER_ID, email="commit@example.com", display_name="Commit User"),
+                FinanceMonthCloseORM(
+                    tenant_id=TENANT,
+                    month=MONTH,
+                    status=status,
+                    allocation_rule_payload={},
+                ),
+            ]
+        )
         if mapped:
-            session.add_all([
-                AdsenseContentOwnerLinkORM(
-                    id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-1",
-                    content_owner_id="owner-1", verification_status="VERIFIED",
-                    provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
-                    effective_month_start="2026-01",
-                ),
-                ContentOwnerChannelLinkORM(
-                    id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
-                    youtube_channel_id="chA", provenance_kind="SOURCE_ROW",
-                    active=True, effective_month_start="2026-01",
-                ),
-            ])
+            session.add_all(
+                [
+                    AdsenseContentOwnerLinkORM(
+                        id=uuid4(),
+                        tenant_id=TENANT,
+                        adsense_account_id="pub-1",
+                        content_owner_id="owner-1",
+                        verification_status="VERIFIED",
+                        provenance_kind="OPERATOR_ASSERTED",
+                        provenance_payload={},
+                        effective_month_start="2026-01",
+                    ),
+                    ContentOwnerChannelLinkORM(
+                        id=uuid4(),
+                        tenant_id=TENANT,
+                        content_owner_id="owner-1",
+                        youtube_channel_id="chA",
+                        provenance_kind="SOURCE_ROW",
+                        active=True,
+                        effective_month_start="2026-01",
+                    ),
+                ]
+            )
         session.commit()
 
 
@@ -130,7 +172,8 @@ def _principal(*, revenue: bool = True, payments: bool = True, change: bool = Tr
             PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH))
         )
     return UserPrincipal(
-        user_id=str(USER_ID), email="commit@example.com",
+        user_id=str(USER_ID),
+        email="commit@example.com",
         direct_permissions=tuple(grants),
     )
 
@@ -233,7 +276,8 @@ def test_unsupported_method_rejected_422(tmp_path):
     resp = client.post(
         COMMIT_PATH,
         json={
-            "idempotency_key": "k", "reason": "r",
+            "idempotency_key": "k",
+            "reason": "r",
             "allocation_method": "definitely_not_a_method",
         },
     )
@@ -280,8 +324,11 @@ def test_commit_post_tax_returns_201_with_basis_amount(tmp_path):
     client = TestClient(app)
     response = client.post(
         COMMIT_PATH,
-        json={"idempotency_key": "k-pt", "reason": "post-tax close",
-              "allocation_method": "post_tax_revenue_proportional"},
+        json={
+            "idempotency_key": "k-pt",
+            "reason": "post-tax close",
+            "allocation_method": "post_tax_revenue_proportional",
+        },
     )
     assert response.status_code == 201
     body = response.json()
@@ -297,9 +344,7 @@ def test_commit_post_tax_returns_201_with_basis_amount(tmp_path):
         pytest.param({"idempotency_key": "k", "reason": ""}, id="empty_reason"),
         pytest.param({"idempotency_key": "k", "reason": "   "}, id="whitespace_reason"),
         pytest.param({"idempotency_key": "", "reason": "r"}, id="empty_idempotency_key"),
-        pytest.param(
-            {"idempotency_key": "   ", "reason": "r"}, id="whitespace_idempotency_key"
-        ),
+        pytest.param({"idempotency_key": "   ", "reason": "r"}, id="whitespace_idempotency_key"),
     ],
 )
 def test_blank_request_field_rejected_422(tmp_path, body):
@@ -337,8 +382,11 @@ def test_commit_no_allocation_snapshots_withheld_components(tmp_path):
     client = _client(db, _principal)
     resp = client.post(
         COMMIT_PATH,
-        json={"idempotency_key": "k-na", "reason": "withhold this month",
-              "allocation_method": "no_allocation"},
+        json={
+            "idempotency_key": "k-na",
+            "reason": "withhold this month",
+            "allocation_method": "no_allocation",
+        },
     )
     assert resp.status_code == 201
     body = resp.json()
@@ -358,8 +406,11 @@ def test_commit_no_allocation_idempotent_replay_200(tmp_path):
     db = build_database_url(tmp_path)
     _seed(db, mapped=True)
     client = _client(db, _principal)
-    payload = {"idempotency_key": "k-na", "reason": "withhold",
-               "allocation_method": "no_allocation"}
+    payload = {
+        "idempotency_key": "k-na",
+        "reason": "withhold",
+        "allocation_method": "no_allocation",
+    }
     first = client.post(COMMIT_PATH, json=payload)
     second = client.post(COMMIT_PATH, json=payload)
     assert first.status_code == 201
@@ -394,8 +445,11 @@ def test_commit_company_level_returns_201(tmp_path):
     client = _client(db, _principal)
     resp = client.post(
         COMMIT_PATH,
-        json={"idempotency_key": "k-cl", "reason": "company close",
-              "allocation_method": "company_level"},
+        json={
+            "idempotency_key": "k-cl",
+            "reason": "company close",
+            "allocation_method": "company_level",
+        },
     )
     assert resp.status_code == 201
     body = resp.json()
@@ -417,18 +471,29 @@ def test_commit_company_level_unmapped_channel_rejected_422(tmp_path):
     # cannot map it to a company -> COMPANY_UNMAPPED -> reject-on-unallocated.
     engine = create_engine(db)
     with Session(engine) as session:
-        session.add_all([
-            YouTubeChannelORM(
-                id=uuid4(), tenant_id=TENANT, youtube_channel_id="chB",
-                channel_name="B", primary_org_unit_id=None,
-                cms_status="INSIDE_CMS", revenue_required=True, active=True,
-            ),
-            ContentOwnerChannelLinkORM(
-                id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
-                youtube_channel_id="chB", provenance_kind="SOURCE_ROW",
-                active=True, effective_month_start="2026-01",
-            ),
-        ])
+        session.add_all(
+            [
+                YouTubeChannelORM(
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    youtube_channel_id="chB",
+                    channel_name="B",
+                    primary_org_unit_id=None,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                ContentOwnerChannelLinkORM(
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    content_owner_id="owner-1",
+                    youtube_channel_id="chB",
+                    provenance_kind="SOURCE_ROW",
+                    active=True,
+                    effective_month_start="2026-01",
+                ),
+            ]
+        )
         session.commit()
     client = _client(db, _principal)
     resp = client.post(
@@ -448,8 +513,11 @@ def test_locked_month_get_returns_no_allocation_snapshot(tmp_path):
     client = _client(db, _principal)
     commit = client.post(
         COMMIT_PATH,
-        json={"idempotency_key": "k-na", "reason": "withhold",
-              "allocation_method": "no_allocation"},
+        json={
+            "idempotency_key": "k-na",
+            "reason": "withhold",
+            "allocation_method": "no_allocation",
+        },
     )
     assert commit.status_code == 201
     engine = create_engine(db)
@@ -535,7 +603,8 @@ def test_manual_lines_with_gross_method_rejected_422(tmp_path):
     resp = client.post(
         COMMIT_PATH,
         json={
-            "idempotency_key": "k", "reason": "r",
+            "idempotency_key": "k",
+            "reason": "r",
             "allocation_method": "gross_revenue_proportional",
             "manual_lines": [
                 {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "100.00"}
@@ -621,10 +690,17 @@ def test_manual_uncovered_component_rejected_422(tmp_path):
     with Session(engine) as session:
         session.add(
             DeductionComponentORM(
-                id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
-                scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("50.00"),
-                currency_code="USD", source_system="adsense_management",
-                source_table="google_revenue_source_rows", component_key="ad-2",
+                id=uuid4(),
+                tenant_id=TENANT,
+                month=MONTH,
+                component_kind="DEDUCTION",
+                scope_kind="ACCOUNT",
+                scope_id="pub-1",
+                amount_usd=Decimal("50.00"),
+                currency_code="USD",
+                source_system="adsense_management",
+                source_table="google_revenue_source_rows",
+                component_key="ad-2",
                 raw_payload={},
             )
         )
@@ -660,18 +736,29 @@ def test_manual_same_key_different_lines_conflicts_409(tmp_path):
     _seed(db, mapped=True)
     engine = create_engine(db)
     with Session(engine) as session:
-        session.add_all([
-            YouTubeChannelORM(
-                id=uuid4(), tenant_id=TENANT, youtube_channel_id="chB",
-                channel_name="B", primary_org_unit_id=COMPANY_ID,
-                cms_status="INSIDE_CMS", revenue_required=True, active=True,
-            ),
-            ContentOwnerChannelLinkORM(
-                id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
-                youtube_channel_id="chB", provenance_kind="SOURCE_ROW",
-                active=True, effective_month_start="2026-01",
-            ),
-        ])
+        session.add_all(
+            [
+                YouTubeChannelORM(
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    youtube_channel_id="chB",
+                    channel_name="B",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                ContentOwnerChannelLinkORM(
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    content_owner_id="owner-1",
+                    youtube_channel_id="chB",
+                    provenance_kind="SOURCE_ROW",
+                    active=True,
+                    effective_month_start="2026-01",
+                ),
+            ]
+        )
         session.commit()
     client = _client(db, _principal)
     first = client.post(COMMIT_PATH, json=_manual_body(key="dup-man"))
@@ -717,7 +804,8 @@ def test_commit_request_fingerprint_backward_compatible_without_lines():
         digest_size=16,
     ).hexdigest()
     current = commit_request_fingerprint(
-        allocation_method="gross_revenue_proportional", reason="month close",
+        allocation_method="gross_revenue_proportional",
+        reason="month close",
     )
     assert current == legacy
 
@@ -879,7 +967,8 @@ def test_commit_non_canonical_casing_accepted_and_canonicalized_201(tmp_path):
     resp = client.post(
         COMMIT_PATH,
         json={
-            "idempotency_key": "K", "reason": "month close",
+            "idempotency_key": "K",
+            "reason": "month close",
             "allocation_method": " GROSS_REVENUE_PROPORTIONAL ",
         },
     )
@@ -901,13 +990,19 @@ def test_commit_cross_casing_idempotent_replay_returns_200(tmp_path):
     client = _client(db, _principal)
     first = client.post(
         COMMIT_PATH,
-        json={"idempotency_key": "K2", "reason": "month close",
-              "allocation_method": "gross_revenue_proportional"},
+        json={
+            "idempotency_key": "K2",
+            "reason": "month close",
+            "allocation_method": "gross_revenue_proportional",
+        },
     )
     second = client.post(
         COMMIT_PATH,
-        json={"idempotency_key": "K2", "reason": "month close",
-              "allocation_method": "GROSS_REVENUE_PROPORTIONAL"},
+        json={
+            "idempotency_key": "K2",
+            "reason": "month close",
+            "allocation_method": "GROSS_REVENUE_PROPORTIONAL",
+        },
     )
     assert first.status_code == 201
     assert second.status_code == 200
@@ -928,8 +1023,7 @@ def test_commit_unknown_method_any_casing_rejected_422(tmp_path):
     client = _client(db, _principal)
     resp = client.post(
         COMMIT_PATH,
-        json={"idempotency_key": "k", "reason": "r",
-              "allocation_method": "MAGIC_ESTIMATE"},
+        json={"idempotency_key": "k", "reason": "r", "allocation_method": "MAGIC_ESTIMATE"},
     )
     assert resp.status_code == 422
     detail = resp.json()["detail"]

@@ -20,9 +20,7 @@ from sqlalchemy.engine import Connection
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_NAME = "20260518_0001_tenant_scoped_youtube_channel_identity"
-MIGRATION_PATH = (
-    PROJECT_ROOT / f"backend/ums_smart_revenue/db/alembic/versions/{MIGRATION_NAME}.py"
-)
+MIGRATION_PATH = PROJECT_ROOT / f"backend/ums_smart_revenue/db/alembic/versions/{MIGRATION_NAME}.py"
 
 
 def test_migration_scopes_youtube_channel_identity_to_tenant():
@@ -39,12 +37,10 @@ def test_migration_scopes_youtube_channel_identity_to_tenant():
             for constraint in inspector.get_unique_constraints("youtube_channels")
         }
         monthly_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("monthly_channel_revenue_facts")
+            fk["name"]: fk for fk in inspector.get_foreign_keys("monthly_channel_revenue_facts")
         }
         override_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("revenue_manual_overrides")
+            fk["name"]: fk for fk in inspector.get_foreign_keys("revenue_manual_overrides")
         }
 
         connection.execute(
@@ -79,15 +75,11 @@ def test_migration_scopes_youtube_channel_identity_to_tenant():
         "tenant_id",
         "youtube_channel_id",
     ]
-    assert monthly_fks["fk_monthly_channel_revenue_facts_tenant_channel"][
-        "referred_columns"
-    ] == [
+    assert monthly_fks["fk_monthly_channel_revenue_facts_tenant_channel"]["referred_columns"] == [
         "tenant_id",
         "youtube_channel_id",
     ]
-    assert override_fks["fk_revenue_manual_overrides_tenant_channel"][
-        "constrained_columns"
-    ] == [
+    assert override_fks["fk_revenue_manual_overrides_tenant_channel"]["constrained_columns"] == [
         "tenant_id",
         "youtube_channel_id",
     ]
@@ -108,13 +100,10 @@ def test_downgrade_restores_global_youtube_channel_identity():
             for constraint in inspector.get_unique_constraints("youtube_channels")
         }
         monthly_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("monthly_channel_revenue_facts")
+            fk["name"]: fk for fk in inspector.get_foreign_keys("monthly_channel_revenue_facts")
         }
 
-    assert youtube_uniques["uq_youtube_channels_youtube_channel_id"] == [
-        "youtube_channel_id"
-    ]
+    assert youtube_uniques["uq_youtube_channels_youtube_channel_id"] == ["youtube_channel_id"]
     assert monthly_fks["fk_monthly_channel_revenue_facts_youtube_channel_id"][
         "constrained_columns"
     ] == ["youtube_channel_id"]

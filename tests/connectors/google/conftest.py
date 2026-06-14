@@ -1,4 +1,5 @@
 """Shared httpx.MockTransport helpers for B2.4+ client tests."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -15,6 +16,7 @@ def make_mock_transport(handler: Callable[[httpx.Request], httpx.Response]) -> h
 @pytest.fixture
 def mock_credentials():
     """Build a stub google-auth Credentials that no-ops before_request."""
+
     class _StubCreds:
         token = "fake-bearer"
 

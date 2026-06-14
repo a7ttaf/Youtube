@@ -1,4 +1,5 @@
 """Tests for the read-only deduction-components endpoint + net-revenue consumption."""
+
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -49,35 +50,67 @@ def seed_database(database_url, *, net_revenue_usd="900.00"):
     SecurityBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add_all([
-            OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
-            OrgUnitORM(id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="TV Co", active=True),
-            YouTubeChannelORM(
-                id=CHANNEL_ROW_ID, youtube_channel_id=CHANNEL, channel_name="TV A",
-                primary_org_unit_id=COMPANY_ID, cms_status="INSIDE_CMS",
-                revenue_required=True, active=True,
-            ),
-            MonthlyChannelRevenueFactORM(
-                id=uuid4(), month=MONTH, youtube_channel_id=CHANNEL,
-                source_kind="ADSENSE", source_report_id="adsense-2026-04",
-                gross_revenue_usd=Decimal("1000.00"),
-                net_revenue_usd=(None if net_revenue_usd is None else Decimal(net_revenue_usd)),
-                views=1000, watch_time_minutes=Decimal("100.00"),
-                confidence_score=Decimal("0.95"), imported_by=USER_ID,
-            ),
-            UserORM(id=USER_ID, email="deduction-view@example.com", display_name="Deduction Viewer"),
-        ])
+        session.add_all(
+            [
+                OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
+                OrgUnitORM(
+                    id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="TV Co", active=True
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_ROW_ID,
+                    youtube_channel_id=CHANNEL,
+                    channel_name="TV A",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month=MONTH,
+                    youtube_channel_id=CHANNEL,
+                    source_kind="ADSENSE",
+                    source_report_id="adsense-2026-04",
+                    gross_revenue_usd=Decimal("1000.00"),
+                    net_revenue_usd=(None if net_revenue_usd is None else Decimal(net_revenue_usd)),
+                    views=1000,
+                    watch_time_minutes=Decimal("100.00"),
+                    confidence_score=Decimal("0.95"),
+                    imported_by=USER_ID,
+                ),
+                UserORM(
+                    id=USER_ID, email="deduction-view@example.com", display_name="Deduction Viewer"
+                ),
+            ]
+        )
         session.commit()
 
 
-def _component(*, kind, scope_kind, scope_id, amount, source_system, key_suffix,
-               source_table="google_revenue_source_rows"):
+def _component(
+    *,
+    kind,
+    scope_kind,
+    scope_id,
+    amount,
+    source_system,
+    key_suffix,
+    source_table="google_revenue_source_rows",
+):
     """Build one DeductionComponentORM row."""
     return DeductionComponentORM(
-        id=uuid4(), month=MONTH, component_kind=kind, scope_kind=scope_kind,
-        scope_id=scope_id, amount_usd=Decimal(amount), amount_native=None,
-        currency_code="USD", source_system=source_system, source_table=source_table,
-        source_id=None, source_key=f"k-{key_suffix}", source_report_id=None,
+        id=uuid4(),
+        month=MONTH,
+        component_kind=kind,
+        scope_kind=scope_kind,
+        scope_id=scope_id,
+        amount_usd=Decimal(amount),
+        amount_native=None,
+        currency_code="USD",
+        source_system=source_system,
+        source_table=source_table,
+        source_id=None,
+        source_key=f"k-{key_suffix}",
+        source_report_id=None,
         raw_payload={"secret_provenance": f"LEAK-{key_suffix}"},
         component_key=f"key:{key_suffix}",
     )
@@ -87,16 +120,36 @@ def _seed_components(database_url):
     """Seed one component of each scope so grouping/audit branches are exercised."""
     engine = create_engine(database_url)
     with Session(engine) as session:
-        session.add_all([
-            _component(kind="DEDUCTION", scope_kind="CHANNEL", scope_id=CHANNEL,
-                       amount="120.00", source_system="adsense_management", key_suffix="chan"),
-            _component(kind="UNRESOLVED_PAYMENT_GAP", scope_kind="ACCOUNT", scope_id="pub-1",
-                       amount="70.00", source_system="adsense_payment_gap",
-                       key_suffix="acct", source_table="adsense_payment_gap"),
-            _component(kind="TRANSFER_FEE", scope_kind="PAYMENT", scope_id="BANK-1",
-                       amount="5.00", source_system="bank_reconciliation",
-                       key_suffix="pay", source_table="bank_reconciliation_entries"),
-        ])
+        session.add_all(
+            [
+                _component(
+                    kind="DEDUCTION",
+                    scope_kind="CHANNEL",
+                    scope_id=CHANNEL,
+                    amount="120.00",
+                    source_system="adsense_management",
+                    key_suffix="chan",
+                ),
+                _component(
+                    kind="UNRESOLVED_PAYMENT_GAP",
+                    scope_kind="ACCOUNT",
+                    scope_id="pub-1",
+                    amount="70.00",
+                    source_system="adsense_payment_gap",
+                    key_suffix="acct",
+                    source_table="adsense_payment_gap",
+                ),
+                _component(
+                    kind="TRANSFER_FEE",
+                    scope_kind="PAYMENT",
+                    scope_id="BANK-1",
+                    amount="5.00",
+                    source_system="bank_reconciliation",
+                    key_suffix="pay",
+                    source_table="bank_reconciliation_entries",
+                ),
+            ]
+        )
         session.commit()
 
 
@@ -105,8 +158,14 @@ def _seed_channel_component(database_url, *, amount, source_system):
     engine = create_engine(database_url)
     with Session(engine) as session:
         session.add(
-            _component(kind="DEDUCTION", scope_kind="CHANNEL", scope_id=CHANNEL,
-                       amount=amount, source_system=source_system, key_suffix="net")
+            _component(
+                kind="DEDUCTION",
+                scope_kind="CHANNEL",
+                scope_id=CHANNEL,
+                amount=amount,
+                source_system=source_system,
+                key_suffix="net",
+            )
         )
         session.commit()
 
@@ -170,9 +229,12 @@ def test_finance_viewer_reads_components_grouped_with_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         from sqlalchemy import select
+
         logs = session.scalars(select(AuditLogORM)).all()
     assert {log.event_type for log in logs} == {
-        "REVENUE_VIEWED", "PAYMENT_VIEWED", "BANK_RECONCILIATION_VIEWED",
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+        "BANK_RECONCILIATION_VIEWED",
     }
     assert all(log.sensitive is True for log in logs)
 
@@ -237,6 +299,7 @@ def test_scope_id_filter_and_channel_only_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         from sqlalchemy import select
+
         logs = session.scalars(select(AuditLogORM)).all()
     assert [log.event_type for log in logs] == ["REVENUE_VIEWED"]
 
@@ -285,9 +348,9 @@ def test_deduction_components_openapi_uses_typed_response_model(tmp_path):
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
     schema = client.get("/openapi.json").json()
-    response_schema = schema["paths"][
-        "/revenue/months/{month}/deduction-components"
-    ]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    response_schema = schema["paths"]["/revenue/months/{month}/deduction-components"]["get"][
+        "responses"
+    ]["200"]["content"]["application/json"]["schema"]
 
     assert response_schema["$ref"].endswith("/MonthDeductionComponentsResponse")
 
@@ -364,7 +427,8 @@ def test_missing_trusted_gateway_token_is_401(tmp_path):
     headers = auth_headers("finance_admin", "global")
     headers.pop("x-ums-trusted-gateway-token")
     response = client.get(
-        f"/revenue/months/{MONTH}/deduction-components", headers=headers,
+        f"/revenue/months/{MONTH}/deduction-components",
+        headers=headers,
     )
     assert response.status_code == 401
 
@@ -378,7 +442,8 @@ def test_invalid_trusted_gateway_token_is_401(tmp_path):
     headers = auth_headers("finance_admin", "global")
     headers["x-ums-trusted-gateway-token"] = "invalid-token"
     response = client.get(
-        f"/revenue/months/{MONTH}/deduction-components", headers=headers,
+        f"/revenue/months/{MONTH}/deduction-components",
+        headers=headers,
     )
     assert response.status_code == 401
 

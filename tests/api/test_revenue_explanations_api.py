@@ -78,9 +78,7 @@ def seed_database(database_url: str) -> None:
     with Session(engine) as session:
         session.add_all(
             [
-                OrgUnitORM(
-                    id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True
-                ),
+                OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
                 OrgUnitORM(
                     id=COMPANY_ID,
                     parent_id=SECTOR_ID,
@@ -196,10 +194,7 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
     assert response.json()["warnings"] == [
         {
             "code": "PENDING_MANUAL_OVERRIDES",
-            "message": (
-                "1 pending manual override is not included in "
-                "adjusted_gross_revenue_usd."
-            ),
+            "message": ("1 pending manual override is not included in adjusted_gross_revenue_usd."),
         }
     ]
     assert response.json()["audit_event"]["event_type"] == "REVENUE_VIEWED"
@@ -274,8 +269,7 @@ def _post_net_explain(client, *, channel, month, principal):
     client.app.dependency_overrides[current_principal_from_headers] = lambda: principal
     try:
         return client.post(
-            f"/revenue/channels/{channel}/months/{month}/explain"
-            "?metric=net_revenue_usd",
+            f"/revenue/channels/{channel}/months/{month}/explain?metric=net_revenue_usd",
         )
     finally:
         client.app.dependency_overrides.pop(current_principal_from_headers, None)
@@ -308,9 +302,7 @@ def test_net_revenue_explanation_global_finance_returns_value_provenance_and_plu
     engine = create_engine(database_url)
     with Session(engine) as session:
         rows = session.scalars(
-            select(NumberExplanationORM).where(
-                NumberExplanationORM.metric == "net_revenue_usd"
-            )
+            select(NumberExplanationORM).where(NumberExplanationORM.metric == "net_revenue_usd")
         ).all()
     assert len(rows) == 1
 
@@ -329,8 +321,7 @@ def test_net_revenue_explanation_org_scoped_finance_viewer_403_on_net_200_on_gro
         headers=headers,
     )
     gross = client.post(
-        "/revenue/channels/channel-tv-a/months/2026-03/explain"
-        "?metric=adjusted_gross_revenue_usd",
+        "/revenue/channels/channel-tv-a/months/2026-03/explain?metric=adjusted_gross_revenue_usd",
         headers=headers,
     )
     assert net.status_code == 403
@@ -393,8 +384,7 @@ def test_net_revenue_explanation_idempotent_upsert_coexists_with_gross(tmp_path)
         principal=_finance_month_net_principal(),
     )
     client.post(
-        "/revenue/channels/channel-tv-a/months/2026-03/explain"
-        "?metric=adjusted_gross_revenue_usd",
+        "/revenue/channels/channel-tv-a/months/2026-03/explain?metric=adjusted_gross_revenue_usd",
         headers=auth_headers("finance_viewer", scope_id=str(COMPANY_ID)),
     )
 
@@ -574,9 +564,7 @@ def test_net_explanation_locked_month_records_committed_snapshot_provenance(tmp_
     )
 
     assert response.status_code == 200
-    account_component = _persisted_account_component(
-        database_url, "channel-alloc", "2026-03"
-    )
+    account_component = _persisted_account_component(database_url, "channel-alloc", "2026-03")
     assert account_component["allocation_source"] == "committed_snapshot"
     assert account_component["committed_run"] is not None
     assert account_component["committed_run"]["commit_version"] == 1
@@ -597,8 +585,6 @@ def test_net_explanation_open_month_records_live_compute_provenance(tmp_path):
     )
 
     assert response.status_code == 200
-    account_component = _persisted_account_component(
-        database_url, "channel-alloc", "2026-03"
-    )
+    account_component = _persisted_account_component(database_url, "channel-alloc", "2026-03")
     assert account_component["allocation_source"] == "live_compute"
     assert account_component["committed_run"] is None

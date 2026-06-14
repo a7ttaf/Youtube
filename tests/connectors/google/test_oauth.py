@@ -5,6 +5,7 @@ and constructs google.oauth2.credentials.Credentials; missing fields or bad
 JSON -> MalformedSecretPayloadError. refresh_credentials(creds) calls
 creds.refresh(Request()); GoogleAuthError -> OAuthRefreshError.
 """
+
 from __future__ import annotations
 
 import json
@@ -67,9 +68,7 @@ def test_build_credentials_rejects_missing_field(missing_field: str) -> None:
         ("token_uri", 123),
     ],
 )
-def test_build_credentials_rejects_non_string_required_fields(
-    field: str, value: object
-) -> None:
+def test_build_credentials_rejects_non_string_required_fields(field: str, value: object) -> None:
     payload = json.loads(_VALID_PAYLOAD)
     payload[field] = value
 

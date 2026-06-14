@@ -167,9 +167,7 @@ def test_finance_viewer_reads_month_smart_alerts_with_sensitive_audits(tmp_path)
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.event_type)
-        ).all()
+        audit_logs = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
     assert response.json()["status"] == "ATTENTION_REQUIRED"
@@ -205,10 +203,7 @@ def test_month_smart_alerts_reject_non_padded_month(tmp_path):
     )
 
     assert response.status_code == 422
-    assert (
-        response.json()["detail"]
-        == "month must use YYYY-MM with a calendar month from 01 to 12"
-    )
+    assert response.json()["detail"] == "month must use YYYY-MM with a calendar month from 01 to 12"
 
 
 def test_previous_month_rejects_non_padded_month():
@@ -257,11 +252,7 @@ def test_month_smart_alerts_include_month_over_month_revenue_anomaly(tmp_path):
 
     assert response.status_code == 200
     anomaly = next(
-        (
-            alert
-            for alert in response.json()["alerts"]
-            if alert["code"] == "REVENUE_TREND_ANOMALY"
-        ),
+        (alert for alert in response.json()["alerts"] if alert["code"] == "REVENUE_TREND_ANOMALY"),
         None,
     )
     assert anomaly is not None

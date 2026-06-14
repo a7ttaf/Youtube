@@ -1,4 +1,5 @@
 """Channel-direct deduction consumption in net-revenue (only when source net missing)."""
+
 from decimal import Decimal
 from importlib import import_module
 
@@ -31,8 +32,15 @@ def fact(*, source_kind="ADSENSE", gross="1000.00", net=None):
     )
 
 
-def component(*, kind="DEDUCTION", scope_kind="CHANNEL", scope_id=CHANNEL,
-              amount="120.00", source_system="adsense_management", month=MONTH):
+def component(
+    *,
+    kind="DEDUCTION",
+    scope_kind="CHANNEL",
+    scope_id=CHANNEL,
+    amount="120.00",
+    source_system="adsense_management",
+    month=MONTH,
+):
     """Build a persisted DeductionComponent read-model row for tests."""
     return DeductionComponent(
         id=f"dc-{kind}-{scope_id}-{amount}",
@@ -56,8 +64,11 @@ def component(*, kind="DEDUCTION", scope_kind="CHANNEL", scope_id=CHANNEL,
 def _channel(*, facts, components=()):
     """Call build_channel_net_revenue_summary for the fixed test channel and month."""
     return _mod().build_channel_net_revenue_summary(
-        facts=facts, manual_overrides=[], month=MONTH,
-        youtube_channel_id=CHANNEL, deduction_components=components,
+        facts=facts,
+        manual_overrides=[],
+        month=MONTH,
+        youtube_channel_id=CHANNEL,
+        deduction_components=components,
     )
 
 
@@ -77,8 +88,10 @@ def test_missing_net_with_channel_components_is_component_derived():
     """Missing source net + applicable CHANNEL components yields COMPONENT_DERIVED status and derived net."""
     summary = _channel(
         facts=[fact(net=None, gross="1000.00")],
-        components=[component(kind="DEDUCTION", amount="120.00"),
-                   component(kind="TAX", amount="30.00", source_system="adsense_management")],
+        components=[
+            component(kind="DEDUCTION", amount="120.00"),
+            component(kind="TAX", amount="30.00", source_system="adsense_management"),
+        ],
     )
     assert summary.status == "COMPONENT_DERIVED"
     assert summary.confidence == "D_ESTIMATED"
@@ -132,7 +145,12 @@ def test_payment_and_fee_fx_gap_components_never_affect_net():
         components=[
             component(kind="TRANSFER_FEE", scope_kind="PAYMENT", scope_id="BANK-1", amount="5.00"),
             component(kind="FX_VARIANCE", scope_kind="PAYMENT", scope_id="BANK-1", amount="-2.00"),
-            component(kind="UNRESOLVED_PAYMENT_GAP", scope_kind="ACCOUNT", scope_id="pub-1", amount="70.00"),
+            component(
+                kind="UNRESOLVED_PAYMENT_GAP",
+                scope_kind="ACCOUNT",
+                scope_id="pub-1",
+                amount="70.00",
+            ),
         ],
     )
     assert summary.status == "NET_REVENUE_SOURCE_MISSING"

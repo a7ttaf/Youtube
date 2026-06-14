@@ -77,37 +77,61 @@ def seed_database(database_url: str) -> None:
         session.add_all(
             [
                 OrgUnitORM(
-                    id=SECTOR_TV_ID, parent_id=None, type="SECTOR",
-                    name="TV", active=True,
+                    id=SECTOR_TV_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="TV",
+                    active=True,
                 ),
                 OrgUnitORM(
-                    id=SECTOR_MUSIC_ID, parent_id=None, type="SECTOR",
-                    name="Music", active=True,
+                    id=SECTOR_MUSIC_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="Music",
+                    active=True,
                 ),
                 OrgUnitORM(
-                    id=COMPANY_TV_A_ID, parent_id=SECTOR_TV_ID, type="COMPANY",
-                    name="TV A", active=True,
+                    id=COMPANY_TV_A_ID,
+                    parent_id=SECTOR_TV_ID,
+                    type="COMPANY",
+                    name="TV A",
+                    active=True,
                 ),
                 OrgUnitORM(
-                    id=COMPANY_TV_B_ID, parent_id=SECTOR_TV_ID, type="COMPANY",
-                    name="TV B", active=True,
+                    id=COMPANY_TV_B_ID,
+                    parent_id=SECTOR_TV_ID,
+                    type="COMPANY",
+                    name="TV B",
+                    active=True,
                 ),
                 OrgUnitORM(
-                    id=COMPANY_MUSIC_ID, parent_id=SECTOR_MUSIC_ID, type="COMPANY",
-                    name="Music Co", active=True,
+                    id=COMPANY_MUSIC_ID,
+                    parent_id=SECTOR_MUSIC_ID,
+                    type="COMPANY",
+                    name="Music Co",
+                    active=True,
                 ),
                 YouTubeChannelORM(
-                    id=CHANNEL_TV_A_ROW_ID, youtube_channel_id="channel-tv-a",
-                    channel_name="TV A Channel", primary_org_unit_id=COMPANY_TV_A_ID,
-                    cms_status="INSIDE_CMS", revenue_required=True, active=True,
+                    id=CHANNEL_TV_A_ROW_ID,
+                    youtube_channel_id="channel-tv-a",
+                    channel_name="TV A Channel",
+                    primary_org_unit_id=COMPANY_TV_A_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
                 ),
                 YouTubeChannelORM(
-                    id=CHANNEL_MUSIC_ROW_ID, youtube_channel_id="channel-music",
-                    channel_name="Music Channel", primary_org_unit_id=COMPANY_MUSIC_ID,
-                    cms_status="INSIDE_CMS", revenue_required=True, active=True,
+                    id=CHANNEL_MUSIC_ROW_ID,
+                    youtube_channel_id="channel-music",
+                    channel_name="Music Channel",
+                    primary_org_unit_id=COMPANY_MUSIC_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
                 ),
                 UserORM(
-                    id=USER_ID, email="scopes@example.com",
+                    id=USER_ID,
+                    email="scopes@example.com",
                     display_name="Scopes User",
                 ),
             ]
@@ -153,9 +177,7 @@ def test_company_scoped_viewer_lists_only_their_company_no_leak(tmp_path):
     seed_database(database_url)
     app = create_app(database_url=database_url)
     app.dependency_overrides[current_principal_from_headers] = lambda: _principal(
-        PermissionGrant(
-            Permission.VIEW_REVENUE, AccessScope.company(str(COMPANY_TV_A_ID))
-        ),
+        PermissionGrant(Permission.VIEW_REVENUE, AccessScope.company(str(COMPANY_TV_A_ID))),
     )
     client = TestClient(app)
 
@@ -163,9 +185,7 @@ def test_company_scoped_viewer_lists_only_their_company_no_leak(tmp_path):
 
     assert response.status_code == 200
     scopes = response.json()["scopes"]
-    assert [(s["scope_type"], s["scope_id"]) for s in scopes] == [
-        ("company", str(COMPANY_TV_A_ID))
-    ]
+    assert [(s["scope_type"], s["scope_id"]) for s in scopes] == [("company", str(COMPANY_TV_A_ID))]
     ids = {s["scope_id"] for s in scopes}
     # Foreign company + sibling company + the viewer's own sector must NOT leak.
     assert str(COMPANY_MUSIC_ID) not in ids
@@ -182,9 +202,7 @@ def test_sector_scoped_viewer_lists_sector_and_its_companies_only(tmp_path):
     seed_database(database_url)
     app = create_app(database_url=database_url)
     app.dependency_overrides[current_principal_from_headers] = lambda: _principal(
-        PermissionGrant(
-            Permission.VIEW_REVENUE, AccessScope.sector(str(SECTOR_TV_ID))
-        ),
+        PermissionGrant(Permission.VIEW_REVENUE, AccessScope.sector(str(SECTOR_TV_ID))),
     )
     client = TestClient(app)
 
@@ -228,9 +246,7 @@ def test_disabled_principal_is_forbidden(tmp_path):
         user_id=str(USER_ID),
         email="scopes@example.com",
         disabled=True,
-        direct_permissions=(
-            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
-        ),
+        direct_permissions=(PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),),
     )
     client = TestClient(app)
 
@@ -254,9 +270,7 @@ def test_non_rollup_only_grant_is_forbidden(tmp_path):
     seed_database(database_url)
     app = create_app(database_url=database_url)
     app.dependency_overrides[current_principal_from_headers] = lambda: _principal(
-        PermissionGrant(
-            Permission.VIEW_REVENUE, AccessScope.channel("channel-tv-a")
-        ),
+        PermissionGrant(Permission.VIEW_REVENUE, AccessScope.channel("channel-tv-a")),
     )
     client = TestClient(app)
 
@@ -285,9 +299,7 @@ def test_deactivated_company_excluded_from_scope_options(tmp_path):
         session.commit()
     app = create_app(database_url=database_url)
     app.dependency_overrides[current_principal_from_headers] = lambda: _principal(
-        PermissionGrant(
-            Permission.VIEW_REVENUE, AccessScope.sector(str(SECTOR_TV_ID))
-        ),
+        PermissionGrant(Permission.VIEW_REVENUE, AccessScope.sector(str(SECTOR_TV_ID))),
     )
     client = TestClient(app)
 

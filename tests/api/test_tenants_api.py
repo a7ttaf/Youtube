@@ -442,7 +442,4 @@ def test_tenants_me_returns_503_when_tenant_middleware_missing(
         headers=_full_principal_headers(),
     )
     assert response.status_code == 503
-    assert (
-        response.json()["detail"]
-        == "Tenant resolver middleware is not installed"
-    )
+    assert response.json()["detail"] == "Tenant resolver middleware is not installed"
