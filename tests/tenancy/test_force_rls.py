@@ -69,7 +69,7 @@ def _force_flags(conn: sa.Connection) -> dict[str, bool]:
         ),
         {"names": list(TENANT_SCOPED_TABLES)},
     ).all()
-    return {name: flag for name, flag in rows}
+    return dict(rows)
 
 
 def test_force_rls_migration_sets_force_flag_on_all_tenant_tables():
