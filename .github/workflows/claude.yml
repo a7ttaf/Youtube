@@ -1,0 +1,103 @@
+name: Claude Code
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude:
+    # Cheap pre-filter only: must mention @claude, not be bot-authored, and come
+    # from a trusted association. NOTE: author_association is a relationship
+    # label, not a permission — the authoritative write-access check runs as the
+    # first step below, before the secret-bearing step.
+    if: |
+      (
+        github.event_name == 'issue_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        github.event.comment.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      ) || (
+        github.event_name == 'pull_request_review_comment' &&
+        contains(github.event.comment.body, '@claude') &&
+        github.event.comment.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      ) || (
+        github.event_name == 'pull_request_review' &&
+        github.event.review.body != null &&
+        contains(github.event.review.body, '@claude') &&
+        github.event.review.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)
+      ) || (
+        github.event_name == 'issues' &&
+        (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) &&
+        github.event.issue.user.type != 'Bot' &&
+        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)
+      )
+    runs-on: ubuntu-latest
+    # Cap a single Claude session so a hung tool/loop from an @claude mention
+    # cannot keep the runner alive until GitHub's 360-minute default and burn
+    # Actions minutes.
+    timeout-minutes: 30
+    permissions:
+      # Least privilege: write scopes so Claude can post replies / push changes
+      # via the workflow GITHUB_TOKEN (see github_token below). No id-token —
+      # the OAuth + explicit github_token path does not use GitHub OIDC. Safe
+      # because the actor is verified to hold write access in the guard step
+      # before the secret is used.
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read # Required for Claude to read CI results on PRs
+    steps:
+      - name: Verify the triggering actor has write access
+        # author_association can be MEMBER/COLLABORATOR for read-only principals,
+        # so enforce the real repository permission (write/admin) before any
+        # secret-bearing step runs. Fail-closed.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          perm=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission')
+          echo "actor=$ACTOR permission=$perm"
+          if [ "$perm" != "admin" ] && [ "$perm" != "write" ]; then
+            echo "::error::$ACTOR lacks write access (permission=$perm); refusing to run Claude."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        # actions/checkout@v4.2.2 — pinned to immutable commit SHA
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        id: claude
+        # anthropics/claude-code-action@v1 — pinned to immutable commit SHA
+        uses: anthropics/claude-code-action@d5726de019ec4498aa667642bc3a80fca83aa102
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Use the workflow GITHUB_TOKEN for GitHub operations so Claude posts as
+          # github-actions[bot] and the write scopes above apply. Without this the
+          # action falls back to an OIDC -> Claude GitHub App token exchange, which
+          # fails on repos where that app is not installed.
+          github_token: ${{ github.token }}
+
+          # This is an optional setting that allows Claude to read CI results on PRs
+          additional_permissions: |
+            actions: read
+
+          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
+          # prompt: 'Update the pull request description to include a summary of changes.'
+
+          # Optional: Add claude_args to customize behavior and configuration
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
+          # claude_args: '--allowed-tools Bash(gh pr *)'
