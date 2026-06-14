@@ -1892,7 +1892,7 @@ def test_derive_credential_health_state_disabled_returns_unknown():
 
 
 def test_derive_credential_health_state_revoked_returns_unknown():
-    """A revoked credential returns 'unknown', not 'healthy'."""
+    """A non-active credential (rotating) returns 'unknown', not 'healthy'."""
     from ums_smart_revenue.connectors.credentials import (
         ConnectorCredentialEntry,
         derive_credential_health_state,
@@ -1903,7 +1903,27 @@ def test_derive_credential_health_state_revoked_returns_unknown():
         id="x",
         connector_key="youtube_reporting",
         account_id="acct-1",
-        status="revoked",
+        status="rotating",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "unknown"
+
+
+def test_derive_credential_health_state_failed_auth_returns_unknown():
+    """A failed_auth credential returns 'unknown', not 'healthy'."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="failed_auth",
         has_secret_ref=True,
         token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
         last_refresh_status="succeeded",

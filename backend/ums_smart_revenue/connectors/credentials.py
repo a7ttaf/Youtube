@@ -76,6 +76,8 @@ def derive_credential_health_state(entry: ConnectorCredentialEntry, *, as_of: da
     """Return one of healthy/expiring/auth_failed/missing/unknown for a credential.
 
     Rules (evaluated in order):
+      - unknown: the credential status is not 'active' (disabled, rotating,
+        failed_auth, or any future non-active status).
       - auth_failed: last_refresh_status is a failure or last_refresh_error_class
         is set.
       - missing: no stored secret reference.
@@ -84,7 +86,10 @@ def derive_credential_health_state(entry: ConnectorCredentialEntry, *, as_of: da
       - unknown: none of the above can be determined.
     """
     as_of = _as_aware_utc(as_of)
-    if entry.status in ("disabled", "revoked"):
+    # FIX: reject any non-active credential — the orchestrator
+    # (orchestrator.py:684) only accepts status == "active", so the health
+    # surface must not label rotating/failed_auth/disabled as usable.
+    if entry.status != "active":
         return "unknown"
     if entry.last_refresh_status == "failed" or entry.last_refresh_error_class:
         return "auth_failed"
