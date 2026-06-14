@@ -286,9 +286,7 @@ def list_connector_credential_health(
     credentials: list[dict[str, object]] = []
     for credential in page.items:
         record = credential.to_api()
-        record["health_state"] = derive_credential_health_state(
-            credential, as_of=as_of
-        )
+        record["health_state"] = derive_credential_health_state(credential, as_of=as_of)
         credentials.append(record)
     return {"credentials": credentials}
 

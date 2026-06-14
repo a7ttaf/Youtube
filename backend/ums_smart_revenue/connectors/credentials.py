@@ -72,9 +72,7 @@ class ConnectorCredentialEntry:
 CREDENTIAL_EXPIRY_WINDOW = timedelta(hours=24)
 
 
-def derive_credential_health_state(
-    entry: ConnectorCredentialEntry, *, as_of: datetime
-) -> str:
+def derive_credential_health_state(entry: ConnectorCredentialEntry, *, as_of: datetime) -> str:
     """Return one of healthy/expiring/auth_failed/missing/unknown for a credential.
 
     Rules (evaluated in order):
