@@ -5,7 +5,9 @@
 parallelism: 0
 
 # Global timeout per check in seconds (0 = no timeout)
-default_timeout_sec: 300
+# The python lane runs the full pytest suite (~2250 tests against Postgres),
+# which takes ~575s; 300s killed it mid-run (FAIL_INFRA). 1200s gives headroom.
+default_timeout_sec: 1200
 
 # Fast check budget for pre-commit (seconds)
 pre_commit_budget_sec: 10
