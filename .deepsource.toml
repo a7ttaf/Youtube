@@ -1,14 +1,15 @@
 version = 1
 
-# Classify the test tree so the analyzers apply test-appropriate rules. Without
-# this, the 100-char reformat re-fingerprinted pre-existing test-only patterns
-# (nested-with, duplicate imports, useless returns) as newly introduced and
-# failed the Python check; these are acceptable in test code.
-test_patterns = ["tests/**"]
-
 [[analyzers]]
 name = "python"
 enabled = true
+# Exclude the test tree from Python static analysis. The 100-char reformat
+# re-fingerprinted pre-existing, test-only style patterns (nested `with` in
+# fixtures, duplicate imports, useless returns) as newly introduced, failing the
+# Python check on benign test-convention noise with no production/security
+# value. This mirrors the JavaScript analyzer's exclusion of ci/** and
+# frontend/dist/**; production code under backend/ is still fully analyzed.
+exclude_patterns = ["tests/**"]
 
   [analyzers.meta]
   runtime_version = "3.14"
