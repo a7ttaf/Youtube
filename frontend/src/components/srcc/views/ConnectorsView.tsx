@@ -172,7 +172,6 @@ export function ConnectorsView({ // skipcq: JS-0067
   // clear them; previously the timers persisted after the component
   // unmounted and could fire setReloadToken on an unmounted React tree.
   const pollTimersRef = useRef<number[]>([]);
-  const runsReload = () => setReloadToken((n) => n + 1);
   const runsReloadPoll = () => {
     setReloadToken((n) => n + 1);
     const timers = pollTimersRef.current;
@@ -255,10 +254,8 @@ export function ConnectorsView({ // skipcq: JS-0067
       })
       .catch((_err: unknown) => {
         // The hook already captured the typed error in jobActions.error and
-        // surfaces it in the banner; nothing more to do here. The arg
-        // name is `_err` to silence the "avoid empty catch" lint rule
-        // while keeping the catch-arm honest about being a no-op.
-        void _err;
+        // surfaces it in the banner; nothing more to do here.
+        // skipcq: JS-0098
       });
   };
 
@@ -649,8 +646,8 @@ function useRunHistoryFeedState(reloadToken: number): RunHistoryFeedState { // s
     if (reloadToken === 0) return;
     setRows([]);
     setPagination(null);
-    setCursorStartedAt(undefined);
-    setCursorId(undefined);
+    setCursorStartedAt();
+    setCursorId();
     reload();
   }, [reloadToken, reload]);
 
