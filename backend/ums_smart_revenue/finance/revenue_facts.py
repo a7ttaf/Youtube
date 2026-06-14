@@ -1,7 +1,6 @@
 """Revenue fact repository and API serialization helpers."""
 
 import re
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -13,8 +12,8 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
-from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
+from ums_smart_revenue.finance.revenue_fact_entries import RevenueFactEntry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -30,51 +29,6 @@ class RevenueFactSourceKind(StrEnum):
     ADSENSE = "ADSENSE"
     MANUAL_UPLOAD = "MANUAL_UPLOAD"
     ALLOCATION = "ALLOCATION"
-
-
-@dataclass(frozen=True)
-class RevenueFactEntry:
-    """Revenue fact entry with identifiers, metrics, and metadata."""
-
-    id: str
-    month: str
-    youtube_channel_id: str
-    source_kind: str
-    source_report_id: str | None
-    gross_revenue_usd: Decimal
-    net_revenue_usd: Decimal | None
-    views: int
-    watch_time_minutes: Decimal
-    confidence_score: Decimal
-    imported_by: str | None
-    shorts_revenue_usd: Decimal | None = None
-    longform_revenue_usd: Decimal | None = None
-    subscription_revenue_usd: Decimal | None = None
-
-    @property
-    def audit_entity_id(self) -> str:
-        return f"{self.youtube_channel_id}:{self.month}:{self.source_kind}"
-
-    def to_api(self) -> dict[str, object]:
-        """Convert this revenue fact instance into a dictionary suitable for API
-        responses.
-        """
-        return {
-            "id": self.id,
-            "month": self.month,
-            "youtube_channel_id": self.youtube_channel_id,
-            "source_kind": self.source_kind,
-            "source_report_id": self.source_report_id,
-            "gross_revenue_usd": _decimal_to_api(self.gross_revenue_usd),
-            "net_revenue_usd": _decimal_to_api(self.net_revenue_usd),
-            "shorts_revenue_usd": _decimal_to_api(self.shorts_revenue_usd),
-            "longform_revenue_usd": _decimal_to_api(self.longform_revenue_usd),
-            "subscription_revenue_usd": _decimal_to_api(self.subscription_revenue_usd),
-            "views": self.views,
-            "watch_time_minutes": _decimal_to_api(self.watch_time_minutes),
-            "confidence_score": _decimal_to_api(self.confidence_score),
-            "imported_by": self.imported_by,
-        }
 
 
 class RevenueFactError(ValueError):

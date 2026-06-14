@@ -1,6 +1,7 @@
 """Integration tests for connector credential and test-connection API endpoints."""
 import os
 from datetime import UTC, datetime
+from typing import Self
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -19,7 +20,9 @@ from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialEntry,
     ConnectorCredentialPage,
+    SqlAlchemyConnectorCredentialRepository,
     _is_duplicate_credential_integrity_error,
+    derive_credential_health_state,
     is_external_secret_ref,
 )
 from ums_smart_revenue.connectors.google.errors import (
@@ -1415,10 +1418,6 @@ def test_list_runs_limit_over_cap_returns_422(tmp_path):
 
 def test_get_credential_found_none_and_wrong_tenant(tmp_path):
     """get_credential returns the entry for the scope, None when absent/cross-tenant."""
-    from ums_smart_revenue.connectors.credentials import (
-        SqlAlchemyConnectorCredentialRepository,
-    )
-
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -1464,10 +1463,6 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
 
 def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
     """_to_entry reads the four telemetry columns into the entry + to_api."""
-    from ums_smart_revenue.connectors.credentials import (
-        SqlAlchemyConnectorCredentialRepository,
-    )
-
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     stamped = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
@@ -1517,8 +1512,6 @@ def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
 
 def test_to_api_serializes_none_telemetry(tmp_path):
     """to_api emits None for unstamped telemetry without raising."""
-    from ums_smart_revenue.connectors.credentials import ConnectorCredentialEntry
-
     entry = ConnectorCredentialEntry(
         id="x",
         connector_key="youtube_reporting",
@@ -1641,7 +1634,7 @@ class _TenantRecordingHealthRepository:
         self.bound_tenant_id: UUID | str | None = None
         self.connector_keys: frozenset[str] | None = None
 
-    def for_tenant(self, tenant_id: UUID | str) -> _TenantRecordingHealthRepository:
+    def for_tenant(self, tenant_id: UUID | str) -> Self:
         self.bound_tenant_id = tenant_id
         return self
 
@@ -1778,11 +1771,6 @@ def test_credential_health_serializes_null_telemetry_as_unknown(tmp_path):
 
 def test_derive_credential_health_state_auth_failed_on_failure_status():
     """A failed last_refresh_status derives 'auth_failed' when the credential is active."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1798,11 +1786,6 @@ def test_derive_credential_health_state_auth_failed_on_failure_status():
 
 def test_derive_credential_health_state_auth_failed_on_error_class():
     """A set last_refresh_error_class derives 'auth_failed' even with no status."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1817,11 +1800,6 @@ def test_derive_credential_health_state_auth_failed_on_error_class():
 
 def test_derive_credential_health_state_missing_without_secret_ref():
     """No stored secret reference derives 'missing'."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1837,11 +1815,6 @@ def test_derive_credential_health_state_missing_without_secret_ref():
 def test_derive_credential_health_state_auth_failed_precedence_over_missing():
     """auth_failed is evaluated before missing: a failed refresh with no secret
     still derives 'auth_failed' (locks the documented rule precedence)."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1856,11 +1829,6 @@ def test_derive_credential_health_state_auth_failed_precedence_over_missing():
 
 def test_derive_credential_health_state_expiring_within_window():
     """token_expiry_at within 24h of as_of derives 'expiring'."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1876,11 +1844,6 @@ def test_derive_credential_health_state_expiring_within_window():
 
 def test_derive_credential_health_state_healthy_on_success_not_expiring():
     """Last success and a far-future expiry derive 'healthy'."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1896,11 +1859,6 @@ def test_derive_credential_health_state_healthy_on_success_not_expiring():
 
 def test_derive_credential_health_state_healthy_on_success_no_expiry():
     """Last success with no recorded expiry is still 'healthy' (not expiring)."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1916,11 +1874,6 @@ def test_derive_credential_health_state_healthy_on_success_no_expiry():
 
 def test_derive_credential_health_state_unknown_without_telemetry():
     """A credential with a secret but no telemetry derives 'unknown'."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1937,11 +1890,6 @@ def test_derive_credential_health_state_unknown_without_telemetry():
 
 def test_derive_credential_health_state_disabled_returns_unknown():
     """A disabled credential with a prior success returns 'unknown', not 'healthy'."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1957,11 +1905,6 @@ def test_derive_credential_health_state_disabled_returns_unknown():
 
 def test_derive_credential_health_state_revoked_returns_unknown():
     """A non-active credential (rotating) returns 'unknown', not 'healthy'."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",
@@ -1977,11 +1920,6 @@ def test_derive_credential_health_state_revoked_returns_unknown():
 
 def test_derive_credential_health_state_failed_auth_returns_unknown():
     """A failed_auth credential returns 'unknown', not 'healthy'."""
-    from ums_smart_revenue.connectors.credentials import (
-        ConnectorCredentialEntry,
-        derive_credential_health_state,
-    )
-
     as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
     entry = ConnectorCredentialEntry(
         id="x",

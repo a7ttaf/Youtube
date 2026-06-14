@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Self
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -149,7 +150,7 @@ class SqlAlchemyConnectorCredentialRepository:
     #   - File: tests/api/test_connectors_api.py -> Covers non-bootstrap
     #     tenant binding for credential health reads.
     # ============================================================================
-    def for_tenant(self, tenant_id: UUID | str) -> SqlAlchemyConnectorCredentialRepository:
+    def for_tenant(self, tenant_id: UUID | str) -> Self:
         """Return a same-session repository bound to an explicit tenant."""
         return type(self)(self._session, tenant_id=tenant_id)
 

@@ -9,8 +9,8 @@ from ums_smart_revenue.api.dependencies import (
     current_platform_db_session,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
-from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import (
     AuditRecord,
