@@ -41,12 +41,14 @@ def test_parsers_reject_non_object_payload() -> None:
 def test_youtube_reporting_rejects_non_string_amount() -> None:
     payload = {
         "report_metadata": {"report_id": "r", "report_type": "t"},
-        "rows": [{
-            "line_index": 0,
-            "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
-            "dimensions": {"channel": "UC_x"},
-            "metrics": {"estimatedRevenue": 123.45, "currencyCode": "USD"},  # float, not str
-        }],
+        "rows": [
+            {
+                "line_index": 0,
+                "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
+                "dimensions": {"channel": "UC_x"},
+                "metrics": {"estimatedRevenue": 123.45, "currencyCode": "USD"},  # float, not str
+            }
+        ],
     }
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
@@ -237,12 +239,14 @@ def test_youtube_reporting_rejects_boolean_line_index() -> None:
     """bool is a subclass of int; True must not be silently treated as 1."""
     payload = {
         "report_metadata": {"report_id": "r", "report_type": "t"},
-        "rows": [{
-            "line_index": True,
-            "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
-            "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
-            "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
-        }],
+        "rows": [
+            {
+                "line_index": True,
+                "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
+                "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
+                "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
+            }
+        ],
     }
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
@@ -252,12 +256,14 @@ def test_youtube_reporting_rejects_malformed_date() -> None:
     """date.fromisoformat ValueError must surface as ParserError."""
     payload = {
         "report_metadata": {"report_id": "r", "report_type": "t"},
-        "rows": [{
-            "line_index": 0,
-            "date_range": {"start": "2026-13-01", "end": "2026-04-30"},  # month 13
-            "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
-            "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
-        }],
+        "rows": [
+            {
+                "line_index": 0,
+                "date_range": {"start": "2026-13-01", "end": "2026-04-30"},  # month 13
+                "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
+                "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
+            }
+        ],
     }
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
@@ -478,12 +484,14 @@ def test_youtube_reporting_rejects_multi_month_row() -> None:
     """A reporting row whose date_range crosses a calendar month would mis-bucket."""
     payload = {
         "report_metadata": {"report_id": "r", "report_type": "t"},
-        "rows": [{
-            "line_index": 0,
-            "date_range": {"start": "2026-04-01", "end": "2026-05-31"},  # crosses month
-            "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
-            "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
-        }],
+        "rows": [
+            {
+                "line_index": 0,
+                "date_range": {"start": "2026-04-01", "end": "2026-05-31"},  # crosses month
+                "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
+                "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
+            }
+        ],
     }
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
@@ -533,12 +541,14 @@ def test_youtube_reporting_rejects_reversed_date_range() -> None:
     """A reporting row with end before start must fail closed."""
     payload = {
         "report_metadata": {"report_id": "r", "report_type": "t"},
-        "rows": [{
-            "line_index": 0,
-            "date_range": {"start": "2026-04-30", "end": "2026-04-01"},  # reversed
-            "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
-            "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
-        }],
+        "rows": [
+            {
+                "line_index": 0,
+                "date_range": {"start": "2026-04-30", "end": "2026-04-01"},  # reversed
+                "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
+                "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
+            }
+        ],
     }
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))

@@ -7,8 +7,7 @@ from sqlalchemy import create_engine, inspect
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
-    PROJECT_ROOT
-    / "backend/ums_smart_revenue/db/alembic/versions/20260510_0004_revenue_facts.py"
+    PROJECT_ROOT / "backend/ums_smart_revenue/db/alembic/versions/20260510_0004_revenue_facts.py"
 )
 
 
@@ -25,23 +24,17 @@ def test_revenue_fact_migration_creates_monthly_fact_table():
         }
         foreign_keys = {
             foreign_key["name"]: foreign_key
-            for foreign_key in inspector.get_foreign_keys(
-                "monthly_channel_revenue_facts"
-            )
+            for foreign_key in inspector.get_foreign_keys("monthly_channel_revenue_facts")
         }
         unique_constraints = {
             constraint["name"]: tuple(constraint["column_names"])
-            for constraint in inspector.get_unique_constraints(
-                "monthly_channel_revenue_facts"
-            )
+            for constraint in inspector.get_unique_constraints("monthly_channel_revenue_facts")
         }
 
     assert "monthly_channel_revenue_facts" in table_names
     assert columns["gross_revenue_usd"]["nullable"] is False
     assert (
-        foreign_keys["fk_monthly_channel_revenue_facts_youtube_channel_id"][
-            "referred_table"
-        ]
+        foreign_keys["fk_monthly_channel_revenue_facts_youtube_channel_id"]["referred_table"]
         == "youtube_channels"
     )
     assert foreign_keys["fk_monthly_channel_revenue_facts_youtube_channel_id"][
@@ -55,9 +48,7 @@ def test_revenue_fact_migration_creates_monthly_fact_table():
 
 
 def _apply_migration(connection) -> None:
-    spec = importlib.util.spec_from_file_location(
-        "revenue_fact_migration", MIGRATION_PATH
-    )
+    spec = importlib.util.spec_from_file_location("revenue_fact_migration", MIGRATION_PATH)
     assert spec is not None
     migration = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

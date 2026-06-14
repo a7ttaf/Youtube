@@ -24,6 +24,7 @@ against the ini's on-disk value, so the injected url still wins over an ambient
 Ini-based cases write a throwaway ``alembic.ini`` under ``tmp_path`` so the test
 never reads (or couples to) the repository's real ini file.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -65,9 +66,7 @@ def _ini_based_config(tmp_path: Path, url: str | None) -> Config:
     return cfg
 
 
-def _ini_based_config_with_injection(
-    tmp_path: Path, *, file_url: str, injected_url: str
-) -> Config:
+def _ini_based_config_with_injection(tmp_path: Path, *, file_url: str, injected_url: str) -> Config:
     """A Config backed by an ini whose url is overridden in code.
 
     Mirrors tests/tenancy/test_isolation.py et al.: ``Config(ini)`` (the ini
@@ -140,7 +139,9 @@ def test_ini_based_config_with_injected_url_no_env_returns_injected(tmp_path: Pa
     assert resolve_database_url(cfg, {}) == PROGRAMMATIC_URL
 
 
-def test_ini_based_config_explicit_placeholder_equals_disk_still_honors_env_var(tmp_path: Path) -> None:
+def test_ini_based_config_explicit_placeholder_equals_disk_still_honors_env_var(
+    tmp_path: Path,
+) -> None:
     # A caller that sets sqlalchemy.url to the SAME value as the ini placeholder
     # has no distinct injection intent; UMS_DATABASE_URL must still win (prod
     # contract).  This closes the edge-case where a test hardcodes the local

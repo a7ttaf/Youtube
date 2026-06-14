@@ -7,6 +7,7 @@ Pinning its contract here means a drift in the placeholder shape will
 fail locally instead of silently changing what the RLS session hook sees
 in two different call sites.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

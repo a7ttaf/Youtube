@@ -1,4 +1,5 @@
 """AdSense client + adapter tests (spec §5.6)."""
+
 from __future__ import annotations
 
 import json
@@ -59,9 +60,10 @@ def test_fetch_monthly_report_pins_currency_usd_timezone_and_date_bounds(
     assert q["endDate.month"] == "5"
     assert q["endDate.day"] == "31"
     q_items = captured["q_items"]
-    assert [
-        value for key, value in q_items if key == "metrics"
-    ] == ["ESTIMATED_EARNINGS", "TOTAL_EARNINGS"]
+    assert [value for key, value in q_items if key == "metrics"] == [
+        "ESTIMATED_EARNINGS",
+        "TOTAL_EARNINGS",
+    ]
     assert q["dimensions"] == "MONTH"
     assert q["currencyCode"] == "USD"
     assert q["reportingTimeZone"] == "GOOGLE_TIME_ZONE"
@@ -102,7 +104,8 @@ def test_fetch_monthly_report_accepts_full_account_resource_name(
     )
     client = AdSenseManagementClient(http=http)
     out = client.fetch_monthly_report(
-        account_id="accounts/pub-1", report_month="2026-05",
+        account_id="accounts/pub-1",
+        report_month="2026-05",
     )
 
     assert captured["path"] == "/v2/accounts/pub-1/reports:generate"
@@ -120,11 +123,15 @@ def test_adapter_wraps_response_with_deterministic_report_id() -> None:
         "rows": [],
     }
     payload = adsense_response_to_parser_payload(
-        response_json=response, account_id="pub-1", report_month="2026-05",
+        response_json=response,
+        account_id="pub-1",
+        report_month="2026-05",
     )
     assert payload["report_id"]
     payload2 = adsense_response_to_parser_payload(
-        response_json=response, account_id="pub-1", report_month="2026-05",
+        response_json=response,
+        account_id="pub-1",
+        report_month="2026-05",
     )
     assert payload["report_id"] == payload2["report_id"]
     # Request is synthesized from the locked client inputs because AdSense v2
@@ -159,7 +166,9 @@ def test_adapter_preserves_google_report_result_metadata() -> None:
     }
 
     payload = adsense_response_to_parser_payload(
-        response_json=response, account_id="pub-1", report_month="2026-05",
+        response_json=response,
+        account_id="pub-1",
+        report_month="2026-05",
     )
 
     assert payload["request"]["accountId"] == "accounts/pub-1"
@@ -182,7 +191,9 @@ def test_adapter_defaults_when_response_fields_missing() -> None:
     vector where a refactor could silently flip them.
     """
     payload = adsense_response_to_parser_payload(
-        response_json={}, account_id="pub-1", report_month="2026-05",
+        response_json={},
+        account_id="pub-1",
+        report_month="2026-05",
     )
     assert payload["request"] == {
         "accountId": "accounts/pub-1",
@@ -209,13 +220,19 @@ def test_adapter_report_id_differs_per_account_or_month() -> None:
     """
     response = {"request": {"accountId": "accounts/pub-1"}, "headers": [], "rows": []}
     base = adsense_response_to_parser_payload(
-        response_json=response, account_id="pub-1", report_month="2026-05",
+        response_json=response,
+        account_id="pub-1",
+        report_month="2026-05",
     )
     other_account = adsense_response_to_parser_payload(
-        response_json=response, account_id="pub-2", report_month="2026-05",
+        response_json=response,
+        account_id="pub-2",
+        report_month="2026-05",
     )
     other_month = adsense_response_to_parser_payload(
-        response_json=response, account_id="pub-1", report_month="2026-04",
+        response_json=response,
+        account_id="pub-1",
+        report_month="2026-04",
     )
     assert base["report_id"] != other_account["report_id"]
     assert base["report_id"] != other_month["report_id"]
@@ -253,7 +270,8 @@ def test_fetch_monthly_report_rejects_truncated_report_result(mock_credentials) 
     ["pub/1", "pub?x=1", "pub#frag", "pub%2F1", "accounts/pub/1", "accounts/"],
 )
 def test_fetch_monthly_report_rejects_reserved_account_id_delimiters_before_http(
-    mock_credentials, bad_account_id: str,
+    mock_credentials,
+    bad_account_id: str,
 ) -> None:
     """Reserved path/query delimiters must fail before URL construction."""
     calls = 0
@@ -271,14 +289,16 @@ def test_fetch_monthly_report_rejects_reserved_account_id_delimiters_before_http
     client = AdSenseManagementClient(http=http)
     with pytest.raises(MalformedAdsenseAccountIdError):
         client.fetch_monthly_report(
-            account_id=bad_account_id, report_month="2026-05",
+            account_id=bad_account_id,
+            report_month="2026-05",
         )
     assert calls == 0
 
 
 @pytest.mark.parametrize("bad_month", ["2026-5", "2026", "abcd-ef", "2026-13", ""])
 def test_fetch_monthly_report_rejects_malformed_report_month(
-    mock_credentials, bad_month: str,
+    mock_credentials,
+    bad_month: str,
 ) -> None:
     """Malformed report_month must raise MalformedReportMonthError before any
     HTTP request is issued, matching YouTube Analytics' typed-boundary pattern
@@ -304,7 +324,8 @@ def test_fetch_monthly_report_rejects_malformed_report_month(
 
 @pytest.mark.parametrize("bad_account_id", ["", " ", "\t\n"])
 def test_fetch_monthly_report_rejects_empty_account_id_before_http(
-    mock_credentials, bad_account_id: str,
+    mock_credentials,
+    bad_account_id: str,
 ) -> None:
     """Empty/blank account ids must fail closed before URL construction."""
     calls = 0
@@ -322,6 +343,7 @@ def test_fetch_monthly_report_rejects_empty_account_id_before_http(
     client = AdSenseManagementClient(http=http)
     with pytest.raises(MalformedAdsenseAccountIdError):
         client.fetch_monthly_report(
-            account_id=bad_account_id, report_month="2026-05",
+            account_id=bad_account_id,
+            report_month="2026-05",
         )
     assert calls == 0

@@ -1,4 +1,5 @@
 """Connector registry: maps --connector key to a runner callable."""
+
 from __future__ import annotations
 
 import pytest
@@ -13,6 +14,7 @@ from ums_smart_revenue.connectors.google.registry import (
 @pytest.fixture(autouse=True)
 def _reset_registry():
     from ums_smart_revenue.connectors.google import registry
+
     snap = dict(registry._REGISTRY)
     registry._REGISTRY.clear()
     yield
@@ -23,6 +25,7 @@ def _reset_registry():
 def test_register_and_dispatch() -> None:
     def runner(**kwargs):
         return "ok"
+
     register_connector(key="youtube-reporting", runner=runner)
     assert dispatch_connector(key="youtube-reporting") is runner
 

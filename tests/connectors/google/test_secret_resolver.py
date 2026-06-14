@@ -6,6 +6,7 @@ UnsupportedSecretSchemeError; ORM-accepted prefixes that aren't implemented
 (aws-secretsmanager://, vault://, kms://, azure-keyvault://)
 are intentionally unknown until a future credential-lifecycle PR.
 """
+
 from __future__ import annotations
 
 import time
@@ -28,6 +29,7 @@ from ums_smart_revenue.connectors.google.secret_resolver import (
 @pytest.fixture(autouse=True)
 def _reset_registry():
     from ums_smart_revenue.connectors.google import secret_resolver as sr
+
     snapshot = dict(sr._REGISTRY)
     sr._REGISTRY.clear()
     yield
@@ -122,10 +124,10 @@ def test_resolve_secret_raises_for_unknown_scheme() -> None:
 @pytest.mark.parametrize(
     "ref",
     [
-        "",                       # empty
-        "no-scheme",              # missing ://
-        "gcp-secret-manager:/",   # malformed delimiter
-        "://no-scheme-name",      # empty scheme
+        "",  # empty
+        "no-scheme",  # missing ://
+        "gcp-secret-manager:/",  # malformed delimiter
+        "://no-scheme-name",  # empty scheme
     ],
 )
 def test_resolve_secret_raises_for_malformed_uri(ref: str) -> None:

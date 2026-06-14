@@ -8,9 +8,7 @@ from ums_smart_revenue.org.access_index import (
 def test_build_org_access_index_maps_channels_to_companies_and_sectors():
     index = build_org_access_index(
         org_units=[
-            OrgUnitRow(
-                id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True
-            ),
+            OrgUnitRow(id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True),
             OrgUnitRow(
                 id="company-tv-a",
                 parent_id="sector-tv",
@@ -64,9 +62,7 @@ def test_build_org_access_index_maps_channels_to_companies_and_sectors():
 def test_build_org_access_index_ignores_inactive_and_unmapped_channels():
     index = build_org_access_index(
         org_units=[
-            OrgUnitRow(
-                id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True
-            ),
+            OrgUnitRow(id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True),
             OrgUnitRow(
                 id="company-tv-a",
                 parent_id="sector-tv",

@@ -63,9 +63,7 @@ def test_in_memory_channel_registry_validates_primary_company_id_on_update():
     with pytest.raises(
         ChannelRegistryValidationError, match="primary_company_id must be a valid UUID"
     ):
-        registry.update_mapping(
-            youtube_channel_id="channel-tv-a", primary_company_id="not-a-uuid"
-        )
+        registry.update_mapping(youtube_channel_id="channel-tv-a", primary_company_id="not-a-uuid")
 
 
 def test_in_memory_channel_registry_update_mapping_has_no_lock_guard():
@@ -93,9 +91,7 @@ def test_in_memory_channel_registry_update_mapping_has_no_lock_guard():
 
 
 def test_in_memory_channel_registry_rejects_duplicate_initial_channels():
-    with pytest.raises(
-        ChannelRegistryConflictError, match="Duplicate channel id: channel-tv-a"
-    ):
+    with pytest.raises(ChannelRegistryConflictError, match="Duplicate channel id: channel-tv-a"):
         ChannelRegistry(
             [
                 ChannelRegistryEntry(

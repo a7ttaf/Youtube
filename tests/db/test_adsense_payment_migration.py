@@ -8,8 +8,7 @@ from sqlalchemy import create_engine, event, inspect, text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
-    PROJECT_ROOT
-    / "backend/ums_smart_revenue/db/alembic/versions/20260512_0002_adsense_payments.py"
+    PROJECT_ROOT / "backend/ums_smart_revenue/db/alembic/versions/20260512_0002_adsense_payments.py"
 )
 
 
@@ -47,10 +46,7 @@ def test_adsense_payment_migration_creates_payment_table():
         ).scalar_one()
         inspector = inspect(connection)
         table_names = inspector.get_table_names()
-        columns = {
-            column["name"]: column
-            for column in inspector.get_columns("adsense_payments")
-        }
+        columns = {column["name"]: column for column in inspector.get_columns("adsense_payments")}
         check_constraints = {
             constraint["name"]: constraint["sqltext"]
             for constraint in inspector.get_check_constraints("adsense_payments")

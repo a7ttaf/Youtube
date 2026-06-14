@@ -156,7 +156,7 @@ def _record_projection_failure_on_run(
     error_summary = f"normalize failed: {type(exc).__name__}: {exc!s}"
     try:
         run_id = UUID(run.id)
-    except (ValueError, TypeError, AttributeError):
+    except ValueError, TypeError, AttributeError:
         logger.warning(
             "cannot record projection failure: run id is not a UUID (run_id=%r)",
             run.id,

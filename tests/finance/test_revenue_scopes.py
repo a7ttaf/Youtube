@@ -51,9 +51,7 @@ def test_global_grant_emits_global_plus_all_sectors_and_companies():
     """A global VIEW_REVENUE grant lists global + every active sector + company."""
     options = _build((AccessScope.global_scope(),))
 
-    assert options[0] == RevenueScopeOption(
-        scope_type="global", scope_id=None, label="Global"
-    )
+    assert options[0] == RevenueScopeOption(scope_type="global", scope_id=None, label="Global")
     by_type = {(o.scope_type, o.scope_id) for o in options}
     assert ("sector", SECTOR_TV) in by_type
     assert ("sector", SECTOR_MUSIC) in by_type
@@ -99,9 +97,7 @@ def test_company_grant_confers_only_that_company_not_its_sector():
     """A company grant lists only the company; it does NOT confer the sector."""
     options = _build((AccessScope.company(COMPANY_TV_A),))
 
-    assert [(o.scope_type, o.scope_id) for o in options] == [
-        ("company", COMPANY_TV_A)
-    ]
+    assert [(o.scope_type, o.scope_id) for o in options] == [("company", COMPANY_TV_A)]
     assert all(o.scope_type != "sector" for o in options)
     assert all(o.scope_type != "global" for o in options)
 

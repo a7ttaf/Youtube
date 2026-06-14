@@ -88,9 +88,7 @@ def test_user_repository_filters_list_users_by_current_tenant() -> None:
     seed_users(session)
     token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
     try:
-        items, has_more, next_cursor = SqlAlchemyUserAccountRepository(
-            session
-        ).list_users(limit=10)
+        items, has_more, next_cursor = SqlAlchemyUserAccountRepository(session).list_users(limit=10)
     finally:
         TENANT_CTX.reset(token)
 
@@ -151,9 +149,9 @@ def test_user_repository_explicit_tenant_overrides_request_context() -> None:
     seed_users(session)
     token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
     try:
-        account = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        ).get_user(user_id=str(DEFAULT_USER_ID))
+        account = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID).get_user(
+            user_id=str(DEFAULT_USER_ID)
+        )
     finally:
         TENANT_CTX.reset(token)
 
@@ -178,9 +176,7 @@ def test_user_repository_rejects_cross_tenant_user_lookup() -> None:
     token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
     try:
         with pytest.raises(UserAccountNotFoundError, match="User not found"):
-            SqlAlchemyUserAccountRepository(session).get_user(
-                user_id=str(DEFAULT_USER_ID)
-            )
+            SqlAlchemyUserAccountRepository(session).get_user(user_id=str(DEFAULT_USER_ID))
     finally:
         TENANT_CTX.reset(token)
 
@@ -194,9 +190,7 @@ def test_user_repository_rejects_invalid_cursor_uuid() -> None:
         UserAccountValidationError,
         match="cursor_id must be a valid UUID",
     ):
-        SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        ).list_users(
+        SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID).list_users(
             cursor_email="shared@example.com",
             cursor_id="not-a-uuid",
         )
@@ -208,9 +202,9 @@ def test_user_repository_accepts_pagination_boundaries(limit: int) -> None:
     session = build_session()
     seed_users(session)
 
-    items, _, _ = SqlAlchemyUserAccountRepository(
-        session, tenant_id=DEFAULT_TENANT_ID
-    ).list_users(limit=limit)
+    items, _, _ = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID).list_users(
+        limit=limit
+    )
 
     assert [item.id for item in items] == [str(DEFAULT_USER_ID)]
 
@@ -220,9 +214,7 @@ def test_user_repository_rejects_page_size_above_boundary() -> None:
     session = build_session()
 
     with pytest.raises(UserAccountValidationError, match="limit must be between"):
-        SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        ).list_users(limit=101)
+        SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID).list_users(limit=101)
 
 
 def test_user_repository_rejects_offset_above_boundary() -> None:
@@ -233,9 +225,7 @@ def test_user_repository_rejects_offset_above_boundary() -> None:
         UserAccountValidationError,
         match=f"offset must be less than or equal to {USER_LIST_MAX_OFFSET}",
     ):
-        SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        ).list_users(
+        SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID).list_users(
             offset=USER_LIST_MAX_OFFSET + 1
         )
 
@@ -254,18 +244,10 @@ def test_user_repository_access_profile_filters_by_current_tenant() -> None:
         TENANT_CTX.reset(token)
 
     assert profile.user.id == str(SECOND_USER_ID)
-    assert [assignment.scope_id for assignment in profile.role_assignments] == [
-        "second-company"
-    ]
-    assert [grant.scope_id for grant in profile.direct_permissions] == [
-        "second-channel"
-    ]
-    assert "default-company" not in {
-        assignment.scope_id for assignment in profile.role_assignments
-    }
-    assert "default-company" not in {
-        grant.scope_id for grant in profile.direct_permissions
-    }
+    assert [assignment.scope_id for assignment in profile.role_assignments] == ["second-company"]
+    assert [grant.scope_id for grant in profile.direct_permissions] == ["second-channel"]
+    assert "default-company" not in {assignment.scope_id for assignment in profile.role_assignments}
+    assert "default-company" not in {grant.scope_id for grant in profile.direct_permissions}
 
 
 def _seed_access_profile_rows(session: Session) -> None:

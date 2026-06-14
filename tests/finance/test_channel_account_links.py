@@ -13,6 +13,7 @@ task that first uses it so every commit stays ruff-clean (no unused imports):
            (AdsenseContentOwnerLinkORM, ContentOwnerChannelLinkORM)`;
            `from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM`.
 """
+
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -54,10 +55,16 @@ def _engine(tmp_path):
 def test_to_api_excludes_provenance_payload():
     """to_api() omits provenance_payload and any secrets it contains."""
     link = AccountOwnerLink(
-        id="x", adsense_account_id="pub-1", content_owner_id="owner-1",
-        verification_status="UNVERIFIED", provenance_kind="OPERATOR_ASSERTED",
-        provenance_payload={"secret": "LEAK"}, verified_by=None, verified_at=None,
-        verification_reason=None, effective_month_start="2026-01",
+        id="x",
+        adsense_account_id="pub-1",
+        content_owner_id="owner-1",
+        verification_status="UNVERIFIED",
+        provenance_kind="OPERATOR_ASSERTED",
+        provenance_payload={"secret": "LEAK"},
+        verified_by=None,
+        verified_at=None,
+        verification_reason=None,
+        effective_month_start="2026-01",
         effective_month_end=None,
     )
     api = link.to_api()
@@ -79,17 +86,19 @@ def test_lock_key_differs_by_account_and_tenant():
     """Lock key differs when account or tenant differs."""
     other_tenant = UUID("00000000-0000-0000-0000-0000000c00ff")
     assert _account_owner_lock_key(TENANT, "pub-1") != _account_owner_lock_key(TENANT, "pub-2")
-    assert _account_owner_lock_key(TENANT, "pub-1") != _account_owner_lock_key(other_tenant, "pub-1")
+    assert _account_owner_lock_key(TENANT, "pub-1") != _account_owner_lock_key(
+        other_tenant, "pub-1"
+    )
 
 
 @pytest.mark.parametrize(
     ("sa", "ea", "sb", "eb", "expected"),
     [
-        ("2026-01", "2026-06", "2026-03", None, True),    # B open, overlaps tail
+        ("2026-01", "2026-06", "2026-03", None, True),  # B open, overlaps tail
         ("2026-01", "2026-02", "2026-03", "2026-04", False),  # disjoint
-        ("2026-01", None, "2030-01", "2030-02", True),     # A open, covers everything later
-        ("2026-05", "2026-05", "2026-05", "2026-05", True),   # same single month
-        ("2026-01", "2026-02", "2026-02", "2026-03", True),   # touch at 2026-02
+        ("2026-01", None, "2030-01", "2030-02", True),  # A open, covers everything later
+        ("2026-05", "2026-05", "2026-05", "2026-05", True),  # same single month
+        ("2026-01", "2026-02", "2026-02", "2026-03", True),  # touch at 2026-02
     ],
 )
 def test_ranges_overlap_truth_table(sa, ea, sb, eb, expected):
@@ -112,9 +121,12 @@ def test_propose_creates_unverified_link(tmp_path):
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
         link = repo.propose_account_owner_link(
-            adsense_account_id="pub-1", content_owner_id="owner-1",
-            effective_month_start="2026-01", effective_month_end=None,
-            provenance_kind="OPERATOR_ASSERTED", provenance_payload={"note": "manual"},
+            adsense_account_id="pub-1",
+            content_owner_id="owner-1",
+            effective_month_start="2026-01",
+            effective_month_end=None,
+            provenance_kind="OPERATOR_ASSERTED",
+            provenance_payload={"note": "manual"},
         )
         session.commit()
     assert link.verification_status == "UNVERIFIED"
@@ -131,9 +143,12 @@ def test_propose_rejects_bad_month(tmp_path):
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
         with pytest.raises(ChannelAccountLinkValidationError):
             repo.propose_account_owner_link(
-                adsense_account_id="pub-1", content_owner_id="owner-1",
-                effective_month_start="2026-13", effective_month_end=None,
-                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+                adsense_account_id="pub-1",
+                content_owner_id="owner-1",
+                effective_month_start="2026-13",
+                effective_month_end=None,
+                provenance_kind="OPERATOR_ASSERTED",
+                provenance_payload={},
             )
 
 
@@ -144,18 +159,24 @@ def test_propose_rejects_end_before_start(tmp_path):
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
         with pytest.raises(ChannelAccountLinkValidationError, match="effective_month_end"):
             repo.propose_account_owner_link(
-                adsense_account_id="pub-1", content_owner_id="owner-1",
-                effective_month_start="2026-06", effective_month_end="2026-01",
-                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+                adsense_account_id="pub-1",
+                content_owner_id="owner-1",
+                effective_month_start="2026-06",
+                effective_month_end="2026-01",
+                provenance_kind="OPERATOR_ASSERTED",
+                provenance_payload={},
             )
 
 
 def _propose(repo, *, account="pub-1", owner="owner-1", start="2026-01", end=None):
     """Propose a link with default values; returns the AccountOwnerLink."""
     return repo.propose_account_owner_link(
-        adsense_account_id=account, content_owner_id=owner,
-        effective_month_start=start, effective_month_end=end,
-        provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+        adsense_account_id=account,
+        content_owner_id=owner,
+        effective_month_start=start,
+        effective_month_end=end,
+        provenance_kind="OPERATOR_ASSERTED",
+        provenance_payload={},
     )
 
 
@@ -259,9 +280,7 @@ def test_list_filters_paginates_and_counts(tmp_path):
         _propose(repo, account="pub-1", owner="owner-2", start="2026-02")
         _propose(repo, account="pub-2", owner="owner-9", start="2026-01")
         session.flush()
-        page = repo.list_account_owner_links(
-            adsense_account_id="pub-1", limit=1, offset=0
-        )
+        page = repo.list_account_owner_links(adsense_account_id="pub-1", limit=1, offset=0)
         all_pub1 = repo.list_account_owner_links(adsense_account_id="pub-1", limit=50, offset=0)
     assert page.total_count == 2
     assert len(page.links) == 1
@@ -334,15 +353,22 @@ def _source_row(session, *, owner, channel, account="pub-x", month="2026-04", ke
     """Insert a GoogleRevenueSourceRowORM row for derivation tests."""
     session.add(
         GoogleRevenueSourceRowORM(
-            id=uuid4(), tenant_id=TENANT, source_system="youtube_reporting",
-            source_row_key=key.ljust(64, "0"), source_account_id=account,
+            id=uuid4(),
+            tenant_id=TENANT,
+            source_system="youtube_reporting",
+            source_row_key=key.ljust(64, "0"),
+            source_account_id=account,
             content_owner_id=owner,
-            youtube_channel_id=channel, report_month=month,
+            youtube_channel_id=channel,
+            report_month=month,
             report_type="channel_basic_a2",
             period_start=datetime(2026, 4, 1, tzinfo=UTC).date(),
             period_end=datetime(2026, 4, 30, tzinfo=UTC).date(),
-            metric_key="estimated_partner_revenue", value_kind="estimated",
-            amount_native=0, currency_code="USD", raw_payload={},
+            metric_key="estimated_partner_revenue",
+            value_kind="estimated",
+            amount_native=0,
+            currency_code="USD",
+            raw_payload={},
         )
     )
 
@@ -352,8 +378,8 @@ def test_derivation_only_uses_rows_with_both_owner_and_channel(tmp_path):
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _source_row(session, owner="owner-1", channel="chan-1", key="k1")
-        _source_row(session, owner=None, channel="chan-2", key="k2")     # no owner
-        _source_row(session, owner="owner-3", channel=None, key="k3")    # no channel
+        _source_row(session, owner=None, channel="chan-2", key="k2")  # no owner
+        _source_row(session, owner="owner-3", channel=None, key="k3")  # no channel
         session.commit()
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
         created = repo.upsert_owner_channel_links_from_source()
@@ -382,9 +408,9 @@ def test_derivation_skips_blank_source_identities(tmp_path):
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _source_row(session, owner="owner-ok", channel="chan-ok", key="kok")
-        _source_row(session, owner="", channel="chan-empty", key="kempty")     # empty owner
-        _source_row(session, owner="owner-ws", channel="   ", key="kws")       # whitespace channel
-        _source_row(session, owner="\t\n", channel="chan-tab", key="ktab")     # tab/newline owner
+        _source_row(session, owner="", channel="chan-empty", key="kempty")  # empty owner
+        _source_row(session, owner="owner-ws", channel="   ", key="kws")  # whitespace channel
+        _source_row(session, owner="\t\n", channel="chan-tab", key="ktab")  # tab/newline owner
         session.commit()
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
         created = repo.upsert_owner_channel_links_from_source()  # must not raise
@@ -425,11 +451,17 @@ def test_derivation_swallows_concurrent_duplicate_insert(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     with Session(engine) as session:
         # The key already exists — a concurrent worker won the race to insert it.
-        session.add(ContentOwnerChannelLinkORM(
-            tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-1",
-            provenance_kind="SOURCE_ROW", active=True,
-            effective_month_start="2026-04", effective_month_end="2026-04",
-        ))
+        session.add(
+            ContentOwnerChannelLinkORM(
+                tenant_id=TENANT,
+                content_owner_id="owner-1",
+                youtube_channel_id="chan-1",
+                provenance_kind="SOURCE_ROW",
+                active=True,
+                effective_month_start="2026-04",
+                effective_month_end="2026-04",
+            )
+        )
         _source_row(session, owner="owner-1", channel="chan-1", month="2026-04", key="k1")
         session.commit()
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -438,8 +470,8 @@ def test_derivation_swallows_concurrent_duplicate_insert(tmp_path, monkeypatch):
         created = repo.upsert_owner_channel_links_from_source()  # must NOT raise
         session.commit()
         rows = session.scalars(select(ContentOwnerChannelLinkORM)).all()
-    assert created == 0          # collision swallowed, not counted as a new insert
-    assert len(rows) == 1        # no duplicate row inserted
+    assert created == 0  # collision swallowed, not counted as a new insert
+    assert len(rows) == 1  # no duplicate row inserted
 
 
 def test_derivation_groups_by_month_and_collapses_duplicate_rows(tmp_path):
@@ -493,7 +525,9 @@ def test_read_contract_excludes_unverified_account(tmp_path):
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
-        _propose(repo, account="pub-1", owner="owner-1", start="2026-01", end=None)  # never verified
+        _propose(
+            repo, account="pub-1", owner="owner-1", start="2026-01", end=None
+        )  # never verified
         _source_row(session, owner="owner-1", channel="chan-1", month="2026-04", key="s1")
         session.commit()
         repo.upsert_owner_channel_links_from_source()
@@ -517,11 +551,17 @@ def test_read_contract_is_tenant_isolated(tmp_path):
         session.commit()
         repo.upsert_owner_channel_links_from_source()
         # Other tenant: same owner_id string, different channel, valid for the month.
-        session.add(ContentOwnerChannelLinkORM(
-            tenant_id=other_tenant, content_owner_id="owner-1", youtube_channel_id="chan-B",
-            provenance_kind="MANUAL", active=True,
-            effective_month_start="2026-04", effective_month_end=None,
-        ))
+        session.add(
+            ContentOwnerChannelLinkORM(
+                tenant_id=other_tenant,
+                content_owner_id="owner-1",
+                youtube_channel_id="chan-B",
+                provenance_kind="MANUAL",
+                active=True,
+                effective_month_start="2026-04",
+                effective_month_end=None,
+            )
+        )
         session.commit()
         got = repo.list_verified_adsense_account_channels(
             tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
@@ -536,11 +576,17 @@ def test_read_contract_excludes_inactive_owner_channel_link(tmp_path):
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
         link = _propose(repo, account="pub-1", owner="owner-1", start="2026-01", end=None)
         repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="r")
-        session.add(ContentOwnerChannelLinkORM(
-            tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-x",
-            provenance_kind="MANUAL", active=False,
-            effective_month_start="2026-04", effective_month_end=None,
-        ))
+        session.add(
+            ContentOwnerChannelLinkORM(
+                tenant_id=TENANT,
+                content_owner_id="owner-1",
+                youtube_channel_id="chan-x",
+                provenance_kind="MANUAL",
+                active=False,
+                effective_month_start="2026-04",
+                effective_month_end=None,
+            )
+        )
         session.commit()
         got = repo.list_verified_adsense_account_channels(
             tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
@@ -557,16 +603,28 @@ def test_read_contract_dedups_channel_reachable_twice(tmp_path):
         repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="r")
         # Same channel via two distinct owner-channel rows, both valid for 2026-04
         # (different effective_month_start so the unique key permits both).
-        session.add(ContentOwnerChannelLinkORM(
-            tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-1",
-            provenance_kind="SOURCE_ROW", active=True,
-            effective_month_start="2026-04", effective_month_end="2026-04",
-        ))
-        session.add(ContentOwnerChannelLinkORM(
-            tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-1",
-            provenance_kind="MANUAL", active=True,
-            effective_month_start="2026-01", effective_month_end=None,
-        ))
+        session.add(
+            ContentOwnerChannelLinkORM(
+                tenant_id=TENANT,
+                content_owner_id="owner-1",
+                youtube_channel_id="chan-1",
+                provenance_kind="SOURCE_ROW",
+                active=True,
+                effective_month_start="2026-04",
+                effective_month_end="2026-04",
+            )
+        )
+        session.add(
+            ContentOwnerChannelLinkORM(
+                tenant_id=TENANT,
+                content_owner_id="owner-1",
+                youtube_channel_id="chan-1",
+                provenance_kind="MANUAL",
+                active=True,
+                effective_month_start="2026-01",
+                effective_month_end=None,
+            )
+        )
         session.commit()
         got = repo.list_verified_adsense_account_channels(
             tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
@@ -645,9 +703,7 @@ def test_verify_far_future_range_does_not_materialize_months(tmp_path):
         link = _propose(repo, start="2026-01", end="9999-12")
         repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="ok")
         session.flush()
-        close_rows = session.scalar(
-            select(func.count()).select_from(FinanceMonthCloseORM)
-        )
+        close_rows = session.scalar(select(func.count()).select_from(FinanceMonthCloseORM))
     assert close_rows == 1  # only the start month, not ~96k rows
 
 
@@ -693,9 +749,7 @@ def test_reject_reloads_link_status_after_acquiring_account_lock(tmp_path, monke
             session.add(FinanceMonthCloseORM(month="2026-02", status="LOCKED"))
             session.flush()
 
-        monkeypatch.setattr(
-            repo, "_acquire_account_owner_lock", _concurrent_verify_and_close
-        )
+        monkeypatch.setattr(repo, "_acquire_account_owner_lock", _concurrent_verify_and_close)
         with pytest.raises(ChannelAccountLinkLockedMonthError, match="2026-02"):
             repo.reject_account_owner_link(link.id, verified_by=VERIFIER, reason="undo")
 
@@ -759,10 +813,14 @@ def test_is_unique_violation_classifies_correctly():
     # psycopg3 (the pinned driver) exposes SQLSTATE via `sqlstate`, not `pgcode`.
     assert _is_unique_violation(SAIntegrityError("x", {}, _Psycopg3Unique())) is True
     assert _is_unique_violation(SAIntegrityError("x", {}, _Psycopg3NotNull())) is False
-    assert _is_unique_violation(
-        SAIntegrityError("x", {}, Exception("UNIQUE constraint failed: t.col"))
-    ) is True
-    assert _is_unique_violation(
-        SAIntegrityError("x", {}, Exception("NOT NULL constraint failed"))
-    ) is False
+    assert (
+        _is_unique_violation(
+            SAIntegrityError("x", {}, Exception("UNIQUE constraint failed: t.col"))
+        )
+        is True
+    )
+    assert (
+        _is_unique_violation(SAIntegrityError("x", {}, Exception("NOT NULL constraint failed")))
+        is False
+    )
     assert _is_unique_violation(SAIntegrityError("x", {}, None)) is False

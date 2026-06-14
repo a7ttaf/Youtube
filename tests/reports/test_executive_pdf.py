@@ -40,16 +40,12 @@ def test_executive_pdf_report_builds_section_manifest_from_source_summaries():
 
     assert payload["artifact_type"] == "EXECUTIVE_FINANCE_PDF"
     assert payload["status"] == "READY_FOR_GENERATION"
-    assert [section["name"] for section in payload["sections"]] == list(
-        EXECUTIVE_PDF_SECTION_NAMES
-    )
+    assert [section["name"] for section in payload["sections"]] == list(EXECUTIVE_PDF_SECTION_NAMES)
     # Provenance: every section that surfaces the channel-direct /
     # account-allocated deduction split must disclose the account-allocation
     # inputs. The Gross vs Net section renders the split rows, and the
     # Deductions Explanation section reports the aggregate split.
-    section_sources = {
-        section["name"]: section["source"] for section in payload["sections"]
-    }
+    section_sources = {section["name"]: section["source"] for section in payload["sections"]}
     assert section_sources["Deductions Explanation"] == (
         "source_net_revenue_manual_overrides_deduction_components_and_account_allocations"
     )
@@ -58,9 +54,7 @@ def test_executive_pdf_report_builds_section_manifest_from_source_summaries():
     )
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
     assert payload["executive_summary"]["payment_match_status"] == "PAYMENT_MATCHED"
-    assert payload["executive_summary"]["bank_reconciliation_status"] == (
-        "BANK_CONFIRMED"
-    )
+    assert payload["executive_summary"]["bank_reconciliation_status"] == ("BANK_CONFIRMED")
     assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "0"
     assert payload["executive_summary"]["total_account_allocated_deduction_amount_usd"] == "0"
 
@@ -76,9 +70,7 @@ def test_executive_pdf_rejects_non_pdf_export_type():
             smart_alerts=_smart_alert_summary(),
         )
 
-    assert str(exc_info.value) == (
-        "executive PDF report only supports EXECUTIVE_PDF exports"
-    )
+    assert str(exc_info.value) == ("executive PDF report only supports EXECUTIVE_PDF exports")
 
 
 def test_executive_pdf_bytes_contain_expected_management_summary():
@@ -146,9 +138,7 @@ def _export_job(*, export_type: str) -> ExportJobEntry:
     )
 
 
-def _net_revenue_summary(
-    *, include_missing_channel: bool = False
-) -> MonthNetRevenueSummary:
+def _net_revenue_summary(*, include_missing_channel: bool = False) -> MonthNetRevenueSummary:
     """Build a MonthNetRevenueSummary for executive PDF tests."""
     channel = ChannelNetRevenueSummary(
         month="2026-03",
@@ -326,8 +316,10 @@ def test_executive_pdf_renders_deduction_breakdown_aggregate_rows():
 def _committed_provenance() -> AllocationProvenance:
     """A committed-snapshot provenance with a fixed commit date for token assertions."""
     return AllocationProvenance(
-        source="committed_snapshot", commit_version=1,
-        committed_at=datetime(2026, 4, 2, tzinfo=UTC), run_id=UUID(int=7),
+        source="committed_snapshot",
+        commit_version=1,
+        committed_at=datetime(2026, 4, 2, tzinfo=UTC),
+        run_id=UUID(int=7),
     )
 
 

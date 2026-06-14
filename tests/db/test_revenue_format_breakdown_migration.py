@@ -2,8 +2,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
-    "backend/ums_smart_revenue/db/alembic/versions/"
-    "20260513_0005_revenue_format_breakdown.py"
+    "backend/ums_smart_revenue/db/alembic/versions/20260513_0005_revenue_format_breakdown.py"
 )
 
 

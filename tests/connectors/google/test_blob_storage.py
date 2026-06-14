@@ -7,6 +7,7 @@ Two backends implement BlobStorageBackend:
 Both must round-trip bytes deterministically; tests assert that get_bytes
 after upload returns the same payload.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -126,9 +127,7 @@ def test_gcs_get_bytes_wraps_api_error_as_blob_download_error() -> None:
     fake_client = MagicMock()
     fake_bucket = MagicMock()
     fake_blob = MagicMock()
-    fake_blob.download_as_bytes.side_effect = gcp_exceptions.GoogleAPICallError(
-        "fail"
-    )
+    fake_blob.download_as_bytes.side_effect = gcp_exceptions.GoogleAPICallError("fail")
     fake_client.bucket.return_value = fake_bucket
     fake_bucket.blob.return_value = fake_blob
 
@@ -195,9 +194,7 @@ def test_compute_checksum_returns_hex_sha256() -> None:
 def test_upload_and_verify_round_trips(tmp_path) -> None:
     backend = LocalFileStoreBackend(root=tmp_path)
     uri = "file-store://bucket/tenant/yt/m/abc.csv"
-    checksum = upload_and_verify(
-        backend=backend, storage_uri=uri, content=b"payload"
-    )
+    checksum = upload_and_verify(backend=backend, storage_uri=uri, content=b"payload")
     assert checksum == hashlib.sha256(b"payload").hexdigest()
 
 

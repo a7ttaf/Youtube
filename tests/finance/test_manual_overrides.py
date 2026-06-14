@@ -148,9 +148,7 @@ def test_manual_override_rejects_locked_month_in_bound_tenant():
         )
         session.commit()
 
-        repository = SqlAlchemyManualOverrideRepository(
-            session, tenant_id=OTHER_TENANT_ID
-        )
+        repository = SqlAlchemyManualOverrideRepository(session, tenant_id=OTHER_TENANT_ID)
         with pytest.raises(ManualOverrideLockedMonthError):
             repository.create_override(
                 month="2026-03",

@@ -7,9 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
-    pyproject = tomllib.loads(
-        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    )
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = set(pyproject["project"]["dependencies"])
     test_dependencies = set(pyproject["project"]["optional-dependencies"]["test"])
     expected_dependencies = {

@@ -38,9 +38,7 @@ def seed_database(database_url: str) -> None:
     SecurityBase.metadata.create_all(engine)
     created_at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=10)
     with Session(engine) as session:
-        session.add(
-            UserORM(id=USER_ID, email="audit@example.com", display_name="Audit User")
-        )
+        session.add(UserORM(id=USER_ID, email="audit@example.com", display_name="Audit User"))
         session.add_all(
             [
                 AuditLogORM(
@@ -79,9 +77,7 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     with TestClient(create_app(database_url=database_url)) as client:
-        response = client.get(
-            "/audit/events?limit=10", headers=auth_headers("audit_viewer")
-        )
+        response = client.get("/audit/events?limit=10", headers=auth_headers("audit_viewer"))
 
         engine = create_engine(database_url)
         with Session(engine) as session:
@@ -104,9 +100,7 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
         assert response.json()["audit_event"]["event_type"] == "AUDIT_LOG_VIEWED"
         assert any(event.event_type == "AUDIT_LOG_VIEWED" for event in audit_events)
 
-        next_response = client.get(
-            "/audit/events?limit=10", headers=auth_headers("audit_viewer")
-        )
+        next_response = client.get("/audit/events?limit=10", headers=auth_headers("audit_viewer"))
 
         assert next_response.status_code == 200
         assert [item["event_type"] for item in next_response.json()["items"]] == [
@@ -120,9 +114,7 @@ def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     with TestClient(create_app(database_url=database_url)) as client:
-        first_page = client.get(
-            "/audit/events?limit=1", headers=auth_headers("audit_viewer")
-        )
+        first_page = client.get("/audit/events?limit=1", headers=auth_headers("audit_viewer"))
         assert first_page.status_code == 200
         assert "pagination" in first_page.json()
         assert "next_cursor" in first_page.json()["pagination"]
@@ -161,9 +153,7 @@ def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path
         assert "pagination" in second_page.json()
         assert "next_cursor" in second_page.json()["pagination"]
 
-        assert [item["event_type"] for item in first_page.json()["items"]] == [
-            "REVENUE_VIEWED"
-        ]
+        assert [item["event_type"] for item in first_page.json()["items"]] == ["REVENUE_VIEWED"]
         assert [item["event_type"] for item in second_page.json()["items"]] == ["LOGIN"]
 
 
@@ -210,10 +200,7 @@ def test_audit_events_export_success_csv_shape(tmp_path):
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
-    assert (
-        response.headers["content-disposition"]
-        == 'attachment; filename="audit-events.csv"'
-    )
+    assert response.headers["content-disposition"] == 'attachment; filename="audit-events.csv"'
     assert "x-truncated" not in response.headers
     lines = response.text.splitlines()
     assert lines[0] == EXPORT_HEADER
@@ -249,9 +236,7 @@ def test_audit_events_export_denied_without_permission(tmp_path):
         engine = create_engine(database_url)
         with Session(engine) as session:
             export_events = session.scalars(
-                select(AuditLogORM).where(
-                    AuditLogORM.event_type == "EXPORT_DOWNLOADED"
-                )
+                select(AuditLogORM).where(AuditLogORM.event_type == "EXPORT_DOWNLOADED")
             ).all()
         assert export_events == []
 
@@ -338,9 +323,7 @@ def test_audit_events_export_ignores_cursor_params(tmp_path):
     plain_rows = list(csv.DictReader(StringIO(plain.text)))
     cursor_rows = list(csv.DictReader(StringIO(with_cursor.text)))
     # Cursor params are ignored: export starts from the beginning either way.
-    assert [r["entity_id"] for r in plain_rows] == [
-        r["entity_id"] for r in cursor_rows
-    ]
+    assert [r["entity_id"] for r in plain_rows] == [r["entity_id"] for r in cursor_rows]
     assert len(cursor_rows) == 1
 
 
@@ -348,9 +331,7 @@ def test_audit_events_export_caps_rows_and_sets_truncated(tmp_path, monkeypatch)
     """Cap large CSV exports and surface truncation via the response header."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    monkeypatch.setattr(
-        "ums_smart_revenue.api.audit.AUDIT_EXPORT_MAX_ROWS", 1
-    )
+    monkeypatch.setattr("ums_smart_revenue.api.audit.AUDIT_EXPORT_MAX_ROWS", 1)
 
     with TestClient(create_app(database_url=database_url)) as client:
         capped = client.get(
@@ -443,9 +424,7 @@ def test_assistant_cannot_view_audit_events(tmp_path):
     seed_database(database_url)
 
     with TestClient(create_app(database_url=database_url)) as client:
-        response = client.get(
-            "/audit/events", headers=auth_headers("assistant_analyst")
-        )
+        response = client.get("/audit/events", headers=auth_headers("assistant_analyst"))
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: audit.view"
@@ -488,9 +467,7 @@ def _audit_table_count(database_url: str) -> int:
         return len(session.scalars(select(AuditLogORM)).all())
 
 
-def _audit_rows_by_type(
-    database_url: str, event_type: str
-) -> list[dict[str, object]]:
+def _audit_rows_by_type(database_url: str, event_type: str) -> list[dict[str, object]]:
     """Return every audit row of the given event_type as plain dicts."""
     engine = create_engine(database_url)
     with Session(engine) as session:
@@ -516,9 +493,7 @@ def test_audit_summary_returns_counts_for_viewer(tmp_path):
     seed_database(database_url)
 
     with TestClient(create_app(database_url=database_url)) as client:
-        response = client.get(
-            "/audit/summary", headers=auth_headers("audit_viewer")
-        )
+        response = client.get("/audit/summary", headers=auth_headers("audit_viewer"))
 
     assert response.status_code == 200
     body = response.json()
@@ -546,9 +521,7 @@ def test_audit_summary_denied_for_assistant_analyst(tmp_path):
     before = _audit_table_count(database_url)
 
     with TestClient(create_app(database_url=database_url)) as client:
-        response = client.get(
-            "/audit/summary", headers=auth_headers("assistant_analyst")
-        )
+        response = client.get("/audit/summary", headers=auth_headers("assistant_analyst"))
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: audit.view"
@@ -563,9 +536,7 @@ def test_audit_summary_counts_sensitive_rows(tmp_path):
     _add_audit_row(database_url, event_type="OVERRIDE_APPLIED", sensitive=True)
 
     with TestClient(create_app(database_url=database_url)) as client:
-        body = client.get(
-            "/audit/summary", headers=auth_headers("audit_viewer")
-        ).json()
+        body = client.get("/audit/summary", headers=auth_headers("audit_viewer")).json()
 
     # Two sensitive rows (seeded REVENUE_VIEWED + added OVERRIDE_APPLIED).
     assert body["total_events"] == 3
@@ -604,9 +575,7 @@ def test_audit_summary_excludes_audit_log_viewed(tmp_path):
     _add_audit_row(database_url, event_type="AUDIT_LOG_VIEWED", sensitive=True)
 
     with TestClient(create_app(database_url=database_url)) as client:
-        body = client.get(
-            "/audit/summary", headers=auth_headers("audit_viewer")
-        ).json()
+        body = client.get("/audit/summary", headers=auth_headers("audit_viewer")).json()
 
     # The AUDIT_LOG_VIEWED row is not counted in any aggregate.
     assert body["total_events"] == 2
@@ -646,9 +615,7 @@ def test_audit_summary_writes_excluded_audit_log_viewed_row(tmp_path):
     before = _audit_table_count(database_url)
 
     with TestClient(create_app(database_url=database_url)) as client:
-        response = client.get(
-            "/audit/summary", headers=auth_headers("audit_viewer")
-        )
+        response = client.get("/audit/summary", headers=auth_headers("audit_viewer"))
         body = response.json()
         # Capture the new row's identity before the request session closes.
         new_rows = _audit_rows_by_type(database_url, "AUDIT_LOG_VIEWED")
@@ -688,9 +655,7 @@ def test_audit_summary_is_tenant_scoped(tmp_path):
     )
 
     with TestClient(create_app(database_url=database_url)) as client:
-        body = client.get(
-            "/audit/summary", headers=auth_headers("audit_viewer")
-        ).json()
+        body = client.get("/audit/summary", headers=auth_headers("audit_viewer")).json()
 
     # Cross-tenant row is invisible: counts stay at the seeded tenant totals.
     assert body["total_events"] == 2

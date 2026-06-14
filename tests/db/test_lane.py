@@ -31,6 +31,7 @@ so the role-statement contract is observable without a live Postgres backend;
 the end-to-end Postgres proof lives in
 ``tests/connectors/runs/test_run_one_rls_postgres.py``.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -149,9 +150,7 @@ def test_platform_lane_elevates_then_restores_tenant_lane() -> None:
     session = _StubSession(role=APP_TENANT_ROLE, dialect_name="postgresql")
     with platform_lane(session):
         # Inside the block only the elevation has been issued.
-        assert session._connection.calls == [
-            f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"'
-        ]
+        assert session._connection.calls == [f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"']
     assert session._connection.calls == [
         f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"',
         f'SET LOCAL ROLE "{APP_TENANT_ROLE}"',
@@ -178,9 +177,7 @@ def test_platform_lane_no_active_txn_at_entry_defers_elevation() -> None:
     set a role the next after_begin re-pins anyway. The body runs without any
     role statements, and the flag is cleared on block exit.
     """
-    session = _StubSession(
-        role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=False
-    )
+    session = _StubSession(role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=False)
     with platform_lane(session):
         pass
     # No role statements issued and no autobegin via session.connection().
@@ -202,9 +199,7 @@ def test_platform_lane_defers_elevation_even_when_body_never_writes() -> None:
     next after_begin re-pins anyway -- the next after_begin will see the
     flag and run the elevation naturally.
     """
-    session = _StubSession(
-        role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=False
-    )
+    session = _StubSession(role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=False)
     with platform_lane(session):
         # Body performs only non-DB work; no session.connection() call.
         assert session.connection_calls == 0
@@ -224,15 +219,11 @@ def test_platform_lane_post_commit_clean_exit_issues_no_restore() -> None:
     restore, avoiding the autobegin. Only the enter-time elevation should be
     on the call log.
     """
-    session = _StubSession(
-        role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=True
-    )
+    session = _StubSession(role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=True)
     with platform_lane(session):
         # Body commits; the in-flight transaction is now gone.
         session.simulate_commit()
-    assert session._connection.calls == [
-        f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"'
-    ]
+    assert session._connection.calls == [f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"']
     # Only the entry-time elevation called session.connection(); the
     # post-commit clean-exit path did not autobegin a fresh transaction.
     assert session.connection_calls == 1
@@ -254,9 +245,7 @@ def test_platform_lane_swallowed_error_clean_exit_skips_restore() -> None:
     # Body swallows its own DB error and exits cleanly -> no raise from __exit__.
     with platform_lane(session):
         pass
-    assert session._connection.calls == [
-        f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"'
-    ]
+    assert session._connection.calls == [f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"']
 
 
 def test_platform_lane_does_not_demote_platform_lane_session() -> None:
@@ -264,9 +253,7 @@ def test_platform_lane_does_not_demote_platform_lane_session() -> None:
     session = _StubSession(role=APP_PLATFORM_ROLE, dialect_name="postgresql")
     with platform_lane(session):
         pass
-    assert session._connection.calls == [
-        f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"'
-    ]
+    assert session._connection.calls == [f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"']
 
 
 def test_platform_lane_skips_role_restore_on_exception() -> None:
@@ -284,9 +271,7 @@ def test_platform_lane_skips_role_restore_on_exception() -> None:
         with platform_lane(session):
             raise ValueError("boom")
     # Only the elevation was issued; no restore statement on the failure path.
-    assert session._connection.calls == [
-        f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"'
-    ]
+    assert session._connection.calls == [f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"']
 
 
 def test_platform_lane_noop_off_postgres_on_exception() -> None:

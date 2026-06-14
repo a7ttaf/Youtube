@@ -1633,7 +1633,7 @@ def _can_access_export_job(
             group_registry=group_registry,
             scope_channel_ids=export_job.scope_channel_ids,
         )
-    except (ExportJobValidationError, HTTPException, KeyError):
+    except ExportJobValidationError, HTTPException, KeyError:
         return False
     return True
 

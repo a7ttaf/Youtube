@@ -839,7 +839,7 @@ def _resolve_triggered_by_user_id(
     """Return the principal UUID only if it is a real users row for the tenant."""
     try:
         candidate = UUID(user.user_id)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     exists = session.scalar(
         select(UserORM.id).where(UserORM.id == candidate, UserORM.tenant_id == tenant_id)

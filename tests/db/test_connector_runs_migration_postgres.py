@@ -73,9 +73,7 @@ def test_pre_state_at_prior_head_has_no_connector_run_tables(
 
     assert "connector_runs" not in inspector.get_table_names()
     assert "connector_run_raw_files" not in inspector.get_table_names()
-    raw_uniques = {
-        c["name"] for c in inspector.get_unique_constraints("raw_report_files")
-    }
+    raw_uniques = {c["name"] for c in inspector.get_unique_constraints("raw_report_files")}
     assert "uq_raw_report_files_tenant_id_id" not in raw_uniques
 
 
@@ -90,20 +88,12 @@ def test_upgrade_creates_tables_constraints_and_indexes(
     assert "connector_run_raw_files" in tables
 
     run_uniques = {c["name"] for c in inspector.get_unique_constraints("connector_runs")}
-    join_uniques = {
-        c["name"] for c in inspector.get_unique_constraints("connector_run_raw_files")
-    }
-    raw_uniques = {
-        c["name"] for c in inspector.get_unique_constraints("raw_report_files")
-    }
+    join_uniques = {c["name"] for c in inspector.get_unique_constraints("connector_run_raw_files")}
+    raw_uniques = {c["name"] for c in inspector.get_unique_constraints("raw_report_files")}
     run_checks = {c["name"] for c in inspector.get_check_constraints("connector_runs")}
-    join_checks = {
-        c["name"] for c in inspector.get_check_constraints("connector_run_raw_files")
-    }
+    join_checks = {c["name"] for c in inspector.get_check_constraints("connector_run_raw_files")}
     run_indexes = {i["name"] for i in inspector.get_indexes("connector_runs")}
-    join_indexes = {
-        i["name"] for i in inspector.get_indexes("connector_run_raw_files")
-    }
+    join_indexes = {i["name"] for i in inspector.get_indexes("connector_run_raw_files")}
 
     assert "uq_connector_runs_tenant_id" in run_uniques
     assert "uq_connector_run_raw_files_run_file" in join_uniques
@@ -221,9 +211,7 @@ def test_downgrade_drops_b2_3_tables_and_raw_unique_only(
     command.downgrade(alembic_config, "-1")
     inspector = inspect(fresh_engine)
     tables = set(inspector.get_table_names())
-    raw_uniques = {
-        c["name"] for c in inspector.get_unique_constraints("raw_report_files")
-    }
+    raw_uniques = {c["name"] for c in inspector.get_unique_constraints("raw_report_files")}
 
     assert "connector_runs" not in tables
     assert "connector_run_raw_files" not in tables
@@ -232,9 +220,7 @@ def test_downgrade_drops_b2_3_tables_and_raw_unique_only(
     assert "uq_raw_report_files_tenant_id_id" not in raw_uniques
 
 
-def test_round_trip_idempotency(
-    alembic_config: Config, fresh_engine: object
-) -> None:
+def test_round_trip_idempotency(alembic_config: Config, fresh_engine: object) -> None:
     command.upgrade(alembic_config, B2_3_HEAD)
     command.downgrade(alembic_config, "-1")
     command.upgrade(alembic_config, B2_3_HEAD)

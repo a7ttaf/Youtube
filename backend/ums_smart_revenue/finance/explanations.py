@@ -516,7 +516,7 @@ def _load_confidence(stored: str) -> dict[str, object]:
         return {"label": "LOW", "score": "0"}
     try:
         parsed = json.loads(stored)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return {"label": str(stored), "score": "0"}
     if isinstance(parsed, dict):
         return parsed

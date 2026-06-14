@@ -1,4 +1,5 @@
 """The three channel-account-link audit events are defined, sensitive, reason-required."""
+
 from ums_smart_revenue.auth.audit import (
     AUDIT_EVENT_DEFINITIONS,
     AuditEventType,

@@ -24,6 +24,7 @@ The first two tests remain subprocess so the argparse error paths are
 end-to-end real. The database/credential tests run in-process so they can
 patch settings and session construction without relying on host env state.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -76,9 +77,7 @@ def _load_cli_module():
     (``load_app_settings``, ``build_session_factory``) without polluting
     ``sys.path`` for the rest of the test session.
     """
-    spec = importlib.util.spec_from_file_location(
-        "ums_run_google_connector_cli", CLI_PATH
-    )
+    spec = importlib.util.spec_from_file_location("ums_run_google_connector_cli", CLI_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -91,10 +90,14 @@ def test_cli_rejects_unknown_connector() -> None:
     """
     out = _run(
         [
-            "--tenant", str(uuid4()),
-            "--connector", "not-a-thing",
-            "--account", "x",
-            "--month", "2026-05",
+            "--tenant",
+            str(uuid4()),
+            "--connector",
+            "not-a-thing",
+            "--account",
+            "x",
+            "--month",
+            "2026-05",
         ]
     )
     assert out.returncode == 2
@@ -108,10 +111,14 @@ def test_cli_rejects_bad_month_format() -> None:
     """
     out = _run(
         [
-            "--tenant", str(uuid4()),
-            "--connector", "youtube-reporting",
-            "--account", "x",
-            "--month", "2026-5",  # wrong format: single-digit month
+            "--tenant",
+            str(uuid4()),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "x",
+            "--month",
+            "2026-5",  # wrong format: single-digit month
         ]
     )
     assert out.returncode == 2
@@ -134,19 +141,21 @@ def test_cli_main_returns_2_when_database_url_missing(
         raise AssertionError("build_session_factory must not run without a database URL")
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
-    monkeypatch.setattr(
-        module, "build_session_factory", _build_session_factory_should_not_run
-    )
+    monkeypatch.setattr(module, "build_session_factory", _build_session_factory_should_not_run)
 
     captured_err = io.StringIO()
     monkeypatch.setattr(sys, "stderr", captured_err)
 
     exit_code = module.main(
         [
-            "--tenant", str(TENANT_ID),
-            "--connector", "youtube-reporting",
-            "--account", "acct",
-            "--month", "2026-05",
+            "--tenant",
+            str(TENANT_ID),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "acct",
+            "--month",
+            "2026-05",
         ]
     )
 
@@ -246,10 +255,14 @@ def test_cli_main_returns_2_when_credential_missing(
 
     exit_code = module.main(
         [
-            "--tenant", str(TENANT_ID),
-            "--connector", "youtube-reporting",
-            "--account", "missing-account",
-            "--month", "2026-05",
+            "--tenant",
+            str(TENANT_ID),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "missing-account",
+            "--month",
+            "2026-05",
             "--dry-run",
         ]
     )
@@ -328,10 +341,14 @@ def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
 
     exit_code = module.main(
         [
-            "--tenant", str(TENANT_ID),
-            "--connector", "youtube-reporting",
-            "--account", "any-account",
-            "--month", "2026-05",
+            "--tenant",
+            str(TENANT_ID),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "any-account",
+            "--month",
+            "2026-05",
         ]
     )
 

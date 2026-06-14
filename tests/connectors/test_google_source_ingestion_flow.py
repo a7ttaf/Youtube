@@ -42,44 +42,46 @@ def session() -> Session:
     ReportBase.metadata.create_all(engine)
     with Session(engine) as s:
         now = datetime.now()
-        s.add_all([
-            TenantORM(id=TENANT_ID, slug="tenant-x", display_name="Tenant X"),
-            # Tenant-scoped raw evidence file backing RAW_FILE_ID so upsert_many's
-            # raw_file_id pre-check (existence + tenant scope) passes.
-            RawReportFileORM(
-                id=RAW_FILE_ID,
-                tenant_id=TENANT_ID,
-                source="youtube_reporting",
-                report_type="channel_monthly_estimated_revenue",
-                report_month="2026-04",
-                file_url="memory://tenant-x/raw.json",
-                checksum="c" * 64,
-            ),
-            CurrencyORM(
-                code="USD",
-                numeric_code="840",
-                name="US Dollar",
-                minor_unit=2,
-                is_supported=True,
-                activated_at=now,
-            ),
-            CurrencyORM(
-                code="GBP",
-                numeric_code="826",
-                name="Pound Sterling",
-                minor_unit=2,
-                is_supported=True,
-                activated_at=now,
-            ),
-            CurrencyORM(
-                code="EGP",
-                numeric_code="818",
-                name="Egyptian Pound",
-                minor_unit=2,
-                is_supported=True,
-                activated_at=now,
-            ),
-        ])
+        s.add_all(
+            [
+                TenantORM(id=TENANT_ID, slug="tenant-x", display_name="Tenant X"),
+                # Tenant-scoped raw evidence file backing RAW_FILE_ID so upsert_many's
+                # raw_file_id pre-check (existence + tenant scope) passes.
+                RawReportFileORM(
+                    id=RAW_FILE_ID,
+                    tenant_id=TENANT_ID,
+                    source="youtube_reporting",
+                    report_type="channel_monthly_estimated_revenue",
+                    report_month="2026-04",
+                    file_url="memory://tenant-x/raw.json",
+                    checksum="c" * 64,
+                ),
+                CurrencyORM(
+                    code="USD",
+                    numeric_code="840",
+                    name="US Dollar",
+                    minor_unit=2,
+                    is_supported=True,
+                    activated_at=now,
+                ),
+                CurrencyORM(
+                    code="GBP",
+                    numeric_code="826",
+                    name="Pound Sterling",
+                    minor_unit=2,
+                    is_supported=True,
+                    activated_at=now,
+                ),
+                CurrencyORM(
+                    code="EGP",
+                    numeric_code="818",
+                    name="Egyptian Pound",
+                    minor_unit=2,
+                    is_supported=True,
+                    activated_at=now,
+                ),
+            ]
+        )
         s.flush()
         yield s
 
@@ -93,22 +95,41 @@ def _load(package: str, name: str) -> dict:
 def test_end_to_end_three_parsers_upsert_into_repository(session: Session) -> None:
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
 
-    yt_rep = list(YouTubeReportingParser().parse(
-        _load("tests.connectors._fixtures.youtube_reporting", "sample_estimated_revenue_2026_04.json"),
-        tenant_id=TENANT_ID,
-    ))
-    yt_ana = list(YouTubeAnalyticsParser().parse(
-        _load("tests.connectors._fixtures.youtube_analytics", "sample_query_response_2026_04.json"),
-        tenant_id=TENANT_ID,
-    ))
-    ads_earn = list(AdSenseManagementParser().parse(
-        _load("tests.connectors._fixtures.adsense_management", "sample_earnings_report_2026_04.json"),
-        tenant_id=TENANT_ID,
-    ))
-    ads_pay = list(AdSenseManagementParser().parse(
-        _load("tests.connectors._fixtures.adsense_management", "sample_payment_report_2026_04.json"),
-        tenant_id=TENANT_ID,
-    ))
+    yt_rep = list(
+        YouTubeReportingParser().parse(
+            _load(
+                "tests.connectors._fixtures.youtube_reporting",
+                "sample_estimated_revenue_2026_04.json",
+            ),
+            tenant_id=TENANT_ID,
+        )
+    )
+    yt_ana = list(
+        YouTubeAnalyticsParser().parse(
+            _load(
+                "tests.connectors._fixtures.youtube_analytics", "sample_query_response_2026_04.json"
+            ),
+            tenant_id=TENANT_ID,
+        )
+    )
+    ads_earn = list(
+        AdSenseManagementParser().parse(
+            _load(
+                "tests.connectors._fixtures.adsense_management",
+                "sample_earnings_report_2026_04.json",
+            ),
+            tenant_id=TENANT_ID,
+        )
+    )
+    ads_pay = list(
+        AdSenseManagementParser().parse(
+            _load(
+                "tests.connectors._fixtures.adsense_management",
+                "sample_payment_report_2026_04.json",
+            ),
+            tenant_id=TENANT_ID,
+        )
+    )
 
     repo.upsert_many(TENANT_ID, yt_rep, raw_file_id=RAW_FILE_ID, imported_by=None)
     repo.upsert_many(TENANT_ID, yt_ana, raw_file_id=RAW_FILE_ID, imported_by=None)
@@ -116,9 +137,7 @@ def test_end_to_end_three_parsers_upsert_into_repository(session: Session) -> No
     repo.upsert_many(TENANT_ID, ads_pay, raw_file_id=RAW_FILE_ID, imported_by=None)
 
     written = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
     ).all()
     expected = len(yt_rep) + len(yt_ana) + len(ads_earn) + len(ads_pay)
     assert len(written) == expected
@@ -129,22 +148,42 @@ def test_rerun_with_identical_fixtures_produces_zero_new_rows(session: Session) 
 
     def parse_all(suffix: str) -> list:
         out = []
-        out.extend(YouTubeReportingParser().parse(
-            _load("tests.connectors._fixtures.youtube_reporting", f"sample_estimated_revenue_2026_04{suffix}.json"),
-            tenant_id=TENANT_ID,
-        ))
-        out.extend(YouTubeAnalyticsParser().parse(
-            _load("tests.connectors._fixtures.youtube_analytics", f"sample_query_response_2026_04{suffix}.json"),
-            tenant_id=TENANT_ID,
-        ))
-        out.extend(AdSenseManagementParser().parse(
-            _load("tests.connectors._fixtures.adsense_management", f"sample_earnings_report_2026_04{suffix}.json"),
-            tenant_id=TENANT_ID,
-        ))
-        out.extend(AdSenseManagementParser().parse(
-            _load("tests.connectors._fixtures.adsense_management", f"sample_payment_report_2026_04{suffix}.json"),
-            tenant_id=TENANT_ID,
-        ))
+        out.extend(
+            YouTubeReportingParser().parse(
+                _load(
+                    "tests.connectors._fixtures.youtube_reporting",
+                    f"sample_estimated_revenue_2026_04{suffix}.json",
+                ),
+                tenant_id=TENANT_ID,
+            )
+        )
+        out.extend(
+            YouTubeAnalyticsParser().parse(
+                _load(
+                    "tests.connectors._fixtures.youtube_analytics",
+                    f"sample_query_response_2026_04{suffix}.json",
+                ),
+                tenant_id=TENANT_ID,
+            )
+        )
+        out.extend(
+            AdSenseManagementParser().parse(
+                _load(
+                    "tests.connectors._fixtures.adsense_management",
+                    f"sample_earnings_report_2026_04{suffix}.json",
+                ),
+                tenant_id=TENANT_ID,
+            )
+        )
+        out.extend(
+            AdSenseManagementParser().parse(
+                _load(
+                    "tests.connectors._fixtures.adsense_management",
+                    f"sample_payment_report_2026_04{suffix}.json",
+                ),
+                tenant_id=TENANT_ID,
+            )
+        )
         return out
 
     first = parse_all("")
@@ -160,6 +199,7 @@ def test_rerun_with_identical_fixtures_produces_zero_new_rows(session: Session) 
 
 def test_malformed_payload_raises_parser_error_without_partial_writes(session: Session) -> None:
     from ums_smart_revenue.connectors.google_source_parsers import ParserError
+
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)  # noqa: F841
     bad_payload = {"report_metadata": {"report_id": "x", "report_type": "y"}, "rows": "not a list"}
     with pytest.raises(ParserError):

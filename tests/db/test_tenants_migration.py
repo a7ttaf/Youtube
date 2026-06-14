@@ -31,17 +31,14 @@ def test_tenants_migration_creates_tables_and_seeds_ums():
         table_names = set(inspector.get_table_names())
         assert {"tenants", "platform_admins"} <= table_names
 
-        tenant_columns = {
-            column["name"]: column for column in inspector.get_columns("tenants")
-        }
+        tenant_columns = {column["name"]: column for column in inspector.get_columns("tenants")}
         assert tenant_columns["slug"]["nullable"] is False
         assert tenant_columns["display_name"]["nullable"] is False
         assert tenant_columns["primary_currency"]["nullable"] is False
         assert tenant_columns["status"]["nullable"] is False
 
         tenant_constraints = {
-            constraint["name"]
-            for constraint in inspector.get_check_constraints("tenants")
+            constraint["name"] for constraint in inspector.get_check_constraints("tenants")
         }
         assert {
             "ck_tenants_slug_lower",
@@ -56,8 +53,7 @@ def test_tenants_migration_creates_tables_and_seeds_ums():
         assert tenant_indexes["uq_tenants_slug"] == ("slug",)
 
         platform_admin_constraints = {
-            constraint["name"]
-            for constraint in inspector.get_check_constraints("platform_admins")
+            constraint["name"] for constraint in inspector.get_check_constraints("platform_admins")
         }
         assert "ck_platform_admins_status" in platform_admin_constraints
 
@@ -172,9 +168,7 @@ def test_migration_downgrade_drops_both_tables():
         try:
             migration.op = operations
             migration.upgrade()
-            assert {"tenants", "platform_admins"} <= set(
-                inspect(connection).get_table_names()
-            )
+            assert {"tenants", "platform_admins"} <= set(inspect(connection).get_table_names())
             migration.downgrade()
             assert "tenants" not in inspect(connection).get_table_names()
             assert "platform_admins" not in inspect(connection).get_table_names()
