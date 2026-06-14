@@ -83,6 +83,7 @@ def derive_credential_health_state(entry: ConnectorCredentialEntry, *, as_of: da
       - healthy: last refresh succeeded and the token is not expiring.
       - unknown: none of the above can be determined.
     """
+    as_of = _as_aware_utc(as_of)
     if entry.last_refresh_status == "failed" or entry.last_refresh_error_class:
         return "auth_failed"
     if not entry.has_secret_ref:
