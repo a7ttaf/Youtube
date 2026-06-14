@@ -102,7 +102,7 @@ def _assert_app_platform_cross_backend_delete_rejected(url: str) -> None:
     import psycopg
 
     libpq_url = url.replace("postgresql+psycopg://", "postgresql://")
-    with psycopg.connect(libpq_url, autocommit=True) as raw_conn:
+    with psycopg.connect(libpq_url, autocommit=True) as raw_conn:  # skipcq: PTC-W0062
         with raw_conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO app_tenant_context "

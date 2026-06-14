@@ -330,7 +330,7 @@ def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
         translates the typed error to exit 2.
         """
         raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
-        yield  # pragma: no cover -- unreachable, the raise above is the test surface
+        yield  # pragma: no cover -- unreachable  # skipcq: PYL-W0101
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
     monkeypatch.setattr(module, "build_session_factory", _build_fake_session_factory)

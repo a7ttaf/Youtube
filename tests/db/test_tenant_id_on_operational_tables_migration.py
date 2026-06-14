@@ -163,7 +163,7 @@ def test_new_inserts_without_tenant_id_get_ums_default():
     assert _strip_uuid(str(row.tenant_id)) == _strip_uuid(UMS_TENANT_ID)
 
 
-def test_tenant_scoped_constraints_are_rewritten():
+def test_tenant_scoped_constraints_are_rewritten():  # skipcq: PY-R1000
     """Tenant-scoped uniqueness, keys, and FKs include tenant_id."""
     engine = _build_engine()
     with engine.begin() as connection:
@@ -681,7 +681,7 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
             ondelete="RESTRICT",
         ),
     )
-    del org_units  # referenced only to register with metadata
+    del org_units  # referenced only to register with metadata  # skipcq: PTC-W0043
     Table(
         "youtube_channels",
         metadata,

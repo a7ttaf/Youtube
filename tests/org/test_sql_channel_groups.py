@@ -74,7 +74,7 @@ def build_session() -> Session:
 
     @event.listens_for(engine, "connect")
     def _enable_foreign_keys(dbapi_connection, connection_record) -> None:
-        del connection_record
+        del connection_record  # skipcq: PTC-W0043
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     OrgBase.metadata.create_all(engine)

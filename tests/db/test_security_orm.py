@@ -65,7 +65,7 @@ def test_postgresql_ddl_contains_sensitive_audit_and_connector_tables():
 
 def test_sqlite_global_access_scope_singleton_index_is_partial():
     table = SecurityBase.metadata.tables["access_scopes"]
-    index = next(
+    index = next(  # skipcq: PTC-W0063
         index for index in table.indexes if index.name == "uq_access_scopes_global_singleton"
     )
 

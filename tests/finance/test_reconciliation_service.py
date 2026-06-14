@@ -556,7 +556,9 @@ def test_run_includes_connector_allocation_fact_in_reconciliation_basis():
 class _LockedDeductionRepository:
     """Test double that simulates a repository month-lock race."""
 
-    def upsert_components(self, *, month, components, replace_source_tables=None):
+    def upsert_components(  # skipcq: PYL-R0201
+        self, *, month, components, replace_source_tables=None
+    ):
         """Raise the same locked-month error as the real repository."""
         raise DeductionComponentLockedMonthError("race locked")
 
@@ -818,7 +820,7 @@ def test_manual_upload_primary_fact_reconciles_without_source_mapping_error():
     assert result.yt_adsense_fee_total_usd == Decimal("5.000000")
     tax_components = [c for c in components if c.component_kind == "TAX"]
     assert {c.source_system for c in tax_components} == {"manual_upload"}
-    gross_component = next(
+    gross_component = next(  # skipcq: PTC-W0063
         component for component in persisted.components if component["key"] == "estimated_gross_usd"
     )
     assert gross_component["label"] == "Gross (manual upload)"

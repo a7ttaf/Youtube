@@ -54,7 +54,7 @@ def test_success_stamp_persists_after_caller_commit(tmp_path) -> None:
 
     factory = _factory(tmp_path)
     expiry = datetime(2026, 6, 1, tzinfo=UTC)
-    with (
+    with (  # skipcq: PTC-W0062
         patch(
             "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
             return_value={},
@@ -94,7 +94,7 @@ def test_failure_stamp_persists_and_reraises(tmp_path) -> None:
     def _boom(_creds):
         raise OAuthRefreshError(inner=RuntimeError("revoked"))
 
-    with (
+    with (  # skipcq: PTC-W0062
         patch(
             "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
             return_value={},
@@ -133,7 +133,7 @@ def test_not_found_does_not_stamp(tmp_path) -> None:
     )
 
     factory = _factory(tmp_path)
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with pytest.raises(CredentialNotFoundError):
             resolve_connector_credentials(
                 session=session,
@@ -153,7 +153,7 @@ def test_dry_run_success_not_persisted_without_caller_commit(tmp_path) -> None:
 
     factory = _factory(tmp_path)
     expiry = datetime(2026, 6, 1, tzinfo=UTC)
-    with (
+    with (  # skipcq: PTC-W0062
         patch(
             "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
             return_value={},

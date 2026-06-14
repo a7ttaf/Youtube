@@ -119,7 +119,7 @@ class _FakeExecutor:
             return None
         return _FakeReservation(kwargs)
 
-    def activate(self, reservation):
+    def activate(self, reservation):  # skipcq: PYL-R1711
         self.activate_calls.append({"reservation": reservation})
         return None
 
@@ -414,10 +414,10 @@ def test_request_connector_job_missing_permission_403(tmp_path):
 
 def test_request_connector_job_503_when_executor_disabled(tmp_path):
     """Executor disabled -> 503 + a job_rejected/executor_disabled audit."""
-    import os
+    import os  # skipcq: PYL-W0404
 
     os.environ.pop("UMS_CONNECTOR_JOB_EXECUTOR_ENABLED", None)
-    from ums_smart_revenue.config.settings import load_app_settings
+    from ums_smart_revenue.config.settings import load_app_settings  # skipcq: PYL-W0404
 
     load_app_settings.cache_clear()
     database_url = build_database_url(tmp_path)

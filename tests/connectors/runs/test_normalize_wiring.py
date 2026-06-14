@@ -604,7 +604,7 @@ def test_failed_facts_txn_is_rolled_back_before_run_rewrite() -> None:
     session = MagicMock(name="session")
     normalizer_cls = MagicMock(name="GoogleSourceNormalizer")
     normalizer_cls.return_value = normalizer
-    with (
+    with (  # skipcq: PTC-W0062
         patch.object(normalization, "get_month_close_status", return_value="OPEN"),
         patch.object(normalization, "GoogleSourceNormalizer", normalizer_cls),
         patch.object(normalization, "record_projection_failure", record_failure),

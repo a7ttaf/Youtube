@@ -88,6 +88,6 @@ def test_complete_artifact_does_not_update_other_tenants_job():
 
 
 def test_repository_rejects_malformed_tenant_id():
-    with build_session() as session:
+    with build_session() as session:  # skipcq: PTC-W0062
         with pytest.raises(ExportJobValidationError, match="tenant_id must be a valid UUID"):
             SqlAlchemyExportJobRepository(session, tenant_id="not-a-uuid")

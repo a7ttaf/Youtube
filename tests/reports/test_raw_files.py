@@ -564,6 +564,6 @@ def test_repository_default_tenant_id_matches_constant():
 
 
 def test_repository_rejects_malformed_tenant_id():
-    with build_session() as session:
+    with build_session() as session:  # skipcq: PTC-W0062
         with pytest.raises(RawReportFileValidationError, match="tenant_id must be a valid UUID"):
             SqlAlchemyRawReportFileRepository(session, tenant_id="not-a-uuid")

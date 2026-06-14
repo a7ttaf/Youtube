@@ -1,14 +1,5 @@
 version = 1
 
-# Exclude the test tree from static analysis (repo-wide). The 100-char reformat
-# re-fingerprinted pre-existing, test-only style patterns (nested `with` in
-# fixtures, duplicate imports, useless returns, intra-test import cycles) as
-# newly introduced, failing the Python check on benign test-convention noise
-# with no production or security signal. Tests still run in the pytest gate;
-# only DeepSource static analysis skips them. Production code under backend/ is
-# fully analyzed (0 Python occurrences after the targeted backend skipcq).
-exclude_patterns = ["tests/**"]
-
 [[analyzers]]
 name = "python"
 enabled = true
