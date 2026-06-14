@@ -839,7 +839,7 @@ def _resolve_triggered_by_user_id(
     """Return the principal UUID only if it is a real users row for the tenant."""
     try:
         candidate = UUID(user.user_id)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return None
     exists = session.scalar(
         select(UserORM.id).where(UserORM.id == candidate, UserORM.tenant_id == tenant_id)
@@ -911,8 +911,11 @@ def _reject_connector_job(
 #   - File: backend/ums_smart_revenue/api/connectors.py ->
 #     request_connector_job attaches the hooks.
 # ============================================================================
-_AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"
-_AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"
+# These are SQLAlchemy `session.info` flag keys (idempotency markers for the
+# event hooks below), not credentials. DeepSource's secret scanner (SCT-A000)
+# false-positives on the `_KEY` suffix; the string values are static identifiers.
+_AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"  # skipcq: SCT-A000
+_AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"  # skipcq: SCT-A000
 
 
 def _attach_after_rollback_hook(
