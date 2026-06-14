@@ -140,9 +140,9 @@ def test_record_entry_stamps_explicit_constructor_tenant() -> None:
     """Explicit constructor tenant ids are stamped onto every inserted row."""
     session = build_session()
 
-    SqlAlchemyBankReconciliationRepository(
-        session, tenant_id=SECOND_TENANT_ID
-    ).record_entry(**_record_entry_kwargs(bank_reference="second-tenant-bank-ref"))
+    SqlAlchemyBankReconciliationRepository(session, tenant_id=SECOND_TENANT_ID).record_entry(
+        **_record_entry_kwargs(bank_reference="second-tenant-bank-ref")
+    )
 
     row = session.scalars(select(BankReconciliationEntryORM)).one()
     assert row.tenant_id == SECOND_TENANT_ID
@@ -168,9 +168,9 @@ def test_record_entry_explicit_tenant_overrides_request_context() -> None:
     session = build_session()
     token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
     try:
-        SqlAlchemyBankReconciliationRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        ).record_entry(**_record_entry_kwargs(bank_reference="explicit-wins-bank-ref"))
+        SqlAlchemyBankReconciliationRepository(session, tenant_id=DEFAULT_TENANT_ID).record_entry(
+            **_record_entry_kwargs(bank_reference="explicit-wins-bank-ref")
+        )
     finally:
         TENANT_CTX.reset(token)
 
@@ -182,14 +182,10 @@ def test_record_entry_allows_same_bank_reference_in_two_tenants() -> None:
     """Per-tenant composite uniqueness lets two tenants share month + reference."""
     session = build_session()
 
-    SqlAlchemyBankReconciliationRepository(
-        session, tenant_id=DEFAULT_TENANT_ID
-    ).record_entry(
+    SqlAlchemyBankReconciliationRepository(session, tenant_id=DEFAULT_TENANT_ID).record_entry(
         **_record_entry_kwargs(bank_reference="bank-2026-03", amount="100.00")
     )
-    SqlAlchemyBankReconciliationRepository(
-        session, tenant_id=SECOND_TENANT_ID
-    ).record_entry(
+    SqlAlchemyBankReconciliationRepository(session, tenant_id=SECOND_TENANT_ID).record_entry(
         **_record_entry_kwargs(bank_reference="bank-2026-03", amount="200.00")
     )
 
@@ -206,19 +202,13 @@ def test_record_entry_upsert_is_scoped_to_one_tenant() -> None:
     """Re-upserting in tenant A leaves tenant B's row with the same reference alone."""
     session = build_session()
 
-    SqlAlchemyBankReconciliationRepository(
-        session, tenant_id=DEFAULT_TENANT_ID
-    ).record_entry(
+    SqlAlchemyBankReconciliationRepository(session, tenant_id=DEFAULT_TENANT_ID).record_entry(
         **_record_entry_kwargs(bank_reference="upsert-bank-ref", amount="100.00")
     )
-    SqlAlchemyBankReconciliationRepository(
-        session, tenant_id=SECOND_TENANT_ID
-    ).record_entry(
+    SqlAlchemyBankReconciliationRepository(session, tenant_id=SECOND_TENANT_ID).record_entry(
         **_record_entry_kwargs(bank_reference="upsert-bank-ref", amount="200.00")
     )
-    SqlAlchemyBankReconciliationRepository(
-        session, tenant_id=DEFAULT_TENANT_ID
-    ).record_entry(
+    SqlAlchemyBankReconciliationRepository(session, tenant_id=DEFAULT_TENANT_ID).record_entry(
         **_record_entry_kwargs(bank_reference="upsert-bank-ref", amount="111.00")
     )
 
@@ -246,13 +236,13 @@ def test_record_entry_locked_month_is_scoped_to_the_bound_tenant() -> None:
     session.commit()
 
     with pytest.raises(BankReconciliationLockedMonthError):
-        SqlAlchemyBankReconciliationRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        ).record_entry(**_record_entry_kwargs(bank_reference="locked-month-bank-ref"))
+        SqlAlchemyBankReconciliationRepository(session, tenant_id=DEFAULT_TENANT_ID).record_entry(
+            **_record_entry_kwargs(bank_reference="locked-month-bank-ref")
+        )
 
-    SqlAlchemyBankReconciliationRepository(
-        session, tenant_id=SECOND_TENANT_ID
-    ).record_entry(**_record_entry_kwargs(bank_reference="open-month-bank-ref"))
+    SqlAlchemyBankReconciliationRepository(session, tenant_id=SECOND_TENANT_ID).record_entry(
+        **_record_entry_kwargs(bank_reference="open-month-bank-ref")
+    )
 
     rows = session.scalars(select(BankReconciliationEntryORM)).all()
     assert len(rows) == 1
@@ -284,9 +274,9 @@ def test_list_month_entries_returns_empty_for_empty_tenant() -> None:
     _seed_entry(session, tenant_id=DEFAULT_TENANT_ID, bank_reference="default-bank-ref")
     _seed_entry(session, tenant_id=SECOND_TENANT_ID, bank_reference="second-bank-ref")
 
-    entries = SqlAlchemyBankReconciliationRepository(
-        session, tenant_id=uuid4()
-    ).list_month_entries(month="2026-03")
+    entries = SqlAlchemyBankReconciliationRepository(session, tenant_id=uuid4()).list_month_entries(
+        month="2026-03"
+    )
 
     assert entries == []
 
@@ -297,9 +287,7 @@ def test_list_month_entries_uses_default_tenant_without_context() -> None:
     _seed_entry(session, tenant_id=DEFAULT_TENANT_ID, bank_reference="default-bank-ref")
     _seed_entry(session, tenant_id=SECOND_TENANT_ID, bank_reference="second-bank-ref")
 
-    entries = SqlAlchemyBankReconciliationRepository(session).list_month_entries(
-        month="2026-03"
-    )
+    entries = SqlAlchemyBankReconciliationRepository(session).list_month_entries(month="2026-03")
 
     assert [entry.bank_reference for entry in entries] == ["default-bank-ref"]
 
@@ -345,7 +333,5 @@ def test_bank_reconciliation_repository_rejects_invalid_tenant_id_string() -> No
     """Malformed constructor tenant ids fail closed before any DB access."""
     session = build_session()
 
-    with pytest.raises(
-        BankReconciliationValidationError, match="tenant_id must be a valid UUID"
-    ):
+    with pytest.raises(BankReconciliationValidationError, match="tenant_id must be a valid UUID"):
         SqlAlchemyBankReconciliationRepository(session, tenant_id="not-a-uuid")

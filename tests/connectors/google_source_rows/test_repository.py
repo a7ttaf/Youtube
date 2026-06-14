@@ -135,15 +135,11 @@ def test_upsert_many_inserts_new_rows(session: Session) -> None:
     """New source keys are inserted and returned as created entries."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     rows = [_row(source_row_key="a" * 64), _row(source_row_key="b" * 64)]
-    result = repo.upsert_many(
-        TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None
-    )
+    result = repo.upsert_many(TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None)
     assert len(result.entries) == 2
 
     reloaded = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_A
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_A)
     ).all()
     assert len(reloaded) == 2
 
@@ -157,11 +153,7 @@ def test_upsert_many_is_idempotent_on_rerun(session: Session) -> None:
     rows = [_row(source_row_key="c" * 64)]
     repo.upsert_many(TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None)
     repo.upsert_many(TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None)
-    count = (
-        session.query(GoogleRevenueSourceRowORM)
-        .filter_by(tenant_id=TENANT_A)
-        .count()
-    )
+    count = session.query(GoogleRevenueSourceRowORM).filter_by(tenant_id=TENANT_A).count()
     assert count == 1
 
 
@@ -174,16 +166,18 @@ def test_upsert_many_preserves_id_on_conflict(session: Session) -> None:
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     key = "d" * 64
     first = repo.upsert_many(
-        TENANT_A, [_row(source_row_key=key, amount="100.000000")],
-        raw_file_id=RAW_FILE_ID, imported_by=None,
+        TENANT_A,
+        [_row(source_row_key=key, amount="100.000000")],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
     )
     second = repo.upsert_many(
-        TENANT_A, [_row(source_row_key=key, amount="150.000000")],
-        raw_file_id=RAW_FILE_ID, imported_by=None,
+        TENANT_A,
+        [_row(source_row_key=key, amount="150.000000")],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
     )
-    assert first.entries[0].id == second.entries[0].id, (
-        "id must be preserved on conflict update"
-    )
+    assert first.entries[0].id == second.entries[0].id, "id must be preserved on conflict update"
 
 
 def test_upsert_many_updates_mutable_fields_on_conflict(session: Session) -> None:
@@ -203,9 +197,7 @@ def test_upsert_many_updates_mutable_fields_on_conflict(session: Session) -> Non
         imported_by=None,
     )
     reloaded = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.source_row_key == key
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.source_row_key == key)
     ).one()
     assert reloaded.amount_native == Decimal("150.000000")
 
@@ -357,9 +349,7 @@ def test_get_exact_returns_match(session: Session) -> None:
         raw_file_id=RAW_FILE_ID,
         imported_by=None,
     )
-    entry = repo.get_exact(
-        TENANT_A, source_system="youtube_reporting", source_row_key=key
-    )
+    entry = repo.get_exact(TENANT_A, source_system="youtube_reporting", source_row_key=key)
     assert entry is not None
     assert entry.source_row_key == key
 
@@ -367,9 +357,7 @@ def test_get_exact_returns_match(session: Session) -> None:
 def test_get_exact_returns_none_for_missing(session: Session) -> None:
     """Test that get_exact returns None when no matching row is found."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
-    entry = repo.get_exact(
-        TENANT_A, source_system="youtube_reporting", source_row_key="m" * 64
-    )
+    entry = repo.get_exact(TENANT_A, source_system="youtube_reporting", source_row_key="m" * 64)
     assert entry is None
 
 
@@ -415,9 +403,7 @@ def test_list_for_channel_returns_only_matches(session: Session) -> None:
         raw_file_id=RAW_FILE_ID,
         imported_by=None,
     )
-    alpha = repo.list_for_channel(
-        TENANT_A, youtube_channel_id="UC_alpha", report_month="2026-04"
-    )
+    alpha = repo.list_for_channel(TENANT_A, youtube_channel_id="UC_alpha", report_month="2026-04")
     assert len(alpha) == 2
     assert {r.youtube_channel_id for r in alpha} == {"UC_alpha"}
 
@@ -433,15 +419,19 @@ def test_upsert_many_does_not_alias_caller_raw_payload(session: Session) -> None
     base = _row(source_row_key="z" * 64)
     row_with_payload = replace(base, raw_payload=payload)
     repo.upsert_many(
-        TENANT_A, [row_with_payload],
-        raw_file_id=RAW_FILE_ID, imported_by=None,
+        TENANT_A,
+        [row_with_payload],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
     )
     # Caller mutates their dict AFTER the call.
     payload["original_metric"] = "MUTATED"
     payload["new_field"] = "leak"
 
     persisted = repo.get_exact(
-        TENANT_A, source_system="youtube_reporting", source_row_key="z" * 64,
+        TENANT_A,
+        source_system="youtube_reporting",
+        source_row_key="z" * 64,
     )
     assert persisted is not None
     assert persisted.raw_payload == {"original_metric": "estimatedRevenue"}
@@ -589,7 +579,9 @@ def test_rejects_unicode_digit_report_month(session: Session) -> None:
     """
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     bad = replace(_row(source_row_key="ud" * 32), report_month="٢٠٢٦-٠٤")
-    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"report_month must be YYYY-MM"):
+    with pytest.raises(
+        GoogleRevenueSourceRowValidationError, match=r"report_month must be YYYY-MM"
+    ):
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
 
@@ -600,7 +592,9 @@ def test_rejects_non_str_nullable_text_column(session: Session) -> None:
     """
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     bad = replace(_row(source_row_key="nl" * 32), content_owner_id=["cms-1"])
-    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"content_owner_id must be a str or None"):
+    with pytest.raises(
+        GoogleRevenueSourceRowValidationError, match=r"content_owner_id must be a str or None"
+    ):
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
 
@@ -647,7 +641,9 @@ def test_rejects_non_json_serialisable_raw_payload(session: Session) -> None:
     """
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     bad = replace(_row(source_row_key="js" * 32), raw_payload={"tags": {1, 2, 3}})
-    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"raw_payload must be JSON-serialisable"):
+    with pytest.raises(
+        GoogleRevenueSourceRowValidationError, match=r"raw_payload must be JSON-serialisable"
+    ):
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
 
@@ -664,21 +660,23 @@ def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) ->
 
     # Phase 1: first import carries provenance.
     repo.upsert_many(
-        TENANT_A, [_row(source_row_key=key)],
-        raw_file_id=RAW_FILE_ID, imported_by=importer_1,
+        TENANT_A,
+        [_row(source_row_key=key)],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=importer_1,
     )
     # Phase 2: replay without provenance (both None) must preserve the original.
     repo.upsert_many(
-        TENANT_A, [_row(source_row_key=key, amount="999.000000")],
-        raw_file_id=None, imported_by=None,
+        TENANT_A,
+        [_row(source_row_key=key, amount="999.000000")],
+        raw_file_id=None,
+        imported_by=None,
     )
     # expire_all so the verification reads fresh DB state rather than the
     # session's identity-map copy (which the upsert does not re-populate).
     session.expire_all()
     preserved = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.source_row_key == key
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.source_row_key == key)
     ).one()
     assert preserved.amount_native == Decimal("999.000000")  # mutable field still updated
     assert preserved.raw_file_id == RAW_FILE_ID  # provenance preserved, not nulled
@@ -699,14 +697,14 @@ def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) ->
     )
     session.flush()
     repo.upsert_many(
-        TENANT_A, [_row(source_row_key=key)],
-        raw_file_id=file_2, imported_by=importer_2,
+        TENANT_A,
+        [_row(source_row_key=key)],
+        raw_file_id=file_2,
+        imported_by=importer_2,
     )
     session.expire_all()
     replaced = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.source_row_key == key
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.source_row_key == key)
     ).one()
     assert replaced.raw_file_id == file_2
     assert replaced.imported_by == importer_2
@@ -735,9 +733,7 @@ def test_upsert_can_clear_stale_raw_file_id_for_aggregate_replacement(
 
     session.expire_all()
     row = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.source_row_key == key
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.source_row_key == key)
     ).one()
     assert row.amount_native == Decimal("777.000000")
     assert row.raw_file_id is None
@@ -779,9 +775,7 @@ def test_delete_stale_for_scope_preserves_other_scopes(session: Session) -> None
     remaining = {
         row.source_row_key
         for row in session.scalars(
-            select(GoogleRevenueSourceRowORM).where(
-                GoogleRevenueSourceRowORM.tenant_id == TENANT_A
-            )
+            select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_A)
         )
     }
     assert stale_key not in remaining
@@ -881,9 +875,7 @@ def test_upsert_many_classifies_all_new_rows_as_created(session: Session) -> Non
         _row(source_row_key="B" * 64),
         _row(source_row_key="C" * 64),
     ]
-    result = repo.upsert_many(
-        TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None
-    )
+    result = repo.upsert_many(TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None)
     assert len(result.entries) == 3
     assert result.created == 3
     assert result.updated == 0
@@ -895,9 +887,7 @@ def test_upsert_many_classifies_existing_unchanged_rerun(session: Session) -> No
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     row = _row(source_row_key="U" * 64)
     repo.upsert_many(TENANT_A, [row], raw_file_id=RAW_FILE_ID, imported_by=None)
-    result = repo.upsert_many(
-        TENANT_A, [row], raw_file_id=RAW_FILE_ID, imported_by=None
-    )
+    result = repo.upsert_many(TENANT_A, [row], raw_file_id=RAW_FILE_ID, imported_by=None)
     assert len(result.entries) == 1
     assert result.created == 0
     assert result.updated == 0
@@ -981,9 +971,7 @@ def test_upsert_many_classifies_mixed_rerun(session: Session) -> None:
         replace(seeded_to_be_updated, amount_native=Decimal("33.000000")),
         _row(source_row_key="M4" * 32, amount="40.000000"),
     ]
-    result = repo.upsert_many(
-        TENANT_A, rerun_rows, raw_file_id=RAW_FILE_ID, imported_by=None
-    )
+    result = repo.upsert_many(TENANT_A, rerun_rows, raw_file_id=RAW_FILE_ID, imported_by=None)
     assert len(result.entries) == 4
     assert result.created == 1
     assert result.updated == 1
@@ -1018,12 +1006,7 @@ def test_upsert_many_rejects_duplicate_source_row_key_in_batch(
     assert shared_key in message
     assert "payload" not in message
     # Fail closed: the whole batch is rejected before any write, so nothing lands.
-    assert (
-        session.query(GoogleRevenueSourceRowORM)
-        .filter_by(tenant_id=TENANT_A)
-        .count()
-        == 0
-    )
+    assert session.query(GoogleRevenueSourceRowORM).filter_by(tenant_id=TENANT_A).count() == 0
 
 
 def test_upsert_many_allows_same_key_different_source_system_in_batch(
@@ -1040,9 +1023,7 @@ def test_upsert_many_allows_same_key_different_source_system_in_batch(
         _row(source_row_key=shared_key, source_system="youtube_reporting"),
         _row(source_row_key=shared_key, source_system="adsense_management"),
     ]
-    result = repo.upsert_many(
-        TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None
-    )
+    result = repo.upsert_many(TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None)
     assert len(result.entries) == 2
     assert result.created == 2
 

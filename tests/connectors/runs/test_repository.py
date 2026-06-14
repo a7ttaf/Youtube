@@ -113,12 +113,9 @@ def test_start_run_accepts_null_triggered_by_user_id(session: Session) -> None:
 
     assert entry.triggered_by_user_id is None
 
-@pytest.mark.parametrize(
-    "month", ["26-04", "2026-00", "2026-13", "202604", "٢٠٢٦-٠٤"]
-)
-def test_start_run_rejects_malformed_report_month(
-    session: Session, month: str
-) -> None:
+
+@pytest.mark.parametrize("month", ["26-04", "2026-00", "2026-13", "202604", "٢٠٢٦-٠٤"])
+def test_start_run_rejects_malformed_report_month(session: Session, month: str) -> None:
     """Check that start_run rejects malformed report_month values."""
     with pytest.raises(ConnectorRunValidationError, match="report_month"):
         start_run(
@@ -179,10 +176,9 @@ def test_finish_run_truncates_error_summary_to_500_chars(
 
     assert finished.error_summary == "x" * 500
 
+
 @pytest.mark.parametrize("status", ["RUNNING", "SUCCESS", "failed"])
-def test_finish_run_rejects_non_terminal_or_unknown_status(
-    session: Session, status: str
-) -> None:
+def test_finish_run_rejects_non_terminal_or_unknown_status(session: Session, status: str) -> None:
     """Check that finish_run rejects non-terminal or invalid statuses."""
     entry = _start_default_run(session)
 
@@ -292,10 +288,9 @@ def test_link_raw_file_inserts_tenant_scoped_join_row(session: Session) -> None:
     assert row.raw_report_file_id == raw_file.id
     assert row.ordering_index == 0
 
+
 @pytest.mark.parametrize("ordering_index", [-1, None, True, "1"])
-def test_link_raw_file_rejects_invalid_ordering_index(
-    session: Session, ordering_index
-) -> None:
+def test_link_raw_file_rejects_invalid_ordering_index(session: Session, ordering_index) -> None:
     """Link raw file rejects invalid ordering_index values."""
     entry = _start_default_run(session)
     raw_file = _raw_file(session, tenant_id=TENANT_ID, report_type="rt-a")
@@ -393,6 +388,7 @@ def _start_default_run(session: Session):
         report_month="2026-04",
         triggered_by_user_id=None,
     )
+
 
 _TERMINAL_COUNTS = {
     "reports_attempted": 2,
@@ -493,9 +489,7 @@ def test_list_runs_limit_out_of_range_raises(session: Session) -> None:
     with pytest.raises(ConnectorRunValidationError):
         list_runs(session, tenant_id=TENANT_ID, limit=0)
     with pytest.raises(ConnectorRunValidationError):
-        list_runs(
-            session, tenant_id=TENANT_ID, limit=MAX_CONNECTOR_RUN_PAGE_SIZE + 1
-        )
+        list_runs(session, tenant_id=TENANT_ID, limit=MAX_CONNECTOR_RUN_PAGE_SIZE + 1)
 
 
 def test_list_runs_excludes_other_tenant(session: Session) -> None:
@@ -515,9 +509,7 @@ def test_list_runs_connector_key_filter(session: Session) -> None:
     yt = _seed_run(session, connector_key="youtube-reporting", started_at=base)
     _seed_run(session, connector_key="adsense", started_at=base.replace(hour=13))
 
-    page = list_runs(
-        session, tenant_id=TENANT_ID, connector_key="youtube-reporting", limit=10
-    )
+    page = list_runs(session, tenant_id=TENANT_ID, connector_key="youtube-reporting", limit=10)
 
     assert [item.id for item in page.items] == [str(yt.id)]
 
@@ -526,9 +518,7 @@ def test_list_runs_connector_keys_filter(session: Session) -> None:
     """Connector-key set filtering returns only the allowed connector runs."""
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     yt = _seed_run(session, connector_key="youtube-reporting", started_at=base)
-    adsense = _seed_run(
-        session, connector_key="adsense", started_at=base.replace(hour=13)
-    )
+    adsense = _seed_run(session, connector_key="adsense", started_at=base.replace(hour=13))
     _seed_run(session, connector_key="news", started_at=base.replace(hour=14))
 
     page = list_runs(
@@ -599,9 +589,7 @@ def test_to_api_normalizes_legacy_counts_missing_rows_deleted_stale(
     """
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     legacy_counts = {
-        key: _TERMINAL_COUNTS[key]
-        for key in _TERMINAL_COUNTS
-        if key != "rows_deleted_stale"
+        key: _TERMINAL_COUNTS[key] for key in _TERMINAL_COUNTS if key != "rows_deleted_stale"
     }
     assert "rows_deleted_stale" not in legacy_counts
 

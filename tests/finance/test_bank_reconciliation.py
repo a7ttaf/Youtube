@@ -1,4 +1,5 @@
 """Tests for monthly bank reconciliation summary behavior."""
+
 from datetime import date
 from decimal import Decimal
 from importlib import import_module
@@ -46,7 +47,8 @@ def adsense_payment(**overrides):
 
 
 def build_summary(*, payments, bank_entries, month="2026-03"):
-    """Builds a bank reconciliation summary for a given month using provided payments and bank entries."""
+    """Builds a bank reconciliation summary for a given month using provided
+    payments and bank entries."""
     module = import_module("ums_smart_revenue.finance.bank_reconciliation")
     return module.build_month_bank_reconciliation_summary(
         month=month,
@@ -71,7 +73,8 @@ def test_bank_reconciliation_summary_confirms_matching_paid_payment_and_bank_rec
 
 
 def test_bank_reconciliation_summary_detects_bank_gap_and_reports_fees():
-    """Test that summary detects bank gap and reports fees when bank received amount differs from payment amount."""
+    """Test that summary detects bank gap and reports fees when bank received
+    amount differs from payment amount."""
     summary = build_summary(
         payments=[adsense_payment(payment_amount=Decimal("930.00"))],
         bank_entries=[

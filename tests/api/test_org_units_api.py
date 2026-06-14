@@ -5,6 +5,7 @@ app built with create_app(database_url=...). Covers: 200 list shape + ordering,
 active-only filtering, tenant isolation, the VIEW_ANALYTICS fail-closed gate,
 and the scoped analytics viewer still receiving the full active list.
 """
+
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient

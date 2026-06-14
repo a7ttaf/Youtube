@@ -71,8 +71,20 @@ def seed_database(database_url: str) -> None:
             [
                 UserORM(id=USER_ID, email="exports@example.com", display_name="Exports User"),
                 OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
-                OrgUnitORM(id=COMPANY_A_ID, parent_id=SECTOR_ID, type="COMPANY", name="Company A", active=True),
-                OrgUnitORM(id=COMPANY_B_ID, parent_id=SECTOR_ID, type="COMPANY", name="Company B", active=True),
+                OrgUnitORM(
+                    id=COMPANY_A_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="Company A",
+                    active=True,
+                ),
+                OrgUnitORM(
+                    id=COMPANY_B_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="Company B",
+                    active=True,
+                ),
                 YouTubeChannelORM(
                     id=CHANNEL_A_ROW_ID,
                     youtube_channel_id="channel-a",
@@ -91,7 +103,9 @@ def seed_database(database_url: str) -> None:
                     revenue_required=True,
                     active=True,
                 ),
-                ChannelGroupORM(id=GROUP_ID, name="Mixed Group", group_type="CUSTOM_GROUP", active=True),
+                ChannelGroupORM(
+                    id=GROUP_ID, name="Mixed Group", group_type="CUSTOM_GROUP", active=True
+                ),
                 ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=CHANNEL_A_ROW_ID),
                 ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=CHANNEL_B_ROW_ID),
                 FinanceMonthCloseORM(month="2026-03", status="LOCKED", allocation_rule_payload={}),
@@ -307,11 +321,7 @@ def test_group_export_read_uses_snapshot_authorization_after_group_deletion(tmp_
                 ChannelGroupMemberORM.group_id == GROUP_ID
             )
         )
-        session.execute(
-            ChannelGroupORM.__table__.delete().where(
-                ChannelGroupORM.id == GROUP_ID
-            )
-        )
+        session.execute(ChannelGroupORM.__table__.delete().where(ChannelGroupORM.id == GROUP_ID))
         session.commit()
 
     detail_response = client.get(f"/exports/{export_id}")
@@ -384,9 +394,7 @@ def test_finance_export_request_requires_artifact_read_permissions(tmp_path):
         export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_finalized_payments"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_finalized_payments")
     assert export_count == 0
 
 
@@ -448,13 +456,12 @@ def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
 
     assert create_response.status_code == 202
     assert list_response.status_code == 200
-    assert [item["id"] for item in list_response.json()["items"]] == [
-        create_response.json()["id"]
-    ]
+    assert [item["id"] for item in list_response.json()["items"]] == [create_response.json()["id"]]
 
 
 def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
-    """Test pagination behavior of export listing, ensuring has_more is marked and metrics are logged."""
+    """Test pagination behavior of export listing, ensuring has_more is marked and
+    metrics are logged."""
     created_at = datetime(2026, 4, 30, 10, 0, tzinfo=UTC)
 
     class PagedRepository:
@@ -702,7 +709,8 @@ def test_group_export_requires_access_to_every_member_channel(tmp_path):
 
 
 def test_export_request_rejects_non_usd_currency_until_exchange_rates_exist(tmp_path):
-    """Verify that export requests with non-USD currency are rejected until exchange rate support is available."""
+    """Verify that export requests with non-USD currency are rejected until
+    exchange rate support is available."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -721,7 +729,10 @@ def test_export_request_rejects_non_usd_currency_until_exchange_rates_exist(tmp_
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "currency must be USD until exchange-rate support is implemented"
+    assert (
+        response.json()["detail"]
+        == "currency must be USD until exchange-rate support is implemented"
+    )
 
 
 def test_export_list_returns_requesting_users_jobs_only(tmp_path):
@@ -769,7 +780,12 @@ def test_export_list_returns_requesting_users_jobs_only(tmp_path):
     assert create_response.status_code == 202
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["items"]] == [create_response.json()["id"]]
-    assert response.json()["pagination"] == {"limit": 10, "offset": 0, "returned": 1, "has_more": False}
+    assert response.json()["pagination"] == {
+        "limit": 10,
+        "offset": 0,
+        "returned": 1,
+        "has_more": False,
+    }
 
 
 def test_user_without_export_permission_cannot_list_historical_export_jobs(tmp_path):
@@ -851,9 +867,7 @@ def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
     assert company_b_analytics.status_code == 202
     assert company_a_finance.status_code == 202
     assert response.status_code == 200
-    assert [item["id"] for item in response.json()["items"]] == [
-        company_a_analytics.json()["id"]
-    ]
+    assert [item["id"] for item in response.json()["items"]] == [company_a_analytics.json()["id"]]
     assert response.json()["pagination"] == {
         "limit": 10,
         "offset": 0,
@@ -863,7 +877,8 @@ def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
 
 
 def test_export_operator_can_get_own_export_job(tmp_path):
-    """Test that an export operator can retrieve their own export job and that audit logs are recorded properly."""
+    """Test that an export operator can retrieve their own export job and that
+    audit logs are recorded properly."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

@@ -1,4 +1,5 @@
 """Unit tests for build_recalculation_preview, including verified_channel_ids."""
+
 from decimal import Decimal
 
 from ums_smart_revenue.finance.recalculation import build_recalculation_preview

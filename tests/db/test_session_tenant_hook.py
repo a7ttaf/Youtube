@@ -19,11 +19,17 @@ def _tenant(uuid_str: str) -> Tenant:
     """Build a deterministic tenant object for session-hook tests."""
     from datetime import UTC, datetime
     from uuid import UUID
+
     now = datetime(2026, 1, 1, tzinfo=UTC)
     return Tenant(
-        id=UUID(uuid_str), slug="ums", display_name="UMS",
-        primary_currency="USD", status=TenantStatus.ACTIVE,
-        onboarding_at=now, created_at=now, updated_at=now,
+        id=UUID(uuid_str),
+        slug="ums",
+        display_name="UMS",
+        primary_currency="USD",
+        status=TenantStatus.ACTIVE,
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -65,6 +71,7 @@ def test_sqlite_engine_uses_static_pool_for_shared_connection():
     contention.
     """
     from sqlalchemy.pool import StaticPool
+
     factory = build_session_factory("sqlite+pysqlite:///:memory:")
     # The sessionmaker keeps a reference to its bound engine, which is
     # the same one build_engine() returns for the URL.
@@ -84,12 +91,8 @@ def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
     token = TENANT_CTX.set(_tenant(tid))
     try:
         with factory() as session:
-            assert str(session.execute(
-                sa.text("SELECT app_current_tenant_id()")
-            ).scalar()) == tid
-            assert session.execute(
-                sa.text("SELECT current_user")
-            ).scalar() == "app_tenant"
+            assert str(session.execute(sa.text("SELECT app_current_tenant_id()")).scalar()) == tid
+            assert session.execute(sa.text("SELECT current_user")).scalar() == "app_tenant"
     finally:
         TENANT_CTX.reset(token)
 
@@ -102,12 +105,8 @@ def test_postgres_no_context_stays_on_tenant_role_and_unset_context():
     # No TENANT_CTX leaves app_tenant active, but clears the trusted context row
     # so RLS policies reject tenant rows instead of falling back to the owner role.
     with factory() as session:
-        assert session.execute(
-            sa.text("SELECT app_current_tenant_id()")
-        ).scalar() is None
-        assert session.execute(
-            sa.text("SELECT current_user")
-        ).scalar() == "app_tenant"
+        assert session.execute(sa.text("SELECT app_current_tenant_id()")).scalar() is None
+        assert session.execute(sa.text("SELECT current_user")).scalar() == "app_tenant"
 
 
 def test_no_context_clears_stale_context_when_clear_helper_is_absent():
@@ -152,12 +151,8 @@ def test_platform_lane_uses_app_platform_and_no_tenant_context():
     _ensure_upgraded(url)
     factory = build_platform_session_factory(url)
     with factory() as session:
-        assert session.execute(
-            sa.text("SELECT current_user")
-        ).scalar() == "app_platform"
-        assert session.execute(
-            sa.text("SELECT app_current_tenant_id()")
-        ).scalar() is None
+        assert session.execute(sa.text("SELECT current_user")).scalar() == "app_platform"
+        assert session.execute(sa.text("SELECT app_current_tenant_id()")).scalar() is None
 
 
 def test_pooled_connection_does_not_leak_role_or_context():
@@ -179,7 +174,5 @@ def test_pooled_connection_does_not_leak_role_or_context():
     # Reuse the pool with no context; role stays restricted and context is empty.
     with factory() as s2:
         assert s2.execute(sa.text("SELECT current_user")).scalar() == "app_tenant"
-        assert s2.execute(
-            sa.text("SELECT app_current_tenant_id()")
-        ).scalar() is None
+        assert s2.execute(sa.text("SELECT app_current_tenant_id()")).scalar() is None
     engine.dispose()

@@ -178,12 +178,8 @@ def test_register_file_strips_whitespace_from_normalized_fields():
 def test_register_file_accepts_each_allowed_parse_status():
     with build_session() as session:
         repo = SqlAlchemyRawReportFileRepository(session)
-        for index, status in enumerate(
-            ["DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"]
-        ):
-            entry = register_defaults(
-                repo, checksum=f"sha256:status-{index}", parse_status=status
-            )
+        for index, status in enumerate(["DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"]):
+            entry = register_defaults(repo, checksum=f"sha256:status-{index}", parse_status=status)
             assert entry.parse_status == status
         session.commit()
         assert len(session.scalars(select(RawReportFileORM)).all()) == 4
@@ -192,9 +188,7 @@ def test_register_file_accepts_each_allowed_parse_status():
 def test_register_file_accepts_each_allowed_storage_prefix():
     with build_session() as session:
         repo = SqlAlchemyRawReportFileRepository(session)
-        for index, prefix in enumerate(
-            ["s3://", "gs://", "azure://", "blob://", "file-store://"]
-        ):
+        for index, prefix in enumerate(["s3://", "gs://", "azure://", "blob://", "file-store://"]):
             entry = register_defaults(
                 repo,
                 checksum=f"sha256:prefix-{index}",
@@ -225,15 +219,11 @@ def test_register_file_with_same_key_under_different_tenants_does_not_conflict()
         register_defaults(primary_repo)
         session.commit()
 
-        other_repo = SqlAlchemyRawReportFileRepository(
-            session, tenant_id=OTHER_TENANT_UUID
-        )
+        other_repo = SqlAlchemyRawReportFileRepository(session, tenant_id=OTHER_TENANT_UUID)
         register_defaults(other_repo)
         session.commit()
 
-        rows = session.scalars(
-            select(RawReportFileORM).order_by(RawReportFileORM.tenant_id)
-        ).all()
+        rows = session.scalars(select(RawReportFileORM).order_by(RawReportFileORM.tenant_id)).all()
         assert {row.tenant_id for row in rows} == {
             DEFAULT_TENANT_UUID,
             OTHER_TENANT_UUID,
@@ -304,13 +294,9 @@ def test_register_file_rejects_storage_uri_outside_allowlist(bad_uri):
 def test_register_file_maps_non_uuid_gateway_actor_user_id():
     with build_session() as session:
         repo = SqlAlchemyRawReportFileRepository(session)
-        registered = register_defaults(
-            repo, actor_user_id="gateway-raw-files-subject"
-        )
+        registered = register_defaults(repo, actor_user_id="gateway-raw-files-subject")
 
-        assert registered.downloaded_by == str(
-            actor_identity_uuid("gateway-raw-files-subject")
-        )
+        assert registered.downloaded_by == str(actor_identity_uuid("gateway-raw-files-subject"))
 
 
 # -----------------------------------------------------------------------------
@@ -353,9 +339,7 @@ def test_get_file_raises_validation_for_malformed_uuid():
 
 def test_get_file_does_not_surface_other_tenants_row_via_id_lookup():
     with build_session() as session:
-        other_repo = SqlAlchemyRawReportFileRepository(
-            session, tenant_id=OTHER_TENANT_UUID
-        )
+        other_repo = SqlAlchemyRawReportFileRepository(session, tenant_id=OTHER_TENANT_UUID)
         foreign = register_defaults(other_repo, checksum="sha256:foreign")
         session.commit()
 
@@ -474,9 +458,7 @@ def test_list_files_filters_by_source_report_type_and_month():
         )
         session.commit()
 
-        only_cms = repo.list_files(
-            source="youtube_reporting", report_type="YOUTUBE_CMS_REVENUE"
-        )
+        only_cms = repo.list_files(source="youtube_reporting", report_type="YOUTUBE_CMS_REVENUE")
         assert {entry.checksum for entry in only_cms.items} == {"sha256:a", "sha256:d"}
 
         only_march = repo.list_files(report_month="2026-03")
@@ -540,9 +522,7 @@ def test_list_files_does_not_surface_cross_tenant_rows():
         register_defaults(primary_repo, checksum="sha256:primary-2")
         session.commit()
 
-        other_repo = SqlAlchemyRawReportFileRepository(
-            session, tenant_id=OTHER_TENANT_UUID
-        )
+        other_repo = SqlAlchemyRawReportFileRepository(session, tenant_id=OTHER_TENANT_UUID)
         register_defaults(other_repo, checksum="sha256:foreign-1")
         register_defaults(other_repo, checksum="sha256:foreign-2")
         register_defaults(other_repo, checksum="sha256:foreign-3")
@@ -585,7 +565,5 @@ def test_repository_default_tenant_id_matches_constant():
 
 def test_repository_rejects_malformed_tenant_id():
     with build_session() as session:
-        with pytest.raises(
-            RawReportFileValidationError, match="tenant_id must be a valid UUID"
-        ):
+        with pytest.raises(RawReportFileValidationError, match="tenant_id must be a valid UUID"):
             SqlAlchemyRawReportFileRepository(session, tenant_id="not-a-uuid")

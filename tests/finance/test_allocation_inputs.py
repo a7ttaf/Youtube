@@ -38,40 +38,60 @@ def _seed(session):
     """Seed a channel, verified account link, revenue fact and account deduction."""
     session.add(
         YouTubeChannelORM(
-            id=uuid4(), tenant_id=TENANT, youtube_channel_id="chA",
-            channel_name="A", active=True,
+            id=uuid4(),
+            tenant_id=TENANT,
+            youtube_channel_id="chA",
+            channel_name="A",
+            active=True,
         )
     )
     session.add(
         AdsenseContentOwnerLinkORM(
-            id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-1",
-            content_owner_id="owner-1", verification_status="VERIFIED",
-            provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            id=uuid4(),
+            tenant_id=TENANT,
+            adsense_account_id="pub-1",
+            content_owner_id="owner-1",
+            verification_status="VERIFIED",
+            provenance_kind="OPERATOR_ASSERTED",
+            provenance_payload={},
             effective_month_start="2026-01",
         )
     )
     session.add(
         ContentOwnerChannelLinkORM(
-            id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
-            youtube_channel_id="chA", provenance_kind="SOURCE_ROW",
-            active=True, effective_month_start="2026-01",
+            id=uuid4(),
+            tenant_id=TENANT,
+            content_owner_id="owner-1",
+            youtube_channel_id="chA",
+            provenance_kind="SOURCE_ROW",
+            active=True,
+            effective_month_start="2026-01",
         )
     )
     session.add(
         MonthlyChannelRevenueFactORM(
-            id=uuid4(), tenant_id=TENANT, month=MONTH,
-            youtube_channel_id="chA", source_kind="ADSENSE",
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            youtube_channel_id="chA",
+            source_kind="ADSENSE",
             gross_revenue_usd=Decimal("500.00"),
         )
     )
     session.add(
         DeductionComponentORM(
-            id=uuid4(), tenant_id=TENANT, month=MONTH,
-            component_kind="DEDUCTION", scope_kind="ACCOUNT", scope_id="pub-1",
-            amount_usd=Decimal("100.00"), currency_code="USD",
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            component_kind="DEDUCTION",
+            scope_kind="ACCOUNT",
+            scope_id="pub-1",
+            amount_usd=Decimal("100.00"),
+            currency_code="USD",
             source_system="adsense_management",
             source_table="google_revenue_source_rows",
-            component_key="acct-ded-1", raw_payload={},
+            component_key="acct-ded-1",
+            raw_payload={},
         )
     )
     session.commit()
@@ -106,15 +126,22 @@ def test_post_tax_uses_source_net_basis(tmp_path):
         # Add a second verified channel (chB) + facts so the split is observable.
         session.add(
             YouTubeChannelORM(
-                id=uuid4(), tenant_id=TENANT, youtube_channel_id="chB",
-                channel_name="B", active=True,
+                id=uuid4(),
+                tenant_id=TENANT,
+                youtube_channel_id="chB",
+                channel_name="B",
+                active=True,
             )
         )
         session.add(
             ContentOwnerChannelLinkORM(
-                id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
-                youtube_channel_id="chB", provenance_kind="SOURCE_ROW",
-                active=True, effective_month_start="2026-01",
+                id=uuid4(),
+                tenant_id=TENANT,
+                content_owner_id="owner-1",
+                youtube_channel_id="chB",
+                provenance_kind="SOURCE_ROW",
+                active=True,
+                effective_month_start="2026-01",
             )
         )
         # chA: gross 500 / net 300; chB: gross 500 / net 100 -> net split 75/25.
@@ -125,9 +152,13 @@ def test_post_tax_uses_source_net_basis(tmp_path):
         )
         session.add(
             MonthlyChannelRevenueFactORM(
-                id=uuid4(), tenant_id=TENANT, month=MONTH,
-                youtube_channel_id="chB", source_kind="ADSENSE",
-                gross_revenue_usd=Decimal("500.00"), net_revenue_usd=Decimal("100.00"),
+                id=uuid4(),
+                tenant_id=TENANT,
+                month=MONTH,
+                youtube_channel_id="chB",
+                source_kind="ADSENSE",
+                gross_revenue_usd=Decimal("500.00"),
+                net_revenue_usd=Decimal("100.00"),
             )
         )
         session.commit()

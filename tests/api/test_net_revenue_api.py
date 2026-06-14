@@ -174,7 +174,8 @@ def seed_database(database_url: str) -> None:
 
 
 def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
-    """Finance viewer reads the company-scoped monthly net-revenue summary and emits a REVENUE_VIEWED audit event."""
+    """Finance viewer reads the company-scoped monthly net-revenue summary and
+    emits a REVENUE_VIEWED audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     app = create_app(database_url=database_url)
@@ -204,7 +205,8 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
 
 
 def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
-    """assistant_analyst lacks VIEW_REVENUE and is rejected with HTTP 403 on the net-revenue endpoint."""
+    """assistant_analyst lacks VIEW_REVENUE and is rejected with HTTP 403 on the
+    net-revenue endpoint."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -219,7 +221,8 @@ def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
 
 
 def test_month_net_revenue_summary_rejects_non_usd_until_fx_support(tmp_path):
-    """Requesting a non-USD currency is rejected with HTTP 422 until exchange-rate support is implemented."""
+    """Requesting a non-USD currency is rejected with HTTP 422 until exchange-rate
+    support is implemented."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -236,7 +239,8 @@ def test_month_net_revenue_summary_rejects_non_usd_until_fx_support(tmp_path):
 
 
 def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_path):
-    """Net-revenue endpoint derives COMPONENT_DERIVED net via youtube_reporting component when source net is absent."""
+    """Net-revenue endpoint derives COMPONENT_DERIVED net via youtube_reporting
+    component when source net is absent."""
     # channel-tv-b has 2026-03 fact with net_revenue_usd=None, gross=200.00,
     # source_kind=YOUTUBE_CMS. A youtube_reporting component (maps to YOUTUBE_CMS)
     # of 20.00 must derive net=180.00 and flip the channel to COMPONENT_DERIVED.
@@ -276,11 +280,11 @@ def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_
     assert "channel-tv-b" in channels_by_id
     channel_b = channels_by_id["channel-tv-b"]
     assert channel_b["status"] == "COMPONENT_DERIVED"
-    assert channel_b["net_revenue_usd"] == "180"   # 200 - 20, trimmed
+    assert channel_b["net_revenue_usd"] == "180"  # 200 - 20, trimmed
     assert channel_b["deduction_amount_usd"] == "20"
     assert body["total_channel_direct_deduction_amount_usd"] == "20"
     assert body["total_account_allocated_deduction_amount_usd"] == "0"
-    assert body["missing_net_source_count"] == 0   # b is now derived, not missing
+    assert body["missing_net_source_count"] == 0  # b is now derived, not missing
     assert {e["event_type"] for e in body["audit_events"]} == {
         "REVENUE_VIEWED",
         "PAYMENT_VIEWED",
@@ -316,9 +320,9 @@ def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
 
     repository = RecordingDeductionComponentRepository()
     app = create_app(database_url=database_url)
-    app.dependency_overrides[
-        revenue_api.current_deduction_component_repository
-    ] = lambda: repository
+    app.dependency_overrides[revenue_api.current_deduction_component_repository] = lambda: (
+        repository
+    )
     app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
     client = TestClient(app)
 
@@ -523,10 +527,14 @@ def _lock_month(database_url: str, month: str) -> None:
             )
         ).one_or_none()
         if row is None:
-            session.add(FinanceMonthCloseORM(
-                tenant_id=UUID(UMS_TENANT_ID), month=month, status="LOCKED",
-                allocation_rule_payload={},
-            ))
+            session.add(
+                FinanceMonthCloseORM(
+                    tenant_id=UUID(UMS_TENANT_ID),
+                    month=month,
+                    status="LOCKED",
+                    allocation_rule_payload={},
+                )
+            )
         else:
             row.status = "LOCKED"
         session.commit()
@@ -539,7 +547,9 @@ def test_net_revenue_open_month_reports_live_provenance(tmp_path):
     app = create_app(database_url=database_url)
     app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
     client = TestClient(app)
-    resp = client.get(f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}")
+    resp = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}"
+    )
     assert resp.status_code == 200
     assert resp.json()["allocation_source"] == "live_compute"
     assert resp.json()["committed_run"] is None
@@ -560,42 +570,73 @@ def _seed_in_scope_account_allocation(database_url: str) -> None:
     engine = create_engine(database_url)
     TenantBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add_all([
-            TenantORM(
-                id=UUID(UMS_TENANT_ID), slug="ums", display_name="UMS",
-                primary_currency="USD", status="ACTIVE",
-            ),
-            YouTubeChannelORM(
-                id=CHANNEL_D_ROW_ID, youtube_channel_id="channel-tv-d",
-                channel_name="TV D", primary_org_unit_id=COMPANY_ID,
-                cms_status="INSIDE_CMS", revenue_required=True, active=True,
-            ),
-            MonthlyChannelRevenueFactORM(
-                id=uuid4(), month="2026-03", youtube_channel_id="channel-tv-d",
-                source_kind="ADSENSE", source_report_id="adsense-report-2026-03",
-                gross_revenue_usd=Decimal("500.00"), net_revenue_usd=None,
-                views=80000, watch_time_minutes=Decimal("2000.00"),
-                confidence_score=Decimal("0.9600"), imported_by=USER_ID,
-            ),
-            AdsenseContentOwnerLinkORM(
-                id=uuid4(), adsense_account_id="pub-7", content_owner_id="owner-7",
-                verification_status="VERIFIED", provenance_kind="OPERATOR_ASSERTED",
-                provenance_payload={}, effective_month_start="2026-01",
-            ),
-            ContentOwnerChannelLinkORM(
-                id=uuid4(), content_owner_id="owner-7", youtube_channel_id="channel-tv-d",
-                provenance_kind="SOURCE_ROW", active=True, effective_month_start="2026-01",
-            ),
-            DeductionComponentORM(
-                id=uuid4(), month="2026-03", component_kind="DEDUCTION",
-                scope_kind="ACCOUNT", scope_id="pub-7", amount_usd=Decimal("70.00"),
-                amount_native=None, currency_code="USD",
-                source_system="adsense_management",
-                source_table="google_revenue_source_rows", source_id=None,
-                source_key="k-7", source_report_id=None, raw_payload={"k": "v"},
-                component_key="srcrow:adsense_management:k-7",
-            ),
-        ])
+        session.add_all(
+            [
+                TenantORM(
+                    id=UUID(UMS_TENANT_ID),
+                    slug="ums",
+                    display_name="UMS",
+                    primary_currency="USD",
+                    status="ACTIVE",
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_D_ROW_ID,
+                    youtube_channel_id="channel-tv-d",
+                    channel_name="TV D",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-d",
+                    source_kind="ADSENSE",
+                    source_report_id="adsense-report-2026-03",
+                    gross_revenue_usd=Decimal("500.00"),
+                    net_revenue_usd=None,
+                    views=80000,
+                    watch_time_minutes=Decimal("2000.00"),
+                    confidence_score=Decimal("0.9600"),
+                    imported_by=USER_ID,
+                ),
+                AdsenseContentOwnerLinkORM(
+                    id=uuid4(),
+                    adsense_account_id="pub-7",
+                    content_owner_id="owner-7",
+                    verification_status="VERIFIED",
+                    provenance_kind="OPERATOR_ASSERTED",
+                    provenance_payload={},
+                    effective_month_start="2026-01",
+                ),
+                ContentOwnerChannelLinkORM(
+                    id=uuid4(),
+                    content_owner_id="owner-7",
+                    youtube_channel_id="channel-tv-d",
+                    provenance_kind="SOURCE_ROW",
+                    active=True,
+                    effective_month_start="2026-01",
+                ),
+                DeductionComponentORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    component_kind="DEDUCTION",
+                    scope_kind="ACCOUNT",
+                    scope_id="pub-7",
+                    amount_usd=Decimal("70.00"),
+                    amount_native=None,
+                    currency_code="USD",
+                    source_system="adsense_management",
+                    source_table="google_revenue_source_rows",
+                    source_id=None,
+                    source_key="k-7",
+                    source_report_id=None,
+                    raw_payload={"k": "v"},
+                    component_key="srcrow:adsense_management:k-7",
+                ),
+            ]
+        )
         session.commit()
 
 
@@ -612,8 +653,11 @@ def test_net_revenue_locked_month_serves_committed_snapshot(tmp_path):
     with Session(engine) as session:
         committed = SqlAlchemyCommittedAllocationRepository(session)
         committed.commit_allocation(
-            month="2026-03", allocation_method="gross_revenue_proportional",
-            idempotency_key="k1", request_fingerprint="fp1", reason="close",
+            month="2026-03",
+            allocation_method="gross_revenue_proportional",
+            idempotency_key="k1",
+            request_fingerprint="fp1",
+            reason="close",
             committed_by=UMS_TENANT_ID,
             deduction_repository=SqlAlchemyDeductionComponentRepository(session),
             revenue_repository=SqlAlchemyRevenueFactRepository(session),
@@ -636,7 +680,9 @@ def test_net_revenue_locked_month_serves_committed_snapshot(tmp_path):
     app = create_app(database_url=database_url)
     app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
     client = TestClient(app)
-    resp = client.get(f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}")
+    resp = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}"
+    )
     assert resp.status_code == 200
     body = resp.json()
     assert body["allocation_source"] == "committed_snapshot"

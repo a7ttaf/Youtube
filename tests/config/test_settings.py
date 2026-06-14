@@ -13,6 +13,7 @@ UMS_AUTHZ_SOURCE behaviour plus the T36 service-principal actor id:
 * A malformed value is rejected at load time so misconfigured deployments
   fail fast instead of silently producing garbled audit actor ids.
 """
+
 from __future__ import annotations
 
 from uuid import UUID
@@ -158,9 +159,7 @@ def test_load_app_settings_strips_whitespace_around_actor_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Whitespace around the env value is tolerated; the result stays canonical."""
-    monkeypatch.setenv(
-        GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, f"   {_VALID_ACTOR_UUID}\n"
-    )
+    monkeypatch.setenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, f"   {_VALID_ACTOR_UUID}\n")
     settings = load_app_settings()
     assert settings.google_connector_service_actor_id == _VALID_ACTOR_UUID
 

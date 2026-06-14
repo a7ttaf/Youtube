@@ -99,9 +99,7 @@ def test_system_integration_user_syncs_adsense_payment_with_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        payment_row = (
-            session.execute(text("SELECT * FROM adsense_payments")).mappings().one()
-        )
+        payment_row = session.execute(text("SELECT * FROM adsense_payments")).mappings().one()
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 200
@@ -137,9 +135,7 @@ def test_system_integration_user_sync_accepts_non_uuid_gateway_actor(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        payment_row = (
-            session.execute(text("SELECT * FROM adsense_payments")).mappings().one()
-        )
+        payment_row = session.execute(text("SELECT * FROM adsense_payments")).mappings().one()
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 200
@@ -167,9 +163,7 @@ def test_adsense_payment_sync_is_idempotent_for_same_month_payment_name(tmp_path
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        payment_count = session.execute(
-            text("SELECT COUNT(*) FROM adsense_payments")
-        ).scalar_one()
+        payment_count = session.execute(text("SELECT COUNT(*) FROM adsense_payments")).scalar_one()
         payment_amount = session.execute(
             text("SELECT payment_amount FROM adsense_payments")
         ).scalar_one()
@@ -203,9 +197,7 @@ def test_adsense_payment_sync_rejects_duplicate_keys_within_batch(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        payment_count = session.execute(
-            text("SELECT COUNT(*) FROM adsense_payments")
-        ).scalar_one()
+        payment_count = session.execute(text("SELECT COUNT(*) FROM adsense_payments")).scalar_one()
 
     assert response.status_code == 422
     assert "duplicate AdSense payment in batch" in response.json()["detail"]
@@ -289,9 +281,7 @@ def test_finance_month_scoped_viewer_cannot_list_another_month(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_finalized_payments"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_finalized_payments")
 
 
 def test_assistant_cannot_view_adsense_payments(tmp_path):
@@ -306,10 +296,7 @@ def test_assistant_cannot_view_adsense_payments(tmp_path):
     )
 
     assert response.status_code == 403
-    assert (
-        response.json()["detail"]
-        == "Missing permission: finance.view_finalized_payments"
-    )
+    assert response.json()["detail"] == "Missing permission: finance.view_finalized_payments"
 
 
 def test_sync_requires_adsense_connector_scope(tmp_path):
@@ -346,14 +333,10 @@ def test_sync_rejects_locked_finance_month(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        payment_count = session.execute(
-            text("SELECT COUNT(*) FROM adsense_payments")
-        ).scalar_one()
+        payment_count = session.execute(text("SELECT COUNT(*) FROM adsense_payments")).scalar_one()
 
     assert response.status_code == 409
-    assert (
-        response.json()["detail"] == "Finance month is locked for AdSense payment sync"
-    )
+    assert response.json()["detail"] == "Finance month is locked for AdSense payment sync"
     assert payment_count == 0
 
 

@@ -99,9 +99,7 @@ def test_pre_state_at_prior_head(alembic_config: Config, fresh_engine: object) -
     command.upgrade(alembic_config, "20260521_0001")
     inspector = inspect(fresh_engine)
     tables = set(inspector.get_table_names())
-    assert "currency_exchange_rates" in tables, (
-        "legacy table must be present from earlier revision"
-    )
+    assert "currency_exchange_rates" in tables, "legacy table must be present from earlier revision"
     assert "currencies" not in tables
     assert "google_revenue_source_rows" not in tables
 
@@ -123,9 +121,7 @@ def test_upgrade_creates_currencies_and_source_rows(
         assert count >= 150
         supported = (
             conn.execute(
-                text(
-                    "SELECT code FROM currencies WHERE is_supported = true ORDER BY code"
-                )
+                text("SELECT code FROM currencies WHERE is_supported = true ORDER BY code")
             )
             .scalars()
             .all()
@@ -170,9 +166,7 @@ def test_partial_channel_month_index_has_where_clause(
         assert "youtube_channel_id" in row.lower()
 
 
-def test_downgrade_drops_only_b1_tables(
-    alembic_config: Config, fresh_engine: object
-) -> None:
+def test_downgrade_drops_only_b1_tables(alembic_config: Config, fresh_engine: object) -> None:
     """Test that downgrading removes new tables but preserves legacy tables."""
     command.upgrade(alembic_config, "20260523_0001")
     command.downgrade(alembic_config, "-1")
@@ -183,9 +177,7 @@ def test_downgrade_drops_only_b1_tables(
     assert "currency_exchange_rates" in tables  # untouched
 
 
-def test_round_trip_idempotency(
-    alembic_config: Config, fresh_engine: object
-) -> None:
+def test_round_trip_idempotency(alembic_config: Config, fresh_engine: object) -> None:
     """Test that upgrading, downgrading, and upgrading again is idempotent."""
     command.upgrade(alembic_config, "20260523_0001")
     command.downgrade(alembic_config, "-1")
@@ -256,10 +248,7 @@ def test_raw_payload_object_check_rejects_non_object(
     """
     command.upgrade(alembic_config, "20260523_0001")
     inspector = inspect(fresh_engine)
-    checks = {
-        c["name"]
-        for c in inspector.get_check_constraints("google_revenue_source_rows")
-    }
+    checks = {c["name"] for c in inspector.get_check_constraints("google_revenue_source_rows")}
     assert "ck_google_revenue_source_rows_raw_payload_object" in checks
 
     tenant_id = uuid4()
@@ -320,9 +309,7 @@ def test_amount_finite_check_rejects_nan_and_infinity(
     """
     command.upgrade(alembic_config, "20260523_0001")
     inspector = inspect(fresh_engine)
-    checks = {
-        c["name"] for c in inspector.get_check_constraints("google_revenue_source_rows")
-    }
+    checks = {c["name"] for c in inspector.get_check_constraints("google_revenue_source_rows")}
     assert "ck_google_revenue_source_rows_amount_finite" in checks
 
     tenant_id = uuid4()

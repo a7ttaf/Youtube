@@ -6,6 +6,7 @@ here to avoid the duplication flagged by Kody. _seed and scenario-specific
 helpers remain file-local because each test module seeds a different set of
 module-level UUID constants and user data.
 """
+
 from uuid import uuid4
 
 from fastapi.testclient import TestClient

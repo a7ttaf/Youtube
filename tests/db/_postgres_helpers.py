@@ -38,7 +38,8 @@ def require_postgres_url() -> str:
             "`$env:UMS_TEST_DATABASE_URL = "
             "'postgresql+psycopg://postgres:ums@localhost:55432/postgres'`. "
             "POSIX shell: "
-            "`export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/postgres`. "
+            "`export UMS_TEST_DATABASE_URL="
+            "postgresql+psycopg://postgres:ums@localhost:55432/postgres`. "
             "SQLite is not a valid substitute for this test."
         )
     return url.strip()

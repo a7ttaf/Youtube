@@ -41,6 +41,7 @@ from ums_smart_revenue.org.channel_registry import (
 # It defines stub registries, helper functions for creating test applications and
 # authentication headers, and test cases for channel listing behaviors.
 
+
 class StaleUpdateRegistry:
     """Registry stub that raises when mapping updates race with concurrent changes."""
 
@@ -74,7 +75,9 @@ class StaleUpdateRegistry:
 
     @staticmethod
     def update_mapping(
-        *, youtube_channel_id: str, primary_company_id: str | None  # noqa: ARG002
+        *,
+        youtube_channel_id: str,
+        primary_company_id: str | None,  # noqa: ARG002
     ) -> ChannelRegistryEntry:
         """Attempt to update the mapping for a channel, raising KeyError for stale entries."""
         raise KeyError(youtube_channel_id)
@@ -86,14 +89,10 @@ class ScopedListRegistry:
     @staticmethod
     def list_channels() -> list[ChannelRegistryEntry]:
         """Disallow unscoped listings for scoped callers by raising an assertion."""
-        raise AssertionError(
-            "unscoped channel listing should not be used for scoped callers"
-        )
+        raise AssertionError("unscoped channel listing should not be used for scoped callers")
 
     @staticmethod
-    def list_channels_by_ids(
-        youtube_channel_ids: set[str]
-    ) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
         """Return channel entries only for the specified set of YouTube channel IDs."""
         assert youtube_channel_ids == {"channel-tv-a"}
         return [
@@ -108,7 +107,8 @@ class ScopedListRegistry:
 
 
 def create_bootstrap_app():
-    """Create an application with bootstrap channel registry and org access index overrides for testing."""
+    """Create an application with bootstrap channel registry and org access index
+    overrides for testing."""
     app = create_app()
     registry = bootstrap_channel_registry()
     app.dependency_overrides[current_channel_registry] = lambda: registry
@@ -116,10 +116,9 @@ def create_bootstrap_app():
     return app
 
 
-def auth_headers(
-    role: str, scope_type: str, scope_id: str | None = None
-) -> dict[str, str]:
-    """Generate authentication headers for a test client given role, scope type, and optional scope ID."""
+def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
+    """Generate authentication headers for a test client given role, scope type,
+    and optional scope ID."""
     headers = {
         "x-user-id": "user-1",
         "x-user-email": "user@example.com",
@@ -143,9 +142,7 @@ def test_company_manager_lists_only_company_channels():
     )
 
     assert response.status_code == 200
-    assert [channel["youtube_channel_id"] for channel in response.json()] == [
-        "channel-tv-a"
-    ]
+    assert [channel["youtube_channel_id"] for channel in response.json()] == ["channel-tv-a"]
 
 
 def test_company_channel_listing_uses_scoped_registry_query():
@@ -160,13 +157,12 @@ def test_company_channel_listing_uses_scoped_registry_query():
     )
 
     assert response.status_code == 200
-    assert [channel["youtube_channel_id"] for channel in response.json()] == [
-        "channel-tv-a"
-    ]
+    assert [channel["youtube_channel_id"] for channel in response.json()] == ["channel-tv-a"]
 
 
 def test_company_manager_reads_scoped_outside_cms_monitor():
-    """Test that a company manager can read channels with OUTSIDE_CMS status using scoped registry."""
+    """Test that a company manager can read channels with OUTSIDE_CMS status using
+    scoped registry."""
     app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: ChannelRegistry(
         [
@@ -256,9 +252,7 @@ def test_global_outside_cms_monitor_keeps_official_manual_import_visible():
         "missing_official_revenue_count": 1,
     }
     manual_import_items = [
-        item
-        for item in payload["items"]
-        if item["youtube_channel_id"] == "channel-news-a"
+        item for item in payload["items"] if item["youtube_channel_id"] == "channel-news-a"
     ]
     assert len(manual_import_items) == 1
     manual_import_item = manual_import_items[0]
@@ -380,9 +374,7 @@ def test_global_channel_issues_include_registry_health_summary():
             "REVENUE_REQUIRED_NO_GROUP": 1,
         },
     }
-    issue_tuples = [
-        (item["youtube_channel_id"], item["issue_type"]) for item in payload["items"]
-    ]
+    issue_tuples = [(item["youtube_channel_id"], item["issue_type"]) for item in payload["items"]]
     assert ("channel-orphan", "MISSING_COMPANY") in issue_tuples
     assert ("channel-missing-sector", "MISSING_SECTOR") in issue_tuples
     assert all(channel_id != "channel-news-a" for channel_id, _ in issue_tuples)
@@ -513,9 +505,7 @@ def test_mapping_change_authorizes_before_not_found():
     )
 
     assert response.status_code == 403
-    assert (
-        response.json()["detail"] == "Missing permission: registry.manage_org_mapping"
-    )
+    assert response.json()["detail"] == "Missing permission: registry.manage_org_mapping"
 
 
 def test_mapping_change_is_audited_for_corporate_admin():
@@ -534,10 +524,7 @@ def test_mapping_change_is_audited_for_corporate_admin():
     assert response.status_code == 200
     assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_NEWS_ID
     assert response.json()["audit_event"]["event_type"] == "CHANNEL_UPDATED"
-    assert (
-        response.json()["audit_event"]["reason"]
-        == "Corporate remap after ownership transfer"
-    )
+    assert response.json()["audit_event"]["reason"] == "Corporate remap after ownership transfer"
 
 
 def test_registry_factory_returns_fresh_state_per_app():
@@ -636,9 +623,7 @@ def _seed_sql_mapping_app(tmp_path, *, month: str, month_status: str):
         )
         session.commit()
     app = create_app(database_url=database_url)
-    app.dependency_overrides[current_channel_registry] = (
-        sql_channel_registry_from_session
-    )
+    app.dependency_overrides[current_channel_registry] = sql_channel_registry_from_session
     app.dependency_overrides[current_org_access_index] = lambda: BOOTSTRAP_ORG_INDEX
     return TestClient(app)
 

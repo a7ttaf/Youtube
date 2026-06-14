@@ -84,9 +84,7 @@ def build_finance_session() -> Session:
 def seed_org(session: Session) -> None:
     session.add_all(
         [
-            OrgUnitORM(
-                id=SECTOR_TV_ID, parent_id=None, type="SECTOR", name="TV", active=True
-            ),
+            OrgUnitORM(id=SECTOR_TV_ID, parent_id=None, type="SECTOR", name="TV", active=True),
             OrgUnitORM(
                 id=COMPANY_TV_ID,
                 parent_id=SECTOR_TV_ID,
@@ -355,17 +353,11 @@ def test_sql_channel_registry_filters_every_read_to_default_tenant():
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
 
-    channels_by_id = registry.list_channels_by_ids(
-        {"channel-tv-a", OTHER_TENANT_CHANNEL_ID}
-    )
+    channels_by_id = registry.list_channels_by_ids({"channel-tv-a", OTHER_TENANT_CHANNEL_ID})
 
     assert registry.get_channel(OTHER_TENANT_CHANNEL_ID) is None
-    assert {channel.youtube_channel_id for channel in registry.list_channels()} == {
-        "channel-tv-a"
-    }
-    assert {channel.youtube_channel_id for channel in channels_by_id} == {
-        "channel-tv-a"
-    }
+    assert {channel.youtube_channel_id for channel in registry.list_channels()} == {"channel-tv-a"}
+    assert {channel.youtube_channel_id for channel in channels_by_id} == {"channel-tv-a"}
 
 
 def test_sql_channel_registry_allows_same_external_channel_id_in_another_tenant():
@@ -401,12 +393,13 @@ def test_sql_channel_registry_explicit_tenant_writes_are_isolated():
 
     assert created.youtube_channel_id == "channel-other-tenant-created"
     assert default_registry.get_channel("channel-other-tenant-created") is None
-    assert {
-        channel.youtube_channel_id for channel in default_registry.list_channels()
-    } == {"channel-tv-a"}
-    assert {
-        channel.youtube_channel_id for channel in other_registry.list_channels()
-    } == {"channel-other-tenant-created", OTHER_TENANT_CHANNEL_ID}
+    assert {channel.youtube_channel_id for channel in default_registry.list_channels()} == {
+        "channel-tv-a"
+    }
+    assert {channel.youtube_channel_id for channel in other_registry.list_channels()} == {
+        "channel-other-tenant-created",
+        OTHER_TENANT_CHANNEL_ID,
+    }
 
 
 def test_sql_channel_registry_rejects_cross_tenant_company_id():

@@ -14,6 +14,7 @@ without a live DB; the production CLI / executor always pass a real session.
 These tests pin both contracts: the contextvar shape (no-DB path) and the
 lifecycle gate (SQLite-backed path with a seeded ``tenants`` table).
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -86,9 +87,7 @@ def _build_prior_tenant(tenant_id: UUID):
 # ---------------------------------------------------------------------------
 
 
-def _build_sqlite_session(
-    *, rows: list[tuple[UUID, str, TenantStatus]]
-) -> Session:
+def _build_sqlite_session(*, rows: list[tuple[UUID, str, TenantStatus]]) -> Session:
     """Return a session bound to a fresh in-memory SQLite with a seeded tenants table."""
     engine = sa.create_engine("sqlite+pysqlite:///:memory:")
     TenantORM.metadata.create_all(engine)
@@ -118,9 +117,7 @@ def _build_sqlite_session(
 def test_session_path_loads_active_tenant() -> None:
     """An ACTIVE tenant row is loaded and placed in TENANT_CTX."""
     tenant_id = uuid4()
-    session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ACTIVE)]
-    )
+    session = _build_sqlite_session(rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ACTIVE)])
     try:
         assert get_current_tenant() is None
         with connector_tenant_context(tenant_id, session=session):
@@ -136,9 +133,7 @@ def test_session_path_loads_active_tenant() -> None:
 def test_session_path_rejects_suspended_tenant() -> None:
     """A SUSPENDED tenant raises TenantLifecycleError and does NOT set the contextvar."""
     tenant_id = uuid4()
-    session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.SUSPENDED)]
-    )
+    session = _build_sqlite_session(rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.SUSPENDED)])
     try:
         with pytest.raises(TenantLifecycleError) as exc_info:
             with connector_tenant_context(tenant_id, session=session):
@@ -162,9 +157,7 @@ def test_session_path_rejects_suspended_tenant() -> None:
 def test_session_path_rejects_archived_tenant() -> None:
     """An ARCHIVED tenant raises TenantLifecycleError and does NOT set the contextvar."""
     tenant_id = uuid4()
-    session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ARCHIVED)]
-    )
+    session = _build_sqlite_session(rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ARCHIVED)])
     try:
         with pytest.raises(TenantLifecycleError) as exc_info:
             with connector_tenant_context(tenant_id, session=session):
@@ -199,9 +192,7 @@ def test_session_path_rejects_missing_tenant() -> None:
 def test_session_path_resets_context_on_lookup_failure() -> None:
     """A failed lifecycle check resets the contextvar to its prior value (None here)."""
     tenant_id = uuid4()
-    session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.SUSPENDED)]
-    )
+    session = _build_sqlite_session(rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.SUSPENDED)])
     try:
         prior = get_current_tenant()
         assert prior is None
@@ -238,9 +229,7 @@ def test_session_path_ends_lookup_transaction_when_session_was_idle() -> None:
     transaction-boundary contract.
     """
     tenant_id = uuid4()
-    session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ACTIVE)]
-    )
+    session = _build_sqlite_session(rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ACTIVE)])
     try:
         # Pre-condition: the session is idle (no transaction). The helper
         # will open the first transaction for the lookup and then end it.
@@ -284,9 +273,7 @@ def test_session_path_does_not_touch_caller_owned_outer_transaction() -> None:
     from sqlalchemy import text
 
     tenant_id = uuid4()
-    session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ACTIVE)]
-    )
+    session = _build_sqlite_session(rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ACTIVE)])
     try:
         # Caller opens a transaction and writes a sentinel row that must
         # survive the helper's exit.
@@ -301,9 +288,7 @@ def test_session_path_does_not_touch_caller_owned_outer_transaction() -> None:
             # Outside the helper, the caller's transaction must still be
             # alive (we did not roll it back).
             assert session.in_transaction()
-            marker = session.execute(
-                text("SELECT id FROM _outer_marker")
-            ).scalar()
+            marker = session.execute(text("SELECT id FROM _outer_marker")).scalar()
             assert marker == 1
         finally:
             session.rollback()

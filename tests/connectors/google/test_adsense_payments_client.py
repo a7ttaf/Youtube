@@ -38,12 +38,8 @@ def test_fetch_payments_calls_correct_endpoint() -> None:
 def test_fetch_payments_strips_accounts_prefix() -> None:
     """Normalizes a stored account resource name to exactly one path prefix."""
     http = _FakeHttp({"payments": []})
-    GoogleAdSensePaymentClient(http=http).fetch_payments(
-        account_id="accounts/pub-123"
-    )
-    assert http.calls[0][1] == (
-        "https://adsense.googleapis.com/v2/accounts/pub-123/payments"
-    )
+    GoogleAdSensePaymentClient(http=http).fetch_payments(account_id="accounts/pub-123")
+    assert http.calls[0][1] == ("https://adsense.googleapis.com/v2/accounts/pub-123/payments")
 
 
 def test_fetch_payments_rejects_blank_account() -> None:

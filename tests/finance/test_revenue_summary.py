@@ -44,9 +44,7 @@ def manual_override(
         reason="Revenue correction",
         status=status,
         created_by="00000000-0000-0000-0000-000000009401",
-        approved_by="00000000-0000-0000-0000-000000009402"
-        if status == "APPROVED"
-        else None,
+        approved_by="00000000-0000-0000-0000-000000009402" if status == "APPROVED" else None,
         approval_reason="Approved source correction" if status == "APPROVED" else None,
     )
 
@@ -95,18 +93,14 @@ def test_adjusted_revenue_summary_rejects_mixed_months_or_channels():
         build_adjusted_revenue_summary(
             facts=[
                 revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00"),
-                revenue_fact(
-                    source_kind="ADSENSE", gross_revenue_usd="900.00", month="2026-04"
-                ),
+                revenue_fact(source_kind="ADSENSE", gross_revenue_usd="900.00", month="2026-04"),
             ],
             manual_overrides=[],
         )
 
     with pytest.raises(ValueError, match="inconsistent month/channel"):
         build_adjusted_revenue_summary(
-            facts=[
-                revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00")
-            ],
+            facts=[revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00")],
             manual_overrides=[
                 manual_override(
                     status="APPROVED",

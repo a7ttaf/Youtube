@@ -1,4 +1,5 @@
 """SQLite model + constraint coverage for the channel-account map tables."""
+
 from uuid import UUID, uuid4
 
 import pytest
@@ -29,8 +30,11 @@ def test_account_owner_link_persists_with_defaults(tmp_path):
     with Session(engine) as session:
         session.add(
             AdsenseContentOwnerLinkORM(
-                tenant_id=TENANT, adsense_account_id="pub-1", content_owner_id="owner-1",
-                provenance_kind="OPERATOR_ASSERTED", effective_month_start="2026-01",
+                tenant_id=TENANT,
+                adsense_account_id="pub-1",
+                content_owner_id="owner-1",
+                provenance_kind="OPERATOR_ASSERTED",
+                effective_month_start="2026-01",
             )
         )
         session.commit()
@@ -46,8 +50,11 @@ def test_account_owner_link_status_check_rejects_unknown(tmp_path):
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(
             AdsenseContentOwnerLinkORM(
-                tenant_id=TENANT, adsense_account_id="pub-1", content_owner_id="owner-1",
-                verification_status="BOGUS", provenance_kind="OPERATOR_ASSERTED",
+                tenant_id=TENANT,
+                adsense_account_id="pub-1",
+                content_owner_id="owner-1",
+                verification_status="BOGUS",
+                provenance_kind="OPERATOR_ASSERTED",
                 effective_month_start="2026-01",
             )
         )
@@ -60,9 +67,12 @@ def test_account_owner_link_range_check_rejects_end_before_start(tmp_path):
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(
             AdsenseContentOwnerLinkORM(
-                tenant_id=TENANT, adsense_account_id="pub-1", content_owner_id="owner-1",
+                tenant_id=TENANT,
+                adsense_account_id="pub-1",
+                content_owner_id="owner-1",
                 provenance_kind="OPERATOR_ASSERTED",
-                effective_month_start="2026-06", effective_month_end="2026-01",
+                effective_month_start="2026-06",
+                effective_month_end="2026-01",
             )
         )
         session.commit()
@@ -74,9 +84,13 @@ def test_owner_channel_link_persists_active_default(tmp_path):
     with Session(engine) as session:
         session.add(
             ContentOwnerChannelLinkORM(
-                tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-1",
-                provenance_kind="SOURCE_ROW", provenance_source_id="row-1",
-                effective_month_start="2026-04", effective_month_end="2026-04",
+                tenant_id=TENANT,
+                content_owner_id="owner-1",
+                youtube_channel_id="chan-1",
+                provenance_kind="SOURCE_ROW",
+                provenance_source_id="row-1",
+                effective_month_start="2026-04",
+                effective_month_end="2026-04",
             )
         )
         session.commit()
@@ -91,8 +105,11 @@ def test_account_owner_link_month_format_check_rejects_malformed(tmp_path, bad_m
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(
             AdsenseContentOwnerLinkORM(
-                tenant_id=TENANT, adsense_account_id="pub-1", content_owner_id="owner-1",
-                provenance_kind="OPERATOR_ASSERTED", effective_month_start=bad_month,
+                tenant_id=TENANT,
+                adsense_account_id="pub-1",
+                content_owner_id="owner-1",
+                provenance_kind="OPERATOR_ASSERTED",
+                effective_month_start=bad_month,
             )
         )
         session.commit()
@@ -104,8 +121,11 @@ def test_owner_channel_link_provenance_kind_check_rejects_unknown(tmp_path):
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(
             ContentOwnerChannelLinkORM(
-                tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-1",
-                provenance_kind="BOGUS", effective_month_start="2026-04",
+                tenant_id=TENANT,
+                content_owner_id="owner-1",
+                youtube_channel_id="chan-1",
+                provenance_kind="BOGUS",
+                effective_month_start="2026-04",
             )
         )
         session.commit()

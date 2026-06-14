@@ -52,14 +52,30 @@ def test_account_id_is_normalized_from_request() -> None:
 
 
 def test_source_row_key_stable_across_reruns_for_earnings() -> None:
-    a = list(AdSenseManagementParser().parse(_load("sample_earnings_report_2026_04.json"), tenant_id=TENANT_ID))
-    b = list(AdSenseManagementParser().parse(_load("sample_earnings_report_2026_04_rerun.json"), tenant_id=TENANT_ID))
+    a = list(
+        AdSenseManagementParser().parse(
+            _load("sample_earnings_report_2026_04.json"), tenant_id=TENANT_ID
+        )
+    )
+    b = list(
+        AdSenseManagementParser().parse(
+            _load("sample_earnings_report_2026_04_rerun.json"), tenant_id=TENANT_ID
+        )
+    )
     assert sorted(r.source_row_key for r in a) == sorted(r.source_row_key for r in b)
 
 
 def test_source_row_key_stable_across_reruns_for_payments() -> None:
-    a = list(AdSenseManagementParser().parse(_load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID))
-    b = list(AdSenseManagementParser().parse(_load("sample_payment_report_2026_04_rerun.json"), tenant_id=TENANT_ID))
+    a = list(
+        AdSenseManagementParser().parse(
+            _load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID
+        )
+    )
+    b = list(
+        AdSenseManagementParser().parse(
+            _load("sample_payment_report_2026_04_rerun.json"), tenant_id=TENANT_ID
+        )
+    )
     assert sorted(r.source_row_key for r in a) == sorted(r.source_row_key for r in b)
 
 
@@ -80,8 +96,16 @@ def test_source_row_key_ignores_run_specific_report_id() -> None:
 
 
 def test_earnings_and_payment_keys_differ() -> None:
-    e = list(AdSenseManagementParser().parse(_load("sample_earnings_report_2026_04.json"), tenant_id=TENANT_ID))
-    p = list(AdSenseManagementParser().parse(_load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID))
+    e = list(
+        AdSenseManagementParser().parse(
+            _load("sample_earnings_report_2026_04.json"), tenant_id=TENANT_ID
+        )
+    )
+    p = list(
+        AdSenseManagementParser().parse(
+            _load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID
+        )
+    )
     assert not (set(r.source_row_key for r in e) & set(r.source_row_key for r in p))
 
 

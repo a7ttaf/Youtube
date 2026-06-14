@@ -70,18 +70,14 @@ def _insert_credential(conn, tenant_id, credential_id) -> None:
     )
 
 
-def test_upgrade_adds_telemetry_columns(
-    alembic_config: Config, fresh_engine: object
-) -> None:
+def test_upgrade_adds_telemetry_columns(alembic_config: Config, fresh_engine: object) -> None:
     command.upgrade(alembic_config, TELEMETRY_HEAD)
     inspector = inspect(fresh_engine)
     columns = {c["name"] for c in inspector.get_columns("api_connector_credentials")}
     assert _NEW_COLUMNS.issubset(columns)
 
 
-def test_downgrade_then_upgrade_round_trip(
-    alembic_config: Config, fresh_engine: object
-) -> None:
+def test_downgrade_then_upgrade_round_trip(alembic_config: Config, fresh_engine: object) -> None:
     command.upgrade(alembic_config, TELEMETRY_HEAD)
     command.downgrade(alembic_config, PRIOR_HEAD)
     inspector = inspect(fresh_engine)
@@ -105,16 +101,12 @@ def test_last_refresh_status_check_positive_and_negative(
         _insert_credential(conn, tenant_id, credential_id)
         conn.execute(
             text(
-                "UPDATE api_connector_credentials SET last_refresh_status = 'failed' "
-                "WHERE id = :id"
+                "UPDATE api_connector_credentials SET last_refresh_status = 'failed' WHERE id = :id"
             ),
             {"id": credential_id},
         )
         value = conn.execute(
-            text(
-                "SELECT last_refresh_status FROM api_connector_credentials "
-                "WHERE id = :id"
-            ),
+            text("SELECT last_refresh_status FROM api_connector_credentials WHERE id = :id"),
             {"id": credential_id},
         ).scalar()
     assert value == "failed"

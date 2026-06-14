@@ -13,6 +13,7 @@ T28 adds coverage for the spec §6 failure buckets:
   marks the run FAILED, commits the terminal row, and returns a FAILED outcome.
 Dry-run lands in T29 with its own tests.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -363,11 +364,12 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
     session: Session,
 ) -> None:
     """The runner must aggregate the month's daily CSVs before yielding to the parser."""
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         client = yt_client_cls.return_value
         client.list_supported_jobs.return_value = [
@@ -442,11 +444,12 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
     session: Session,
 ) -> None:
     """Mid-run CSV failures must keep the already-downloaded CSVs attached for replay."""
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         client = yt_client_cls.return_value
         client.list_supported_jobs.return_value = [
@@ -461,10 +464,7 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
                 b"date,channel_id,estimated_partner_revenue,currency_code\n"
                 b"2026-05-01,UC_orch_alpha,1.25,USD\n"
             ),
-            (
-                b"date,channel_id,currency_code\n"
-                b"2026-05-02,UC_orch_alpha,USD\n"
-            ),
+            (b"date,channel_id,currency_code\n2026-05-02,UC_orch_alpha,USD\n"),
         ]
 
         produced_iter = YouTubeReportingRunner().produce_reports(
@@ -487,8 +487,7 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
                 b"2026-05-01,UC_orch_alpha,1.25,USD\n"
             )
             assert produced.raw_reports[1].read_bytes() == (
-                b"date,channel_id,currency_code\n"
-                b"2026-05-02,UC_orch_alpha,USD\n"
+                b"date,channel_id,currency_code\n2026-05-02,UC_orch_alpha,USD\n"
             )
             with pytest.raises(StopIteration):
                 next(produced_iter)
@@ -500,11 +499,12 @@ def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
     session: Session,
 ) -> None:
     """Two jobs publishing the same report_type collapse to a single produced report."""
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         client = yt_client_cls.return_value
         client.list_supported_jobs.return_value = [
@@ -531,9 +531,7 @@ def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
             assert isinstance(produced, ProducedReportSuccess)
             assert produced.report_type == "content_owner_estimated_revenue_a1"
             assert client.list_reports_for_month.call_count == 1
-            assert client.list_reports_for_month.call_args.kwargs["job_id"] == (
-                "job-primary"
-            )
+            assert client.list_reports_for_month.call_args.kwargs["job_id"] == ("job-primary")
             with pytest.raises(StopIteration):
                 next(produced_iter)
         finally:
@@ -565,15 +563,14 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     )
     csv_bytes = _csv_for_one_row()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         # GoogleHttpClient is patched so the runner doesn't try to build
         # a real httpx.Client (which would attempt google-auth refresh on
         # the stub credentials). The patched class is referenced only via
@@ -585,9 +582,7 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
@@ -626,9 +621,7 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     assert counts["rows_upserted_total"] >= 1
 
     # ----- durable side effects -----
-    run_row = session.scalar(
-        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-    )
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
     assert run_row is not None
     assert run_row.status == "SUCCEEDED"
     assert run_row.finished_at is not None
@@ -647,17 +640,13 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     assert len(raw_files[0].checksum) == 64
 
     links = session.scalars(
-        select(ConnectorRunRawFileORM).where(
-            ConnectorRunRawFileORM.tenant_id == TENANT_ID
-        )
+        select(ConnectorRunRawFileORM).where(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
     ).all()
     assert len(links) == 1
     assert links[0].ordering_index == 0
 
     source_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
     ).all()
     assert len(source_rows) == counts["rows_upserted_total"]
     assert source_rows[0].source_system == "youtube_reporting"
@@ -688,7 +677,8 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
     calls = {"n": 0}
 
     def racing_find(db_session, *, tenant_id, source, report_type, report_month, checksum):
-        """Race the duplicate-row lookup with a sibling insert to exercise the IntegrityError fallback."""
+        """Race the duplicate-row lookup with a sibling insert to exercise the
+        IntegrityError fallback."""
         calls["n"] += 1
         if calls["n"] == 1:
             db_session.add(
@@ -714,19 +704,16 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
             checksum=checksum,
         )
 
-    monkeypatch.setattr(
-        orchestrator_module, "_find_existing_raw_file", racing_find
-    )
+    monkeypatch.setattr(orchestrator_module, "_find_existing_raw_file", racing_find)
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -734,9 +721,7 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
@@ -773,9 +758,7 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
     assert raw_files[0].parse_status == "PARSED"
 
     link = session.scalars(
-        select(ConnectorRunRawFileORM).where(
-            ConnectorRunRawFileORM.tenant_id == TENANT_ID
-        )
+        select(ConnectorRunRawFileORM).where(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
     ).one()
     assert link.raw_report_file_id == race_winner_id
     assert _audit_lifecycles(_connector_audit_events(session)) == [
@@ -819,13 +802,13 @@ def test_run_one_real_local_file_store_backend_round_trips(
     csv_bytes = _csv_for_one_row()
     expected_checksum = hashlib.sha256(csv_bytes).hexdigest()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         # NOTE: LocalFileStoreBackend is intentionally NOT patched here -- the
         # real backend writes to ``tmp_path`` so we can prove deterministic_blob_path
         # emits a scheme the backend will accept.
@@ -836,9 +819,7 @@ def test_run_one_real_local_file_store_backend_round_trips(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         outcome = run_one(
@@ -918,9 +899,7 @@ def test_run_one_accepts_youtube_reporting_credential_aliases(
     ``youtube-reporting`` or the B1 source-system key ``youtube_reporting``;
     orchestration must find the row from either dispatch spelling.
     """
-    account_id = (
-        f"{ACCOUNT_ID}-{run_connector_key.replace('-', 'dash').replace('_', 'under')}"
-    )
+    account_id = f"{ACCOUNT_ID}-{run_connector_key.replace('-', 'dash').replace('_', 'under')}"
     _make_credential_row(
         session,
         tenant_id=TENANT_ID,
@@ -929,15 +908,14 @@ def test_run_one_accepts_youtube_reporting_credential_aliases(
     )
     csv_bytes = _csv_for_one_row()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -945,15 +923,13 @@ def test_run_one_accepts_youtube_reporting_credential_aliases(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -987,15 +963,14 @@ def test_run_one_normalizes_secret_ref_before_resolving(
     )
     csv_bytes = _csv_for_one_row()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -1003,15 +978,13 @@ def test_run_one_normalizes_secret_ref_before_resolving(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -1069,15 +1042,14 @@ def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
     session.add(existing_raw_file)
     session.commit()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -1085,15 +1057,13 @@ def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -1143,15 +1113,14 @@ def test_run_one_reopens_failed_raw_file_with_current_download_metadata(
     session.add(existing_raw_file)
     session.commit()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -1159,15 +1128,13 @@ def test_run_one_reopens_failed_raw_file_with_current_download_metadata(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -1201,19 +1168,17 @@ def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
     )
     header_only_csv = b"date,channel,estimatedRevenue,currencyCode\n"
     populated_csv = (
-        b"date,channel,estimatedRevenue,currencyCode\n"
-        b"2026-05-01,UC_orch_alpha,7.500000,USD\n"
+        b"date,channel,estimatedRevenue,currencyCode\n2026-05-01,UC_orch_alpha,7.500000,USD\n"
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -1236,8 +1201,8 @@ def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -1252,9 +1217,7 @@ def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
     assert outcome.run is not None
     assert outcome.run.status == "SUCCEEDED"
     assert outcome.counts["reports_failed"] == 0
-    raw_files = session.scalars(
-        select(RawReportFileORM).order_by(RawReportFileORM.checksum)
-    ).all()
+    raw_files = session.scalars(select(RawReportFileORM).order_by(RawReportFileORM.checksum)).all()
     assert len(raw_files) == 2
     assert len(session.scalars(select(ConnectorRunRawFileORM)).all()) == 2
     source_rows = session.scalars(select(GoogleRevenueSourceRowORM)).all()
@@ -1275,15 +1238,14 @@ def test_run_one_persists_invalid_csv_evidence_before_shape_failure(
     )
     headerless_csv = b"2026-05-01,UC_orch_alpha,7.500000,USD\n"
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -1298,8 +1260,8 @@ def test_run_one_persists_invalid_csv_evidence_before_shape_failure(
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -1363,15 +1325,14 @@ def test_run_one_removes_stale_source_rows_when_replacement_omits_them(
         b"2026-05-01,UC_replacement,content-owner-1,7.500000,USD\n"
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -1386,8 +1347,8 @@ def test_run_one_removes_stale_source_rows_when_replacement_omits_them(
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -1402,9 +1363,7 @@ def test_run_one_removes_stale_source_rows_when_replacement_omits_them(
     assert outcome.run is not None
     assert outcome.run.status == "SUCCEEDED"
     source_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
     ).all()
     assert [row.youtube_channel_id for row in source_rows] == ["UC_replacement"]
     assert stale_key not in {row.source_row_key for row in source_rows}
@@ -1421,19 +1380,17 @@ def test_run_one_skips_monthly_aggregate_when_daily_download_fails(
         account_id=ACCOUNT_ID,
     )
     csv_bytes = (
-        b"date,channel,estimatedRevenue,currencyCode\n"
-        b"2026-05-01,UC_orch_alpha,7.500000,USD\n"
+        b"date,channel,estimatedRevenue,currencyCode\n2026-05-01,UC_orch_alpha,7.500000,USD\n"
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -1448,7 +1405,10 @@ def test_run_one_skips_monthly_aggregate_when_daily_download_fails(
         client.fetch_report.side_effect = [
             csv_bytes,
             GoogleApiServerError(
-                method="GET", url="https://yt/r-fail", status=503, attempts=3,
+                method="GET",
+                url="https://yt/r-fail",
+                status=503,
+                attempts=3,
             ),
         ]
 
@@ -1487,9 +1447,7 @@ def test_run_one_marks_run_failed_when_blob_backend_configuration_is_invalid(
         account_id=ACCOUNT_ID,
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh:
+    with patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh:
         refresh.return_value = None
         outcome = run_one(
             session,
@@ -1502,17 +1460,13 @@ def test_run_one_marks_run_failed_when_blob_backend_configuration_is_invalid(
     assert outcome.run is not None
     assert outcome.run.status == "FAILED"
     assert outcome.counts["reports_attempted"] == 0
-    run_row = session.scalar(
-        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-    )
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
     assert run_row is not None
     assert run_row.status == "FAILED"
     assert "BlobStorageConfigurationError" in (run_row.error_summary or "")
 
 
-def test_run_one_rejects_csv_rows_without_currency(
-    session: Session, _stub_secret_resolver
-) -> None:
+def test_run_one_rejects_csv_rows_without_currency(session: Session, _stub_secret_resolver) -> None:
     """The CSV adapter must not invent USD when Google omits currency
     metadata; that would make downstream revenue provenance ambiguous.
     """
@@ -1527,15 +1481,14 @@ def test_run_one_rejects_csv_rows_without_currency(
         b"2026-05-01,UC_orch_alpha,cms-orch-1,12.345600\n"
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -1543,15 +1496,13 @@ def test_run_one_rejects_csv_rows_without_currency(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -1565,9 +1516,7 @@ def test_run_one_rejects_csv_rows_without_currency(
 
     assert outcome.run is not None
     assert outcome.run.status == "FAILED"
-    run_row = session.scalar(
-        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-    )
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
     assert run_row is not None
     assert "currency" in (run_row.error_summary or "")
     raw_files = session.scalars(select(RawReportFileORM)).all()
@@ -1591,15 +1540,14 @@ def test_oauth_refresh_error_during_report_fetch_ends_run_in_bucket_c(
         account_id=ACCOUNT_ID,
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -1607,12 +1555,8 @@ def test_oauth_refresh_error_during_report_fetch_ends_run_in_bucket_c(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
-        client.fetch_report.side_effect = OAuthRefreshError(
-            inner=RefreshError("token revoked")
-        )
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
+        client.fetch_report.side_effect = OAuthRefreshError(inner=RefreshError("token revoked"))
         local_cls.return_value.upload.side_effect = AssertionError(
             "blob upload must not run after OAuth failure"
         )
@@ -1630,9 +1574,7 @@ def test_oauth_refresh_error_during_report_fetch_ends_run_in_bucket_c(
     assert outcome.counts["reports_attempted"] == 0
     assert outcome.counts["reports_failed"] == 0
     assert outcome.per_report_failures == []
-    run_row = session.scalar(
-        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-    )
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
     assert run_row is not None
     assert "OAuthRefreshError" in (run_row.error_summary or "")
     assert session.scalars(select(RawReportFileORM)).all() == []
@@ -1676,9 +1618,7 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
     # checks for.
     call_count = {"n": 0}
 
-    def flaky_finish_run(
-        session, *, tenant_id, connector_run_id, status, counts, error_summary
-    ):
+    def flaky_finish_run(session, *, tenant_id, connector_run_id, status, counts, error_summary):
         """Inject a transient failure on the finish-run hook to exercise the retry path."""
         call_count["n"] += 1
         if call_count["n"] == 1:
@@ -1703,17 +1643,17 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
             error_summary=error_summary,
         )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.finish_run",
-        side_effect=flaky_finish_run,
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.finish_run",
+            side_effect=flaky_finish_run,
+        ),
     ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
@@ -1722,19 +1662,15 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
-        backend.get_bytes.side_effect = (
-            lambda *, storage_uri: store[storage_uri]
-        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
         with pytest.raises(RuntimeError, match="simulated finish_run failure"):
             run_one(
@@ -1753,9 +1689,7 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
     # Re-fetch the run row from the DB and verify the fail-safe ran:
     # the run must NOT be left in RUNNING; it must be swept to FAILED
     # with the generic fail-safe error_summary.
-    run_row = session.scalar(
-        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-    )
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
     assert run_row is not None
     assert run_row.status == "FAILED"
     assert "orchestrator aborted" in (run_row.error_summary or "")
@@ -1790,9 +1724,7 @@ def test_bucket_a_no_credential_raises_and_no_run_row(
 
     # No connector_runs row should exist: Bucket A never reaches start_run.
     assert (
-        session.scalar(
-            select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-        )
+        session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
         is None
     )
 
@@ -1827,9 +1759,7 @@ def test_bucket_a_inactive_credential_raises_and_no_run_row(
         )
 
     assert (
-        session.scalar(
-            select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-        )
+        session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
         is None
     )
 
@@ -1886,7 +1816,8 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
     call_state = {"n": 0}
 
     class FlakyParser:
-        """Parser that fails the first call and succeeds on retry; exercises parser retry semantics."""
+        """Parser that fails the first call and succeeds on retry; exercises parser
+        retry semantics."""
 
         @staticmethod
         def parse(payload, *, tenant_id):
@@ -1896,17 +1827,17 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
                 raise ParserError("simulated parser failure on report 2")
             return list(real_parser.parse(payload, tenant_id=tenant_id))
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
-        return_value=FlakyParser(),
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
+            return_value=FlakyParser(),
+        ),
     ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
@@ -1922,18 +1853,16 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
             "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
             "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
         }
-        client.list_reports_for_month.side_effect = (
-            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        client.list_reports_for_month.side_effect = lambda *, account_id, job_id, report_month: (
+            reports_by_job[job_id]
         )
         bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
-        client.fetch_report.side_effect = (
-            lambda *, download_url: bytes_by_url[download_url]
-        )
+        client.fetch_report.side_effect = lambda *, download_url: bytes_by_url[download_url]
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -1955,9 +1884,7 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
     # per_report_failures lists (report_type_id, error_class_name) for the
     # failed report. The failing report was the second yielded
     # (content_owner_basic_a3) and the error class is ParserError.
-    assert outcome.per_report_failures == [
-        ("content_owner_basic_a3", "ParserError")
-    ]
+    assert outcome.per_report_failures == [("content_owner_basic_a3", "ParserError")]
 
     # Durable side-effects: raw_file #1 (channel_basic_a2) is PARSED;
     # raw_file #2 (content_owner_basic_a3) was inserted before parser.parse
@@ -1975,9 +1902,7 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
     }
 
     # Run row reflects PARTIAL with the failures captured in error_summary.
-    run_row = session.scalar(
-        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-    )
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
     assert run_row is not None
     assert run_row.status == "PARTIAL"
     assert run_row.error_summary is not None
@@ -2008,15 +1933,14 @@ def test_bucket_c_generator_error_marks_run_failed_without_cli_bucket_a_exit(
         account_id=ACCOUNT_ID,
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -2052,9 +1976,7 @@ def test_bucket_c_generator_error_marks_run_failed_without_cli_bucket_a_exit(
     assert outcome.per_report_failures == []
 
     # Run row must be FAILED with the typed class name in error_summary.
-    run_row = session.scalar(
-        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-    )
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
     assert run_row is not None
     assert run_row.status == "FAILED"
     assert run_row.finished_at is not None
@@ -2065,9 +1987,7 @@ def test_bucket_c_generator_error_marks_run_failed_without_cli_bucket_a_exit(
 
     # No raw_files: failure was pre-yield.
     assert (
-        session.scalar(
-            select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
-        )
+        session.scalar(select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID))
         is None
     )
 
@@ -2113,6 +2033,7 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
     # Bucket B — the branch that originally called ``session.rollback()``
     # and wiped report #1's flushed-but-uncommitted state.
     from ums_smart_revenue.connectors.runs import blob_storage as _blob_storage
+
     real_upload_and_verify = _blob_storage.upload_and_verify
     call_count = {"n": 0}
 
@@ -2121,23 +2042,24 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
         call_count["n"] += 1
         if call_count["n"] == 2:
             raise GoogleApiServerError(
-                method="PUT", url=storage_uri, status=503, attempts=1,
+                method="PUT",
+                url=storage_uri,
+                status=503,
+                attempts=1,
             )
-        return real_upload_and_verify(
-            backend=backend, storage_uri=storage_uri, content=content
-        )
+        return real_upload_and_verify(backend=backend, storage_uri=storage_uri, content=content)
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.upload_and_verify",
-        side_effect=flaky_upload_and_verify,
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.upload_and_verify",
+            side_effect=flaky_upload_and_verify,
+        ),
     ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
@@ -2151,18 +2073,16 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
             "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
             "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
         }
-        client.list_reports_for_month.side_effect = (
-            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        client.list_reports_for_month.side_effect = lambda *, account_id, job_id, report_month: (
+            reports_by_job[job_id]
         )
         bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
-        client.fetch_report.side_effect = (
-            lambda *, download_url: bytes_by_url[download_url]
-        )
+        client.fetch_report.side_effect = lambda *, download_url: bytes_by_url[download_url]
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -2181,9 +2101,7 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
     assert outcome.counts["reports_attempted"] == 2
     assert outcome.counts["reports_succeeded"] == 1
     assert outcome.counts["reports_failed"] == 1
-    assert outcome.per_report_failures == [
-        ("content_owner_basic_a3", "GoogleApiServerError")
-    ]
+    assert outcome.per_report_failures == [("content_owner_basic_a3", "GoogleApiServerError")]
 
     # Critical M6 assertion: report #1's RawReportFileORM row must still
     # exist after the run completes — proving the per-report commit made
@@ -2207,9 +2125,7 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
 
     # Source rows for report #1 must also be durable.
     source_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
     ).all()
     assert len(source_rows) >= 1, (
         "Expected report #1's GoogleRevenueSourceRowORM rows to survive "
@@ -2218,9 +2134,7 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
 
     # Run row reflects PARTIAL with the failing report's error in
     # error_summary.
-    run_row = session.scalar(
-        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
-    )
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
     assert run_row is not None
     assert run_row.status == "PARTIAL"
     assert "GoogleApiServerError" in (run_row.error_summary or "")
@@ -2244,15 +2158,14 @@ def test_bucket_b_download_failure_on_second_report_preserves_first_report(
         b"2026-05-01,UC_orch_alpha,cms-orch-1,10.000000,USD\n"
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -2265,15 +2178,18 @@ def test_bucket_b_download_failure_on_second_report_preserves_first_report(
             "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
             "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
         }
-        client.list_reports_for_month.side_effect = (
-            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        client.list_reports_for_month.side_effect = lambda *, account_id, job_id, report_month: (
+            reports_by_job[job_id]
         )
 
         def fetch_report(*, download_url: str) -> bytes:
             """Return the canned single-CSV bytes for the requested report_id."""
             if download_url == "https://yt/r2":
                 raise GoogleApiServerError(
-                    method="GET", url=download_url, status=503, attempts=4,
+                    method="GET",
+                    url=download_url,
+                    status=503,
+                    attempts=4,
                 )
             return csv_bytes_a
 
@@ -2281,8 +2197,8 @@ def test_bucket_b_download_failure_on_second_report_preserves_first_report(
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -2299,9 +2215,7 @@ def test_bucket_b_download_failure_on_second_report_preserves_first_report(
     assert outcome.counts["reports_attempted"] == 2
     assert outcome.counts["reports_succeeded"] == 1
     assert outcome.counts["reports_failed"] == 1
-    assert outcome.per_report_failures == [
-        ("content_owner_basic_a3", "GoogleApiServerError")
-    ]
+    assert outcome.per_report_failures == [("content_owner_basic_a3", "GoogleApiServerError")]
 
     raw_files = session.scalars(
         select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
@@ -2311,9 +2225,7 @@ def test_bucket_b_download_failure_on_second_report_preserves_first_report(
     assert raw_files[0].report_type == "channel_basic_a2"
 
     source_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
     ).all()
     assert len(source_rows) == 1
 
@@ -2332,17 +2244,17 @@ def test_run_one_counts_rows_only_after_mark_parsed_and_commit(
     )
     csv_bytes = _csv_for_one_row()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.mark_parsed",
-        side_effect=RuntimeError("mark_parsed failed"),
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.mark_parsed",
+            side_effect=RuntimeError("mark_parsed failed"),
+        ),
     ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
@@ -2358,8 +2270,8 @@ def test_run_one_counts_rows_only_after_mark_parsed_and_commit(
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -2385,9 +2297,7 @@ def test_run_one_counts_rows_only_after_mark_parsed_and_commit(
     assert raw_file.parse_status == "FAILED"
 
     source_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
     ).all()
     assert source_rows == []
 
@@ -2438,15 +2348,14 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
         b"2026-05-02,UC_dry_beta,cms-orch-1,4.560000,USD\n"
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         # Patch the backend even though dry-run never uploads -- this
         # prevents the real LocalFileStoreBackend from being instantiated
         # and touching the filesystem / env vars for hygiene. Also assert
@@ -2463,18 +2372,14 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
             "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
             "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
         }
-        client.list_reports_for_month.side_effect = (
-            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        client.list_reports_for_month.side_effect = lambda *, account_id, job_id, report_month: (
+            reports_by_job[job_id]
         )
         bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
-        client.fetch_report.side_effect = (
-            lambda *, download_url: bytes_by_url[download_url]
-        )
+        client.fetch_report.side_effect = lambda *, download_url: bytes_by_url[download_url]
 
         backend = local_cls.return_value
-        backend.upload.side_effect = AssertionError(
-            "blob upload must not be called in dry-run"
-        )
+        backend.upload.side_effect = AssertionError("blob upload must not be called in dry-run")
         backend.get_bytes.side_effect = AssertionError(
             "blob get_bytes must not be called in dry-run"
         )
@@ -2592,7 +2497,8 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
             report_month,
             account_id,
         ):
-            """Yield one ``ProducedReportSuccess`` carrying the canned parser payload + raw report."""
+            """Yield one ``ProducedReportSuccess`` carrying the canned parser
+            payload + raw report."""
             _ = (run, credentials, report_month, account_id)
             marker_id = uuid4()
             session.add(
@@ -2627,9 +2533,7 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
     registry._REGISTRY[CONNECTOR_KEY] = WritingRunner()
 
     try:
-        with patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-        ) as refresh:
+        with patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh:
             refresh.return_value = None
             outcome = run_one(
                 session,
@@ -2648,9 +2552,7 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
     # (e.g. someone removes ``savepoint.rollback()``), this scalar fetch
     # returns the row and the assertion fails loudly.
     assert WritingRunner.last_marker_id is not None
-    marker = session.scalar(
-        select(TenantORM).where(TenantORM.id == WritingRunner.last_marker_id)
-    )
+    marker = session.scalar(select(TenantORM).where(TenantORM.id == WritingRunner.last_marker_id))
     assert marker is None, (
         "SAVEPOINT defence regressed: a runner's side-write to the session "
         "leaked out of the dry-run branch. The session.begin_nested() / "
@@ -2725,17 +2627,17 @@ def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_f
                 raise ParserError("simulated parser failure on dry-run report 2")
             return list(real_parser.parse(payload, tenant_id=tenant_id))
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
-        return_value=FlakyParser(),
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
+            return_value=FlakyParser(),
+        ),
     ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
@@ -2750,22 +2652,18 @@ def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_f
             "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
             "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
         }
-        client.list_reports_for_month.side_effect = (
-            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        client.list_reports_for_month.side_effect = lambda *, account_id, job_id, report_month: (
+            reports_by_job[job_id]
         )
         bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
-        client.fetch_report.side_effect = (
-            lambda *, download_url: bytes_by_url[download_url]
-        )
+        client.fetch_report.side_effect = lambda *, download_url: bytes_by_url[download_url]
 
         # Defensive: dry-run must never instantiate a real backend or call
         # upload/get_bytes. The dry-run branch in run_one never invokes
         # ``_build_blob_backend()``, but patching the bare LocalFileStoreBackend
         # symbol guards against a regression that flips ordering.
         backend = local_cls.return_value
-        backend.upload.side_effect = AssertionError(
-            "blob upload must not be called in dry-run"
-        )
+        backend.upload.side_effect = AssertionError("blob upload must not be called in dry-run")
         backend.get_bytes.side_effect = AssertionError(
             "blob get_bytes must not be called in dry-run"
         )
@@ -2868,10 +2766,7 @@ def _make_analytics_parser_payload(
             "dimensions": _ANALYTICS_DIMENSIONS,
         },
         "columnHeaders": (
-            [
-                {"columnType": "DIMENSION", "name": name}
-                for name in dimension_names
-            ]
+            [{"columnType": "DIMENSION", "name": name} for name in dimension_names]
             + [{"columnType": "METRIC", "name": name} for name in metric_names]
         ),
         "rows": [
@@ -2958,15 +2853,14 @@ def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
             return payload_cms
         raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-    ) as yt_analytics_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -3021,17 +2915,13 @@ def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
 
     # ----- durable side effects: connector_run_raw_files join rows -----
     links = session.scalars(
-        select(ConnectorRunRawFileORM).where(
-            ConnectorRunRawFileORM.tenant_id == TENANT_ID
-        )
+        select(ConnectorRunRawFileORM).where(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
     ).all()
     assert len(links) == 1
 
     # ----- durable side effects: google_revenue_source_rows -----
     source_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
     ).all()
     assert len(source_rows) == expected_row_count
     assert all(r.source_system == "youtube_analytics" for r in source_rows)
@@ -3100,25 +2990,22 @@ def test_run_one_with_youtube_analytics_contains_channel_fetch_failures(
             return payload_ok
         raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-    ) as yt_analytics_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
-        yt_analytics_cls.return_value.fetch_channel_report.side_effect = (
-            fake_fetch_channel_report
-        )
+        yt_analytics_cls.return_value.fetch_channel_report.side_effect = fake_fetch_channel_report
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -3136,9 +3023,7 @@ def test_run_one_with_youtube_analytics_contains_channel_fetch_failures(
     assert outcome.counts["reports_attempted"] == 2
     assert outcome.counts["reports_succeeded"] == 1
     assert outcome.counts["reports_failed"] == 1
-    assert outcome.per_report_failures == [
-        ("youtube_analytics", "GoogleApiServerError")
-    ]
+    assert outcome.per_report_failures == [("youtube_analytics", "GoogleApiServerError")]
 
     raw_files = session.scalars(
         select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
@@ -3180,6 +3065,7 @@ def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
 
     def _run_with_payload(payload: dict[str, object]) -> ConnectorRunOutcome:
         """Run the analytics ingestion once with the supplied parser payload."""
+
         def fake_fetch_channel_report(
             *, account_id: str, channel_id: str, report_month: str
         ) -> dict:
@@ -3189,15 +3075,16 @@ def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
             assert report_month == "2026-05"
             return payload
 
-        with patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-        ) as yt_analytics_cls, patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-        ) as local_cls, patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-        ) as refresh, patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-        ) as http_cls:
+        with (
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+            ) as yt_analytics_cls,
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+            ) as local_cls,
+            patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+            patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        ):
             http_cls.return_value.close.return_value = None
             refresh.return_value = None
             yt_analytics_cls.return_value.fetch_channel_report.side_effect = (
@@ -3206,8 +3093,8 @@ def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
 
             backend = local_cls.return_value
             store: dict[str, bytes] = {}
-            backend.upload.side_effect = (
-                lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+            backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+                storage_uri, content
             )
             backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -3231,9 +3118,9 @@ def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
         )
     ).all()
     assert len(initial_rows) >= 1
-    assert {
-        row.source_account_id for row in initial_rows
-    } == {f"contentOwner=={_ANALYTICS_ACCOUNT_ID}"}
+    assert {row.source_account_id for row in initial_rows} == {
+        f"contentOwner=={_ANALYTICS_ACCOUNT_ID}"
+    }
 
     second_outcome = _run_with_payload(payload_empty)
     assert second_outcome.run is not None
@@ -3301,33 +3188,28 @@ def test_run_one_with_youtube_analytics_keeps_sibling_cms_rows_on_full_success(
         ),
     }
 
-    def fake_fetch_channel_report(
-        *, account_id: str, channel_id: str, report_month: str
-    ) -> dict:
+    def fake_fetch_channel_report(*, account_id: str, channel_id: str, report_month: str) -> dict:
         """Return the per-channel payload from the lookup table."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         return payload_by_channel[channel_id]
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-    ) as yt_analytics_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
-        yt_analytics_cls.return_value.fetch_channel_report.side_effect = (
-            fake_fetch_channel_report
-        )
+        yt_analytics_cls.return_value.fetch_channel_report.side_effect = fake_fetch_channel_report
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -3348,7 +3230,8 @@ def test_run_one_with_youtube_analytics_keeps_sibling_cms_rows_on_full_success(
     assert outcome.counts["rows_upserted_total"] == 2 * expected_metric_count
 
     final_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
+        select(GoogleRevenueSourceRowORM)
+        .where(
             GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
             GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
             GoogleRevenueSourceRowORM.report_type == "reports.query",
@@ -3368,9 +3251,9 @@ def test_run_one_with_youtube_analytics_keeps_sibling_cms_rows_on_full_success(
         expected_metric_count
     )
     assert {row.metric_key for row in final_rows} == set(_ANALYTICS_METRICS.split(","))
-    assert {
-        row.source_account_id for row in final_rows
-    } == {f"contentOwner=={_ANALYTICS_ACCOUNT_ID}"}
+    assert {row.source_account_id for row in final_rows} == {
+        f"contentOwner=={_ANALYTICS_ACCOUNT_ID}"
+    }
 
 
 def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_rows(
@@ -3424,23 +3307,24 @@ def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_row
         fetch_impl,
     ) -> ConnectorRunOutcome:
         """Run the analytics ingestion once with the supplied fetch implementation."""
-        with patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-        ) as yt_analytics_cls, patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-        ) as local_cls, patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-        ) as refresh, patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-        ) as http_cls:
+        with (
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+            ) as yt_analytics_cls,
+            patch(
+                "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+            ) as local_cls,
+            patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+            patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        ):
             http_cls.return_value.close.return_value = None
             refresh.return_value = None
             yt_analytics_cls.return_value.fetch_channel_report.side_effect = fetch_impl
 
             backend = local_cls.return_value
             store: dict[str, bytes] = {}
-            backend.upload.side_effect = (
-                lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+            backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+                storage_uri, content
             )
             backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -3452,9 +3336,7 @@ def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_row
                 report_month="2026-05",
             )
 
-    def first_fetch(
-        *, account_id: str, channel_id: str, report_month: str
-    ) -> dict:
+    def first_fetch(*, account_id: str, channel_id: str, report_month: str) -> dict:
         """Initial successful run: every attempted channel returns its payload."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
@@ -3464,9 +3346,7 @@ def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_row
     assert first_outcome.run is not None
     assert first_outcome.run.status == "SUCCEEDED"
 
-    def second_fetch(
-        *, account_id: str, channel_id: str, report_month: str
-    ) -> dict:
+    def second_fetch(*, account_id: str, channel_id: str, report_month: str) -> dict:
         """Rerun: UC_keep_fail raises 503 so its sibling rows must be preserved."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
@@ -3487,12 +3367,11 @@ def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_row
     assert second_outcome.counts["reports_failed"] == 1
     expected_metric_count = len(_ANALYTICS_METRICS.split(","))
     assert second_outcome.counts["rows_upserted_total"] == expected_metric_count
-    assert second_outcome.per_report_failures == [
-        ("youtube_analytics", "GoogleApiServerError")
-    ]
+    assert second_outcome.per_report_failures == [("youtube_analytics", "GoogleApiServerError")]
 
     final_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
+        select(GoogleRevenueSourceRowORM)
+        .where(
             GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
             GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
             GoogleRevenueSourceRowORM.report_type == "reports.query",
@@ -3588,11 +3467,11 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
 
     # The parser-payload's endDate is the calendar month end, not the wire
     # first-of-month, so persisted period_end records the actual coverage.
-    from calendar import monthrange as _monthrange  # local import to avoid test churn  # noqa: PLC0415
-    _last_day = (
-        f"{int(_year):04d}-{int(_month):02d}-"
-        f"{_monthrange(int(_year), int(_month))[1]:02d}"
-    )
+    from calendar import (
+        monthrange as _monthrange,
+    )  # local import to avoid test churn  # noqa: PLC0415
+
+    _last_day = f"{int(_year):04d}-{int(_month):02d}-{_monthrange(int(_year), int(_month))[1]:02d}"
 
     def _runner_query_request(channel_id: str) -> dict:
         """Build the runner-side query_request dict (mirrors the wire request layout)."""
@@ -3609,10 +3488,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         """Inject the `channel` dimension into payload columns/rows (mirrors the runner)."""
         column_headers = payload.get("columnHeaders") or []
         rows = payload.get("rows") or []
-        if any(
-            isinstance(h, dict) and h.get("name") == "channel"
-            for h in column_headers
-        ):
+        if any(isinstance(h, dict) and h.get("name") == "channel" for h in column_headers):
             return payload
         return {
             **payload,
@@ -3620,10 +3496,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
                 {"columnType": "DIMENSION", "name": "channel"},
                 *column_headers,
             ],
-            "rows": [
-                [channel_id, *row] if isinstance(row, list) else row
-                for row in rows
-            ],
+            "rows": [[channel_id, *row] if isinstance(row, list) else row for row in rows],
         }
 
     augmented_cms = {
@@ -3646,13 +3519,13 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
             return payload_cms
         raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-    ) as yt_analytics_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         # NOTE: LocalFileStoreBackend is intentionally NOT patched here -- the
         # real backend writes to ``tmp_path`` so we can prove deterministic_blob_path
         # emits a file-store:// scheme the backend will accept.
@@ -3701,9 +3574,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         f"raw blob for UC_fs_cms did not land on disk at {expected_path}; "
         f"tmp_path tree: {list(tmp_path.rglob('*'))}"
     )
-    assert expected_path.read_bytes() == raw_bytes_cms, (
-        "blob bytes mismatch for UC_fs_cms"
-    )
+    assert expected_path.read_bytes() == raw_bytes_cms, "blob bytes mismatch for UC_fs_cms"
 
     # The persisted file_url for each channel must carry file-store scheme + bucket.
     raw_files = session.scalars(
@@ -3717,14 +3588,10 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         assert raw_file.file_url.endswith(".json")
 
     source_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
     ).all()
     assert len(source_rows) == expected_row_count
-    assert {row.metric_key for row in source_rows} == set(
-        _ANALYTICS_METRICS.split(",")
-    )
+    assert {row.metric_key for row in source_rows} == set(_ANALYTICS_METRICS.split(","))
     assert {row.youtube_channel_id for row in source_rows} == {"UC_fs_cms"}
 
 
@@ -3807,15 +3674,14 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
             return payload_cms
         raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-    ) as yt_analytics_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -3824,9 +3690,7 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
 
         # Blob backend patched defensively: dry-run must never call upload/get_bytes.
         backend = local_cls.return_value
-        backend.upload.side_effect = AssertionError(
-            "blob upload must not be called in dry-run"
-        )
+        backend.upload.side_effect = AssertionError("blob upload must not be called in dry-run")
         backend.get_bytes.side_effect = AssertionError(
             "blob get_bytes must not be called in dry-run"
         )
@@ -3962,15 +3826,14 @@ def test_run_one_with_youtube_analytics_no_eligible_channels(
         account_id=_ANALYTICS_ACCOUNT_ID,
     )
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-    ) as yt_analytics_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -4012,10 +3875,7 @@ def test_run_one_with_youtube_analytics_no_eligible_channels(
     assert counts["rows_upserted_unchanged"] == 0
 
     assert (
-        session.query(RawReportFileORM)
-        .filter(RawReportFileORM.tenant_id == TENANT_ID)
-        .count()
-        == 0
+        session.query(RawReportFileORM).filter(RawReportFileORM.tenant_id == TENANT_ID).count() == 0
     )
     assert (
         session.query(ConnectorRunRawFileORM)
@@ -4095,22 +3955,21 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
         assert report_month == "2026-05"
         return payload_by_channel_run1[channel_id]
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-    ) as yt_analytics_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
         yt_analytics_cls.return_value.fetch_channel_report.side_effect = fake_fetch_run1
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -4137,9 +3996,7 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
         "UC_preserve_b",
     }
     b_row_keys_before = sorted(
-        row.source_row_key
-        for row in run1_rows
-        if row.youtube_channel_id == "UC_preserve_b"
+        row.source_row_key for row in run1_rows if row.youtube_channel_id == "UC_preserve_b"
     )
     assert len(b_row_keys_before) == expected_metric_count
 
@@ -4158,26 +4015,23 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         if channel_id not in payload_by_channel_run2:
-            raise AssertionError(
-                f"run 2 fetched unexpected channel: {channel_id!r}"
-            )
+            raise AssertionError(f"run 2 fetched unexpected channel: {channel_id!r}")
         return payload_by_channel_run2[channel_id]
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
-    ) as yt_analytics_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
         yt_analytics_cls.return_value.fetch_channel_report.side_effect = fake_fetch_run2
         backend = local_cls.return_value
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -4209,9 +4063,7 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
     assert a_count == expected_metric_count
     assert b_count == expected_metric_count
     b_row_keys_after = sorted(
-        row.source_row_key
-        for row in final_rows
-        if row.youtube_channel_id == "UC_preserve_b"
+        row.source_row_key for row in final_rows if row.youtube_channel_id == "UC_preserve_b"
     )
     assert b_row_keys_after == b_row_keys_before, (
         "B's historical row keys must be identical after a deactivation rerun"
@@ -4259,15 +4111,14 @@ def test_run_one_emits_audit_started_finished_for_clean_run(
     )
     csv_bytes = _csv_for_one_row()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -4275,15 +4126,13 @@ def test_run_one_emits_audit_started_finished_for_clean_run(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -4361,17 +4210,17 @@ def test_run_one_emits_audit_event_sequence_for_partial_run(
                 raise ParserError("simulated parser failure for audit ordering test")
             return list(real_parser.parse(payload, tenant_id=tenant_id))
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
-        return_value=FlakyParser(),
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
+            return_value=FlakyParser(),
+        ),
     ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
@@ -4385,18 +4234,16 @@ def test_run_one_emits_audit_event_sequence_for_partial_run(
             "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
             "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
         }
-        client.list_reports_for_month.side_effect = (
-            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        client.list_reports_for_month.side_effect = lambda *, account_id, job_id, report_month: (
+            reports_by_job[job_id]
         )
         bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
-        client.fetch_report.side_effect = (
-            lambda *, download_url: bytes_by_url[download_url]
-        )
+        client.fetch_report.side_effect = lambda *, download_url: bytes_by_url[download_url]
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -4437,9 +4284,7 @@ def test_run_one_emits_audit_event_sequence_for_partial_run(
     assert finished.details["error_summary_present"] is True
 
 
-def test_run_one_dry_run_emits_zero_audit_events(
-    session: Session, _stub_secret_resolver
-) -> None:
+def test_run_one_dry_run_emits_zero_audit_events(session: Session, _stub_secret_resolver) -> None:
     """``dry_run=True`` writes no audit rows -- the dry-run path skips emitters entirely."""
     _make_credential_row(
         session,
@@ -4449,15 +4294,14 @@ def test_run_one_dry_run_emits_zero_audit_events(
     )
     csv_bytes = _csv_for_one_row()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_client_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -4465,15 +4309,11 @@ def test_run_one_dry_run_emits_zero_audit_events(
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = csv_bytes
 
         backend = local_cls.return_value
-        backend.upload.side_effect = AssertionError(
-            "blob upload must not be called in dry-run"
-        )
+        backend.upload.side_effect = AssertionError("blob upload must not be called in dry-run")
         backend.get_bytes.side_effect = AssertionError(
             "blob get_bytes must not be called in dry-run"
         )
@@ -4525,12 +4365,8 @@ def test_run_one_fail_closed_when_service_actor_id_missing(
     load_app_settings.cache_clear()
 
     with (
-        patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-        ),
-        patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-        ),
+        patch("ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"),
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"),
         patch(
             "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials",
             return_value=None,
@@ -4631,7 +4467,8 @@ def _make_adsense_payment_parser_payload(
     """Build an AdSense payload that emits a payment_report row."""
     year_s, month_s = report_month.split("-")
     payload = _make_adsense_parser_payload(
-        account_id=account_id, report_month=report_month,
+        account_id=account_id,
+        report_month=report_month,
     )
     payload["headers"] = [
         {"type": "DIMENSION", "name": "MONTH"},
@@ -4666,25 +4503,22 @@ def _run_adsense_orchestrator_with_payload(
         assert report_month == expected_report_month
         return payload
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
-    ) as adsense_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
+        ) as adsense_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
-        adsense_cls.return_value.fetch_monthly_report.side_effect = (
-            fake_fetch_monthly_report
-        )
+        adsense_cls.return_value.fetch_monthly_report.side_effect = fake_fetch_monthly_report
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
@@ -4727,7 +4561,8 @@ def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
     )
     report_month = "2026-05"
     payload = _make_adsense_parser_payload(
-        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
     )
 
     def fake_fetch_monthly_report(*, account_id: str, report_month: str) -> dict:
@@ -4736,15 +4571,14 @@ def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
         assert report_month == "2026-05"
         return payload
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
-    ) as adsense_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
+        ) as adsense_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
 
@@ -4805,17 +4639,13 @@ def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
 
     # ----- durable side effects: connector_run_raw_files join rows -----
     links = session.scalars(
-        select(ConnectorRunRawFileORM).where(
-            ConnectorRunRawFileORM.tenant_id == TENANT_ID
-        )
+        select(ConnectorRunRawFileORM).where(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
     ).all()
     assert len(links) == 1
 
     # ----- durable side effects: google_revenue_source_rows -----
     source_rows = session.scalars(
-        select(GoogleRevenueSourceRowORM).where(
-            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
-        )
+        select(GoogleRevenueSourceRowORM).where(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
     ).all()
     assert len(source_rows) == 2
     assert all(r.source_system == "adsense_management" for r in source_rows)
@@ -4851,7 +4681,8 @@ def test_run_one_with_adsense_management_empty_success_replaces_existing_rows(
     )
     report_month = "2026-05"
     payload_with_rows = _make_adsense_parser_payload(
-        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
     )
     payload_empty = {**payload_with_rows, "rows": []}
 
@@ -4915,10 +4746,12 @@ def test_run_one_with_adsense_management_nonempty_success_deletes_missing_scope(
     )
     report_month = "2026-05"
     payload_payment = _make_adsense_payment_parser_payload(
-        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
     )
     payload_earnings = _make_adsense_parser_payload(
-        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
     )
 
     first_outcome = _run_adsense_orchestrator_with_payload(
@@ -4980,10 +4813,12 @@ def test_run_one_with_adsense_management_full_resource_cleanup_uses_parser_scope
     )
     report_month = "2026-05"
     payload_payment = _make_adsense_payment_parser_payload(
-        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
     )
     payload_earnings = _make_adsense_parser_payload(
-        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
     )
 
     first_outcome = _run_adsense_orchestrator_with_payload(
@@ -5042,7 +4877,8 @@ def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
     )
     report_month = "2026-05"
     base_payload = _make_adsense_parser_payload(
-        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
     )
 
     # Run 1: both AdSense source rows are new → CREATED=2.

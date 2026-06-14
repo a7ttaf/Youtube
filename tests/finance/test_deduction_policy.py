@@ -17,7 +17,10 @@ def test_deduction_policy_holds_net_policy_constants():
 def test_net_revenue_reexports_same_objects():
     """net_revenue MUST re-export the same constant objects for back-compat."""
     assert net_revenue.SOURCE_SYSTEM_TO_SOURCE_KIND is deduction_policy.SOURCE_SYSTEM_TO_SOURCE_KIND
-    assert net_revenue.NET_APPLICABLE_COMPONENT_KINDS is deduction_policy.NET_APPLICABLE_COMPONENT_KINDS
+    assert (
+        net_revenue.NET_APPLICABLE_COMPONENT_KINDS
+        is deduction_policy.NET_APPLICABLE_COMPONENT_KINDS
+    )
 
 
 def test_net_revenue_and_allocation_import_together_no_cycle():

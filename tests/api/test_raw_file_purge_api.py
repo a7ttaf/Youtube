@@ -70,9 +70,7 @@ def app_env(monkeypatch):
 def _register(client: TestClient) -> str:
     response = client.post(
         "/reports/raw-files",
-        headers=auth_headers(
-            "system_integration_user", "connector", "youtube_reporting"
-        ),
+        headers=auth_headers("system_integration_user", "connector", "youtube_reporting"),
         json={
             "source": "youtube_reporting",
             "report_type": "YOUTUBE_CMS_REVENUE",
@@ -92,9 +90,7 @@ def test_register_rejects_purged_parse_status(app_env):
 
     response = client.post(
         "/reports/raw-files",
-        headers=auth_headers(
-            "system_integration_user", "connector", "youtube_reporting"
-        ),
+        headers=auth_headers("system_integration_user", "connector", "youtube_reporting"),
         json={
             "source": "youtube_reporting",
             "report_type": "YOUTUBE_CMS_REVENUE",
@@ -169,9 +165,7 @@ def test_purge_missing_permission_returns_403(app_env):
     response = client.request(
         "DELETE",
         f"/reports/raw-files/{raw_file_id}",
-        headers=auth_headers(
-            "system_integration_user", "connector", "youtube_reporting"
-        ),
+        headers=auth_headers("system_integration_user", "connector", "youtube_reporting"),
         json={"reason": "Operator-requested deletion"},
     )
 

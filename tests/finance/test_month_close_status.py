@@ -23,9 +23,7 @@ def _lock_month(session: Session, month: str, *, tenant_id: UUID) -> None:
     """Mark a month locked directly for the read-only status accessor tests."""
     # Drive the close row straight to LOCKED for a read-only accessor test,
     # bypassing the readiness-gated lock_month() machinery on purpose.
-    row = get_or_create_month_close_row(
-        session, month, tenant_id=tenant_id, for_update=False
-    )
+    row = get_or_create_month_close_row(session, month, tenant_id=tenant_id, for_update=False)
     row.status = "LOCKED"
     session.flush()
 
@@ -41,9 +39,7 @@ def test_status_none_when_no_row() -> None:
 def test_status_open_when_row_open() -> None:
     """Existing OPEN rows return OPEN."""
     session = build_session()
-    get_or_create_month_close_row(
-        session, "2026-04", tenant_id=TENANT_ID, for_update=False
-    )
+    get_or_create_month_close_row(session, "2026-04", tenant_id=TENANT_ID, for_update=False)
     assert get_month_close_status(session, "2026-04", tenant_id=TENANT_ID) == "OPEN"
 
 

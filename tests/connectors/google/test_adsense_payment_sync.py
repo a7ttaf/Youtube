@@ -64,7 +64,9 @@ def _p(name, date_obj, amount):
     d = {"name": name, "amount": amount}
     if date_obj is not None:
         d["date"] = {
-            "year": date_obj.year, "month": date_obj.month, "day": date_obj.day,
+            "year": date_obj.year,
+            "month": date_obj.month,
+            "day": date_obj.day,
         }
     return d
 
@@ -85,9 +87,7 @@ class _FakeClient:
 
 def _lock_month(session, month):
     """Mark a finance month LOCKED without invoking the full lock workflow."""
-    row = get_or_create_month_close_row(
-        session, month, tenant_id=TENANT_ID, for_update=False
-    )
+    row = get_or_create_month_close_row(session, month, tenant_id=TENANT_ID, for_update=False)
     row.status = "LOCKED"
     session.flush()
 
@@ -98,7 +98,7 @@ def _service(session, client, audit):
         session,
         audit_sink=audit,
         credential_resolver=lambda **_: object(),  # no real OAuth
-        client_factory=lambda _creds: client,       # no real HTTP
+        client_factory=lambda _creds: client,  # no real HTTP
     )
 
 
@@ -106,12 +106,17 @@ def test_sync_upserts_open_month_settlements() -> None:
     """Persists open paid settlements and audits retained-balance skips."""
     session = _build_session()
     audit = InMemoryAuditSink()
-    client = _FakeClient(_resp(
-        _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "£60.00"),
-        _p("accounts/pub-1/payments/unpaid", None, "£5.00"),
-    ))
+    client = _FakeClient(
+        _resp(
+            _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "£60.00"),
+            _p("accounts/pub-1/payments/unpaid", None, "£5.00"),
+        )
+    )
     result = _service(session, client, audit).sync(
-        tenant_id=TENANT_ID, account_id="pub-1", actor=ACTOR, reason="live pull",
+        tenant_id=TENANT_ID,
+        account_id="pub-1",
+        actor=ACTOR,
+        reason="live pull",
     )
     session.commit()
     assert result.synced_count == 1
@@ -130,18 +135,18 @@ def test_sync_upserts_open_month_settlements() -> None:
     details = audit.records[0].details
     assert details["trigger"] == "live_pull"
     assert details["source_account_id"] == "pub-1"
-    assert details["skipped_balances"][0]["resource_name"] == (
-        "accounts/pub-1/payments/unpaid"
-    )
+    assert details["skipped_balances"][0]["resource_name"] == ("accounts/pub-1/payments/unpaid")
 
 
 def test_sync_is_idempotent() -> None:
     """Repeating the same live pull updates the existing account-scoped row."""
     session = _build_session()
     audit = InMemoryAuditSink()
-    client = _FakeClient(_resp(
-        _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "£60.00"),
-    ))
+    client = _FakeClient(
+        _resp(
+            _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "£60.00"),
+        )
+    )
     svc = _service(session, client, audit)
     svc.sync(tenant_id=TENANT_ID, account_id="pub-1", actor=ACTOR, reason="r")
     svc.sync(tenant_id=TENANT_ID, account_id="pub-1", actor=ACTOR, reason="r")
@@ -185,41 +190,51 @@ def test_locked_month_is_skipped_not_aborted() -> None:
     session = _build_session()
     audit = InMemoryAuditSink()
     # one paid row in a LOCKED month ('$' ambiguous) + one in an OPEN month (GBP)
-    client = _FakeClient(_resp(
-        _p("accounts/pub-1/payments/2026-03-10", date(2026, 3, 10), "$50.00"),
-        _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "£60.00"),
-    ))
+    client = _FakeClient(
+        _resp(
+            _p("accounts/pub-1/payments/2026-03-10", date(2026, 3, 10), "$50.00"),
+            _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "£60.00"),
+        )
+    )
     _lock_month(session, "2026-03")
     result = _service(session, client, audit).sync(
-        tenant_id=TENANT_ID, account_id="pub-1", actor=ACTOR, reason="r",
+        tenant_id=TENANT_ID,
+        account_id="pub-1",
+        actor=ACTOR,
+        reason="r",
     )
     session.commit()
-    assert result.skipped_locked_count == 1   # the '$' locked row never parsed
-    assert result.synced_count == 1           # only the open GBP row
+    assert result.skipped_locked_count == 1  # the '$' locked row never parsed
+    assert result.synced_count == 1  # only the open GBP row
     rows = session.scalars(select(AdSensePaymentORM)).all()
     assert {r.month for r in rows} == {"2026-04"}
     locked_meta = audit.records[0].details["skipped_locked"][0]
     assert locked_meta["month"] == "2026-03"
     assert locked_meta["reason"] == "month_locked"
-    assert locked_meta["raw_amount"] == "$50.00"   # raw preserved, never parsed
+    assert locked_meta["raw_amount"] == "$50.00"  # raw preserved, never parsed
 
 
 def test_nothing_remains_audits_zero_synced() -> None:
     """Audits a successful live pull even when only balances are returned."""
     session = _build_session()
     audit = InMemoryAuditSink()
-    client = _FakeClient(_resp(
-        _p("accounts/pub-1/payments/unpaid", None, "£5.00"),
-        _p("accounts/pub-1/payments/youtube-unpaid", None, "£3.00"),
-    ))
+    client = _FakeClient(
+        _resp(
+            _p("accounts/pub-1/payments/unpaid", None, "£5.00"),
+            _p("accounts/pub-1/payments/youtube-unpaid", None, "£3.00"),
+        )
+    )
     result = _service(session, client, audit).sync(
-        tenant_id=TENANT_ID, account_id="pub-1", actor=ACTOR, reason="r",
+        tenant_id=TENANT_ID,
+        account_id="pub-1",
+        actor=ACTOR,
+        reason="r",
     )
     session.commit()
     assert result.synced_count == 0
     assert result.skipped_balance_count == 2
     assert session.scalars(select(AdSensePaymentORM)).all() == []  # no payment rows
-    assert len(audit.records) == 1                                 # still audited
+    assert len(audit.records) == 1  # still audited
     assert audit.records[0].details["synced_count"] == 0
 
 
@@ -230,9 +245,7 @@ def test_credential_failure_writes_nothing() -> None:
 
     def _boom(**_):
         """Simulate a missing connector credential before any writes."""
-        raise CredentialNotFoundError(
-            connector_key="adsense-management", account_id="pub-1"
-        )
+        raise CredentialNotFoundError(connector_key="adsense-management", account_id="pub-1")
 
     svc = AdSensePaymentSyncService(
         session,
@@ -250,12 +263,17 @@ def test_open_month_dollar_amount_aborts_with_zero_writes() -> None:
     """Open-month ambiguous dollar amounts fail closed with zero writes."""
     session = _build_session()
     audit = InMemoryAuditSink()
-    client = _FakeClient(_resp(
-        _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "$60.00"),
-    ))
+    client = _FakeClient(
+        _resp(
+            _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "$60.00"),
+        )
+    )
     with pytest.raises(AdSensePaymentMappingError):
         _service(session, client, audit).sync(
-            tenant_id=TENANT_ID, account_id="pub-1", actor=ACTOR, reason="r",
+            tenant_id=TENANT_ID,
+            account_id="pub-1",
+            actor=ACTOR,
+            reason="r",
         )
     assert session.scalars(select(AdSensePaymentORM)).all() == []  # fail closed
     assert audit.records == []
@@ -265,14 +283,19 @@ def test_dry_run_writes_no_rows_and_no_audit() -> None:
     """Dry-run validates and counts would-sync rows without persistence."""
     session = _build_session()
     audit = InMemoryAuditSink()
-    client = _FakeClient(_resp(
-        _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "£60.00"),
-    ))
+    client = _FakeClient(
+        _resp(
+            _p("accounts/pub-1/payments/2026-04-10", date(2026, 4, 10), "£60.00"),
+        )
+    )
     result = _service(session, client, audit).sync(
-        tenant_id=TENANT_ID, account_id="pub-1", actor=ACTOR, reason="r",
+        tenant_id=TENANT_ID,
+        account_id="pub-1",
+        actor=ACTOR,
+        reason="r",
         dry_run=True,
     )
     session.commit()
-    assert result.synced_count == 1                                # would-sync count
+    assert result.synced_count == 1  # would-sync count
     assert session.scalars(select(AdSensePaymentORM)).all() == []  # no rows
-    assert audit.records == []                                     # no audit
+    assert audit.records == []  # no audit

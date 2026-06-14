@@ -29,9 +29,7 @@ GROUP_MIXED_ID = UUID("00000000-0000-0000-0000-000000003402")
 USER_ID = UUID("00000000-0000-0000-0000-000000003501")
 
 
-def auth_headers(
-    role: str, scope_type: str, scope_id: str | None = None
-) -> dict[str, str]:
+def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "groups-user@example.com",
@@ -394,9 +392,7 @@ def test_malformed_group_id_returns_not_found(tmp_path):
     assert response.json()["detail"] == "Group not found"
 
 
-def test_sql_group_add_members_treats_duplicate_race_as_idempotent(
-    tmp_path, monkeypatch
-):
+def test_sql_group_add_members_treats_duplicate_race_as_idempotent(tmp_path, monkeypatch):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)

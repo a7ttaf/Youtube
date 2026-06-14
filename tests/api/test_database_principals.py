@@ -79,9 +79,7 @@ class FailingSession:
         self.connection_count = 0
         self.dialect_name = dialect_name
         self.get_count = 0
-        self.lookup_error = lookup_error or SQLAlchemyTimeoutError(
-            "database unavailable"
-        )
+        self.lookup_error = lookup_error or SQLAlchemyTimeoutError("database unavailable")
         self.recording_connection = RecordingConnection()
         self.rollback_count = 0
 
@@ -418,9 +416,7 @@ def test_database_principal_loads_direct_permission_grants(tmp_path):
     )
 
     assert response.status_code == 200
-    assert [item["event_type"] for item in response.json()["items"]] == [
-        "CHANNEL_UPDATED"
-    ]
+    assert [item["event_type"] for item in response.json()["items"]] == ["CHANNEL_UPDATED"]
 
 
 def test_database_principal_uses_stored_user_tenant(tmp_path):
@@ -441,8 +437,9 @@ def test_database_principal_rejects_mismatched_explicit_tenant(tmp_path):
     seed_database(database_url)
     engine = create_engine(database_url)
 
-    with Session(engine) as session, pytest.raises(
-        PrincipalNotFoundError, match="User is not registered"
+    with (
+        Session(engine) as session,
+        pytest.raises(PrincipalNotFoundError, match="User is not registered"),
     ):
         SqlAlchemyPrincipalLoader(session).load(
             user_id=str(ACTOR_ID),
@@ -574,9 +571,11 @@ def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch
     assert response.json()["detail"] == "Invalid trusted gateway token"
     assert counter.opened_sessions == 0
 
+
 # Test module for database tenant resolver behavior, including the health endpoint.
 # This module ensures that bypass paths are normalized before authentication and that the health
 # endpoint correctly reports the service status.
+
 
 def test_database_tenant_resolver_normalizes_bypass_paths_before_auth():
     """Database-auth wrapper bypasses normalized paths before gateway checks."""

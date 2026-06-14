@@ -31,8 +31,16 @@ def _fact(*, source_kind="ADSENSE", gross="1000.00", net=None, channel=CH):
     )
 
 
-def _alloc(*, channel=CH, account="pub-1", kind="DEDUCTION", amount="100.000000",
-           source_system="adsense_management", net_applicable=True, key="k1"):
+def _alloc(
+    *,
+    channel=CH,
+    account="pub-1",
+    kind="DEDUCTION",
+    amount="100.000000",
+    source_system="adsense_management",
+    net_applicable=True,
+    key="k1",
+):
     """Build an AllocationLine for test scenarios."""
     return AllocationLine(
         adsense_account_id=account,
@@ -48,11 +56,22 @@ def _alloc(*, channel=CH, account="pub-1", kind="DEDUCTION", amount="100.000000"
     )
 
 
-def _issue(*, account="pub-9", kind="DEDUCTION", amount="40.000000", code="ACCOUNT_UNMAPPED_OR_UNVERIFIED", key="u1"):
+def _issue(
+    *,
+    account="pub-9",
+    kind="DEDUCTION",
+    amount="40.000000",
+    code="ACCOUNT_UNMAPPED_OR_UNVERIFIED",
+    key="u1",
+):
     """Build an UnallocatedIssue for test scenarios."""
     return UnallocatedIssue(
-        scope_id=account, component_kind=kind, component_key=key,
-        amount_usd=Decimal(amount), issue_code=code, detail="unmapped",
+        scope_id=account,
+        component_kind=kind,
+        component_key=key,
+        amount_usd=Decimal(amount),
+        issue_code=code,
+        detail="unmapped",
     )
 
 
@@ -72,8 +91,7 @@ def test_missing_net_applies_account_allocation():
     assert summary.account_allocated_deduction_amount_usd == Decimal("100.000000")
     # sum identity holds on COMPONENT_DERIVED
     assert (
-        summary.channel_direct_deduction_amount_usd
-        + summary.account_allocated_deduction_amount_usd
+        summary.channel_direct_deduction_amount_usd + summary.account_allocated_deduction_amount_usd
         == summary.deduction_amount_usd
     )
 
@@ -137,11 +155,21 @@ def test_non_net_applicable_allocation_never_reduces_net():
 def test_channel_direct_plus_account_allocated_sum():
     """Both contributions apply additively on the missing-net path."""
     channel_direct = DeductionComponent(
-        id="dc1", month=MONTH, component_kind="DEDUCTION", scope_kind="CHANNEL",
-        scope_id=CH, amount_usd=Decimal("30.00"), amount_native=None,
-        currency_code="USD", source_system="adsense_management",
-        source_table="google_revenue_source_rows", source_id=None,
-        source_key=None, source_report_id=None, raw_payload={}, component_key="cd1",
+        id="dc1",
+        month=MONTH,
+        component_kind="DEDUCTION",
+        scope_kind="CHANNEL",
+        scope_id=CH,
+        amount_usd=Decimal("30.00"),
+        amount_native=None,
+        currency_code="USD",
+        source_system="adsense_management",
+        source_table="google_revenue_source_rows",
+        source_id=None,
+        source_key=None,
+        source_report_id=None,
+        raw_payload={},
+        component_key="cd1",
     )
     summary = build_channel_net_revenue_summary(
         facts=[_fact(net=None, gross="1000.00")],
@@ -163,11 +191,21 @@ def test_safety_dedup_skips_duplicate_component_key():
     """
     shared_key = "dup-key"
     channel_direct = DeductionComponent(
-        id="dc1", month=MONTH, component_kind="DEDUCTION", scope_kind="CHANNEL",
-        scope_id=CH, amount_usd=Decimal("30.00"), amount_native=None,
-        currency_code="USD", source_system="adsense_management",
-        source_table="google_revenue_source_rows", source_id=None,
-        source_key=None, source_report_id=None, raw_payload={}, component_key=shared_key,
+        id="dc1",
+        month=MONTH,
+        component_kind="DEDUCTION",
+        scope_kind="CHANNEL",
+        scope_id=CH,
+        amount_usd=Decimal("30.00"),
+        amount_native=None,
+        currency_code="USD",
+        source_system="adsense_management",
+        source_table="google_revenue_source_rows",
+        source_id=None,
+        source_key=None,
+        source_report_id=None,
+        raw_payload={},
+        component_key=shared_key,
     )
     summary = build_channel_net_revenue_summary(
         facts=[_fact(net=None, gross="1000.00")],
@@ -191,7 +229,9 @@ def test_month_unallocated_surface_global():
         account_allocations=[_alloc(amount="100.000000")],
         unallocated_account_issues=[
             _issue(amount="40.000000", kind="DEDUCTION"),
-            _issue(amount="5.000000", kind="UNRESOLVED_PAYMENT_GAP", code="UNSUPPORTED_SCOPE", key="u2"),
+            _issue(
+                amount="5.000000", kind="UNRESOLVED_PAYMENT_GAP", code="UNSUPPORTED_SCOPE", key="u2"
+            ),
         ],
     )
     # only the net-applicable (DEDUCTION) issue is surfaced; reconciliation kind excluded
@@ -239,9 +279,7 @@ def test_allocation_only_channel_is_included_without_keyerror():
     )
     ids = {channel.youtube_channel_id for channel in summary.channels}
     assert ids == {"chA", "chZ"}
-    alloc_only = next(
-        (c for c in summary.channels if c.youtube_channel_id == "chZ"), None
-    )
+    alloc_only = next((c for c in summary.channels if c.youtube_channel_id == "chZ"), None)
     assert alloc_only is not None
     # No facts -> NO_FACTS status, built via .get(channel_id, ()) without KeyError.
     assert alloc_only.status == "NO_FACTS"
@@ -257,9 +295,7 @@ def test_filter_account_allocations_scoped_drops_out_of_scope_lines():
     """A scoped read keeps only lines whose channel is inside the authorized set."""
     in_scope = _alloc(channel="chA", key="k1")
     out_of_scope = _alloc(channel="chB", key="k2")
-    filtered = filter_account_allocations_to_scope(
-        [in_scope, out_of_scope], {"chA"}
-    )
+    filtered = filter_account_allocations_to_scope([in_scope, out_of_scope], {"chA"})
     assert filtered == [in_scope]
 
 
@@ -268,15 +304,32 @@ def test_filter_account_allocations_empty_scope_drops_everything():
     assert filter_account_allocations_to_scope([_alloc(channel="chA")], set()) == []
 
 
-def _component(*, key="cd-1", kind="TAX", amount="30.00",
-               source_system="adsense_management", channel=CH, month=MONTH):
+def _component(
+    *,
+    key="cd-1",
+    kind="TAX",
+    amount="30.00",
+    source_system="adsense_management",
+    channel=CH,
+    month=MONTH,
+):
     """Build a CHANNEL-scoped DeductionComponent for test scenarios."""
     return DeductionComponent(
-        id=f"dc-{key}", month=month, component_kind=kind, scope_kind="CHANNEL",
-        scope_id=channel, amount_usd=Decimal(amount), amount_native=None,
-        currency_code="USD", source_system=source_system,
-        source_table="deduction_components", source_id=None, source_key=None,
-        source_report_id=None, raw_payload={}, component_key=key,
+        id=f"dc-{key}",
+        month=month,
+        component_kind=kind,
+        scope_kind="CHANNEL",
+        scope_id=channel,
+        amount_usd=Decimal(amount),
+        amount_native=None,
+        currency_code="USD",
+        source_system=source_system,
+        source_table="deduction_components",
+        source_id=None,
+        source_key=None,
+        source_report_id=None,
+        raw_payload={},
+        component_key=key,
     )
 
 
@@ -284,8 +337,8 @@ def test_resolve_applicable_channel_deductions_filters_dedups_and_matches_totals
     """The shared helper filters, dedups by component_key, and matches the builder totals."""
     components = [_component(key="cd-1", kind="TAX", amount="30.00")]
     allocations = [
-        _alloc(key="acct-1", amount="100.000000"),               # applies
-        _alloc(key="cd-1", amount="999.000000"),                 # dedup vs channel-direct key
+        _alloc(key="acct-1", amount="100.000000"),  # applies
+        _alloc(key="cd-1", amount="999.000000"),  # dedup vs channel-direct key
         _alloc(channel="ch-other", key="acct-2", amount="500.000000"),  # wrong channel
     ]
 
@@ -320,11 +373,21 @@ def test_resolve_applicable_channel_deductions_filters_dedups_and_matches_totals
 def test_month_aggregate_breakdown_totals_sum_component_split():
     """Month aggregates sum the per-channel component-derived split."""
     channel_direct = DeductionComponent(
-        id="dc-mixed", month=MONTH, component_kind="DEDUCTION", scope_kind="CHANNEL",
-        scope_id="chA", amount_usd=Decimal("30.00"), amount_native=None,
-        currency_code="USD", source_system="adsense_management",
-        source_table="google_revenue_source_rows", source_id=None,
-        source_key=None, source_report_id=None, raw_payload={}, component_key="cd-mixed",
+        id="dc-mixed",
+        month=MONTH,
+        component_kind="DEDUCTION",
+        scope_kind="CHANNEL",
+        scope_id="chA",
+        amount_usd=Decimal("30.00"),
+        amount_native=None,
+        currency_code="USD",
+        source_system="adsense_management",
+        source_table="google_revenue_source_rows",
+        source_id=None,
+        source_key=None,
+        source_report_id=None,
+        raw_payload={},
+        component_key="cd-mixed",
     )
     summary = build_month_net_revenue_summary(
         month=MONTH,

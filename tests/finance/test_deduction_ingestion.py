@@ -1,4 +1,5 @@
 """Repository + service tests for deduction-component ingestion (SQLite)."""
+
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from importlib import import_module
@@ -45,60 +46,88 @@ def _actor() -> UserPrincipal:
 
 def _engine(tmp_path):
     """Create a temporary SQLite finance schema."""
-    engine = create_engine(
-        f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
-    )
+    engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
     FinanceBase.metadata.create_all(engine)
     return engine
 
 
-def _seed(session: Session, *, settled="1000.00", paid="930.00", tax_currency="USD",
-          locked=False):
+def _seed(session: Session, *, settled="1000.00", paid="930.00", tax_currency="USD", locked=False):
     """Seed source rows, bank entries, payments, and optional month lock."""
     session.add(
         BankReconciliationEntryORM(
-            id=uuid4(), month=MONTH, bank_reference="BANK-1",
+            id=uuid4(),
+            month=MONTH,
+            bank_reference="BANK-1",
             bank_received_date=date(2026, 4, 20),
-            bank_received_amount=Decimal("1000.00"), bank_received_currency="USD",
+            bank_received_amount=Decimal("1000.00"),
+            bank_received_currency="USD",
             bank_received_amount_usd=Decimal("1000.00"),
-            transfer_fee_usd=Decimal("3.50"), fx_difference_usd=Decimal("-2.00"),
+            transfer_fee_usd=Decimal("3.50"),
+            fx_difference_usd=Decimal("-2.00"),
             recorded_by=ACTOR_ID,
         )
     )
     session.add(
         AdSensePaymentORM(
-            id=uuid4(), month=MONTH, payment_name="apr", source_account_id="pub-1",
-            payment_date=date(2026, 5, 21), payment_amount=Decimal(paid),
-            payment_currency="USD", payment_status="PAID", raw_payload={},
-            source_report_id=None, imported_by=ACTOR_ID,
+            id=uuid4(),
+            month=MONTH,
+            payment_name="apr",
+            source_account_id="pub-1",
+            payment_date=date(2026, 5, 21),
+            payment_amount=Decimal(paid),
+            payment_currency="USD",
+            payment_status="PAID",
+            raw_payload={},
+            source_report_id=None,
+            imported_by=ACTOR_ID,
         )
     )
     session.add(
         GoogleRevenueSourceRowORM(
-            id=uuid4(), tenant_id=_ums_tenant(), source_system="adsense_management",
+            id=uuid4(),
+            tenant_id=_ums_tenant(),
+            source_system="adsense_management",
             source_row_key=("settled-key").ljust(64, "0")[:64],
-            source_account_id="pub-1", youtube_channel_id=None, report_type="r",
-            report_month=MONTH, period_start=date(2026, 4, 1),
-            period_end=date(2026, 4, 30), metric_key="m", value_kind="settled",
-            amount_native=Decimal(settled), currency_code="USD",
-            source_report_id=None, raw_payload={},
+            source_account_id="pub-1",
+            youtube_channel_id=None,
+            report_type="r",
+            report_month=MONTH,
+            period_start=date(2026, 4, 1),
+            period_end=date(2026, 4, 30),
+            metric_key="m",
+            value_kind="settled",
+            amount_native=Decimal(settled),
+            currency_code="USD",
+            source_report_id=None,
+            raw_payload={},
         )
     )
     session.add(
         GoogleRevenueSourceRowORM(
-            id=uuid4(), tenant_id=_ums_tenant(), source_system="adsense_management",
+            id=uuid4(),
+            tenant_id=_ums_tenant(),
+            source_system="adsense_management",
             source_row_key=("tax-key").ljust(64, "0")[:64],
-            source_account_id="pub-1", youtube_channel_id=None, report_type="r",
-            report_month=MONTH, period_start=date(2026, 4, 1),
-            period_end=date(2026, 4, 30), metric_key="m", value_kind="tax",
-            amount_native=Decimal("11.00"), currency_code=tax_currency,
-            source_report_id=None, raw_payload={},
+            source_account_id="pub-1",
+            youtube_channel_id=None,
+            report_type="r",
+            report_month=MONTH,
+            period_start=date(2026, 4, 1),
+            period_end=date(2026, 4, 30),
+            metric_key="m",
+            value_kind="tax",
+            amount_native=Decimal("11.00"),
+            currency_code=tax_currency,
+            source_report_id=None,
+            raw_payload={},
         )
     )
     if locked:
         session.add(
             FinanceMonthCloseORM(
-                tenant_id=_ums_tenant(), month=MONTH, status="LOCKED",
+                tenant_id=_ums_tenant(),
+                month=MONTH,
+                status="LOCKED",
                 allocation_rule_payload={},
             )
         )
@@ -108,11 +137,13 @@ def _seed(session: Session, *, settled="1000.00", paid="930.00", tax_currency="U
 def _ums_tenant() -> UUID:
     """Return the UUID for the UMS tenant from the tenancy constants."""
     from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
     return UUID(UMS_TENANT_ID)
 
 
 def _service(session):
-    """Initialize and return the DeductionIngestionService with an in-memory audit sink for testing."""
+    """Initialize and return the DeductionIngestionService with an in-memory audit
+    sink for testing."""
     return _mod().DeductionIngestionService(session, audit_sink=InMemoryAuditSink())
 
 
@@ -136,7 +167,8 @@ def _component(component_key: str, *, amount: str = "1.00"):
 
 
 def test_ingest_creates_components_from_all_sources(tmp_path):
-    """Test that ingest creates deduction components for all expected source kinds and records an audit event."""
+    """Test that ingest creates deduction components for all expected source kinds
+    and records an audit event."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -179,16 +211,20 @@ def test_ingest_refuses_locked_month(tmp_path):
 
 
 def test_ingest_refuses_locked_month_even_with_zero_components(tmp_path):
-    """Test that a locked month with no source evidence still raises an error and writes no audit records."""
+    """Test that a locked month with no source evidence still raises an error and
+    writes no audit records."""
     # Lock the month but seed NO source evidence -> zero mapped components. Live
     # ingestion must still fail closed (no audit write) — the lock check must
     # precede the empty-component short-circuit in upsert_components.
     engine = _engine(tmp_path)
     with Session(engine) as session:
         from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
         session.add(
             FinanceMonthCloseORM(
-                tenant_id=UUID(UMS_TENANT_ID), month=MONTH, status="LOCKED",
+                tenant_id=UUID(UMS_TENANT_ID),
+                month=MONTH,
+                status="LOCKED",
                 allocation_rule_payload={},
             )
         )
@@ -230,7 +266,8 @@ def test_ingest_skips_non_usd_and_counts_it(tmp_path):
 
 
 def test_dry_run_writes_nothing_and_records_no_audit(tmp_path):
-    """Test that dry run mode does not persist components or write audit records, but reports potential upserts."""
+    """Test that dry run mode does not persist components or write audit records,
+    but reports potential upserts."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -291,8 +328,7 @@ def test_scoped_bank_ingest_preserves_other_source_components(tmp_path):
 
         repo = _mod().SqlAlchemyDeductionComponentRepository(session)
         component_keys = {
-            component.component_key
-            for component in repo.list_month_components(month=MONTH)
+            component.component_key for component in repo.list_month_components(month=MONTH)
         }
 
     assert "bank:2026-04:BANK-1:transfer_fee" in component_keys
@@ -359,9 +395,7 @@ def test_dry_run_refuses_locked_month(tmp_path):
         ("gap", {"source_rows", "payments"}),
     ],
 )
-def test_source_filter_reads_only_required_adapters(
-    monkeypatch, selected_source, expected_reads
-):
+def test_source_filter_reads_only_required_adapters(monkeypatch, selected_source, expected_reads):
     """Test that a source-filtered dry run does not touch unrelated adapters."""
     module = _mod()
     reads: list[str] = []
@@ -506,7 +540,9 @@ def test_list_account_components_returns_only_account_scope(tmp_path):
         _add_component(session, scope_kind="ACCOUNT", scope_id="pub-1")
         _add_component(session, scope_kind="CHANNEL", scope_id="chan-1")
         _add_component(
-            session, scope_kind="PAYMENT", scope_id="BANK-1",
+            session,
+            scope_kind="PAYMENT",
+            scope_id="BANK-1",
             source_system="bank_reconciliation",
         )
         session.commit()

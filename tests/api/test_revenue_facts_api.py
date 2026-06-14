@@ -22,9 +22,7 @@ OTHER_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000006302")
 USER_ID = UUID("00000000-0000-0000-0000-000000006401")
 
 
-def auth_headers(
-    role: str, scope_type: str, scope_id: str | None = None
-) -> dict[str, str]:
+def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "revenue-facts@example.com",
@@ -49,9 +47,7 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
     with Session(engine) as session:
         session.add_all(
             [
-                OrgUnitORM(
-                    id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True
-                ),
+                OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
                 OrgUnitORM(
                     id=COMPANY_ID,
                     parent_id=SECTOR_ID,
@@ -92,11 +88,7 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
             ]
         )
         if locked_month:
-            session.add(
-                FinanceMonthCloseORM(
-                    month="2026-03", status="LOCKED", locked_by=USER_ID
-                )
-            )
+            session.add(FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID))
         session.commit()
 
 
@@ -171,8 +163,7 @@ def test_import_rejects_connector_source_kind_mismatch(tmp_path):
 
     assert response.status_code == 422
     assert (
-        response.json()["detail"]
-        == "connector_key youtube-cms cannot import source_kind ADSENSE"
+        response.json()["detail"] == "connector_key youtube-cms cannot import source_kind ADSENSE"
     )
 
 
@@ -239,8 +230,7 @@ def test_import_rejects_revenue_breakdown_above_gross(tmp_path):
 
     assert response.status_code == 422
     assert (
-        response.json()["detail"]
-        == "revenue format breakdown total must be <= gross_revenue_usd"
+        response.json()["detail"] == "revenue format breakdown total must be <= gross_revenue_usd"
     )
     engine = create_engine(database_url)
     with Session(engine) as session:
@@ -400,9 +390,7 @@ def test_finance_viewer_reads_month_reconciliation_issue_queue_for_allowed_compa
     assert response.status_code == 200
     assert response.json()["month"] == "2026-03"
     assert response.json()["issue_count"] == 1
-    assert [item["youtube_channel_id"] for item in response.json()["items"]] == [
-        "channel-tv-a"
-    ]
+    assert [item["youtube_channel_id"] for item in response.json()["items"]] == ["channel-tv-a"]
     assert response.json()["pagination"] == {
         "limit": 100,
         "offset": 0,
@@ -479,9 +467,7 @@ def test_finance_viewer_pages_month_reconciliation_issue_queue_by_channel(tmp_pa
     )
 
     assert first_page.status_code == 200
-    assert [item["youtube_channel_id"] for item in first_page.json()["items"]] == [
-        "channel-news-a"
-    ]
+    assert [item["youtube_channel_id"] for item in first_page.json()["items"]] == ["channel-news-a"]
     assert first_page.json()["pagination"] == {
         "limit": 1,
         "offset": 0,
@@ -489,9 +475,7 @@ def test_finance_viewer_pages_month_reconciliation_issue_queue_by_channel(tmp_pa
         "has_more": True,
     }
     assert second_page.status_code == 200
-    assert [item["youtube_channel_id"] for item in second_page.json()["items"]] == [
-        "channel-tv-a"
-    ]
+    assert [item["youtube_channel_id"] for item in second_page.json()["items"]] == ["channel-tv-a"]
     assert second_page.json()["pagination"] == {
         "limit": 1,
         "offset": 1,
@@ -538,9 +522,7 @@ def test_import_rejects_locked_finance_month(tmp_path):
         facts = session.scalars(select(MonthlyChannelRevenueFactORM)).all()
 
     assert response.status_code == 409
-    assert (
-        response.json()["detail"] == "Finance month is locked for revenue fact imports"
-    )
+    assert response.json()["detail"] == "Finance month is locked for revenue fact imports"
     assert facts == []
 
 
@@ -564,10 +546,7 @@ def test_import_rejects_missing_channel(tmp_path):
     )
 
     assert response.status_code == 422
-    assert (
-        response.json()["detail"]
-        == "youtube_channel_id must reference an active channel"
-    )
+    assert response.json()["detail"] == "youtube_channel_id must reference an active channel"
 
 
 def test_import_rejects_invalid_source_kind(tmp_path):
@@ -590,10 +569,7 @@ def test_import_rejects_invalid_source_kind(tmp_path):
     )
 
     assert response.status_code == 422
-    assert (
-        response.json()["detail"]
-        == "Unknown revenue fact source_kind: ESTIMATED_FAKE_SOURCE"
-    )
+    assert response.json()["detail"] == "Unknown revenue fact source_kind: ESTIMATED_FAKE_SOURCE"
 
 
 def test_import_accepts_gateway_subject_actor_id(tmp_path):

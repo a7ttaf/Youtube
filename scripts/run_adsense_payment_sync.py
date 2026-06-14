@@ -21,6 +21,7 @@ Exit codes (operator contract -- spec §10):
     !=0 -- argparse rejection (bad --tenant UUID, missing/blank required flag).
     (untyped errors propagate with a real traceback.)
 """
+
 # ============================================================================
 # Purpose: Operator CLI surface that drives one AdSense live payment sync for a
 #          single (tenant, account). Translates argparse errors, typed
@@ -84,17 +85,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the AdSense live payment sync for one (tenant, account).",
     )
-    parser.add_argument(
-        "--tenant", required=True, type=UUID, help="Tenant UUID for this sync."
-    )
+    parser.add_argument("--tenant", required=True, type=UUID, help="Tenant UUID for this sync.")
     parser.add_argument(
         "--account",
         required=True,
         help="AdSense account id (bare id or accounts/<id>).",
     )
-    parser.add_argument(
-        "--reason", required=True, help="Non-empty audit reason for the pull."
-    )
+    parser.add_argument("--reason", required=True, help="Non-empty audit reason for the pull.")
     parser.add_argument(
         "--dry-run",
         action="store_true",

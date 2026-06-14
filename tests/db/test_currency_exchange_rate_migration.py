@@ -47,14 +47,11 @@ def test_currency_exchange_rate_migration_creates_rate_table():
         inspector = inspect(connection)
         table_names = inspector.get_table_names()
         columns = {
-            column["name"]: column
-            for column in inspector.get_columns("currency_exchange_rates")
+            column["name"]: column for column in inspector.get_columns("currency_exchange_rates")
         }
         check_constraints = {
             constraint["name"]: constraint["sqltext"]
-            for constraint in inspector.get_check_constraints(
-                "currency_exchange_rates"
-            )
+            for constraint in inspector.get_check_constraints("currency_exchange_rates")
         }
         indexes = {
             index["name"]: tuple(index["column_names"])
@@ -62,9 +59,7 @@ def test_currency_exchange_rate_migration_creates_rate_table():
         }
         unique_constraints = {
             constraint["name"]: tuple(constraint["column_names"])
-            for constraint in inspector.get_unique_constraints(
-                "currency_exchange_rates"
-            )
+            for constraint in inspector.get_unique_constraints("currency_exchange_rates")
         }
 
     assert "currency_exchange_rates" in table_names

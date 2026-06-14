@@ -1,4 +1,5 @@
 """YouTube Analytics targeted channel ingestion tests (spec §5.5)."""
+
 from __future__ import annotations
 
 import json
@@ -183,9 +184,7 @@ def test_fetch_channel_report(mock_credentials) -> None:
         assert params["endDate"] == "2026-05-01"
         assert params["metrics"] == "estimatedRevenue,estimatedAdRevenue,grossRevenue"
         assert params["dimensions"] == "month"
-        body = json.dumps(
-            {"rows": [["2026-05", 1.23, 0.45, 1.68]]}
-        ).encode()
+        body = json.dumps({"rows": [["2026-05", 1.23, 0.45, 1.68]]}).encode()
         return httpx.Response(200, content=body)
 
     http = GoogleHttpClient(
@@ -222,7 +221,8 @@ def test_fetch_channel_report_rejects_malformed_report_month(
 
 @pytest.mark.parametrize("bad_account", ["", "   ", "\t\n"])
 def test_fetch_channel_report_rejects_empty_account_id(
-    mock_credentials, bad_account: str,
+    mock_credentials,
+    bad_account: str,
 ) -> None:
     """Empty/whitespace account_id must fail closed before any HTTP traffic."""
     http = GoogleHttpClient(
@@ -241,7 +241,8 @@ def test_fetch_channel_report_rejects_empty_account_id(
 
 @pytest.mark.parametrize("bad_channel", ["", "   ", "\t\n"])
 def test_fetch_channel_report_rejects_empty_channel_id(
-    mock_credentials, bad_channel: str,
+    mock_credentials,
+    bad_channel: str,
 ) -> None:
     """Empty/whitespace channel_id must fail closed before any HTTP traffic."""
     http = GoogleHttpClient(
