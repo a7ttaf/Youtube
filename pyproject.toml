@@ -48,8 +48,21 @@ src = ["backend"]
 # Ruff 0.15+ removes parentheses around except-tuples on Python 3.14+ even
 # though the two forms are semantically equivalent; keep the explicit tuple
 # form on files where the parenthesized multi-type except was the shipping
-# style in main and where DeepSource flagged the bare-comma form.
-per-file-target-version = { "backend/ums_smart_revenue/api/connectors.py" = "py38", "backend/ums_smart_revenue/api/exports.py" = "py38", "backend/ums_smart_revenue/auth/sql_audit_sink.py" = "py38" }
+# style in main and where DeepSource flagged the bare-comma form (FLK-E999:
+# DeepSource's parser does not accept PEP 758 unparenthesized except groups).
+[tool.ruff.per-file-target-version]
+"backend/ums_smart_revenue/api/connectors.py" = "py38"
+"backend/ums_smart_revenue/api/exports.py" = "py38"
+"backend/ums_smart_revenue/auth/sql_audit_sink.py" = "py38"
+"backend/ums_smart_revenue/connectors/runs/normalization.py" = "py38"
+"backend/ums_smart_revenue/finance/explanations.py" = "py38"
+
+[tool.ruff.format]
+# Force LF so `ruff format` does not rewrite files with CRLF on Windows
+# checkouts; the repo is LF-standard (core.autocrlf is false and the only
+# CRLF file is pinned to eol=lf in .gitattributes). Keeps `git diff --check`
+# clean regardless of the developer's platform.
+line-ending = "lf"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]
