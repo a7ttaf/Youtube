@@ -18,9 +18,7 @@ SECRET_REF_PREFIXES = (
     "vault://",
     "kms://",
 )
-CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = (
-    "uq_api_connector_credentials_connector_account"
-)
+CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = "uq_api_connector_credentials_connector_account"
 MAX_CREDENTIAL_PAGE_SIZE = 100
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
@@ -50,9 +48,7 @@ class ConnectorCredentialEntry:
                 else None
             ),
             "token_expiry_at": (
-                self.token_expiry_at.isoformat()
-                if self.token_expiry_at is not None
-                else None
+                self.token_expiry_at.isoformat() if self.token_expiry_at is not None else None
             ),
             "last_refresh_status": self.last_refresh_status,
             "last_refresh_error_class": self.last_refresh_error_class,
@@ -112,9 +108,7 @@ class SqlAlchemyConnectorCredentialRepository:
             statement = statement.where(
                 ApiConnectorCredentialORM.connector_key.in_(sorted(connector_keys))
             )
-        rows = self._session.scalars(
-            statement.limit(limit + 1).offset(offset)
-        ).all()
+        rows = self._session.scalars(statement.limit(limit + 1).offset(offset)).all()
         visible_rows = rows[:limit]
         return ConnectorCredentialPage(
             items=[self._to_entry(row) for row in visible_rows],
@@ -242,9 +236,7 @@ def _parse_uuid(value: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ConnectorCredentialValidationError(
-            "actor_user_id must be a valid UUID"
-        ) from exc
+        raise ConnectorCredentialValidationError("actor_user_id must be a valid UUID") from exc
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
@@ -264,9 +256,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
     try:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
-        raise ConnectorCredentialValidationError(
-            "tenant_id must be a valid UUID"
-        ) from exc
+        raise ConnectorCredentialValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
@@ -294,12 +284,14 @@ def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
     )
 
 
-_ACTOR_FK_CONSTRAINTS = frozenset({
-    "fk_api_connector_credentials_created_by",
-    "fk_api_connector_credentials_updated_by",
-    "fk_api_connector_credentials_tenant_created_by",
-    "fk_api_connector_credentials_tenant_updated_by",
-})
+_ACTOR_FK_CONSTRAINTS = frozenset(
+    {
+        "fk_api_connector_credentials_created_by",
+        "fk_api_connector_credentials_updated_by",
+        "fk_api_connector_credentials_tenant_created_by",
+        "fk_api_connector_credentials_tenant_updated_by",
+    }
+)
 
 
 def _is_foreign_key_integrity_error(exc: IntegrityError) -> bool:

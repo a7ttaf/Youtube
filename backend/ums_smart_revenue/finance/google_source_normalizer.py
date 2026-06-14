@@ -226,9 +226,7 @@ class GoogleSourceNormalizer:
                 self._tenant_id,
                 month,
             )
-            raise RevenueFactLockedMonthError(
-                "Finance month is locked for revenue fact imports"
-            )
+            raise RevenueFactLockedMonthError("Finance month is locked for revenue fact imports")
 
         # Step 2 - Fetch source rows for this tenant + month.
         source_repo = SqlAlchemyGoogleRevenueSourceRowRepository(self._session)
@@ -240,17 +238,14 @@ class GoogleSourceNormalizer:
         # caller restricted scope; "not requested" is not "broken".
         if normalized_channel_ids is not None:
             in_scope_rows = [
-                row for row in all_rows
-                if row.youtube_channel_id in normalized_channel_ids
+                row for row in all_rows if row.youtube_channel_id in normalized_channel_ids
             ]
         else:
             in_scope_rows = all_rows
 
         # Step 4 - Resolve active channels for this tenant in one batched query.
         in_scope_channel_ids = {
-            row.youtube_channel_id
-            for row in in_scope_rows
-            if row.youtube_channel_id is not None
+            row.youtube_channel_id for row in in_scope_rows if row.youtube_channel_id is not None
         }
         active_channel_ids: set[str] = set()
         if in_scope_channel_ids:
@@ -275,7 +270,8 @@ class GoogleSourceNormalizer:
         unchanged: list[RevenueFactEntry] = []
         skipped: list[SkippedSourceRow] = []
         facts_repo = SqlAlchemyRevenueFactRepository(
-            self._session, tenant_id=self._tenant_id,
+            self._session,
+            tenant_id=self._tenant_id,
         )
         facts_by_channel: dict[str, list[RevenueFactEntry]] = {}
 
@@ -325,7 +321,8 @@ class GoogleSourceNormalizer:
                 # preferred metric_keys for this source_system.
                 skipped.extend(
                     SkippedSourceRow(
-                        source_row_id=r.id, reason=SkipReason.NO_CANONICAL_ROW,
+                        source_row_id=r.id,
+                        reason=SkipReason.NO_CANONICAL_ROW,
                     )
                     for r in usd_rows
                 )
@@ -334,7 +331,8 @@ class GoogleSourceNormalizer:
             # Step 6(g) - non-canonical USD siblings.
             skipped.extend(
                 SkippedSourceRow(
-                    source_row_id=r.id, reason=SkipReason.NON_CANONICAL_METRIC,
+                    source_row_id=r.id,
+                    reason=SkipReason.NON_CANONICAL_METRIC,
                 )
                 for r in non_canonical_rest
             )
@@ -350,14 +348,12 @@ class GoogleSourceNormalizer:
             # channel_id appears across multiple source_system buckets.
             if channel_id not in facts_by_channel:
                 facts_by_channel[channel_id] = facts_repo.list_channel_month_facts(
-                    month=month, youtube_channel_id=channel_id,
+                    month=month,
+                    youtube_channel_id=channel_id,
                 )
             existing_facts = facts_by_channel[channel_id]
             existing = next(
-                (
-                    fact for fact in existing_facts
-                    if fact.source_kind == mapped_source_kind.value
-                ),
+                (fact for fact in existing_facts if fact.source_kind == mapped_source_kind.value),
                 None,
             )
 
@@ -415,7 +411,10 @@ class GoogleSourceNormalizer:
             updated.append(written)
 
         result = NormalizationResult(
-            created=created, updated=updated, unchanged=unchanged, skipped=skipped,
+            created=created,
+            updated=updated,
+            unchanged=unchanged,
+            skipped=skipped,
         )
         # Aggregate skip-reason distribution (counts only, no source_row_id
         # values) per spec Section 6.5 "Observability". Empty dict when

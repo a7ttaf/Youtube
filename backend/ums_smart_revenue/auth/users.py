@@ -32,9 +32,7 @@ T = TypeVar("T")
 USER_STATUS_ACTIVE = "active"
 USER_STATUS_DISABLED = "disabled"
 USER_STATUS_SERVICE = "service"
-USER_STATUSES = frozenset(
-    {USER_STATUS_ACTIVE, USER_STATUS_DISABLED, USER_STATUS_SERVICE}
-)
+USER_STATUSES = frozenset({USER_STATUS_ACTIVE, USER_STATUS_DISABLED, USER_STATUS_SERVICE})
 USER_EMAIL_UNIQUE_CONSTRAINT = "uq_users_email_lower"
 USER_EMAIL_MAX_LENGTH = 320
 USER_DISPLAY_NAME_MAX_LENGTH = 200
@@ -80,9 +78,7 @@ class UserAccessProfileEntry:
         """Serialize the access profile for API responses."""
         return {
             "user": self.user.to_api(),
-            "role_assignments": [
-                assignment.to_api() for assignment in self.role_assignments
-            ],
+            "role_assignments": [assignment.to_api() for assignment in self.role_assignments],
             "direct_permissions": [grant.to_api() for grant in self.direct_permissions],
         }
 
@@ -145,9 +141,7 @@ class SqlAlchemyUserAccountRepository:
             "display_name",
             max_length=USER_DISPLAY_NAME_MAX_LENGTH,
         )
-        normalized_is_service_account = _normalize_service_account_flag(
-            is_service_account
-        )
+        normalized_is_service_account = _normalize_service_account_flag(is_service_account)
 
         def operation() -> UserAccountEntry:
             """Attempt one account-create write against the current session."""
@@ -160,9 +154,7 @@ class SqlAlchemyUserAccountRepository:
                 email=normalized_email,
                 display_name=normalized_display_name,
                 status=(
-                    USER_STATUS_SERVICE
-                    if normalized_is_service_account
-                    else USER_STATUS_ACTIVE
+                    USER_STATUS_SERVICE if normalized_is_service_account else USER_STATUS_ACTIVE
                 ),
                 is_service_account=normalized_is_service_account,
             )
@@ -171,9 +163,7 @@ class SqlAlchemyUserAccountRepository:
                 self._session.flush()
             except IntegrityError as exc:
                 self._session.rollback()
-                if _is_email_constraint_violation(exc) or self._email_exists(
-                    normalized_email
-                ):
+                if _is_email_constraint_violation(exc) or self._email_exists(normalized_email):
                     raise UserAccountConflictError("User email already exists") from exc
                 raise UserAccountConflictError(
                     "User account violates database constraints"
@@ -219,9 +209,7 @@ class SqlAlchemyUserAccountRepository:
             offset=normalized_offset,
         )
 
-        def operation() -> tuple[
-            tuple[UserAccountEntry, ...], bool, dict[str, str] | None
-        ]:
+        def operation() -> tuple[tuple[UserAccountEntry, ...], bool, dict[str, str] | None]:
             """Attempt one user-list read against the current session."""
             email_sort_key = func.lower(UserORM.email)
             statement = (
@@ -304,8 +292,7 @@ class SqlAlchemyUserAccountRepository:
                     _role_access_to_entry(row, scope) for row, scope in role_rows
                 ),
                 direct_permissions=tuple(
-                    _permission_access_to_entry(row, scope)
-                    for row, scope in permission_rows
+                    _permission_access_to_entry(row, scope) for row, scope in permission_rows
                 ),
             )
 
@@ -397,17 +384,11 @@ class SqlAlchemyUserAccountRepository:
                     attempt_index + 1 >= USER_ACCOUNT_STORAGE_ATTEMPTS
                     or not _is_retryable_user_storage_error(exc)
                 ):
-                    raise UserAccountStorageError(
-                        "User account storage unavailable"
-                    ) from exc
-                logger.warning(
-                    "Retrying user account storage operation after transient failure"
-                )
+                    raise UserAccountStorageError("User account storage unavailable") from exc
+                logger.warning("Retrying user account storage operation after transient failure")
         raise RuntimeError("unreachable user account retry state")
 
-    def _email_exists(
-        self, email: str, *, excluding_user_id: UUID | None = None
-    ) -> bool:
+    def _email_exists(self, email: str, *, excluding_user_id: UUID | None = None) -> bool:
         """Return whether a normalized email already belongs to another user."""
         criteria = [
             UserORM.tenant_id == self._tenant_id,
@@ -450,9 +431,7 @@ def _parse_uuid(value: object, *, field_name: str) -> UUID:
 
 def _normalize_email(value: str) -> str:
     """Normalize an account email and reject malformed local or domain parts."""
-    normalized = _normalize_bounded_string(
-        value, "email", max_length=USER_EMAIL_MAX_LENGTH
-    ).lower()
+    normalized = _normalize_bounded_string(value, "email", max_length=USER_EMAIL_MAX_LENGTH).lower()
     if normalized.count("@") != 1:
         raise UserAccountValidationError("email must be a valid email address")
     local, domain = normalized.split("@", maxsplit=1)
@@ -474,9 +453,7 @@ def _normalize_status(value: str) -> str:
     normalized = _normalize_required_string(value, "status").lower()
     if normalized not in USER_STATUSES:
         allowed = ", ".join(sorted(USER_STATUSES))
-        raise UserAccountValidationError(
-            f"Unknown status: {normalized}; allowed: {allowed}"
-        )
+        raise UserAccountValidationError(f"Unknown status: {normalized}; allowed: {allowed}")
     return normalized
 
 
@@ -510,9 +487,7 @@ def _normalize_user_cursor(
 ) -> tuple[str, UUID] | None:
     """Normalize the user-list keyset cursor and reject ambiguous paging."""
     if (cursor_email is None) != (cursor_id is None):
-        raise UserAccountValidationError(
-            "cursor_email and cursor_id must be provided together"
-        )
+        raise UserAccountValidationError("cursor_email and cursor_id must be provided together")
     if cursor_email is None or cursor_id is None:
         return None
     if offset != 0:
@@ -533,13 +508,9 @@ def _normalize_service_account_flag(value: object) -> bool:
 def _require_compatible_status(row: UserORM, status: str) -> None:
     """Enforce human versus service-account lifecycle status invariants."""
     if status == USER_STATUS_SERVICE and not row.is_service_account:
-        raise UserAccountValidationError(
-            "service status requires a service account user"
-        )
+        raise UserAccountValidationError("service status requires a service account user")
     if row.is_service_account and status == USER_STATUS_ACTIVE:
-        raise UserAccountValidationError(
-            "service accounts must use service or disabled status"
-        )
+        raise UserAccountValidationError("service accounts must use service or disabled status")
 
 
 def _normalize_required_string(value: object, field_name: str) -> str:
@@ -556,9 +527,7 @@ def _normalize_bounded_string(value: str, field_name: str, *, max_length: int) -
     """Normalize a required string and enforce a maximum persisted length."""
     normalized = _normalize_required_string(value, field_name)
     if len(normalized) > max_length:
-        raise UserAccountValidationError(
-            f"{field_name} must be at most {max_length} characters"
-        )
+        raise UserAccountValidationError(f"{field_name} must be at most {max_length} characters")
     return normalized
 
 

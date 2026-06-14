@@ -143,8 +143,7 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         # run-history panel; mirrors GET /connectors/runs. This one capability
         # is scope-aware so connector-scoped users can open the panel while the
         # backend still restricts the row set to their granted connector IDs.
-        can_view_connector_health=connector_health_ids is None
-        or bool(connector_health_ids),
+        can_view_connector_health=connector_health_ids is None or bool(connector_health_ids),
         can_run_connector_jobs=_can(Permission.RUN_CONNECTOR_JOBS),
         can_view_audit=_can(Permission.VIEW_AUDIT_LOG),
     )

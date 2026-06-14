@@ -197,9 +197,7 @@ PERMISSION_DEFINITIONS: dict[Permission, PermissionDefinition] = {
 
 
 SENSITIVE_PERMISSIONS = frozenset(
-    permission
-    for permission, definition in PERMISSION_DEFINITIONS.items()
-    if definition.sensitive
+    permission for permission, definition in PERMISSION_DEFINITIONS.items() if definition.sensitive
 )
 
 
@@ -207,12 +205,8 @@ if set(PERMISSION_DEFINITIONS) != set(Permission):
     missing = sorted(
         permission.value for permission in set(Permission) - set(PERMISSION_DEFINITIONS)
     )
-    extra = sorted(
-        permission.value for permission in set(PERMISSION_DEFINITIONS) - set(Permission)
-    )
-    raise RuntimeError(
-        f"Permission definition coverage mismatch. missing={missing} extra={extra}"
-    )
+    extra = sorted(permission.value for permission in set(PERMISSION_DEFINITIONS) - set(Permission))
+    raise RuntimeError(f"Permission definition coverage mismatch. missing={missing} extra={extra}")
 
 _mismatched_permission_definitions = sorted(
     permission.value
@@ -220,6 +214,4 @@ _mismatched_permission_definitions = sorted(
     if definition.permission != permission
 )
 if _mismatched_permission_definitions:
-    raise RuntimeError(
-        f"Permission metadata key mismatch: {_mismatched_permission_definitions}"
-    )
+    raise RuntimeError(f"Permission metadata key mismatch: {_mismatched_permission_definitions}")

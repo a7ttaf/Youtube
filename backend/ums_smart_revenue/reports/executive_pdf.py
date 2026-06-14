@@ -133,9 +133,7 @@ def build_executive_pdf_report(
     if export_job.currency != "USD":
         raise ExecutivePdfValidationError("executive PDF report requires USD currency")
     if payment_match.currency != "USD" or bank_reconciliation.currency != "USD":
-        raise ExecutivePdfValidationError(
-            "executive PDF report requires USD source summaries"
-        )
+        raise ExecutivePdfValidationError("executive PDF report requires USD source summaries")
 
     return ExecutivePdfReport(
         export_job=export_job,
@@ -178,9 +176,7 @@ def build_executive_pdf_bytes(report: ExecutivePdfReport) -> bytes:
             f"Month: {report.export_job.month} | Scope: "
             f"{report.export_job.scope_type}"
             + (
-                f" ({report.export_job.scope_id})"
-                if report.export_job.scope_id is not None
-                else ""
+                f" ({report.export_job.scope_id})" if report.export_job.scope_id is not None else ""
             ),
             styles["Small"],
         ),
@@ -280,9 +276,7 @@ def _executive_summary(
             net_revenue.total_adjusted_gross_revenue_usd
         ),
         "total_net_revenue_usd": _decimal_to_api(net_revenue.total_net_revenue_usd),
-        "total_deduction_amount_usd": _decimal_to_api(
-            net_revenue.total_deduction_amount_usd
-        ),
+        "total_deduction_amount_usd": _decimal_to_api(net_revenue.total_deduction_amount_usd),
         # Deduction-split export contract: the channel-direct and
         # account-allocated totals SUPPLEMENT (never replace)
         # total_deduction_amount_usd. See the _gross_net_table contract block.
@@ -338,9 +332,7 @@ def _gross_net_table(report: ExecutivePdfReport) -> Table:
             "Adjusted Gross Revenue USD": _decimal_to_api(
                 report.net_revenue.total_adjusted_gross_revenue_usd
             ),
-            "Total Net Revenue USD": _decimal_to_api(
-                report.net_revenue.total_net_revenue_usd
-            ),
+            "Total Net Revenue USD": _decimal_to_api(report.net_revenue.total_net_revenue_usd),
             "Total Deduction Amount USD": _decimal_to_api(
                 report.net_revenue.total_deduction_amount_usd
             ),
@@ -398,9 +390,7 @@ def _channel_ranking_table(report: ExecutivePdfReport) -> Table:
     return _styled_table(rows)
 
 
-def _problem_summary(
-    report: ExecutivePdfReport, styles: dict[str, ParagraphStyle]
-) -> Paragraph:
+def _problem_summary(report: ExecutivePdfReport, styles: dict[str, ParagraphStyle]) -> Paragraph:
     """Create a paragraph summarizing detected smart alerts or indicate that none were generated."""
     if not report.smart_alerts.alerts:
         return Paragraph(
@@ -410,9 +400,7 @@ def _problem_summary(
     return Paragraph(messages, styles["BodyText"])
 
 
-def _recommendations(
-    report: ExecutivePdfReport, styles: dict[str, ParagraphStyle]
-) -> Paragraph:
+def _recommendations(report: ExecutivePdfReport, styles: dict[str, ParagraphStyle]) -> Paragraph:
     """Build recommendations from finance status summaries."""
     if report.payment_match.status != "PAYMENT_MATCHED":
         return Paragraph(
@@ -429,9 +417,7 @@ def _recommendations(
             "Review smart alerts and document resolution before distributing.",
             styles["BodyText"],
         )
-    return Paragraph(
-        "No blocking finance issues detected for this scope.", styles["BodyText"]
-    )
+    return Paragraph("No blocking finance issues detected for this scope.", styles["BodyText"])
 
 
 def _key_value_table(values: dict[str, object]) -> Table:

@@ -53,9 +53,7 @@ class TenantORM(TenantBase):
     primary_currency: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'USD'")
     )
-    status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'ACTIVE'")
-    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'ACTIVE'"))
     onboarding_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -76,8 +74,7 @@ class TenantORM(TenantBase):
             name="ck_tenants_status",
         ),
         CheckConstraint(
-            "length(primary_currency) = 3 "
-            "AND primary_currency = upper(primary_currency)",
+            "length(primary_currency) = 3 AND primary_currency = upper(primary_currency)",
             name="ck_tenants_primary_currency_iso4217",
         ),
         Index("uq_tenants_slug", "slug", unique=True),
@@ -94,9 +91,7 @@ class PlatformAdminORM(TenantBase):
     )
     email: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'ACTIVE'")
-    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'ACTIVE'"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

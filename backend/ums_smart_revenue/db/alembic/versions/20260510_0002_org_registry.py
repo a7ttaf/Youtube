@@ -31,9 +31,7 @@ def upgrade() -> None:
         ),
         sa.Column("type", sa.Text(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
-        sa.Column(
-            "active", sa.Boolean(), nullable=False, server_default=sa.text("true")
-        ),
+        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -46,9 +44,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.func.now(),
         ),
-        sa.CheckConstraint(
-            "type IN ('HOLDING', 'SECTOR', 'COMPANY')", name="ck_org_units_type"
-        ),
+        sa.CheckConstraint("type IN ('HOLDING', 'SECTOR', 'COMPANY')", name="ck_org_units_type"),
     )
     op.create_index("ix_org_units_parent_id", "org_units", ["parent_id"])
 
@@ -68,9 +64,7 @@ def upgrade() -> None:
             sa.ForeignKey("org_units.id", ondelete="RESTRICT"),
             nullable=True,
         ),
-        sa.Column(
-            "cms_status", sa.Text(), nullable=False, server_default=sa.text("'UNKNOWN'")
-        ),
+        sa.Column("cms_status", sa.Text(), nullable=False, server_default=sa.text("'UNKNOWN'")),
         sa.Column("content_owner_id", sa.Text(), nullable=True),
         sa.Column(
             "revenue_required",
@@ -84,9 +78,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'MISSING_REVENUE_SOURCE'"),
         ),
-        sa.Column(
-            "active", sa.Boolean(), nullable=False, server_default=sa.text("true")
-        ),
+        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -130,9 +122,7 @@ def upgrade() -> None:
         ),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("group_type", sa.Text(), nullable=False),
-        sa.Column(
-            "active", sa.Boolean(), nullable=False, server_default=sa.text("true")
-        ),
+        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -176,9 +166,7 @@ def downgrade() -> None:
     in this migration in reverse dependency order."""
     op.drop_table("channel_group_members")
     op.drop_table("channel_groups")
-    op.drop_index(
-        "ix_youtube_channels_primary_org_unit_id", table_name="youtube_channels"
-    )
+    op.drop_index("ix_youtube_channels_primary_org_unit_id", table_name="youtube_channels")
     op.drop_table("youtube_channels")
     op.drop_index("ix_org_units_parent_id", table_name="org_units")
     op.drop_table("org_units")

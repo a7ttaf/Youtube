@@ -23,8 +23,7 @@ def upgrade() -> None:
         "WHERE status = 'service' AND is_service_account IS false"
     )
     op.execute(
-        "UPDATE users SET status = 'service' "
-        "WHERE is_service_account IS true AND status = 'active'"
+        "UPDATE users SET status = 'service' WHERE is_service_account IS true AND status = 'active'"
     )
     op.create_check_constraint(
         "ck_users_service_account_status",

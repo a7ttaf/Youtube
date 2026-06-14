@@ -19,9 +19,7 @@ def upgrade() -> None:
     op.create_table(
         "finance_month_close",
         sa.Column("month", sa.Text(), primary_key=True),
-        sa.Column(
-            "status", sa.Text(), nullable=False, server_default=sa.text("'OPEN'")
-        ),
+        sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'OPEN'")),
         sa.Column("allocation_method", sa.Text(), nullable=True),
         sa.Column(
             "allocation_rule_payload",
@@ -48,9 +46,7 @@ def upgrade() -> None:
             "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_finance_month_close_month_format",
         ),
-        sa.CheckConstraint(
-            "status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"
-        ),
+        sa.CheckConstraint("status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"),
     )
 
 

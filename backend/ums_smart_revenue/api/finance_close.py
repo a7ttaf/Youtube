@@ -30,9 +30,7 @@ from ums_smart_revenue.finance.month_close_readiness import (
 
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-_BROADER_REVENUE_READ_SCOPE_TYPES = frozenset(
-    {"global", "sector", "company", "channel"}
-)
+_BROADER_REVENUE_READ_SCOPE_TYPES = frozenset({"global", "sector", "company", "channel"})
 
 
 class FinanceCloseReasonRequest(BaseModel):
@@ -80,7 +78,9 @@ def _strip_required_string(value):
 def get_finance_month_close(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
@@ -88,7 +88,9 @@ def get_finance_month_close(
     _require_finance_close_read_permission(user, month)
     close = repository.get(month)
     if close is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance month close record not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Finance month close record not found"
+        )
     record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -138,7 +140,9 @@ def lock_finance_month(
     month: str,
     payload: FinanceCloseReasonRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
@@ -173,7 +177,9 @@ def unlock_finance_month(
     month: str,
     payload: FinanceCloseReasonRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
@@ -203,7 +209,9 @@ def record_allocation_rule(
     month: str,
     payload: AllocationRuleRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
@@ -226,7 +234,10 @@ def record_allocation_rule(
         event_type=AuditEventType.ALLOCATION_RULE_CHANGED,
         month=month,
         reason=payload.reason,
-        details={"allocation_method": payload.allocation_method, "rule_payload": payload.rule_payload},
+        details={
+            "allocation_method": payload.allocation_method,
+            "rule_payload": payload.rule_payload,
+        },
     )
     return _with_audit_event(close, record)
 
@@ -250,9 +261,7 @@ def _require_finance_close_read_permission(user: UserPrincipal, month: str) -> N
     for assignment in user.role_assignments:
         if not assignment.active:
             continue
-        if Permission.VIEW_REVENUE not in ROLE_PERMISSIONS.get(
-            assignment.role, frozenset()
-        ):
+        if Permission.VIEW_REVENUE not in ROLE_PERMISSIONS.get(assignment.role, frozenset()):
             continue
         if _scope_authorizes_month_close_read(assignment.scope, month):
             return

@@ -68,7 +68,9 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
             "currency": fields["currency"],
             "period_start": fields["period_start"],
             "period_end": fields["period_end"],
-            "dimensions": _canonical_dimensions(cast(dict[str, object], fields.get("dimensions") or {})),
+            "dimensions": _canonical_dimensions(
+                cast(dict[str, object], fields.get("dimensions") or {})
+            ),
         }
     elif source_system == "youtube_analytics":
         canonical_payload = {
@@ -85,7 +87,9 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
             "filters": fields.get("filters"),
             "period_start": fields["period_start"],
             "period_end": fields["period_end"],
-            "dimensions": _canonical_dimensions(cast(dict[str, object], fields.get("dimensions") or {})),
+            "dimensions": _canonical_dimensions(
+                cast(dict[str, object], fields.get("dimensions") or {})
+            ),
         }
     else:  # adsense_management
         # Keyed on the STABLE logical identity: metric + account + period +
@@ -108,7 +112,9 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
             "account_id": fields["account_id"],
             "period_start": fields["period_start"],
             "period_end": fields["period_end"],
-            "dimensions": _canonical_dimensions(cast(dict[str, object], fields.get("dimensions") or {})),
+            "dimensions": _canonical_dimensions(
+                cast(dict[str, object], fields.get("dimensions") or {})
+            ),
         }
 
     # sort_keys gives cross-process stability; tight separators keep the digest

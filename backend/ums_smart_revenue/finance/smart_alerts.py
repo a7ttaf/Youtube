@@ -85,9 +85,7 @@ def build_monthly_smart_alert_summary(
     if high_gap_threshold_usd < 0:
         raise ValueError("high_gap_threshold_usd must be non-negative")
     if revenue_trend_anomaly_threshold_percent < 0:
-        raise ValueError(
-            "revenue_trend_anomaly_threshold_percent must be non-negative"
-        )
+        raise ValueError("revenue_trend_anomaly_threshold_percent must be non-negative")
     if missing_revenue_fact_channel_count < 0:
         raise ValueError("missing_revenue_fact_channel_count must be non-negative")
     normalized_close_status = close_status or "OPEN"
@@ -174,10 +172,7 @@ def _channels_missing_revenue_facts_alert(
     return MonthlySmartAlert(
         code="CHANNELS_MISSING_REVENUE_FACTS",
         severity="HIGH",
-        message=(
-            f"{count} active revenue-required "
-            f"channel(s) have no revenue facts for {month}."
-        ),
+        message=(f"{count} active revenue-required channel(s) have no revenue facts for {month}."),
         source="revenue_facts",
         confidence="E_MISSING",
         details={
@@ -289,9 +284,7 @@ def _revenue_trend_anomaly_alert(
     )
 
 
-def _month_not_locked_alert(
-    month: str, normalized_close_status: str
-) -> MonthlySmartAlert | None:
+def _month_not_locked_alert(month: str, normalized_close_status: str) -> MonthlySmartAlert | None:
     """Finance month is not yet LOCKED."""
     if normalized_close_status == "LOCKED":
         return None
@@ -322,9 +315,7 @@ def _manual_overrides_alert(
     )
 
 
-def _gap_above_threshold(
-    gap_usd: Decimal | None, threshold_usd: Decimal
-) -> bool:
+def _gap_above_threshold(gap_usd: Decimal | None, threshold_usd: Decimal) -> bool:
     """True when the absolute gap is at or above the threshold."""
     return gap_usd is not None and abs(gap_usd) >= threshold_usd
 
@@ -414,9 +405,7 @@ def _channel_trend_detail(
     """Return the trend anomaly detail for one channel, or None when not anomalous."""
     if previous.gross_revenue_usd == 0:
         return None
-    current_gross_revenue_usd = (
-        current.gross_revenue_usd if current is not None else Decimal("0")
-    )
+    current_gross_revenue_usd = current.gross_revenue_usd if current is not None else Decimal("0")
     change_ratio = (
         current_gross_revenue_usd - previous.gross_revenue_usd
     ) / previous.gross_revenue_usd

@@ -102,8 +102,7 @@ def run_policy_gate(project_root: Path = PROJECT_ROOT) -> int:
     )
     for violation in violations:
         print(
-            f"{violation.relative_path.as_posix()}:{violation.line}: "
-            f"{violation.symbol}",
+            f"{violation.relative_path.as_posix()}:{violation.line}: {violation.symbol}",
             file=sys.stderr,
         )
     return 1
@@ -137,18 +136,14 @@ def _scan_statement(
     violations: list[TestPolicyViolation],
 ) -> None:
     if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
-        violations.extend(
-            _decorator_violations(statement.decorator_list, relative_path, context)
-        )
+        violations.extend(_decorator_violations(statement.decorator_list, relative_path, context))
         _shadow_local_name(context, statement.name)
         child_context = _child_context_for_function(context, statement)
         _scan_statement_body(statement.body, relative_path, child_context, violations)
         return
 
     if isinstance(statement, ast.ClassDef):
-        violations.extend(
-            _decorator_violations(statement.decorator_list, relative_path, context)
-        )
+        violations.extend(_decorator_violations(statement.decorator_list, relative_path, context))
         _record_class_string_aliases(statement, context)
         _shadow_local_name(context, statement.name)
         child_context = _child_context_for_body(context, statement.body)
@@ -176,13 +171,9 @@ def _scan_statement(
 
     if isinstance(statement, ast.With | ast.AsyncWith):
         for item in statement.items:
-            _scan_node_for_violations(
-                item.context_expr, relative_path, context, violations
-            )
+            _scan_node_for_violations(item.context_expr, relative_path, context, violations)
             if item.optional_vars is not None:
-                _scan_node_for_violations(
-                    item.optional_vars, relative_path, context, violations
-                )
+                _scan_node_for_violations(item.optional_vars, relative_path, context, violations)
         _scan_statement_body(statement.body, relative_path, context, violations)
         return
 
@@ -190,9 +181,7 @@ def _scan_statement(
         _scan_statement_body(statement.body, relative_path, context, violations)
         for handler in statement.handlers:
             if handler.type is not None:
-                _scan_node_for_violations(
-                    handler.type, relative_path, context, violations
-                )
+                _scan_node_for_violations(handler.type, relative_path, context, violations)
             _scan_statement_body(handler.body, relative_path, context, violations)
         _scan_statement_body(statement.orelse, relative_path, context, violations)
         _scan_statement_body(statement.finalbody, relative_path, context, violations)
@@ -202,9 +191,7 @@ def _scan_statement(
         _scan_node_for_violations(statement.subject, relative_path, context, violations)
         for case in statement.cases:
             if case.guard is not None:
-                _scan_node_for_violations(
-                    case.guard, relative_path, context, violations
-                )
+                _scan_node_for_violations(case.guard, relative_path, context, violations)
             _scan_statement_body(case.body, relative_path, context, violations)
         return
 
@@ -220,9 +207,7 @@ def _scan_node_for_violations(
 ) -> None:
     for child in ast.walk(node):
         if isinstance(child, ast.Call):
-            _append_violation_if_forbidden(
-                violations, child.func, relative_path, context
-            )
+            _append_violation_if_forbidden(violations, child.func, relative_path, context)
             _check_getattr_indirection(violations, child, relative_path, context)
         elif isinstance(child, ast.Attribute | ast.Name):
             _append_violation_if_forbidden(violations, child, relative_path, context)
@@ -461,10 +446,7 @@ def _resolve_getattr_call_args(
 
 def _is_getattr_call(call: ast.Call, context: _ScopeContext) -> bool:
     if isinstance(call.func, ast.Name):
-        if (
-            call.func.id in context.shadowed_getattr_names
-            and call.func.id not in context.aliases
-        ):
+        if call.func.id in context.shadowed_getattr_names and call.func.id not in context.aliases:
             return False
     return _qualified_name(call.func, context.aliases) in GETATTR_SYMBOLS
 
@@ -520,9 +502,7 @@ def _iter_policy_files(project_root: Path) -> tuple[Path, ...]:
     return tuple(sorted(paths))
 
 
-def _include_declared_pytest_plugins(
-    project_root: Path, initial_paths: set[Path]
-) -> set[Path]:
+def _include_declared_pytest_plugins(project_root: Path, initial_paths: set[Path]) -> set[Path]:
     paths = set(initial_paths)
     pending = list(initial_paths)
     while pending:
@@ -574,10 +554,7 @@ def _pytest_plugin_mutation_literals(
         return ()
     if call.func.attr not in {"append", "extend"}:
         return ()
-    if not (
-        isinstance(call.func.value, ast.Name)
-        and call.func.value.id == PYTEST_PLUGINS_NAME
-    ):
+    if not (isinstance(call.func.value, ast.Name) and call.func.value.id == PYTEST_PLUGINS_NAME):
         return ()
     if len(call.args) != 1:
         return ()
@@ -640,11 +617,7 @@ def _string_literals(
 ) -> tuple[str, ...]:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return (node.value,)
-    if (
-        isinstance(node, ast.Name)
-        and string_aliases is not None
-        and node.id in string_aliases
-    ):
+    if isinstance(node, ast.Name) and string_aliases is not None and node.id in string_aliases:
         return string_aliases[node.id]
     if isinstance(node, ast.Starred):
         return _string_literals(node.value, string_aliases)
@@ -719,9 +692,7 @@ def _target_string_value_bindings(
     key = _assignment_string_key(target)
     if key:
         return ((key, value),)
-    if isinstance(target, ast.List | ast.Tuple) and isinstance(
-        value, ast.List | ast.Tuple
-    ):
+    if isinstance(target, ast.List | ast.Tuple) and isinstance(value, ast.List | ast.Tuple):
         bindings: list[tuple[str, ast.AST]] = []
         for child_target, child_value in zip(target.elts, value.elts, strict=False):
             bindings.extend(_target_string_value_bindings(child_target, child_value))
@@ -755,14 +726,10 @@ def _assignment_bindings(node: ast.AST) -> tuple[tuple[ast.Name, ast.AST], ...]:
     return tuple(bindings)
 
 
-def _target_value_bindings(
-    target: ast.AST, value: ast.AST
-) -> tuple[tuple[ast.Name, ast.AST], ...]:
+def _target_value_bindings(target: ast.AST, value: ast.AST) -> tuple[tuple[ast.Name, ast.AST], ...]:
     if isinstance(target, ast.Name):
         return ((target, value),)
-    if isinstance(target, ast.List | ast.Tuple) and isinstance(
-        value, ast.List | ast.Tuple
-    ):
+    if isinstance(target, ast.List | ast.Tuple) and isinstance(value, ast.List | ast.Tuple):
         bindings: list[tuple[ast.Name, ast.AST]] = []
         for child_target, child_value in zip(target.elts, value.elts, strict=False):
             bindings.extend(_target_value_bindings(child_target, child_value))
@@ -784,8 +751,7 @@ def _assignment_value(node: ast.AST) -> ast.AST | None:
 
 def _is_policy_symbol_or_prefix(symbol: str) -> bool:
     return any(
-        forbidden == symbol or forbidden.startswith(f"{symbol}.")
-        for forbidden in FORBIDDEN_SYMBOLS
+        forbidden == symbol or forbidden.startswith(f"{symbol}.") for forbidden in FORBIDDEN_SYMBOLS
     )
 
 
@@ -808,9 +774,7 @@ def _dedupe_violations(
         (violation.relative_path, violation.line, violation.symbol): violation
         for violation in violations
     }
-    return tuple(
-        sorted(unique.values(), key=lambda item: (item.relative_path, item.line))
-    )
+    return tuple(sorted(unique.values(), key=lambda item: (item.relative_path, item.line)))
 
 
 def main() -> int:

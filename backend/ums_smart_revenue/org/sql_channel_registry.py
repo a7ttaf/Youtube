@@ -20,8 +20,7 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _SQLITE_TENANT_CHANNEL_UNIQUE_ERROR = (
-    "unique constraint failed: youtube_channels.tenant_id, "
-    "youtube_channels.youtube_channel_id"
+    "unique constraint failed: youtube_channels.tenant_id, youtube_channels.youtube_channel_id"
 )
 
 
@@ -44,9 +43,7 @@ class SqlAlchemyChannelRegistry:
         ).all()
         return [self._to_entry(row) for row in rows]
 
-    def list_channels_by_ids(
-        self, youtube_channel_ids: set[str]
-    ) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
         """Return active channels matching a set of external channel ids."""
         if not youtube_channel_ids:
             return []
@@ -79,18 +76,14 @@ class SqlAlchemyChannelRegistry:
     ) -> ChannelRegistryEntry:
         """Create a channel row, raising on tenant-scoped duplicate or FK violation."""
         if self._get_row(youtube_channel_id) is not None:
-            raise ChannelRegistryConflictError(
-                f"Channel already exists: {youtube_channel_id}"
-            )
+            raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
 
         row = YouTubeChannelORM(
             id=uuid4(),
             tenant_id=self._tenant_id,
             youtube_channel_id=youtube_channel_id,
             channel_name=channel_name,
-            primary_org_unit_id=_parse_optional_uuid(
-                primary_company_id, "primary_company_id"
-            ),
+            primary_org_unit_id=_parse_optional_uuid(primary_company_id, "primary_company_id"),
             cms_status=cms_status,
             content_owner_id=None,
             revenue_required=revenue_required,
@@ -150,9 +143,7 @@ class SqlAlchemyChannelRegistry:
         # is a safe retry: no re-parenting would occur, so the lock check is
         # unnecessary and would otherwise wrongly return 409 to legitimate
         # clients that resubmit the current value.
-        parsed_primary_company_id = _parse_optional_uuid(
-            primary_company_id, "primary_company_id"
-        )
+        parsed_primary_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
         if parsed_primary_company_id == row.primary_org_unit_id:
             return self._to_entry(row)
 
@@ -192,15 +183,12 @@ class SqlAlchemyChannelRegistry:
             .distinct()
             .join(
                 FinanceMonthCloseORM,
-                (FinanceMonthCloseORM.tenant_id
-                 == MonthlyChannelRevenueFactORM.tenant_id)
-                & (FinanceMonthCloseORM.month
-                   == MonthlyChannelRevenueFactORM.month),
+                (FinanceMonthCloseORM.tenant_id == MonthlyChannelRevenueFactORM.tenant_id)
+                & (FinanceMonthCloseORM.month == MonthlyChannelRevenueFactORM.month),
             )
             .where(
                 MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
-                MonthlyChannelRevenueFactORM.youtube_channel_id
-                == youtube_channel_id,
+                MonthlyChannelRevenueFactORM.youtube_channel_id == youtube_channel_id,
                 FinanceMonthCloseORM.status == "LOCKED",
             )
         ).all()
@@ -248,9 +236,7 @@ def _parse_optional_uuid(value: str | None, field_name: str) -> UUID | None:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ChannelRegistryValidationError(
-            f"{field_name} must be a valid UUID"
-        ) from exc
+        raise ChannelRegistryValidationError(f"{field_name} must be a valid UUID") from exc
 
 
 def _is_duplicate_channel_integrity_error(exc: IntegrityError) -> bool:
@@ -258,10 +244,7 @@ def _is_duplicate_channel_integrity_error(exc: IntegrityError) -> bool:
     error_text = _integrity_error_text(exc)
     return (
         "youtube_channel_id" in constraint_name
-        or (
-            "youtube_channels" in constraint_name
-            and "youtube_channel" in constraint_name
-        )
+        or ("youtube_channels" in constraint_name and "youtube_channel" in constraint_name)
         or "unique constraint failed: youtube_channels.youtube_channel_id" in error_text
         or _SQLITE_TENANT_CHANNEL_UNIQUE_ERROR in error_text
     )
@@ -280,9 +263,7 @@ def _channel_registry_validation_error_from_integrity_error(
         return ChannelRegistryValidationError(
             "primary_company_id must reference an existing org unit"
         )
-    return ChannelRegistryValidationError(
-        "Channel registry values violate database constraints"
-    )
+    return ChannelRegistryValidationError("Channel registry values violate database constraints")
 
 
 def _constraint_name(exc: IntegrityError) -> str:

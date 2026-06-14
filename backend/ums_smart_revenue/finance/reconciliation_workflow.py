@@ -11,6 +11,7 @@ Hops:
 Rounding remainder for each attributed aggregate lands on the largest-gross
 channel so per-channel sums equal the aggregate exactly.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -30,9 +31,7 @@ def _q(value: Decimal) -> Decimal:
 class UsViewShareProvider(Protocol):
     """Supplies the US-view revenue fraction (0..1) for a channel-month."""
 
-    def us_view_share(
-        self, month: str, youtube_channel_id: str
-    ) -> Decimal | None:
+    def us_view_share(self, month: str, youtube_channel_id: str) -> Decimal | None:
         """Return the US-view fraction, or None if unavailable."""
         ...
 
@@ -40,9 +39,7 @@ class UsViewShareProvider(Protocol):
 class NullUsViewShareProvider:
     """Default provider: US-view data not yet ingested (refine-later)."""
 
-    def us_view_share(
-        self, month: str, youtube_channel_id: str
-    ) -> Decimal | None:
+    def us_view_share(self, month: str, youtube_channel_id: str) -> Decimal | None:
         """Always None until a real geography feed exists."""
         return None
 
@@ -77,9 +74,7 @@ class MonthReconciliationResult:
     warnings: list[dict[str, str]] = field(default_factory=list)
 
 
-def _attribute(
-    total: Decimal, gross: dict[str, Decimal], g: Decimal
-) -> dict[str, Decimal]:
+def _attribute(total: Decimal, gross: dict[str, Decimal], g: Decimal) -> dict[str, Decimal]:
     """Split ``total`` across channels ∝ gross; remainder to largest gross."""
     if total == 0 or g <= 0:
         return {c: Decimal("0.000000") for c in gross}
@@ -108,10 +103,7 @@ def compute_month_reconciliation(
 
     # Hop 1 — US tax per channel.
     us_tax = {
-        c: _q(
-            (us_view_shares.get(c) or Decimal("0")) * gross[c] * withholding_rate
-        )
-        for c in gross
+        c: _q((us_view_shares.get(c) or Decimal("0")) * gross[c] * withholding_rate) for c in gross
     }
     tax_total = sum(us_tax.values(), Decimal("0"))
     if any(us_view_shares.get(c) is None for c in gross):
@@ -224,13 +216,7 @@ def compute_month_reconciliation(
 
     channels: list[ChannelReconciliation] = []
     for c in gross:
-        net = _q(
-            gross[c]
-            - us_tax[c]
-            - yt_fee[c]
-            - adsense_bank_fee[c]
-            - fx_variance[c]
-        )
+        net = _q(gross[c] - us_tax[c] - yt_fee[c] - adsense_bank_fee[c] - fx_variance[c])
         channels.append(
             ChannelReconciliation(
                 youtube_channel_id=c,

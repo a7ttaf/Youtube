@@ -28,13 +28,9 @@ def upgrade() -> None:
         sa.Column("scope_type", sa.Text(), nullable=False),
         sa.Column("scope_id", sa.Text(), nullable=True),
         sa.Column("month", sa.Text(), nullable=False),
-        sa.Column(
-            "currency", sa.Text(), nullable=False, server_default=sa.text("'USD'")
-        ),
+        sa.Column("currency", sa.Text(), nullable=False, server_default=sa.text("'USD'")),
         sa.Column("requested_by", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column(
-            "status", sa.Text(), nullable=False, server_default=sa.text("'QUEUED'")
-        ),
+        sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'QUEUED'")),
         sa.Column("file_url", sa.Text(), nullable=True),
         sa.Column(
             "month_lock_status",

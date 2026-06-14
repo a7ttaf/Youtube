@@ -66,7 +66,7 @@ def _parse_uuid_or_none(value: str) -> UUID | None:
     """Parse audit actor ids when they can be represented as local user FKs."""
     try:
         return UUID(value)
-    except (ValueError, TypeError, AttributeError):
+    except ValueError, TypeError, AttributeError:
         # ValueError covers malformed UUID strings; TypeError/AttributeError
         # cover non-string inputs (None, int, etc.) that violate the str
         # contract. All fall back to the fail-closed gateway-actor path.

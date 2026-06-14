@@ -62,18 +62,14 @@ def _require_analytics_view_permission(user: UserPrincipal) -> None:
         HTTPException: HTTP 403 when the principal is disabled or holds no
             VIEW_ANALYTICS grant in any scope.
     """
-    if user.disabled or not _granted_scopes_for_permission(
-        user, Permission.VIEW_ANALYTICS
-    ):
+    if user.disabled or not _granted_scopes_for_permission(user, Permission.VIEW_ANALYTICS):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {Permission.VIEW_ANALYTICS.value}",
         )
 
 
-def _direct_scopes_for_permission(
-    user: UserPrincipal, permission: Permission
-) -> list[AccessScope]:
+def _direct_scopes_for_permission(user: UserPrincipal, permission: Permission) -> list[AccessScope]:
     """Yield active direct scopes granting the permission."""
     return [
         grant.scope
@@ -82,15 +78,12 @@ def _direct_scopes_for_permission(
     ]
 
 
-def _role_scopes_for_permission(
-    user: UserPrincipal, permission: Permission
-) -> list[AccessScope]:
+def _role_scopes_for_permission(user: UserPrincipal, permission: Permission) -> list[AccessScope]:
     """Yield active role-derived scopes granting the permission."""
     return [
         assignment.scope
         for assignment in user.role_assignments
-        if assignment.active
-        and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
     ]
 
 

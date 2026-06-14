@@ -10,9 +10,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 EXPORT_ARTIFACT_DIR_ENV = "UMS_EXPORT_ARTIFACT_DIR"
-DEFAULT_EXPORT_ARTIFACT_DIR = (
-    Path(tempfile.gettempdir()) / "ums-smart-revenue-export-artifacts"
-)
+DEFAULT_EXPORT_ARTIFACT_DIR = Path(tempfile.gettempdir()) / "ums-smart-revenue-export-artifacts"
 EXPORT_ARTIFACT_URI_PREFIX = "file-store://"
 DEFAULT_MAX_ARTIFACT_SIZE_BYTES = 500 * 1024 * 1024
 
@@ -66,8 +64,7 @@ class FileSystemExportArtifactStore:
             raise ExportArtifactStorageError("artifact content must not be empty")
         if len(content) > self._max_artifact_size_bytes:
             raise ExportArtifactStorageError(
-                "artifact size exceeds limit: "
-                f"{len(content)} > {self._max_artifact_size_bytes}"
+                f"artifact size exceeds limit: {len(content)} > {self._max_artifact_size_bytes}"
             )
 
         relative_path = Path("exports") / normalized_export_id / normalized_filename
@@ -108,9 +105,7 @@ class FileSystemExportArtifactStore:
             try:
                 persisted_bytes = target_path.read_bytes()
             except OSError as exc:
-                raise ExportArtifactStorageError(
-                    "artifact storage unavailable"
-                ) from exc
+                raise ExportArtifactStorageError("artifact storage unavailable") from exc
             byte_size = len(persisted_bytes)
             checksum = hashlib.sha256(persisted_bytes).hexdigest()
         return ExportArtifactMetadata(
@@ -153,12 +148,7 @@ def _normalize_export_id(value: str) -> str:
 
 def _normalize_filename(value: str) -> str:
     normalized = value.strip()
-    if (
-        not normalized
-        or normalized in {".", ".."}
-        or "/" in normalized
-        or "\\" in normalized
-    ):
+    if not normalized or normalized in {".", ".."} or "/" in normalized or "\\" in normalized:
         raise ExportArtifactStorageError("artifact filename is invalid")
     return normalized
 

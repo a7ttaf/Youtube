@@ -54,13 +54,9 @@ def load_app_settings() -> AppSettings:
     raw_database_url = environ.get(DATABASE_URL_ENV)
     database_url = raw_database_url.strip() if raw_database_url else None
     raw_trusted_gateway_token = environ.get(TRUSTED_GATEWAY_TOKEN_ENV)
-    trusted_gateway_token = (
-        raw_trusted_gateway_token.strip() if raw_trusted_gateway_token else None
-    )
+    trusted_gateway_token = raw_trusted_gateway_token.strip() if raw_trusted_gateway_token else None
     raw_authz_source = environ.get(AUTHZ_SOURCE_ENV)
-    authz_source = (
-        raw_authz_source.strip().lower() if raw_authz_source else AUTHZ_SOURCE_HEADERS
-    )
+    authz_source = raw_authz_source.strip().lower() if raw_authz_source else AUTHZ_SOURCE_HEADERS
     if authz_source not in ALLOWED_AUTHZ_SOURCES:
         allowed = ", ".join(sorted(ALLOWED_AUTHZ_SOURCES))
         raise ValueError(f"{AUTHZ_SOURCE_ENV} must be one of: {allowed}")
@@ -72,9 +68,7 @@ def load_app_settings() -> AppSettings:
         connector_job_executor_enabled=_load_bool(
             CONNECTOR_JOB_EXECUTOR_ENABLED_ENV, default=False
         ),
-        connector_job_max_workers=_load_int(
-            CONNECTOR_JOB_MAX_WORKERS_ENV, default=1
-        ),
+        connector_job_max_workers=_load_int(CONNECTOR_JOB_MAX_WORKERS_ENV, default=1),
         connector_job_stale_running_hours=_load_int(
             CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV, default=6
         ),
@@ -131,9 +125,7 @@ def _load_google_connector_service_actor_id() -> str | None:
     try:
         parsed = UUID(candidate)
     except (ValueError, AttributeError) as exc:
-        raise ValueError(
-            f"{GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV} must be a valid UUID"
-        ) from exc
+        raise ValueError(f"{GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV} must be a valid UUID") from exc
     return str(parsed)
 
 

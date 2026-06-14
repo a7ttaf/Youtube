@@ -28,9 +28,7 @@ def upgrade() -> None:
         ),
         sa.Column("email", sa.Text(), nullable=False),
         sa.Column("display_name", sa.Text(), nullable=False),
-        sa.Column(
-            "status", sa.Text(), nullable=False, server_default=sa.text("'active'")
-        ),
+        sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'active'")),
         sa.Column(
             "is_service_account",
             sa.Boolean(),
@@ -49,13 +47,9 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.func.now(),
         ),
-        sa.CheckConstraint(
-            "status IN ('active', 'disabled', 'service')", name="ck_users_status"
-        ),
+        sa.CheckConstraint("status IN ('active', 'disabled', 'service')", name="ck_users_status"),
     )
-    op.create_index(
-        "uq_users_email_lower", "users", [sa.text("lower(email)")], unique=True
-    )
+    op.create_index("uq_users_email_lower", "users", [sa.text("lower(email)")], unique=True)
 
     op.create_table(
         "roles",
@@ -80,9 +74,7 @@ def upgrade() -> None:
         "permissions",
         sa.Column("key", sa.Text(), primary_key=True),
         sa.Column("label", sa.Text(), nullable=False),
-        sa.Column(
-            "sensitive", sa.Boolean(), nullable=False, server_default=sa.text("false")
-        ),
+        sa.Column("sensitive", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column(
             "audit_on_use",
             sa.Boolean(),
@@ -206,12 +198,9 @@ def upgrade() -> None:
         ),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("reason", sa.Text(), nullable=True),
-        sa.Column(
-            "active", sa.Boolean(), nullable=False, server_default=sa.text("true")
-        ),
+        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.CheckConstraint(
-            "(active = true AND revoked_at IS NULL) "
-            "OR (active = false AND revoked_at IS NOT NULL)",
+            "(active = true AND revoked_at IS NULL) OR (active = false AND revoked_at IS NOT NULL)",
             name="ck_user_role_assignments_revocation",
         ),
     )
@@ -222,9 +211,7 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("active = true"),
     )
-    op.create_index(
-        "ix_user_role_assignments_user_id", "user_role_assignments", ["user_id"]
-    )
+    op.create_index("ix_user_role_assignments_user_id", "user_role_assignments", ["user_id"])
 
     op.create_table(
         "user_permission_grants",
@@ -270,12 +257,9 @@ def upgrade() -> None:
         ),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("reason", sa.Text(), nullable=True),
-        sa.Column(
-            "active", sa.Boolean(), nullable=False, server_default=sa.text("true")
-        ),
+        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.CheckConstraint(
-            "(active = true AND revoked_at IS NULL) "
-            "OR (active = false AND revoked_at IS NOT NULL)",
+            "(active = true AND revoked_at IS NULL) OR (active = false AND revoked_at IS NOT NULL)",
             name="ck_user_permission_grants_revocation",
         ),
     )
@@ -286,9 +270,7 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("active = true"),
     )
-    op.create_index(
-        "ix_user_permission_grants_user_id", "user_permission_grants", ["user_id"]
-    )
+    op.create_index("ix_user_permission_grants_user_id", "user_permission_grants", ["user_id"])
 
     op.create_table(
         "audit_logs",
@@ -316,9 +298,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text("'{}'::jsonb"),
         ),
-        sa.Column(
-            "sensitive", sa.Boolean(), nullable=False, server_default=sa.text("false")
-        ),
+        sa.Column("sensitive", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -326,12 +306,8 @@ def upgrade() -> None:
             server_default=sa.func.now(),
         ),
     )
-    op.create_index(
-        "ix_audit_logs_user_created", "audit_logs", ["user_id", "created_at"]
-    )
-    op.create_index(
-        "ix_audit_logs_event_created", "audit_logs", ["event_type", "created_at"]
-    )
+    op.create_index("ix_audit_logs_user_created", "audit_logs", ["user_id", "created_at"])
+    op.create_index("ix_audit_logs_event_created", "audit_logs", ["event_type", "created_at"])
     op.create_index("ix_audit_logs_entity", "audit_logs", ["entity_type", "entity_id"])
 
     op.create_table(
@@ -345,9 +321,7 @@ def upgrade() -> None:
         sa.Column("connector_key", sa.Text(), nullable=False),
         sa.Column("account_id", sa.Text(), nullable=False),
         sa.Column("encrypted_secret_ref", sa.Text(), nullable=False),
-        sa.Column(
-            "status", sa.Text(), nullable=False, server_default=sa.text("'active'")
-        ),
+        sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'active'")),
         sa.Column(
             "created_by",
             postgresql.UUID(as_uuid=True),
@@ -395,16 +369,10 @@ def downgrade() -> None:
     op.drop_index("ix_audit_logs_event_created", table_name="audit_logs")
     op.drop_index("ix_audit_logs_user_created", table_name="audit_logs")
     op.drop_table("audit_logs")
-    op.drop_index(
-        "ix_user_permission_grants_user_id", table_name="user_permission_grants"
-    )
-    op.drop_index(
-        "uq_active_user_permission_scope", table_name="user_permission_grants"
-    )
+    op.drop_index("ix_user_permission_grants_user_id", table_name="user_permission_grants")
+    op.drop_index("uq_active_user_permission_scope", table_name="user_permission_grants")
     op.drop_table("user_permission_grants")
-    op.drop_index(
-        "ix_user_role_assignments_user_id", table_name="user_role_assignments"
-    )
+    op.drop_index("ix_user_role_assignments_user_id", table_name="user_role_assignments")
     op.drop_index("uq_active_user_role_scope", table_name="user_role_assignments")
     op.drop_table("user_role_assignments")
     op.drop_table("role_permission_assignments")

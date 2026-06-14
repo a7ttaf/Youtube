@@ -3,6 +3,7 @@
 Mirrors the connector-runs keyset read pattern. raw_payload is never projected
 into the API entry (spec §3.3: never returned in this PR for any caller).
 """
+
 from __future__ import annotations
 
 import re
@@ -18,9 +19,7 @@ from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
 MAX_SOURCE_ROW_PAGE_SIZE = 100
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
-_VALID_SOURCE_SYSTEMS = frozenset(
-    {"youtube_reporting", "youtube_analytics", "adsense_management"}
-)
+_VALID_SOURCE_SYSTEMS = frozenset({"youtube_reporting", "youtube_analytics", "adsense_management"})
 _SOURCE_ROW_LOAD_ONLY = load_only(
     GoogleRevenueSourceRowORM.id,
     GoogleRevenueSourceRowORM.source_system,
@@ -63,9 +62,7 @@ def normalize_source_row_month(month: str) -> str:
     """Return a stripped YYYY-MM month or raise a typed validation error."""
     normalized = month.strip()
     if not MONTH_PATTERN.fullmatch(normalized):
-        raise SourceRowValidationError(
-            "month must use YYYY-MM with a calendar month from 01 to 12"
-        )
+        raise SourceRowValidationError("month must use YYYY-MM with a calendar month from 01 to 12")
     return normalized
 
 
@@ -180,13 +177,9 @@ def list_source_rows(
     """List tenant-scoped source rows for a month, newest-first, keyset-paged."""
     month = normalize_source_row_month(month)
     if limit < 1 or limit > MAX_SOURCE_ROW_PAGE_SIZE:
-        raise SourceRowValidationError(
-            f"limit must be between 1 and {MAX_SOURCE_ROW_PAGE_SIZE}"
-        )
+        raise SourceRowValidationError(f"limit must be between 1 and {MAX_SOURCE_ROW_PAGE_SIZE}")
     if (cursor_ingested_at is None) != (cursor_id is None):
-        raise SourceRowValidationError(
-            "cursor_ingested_at and cursor_id must be provided together"
-        )
+        raise SourceRowValidationError("cursor_ingested_at and cursor_id must be provided together")
     if source_system is not None and source_system not in _VALID_SOURCE_SYSTEMS:
         raise SourceRowValidationError("invalid source_system")
 
@@ -215,14 +208,13 @@ def list_source_rows(
     items = [_to_entry(r) for r in rows[:limit]]
     has_more = len(rows) > limit
     return SourceRowPage(
-        items=items, limit=limit,
+        items=items,
+        limit=limit,
         next_cursor=_next_cursor(items) if has_more else None,
     )
 
 
-def get_source_row(
-    session: Session, *, tenant_id: UUID, row_id: str
-) -> SourceRowEntry | None:
+def get_source_row(session: Session, *, tenant_id: UUID, row_id: str) -> SourceRowEntry | None:
     """Return one tenant-scoped source row, or None if absent/cross-tenant."""
     try:
         parsed = UUID(row_id)

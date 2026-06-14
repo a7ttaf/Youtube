@@ -60,11 +60,7 @@ def _expand_global_grants(
 ) -> tuple[set[str], set[str]]:
     """A global grant authorizes the entire active universe."""
     sector_ids = set(sector_names.keys())
-    company_ids = {
-        cid
-        for cid in company_names
-        if cid in org_index.company_sector
-    }
+    company_ids = {cid for cid in company_names if cid in org_index.company_sector}
     return sector_ids, company_ids
 
 
@@ -73,9 +69,7 @@ def _collect_sector_scope(
     org_index: OrgAccessIndex,
 ) -> tuple[set[str], set[str]]:
     """Expand one sector grant into its sector id + member company ids."""
-    company_ids = {
-        cid for cid, sid in org_index.company_sector.items() if sid == scope_id
-    }
+    company_ids = {cid for cid, sid in org_index.company_sector.items() if sid == scope_id}
     return {scope_id}, company_ids
 
 
@@ -141,9 +135,7 @@ def _build_options(
     companies.sort(key=_scope_sort_key)
     options: list[RevenueScopeOption] = []
     if has_global:
-        options.append(
-            RevenueScopeOption(scope_type="global", scope_id=None, label="Global")
-        )
+        options.append(RevenueScopeOption(scope_type="global", scope_id=None, label="Global"))
     options.extend(sectors)
     options.extend(companies)
     return options
@@ -170,13 +162,9 @@ def build_authorized_revenue_scopes(
     """
     has_global = any(scope.type == ScopeType.GLOBAL for scope in granted)
     if has_global:
-        sector_ids, company_ids = _expand_global_grants(
-            sector_names, company_names, org_index
-        )
+        sector_ids, company_ids = _expand_global_grants(sector_names, company_names, org_index)
     else:
         sector_ids, company_ids = _expand_scoped_grants(
             granted, org_index, sector_names, company_names
         )
-    return _build_options(
-        has_global, sector_ids, company_ids, sector_names, company_names
-    )
+    return _build_options(has_global, sector_ids, company_ids, sector_names, company_names)

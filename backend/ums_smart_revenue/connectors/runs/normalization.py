@@ -64,25 +64,21 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
         actor_user_id: str,
         audit_actor: UserPrincipal,
     ) -> None:
-        audit_sink: AuditSink = SqlAlchemyAuditSink(
-            self._session, tenant_id=self._tenant_id
-        )
+        audit_sink: AuditSink = SqlAlchemyAuditSink(self._session, tenant_id=self._tenant_id)
         try:
-            if get_month_close_status(
-                self._session, report_month, tenant_id=self._tenant_id
-            ) == "LOCKED":
+            if (
+                get_month_close_status(self._session, report_month, tenant_id=self._tenant_id)
+                == "LOCKED"
+            ):
                 self._session.rollback()
                 logger.info(
-                    "ingestion normalize skipped (month locked) "
-                    "tenant_id=%s month=%s",
+                    "ingestion normalize skipped (month locked) tenant_id=%s month=%s",
                     self._tenant_id,
                     report_month,
                 )
                 return
 
-            normalizer = GoogleSourceNormalizer(
-                self._session, tenant_id=self._tenant_id
-            )
+            normalizer = GoogleSourceNormalizer(self._session, tenant_id=self._tenant_id)
             # FIX: the normalize write set is platform-only -- record_fact upserts
             # monthly_channel_revenue_facts, get_or_create_month_close_row can
             # INSERT an OPEN finance_month_close row, and the REPORT_IMPORTED
@@ -115,8 +111,7 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
         except RevenueFactLockedMonthError:
             self._session.rollback()
             logger.info(
-                "ingestion normalize skipped (month locked mid-flight) "
-                "tenant_id=%s month=%s",
+                "ingestion normalize skipped (month locked mid-flight) tenant_id=%s month=%s",
                 self._tenant_id,
                 report_month,
             )
@@ -161,7 +156,7 @@ def _record_projection_failure_on_run(
     error_summary = f"normalize failed: {type(exc).__name__}: {exc!s}"
     try:
         run_id = UUID(run.id)
-    except (ValueError, TypeError, AttributeError):
+    except ValueError, TypeError, AttributeError:
         logger.warning(
             "cannot record projection failure: run id is not a UUID (run_id=%r)",
             run.id,

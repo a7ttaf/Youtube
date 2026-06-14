@@ -38,9 +38,7 @@ class ChannelGroupRegistryStore(Protocol):
     ) -> ChannelGroupEntry:
         pass
 
-    def add_members(
-        self, *, group_id: str, channel_ids: list[str]
-    ) -> ChannelGroupEntry:
+    def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
         pass
 
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
@@ -82,9 +80,7 @@ class ChannelGroupRegistry:
         self._groups[group_id] = updated
         return updated
 
-    def add_members(
-        self, *, group_id: str, channel_ids: list[str]
-    ) -> ChannelGroupEntry:
+    def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
         group = self._require_group(group_id)
         updated = replace(
             group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids]))
@@ -96,9 +92,7 @@ class ChannelGroupRegistry:
         group = self._require_group(group_id)
         updated = replace(
             group,
-            channel_ids=tuple(
-                channel for channel in group.channel_ids if channel != channel_id
-            ),
+            channel_ids=tuple(channel for channel in group.channel_ids if channel != channel_id),
         )
         self._groups[group_id] = updated
         return updated

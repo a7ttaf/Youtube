@@ -46,9 +46,7 @@ def upgrade() -> None:
     )
     # 3. Enforce NOT NULL + non-empty, and re-key uniqueness to include account.
     with op.batch_alter_table("adsense_payments") as batch:
-        batch.alter_column(
-            "source_account_id", existing_type=sa.Text(), nullable=False
-        )
+        batch.alter_column("source_account_id", existing_type=sa.Text(), nullable=False)
         batch.create_check_constraint(
             "ck_adsense_payments_source_account_id_nonempty",
             "length(source_account_id) >= 1",
@@ -73,33 +71,33 @@ def downgrade() -> None:
         table_name="adsense_payments",
     )
     with op.batch_alter_table("adsense_payments") as batch:
-        batch.drop_constraint(
-            "uq_adsense_payments_account_month_name", type_="unique"
-        )
+        batch.drop_constraint("uq_adsense_payments_account_month_name", type_="unique")
         batch.create_unique_constraint(
             "uq_adsense_payments_month_name",
             ["tenant_id", "month", "payment_name"],
         )
-        batch.drop_constraint(
-            "ck_adsense_payments_source_account_id_nonempty", type_="check"
-        )
+        batch.drop_constraint("ck_adsense_payments_source_account_id_nonempty", type_="check")
         batch.drop_column("source_account_id")
 
 
 def _raise_if_old_key_collisions_exist() -> None:
     """Fail downgrade before recreating the pre-account uniqueness key."""
     bind = op.get_bind()
-    row = bind.execute(
-        sa.text(
-            """
+    row = (
+        bind.execute(
+            sa.text(
+                """
             SELECT tenant_id, month, payment_name, COUNT(*) AS duplicate_count
             FROM adsense_payments
             GROUP BY tenant_id, month, payment_name
             HAVING COUNT(*) > 1
             LIMIT 1
             """
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
     if row is not None:
         raise RuntimeError(
             "Cannot downgrade adsense_payments: account-scoped duplicate "

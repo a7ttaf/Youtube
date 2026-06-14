@@ -121,9 +121,7 @@ class SqlAlchemyFinanceMonthCloseRepository:
         self._session.flush()
         return self._to_entry(row)
 
-    def _get_or_create_row(
-        self, month: str, *, for_update: bool = False
-    ) -> FinanceMonthCloseORM:
+    def _get_or_create_row(self, month: str, *, for_update: bool = False) -> FinanceMonthCloseORM:
         """Return the ORM row, optionally acquiring the month close guard."""
         return get_or_create_month_close_row(
             self._session,
@@ -165,9 +163,7 @@ def get_or_create_month_close_row(
     """Return or create the close row, guarding month writers when requested."""
     resolved_tenant_id = _resolve_tenant_id(tenant_id)
     if for_update:
-        acquire_finance_month_advisory_lock(
-            session, month, tenant_id=resolved_tenant_id
-        )
+        acquire_finance_month_advisory_lock(session, month, tenant_id=resolved_tenant_id)
     statement = select(FinanceMonthCloseORM).where(
         FinanceMonthCloseORM.tenant_id == resolved_tenant_id,
         FinanceMonthCloseORM.month == month,
@@ -232,16 +228,12 @@ def acquire_finance_month_advisory_lock(
     )
 
 
-def _month_close_key(
-    month: str, *, tenant_id: UUID | str | None = None
-) -> tuple[UUID, str]:
+def _month_close_key(month: str, *, tenant_id: UUID | str | None = None) -> tuple[UUID, str]:
     """Return the resolved tenant/month close key."""
     return (_resolve_tenant_id(tenant_id), month)
 
 
-def _resolve_tenant_id(
-    tenant_id: UUID | str | None, *, use_context: bool = True
-) -> UUID:
+def _resolve_tenant_id(tenant_id: UUID | str | None, *, use_context: bool = True) -> UUID:
     """Resolve tenant id from an explicit value, context, or default."""
     if tenant_id is not None:
         return _parse_tenant_uuid(tenant_id)

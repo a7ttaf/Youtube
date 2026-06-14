@@ -100,11 +100,7 @@ def upgrade() -> None:
     # mutation surface to the caller's own backend row, so widening the
     # platform lane's DELETE privilege here does NOT widen its effective
     # blast radius (Codex P2 review on PR #88).
-    bind.execute(
-        sa.text(
-            f'GRANT DELETE ON {TENANT_CONTEXT_TABLE} TO "{APP_PLATFORM_ROLE}"'
-        )
-    )
+    bind.execute(sa.text(f'GRANT DELETE ON {TENANT_CONTEXT_TABLE} TO "{APP_PLATFORM_ROLE}"'))
     bind.execute(
         sa.text(
             f"""
@@ -120,15 +116,9 @@ def upgrade() -> None:
             """
         )
     )
+    bind.execute(sa.text(f"REVOKE ALL ON FUNCTION {TENANT_CONTEXT_CLEARER}() FROM PUBLIC"))
     bind.execute(
-        sa.text(
-            f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_CLEARER}() FROM PUBLIC'
-        )
-    )
-    bind.execute(
-        sa.text(
-            f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_CLEARER}() TO "{APP_PLATFORM_ROLE}"'
-        )
+        sa.text(f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_CLEARER}() TO "{APP_PLATFORM_ROLE}"')
     )
 
 
@@ -146,4 +136,4 @@ def downgrade() -> None:
     # DELETE grant. 20260608_0001 owns final cleanup of the table,
     # trigger, and guard function when rolling back below the trusted
     # context-table revision.
-    bind.execute(sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()'))
+    bind.execute(sa.text(f"DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()"))

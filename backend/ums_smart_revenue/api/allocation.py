@@ -98,9 +98,7 @@ class ManualAllocationLineModel(BaseModel):
         except InvalidOperation:
             raise ValueError("amount_usd is out of range")
         if value != quantized:
-            raise ValueError(
-                "amount_usd must have at most 6 decimal places"
-            )
+            raise ValueError("amount_usd must have at most 6 decimal places")
         return value
 
 
@@ -239,10 +237,13 @@ def emit_allocation_committed_audit(
         return None
     return audit_record_to_api(
         record_audit_event(
-            sink=sink, actor=actor,
+            sink=sink,
+            actor=actor,
             event_type=AuditEventType.ALLOCATION_COMMITTED,
-            entity_type="committed_allocation_run", entity_id=str(outcome.run.id),
-            scope=scope, reason=reason,
+            entity_type="committed_allocation_run",
+            entity_id=str(outcome.run.id),
+            scope=scope,
+            reason=reason,
             details={
                 "run_id": str(outcome.run.id),
                 "commit_version": outcome.run.commit_version,
@@ -252,18 +253,14 @@ def emit_allocation_committed_audit(
                 "allocated_component_count": outcome.run.allocated_component_count,
                 "unallocated_component_count": outcome.run.unallocated_component_count,
                 "allocated_total_usd": decimal_to_api(outcome.run.allocated_total_usd),
-                "net_applicable_total_usd": decimal_to_api(
-                    outcome.run.net_applicable_total_usd
-                ),
+                "net_applicable_total_usd": decimal_to_api(outcome.run.net_applicable_total_usd),
                 "note_count": len(outcome.notes),
             },
         )
     )
 
 
-def _require_permission(
-    user: UserPrincipal, permission: Permission, scope: AccessScope
-) -> None:
+def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
     """Raise HTTP 403 if the principal lacks the permission for the scope."""
     if not has_permission(user, permission, scope):
         raise HTTPException(
@@ -335,12 +332,8 @@ def _result_to_api(result: AccountAllocationResult) -> dict[str, object]:
             "unallocated_component_count": result.summary.unallocated_component_count,
             "allocated_total_usd": decimal_to_api(result.summary.allocated_total_usd),
             "unallocated_total_usd": decimal_to_api(result.summary.unallocated_total_usd),
-            "net_applicable_total_usd": decimal_to_api(
-                result.summary.net_applicable_total_usd
-            ),
-            "reconciliation_total_usd": decimal_to_api(
-                result.summary.reconciliation_total_usd
-            ),
+            "net_applicable_total_usd": decimal_to_api(result.summary.net_applicable_total_usd),
+            "reconciliation_total_usd": decimal_to_api(result.summary.reconciliation_total_usd),
         },
     }
 
@@ -416,18 +409,24 @@ def get_account_allocations(
     audit_events = [
         audit_record_to_api(
             record_audit_event(
-                sink=audit_sink, actor=user,
+                sink=audit_sink,
+                actor=user,
                 event_type=AuditEventType.REVENUE_VIEWED,
-                entity_type="monthly_account_allocations", entity_id=month,
-                scope=revenue_scope, details=details,
+                entity_type="monthly_account_allocations",
+                entity_id=month,
+                scope=revenue_scope,
+                details=details,
             )
         ),
         audit_record_to_api(
             record_audit_event(
-                sink=audit_sink, actor=user,
+                sink=audit_sink,
+                actor=user,
                 event_type=AuditEventType.PAYMENT_VIEWED,
-                entity_type="monthly_account_allocations", entity_id=month,
-                scope=payment_scope, details=details,
+                entity_type="monthly_account_allocations",
+                entity_id=month,
+                scope=payment_scope,
+                details=details,
             )
         ),
     ]
@@ -534,7 +533,8 @@ def commit_account_allocations(
     allocation_method = payload.allocation_method.strip().lower()
 
     fingerprint = commit_request_fingerprint(
-        allocation_method=allocation_method, reason=payload.reason,
+        allocation_method=allocation_method,
+        reason=payload.reason,
         manual_lines=payload.manual_lines,
     )
     manual_lines = (
@@ -551,12 +551,17 @@ def commit_account_allocations(
     )
     try:
         outcome = committed_repository.commit_allocation(
-            month=month, allocation_method=allocation_method,
-            idempotency_key=payload.idempotency_key, request_fingerprint=fingerprint,
-            reason=payload.reason, committed_by=user.user_id,  # str; repo -> UUID
+            month=month,
+            allocation_method=allocation_method,
+            idempotency_key=payload.idempotency_key,
+            request_fingerprint=fingerprint,
+            reason=payload.reason,
+            committed_by=user.user_id,  # str; repo -> UUID
             deduction_repository=deduction_repository,
-            revenue_repository=revenue_repository, link_repository=link_repository,
-            channel_company=org_index.channel_company, manual_lines=manual_lines,
+            revenue_repository=revenue_repository,
+            link_repository=link_repository,
+            channel_company=org_index.channel_company,
+            manual_lines=manual_lines,
         )
     except CommittedAllocationValidationError as exc:
         raise HTTPException(
@@ -569,15 +574,17 @@ def commit_account_allocations(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     audit_event = emit_allocation_committed_audit(
-        sink=audit_sink, actor=user, month=month, scope=payment_scope,
-        reason=payload.reason, outcome=outcome,
+        sink=audit_sink,
+        actor=user,
+        month=month,
+        scope=payment_scope,
+        reason=payload.reason,
+        outcome=outcome,
     )
     # The decorator declares 201 as the default success status. A fresh commit
     # keeps 201 (new snapshot + audit); an idempotent replay returns the existing
     # run with 200 and no second audit -- matching the documented OpenAPI responses.
-    response.status_code = (
-        status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK
-    )
+    response.status_code = status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK
 
     return CommitAllocationResponse(
         run=_run_to_api(outcome.run),
@@ -585,8 +592,10 @@ def commit_account_allocations(
             {
                 "adsense_account_id": ln.adsense_account_id,
                 "youtube_channel_id": ln.youtube_channel_id,
-                "component_kind": ln.component_kind, "source_system": ln.source_system,
-                "component_key": ln.component_key, "basis_source_kind": ln.basis_source_kind,
+                "component_kind": ln.component_kind,
+                "source_system": ln.source_system,
+                "component_key": ln.component_key,
+                "basis_source_kind": ln.basis_source_kind,
                 "basis_amount_usd": decimal_to_api(ln.basis_amount_usd),
                 "basis_share": decimal_to_api(ln.basis_share),
                 "allocated_amount_usd": decimal_to_api(ln.allocated_amount_usd),
@@ -596,16 +605,21 @@ def commit_account_allocations(
         ],
         unallocated=[
             {
-                "scope_id": iss.scope_id, "component_kind": iss.component_kind,
+                "scope_id": iss.scope_id,
+                "component_kind": iss.component_kind,
                 "component_key": iss.component_key,
                 "amount_usd": decimal_to_api(iss.amount_usd),
-                "issue_code": iss.issue_code, "detail": iss.detail,
+                "issue_code": iss.issue_code,
+                "detail": iss.detail,
             }
             for iss in outcome.unallocated
         ],
         notes=[
-            {"note_code": n.note_code, "youtube_channel_id": n.youtube_channel_id,
-             "detail": n.detail}
+            {
+                "note_code": n.note_code,
+                "youtube_channel_id": n.youtube_channel_id,
+                "detail": n.detail,
+            }
             for n in outcome.notes
         ],
         audit_event=audit_event,

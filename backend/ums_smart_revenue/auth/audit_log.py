@@ -105,9 +105,7 @@ class SqlAlchemyAuditLogRepository:
     ) -> AuditLogPage:
         """Return a bounded page of audit events visible to this tenant."""
         if limit < 1 or limit > MAX_AUDIT_LOG_PAGE_SIZE:
-            raise AuditLogValidationError(
-                f"limit must be between 1 and {MAX_AUDIT_LOG_PAGE_SIZE}"
-            )
+            raise AuditLogValidationError(f"limit must be between 1 and {MAX_AUDIT_LOG_PAGE_SIZE}")
         if (cursor_created_at is None) != (cursor_id is None):
             raise AuditLogValidationError(
                 "cursor_created_at and cursor_id must be provided together"
@@ -120,8 +118,7 @@ class SqlAlchemyAuditLogRepository:
         )
         if event_type is not None:
             statement = statement.where(
-                AuditLogORM.event_type
-                == _normalize_required_string(event_type, "event_type")
+                AuditLogORM.event_type == _normalize_required_string(event_type, "event_type")
             )
         if exclude_event_type is not None:
             statement = statement.where(
@@ -130,13 +127,11 @@ class SqlAlchemyAuditLogRepository:
             )
         if entity_type is not None:
             statement = statement.where(
-                AuditLogORM.entity_type
-                == _normalize_required_string(entity_type, "entity_type")
+                AuditLogORM.entity_type == _normalize_required_string(entity_type, "entity_type")
             )
         if entity_id is not None:
             statement = statement.where(
-                AuditLogORM.entity_id
-                == _normalize_required_string(entity_id, "entity_id")
+                AuditLogORM.entity_id == _normalize_required_string(entity_id, "entity_id")
             )
         if cursor_created_at is not None and cursor_id is not None:
             cursor_uuid = _parse_uuid(cursor_id, "cursor_id")
@@ -191,9 +186,7 @@ class SqlAlchemyAuditLogRepository:
             select(
                 func.count().label("total_events"),
                 func.coalesce(
-                    func.sum(
-                        case((AuditLogORM.sensitive.is_(True), 1), else_=0)
-                    ),
+                    func.sum(case((AuditLogORM.sensitive.is_(True), 1), else_=0)),
                     0,
                 ).label("sensitive_events"),
                 func.coalesce(

@@ -107,9 +107,7 @@ class TenantResolverMiddleware:
         self._authorization_timeout_seconds = _validate_timeout(
             "authorization_timeout_seconds", authorization_timeout_seconds
         )
-        blocking_task_limit = _validate_positive_int(
-            "max_blocking_tasks", max_blocking_tasks
-        )
+        blocking_task_limit = _validate_positive_int("max_blocking_tasks", max_blocking_tasks)
         self._blocking_tasks = asyncio.BoundedSemaphore(blocking_task_limit)
         self._blocking_executor = ThreadPoolExecutor(
             max_workers=blocking_task_limit,
@@ -219,9 +217,7 @@ class TenantResolverMiddleware:
         lookup_error: BaseException | None = None
         try:
             try:
-                tenant = SqlAlchemyTenantRepository(session).get_by_slug(
-                    normalised_slug
-                )
+                tenant = SqlAlchemyTenantRepository(session).get_by_slug(normalised_slug)
             except TenantNotFoundError:
                 raise _ResolverError(
                     status_code=404,
@@ -277,9 +273,7 @@ class TenantResolverMiddleware:
             return False
         return decision
 
-    async def _is_authorized_with_timeout(
-        self, scope: Scope, normalised_slug: str
-    ) -> bool:
+    async def _is_authorized_with_timeout(self, scope: Scope, normalised_slug: str) -> bool:
         """Run authorization off-loop and fail closed if it exceeds its budget."""
         try:
             return await self._run_blocking_with_timeout(

@@ -21,6 +21,7 @@ Channels are sourced from the youtube_channels registry (PR #25) filtered
 by tenant + active + revenue_required + content_owner match only. Outside-CMS
 revenue sourcing remains unresolved and is not ingested here.
 """
+
 from __future__ import annotations
 
 import re
@@ -75,7 +76,10 @@ _DIMENSIONS = "month"
 #     persists the same query_request alongside the response payload.
 # ============================================================================
 def _build_query_request(
-    *, account_id: str, channel_id: str, report_month: str,
+    *,
+    account_id: str,
+    channel_id: str,
+    report_month: str,
 ) -> dict[str, str]:
     """Return the canonical reports.query parameters for one channel-month slice."""
     # FIX: fail closed on empty/whitespace account_id or channel_id before
@@ -87,11 +91,13 @@ def _build_query_request(
     # check, not user input sanitisation.
     if not isinstance(account_id, str) or not account_id.strip():
         raise MalformedAnalyticsSelectorError(
-            field_name="account_id", value=account_id,
+            field_name="account_id",
+            value=account_id,
         )
     if not isinstance(channel_id, str) or not channel_id.strip():
         raise MalformedAnalyticsSelectorError(
-            field_name="channel_id", value=channel_id,
+            field_name="channel_id",
+            value=channel_id,
         )
     account_id = account_id.strip()
     channel_id = channel_id.strip()
@@ -162,7 +168,10 @@ def calendar_month_end_iso(report_month: str) -> str:
 #     per-channel report fetches.
 # ============================================================================
 def list_target_channels(
-    session: Session, *, tenant_id: UUID, account_id: str,
+    session: Session,
+    *,
+    tenant_id: UUID,
+    account_id: str,
 ) -> list[str]:
     """Return eligible CMS-owned channel IDs for the tenant/account, sorted asc.
 
@@ -221,7 +230,11 @@ class YouTubeAnalyticsClient:
     #     design.md §5.5 -> endpoint, metric set, and dimension contract.
     # ============================================================================
     def fetch_channel_report(
-        self, *, account_id: str, channel_id: str, report_month: str,
+        self,
+        *,
+        account_id: str,
+        channel_id: str,
+        report_month: str,
     ) -> dict[str, object]:
         """Fetch one CMS-owned channel's monthly reports.query JSON body."""
         params = _build_query_request(

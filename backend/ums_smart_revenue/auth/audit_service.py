@@ -26,8 +26,7 @@ class AuditRecord:
 
 
 class AuditSink(Protocol):
-    def append(self, record: AuditRecord) -> None:
-        ...
+    def append(self, record: AuditRecord) -> None: ...
 
 
 @dataclass
@@ -80,11 +79,9 @@ def record_audit_event(
         reason=normalized_reason,
         details=normalized_details,
         sensitive=bool(
-            permission in SENSITIVE_PERMISSIONS
-            or definition_permission in SENSITIVE_PERMISSIONS
+            permission in SENSITIVE_PERMISSIONS or definition_permission in SENSITIVE_PERMISSIONS
         ),
         permission=permission.value if permission else None,
     )
     sink.append(record)
     return record
-

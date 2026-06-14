@@ -59,13 +59,17 @@ def downgrade() -> None:
         the widened methods and have not been removed first.
     """
     if op.get_bind().dialect.name == "postgresql":
-        count = op.get_bind().execute(
-            sa.text(
-                "SELECT COUNT(*) FROM committed_allocation_runs "
-                "WHERE allocation_method IN "
-                "('company_level', 'manual', 'no_allocation')"
+        count = (
+            op.get_bind()
+            .execute(
+                sa.text(
+                    "SELECT COUNT(*) FROM committed_allocation_runs "
+                    "WHERE allocation_method IN "
+                    "('company_level', 'manual', 'no_allocation')"
+                )
             )
-        ).scalar()
+            .scalar()
+        )
         if count:
             raise RuntimeError(
                 f"Cannot downgrade 20260606_0001: {count} committed_allocation_runs "
@@ -75,6 +79,5 @@ def downgrade() -> None:
         batch.drop_constraint("ck_committed_allocation_runs_method", type_="check")
         batch.create_check_constraint(
             "ck_committed_allocation_runs_method",
-            "allocation_method IN "
-            "('gross_revenue_proportional', 'post_tax_revenue_proportional')",
+            "allocation_method IN ('gross_revenue_proportional', 'post_tax_revenue_proportional')",
         )

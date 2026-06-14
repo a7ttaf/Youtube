@@ -4,6 +4,7 @@ These are the monetary/revenue-relevant report types the existing
 B1 parsers know how to consume. Outside this set raises
 UnsupportedReportTypeError at orchestrator time.
 """
+
 from __future__ import annotations
 
 SUPPORTED_REPORT_TYPES: frozenset[str] = frozenset(

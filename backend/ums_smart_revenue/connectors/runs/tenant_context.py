@@ -14,6 +14,7 @@ rows. ``TenantResolverMiddleware`` enforces the same gate on web requests
 (SUSPENDED -> 423, ARCHIVED -> 410); the connector entry point is the
 authoritative replay of that check for the background CLI / executor.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -132,13 +133,9 @@ def connector_tenant_context(
             try:
                 tenant = SqlAlchemyTenantRepository(session).get_by_id(tenant_id)
             except TenantNotFoundError as exc:
-                raise TenantLifecycleError(
-                    tenant_id=tenant_id, status=None
-                ) from exc
+                raise TenantLifecycleError(tenant_id=tenant_id, status=None) from exc
             if tenant.status != TenantStatus.ACTIVE:
-                raise TenantLifecycleError(
-                    tenant_id=tenant_id, status=tenant.status.value
-                )
+                raise TenantLifecycleError(tenant_id=tenant_id, status=tenant.status.value)
         finally:
             # End the lookup transaction on every exit path so the
             # caller's first DB call autobegins a fresh transaction and

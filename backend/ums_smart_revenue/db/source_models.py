@@ -64,9 +64,7 @@ class CurrencyORM(FinanceBase):
     is_supported: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
-    activated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -121,8 +119,10 @@ class CurrencyORM(FinanceBase):
 # Blast Radius: Source-of-truth table for downstream finance ingestion. No
 #               graph projection impact detected.
 # Connections:
-#   - File: Docs/superpowers/specs/2026-05-23-spec-b1-google-revenue-source-ingestion-design.md -> §4 schema.
-#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py -> Storage repository.
+#   - File: Docs/superpowers/specs/2026-05-23-spec-b1-google-revenue-source-ingestion-design.md
+#     -> §4 schema.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> Storage repository.
 # ============================================================================
 class GoogleRevenueSourceRowORM(FinanceBase):
     __tablename__ = "google_revenue_source_rows"
@@ -160,21 +160,26 @@ class GoogleRevenueSourceRowORM(FinanceBase):
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["tenant_id"], [TenantORM.id],
+            ["tenant_id"],
+            [TenantORM.id],
             name="fk_google_revenue_source_rows_tenant",
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["currency_code"], ["currencies.code"],
+            ["currency_code"],
+            ["currencies.code"],
             name="fk_google_revenue_source_rows_currency",
         ),
         ForeignKeyConstraint(
-            ["raw_file_id"], [RawReportFileORM.id],
+            ["raw_file_id"],
+            [RawReportFileORM.id],
             name="fk_google_revenue_source_rows_raw_file",
             ondelete="RESTRICT",
         ),
         UniqueConstraint(
-            "tenant_id", "source_system", "source_row_key",
+            "tenant_id",
+            "source_system",
+            "source_row_key",
             name="uq_google_revenue_source_rows_source_key",
         ),
         CheckConstraint(
@@ -230,15 +235,22 @@ class GoogleRevenueSourceRowORM(FinanceBase):
         ).ddl_if(dialect="postgresql"),
         Index(
             "ix_google_revenue_source_rows_tenant_month_source",
-            "tenant_id", "report_month", "source_system",
+            "tenant_id",
+            "report_month",
+            "source_system",
         ),
         Index(
             "ix_google_revenue_source_rows_tenant_month_ingested_id",
-            "tenant_id", "report_month", "ingested_at", "id",
+            "tenant_id",
+            "report_month",
+            "ingested_at",
+            "id",
         ),
         Index(
             "ix_google_revenue_source_rows_tenant_channel_month",
-            "tenant_id", "youtube_channel_id", "report_month",
+            "tenant_id",
+            "youtube_channel_id",
+            "report_month",
             postgresql_where=text("youtube_channel_id IS NOT NULL"),
             sqlite_where=text("youtube_channel_id IS NOT NULL"),
         ),

@@ -1,4 +1,5 @@
 """SQLAlchemy engine and session-factory helpers with per-URL engine caching."""
+
 from collections.abc import Callable, Iterator
 from threading import Lock
 
@@ -79,9 +80,7 @@ def build_engine(database_url: str) -> Engine:
 #   - File: backend/ums_smart_revenue/db/rls.py -> app_tenant role name.
 #   - File: backend/ums_smart_revenue/app.py -> request session factory.
 # ============================================================================
-def build_session_factory(
-    database_url: str, engine: Engine | None = None
-) -> SessionFactory:
+def build_session_factory(database_url: str, engine: Engine | None = None) -> SessionFactory:
     """Return a tenant-lane sessionmaker bound to a cached or given engine."""
     if engine is None:
         with _engine_cache_lock:

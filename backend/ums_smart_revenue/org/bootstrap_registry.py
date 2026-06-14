@@ -10,9 +10,7 @@ BOOTSTRAP_COMPANY_TV_ID = "00000000-0000-0000-0000-000000000201"
 BOOTSTRAP_COMPANY_NEWS_ID = "00000000-0000-0000-0000-000000000202"
 
 BOOTSTRAP_ORG_UNITS = [
-    OrgUnitRow(
-        id=BOOTSTRAP_SECTOR_TV_ID, parent_id=None, type="SECTOR", name="TV", active=True
-    ),
+    OrgUnitRow(id=BOOTSTRAP_SECTOR_TV_ID, parent_id=None, type="SECTOR", name="TV", active=True),
     OrgUnitRow(
         id=BOOTSTRAP_SECTOR_NEWS_ID,
         parent_id=None,

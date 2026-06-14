@@ -18,9 +18,7 @@ def role_metadata() -> list[dict[str, object]]:
                 permission.value for permission in ROLE_PERMISSIONS.get(role, [])
             ),
         }
-        for role, definition in sorted(
-            ROLE_DEFINITIONS.items(), key=lambda item: item[0].value
-        )
+        for role, definition in sorted(ROLE_DEFINITIONS.items(), key=lambda item: item[0].value)
     ]
 
 

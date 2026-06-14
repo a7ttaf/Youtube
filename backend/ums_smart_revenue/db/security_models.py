@@ -45,9 +45,7 @@ class UserORM(SecurityBase):
     )
     email: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'active'")
-    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
     is_service_account: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -69,9 +67,7 @@ class UserORM(SecurityBase):
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_users_tenant_id_id"),
-        CheckConstraint(
-            "status IN ('active', 'disabled', 'service')", name="ck_users_status"
-        ),
+        CheckConstraint("status IN ('active', 'disabled', 'service')", name="ck_users_status"),
         CheckConstraint(
             "(is_service_account = true AND status IN ('service', 'disabled')) "
             "OR (is_service_account = false AND status IN ('active', 'disabled'))",
@@ -111,9 +107,7 @@ class PermissionORM(SecurityBase):
 
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     label: Mapped[str] = mapped_column(Text, nullable=False)
-    sensitive: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     audit_on_use: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -217,13 +211,9 @@ class UserRoleAssignmentORM(SecurityBase):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     revoked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true")
-    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     tenant_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
         nullable=False,
@@ -233,8 +223,7 @@ class UserRoleAssignmentORM(SecurityBase):
 
     __table_args__ = (
         CheckConstraint(
-            "(active = true AND revoked_at IS NULL) "
-            "OR (active = false AND revoked_at IS NOT NULL)",
+            "(active = true AND revoked_at IS NULL) OR (active = false AND revoked_at IS NOT NULL)",
             name="ck_user_role_assignments_revocation",
         ),
         ForeignKeyConstraint(
@@ -294,14 +283,10 @@ class UserPermissionGrantORM(SecurityBase):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     revoked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     revoke_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true")
-    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     tenant_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
         nullable=False,
@@ -311,8 +296,7 @@ class UserPermissionGrantORM(SecurityBase):
 
     __table_args__ = (
         CheckConstraint(
-            "(active = true AND revoked_at IS NULL) "
-            "OR (active = false AND revoked_at IS NOT NULL)",
+            "(active = true AND revoked_at IS NULL) OR (active = false AND revoked_at IS NOT NULL)",
             name="ck_user_permission_grants_revocation",
         ),
         ForeignKeyConstraint(
@@ -376,9 +360,7 @@ class AuditLogORM(SecurityBase):
         default=dict,
         server_default=text("'{}'"),
     )
-    sensitive: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("false")
-    )
+    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -414,9 +396,7 @@ class ApiConnectorCredentialORM(SecurityBase):
     connector_key: Mapped[str] = mapped_column(Text, nullable=False)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_secret_ref: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'active'")
-    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
     created_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     updated_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -437,13 +417,9 @@ class ApiConnectorCredentialORM(SecurityBase):
     last_refresh_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    token_expiry_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    token_expiry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_refresh_status: Mapped[str | None] = mapped_column(Text, nullable=True)
-    last_refresh_error_class: Mapped[str | None] = mapped_column(
-        Text, nullable=True
-    )
+    last_refresh_error_class: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint(
@@ -451,8 +427,7 @@ class ApiConnectorCredentialORM(SecurityBase):
             name="ck_connector_status",
         ),
         CheckConstraint(
-            "last_refresh_status IS NULL "
-            "OR last_refresh_status IN ('succeeded', 'failed')",
+            "last_refresh_status IS NULL OR last_refresh_status IN ('succeeded', 'failed')",
             name="ck_connector_last_refresh_status",
         ),
         ForeignKeyConstraint(

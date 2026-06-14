@@ -107,9 +107,7 @@ def _proportional_allocation(
     """
     basis_total = sum((weight for _, weight in weights), Decimal("0"))
     if basis_total <= 0:
-        raise AllocationValidationError(
-            "basis_total must be positive for proportional allocation"
-        )
+        raise AllocationValidationError("basis_total must be positive for proportional allocation")
     floors: dict[str, Decimal] = {}
     remainders: list[tuple[Decimal, str]] = []
     allocated = Decimal("0")
@@ -222,7 +220,8 @@ def _company_level_weights(
     unmapped = sorted(ch for ch in channels if ch not in channel_company)
     if unmapped:
         return _issue(
-            component, "COMPANY_UNMAPPED",
+            component,
+            "COMPANY_UNMAPPED",
             "verified channels missing company mapping: " + ", ".join(unmapped[:10]),
         )
     members: dict[str, list[str]] = {}
@@ -234,23 +233,21 @@ def _company_level_weights(
         if any((ch, source_kind) in basis for ch in company_channels)
     }
     if not present_companies:
-        return _issue(component, "BASIS_MISSING",
-                      "no source-aligned basis for any verified channel")
+        return _issue(
+            component, "BASIS_MISSING", "no source-aligned basis for any verified channel"
+        )
     absent = sorted(set(members) - present_companies)
     if absent:
         return _issue(
-            component, "COMPANY_BASIS_INCOMPLETE",
+            component,
+            "COMPANY_BASIS_INCOMPLETE",
             "companies with no source-aligned basis: " + ", ".join(absent[:10]),
         )
     weights: list[tuple[str, Decimal]] = []
     for company in sorted(members):
         company_channels = sorted(members[company])
         company_gross = sum(
-            (
-                basis[(ch, source_kind)]
-                for ch in company_channels
-                if (ch, source_kind) in basis
-            ),
+            (basis[(ch, source_kind)] for ch in company_channels if (ch, source_kind) in basis),
             Decimal("0"),
         )
         # Keep full Decimal precision here; _proportional_allocation quantizes
@@ -300,9 +297,7 @@ def _resolve_weights(
     by the caller before this function is ever reached.
     """
     if allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD:
-        return _company_level_weights(
-            component, channels, source_kind, basis, channel_company
-        )
+        return _company_level_weights(component, channels, source_kind, basis, channel_company)
     present = [
         (channel_id, basis[(channel_id, source_kind)])
         for channel_id in channels
@@ -310,12 +305,14 @@ def _resolve_weights(
     ]
     if not present:
         return _issue(
-            component, "BASIS_MISSING",
+            component,
+            "BASIS_MISSING",
             "no source-aligned basis for any verified channel",
         )
     if len(present) != len(channels):
         return _issue(
-            component, "BASIS_INCOMPLETE",
+            component,
+            "BASIS_INCOMPLETE",
             "some verified channels missing source-aligned basis",
         )
     return present
@@ -369,8 +366,11 @@ def _allocate_component(
         # committed snapshot preserves every withheld component as evidence.
         return _ComponentOutcome(
             (),
-            _issue(component, "INTENTIONAL_NO_ALLOCATION",
-                   "allocation intentionally withheld by the no_allocation method"),
+            _issue(
+                component,
+                "INTENTIONAL_NO_ALLOCATION",
+                "allocation intentionally withheld by the no_allocation method",
+            ),
             False,
         )
 
@@ -378,8 +378,11 @@ def _allocate_component(
     if not channels:
         return _ComponentOutcome(
             (),
-            _issue(component, "ACCOUNT_UNMAPPED_OR_UNVERIFIED",
-                   "no verified channels for account-month"),
+            _issue(
+                component,
+                "ACCOUNT_UNMAPPED_OR_UNVERIFIED",
+                "no verified channels for account-month",
+            ),
             False,
         )
 
@@ -387,8 +390,9 @@ def _allocate_component(
     if source_kind is None:
         return _ComponentOutcome(
             (),
-            _issue(component, "BASIS_MISSING",
-                   f"unresolved source kind for {component.source_system}"),
+            _issue(
+                component, "BASIS_MISSING", f"unresolved source kind for {component.source_system}"
+            ),
             False,
         )
 
@@ -437,9 +441,7 @@ def summarize_account_allocation(
     """Conserved roll-up over a set of allocation lines + unallocated issues."""
     allocated_total = sum((ln.allocated_amount_usd for ln in lines), Decimal("0"))
     unallocated_total = sum((iss.amount_usd for iss in unallocated), Decimal("0"))
-    net_total = sum(
-        (ln.allocated_amount_usd for ln in lines if ln.net_applicable), Decimal("0")
-    )
+    net_total = sum((ln.allocated_amount_usd for ln in lines if ln.net_applicable), Decimal("0"))
     reconciliation_total = sum(
         (ln.allocated_amount_usd for ln in lines if not ln.net_applicable), Decimal("0")
     )
@@ -494,16 +496,12 @@ def build_account_allocation(
     # or KeyError in the _ZERO_BASIS_ISSUE lookup. AllocationValidationError is
     # already defined in this module (allocation.py:30); no import needed.
     if allocation_method not in COMMITTABLE_ALLOCATION_METHODS:
-        raise AllocationValidationError(
-            f"unsupported allocation method: {allocation_method}"
-        )
+        raise AllocationValidationError(f"unsupported allocation method: {allocation_method}")
     # company_level cannot distinguish "channel has no company" from "the caller
     # forgot the mapping" — require an explicit mapping object (empty is allowed
     # and yields per-component COMPANY_UNMAPPED issues).
     if allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD and channel_company is None:
-        raise AllocationValidationError(
-            "channel_company mapping is required for company_level"
-        )
+        raise AllocationValidationError("channel_company mapping is required for company_level")
     lines: list[AllocationLine] = []
     unallocated: list[UnallocatedIssue] = []
     notes = _multi_account_notes(verified_channels)
@@ -513,7 +511,10 @@ def build_account_allocation(
     for component in components:
         component_count += 1
         outcome = _allocate_component(
-            component, verified_channels, basis, allocation_method,
+            component,
+            verified_channels,
+            basis,
+            allocation_method,
             channel_company or {},
         )
         lines.extend(outcome.lines)

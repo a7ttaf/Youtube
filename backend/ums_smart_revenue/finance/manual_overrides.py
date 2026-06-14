@@ -215,9 +215,7 @@ class SqlAlchemyManualOverrideRepository:
         self._session.flush()
         return self._to_entry(row)
 
-    def _get_row(
-        self, override_id: str, *, for_update: bool = False
-    ) -> RevenueManualOverrideORM:
+    def _get_row(self, override_id: str, *, for_update: bool = False) -> RevenueManualOverrideORM:
         """Internal helper to fetch a manual override ORM row by ID, optionally locking it."""
         override_uuid = _parse_uuid(override_id, field_name="manual_override_id")
         statement = select(RevenueManualOverrideORM).where(
@@ -254,9 +252,7 @@ class SqlAlchemyManualOverrideRepository:
             for_update=for_update,
         )
         if close.status == "LOCKED":
-            raise ManualOverrideLockedMonthError(
-                "Finance month is locked for manual overrides"
-            )
+            raise ManualOverrideLockedMonthError("Finance month is locked for manual overrides")
 
     @staticmethod
     def _to_entry(row: RevenueManualOverrideORM) -> RevenueManualOverrideEntry:
@@ -305,9 +301,7 @@ def _validate_month(month: str) -> None:
 def _validate_nonzero_adjustment(value: Decimal) -> None:
     """Ensure the adjustment revenue decimal is finite and non-zero."""
     if not value.is_finite():
-        raise ManualOverrideValidationError(
-            "adjustment_revenue_usd must be a finite decimal"
-        )
+        raise ManualOverrideValidationError("adjustment_revenue_usd must be a finite decimal")
     if value == 0:
         raise ManualOverrideValidationError("adjustment_revenue_usd must not be zero")
 
@@ -338,6 +332,4 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ManualOverrideValidationError(
-            f"{field_name} must be a valid UUID"
-        ) from exc
+        raise ManualOverrideValidationError(f"{field_name} must be a valid UUID") from exc

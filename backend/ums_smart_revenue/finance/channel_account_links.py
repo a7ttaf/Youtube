@@ -14,6 +14,7 @@ that first uses it so every commit stays ruff-clean:
   Task 9 → add `ContentOwnerChannelLinkORM` to the finance_models import;
            `from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM`
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -109,9 +110,7 @@ class AccountOwnerLink:
             "verification_status": self.verification_status,
             "provenance_kind": self.provenance_kind,
             "verified_by": self.verified_by,
-            "verified_at": (
-                None if self.verified_at is None else self.verified_at.isoformat()
-            ),
+            "verified_at": (None if self.verified_at is None else self.verified_at.isoformat()),
             "verification_reason": self.verification_reason,
             "effective_month_start": self.effective_month_start,
             "effective_month_end": self.effective_month_end,
@@ -162,9 +161,7 @@ def _validate_month(month: str) -> None:
         raise ChannelAccountLinkValidationError("month must use YYYY-MM")
 
 
-def _ranges_overlap(
-    start_a: str, end_a: str | None, start_b: str, end_b: str | None
-) -> bool:
+def _ranges_overlap(start_a: str, end_a: str | None, start_b: str, end_b: str | None) -> bool:
     """Return True if two YYYY-MM ranges overlap (None end = open-ended)."""
     ea = end_a if end_a is not None else _OPEN_END
     eb = end_b if end_b is not None else _OPEN_END
@@ -178,9 +175,7 @@ def _account_owner_lock_key(tenant_id: UUID, adsense_account_id: str) -> int:
     discriminator, shifted into the positive signed-bigint range. Never includes
     payload, amounts, or credentials.
     """
-    payload = (
-        f"adsense_content_owner_links\0{tenant_id}\0{adsense_account_id}"
-    ).encode()
+    payload = (f"adsense_content_owner_links\0{tenant_id}\0{adsense_account_id}").encode()
     digest = hashlib.blake2b(payload, digest_size=8).digest()
     return int.from_bytes(digest, "big") >> 1
 
@@ -282,11 +277,7 @@ class SqlAlchemyChannelAccountLinkRepository:
             statement = statement.where(FinanceMonthCloseORM.month <= end)
         statement = statement.order_by(FinanceMonthCloseORM.month).with_for_update()
         locked_month = next(
-            (
-                row.month
-                for row in self._session.scalars(statement)
-                if row.status == "LOCKED"
-            ),
+            (row.month for row in self._session.scalars(statement) if row.status == "LOCKED"),
             None,
         )
         if locked_month is not None:
@@ -295,7 +286,8 @@ class SqlAlchemyChannelAccountLinkRepository:
             )
 
     def propose_account_owner_link(
-        self, *,
+        self,
+        *,
         adsense_account_id: str,
         content_owner_id: str,
         effective_month_start: str,
@@ -420,8 +412,10 @@ class SqlAlchemyChannelAccountLinkRepository:
         ).all()
         for other in existing:
             if _ranges_overlap(
-                row.effective_month_start, row.effective_month_end,
-                other.effective_month_start, other.effective_month_end,
+                row.effective_month_start,
+                row.effective_month_end,
+                other.effective_month_start,
+                other.effective_month_end,
             ):
                 raise ChannelAccountLinkConflictError(
                     "a verified link already covers an overlapping month range "
@@ -469,7 +463,8 @@ class SqlAlchemyChannelAccountLinkRepository:
         return self._to_account_owner_link(row)
 
     def list_account_owner_links(
-        self, *,
+        self,
+        *,
         status: str | None = None,
         adsense_account_id: str | None = None,
         content_owner_id: str | None = None,
@@ -527,9 +522,7 @@ class SqlAlchemyChannelAccountLinkRepository:
             links=[self._to_account_owner_link(row) for row in rows],
         )
 
-    def _owner_channel_link_exists(
-        self, owner_id: str, channel_id: str, month: str
-    ) -> bool:
+    def _owner_channel_link_exists(self, owner_id: str, channel_id: str, month: str) -> bool:
         """Return True if an owner↔channel link for (owner, channel, month) already
         exists under this tenant. Fast existence probe for derivation idempotency.
         """
@@ -696,16 +689,13 @@ class SqlAlchemyChannelAccountLinkRepository:
         """
         _validate_month(month)
         resolved_tenant = _resolve_tenant_id(tenant_id)
-        owner_subquery = (
-            select(AdsenseContentOwnerLinkORM.content_owner_id)
-            .where(
-                AdsenseContentOwnerLinkORM.tenant_id == resolved_tenant,
-                AdsenseContentOwnerLinkORM.adsense_account_id == adsense_account_id,
-                AdsenseContentOwnerLinkORM.verification_status == "VERIFIED",
-                AdsenseContentOwnerLinkORM.effective_month_start <= month,
-                (AdsenseContentOwnerLinkORM.effective_month_end.is_(None))
-                | (AdsenseContentOwnerLinkORM.effective_month_end >= month),
-            )
+        owner_subquery = select(AdsenseContentOwnerLinkORM.content_owner_id).where(
+            AdsenseContentOwnerLinkORM.tenant_id == resolved_tenant,
+            AdsenseContentOwnerLinkORM.adsense_account_id == adsense_account_id,
+            AdsenseContentOwnerLinkORM.verification_status == "VERIFIED",
+            AdsenseContentOwnerLinkORM.effective_month_start <= month,
+            (AdsenseContentOwnerLinkORM.effective_month_end.is_(None))
+            | (AdsenseContentOwnerLinkORM.effective_month_end >= month),
         )
         rows = self._session.scalars(
             select(ContentOwnerChannelLinkORM.youtube_channel_id)

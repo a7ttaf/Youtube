@@ -135,9 +135,7 @@ class UserAccountUpdateRequest(BaseModel):
     """Request body for partial account metadata or lifecycle updates."""
 
     email: str | None = Field(default=None, max_length=USER_EMAIL_MAX_LENGTH)
-    display_name: str | None = Field(
-        default=None, max_length=USER_DISPLAY_NAME_MAX_LENGTH
-    )
+    display_name: str | None = Field(default=None, max_length=USER_DISPLAY_NAME_MAX_LENGTH)
     status: str | None = None
     reason: str = Field(min_length=1, max_length=USER_ACTION_REASON_MAX_LENGTH)
 
@@ -325,9 +323,7 @@ def get_user_access_profile(
     try:
         return repository.get_access_profile(user_id=user_id).to_api()
     except UserAccountNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserAccountValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -358,13 +354,9 @@ def create_user_account(
             is_service_account=payload.is_service_account,
         )
     except UserAccountConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except UserAccountNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserAccountValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -401,9 +393,7 @@ def update_user_account(
     try:
         existing = repository.get_user(user_id=user_id)
     except UserAccountNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserAccountValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -428,21 +418,15 @@ def update_user_account(
             service_account_updates_allowed=service_account_updates_allowed,
         )
     except UserAccountConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except UserAccountNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserAccountValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     except UserAccountServiceAccountPolicyError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
     except UserAccountStorageError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -488,13 +472,9 @@ def assign_user_role(
             reason=payload.reason,
         )
     except UserRoleAssignmentConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except UserRoleAssignmentNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserRoleAssignmentValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -530,13 +510,9 @@ def revoke_user_role(
     """
     _require_role_assignment_permission(user)
     try:
-        existing = repository.get_assignment(
-            user_id=user_id, assignment_id=assignment_id
-        )
+        existing = repository.get_assignment(user_id=user_id, assignment_id=assignment_id)
     except UserRoleAssignmentNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserRoleAssignmentValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -552,13 +528,9 @@ def revoke_user_role(
             reason=payload.reason,
         )
     except UserRoleAssignmentConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except UserRoleAssignmentNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserRoleAssignmentValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -600,13 +572,9 @@ def grant_user_permission(
             reason=payload.reason,
         )
     except UserPermissionGrantConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except UserPermissionGrantNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserPermissionGrantValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -644,9 +612,7 @@ def revoke_user_permission(
     try:
         existing = repository.get_grant(user_id=user_id, grant_id=grant_id)
     except UserPermissionGrantNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserPermissionGrantValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -663,13 +629,9 @@ def revoke_user_permission(
             reason=payload.reason,
         )
     except UserPermissionGrantConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except UserPermissionGrantNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserPermissionGrantValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -751,13 +713,9 @@ def _require_role_assignment_policy(user: UserPrincipal, role: RoleKey) -> None:
         )
 
 
-def _require_permission_grant_policy(
-    user: UserPrincipal, permission: Permission
-) -> None:
+def _require_permission_grant_policy(user: UserPrincipal, permission: Permission) -> None:
     """Enforce permission-family-specific grant authority."""
-    if permission in SUPER_OWNER_ONLY_PERMISSION_KEYS and not _has_role(
-        user, RoleKey.SUPER_OWNER
-    ):
+    if permission in SUPER_OWNER_ONLY_PERMISSION_KEYS and not _has_role(user, RoleKey.SUPER_OWNER):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Administrative permissions require Super Owner",
@@ -781,16 +739,14 @@ def _require_permission_grant_policy(
 def _has_role(user: UserPrincipal, role: RoleKey) -> bool:
     """Return whether the caller has an active assignment for one role."""
     return any(
-        assignment.active and assignment.role == role
-        for assignment in user.role_assignments
+        assignment.active and assignment.role == role for assignment in user.role_assignments
     )
 
 
 def _has_any_role(user: UserPrincipal, roles: set[RoleKey]) -> bool:
     """Return whether the caller has any active assignment in a role set."""
     return any(
-        assignment.active and assignment.role in roles
-        for assignment in user.role_assignments
+        assignment.active and assignment.role in roles for assignment in user.role_assignments
     )
 
 

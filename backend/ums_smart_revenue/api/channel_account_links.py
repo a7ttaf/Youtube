@@ -11,6 +11,7 @@ that first uses it so every commit stays ruff-clean:
   Task 13 → `ChannelAccountLinkConflictError, ChannelAccountLinkNotFoundError`
             from finance.channel_account_links.
 """
+
 from typing import Annotated
 from uuid import UUID
 
@@ -61,9 +62,7 @@ class AccountOwnerLinksListResponse(BaseModel):
     audit_events: list[dict[str, object]]
 
 
-def _require_permission(
-    user: UserPrincipal, permission: Permission, scope: AccessScope
-) -> None:
+def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
     """Raise HTTP 403 if the principal lacks the permission for the scope."""
     if not has_permission(user, permission, scope):
         raise HTTPException(
@@ -113,9 +112,7 @@ def _require_allocation_permission_for_range(
     authorizes a non-global caller without at least one explicit month check).
     """
     if end is None:
-        _require_permission(
-            user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
-        )
+        _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope())
         return
     # FIX (PR #57 N10): a CHANGE_ALLOCATION_RULE grant at global scope authorizes
     # every finance month (OrgAccessIndex.contains returns True for a GLOBAL
@@ -124,9 +121,7 @@ def _require_allocation_permission_for_range(
     # iterations for an authorized far-future bounded effective_month_end (e.g.
     # 9999-12). Use the NON-raising has_permission so a non-global caller falls
     # through to the per-month loop and is still gated month-by-month.
-    if has_permission(
-        user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
-    ):
+    if has_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()):
         return
     for month in _iter_months(start, end) or [start]:
         _require_permission(
@@ -180,18 +175,24 @@ def list_channel_account_links(
     audit_events = [
         audit_record_to_api(
             record_audit_event(
-                sink=audit_sink, actor=user,
+                sink=audit_sink,
+                actor=user,
                 event_type=AuditEventType.REVENUE_VIEWED,
-                entity_type="channel_account_links", entity_id="list",
-                scope=global_scope, details=details,
+                entity_type="channel_account_links",
+                entity_id="list",
+                scope=global_scope,
+                details=details,
             )
         ),
         audit_record_to_api(
             record_audit_event(
-                sink=audit_sink, actor=user,
+                sink=audit_sink,
+                actor=user,
                 event_type=AuditEventType.PAYMENT_VIEWED,
-                entity_type="channel_account_links", entity_id="list",
-                scope=global_scope, details=details,
+                entity_type="channel_account_links",
+                entity_id="list",
+                scope=global_scope,
+                details=details,
             )
         ),
     ]
@@ -201,7 +202,8 @@ def list_channel_account_links(
         returned_count=len(page.links),
         links=[link.to_api() for link in page.links],
         pagination={
-            "limit": limit, "offset": offset,
+            "limit": limit,
+            "offset": offset,
             "next_offset": (offset + limit) if has_more else None,
             "has_more": has_more,
         },
@@ -221,7 +223,9 @@ class ProposeAccountOwnerLinkRequest(BaseModel):
     reason: str = Field(min_length=1)
 
     @field_validator(
-        "content_owner_id", "provenance_kind", "reason",
+        "content_owner_id",
+        "provenance_kind",
+        "reason",
         mode="before",
     )
     @classmethod
@@ -295,12 +299,17 @@ def propose_channel_account_link(
     except ChannelAccountLinkConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     record = record_audit_event(
-        sink=audit_sink, actor=user,
+        sink=audit_sink,
+        actor=user,
         event_type=AuditEventType.CHANNEL_ACCOUNT_LINK_PROPOSED,
-        entity_type="adsense_content_owner_link", entity_id=link.id,
-        scope=AccessScope.global_scope(), reason=payload.reason,
-        details={"adsense_account_id": link.adsense_account_id,
-                 "content_owner_id": link.content_owner_id},
+        entity_type="adsense_content_owner_link",
+        entity_id=link.id,
+        scope=AccessScope.global_scope(),
+        reason=payload.reason,
+        details={
+            "adsense_account_id": link.adsense_account_id,
+            "content_owner_id": link.content_owner_id,
+        },
     )
     return AccountOwnerLinkMutationResponse(
         link=link.to_api(), audit_event=audit_record_to_api(record)
@@ -320,8 +329,12 @@ class LinkDecisionRequest(BaseModel):
 
 
 def _decide_link(
-    *, link_id: str, reason: str, verify: bool,
-    user: UserPrincipal, repository: SqlAlchemyChannelAccountLinkRepository,
+    *,
+    link_id: str,
+    reason: str,
+    verify: bool,
+    user: UserPrincipal,
+    repository: SqlAlchemyChannelAccountLinkRepository,
     audit_sink: AuditSink,
 ) -> AccountOwnerLinkMutationResponse:
     """Shared verify/reject handler: gate, exact-load, authorize on month, mutate, audit.
@@ -336,9 +349,7 @@ def _decide_link(
     try:
         existing = repository.get_account_owner_link(link_id)
     except ChannelAccountLinkNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="unknown link"
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown link") from exc
     # FIX: a VERIFIED link is consumed by allocation for every month in its
     # [start, end] range; the previous check only gated effective_month_start,
     # letting a caller scoped to the start month approve later months they were
@@ -381,13 +392,19 @@ def _decide_link(
     # details so month-level audit review of a later (now closed) period can still
     # surface the mutation that touched it, not only the start-month event.
     record = record_audit_event(
-        sink=audit_sink, actor=user, event_type=event_type,
-        entity_type="adsense_content_owner_link", entity_id=link.id,
-        scope=AccessScope.finance_month(link.effective_month_start), reason=reason,
-        details={"adsense_account_id": link.adsense_account_id,
-                 "verification_status": link.verification_status,
-                 "effective_month_start": link.effective_month_start,
-                 "effective_month_end": link.effective_month_end},
+        sink=audit_sink,
+        actor=user,
+        event_type=event_type,
+        entity_type="adsense_content_owner_link",
+        entity_id=link.id,
+        scope=AccessScope.finance_month(link.effective_month_start),
+        reason=reason,
+        details={
+            "adsense_account_id": link.adsense_account_id,
+            "verification_status": link.verification_status,
+            "effective_month_start": link.effective_month_start,
+            "effective_month_end": link.effective_month_end,
+        },
     )
     return AccountOwnerLinkMutationResponse(
         link=link.to_api(), audit_event=audit_record_to_api(record)
@@ -418,8 +435,12 @@ def verify_channel_account_link(
 ) -> AccountOwnerLinkMutationResponse:
     """Verify an account↔owner link (dual-permission, overlap-guarded)."""
     return _decide_link(
-        link_id=link_id, reason=payload.reason, verify=True,
-        user=user, repository=repository, audit_sink=audit_sink,
+        link_id=link_id,
+        reason=payload.reason,
+        verify=True,
+        user=user,
+        repository=repository,
+        audit_sink=audit_sink,
     )
 
 
@@ -439,6 +460,10 @@ def reject_channel_account_link(
 ) -> AccountOwnerLinkMutationResponse:
     """Reject an account↔owner link (dual-permission)."""
     return _decide_link(
-        link_id=link_id, reason=payload.reason, verify=False,
-        user=user, repository=repository, audit_sink=audit_sink,
+        link_id=link_id,
+        reason=payload.reason,
+        verify=False,
+        user=user,
+        repository=repository,
+        audit_sink=audit_sink,
     )

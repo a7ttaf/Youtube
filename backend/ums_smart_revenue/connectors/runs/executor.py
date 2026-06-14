@@ -1,4 +1,5 @@
 """In-process bounded executor that runs connector pulls off the request thread."""
+
 from __future__ import annotations
 
 import logging
@@ -233,9 +234,7 @@ class ConnectorJobExecutor:
             if isinstance(current, Future):
                 return current
             if current is not reservation:
-                raise RuntimeError(
-                    f"reservation for {key} was deregistered or replaced"
-                )
+                raise RuntimeError(f"reservation for {key} was deregistered or replaced")
             future = self._executor.submit(
                 self._run_job,
                 tenant_id=reservation.tenant_id,

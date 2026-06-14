@@ -11,6 +11,7 @@ azure-keyvault://) are intentionally unregistered until a future
 credential-lifecycle PR. They raise UnsupportedSecretSchemeError so B2 fails
 closed instead of silently dropping the secret.
 """
+
 from __future__ import annotations
 
 from threading import RLock
@@ -41,8 +42,10 @@ _REGISTRY_LOCK = RLock()
 # Blast Radius: Credential secret bootstrap only. Authorization, finance,
 #               audit, Neo4j, and exports are unaffected.
 # Connections:
-#   - File: backend/ums_smart_revenue/connectors/google/gcp_secret_manager.py -> Production resolver.
-#   - File: backend/ums_smart_revenue/connectors/google/local_secret_resolver.py -> Test/dev resolver.
+#   - File: backend/ums_smart_revenue/connectors/google/gcp_secret_manager.py
+#     -> Production resolver.
+#   - File: backend/ums_smart_revenue/connectors/google/local_secret_resolver.py
+#     -> Test/dev resolver.
 # ============================================================================
 def register_resolver(*, scheme: str, resolver: SecretResolver) -> None:
     with _REGISTRY_LOCK:
@@ -67,18 +70,14 @@ def register_resolver(*, scheme: str, resolver: SecretResolver) -> None:
 def ensure_default_resolvers() -> None:
     """Register production secret resolvers exactly once at runtime boot."""
     with _REGISTRY_LOCK:
-        missing = [
-            scheme for scheme in _GCP_SECRET_MANAGER_SCHEMES if scheme not in _REGISTRY
-        ]
+        missing = [scheme for scheme in _GCP_SECRET_MANAGER_SCHEMES if scheme not in _REGISTRY]
         if not missing:
             return
         from ums_smart_revenue.connectors.google.gcp_secret_manager import (
             GcpSecretManagerResolver,
         )
 
-        resolver = _REGISTRY.get("gcp-secret-manager") or _REGISTRY.get(
-            "secret-manager"
-        )
+        resolver = _REGISTRY.get("gcp-secret-manager") or _REGISTRY.get("secret-manager")
         if resolver is None:
             resolver = GcpSecretManagerResolver()
         for scheme in missing:

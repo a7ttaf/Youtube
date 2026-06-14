@@ -87,9 +87,7 @@ class SqlAlchemyExchangeRateRepository:
     ) -> list[CurrencyExchangeRateEntry]:
         """Synchronize exchange rates after validating batch size and inputs."""
         if not rates:
-            raise ExchangeRateValidationError(
-                "rates must contain at least one exchange rate"
-            )
+            raise ExchangeRateValidationError("rates must contain at least one exchange rate")
         if len(rates) > MAX_EXCHANGE_RATE_BATCH_SIZE:
             raise ExchangeRateValidationError(
                 f"rates cannot exceed {MAX_EXCHANGE_RATE_BATCH_SIZE} entries"
@@ -119,16 +117,15 @@ class SqlAlchemyExchangeRateRepository:
             seen_rate_keys.add(rate_key)
 
         prepared_rates = [
-            (normalized, _quantize_rate(normalized.rate))
-            for normalized in normalized_rates
+            (normalized, _quantize_rate(normalized.rate)) for normalized in normalized_rates
         ]
 
         entries: list[CurrencyExchangeRateEntry] = []
         for normalized, quantized_rate in prepared_rates:
             now = datetime.now(UTC)
-            insert_statement = _dialect_insert(
-                self._session.get_bind().dialect.name
-            )(CurrencyExchangeRateORM).values(
+            insert_statement = _dialect_insert(self._session.get_bind().dialect.name)(
+                CurrencyExchangeRateORM
+            ).values(
                 id=uuid4(),
                 rate_date=normalized.rate_date,
                 base_currency=normalized.base_currency,
@@ -171,9 +168,7 @@ class SqlAlchemyExchangeRateRepository:
         normalized_base = _normalize_currency(base_currency, "base_currency")
         normalized_quote = _normalize_currency(quote_currency, "quote_currency")
         if normalized_base == normalized_quote:
-            raise ExchangeRateValidationError(
-                "base_currency and quote_currency must differ"
-            )
+            raise ExchangeRateValidationError("base_currency and quote_currency must differ")
         normalized_provider = _normalize_optional_string(provider_key)
         statement = (
             select(CurrencyExchangeRateORM)
@@ -191,9 +186,7 @@ class SqlAlchemyExchangeRateRepository:
             .limit(1)
         )
         if normalized_provider is not None:
-            statement = statement.where(
-                CurrencyExchangeRateORM.provider_key == normalized_provider
-            )
+            statement = statement.where(CurrencyExchangeRateORM.provider_key == normalized_provider)
         row = self._session.scalars(statement).one_or_none()
         return self._to_entry(row) if row is not None else None
 
@@ -220,9 +213,7 @@ def _normalize_rate_input(
     base_currency = _normalize_currency(value.base_currency, "base_currency")
     quote_currency = _normalize_currency(value.quote_currency, "quote_currency")
     if base_currency == quote_currency:
-        raise ExchangeRateValidationError(
-            "base_currency and quote_currency must differ"
-        )
+        raise ExchangeRateValidationError("base_currency and quote_currency must differ")
     if not value.rate.is_finite() or value.rate <= 0:
         raise ExchangeRateValidationError("rate must be > 0")
     if value.raw_payload is not None and not isinstance(value.raw_payload, dict):
@@ -240,9 +231,7 @@ def _normalize_currency(value: str, field_name: str) -> str:
     """Normalize and validate a three-letter currency code."""
     normalized = _normalize_required_string(value, field_name).upper()
     if not CURRENCY_PATTERN.fullmatch(normalized):
-        raise ExchangeRateValidationError(
-            f"{field_name} must be a three-letter ISO currency code"
-        )
+        raise ExchangeRateValidationError(f"{field_name} must be a three-letter ISO currency code")
     return normalized
 
 
@@ -276,13 +265,9 @@ def _quantize_rate(value: Decimal) -> Decimal:
     try:
         quantized = value.quantize(Decimal("0.0000000001"))
     except InvalidOperation as exc:
-        raise ExchangeRateValidationError(
-            f"rate has too many significant digits: {value}"
-        ) from exc
+        raise ExchangeRateValidationError(f"rate has too many significant digits: {value}") from exc
     if quantized <= 0:
-        raise ExchangeRateValidationError(
-            f"rate rounds to zero after quantization: {value}"
-        )
+        raise ExchangeRateValidationError(f"rate rounds to zero after quantization: {value}")
     return quantized
 
 

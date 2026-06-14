@@ -48,7 +48,8 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_export_jobs_artifact_content_type",
         "export_jobs",
-        "artifact_content_type IS NULL OR artifact_content_type ~ '^[A-Za-z0-9.+_-]+/[A-Za-z0-9.+_-]+$'",
+        "artifact_content_type IS NULL OR "
+        "artifact_content_type ~ '^[A-Za-z0-9.+_-]+/[A-Za-z0-9.+_-]+$'",
     )
     op.create_check_constraint(
         "ck_export_jobs_artifact_all_or_none",

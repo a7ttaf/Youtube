@@ -72,8 +72,7 @@ def upgrade() -> None:
             name="ck_tenants_status",
         ),
         sa.CheckConstraint(
-            "length(primary_currency) = 3 "
-            "AND primary_currency = upper(primary_currency)",
+            "length(primary_currency) = 3 AND primary_currency = upper(primary_currency)",
             name="ck_tenants_primary_currency_iso4217",
         ),
     )
