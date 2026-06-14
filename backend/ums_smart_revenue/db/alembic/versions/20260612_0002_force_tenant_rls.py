@@ -35,6 +35,7 @@ FORCEd and intentionally absent from TENANT_SCOPED_TABLES.
 Rollback: drop FORCE on every tenant table (NO FORCE). RLS stays ENABLED and the
 isolation policies stay in place — this revision owns only the FORCE flag.
 """
+
 import sqlalchemy as sa
 from alembic import op
 
