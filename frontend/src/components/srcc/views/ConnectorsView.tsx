@@ -254,8 +254,8 @@ export function ConnectorsView({ // skipcq: JS-0067
       })
       .catch((_err: unknown) => {
         // The hook already captured the typed error in jobActions.error and
-        // surfaces it in the banner; nothing more to do here.
-        // skipcq: JS-0098
+        // surfaces it in the banner; log here for traceability at this call site.
+        console.error("[ConnectorsView] connector job request failed:", _err);
       });
   };
 
@@ -646,8 +646,8 @@ function useRunHistoryFeedState(reloadToken: number): RunHistoryFeedState { // s
     if (reloadToken === 0) return;
     setRows([]);
     setPagination(null);
-    setCursorStartedAt();
-    setCursorId();
+    setCursorStartedAt(undefined);
+    setCursorId(undefined);
     reload();
   }, [reloadToken, reload]);
 

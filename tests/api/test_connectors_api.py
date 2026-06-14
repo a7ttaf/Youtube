@@ -1713,7 +1713,7 @@ def test_credential_health_serializes_null_telemetry_as_unknown(tmp_path):
 
 
 def test_derive_credential_health_state_auth_failed_on_failure_status():
-    """A failed last_refresh_status derives 'auth_failed' regardless of expiry."""
+    """A failed last_refresh_status derives 'auth_failed' when the credential is active."""
     from ums_smart_revenue.connectors.credentials import (
         ConnectorCredentialEntry,
         derive_credential_health_state,
@@ -1724,7 +1724,7 @@ def test_derive_credential_health_state_auth_failed_on_failure_status():
         id="x",
         connector_key="youtube_reporting",
         account_id="acct-1",
-        status="failed_auth",
+        status="active",
         has_secret_ref=True,
         token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
         last_refresh_status="failed",
