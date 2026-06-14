@@ -1,5 +1,30 @@
 -- Initial UMS security seed data.
 -- Safe to re-run after security_schema.sql.
+--
+-- RUNTIME CONTRACT (Track-E, post-FORCE migration 20260612_0002):
+-- This seed writes to FORCEd RLS tenant-scoped tables (access_scopes,
+-- user_role_assignments, user_permission_grants, role_permission_assignments,
+-- permissions, roles). The tenant_id-scoped policies are now in force for the
+-- table owner too, so a non-superuser non-BYPASSRLS table owner MUST either:
+--   (a) run as a superuser / BYPASSRLS role, OR
+--   (b) SET LOCAL app.current_tenant_id to a real tenant id before this
+--       transaction (the table owner is subject to FORCE), OR
+--   (c) the script-runner is the table owner who issues the
+--       `SET LOCAL row_security = OFF;` shim below inside the same
+--       transaction (the per-session table-owner bypass is exactly what
+--       FORCE turns off, but `row_security` remains an explicit override
+--       for the owner). Superusers and BYPASSRLS roles are unaffected.
+-- The Python code path (backend/ums_smart_revenue/auth/seed.py + a migration
+-- loader) is the in-repo source of truth; this .sql file is documentation
+-- for an operator-run reseed and uses the SET LOCAL escape hatch so a
+-- non-superuser owner can re-run it cleanly.
+
+-- Owner-bypass escape hatch for the FORCEd tenant tables: the table owner
+-- running this script would otherwise be subject to `tenant_id =
+-- app_current_tenant_id()` and see NULL, which rejects every row. The shim
+-- only affects the current transaction; it is a no-op for superusers and
+-- BYPASSRLS roles.
+SET LOCAL row_security = OFF;
 
 INSERT INTO access_scopes (scope_type, scope_id, label)
 VALUES ('global', NULL, 'Global')
