@@ -62,8 +62,10 @@ def _force_flags(conn: sa.Connection) -> dict[str, bool]:
     """Return ``{table: relforcerowsecurity}`` for the tenant-scoped tables."""
     rows = conn.execute(
         sa.text(
-            "SELECT relname, relforcerowsecurity FROM pg_class "
-            "WHERE relname = ANY(:names)"
+            "SELECT c.relname, c.relforcerowsecurity "
+            "FROM pg_class c "
+            "JOIN pg_namespace n ON c.relnamespace = n.oid "
+            "WHERE n.nspname = 'public' AND c.relname = ANY(:names)"
         ),
         {"names": list(TENANT_SCOPED_TABLES)},
     ).all()
