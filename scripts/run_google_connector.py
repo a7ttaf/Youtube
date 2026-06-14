@@ -25,6 +25,7 @@ Exit codes (operator contract -- see Docs spec §5.4):
     !=0 -- argparse rejection (unknown --connector, bad UUID, malformed
            --month). Always non-zero with argparse's standard exit status.
 """
+
 # ============================================================================
 # Purpose: Operator CLI surface that drives one end-to-end connector_runs
 #          lifecycle (or a counts-only dry-run) for a single
@@ -117,18 +118,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the B2 live Google connector for one (tenant, account, month).",
     )
-    parser.add_argument(
-        "--tenant", required=True, type=UUID, help="Tenant UUID for this run."
-    )
+    parser.add_argument("--tenant", required=True, type=UUID, help="Tenant UUID for this run.")
     parser.add_argument(
         "--connector",
         required=True,
         choices=sorted(registry.known_keys()),
         help="Connector key registered in connectors.google.registry.",
     )
-    parser.add_argument(
-        "--account", required=True, help="Connector account identifier (string)."
-    )
+    parser.add_argument("--account", required=True, help="Connector account identifier (string).")
     parser.add_argument(
         "--month",
         required=True,
@@ -211,9 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     # documented exit 2.
     with session_factory() as session:
         try:
-            with connector_tenant_context(
-                args.tenant, session=session
-            ):
+            with connector_tenant_context(args.tenant, session=session):
                 outcome = run_one(
                     session,
                     tenant_id=args.tenant,
@@ -241,10 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     # the per-report failures list so the operator's first signal is on one
     # line. Exit 0 only on SUCCEEDED; PARTIAL and FAILED both exit 1 so
     # cron's "non-zero = paging condition" stays correct.
-    print(
-        f"{outcome.run.status} counts={outcome.counts} "
-        f"failures={outcome.per_report_failures}"
-    )
+    print(f"{outcome.run.status} counts={outcome.counts} failures={outcome.per_report_failures}")
     return 0 if outcome.run.status == "SUCCEEDED" else 1
 
 

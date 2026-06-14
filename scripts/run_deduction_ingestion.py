@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """CLI entrypoint for deduction-component ingestion."""
+
 from __future__ import annotations
 
 import argparse
@@ -115,11 +116,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--month", required=True, help="Finance month YYYY-MM.")
     parser.add_argument("--reason", required=True, help="Non-empty audit reason.")
     parser.add_argument(
-        "--source", choices=list(INGESTION_SOURCES), default=None,
+        "--source",
+        choices=list(INGESTION_SOURCES),
+        default=None,
         help="Limit to one source adapter (default: all).",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Compute counts only: no DB writes, no audit, no commit.",
     )
     args = parser.parse_args(argv)
@@ -173,13 +177,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         audit_sink = deps.audit_sink_cls(session, tenant_id=args.tenant)
-        service = deps.ingestion_service_cls(
-            session, audit_sink=audit_sink, tenant_id=args.tenant
-        )
+        service = deps.ingestion_service_cls(session, audit_sink=audit_sink, tenant_id=args.tenant)
         try:
             result = service.ingest(
-                month=args.month, actor=actor, reason=args.reason,
-                source=args.source, dry_run=args.dry_run,
+                month=args.month,
+                actor=actor,
+                reason=args.reason,
+                source=args.source,
+                dry_run=args.dry_run,
             )
         except deps.ingestion_error_cls as exc:
             print(f"{type(exc).__name__}: {exc!s}", file=sys.stderr)

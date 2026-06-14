@@ -22,6 +22,7 @@ Run: ``python scripts/smoke_mvp.py``  (optionally ``--month 2026-03``).
 This is a verification harness, NOT a product feature: it imports + drives the
 existing seed and app and never reimplements finance math or auth.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -125,12 +126,9 @@ def _validate_finance_close(body: Any) -> str:
     """Assert the finance-close status carries month + lock state."""
     if not isinstance(body, Mapping):
         return "response is not a JSON object"
-    return (
-        _require(isinstance(body.get("month"), str), "missing month")
-        or _require(
-            body.get("status") in {"OPEN", "LOCKED"},
-            f"unexpected close status: {body.get('status')!r}",
-        )
+    return _require(isinstance(body.get("month"), str), "missing month") or _require(
+        body.get("status") in {"OPEN", "LOCKED"},
+        f"unexpected close status: {body.get('status')!r}",
     )
 
 
@@ -191,12 +189,9 @@ def _validate_paginated_items(body: Any) -> str:
     """Assert a list endpoint returns the {items, pagination} envelope."""
     if not isinstance(body, Mapping):
         return "response is not a JSON object"
-    return (
-        _require(isinstance(body.get("items"), list), "items must be a list")
-        or _require(
-            isinstance(body.get("pagination"), Mapping),
-            "pagination envelope missing",
-        )
+    return _require(isinstance(body.get("items"), list), "items must be a list") or _require(
+        isinstance(body.get("pagination"), Mapping),
+        "pagination envelope missing",
     )
 
 
@@ -204,12 +199,9 @@ def _validate_adsense_payments(body: Any) -> str:
     """Assert the AdSense payment list returns items + pagination + audit event."""
     if not isinstance(body, Mapping):
         return "response is not a JSON object"
-    return (
-        _validate_paginated_items(body)
-        or _require(
-            isinstance(body.get("audit_event"), Mapping),
-            "audit_event missing on payment read",
-        )
+    return _validate_paginated_items(body) or _require(
+        isinstance(body.get("audit_event"), Mapping),
+        "audit_event missing on payment read",
     )
 
 
@@ -378,9 +370,7 @@ class _SmokeContext:
     headers: dict[str, str] = field(default_factory=_demo_headers)
 
 
-def _seed_and_build_app(
-    month: str, database_path: str, database_url: str
-) -> _SmokeContext:
+def _seed_and_build_app(month: str, database_path: str, database_url: str) -> _SmokeContext:
     """Seed the demo month then build the in-process app + TestClient.
 
     Sets the trusted-gateway token in THIS process env and clears the cached
@@ -417,9 +407,7 @@ def _seed_and_build_app(
             os.environ[AUTHZ_SOURCE_ENV] = previous_authz_source
 
 
-def _seed_and_build_app_pinned(
-    month: str, database_path: str, database_url: str
-) -> _SmokeContext:
+def _seed_and_build_app_pinned(month: str, database_path: str, database_url: str) -> _SmokeContext:
     """Seed + build the app with header-authz already pinned in the env.
 
     Split out so the caller owns the env set/restore lifetime; this body runs
@@ -439,8 +427,12 @@ def _seed_and_build_app_pinned(
     # state so the LOCKED-month read paths are covered. Disposable SQLite only.
     seed_rc = seed.main(
         [
-            "--database-url", database_url, "--create-schema",
-            "--month", month, "--demo-lock-bypass",
+            "--database-url",
+            database_url,
+            "--create-schema",
+            "--month",
+            month,
+            "--demo-lock-bypass",
         ]
     )
     if seed_rc != 0:
@@ -454,9 +446,7 @@ def _seed_and_build_app_pinned(
 
     # The explicit authz_source also documents intent + defends the smoke's own
     # app against any future settings drift, independent of the env pin.
-    app = create_app(
-        database_url=database_url, authz_source=AUTHZ_SOURCE_HEADERS
-    )
+    app = create_app(database_url=database_url, authz_source=AUTHZ_SOURCE_HEADERS)
     return _SmokeContext(
         database_path=database_path,
         database_url=database_url,
@@ -491,8 +481,7 @@ def _run_check(context: _SmokeContext, check: _Check) -> _CheckResult:
     if response.status_code != check.expected_status:
         body_preview = response.text[:160].replace("\n", " ")
         result.detail = (
-            f"expected {check.expected_status}, got {response.status_code}"
-            f" - {body_preview}"
+            f"expected {check.expected_status}, got {response.status_code} - {body_preview}"
         )
         return result
 
@@ -523,10 +512,7 @@ def _print_table(results: list[_CheckResult]) -> None:
         status_label = "PASS" if result.passed else "FAIL"
         code = "" if result.status_code is None else str(result.status_code)
         detail = "" if result.passed else result.detail
-        print(
-            f"{status_label:<6} {result.screen:<16} {result.name:<24} "
-            f"{code:<5} {detail}"
-        )
+        print(f"{status_label:<6} {result.screen:<16} {result.name:<24} {code:<5} {detail}")
     print("-" * 96)
     passed = sum(1 for r in results if r.passed)
     print(f"{passed}/{len(results)} checks passed")
