@@ -1,10 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ConnectorsView from "@/components/srcc/views/ConnectorsView";
 import type {
   AdsensePaymentListResponse,
+  ConnectorCredentialHealthResponse,
   ConnectorCredentialListResponse,
   ConnectorRunListResponse,
 } from "@/lib/api/types";
@@ -38,6 +39,48 @@ const CREDENTIALS: ConnectorCredentialListResponse = {
 const EMPTY_CREDENTIALS: ConnectorCredentialListResponse = {
   items: [],
   pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
+};
+
+// Default credential-health page served by routeBoth to the unrelated tests.
+// Uses a DISTINCT credential identity (analytics · pub-health) and a benign
+// health_state so it never collides with the run-history rows
+// (youtube_reporting · acct-1 / adsense · pub-9) or the test-connection result
+// badges (ok / auth_failed / not_found) those tests assert on. The telemetry-
+// breakdown test below overrides the health route with its own richer fixture.
+const HEALTH: ConnectorCredentialHealthResponse = {
+  credentials: [
+    {
+      id: "55555555-5555-5555-5555-555555555555",
+      connector_key: "analytics",
+      account_id: "pub-health",
+      status: "ACTIVE",
+      has_secret_ref: true,
+      last_refresh_attempt_at: "2026-03-01T12:00:00Z",
+      token_expiry_at: "2030-01-01T00:00:00Z",
+      last_refresh_status: "succeeded",
+      last_refresh_error_class: null,
+      health_state: "healthy",
+    },
+  ],
+};
+
+// Rich credential-health page exercising the auth_failed state + every telemetry
+// field (expiry, last attempt, failed status, error class) for the breakdown test.
+const HEALTH_AUTH_FAILED: ConnectorCredentialHealthResponse = {
+  credentials: [
+    {
+      id: "11111111-1111-1111-1111-111111111111",
+      connector_key: "youtube_reporting",
+      account_id: "acct-1",
+      status: "ACTIVE",
+      has_secret_ref: true,
+      last_refresh_attempt_at: "2026-03-01T12:00:00Z",
+      token_expiry_at: "2030-01-01T00:00:00Z",
+      last_refresh_status: "failed",
+      last_refresh_error_class: "RefreshError",
+      health_state: "auth_failed",
+    },
+  ],
 };
 
 // Real-shaped AdSense payment list (AdSensePaymentEntry.to_api() + pagination).
@@ -171,6 +214,11 @@ function routeBoth( // skipcq: JS-0067
     if (url.startsWith("/connectors/runs")) {
       return Promise.resolve(jsonResponse(RUNS));
     }
+    // The credential-HEALTH path is a prefix-subset of /connectors/credentials,
+    // so it MUST be matched first or the list route would swallow it.
+    if (url.startsWith("/connectors/credentials/health")) {
+      return Promise.resolve(jsonResponse(HEALTH));
+    }
     if (url.startsWith("/connectors/credentials")) {
       return Promise.resolve(jsonResponse(CREDENTIALS));
     }
@@ -184,6 +232,12 @@ function routeBoth( // skipcq: JS-0067
 function runCalls() { // skipcq: JS-0067
   return fetchMock().mock.calls.filter(([input]) =>
     urlOf(input).startsWith("/connectors/runs"),
+  );
+}
+
+function healthCalls() { // skipcq: JS-0067
+  return fetchMock().mock.calls.filter(([input]) =>
+    urlOf(input).startsWith("/connectors/credentials/health"),
   );
 }
 
@@ -905,5 +959,47 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     expect(
       screen.getAllByText("Requires a connector-operations role.").length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe("ConnectorsView token-health panel", () => {
+  it("renders credential telemetry (state + expiry + last attempt/status + error class) when the viewer can view connector health", async () => {
+    fetchMock().mockImplementation(
+      routeBoth((url) =>
+        url.startsWith("/connectors/credentials/health")
+          ? jsonResponse(HEALTH_AUTH_FAILED)
+          : null,
+      ),
+    );
+    renderConnectorsView();
+
+    const panel = await screen.findByRole("region", { name: /token health/i });
+    const utils = within(panel);
+    // The health row identifies the credential and its server-derived state.
+    expect(utils.getByText("youtube_reporting · acct-1")).toBeInTheDocument();
+    expect(utils.getByText("auth_failed")).toBeInTheDocument();
+    // The four telemetry fields surface: expiry, last attempt, status, error class.
+    expect(utils.getByText(/expires/i)).toBeInTheDocument();
+    expect(utils.getByText(/last attempt/i)).toBeInTheDocument();
+    expect(utils.getByText(/refresh failed/i)).toBeInTheDocument();
+    expect(utils.getByText(/RefreshError/)).toBeInTheDocument();
+    // The auto-fetch hit the credential-health endpoint exactly once.
+    expect(healthCalls()).toHaveLength(1);
+  });
+
+  it("fail-closed: renders NOTHING and fires NO /connectors/credentials/health fetch when the viewer lacks the connector-health capability", async () => {
+    fetchMock().mockImplementation(routeBoth(() => null));
+    renderConnectorsView(true, true, false);
+
+    // The rest of the screen still mounts (credentials list is independent).
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    // No token-health panel is rendered at all (fail-closed: render nothing).
+    expect(
+      screen.queryByRole("region", { name: /token health/i }),
+    ).not.toBeInTheDocument();
+    // The gated branch mounts no hook, so no credential-health request is issued.
+    expect(healthCalls()).toHaveLength(0);
   });
 });

@@ -4,6 +4,8 @@ import { ApiError } from "@/lib/api/client";
 import type {
   AdsensePayment,
   ConnectorCredential,
+  ConnectorCredentialHealth,
+  ConnectorCredentialHealthState,
   ConnectorJobResponse,
   ConnectorRun,
   ConnectorRunPagination,
@@ -13,6 +15,7 @@ import {
   useAdsensePayments,
   useAdsenseSyncActions,
 } from "@/lib/api/useAdsense";
+import { useConnectorCredentialHealth } from "@/lib/api/useConnectorHealth";
 import {
   useConnectorCredentials,
   useConnectorJobActions,
@@ -43,8 +46,12 @@ import { describeError } from "./CommandView";
 //   executor returns 503, surfaced as an error). On a "submitted" result the
 //   run-history feed refetches.
 //   The view also consumes GET /connectors/runs for the newest-first run-history
-//   feed, with keyset pagination and fail-closed 403 handling. Loading / error
-//   / empty / 403 states mirror the other wired views.
+//   feed, with keyset pagination and fail-closed 403 handling, and GET
+//   /connectors/credentials/health for the token-health panel (server-derived
+//   health_state + OAuth refresh telemetry per credential). Both connector-health
+//   surfaces fail closed on canViewConnectorHealth: when the viewer lacks the
+//   capability the gated subtree mounts no hook and issues no request. Loading /
+//   error / empty / 403 states mirror the other wired views.
 // Database/ORM: None (frontend) — consumes GET /connectors/credentials, POST
 //   /connectors/jobs (audited record-only), GET /adsense/payments, and POST
 //   /adsense/sync-payments (audited payment upsert).
@@ -59,9 +66,10 @@ import { describeError } from "./CommandView";
 //   source-of-truth finance number is computed or mutated client-side.
 // Connections:
 //   - File: frontend/src/lib/api/useConnectors.ts -> credentials + job action hooks.
+//   - File: frontend/src/lib/api/useConnectorHealth.ts -> credential-health hook.
 //   - File: frontend/src/lib/api/useAdsense.ts -> payments + sync action hooks.
 //   - File: frontend/src/lib/api/types.ts -> ConnectorCredential / AdsensePayment.
-//   - File: backend/ums_smart_revenue/api/connectors.py -> credentials/jobs routes.
+//   - File: backend/ums_smart_revenue/api/connectors.py -> credentials/jobs/health routes.
 //   - File: backend/ums_smart_revenue/api/adsense.py -> payments/sync routes.
 // ============================================================================
 
@@ -476,6 +484,8 @@ function ConnectorSidebar({ // skipcq: JS-0067
         canViewConnectorHealth={canViewConnectorHealth}
         reloadToken={reloadToken}
       />
+
+      <TokenHealth canViewConnectorHealth={canViewConnectorHealth} />
     </aside>
   );
 }
@@ -777,6 +787,167 @@ function RunHistoryRow({ run }: { run: ConnectorRun }) { // skipcq: JS-0067
         ) : null}
       </span>
       <Badge tone={runStatusTone(run.status)}>{run.status}</Badge>
+    </div>
+  );
+}
+
+/** Map a server-derived credential health_state to a tone for its display badge. */
+const healthStateTone = (state: ConnectorCredentialHealthState): Severity => {
+  switch (state) {
+    case "healthy":
+      return "green";
+    case "expiring":
+      return "amber";
+    case "auth_failed":
+    case "missing":
+      return "red";
+    case "unknown":
+    default:
+      return "blue";
+  }
+};
+
+/**
+ * The token-health panel. Fail-closed: a viewer lacking the connector-health
+ * capability sees NOTHING (the panel is not rendered) and NO fetch fires — the
+ * live feed subcomponent (which mounts the credential-health hook) is only
+ * rendered when permitted, mirroring RunHistory. The backend
+ * VIEW_CONNECTOR_HEALTH 403 remains authoritative and surfaces as no-permission
+ * copy inside the feed.
+ */
+function TokenHealth({ // skipcq: JS-0067
+  canViewConnectorHealth,
+}: {
+  canViewConnectorHealth: boolean;
+}) {
+  // FIX: fail-closed — render the panel only when the viewer holds the
+  // capability so a non-permitted viewer mounts no hook and issues no
+  // /connectors/credentials/health request (defense in depth alongside the
+  // authoritative backend gate), mirroring the AuditTimeline -> feed gate.
+  if (!canViewConnectorHealth) return null;
+  return (
+    <section className="panel" aria-labelledby="tokenHealthTitle">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="tokenHealthTitle">Token Health</strong>
+          <span>OAuth credential refresh telemetry — read-only operational log</span>
+        </div>
+        <Badge tone="blue">Live</Badge>
+      </div>
+      <TokenHealthFeed />
+    </section>
+  );
+}
+
+/**
+ * The live credential-health feed: maps loading / error (403 -> no-permission
+ * copy) / empty / loaded states from GET /connectors/credentials/health. The
+ * health_state and telemetry are server-derived; the view never recomputes them.
+ */
+function TokenHealthFeed() { // skipcq: JS-0067
+  const { data, loading, error } = useConnectorCredentialHealth();
+  const rows = data ?? [];
+
+  if (error) return <TokenHealthError error={error} />;
+  if (loading && rows.length === 0) return <TokenHealthLoadingState />;
+  if (rows.length === 0) return <TokenHealthEmptyState />;
+  return <TokenHealthList credentials={rows} />;
+}
+
+/** Skeleton-free loading note for the initial credential-health fetch. */
+function TokenHealthLoadingState() { // skipcq: JS-0067
+  return (
+    <div className="permission-band" role="note" aria-busy="true">
+      <Dot tone="blue" />
+      <span>
+        <strong>Loading token health…</strong>
+        <span>Reading the connector credential telemetry.</span>
+      </span>
+      <Badge tone="blue">Loading</Badge>
+    </div>
+  );
+}
+
+/** Empty-state note shown when no connector credentials exist yet. */
+function TokenHealthEmptyState() { // skipcq: JS-0067
+  return (
+    <div className="permission-band" role="note">
+      <Dot tone="amber" />
+      <span>
+        <strong>No connector credentials configured</strong>
+        <span>No connector credentials are available to report health for.</span>
+      </span>
+      <Badge tone="amber">Empty</Badge>
+    </div>
+  );
+}
+
+/** Error state for the credential-health feed; 403 maps to connector-health copy. */
+function TokenHealthError({ error }: { error: ApiError | Error }) { // skipcq: JS-0067
+  const described = describeError(error);
+  const is403 = error instanceof ApiError && error.status === 403;
+  const detail = is403
+    ? "Your role cannot view connector credential health."
+    : described.detail;
+  return (
+    <div className="permission-band" role="alert">
+      <Dot tone="red" />
+      <span>
+        <strong>{described.title}</strong>
+        <span>{detail}</span>
+      </span>
+      <Badge tone="red">Error</Badge>
+    </div>
+  );
+}
+
+/** Render the loaded credential-health list (one row per credential). */
+function TokenHealthList({ // skipcq: JS-0067
+  credentials,
+}: {
+  credentials: ConnectorCredentialHealth[];
+}) {
+  return (
+    <div className="timeline" role="list">
+      {credentials.map((credential) => (
+        <TokenHealthRow key={credential.id} credential={credential} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * A single credential-health row: connector_key + account, the server-derived
+ * health_state badge, token expiry, last refresh attempt + status, and the
+ * refresh error class when the last refresh recorded one. All values are
+ * server-derived; the view formats timestamps for display only.
+ */
+function TokenHealthRow({ // skipcq: JS-0067
+  credential,
+}: {
+  credential: ConnectorCredentialHealth;
+}) {
+  const tone = healthStateTone(credential.health_state);
+  const status = credential.last_refresh_status ?? "never run";
+  return (
+    <div className="timeline-item" role="listitem">
+      <Dot tone={tone} />
+      <span>
+        <span className="item-title">
+          {credential.connector_key} · {credential.account_id}
+        </span>
+        <span className="item-sub">
+          {`expires ${formatTimestamp(credential.token_expiry_at)}` +
+            ` · last attempt ${formatTimestamp(credential.last_refresh_attempt_at)}` +
+            ` · refresh ${status}`}
+        </span>
+        {credential.last_refresh_error_class ? (
+          <span className="item-sub" role="note">
+            {`error: ${credential.last_refresh_error_class}`}
+          </span>
+        ) : null}
+      </span>
+      <Badge tone={tone}>{credential.health_state}</Badge>
     </div>
   );
 }
