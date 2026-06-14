@@ -10,9 +10,15 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.connectors import list_connector_credential_health
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
+from ums_smart_revenue.auth.roles import RoleKey
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
+    ConnectorCredentialEntry,
+    ConnectorCredentialPage,
     _is_duplicate_credential_integrity_error,
     is_external_secret_ref,
 )
@@ -1628,6 +1634,68 @@ def test_credential_health_returns_telemetry_and_state_for_viewer(tmp_path):
     assert body["pagination"]["offset"] == 0
     assert body["pagination"]["returned"] == 1
     assert body["pagination"]["has_more"] is False
+
+
+class _TenantRecordingHealthRepository:
+    def __init__(self) -> None:
+        self.bound_tenant_id: UUID | str | None = None
+        self.connector_keys: frozenset[str] | None = None
+
+    def for_tenant(self, tenant_id: UUID | str) -> _TenantRecordingHealthRepository:
+        self.bound_tenant_id = tenant_id
+        return self
+
+    def list_credentials(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        connector_keys: frozenset[str] | None = None,
+    ) -> ConnectorCredentialPage:
+        self.connector_keys = connector_keys
+        return ConnectorCredentialPage(
+            items=[
+                ConnectorCredentialEntry(
+                    id="cred-other-tenant",
+                    connector_key="youtube_reporting",
+                    account_id="acct-other",
+                    status="active",
+                    has_secret_ref=True,
+                )
+            ],
+            limit=limit,
+            offset=offset,
+            has_more=False,
+        )
+
+
+def test_credential_health_binds_repository_to_principal_tenant():
+    """Credential-health reads use the authenticated tenant, not the bootstrap default."""
+    tenant_id = UUID("00000000-0000-0000-0000-00000000b105")
+    repository = _TenantRecordingHealthRepository()
+    user = UserPrincipal(
+        user_id=str(USER_ID),
+        email="connector-user@example.com",
+        role_assignments=(
+            RoleAssignment(
+                role=RoleKey.SYSTEM_INTEGRATION_USER,
+                scope=AccessScope.global_scope(),
+            ),
+        ),
+        is_service_account=True,
+        tenant_id=str(tenant_id),
+    )
+
+    body = list_connector_credential_health(
+        user=user,
+        repository=repository,
+        limit=50,
+        offset=0,
+    )
+
+    assert repository.bound_tenant_id == tenant_id
+    assert repository.connector_keys is None
+    assert body["credentials"][0]["account_id"] == "acct-other"
 
 
 def test_credential_health_connector_scope_excludes_foreign_connector(tmp_path):

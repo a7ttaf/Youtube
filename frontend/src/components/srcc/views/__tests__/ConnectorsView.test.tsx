@@ -971,7 +971,9 @@ describe("ConnectorsView token-health panel", () => {
     const panel = await screen.findByRole("region", { name: /token health/i });
     const utils = within(panel);
     // The health row identifies the credential and its server-derived state.
-    expect(utils.getByText("youtube_reporting · acct-1")).toBeInTheDocument();
+    expect(
+      await utils.findByText("youtube_reporting · acct-1"),
+    ).toBeInTheDocument();
     expect(utils.getByText("auth_failed")).toBeInTheDocument();
     // The four telemetry fields surface: expiry, last attempt, status, error class.
     expect(utils.getByText(/expires/i)).toBeInTheDocument();

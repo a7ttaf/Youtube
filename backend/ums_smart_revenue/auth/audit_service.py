@@ -37,6 +37,51 @@ class InMemoryAuditSink:
         self.records.append(record)
 
 
+def _normalize_audit_reason(
+    *,
+    event_type: AuditEventType,
+    reason: str | None,
+    reason_required: bool,
+) -> str | None:
+    """Trim optional audit reasons and enforce event-level reason requirements."""
+    normalized_reason = reason.strip() if reason is not None else None
+    if normalized_reason == "":
+        normalized_reason = None
+    if reason_required and not normalized_reason:
+        raise ValueError(f"Audit event {event_type.value} requires a reason")
+    return normalized_reason
+
+
+def _resolve_audit_permission(
+    *,
+    event_type: AuditEventType,
+    definition_permission: Permission | None,
+    permission_override: Permission | None,
+) -> Permission | None:
+    """Resolve the audit permission while preventing sensitive downgrade."""
+    permission = permission_override if permission_override is not None else definition_permission
+    if (
+        permission_override is not None
+        and definition_permission in SENSITIVE_PERMISSIONS
+        and permission_override not in SENSITIVE_PERMISSIONS
+    ):
+        raise ValueError(
+            f"permission_override cannot downgrade sensitive audit event {event_type.value}"
+        )
+    return permission
+
+
+def _is_sensitive_audit_record(
+    *,
+    permission: Permission | None,
+    definition_permission: Permission | None,
+) -> bool:
+    """Return whether either effective or definition permission is sensitive."""
+    return bool(
+        permission in SENSITIVE_PERMISSIONS or definition_permission in SENSITIVE_PERMISSIONS
+    )
+
+
 def record_audit_event(
     *,
     sink: AuditSink,
@@ -51,22 +96,18 @@ def record_audit_event(
     permission_override: Permission | None = None,
 ) -> AuditRecord:
     definition = AUDIT_EVENT_DEFINITIONS.get(event_type)
-    normalized_reason = reason.strip() if reason is not None else None
-    if normalized_reason == "":
-        normalized_reason = None
-    if definition and definition.reason_required and not normalized_reason:
-        raise ValueError(f"Audit event {event_type.value} requires a reason")
+    normalized_reason = _normalize_audit_reason(
+        event_type=event_type,
+        reason=reason,
+        reason_required=bool(definition and definition.reason_required),
+    )
 
     definition_permission = definition.permission if definition else None
-    permission = permission_override if permission_override is not None else definition_permission
-    if (
-        permission_override is not None
-        and definition_permission in SENSITIVE_PERMISSIONS
-        and permission_override not in SENSITIVE_PERMISSIONS
-    ):
-        raise ValueError(
-            f"permission_override cannot downgrade sensitive audit event {event_type.value}"
-        )
+    permission = _resolve_audit_permission(
+        event_type=event_type,
+        definition_permission=definition_permission,
+        permission_override=permission_override,
+    )
     normalized_details = deepcopy(details) if details is not None else {}
     record = AuditRecord(
         user_id=actor.user_id,
@@ -78,8 +119,9 @@ def record_audit_event(
         request_id=request_id,
         reason=normalized_reason,
         details=normalized_details,
-        sensitive=bool(
-            permission in SENSITIVE_PERMISSIONS or definition_permission in SENSITIVE_PERMISSIONS
+        sensitive=_is_sensitive_audit_record(
+            permission=permission,
+            definition_permission=definition_permission,
         ),
         permission=permission.value if permission else None,
     )

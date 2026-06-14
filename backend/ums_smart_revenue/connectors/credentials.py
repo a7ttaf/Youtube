@@ -135,6 +135,24 @@ class SqlAlchemyConnectorCredentialRepository:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
+    # ============================================================================
+    # Purpose: Rebind the request-scoped credential repository to the resolved
+    #   tenant without changing the SQLAlchemy session or transaction lifecycle.
+    # Database/ORM: ApiConnectorCredentialORM through the repository session.
+    # Standards: Keeps tenant scope explicit at the route boundary and
+    #   repository-owned for credential reads and writes.
+    # Blast Radius: Connector credential reads/writes only; no finance, audit,
+    #   authorization mutation, or Neo4j projection impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/connectors.py -> Health route
+    #     binds reads to the authenticated principal tenant before listing.
+    #   - File: tests/api/test_connectors_api.py -> Covers non-bootstrap
+    #     tenant binding for credential health reads.
+    # ============================================================================
+    def for_tenant(self, tenant_id: UUID | str) -> SqlAlchemyConnectorCredentialRepository:
+        """Return a same-session repository bound to an explicit tenant."""
+        return type(self)(self._session, tenant_id=tenant_id)
+
     def list_credentials(
         self,
         *,

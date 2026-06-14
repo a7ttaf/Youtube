@@ -7,6 +7,8 @@ a dict. Emits ParsedSourceRow instances with value_kind='estimated'.
 
 from collections.abc import Iterable
 from copy import deepcopy
+from dataclasses import dataclass
+from datetime import date
 from uuid import UUID
 
 from ums_smart_revenue.connectors.google_source_parsers.base import (
@@ -21,6 +23,145 @@ from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
     build_source_row_key,
 )
 from ums_smart_revenue.connectors.google_source_rows import ParsedSourceRow
+
+
+@dataclass(frozen=True)
+class _ReportingRowContext:
+    raw_row: dict[str, object]
+    period_start: date
+    period_end: date
+    channel: str
+    content_owner: str | None
+    amount_raw: str
+    currency: str
+    key_dimensions: dict[str, object]
+
+
+# ============================================================================
+# Purpose: Validate YouTube Reporting parser rows before source-row emission.
+# Database/ORM: None. ParsedSourceRow boundary.
+# Standards: Typed ParserError failures, stable source-row identity axes.
+# Blast Radius: Finance ingestion provenance; no graph projection impact detected.
+# Connections:
+#   - File: tests/connectors/google_source_parsers/test_youtube_reporting_parser.py -> Parser contract.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows.py -> ParsedSourceRow shape.
+# ============================================================================
+def _reporting_rows(payload: dict[str, object]) -> list[object]:
+    """Return Reporting rows after validating the top-level row container."""
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise ParserError("payload['rows'] must be a list")
+    return rows
+
+
+def _reporting_row_context(row: object) -> _ReportingRowContext:
+    """Validate one YouTube Reporting row and normalize identity fields."""
+    if not isinstance(row, dict):
+        raise ParserError("each rows[*] must be a dict")
+    require_int(row, "line_index")
+    period_start, period_end = _reporting_period(row)
+    dimensions = require_dict(row, "dimensions")
+    metrics = require_dict(row, "metrics")
+    channel, content_owner, key_dimensions = _reporting_identity(dimensions)
+    amount_raw = metrics.get("estimatedRevenue")
+    if not isinstance(amount_raw, str):
+        raise ParserError("metrics.estimatedRevenue must be a string for Decimal precision")
+    currency = _reporting_currency(metrics)
+    return _ReportingRowContext(
+        raw_row=row,
+        period_start=period_start,
+        period_end=period_end,
+        channel=channel,
+        content_owner=content_owner,
+        amount_raw=amount_raw,
+        currency=currency,
+        key_dimensions=key_dimensions,
+    )
+
+
+def _reporting_period(row: dict[str, object]) -> tuple[date, date]:
+    """Parse and validate one Reporting row's single-month date range."""
+    date_range = require_dict(row, "date_range")
+    period_start = parse_iso_date(require_str(date_range, "start"), field="date_range.start")
+    period_end = parse_iso_date(require_str(date_range, "end"), field="date_range.end")
+    if period_end < period_start:
+        raise ParserError(
+            "row date_range.end must be on or after start, got "
+            f"{period_start.isoformat()}..{period_end.isoformat()}"
+        )
+    if (period_start.year, period_start.month) != (period_end.year, period_end.month):
+        raise ParserError(
+            "row date_range must fall within a single calendar month for "
+            f"report_month bucketing, got {period_start.isoformat()}..{period_end.isoformat()}"
+        )
+    return period_start, period_end
+
+
+def _reporting_identity(
+    dimensions: dict[str, object],
+) -> tuple[str, str | None, dict[str, object]]:
+    """Normalize required channel and optional content-owner identity dimensions."""
+    channel = dimensions.get("channel")
+    if not isinstance(channel, str) or not channel.strip():
+        raise ParserError("dimensions.channel must be a non-empty string")
+    channel = channel.strip()
+
+    content_owner = dimensions.get("content_owner")
+    if content_owner is not None and not isinstance(content_owner, str):
+        raise ParserError("dimensions.content_owner must be a string when present")
+    content_owner = content_owner.strip() if isinstance(content_owner, str) else None
+    if not content_owner:
+        content_owner = None
+
+    key_dimensions = {**dimensions, "channel": channel}
+    if content_owner is None:
+        key_dimensions.pop("content_owner", None)
+    else:
+        key_dimensions["content_owner"] = content_owner
+    return channel, content_owner, key_dimensions
+
+
+def _reporting_currency(metrics: dict[str, object]) -> str:
+    """Trim and validate the source currency for one Reporting metric row."""
+    currency = metrics.get("currencyCode")
+    if not isinstance(currency, str) or not currency.strip():
+        raise ParserError("metrics.currencyCode must be a non-empty string")
+    return currency.strip()
+
+
+def _reporting_source_row(
+    *,
+    source_system: str,
+    report_id: str,
+    report_type: str,
+    context: _ReportingRowContext,
+) -> ParsedSourceRow:
+    """Build the immutable source row from one normalized Reporting row."""
+    source_row_key = build_source_row_key(
+        source_system=source_system,
+        report_type=report_type,
+        currency=context.currency,
+        period_start=context.period_start.isoformat(),
+        period_end=context.period_end.isoformat(),
+        dimensions=context.key_dimensions,
+    )
+    return ParsedSourceRow(
+        source_system=source_system,
+        source_row_key=source_row_key,
+        source_account_id=context.content_owner if context.content_owner is not None else context.channel,
+        content_owner_id=context.content_owner,
+        youtube_channel_id=context.channel,
+        report_type=report_type,
+        report_month=f"{context.period_start.year:04d}-{context.period_start.month:02d}",
+        period_start=context.period_start,
+        period_end=context.period_end,
+        metric_key="estimatedRevenue",
+        value_kind="estimated",
+        amount_native=parse_decimal_amount(context.amount_raw, metric_key="estimatedRevenue"),
+        currency_code=context.currency,
+        source_report_id=report_id,
+        raw_payload=deepcopy(context.raw_row),
+    )
 
 
 # ============================================================================
@@ -47,127 +188,13 @@ class YouTubeReportingParser:
         tenant_id: UUID,
     ) -> Iterable[ParsedSourceRow]:
         metadata = require_dict(payload, "report_metadata")
-        rows = payload.get("rows")
-        if not isinstance(rows, list):
-            raise ParserError("payload['rows'] must be a list")
         report_id = require_str(metadata, "report_id")
         report_type = require_str(metadata, "report_type")
 
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ParserError("each rows[*] must be a dict")
-            # Validate line_index is a well-formed int (payload-shape check),
-            # but do NOT use it in the source_row_key: YouTube Reporting rows
-            # are unsorted/backfilled, so a positional index would break
-            # idempotent upserts (see source_row_keys.build_source_row_key).
-            require_int(row, "line_index")
-            date_range = require_dict(row, "date_range")
-            period_start = parse_iso_date(
-                require_str(date_range, "start"), field="date_range.start"
-            )
-            period_end = parse_iso_date(require_str(date_range, "end"), field="date_range.end")
-            # Reject reversed ranges before month bucketing: end must be on or
-            # after start; fail closed so a malformed payload stays typed.
-            if period_end < period_start:
-                raise ParserError(
-                    "row date_range.end must be on or after start, got "
-                    f"{period_start.isoformat()}..{period_end.isoformat()}"
-                )
-            # report_month is derived from period_start; a row whose range
-            # crosses a calendar-month boundary would be mis-bucketed.
-            if (period_start.year, period_start.month) != (period_end.year, period_end.month):
-                raise ParserError(
-                    "row date_range must fall within a single calendar month for "
-                    f"report_month bucketing, got {period_start.isoformat()}.."
-                    f"{period_end.isoformat()}"
-                )
-            dimensions = require_dict(row, "dimensions")
-            metrics = require_dict(row, "metrics")
-
-            channel = dimensions.get("channel")
-            # FIX: channel is the required attribution identity AND the fallback
-            # for source_account_id when content_owner is absent, so it must be a
-            # NON-BLANK string. The prior isinstance-only check let a whitespace
-            # value through and produced a blank youtube_channel_id /
-            # source_account_id. Store the trimmed id.
-            if not isinstance(channel, str) or not channel.strip():
-                raise ParserError("dimensions.channel must be a non-empty string")
-            channel = channel.strip()
-            # FIX: content_owner is OPTIONAL. YouTube Reporting bulk reports are
-            # generated for either a content owner OR a single channel, and a
-            # channel-scoped report legitimately omits content_owner. When present
-            # it must be a string (fail closed on a malformed type). A present-but-
-            # blank/whitespace content_owner carries no CMS identity, so it is
-            # treated the SAME as absent: content_owner_id becomes None and
-            # source_account_id falls back to the channel id below — never a blank
-            # identity (CLAUDE.md rule 4). Normalising blank to None also makes a
-            # blank and an omitted content_owner hash to one source_row_key.
-            content_owner = dimensions.get("content_owner")
-            if content_owner is not None and not isinstance(content_owner, str):
-                raise ParserError("dimensions.content_owner must be a string when present")
-            content_owner = content_owner.strip() if isinstance(content_owner, str) else None
-            if not content_owner:
-                content_owner = None
-
-            amount_raw = metrics.get("estimatedRevenue")
-            if not isinstance(amount_raw, str):
-                raise ParserError("metrics.estimatedRevenue must be a string for Decimal precision")
-            currency = metrics.get("currencyCode")
-            # FIX: reject a blank/whitespace currency: it is not a valid ISO code
-            # and would persist as a blank currency_code and fold a blank into the
-            # row key (mirrors the YouTube Analytics / AdSense currency guards;
-            # CLAUDE.md rule 4). Store the trimmed code.
-            if not isinstance(currency, str) or not currency.strip():
-                raise ParserError("metrics.currencyCode must be a non-empty string")
-            currency = currency.strip()
-
-            # FIX: build the dedup key from the NORMALISED identity — the trimmed
-            # channel, and content_owner dropped when blank/absent — so trivially
-            # different inputs (whitespace padding, or a blank vs omitted
-            # content_owner) hash to ONE key and upsert in place instead of
-            # inserting duplicate revenue rows (idempotency, CLAUDE.md rule 4).
-            # Any other dimensions are preserved as-is.
-            key_dimensions = {**dimensions, "channel": channel}
-            if content_owner is None:
-                key_dimensions.pop("content_owner", None)
-            else:
-                key_dimensions["content_owner"] = content_owner
-            source_row_key = build_source_row_key(
+        for row in _reporting_rows(payload):
+            yield _reporting_source_row(
                 source_system=self.source_system,
+                report_id=report_id,
                 report_type=report_type,
-                # currency is a financial-identity axis (matches youtube_analytics
-                # /adsense): the same report_type/period/dimensions reported in a
-                # different currency is a distinct monetary row and must not
-                # collapse onto one upsert key and overwrite the other (rule 4).
-                currency=currency,
-                period_start=period_start.isoformat(),
-                period_end=period_end.isoformat(),
-                dimensions=key_dimensions,
-            )
-
-            yield ParsedSourceRow(
-                source_system=self.source_system,
-                source_row_key=source_row_key,
-                # source_account_id is the content owner when present, else the
-                # channel id (channel-scoped report) — never a sentinel.
-                source_account_id=content_owner if content_owner is not None else channel,
-                content_owner_id=content_owner,
-                youtube_channel_id=channel,
-                report_type=report_type,
-                report_month=f"{period_start.year:04d}-{period_start.month:02d}",
-                period_start=period_start,
-                period_end=period_end,
-                metric_key="estimatedRevenue",
-                value_kind="estimated",
-                amount_native=parse_decimal_amount(amount_raw, metric_key="estimatedRevenue"),
-                currency_code=currency,
-                source_report_id=report_id,
-                # FIX: deep-copy the source row so the persisted audit payload
-                # cannot be altered by later mutation of the caller's input
-                # payload. dict(row) only shallow-copies, leaving the nested
-                # date_range/dimensions/metrics objects aliased to the caller
-                # between parse() and upsert_many(); analytics/adsense already
-                # build owned dicts from parsed primitives, so only this parser
-                # copied the raw input row directly.
-                raw_payload=deepcopy(row),
+                context=_reporting_row_context(row),
             )

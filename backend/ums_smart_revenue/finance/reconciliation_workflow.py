@@ -75,6 +75,31 @@ class MonthReconciliationResult:
     warnings: list[dict[str, str]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _UsTaxResult:
+    """Aggregate and per-channel US withholding estimate."""
+
+    by_channel: dict[str, Decimal]
+    total: Decimal
+
+
+@dataclass(frozen=True)
+class _YtAdsenseFeeResult:
+    """YouTube-to-AdSense residual fee state."""
+
+    total: Decimal
+    pct: Decimal | None
+    adsense_clamped: bool
+
+
+@dataclass(frozen=True)
+class _BankResidualResult:
+    """AdSense-to-bank residual split between fee and FX."""
+
+    fee_part: Decimal
+    fx_part: Decimal
+
+
 def _attribute(total: Decimal, gross: dict[str, Decimal], g: Decimal) -> dict[str, Decimal]:
     """Split ``total`` across channels ∝ gross; remainder to largest gross."""
     if total == 0 or g <= 0:
@@ -85,6 +110,210 @@ def _attribute(total: Decimal, gross: dict[str, Decimal], g: Decimal) -> dict[st
         largest = max(gross, key=lambda c: gross[c])
         out[largest] = _q(out[largest] + drift)
     return out
+
+
+def _compute_us_tax(
+    *,
+    gross: dict[str, Decimal],
+    us_view_shares: Mapping[str, Decimal | None],
+    withholding_rate: Decimal,
+    warnings: list[dict[str, str]],
+) -> _UsTaxResult:
+    """Compute per-channel US tax and append the missing-data warning."""
+    by_channel = {
+        c: _q((us_view_shares.get(c) or Decimal("0")) * gross[c] * withholding_rate)
+        for c in gross
+    }
+    if any(us_view_shares.get(c) is None for c in gross):
+        warnings.append(
+            {
+                "code": "MISSING_US_VIEW_DATA",
+                "message": "US-view share missing; tax may be understated",
+            }
+        )
+    return _UsTaxResult(by_channel=by_channel, total=sum(by_channel.values(), Decimal("0")))
+
+
+def _compute_yt_adsense_fee(
+    *,
+    gross_total: Decimal,
+    tax_total: Decimal,
+    adsense_received_usd: Decimal | None,
+    warnings: list[dict[str, str]],
+) -> _YtAdsenseFeeResult:
+    """Compute the YouTube-to-AdSense residual fee and anomaly warning."""
+    if adsense_received_usd is None:
+        warnings.append(
+            {
+                "code": "MISSING_ADSENSE_TOTAL",
+                "message": "No AdSense total; fee not derived",
+            }
+        )
+        return _YtAdsenseFeeResult(
+            total=Decimal("0"),
+            pct=None,
+            adsense_clamped=False,
+        )
+
+    base = gross_total - tax_total
+    if adsense_received_usd > base:
+        warnings.append(
+            {
+                "code": "RECONCILIATION_ANOMALY",
+                "message": (
+                    "AdSense received exceeds estimate; YouTube->AdSense "
+                    "fee clamped to 0 and bank-fee math uses the estimate "
+                    "basis so the residual does not penalize CMS channels"
+                ),
+            }
+        )
+        return _YtAdsenseFeeResult(
+            total=Decimal("0"),
+            pct=Decimal("0.000000") if base > 0 else None,
+            adsense_clamped=True,
+        )
+
+    yt_fee_total = _q(base - adsense_received_usd)
+    return _YtAdsenseFeeResult(
+        total=yt_fee_total,
+        pct=_q(yt_fee_total / base) if base > 0 else None,
+        adsense_clamped=False,
+    )
+
+
+def _effective_adsense_basis(
+    *,
+    gross_total: Decimal,
+    tax_total: Decimal,
+    adsense_received_usd: Decimal | None,
+    adsense_clamped: bool,
+) -> Decimal | None:
+    """Return the Hop 3 AdSense basis after Hop 2 anomaly clamping."""
+    if adsense_clamped:
+        return _q(gross_total - tax_total)
+    return adsense_received_usd
+
+
+def _clamp_negative_bank_fee(
+    *,
+    delta: Decimal,
+    fx_part: Decimal,
+    warnings: list[dict[str, str]],
+) -> _BankResidualResult:
+    """Clamp a negative bank-fee residual while preserving supported FX evidence."""
+    warning_message = "Bank exceeds AdSense after FX; bank fee clamped to 0"
+    if fx_part > 0:
+        # FIX: A positive FX variance larger than the cash delta cannot be
+        # published after the fee residual clamps; cap it to the
+        # evidence-backed delta so net does not drift below bank cash.
+        fx_part = _q(max(delta, Decimal("0")))
+        warning_message = (
+            "FX exceeds AdSense-bank delta; unmatched FX suppressed "
+            "and bank fee clamped to 0"
+        )
+    elif fx_part > delta:
+        # FIX: A favorable (negative) FX variance smaller than the
+        # AdSense-to-bank overage cannot be published after the fee
+        # residual clamps; cap it to the cash delta so net does not
+        # drift above observed bank cash.
+        fx_part = _q(delta)
+        warning_message = (
+            "FX insufficient to explain AdSense-bank overage; "
+            "unmatched FX suppressed and bank fee clamped to 0"
+        )
+    warnings.append(
+        {
+            "code": "RECONCILIATION_ANOMALY",
+            "message": warning_message,
+        }
+    )
+    return _BankResidualResult(fee_part=Decimal("0"), fx_part=fx_part)
+
+
+def _suppress_zero_gross_residual(
+    *,
+    gross_total: Decimal,
+    result: _BankResidualResult,
+    warnings: list[dict[str, str]],
+) -> _BankResidualResult:
+    """Suppress Hop 3 totals when there is no gross basis for attribution."""
+    if gross_total > 0 or (result.fee_part == 0 and result.fx_part == 0):
+        return result
+    warnings.append(
+        {
+            "code": "ZERO_GROSS_RECONCILIATION_BASIS",
+            "message": (
+                "Bank fee/FX evidence cannot be attributed with a zero "
+                "source-backed gross basis; hop 3 totals suppressed"
+            ),
+        }
+    )
+    return _BankResidualResult(fee_part=Decimal("0"), fx_part=Decimal("0"))
+
+
+def _compute_bank_residual(
+    *,
+    gross_total: Decimal,
+    effective_adsense_usd: Decimal | None,
+    bank_received_usd: Decimal | None,
+    fx_total_usd: Decimal,
+    warnings: list[dict[str, str]],
+) -> _BankResidualResult:
+    """Compute the AdSense-to-bank fee/FX residual and related warnings."""
+    if effective_adsense_usd is None or bank_received_usd is None:
+        if bank_received_usd is None:
+            warnings.append(
+                {
+                    "code": "MISSING_BANK_TOTAL",
+                    "message": "No bank receipt; fee/FX not derived",
+                }
+            )
+        return _BankResidualResult(fee_part=Decimal("0"), fx_part=Decimal("0"))
+
+    delta = effective_adsense_usd - bank_received_usd
+    fx_part = _q(fx_total_usd)
+    fee_part = _q(delta - fx_part)
+    result = _BankResidualResult(fee_part=fee_part, fx_part=fx_part)
+    if fee_part < 0:
+        result = _clamp_negative_bank_fee(
+            delta=delta,
+            fx_part=fx_part,
+            warnings=warnings,
+        )
+    return _suppress_zero_gross_residual(
+        gross_total=gross_total,
+        result=result,
+        warnings=warnings,
+    )
+
+
+def _build_channel_reconciliations(
+    *,
+    gross: dict[str, Decimal],
+    us_tax: dict[str, Decimal],
+    yt_fee: dict[str, Decimal],
+    adsense_bank_fee: dict[str, Decimal],
+    fx_variance: dict[str, Decimal],
+    us_view_shares: Mapping[str, Decimal | None],
+) -> list[ChannelReconciliation]:
+    """Build sorted per-channel reconciliation rows."""
+    channels = [
+        ChannelReconciliation(
+            youtube_channel_id=c,
+            gross_usd=_q(gross[c]),
+            us_tax_usd=us_tax[c],
+            yt_adsense_fee_usd=yt_fee[c],
+            adsense_bank_fee_usd=adsense_bank_fee[c],
+            fx_variance_usd=fx_variance[c],
+            net_received_usd=_q(
+                gross[c] - us_tax[c] - yt_fee[c] - adsense_bank_fee[c] - fx_variance[c]
+            ),
+            us_view_share=us_view_shares.get(c),
+        )
+        for c in gross
+    ]
+    channels.sort(key=lambda x: x.youtube_channel_id)
+    return channels
 
 
 def compute_month_reconciliation(
@@ -102,144 +331,58 @@ def compute_month_reconciliation(
     g = sum(gross.values(), Decimal("0"))
     warnings: list[dict[str, str]] = []
 
-    # Hop 1 — US tax per channel.
-    us_tax = {
-        c: _q((us_view_shares.get(c) or Decimal("0")) * gross[c] * withholding_rate) for c in gross
-    }
-    tax_total = sum(us_tax.values(), Decimal("0"))
-    if any(us_view_shares.get(c) is None for c in gross):
-        warnings.append(
-            {
-                "code": "MISSING_US_VIEW_DATA",
-                "message": "US-view share missing; tax may be understated",
-            }
-        )
+    us_tax = _compute_us_tax(
+        gross=gross,
+        us_view_shares=us_view_shares,
+        withholding_rate=withholding_rate,
+        warnings=warnings,
+    )
 
-    # Hop 2 — YouTube->AdSense residual fee.
-    adsense_clamped: bool = False
-    if adsense_received_usd is None:
-        warnings.append(
-            {
-                "code": "MISSING_ADSENSE_TOTAL",
-                "message": "No AdSense total; fee not derived",
-            }
-        )
-        yt_fee_total = Decimal("0")
-        yt_fee_pct: Decimal | None = None
-    else:
-        base = g - tax_total
-        if adsense_received_usd > base:
-            warnings.append(
-                {
-                    "code": "RECONCILIATION_ANOMALY",
-                    "message": (
-                        "AdSense received exceeds estimate; YouTube->AdSense "
-                        "fee clamped to 0 and bank-fee math uses the estimate "
-                        "basis so the residual does not penalize CMS channels"
-                    ),
-                }
-            )
-            adsense_clamped = True
-            yt_fee_total = Decimal("0")
-        else:
-            yt_fee_total = _q(base - adsense_received_usd)
-        yt_fee_pct = _q(yt_fee_total / base) if base > 0 else None
-    yt_fee = _attribute(yt_fee_total, gross, g)
+    yt_adsense_fee = _compute_yt_adsense_fee(
+        gross_total=g,
+        tax_total=us_tax.total,
+        adsense_received_usd=adsense_received_usd,
+        warnings=warnings,
+    )
+    yt_fee = _attribute(yt_adsense_fee.total, gross, g)
 
-    # Hop 3 — AdSense->bank fee + FX.
     # FIX: When Hop 2 already clamped an over-estimate AdSense receipt to a
     # zero YouTube->AdSense fee, the bank-fee residual must be derived from
     # the *effective* (clamped) AdSense basis, not the raw over-receipt.
     # Otherwise Hop 3 turns the overage into a phantom bank fee and the
     # channel net drifts below observed bank cash.
-    if adsense_clamped:
-        base = g - tax_total
-        effective_adsense_usd: Decimal | None = _q(base)
-    else:
-        effective_adsense_usd = adsense_received_usd
-    fx_total = _q(fx_total_usd)
-    if effective_adsense_usd is None or bank_received_usd is None:
-        if bank_received_usd is None:
-            warnings.append(
-                {
-                    "code": "MISSING_BANK_TOTAL",
-                    "message": "No bank receipt; fee/FX not derived",
-                }
-            )
-        fee_part = Decimal("0")
-        fx_part = Decimal("0")
-    else:
-        delta = effective_adsense_usd - bank_received_usd
-        fx_part = fx_total
-        fee_part = _q(delta - fx_part)
-        if fee_part < 0:
-            warning_message = "Bank exceeds AdSense after FX; bank fee clamped to 0"
-            if fx_part > 0:
-                # FIX: A positive FX variance larger than the cash delta cannot
-                # be published after the fee residual clamps; cap it to the
-                # evidence-backed delta so net does not drift below bank cash.
-                fx_part = _q(max(delta, Decimal("0")))
-                warning_message = (
-                    "FX exceeds AdSense-bank delta; unmatched FX suppressed "
-                    "and bank fee clamped to 0"
-                )
-            elif fx_part > delta:
-                # FIX: A favorable (negative) FX variance smaller than the
-                # AdSense-to-bank overage cannot be published after the fee
-                # residual clamps; cap it to the cash delta so net does not
-                # drift above observed bank cash.
-                fx_part = _q(delta)
-                warning_message = (
-                    "FX insufficient to explain AdSense-bank overage; "
-                    "unmatched FX suppressed and bank fee clamped to 0"
-                )
-            warnings.append(
-                {
-                    "code": "RECONCILIATION_ANOMALY",
-                    "message": warning_message,
-                }
-            )
-            fee_part = Decimal("0")
-        if g <= 0 and (fee_part != 0 or fx_part != 0):
-            warnings.append(
-                {
-                    "code": "ZERO_GROSS_RECONCILIATION_BASIS",
-                    "message": (
-                        "Bank fee/FX evidence cannot be attributed with a zero "
-                        "source-backed gross basis; hop 3 totals suppressed"
-                    ),
-                }
-            )
-            fee_part = Decimal("0")
-            fx_part = Decimal("0")
-    adsense_bank_fee = _attribute(fee_part, gross, g)
-    fx_variance = _attribute(fx_part, gross, g)
+    bank_residual = _compute_bank_residual(
+        gross_total=g,
+        effective_adsense_usd=_effective_adsense_basis(
+            gross_total=g,
+            tax_total=us_tax.total,
+            adsense_received_usd=adsense_received_usd,
+            adsense_clamped=yt_adsense_fee.adsense_clamped,
+        ),
+        bank_received_usd=bank_received_usd,
+        fx_total_usd=fx_total_usd,
+        warnings=warnings,
+    )
+    adsense_bank_fee = _attribute(bank_residual.fee_part, gross, g)
+    fx_variance = _attribute(bank_residual.fx_part, gross, g)
+    channels = _build_channel_reconciliations(
+        gross=gross,
+        us_tax=us_tax.by_channel,
+        yt_fee=yt_fee,
+        adsense_bank_fee=adsense_bank_fee,
+        fx_variance=fx_variance,
+        us_view_shares=us_view_shares,
+    )
 
-    channels: list[ChannelReconciliation] = []
-    for c in gross:
-        net = _q(gross[c] - us_tax[c] - yt_fee[c] - adsense_bank_fee[c] - fx_variance[c])
-        channels.append(
-            ChannelReconciliation(
-                youtube_channel_id=c,
-                gross_usd=_q(gross[c]),
-                us_tax_usd=us_tax[c],
-                yt_adsense_fee_usd=yt_fee[c],
-                adsense_bank_fee_usd=adsense_bank_fee[c],
-                fx_variance_usd=fx_variance[c],
-                net_received_usd=net,
-                us_view_share=us_view_shares.get(c),
-            )
-        )
-    channels.sort(key=lambda x: x.youtube_channel_id)
     return MonthReconciliationResult(
         month=month,
         channels=channels,
         gross_total_usd=_q(g),
-        us_tax_total_usd=_q(tax_total),
-        yt_adsense_fee_total_usd=_q(yt_fee_total),
-        adsense_bank_fee_total_usd=_q(fee_part),
-        fx_total_usd=_q(fx_part),
+        us_tax_total_usd=_q(us_tax.total),
+        yt_adsense_fee_total_usd=_q(yt_adsense_fee.total),
+        adsense_bank_fee_total_usd=_q(bank_residual.fee_part),
+        fx_total_usd=_q(bank_residual.fx_part),
         net_total_usd=_q(sum((x.net_received_usd for x in channels), Decimal("0"))),
-        yt_adsense_fee_pct=yt_fee_pct,
+        yt_adsense_fee_pct=yt_adsense_fee.pct,
         warnings=warnings,
     )

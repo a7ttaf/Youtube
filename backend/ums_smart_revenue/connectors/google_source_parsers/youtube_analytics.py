@@ -6,6 +6,8 @@ is always 'estimated' because Analytics never returns settled values.
 """
 
 from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import date
 from typing import Final
 from uuid import UUID
 
@@ -66,6 +68,208 @@ def _canonical_filters(filters: str | None) -> str | None:
     return ";".join(sorted(canonical_clauses)) or None
 
 
+@dataclass(frozen=True)
+class _AnalyticsParseContext:
+    period_start: date
+    period_end: date
+    currency: str
+    content_owner_id: str | None
+    normalized_ids: str
+    query_signature: str
+    filters_key: str | None
+
+
+# ============================================================================
+# Purpose: Validate YouTube Analytics parser context and tabular row structure.
+# Database/ORM: None. ParsedSourceRow boundary.
+# Standards: Typed ParserError failures, stable source-row identity axes.
+# Blast Radius: Finance ingestion provenance; no graph projection impact detected.
+# Connections:
+#   - File: tests/connectors/google_source_parsers/test_youtube_analytics_parser.py -> Parser contract.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows.py -> ParsedSourceRow shape.
+# ============================================================================
+def _analytics_parse_context(request: dict[str, object]) -> _AnalyticsParseContext:
+    """Extract request-level YouTube Analytics parser context."""
+    period_start = parse_iso_date(require_str(request, "startDate"), field="startDate")
+    period_end = parse_iso_date(require_str(request, "endDate"), field="endDate")
+    currency = _analytics_currency(request)
+    include_historical = _analytics_include_historical(request)
+    require_str(request, "metrics")
+    dimensions_csv = require_str(request, "dimensions")
+    content_owner_id, normalized_ids = _analytics_ids(require_str(request, "ids"))
+    filters_key = _analytics_filters_key(request)
+    _require_analytics_single_month_range(period_start, period_end)
+    account_identity = content_owner_id or ""
+    query_signature = (
+        f"{account_identity}|{_canonical_csv(dimensions_csv, ',')}"
+        f"|hist={'1' if include_historical else '0'}"
+    )
+    return _AnalyticsParseContext(
+        period_start=period_start,
+        period_end=period_end,
+        currency=currency,
+        content_owner_id=content_owner_id,
+        normalized_ids=normalized_ids,
+        query_signature=query_signature,
+        filters_key=filters_key,
+    )
+
+
+def _analytics_currency(request: dict[str, object]) -> str:
+    """Return the requested currency, defaulting omitted Analytics currency to USD."""
+    if "currency" not in request:
+        return "USD"
+    currency = request["currency"]
+    if not isinstance(currency, str) or not currency.strip():
+        raise ParserError("query_request.currency must be a non-empty string when present")
+    return currency.strip()
+
+
+def _analytics_include_historical(request: dict[str, object]) -> bool:
+    """Validate includeHistoricalChannelData because it changes row-key identity."""
+    include_historical = request.get("includeHistoricalChannelData", False)
+    if not isinstance(include_historical, bool):
+        raise ParserError("query_request.includeHistoricalChannelData must be a boolean when present")
+    return include_historical
+
+
+def _analytics_ids(ids: str) -> tuple[str | None, str]:
+    """Normalize a structured reports.query ids selector."""
+    selector_kind, sep, selector_id = ids.partition("==")
+    selector_id = selector_id.strip()
+    if sep != "==" or selector_kind not in {"channel", "contentOwner"} or not selector_id:
+        raise ParserError(
+            f"query_request.ids must be 'channel==<id>' or 'contentOwner==<id>', got {ids!r}"
+        )
+    content_owner_id = selector_id if selector_kind == "contentOwner" else None
+    return content_owner_id, f"{selector_kind}=={selector_id}"
+
+
+def _analytics_filters_key(request: dict[str, object]) -> str | None:
+    """Validate and canonicalize optional Analytics filters for idempotent keys."""
+    filters = request.get("filters")
+    if filters is not None and not isinstance(filters, str):
+        raise ParserError("query_request.filters must be a string when present")
+    return _canonical_filters(filters)
+
+
+def _require_analytics_single_month_range(period_start: date, period_end: date) -> None:
+    """Fail closed when an Analytics range would mis-bucket report_month."""
+    if period_end < period_start:
+        raise ParserError(
+            "reports.query endDate must be on or after startDate, got "
+            f"{period_start.isoformat()}..{period_end.isoformat()}"
+        )
+    if (period_start.year, period_start.month) != (period_end.year, period_end.month):
+        raise ParserError(
+            "reports.query range must fall within a single calendar month for "
+            f"report_month bucketing, got {period_start.isoformat()}..{period_end.isoformat()}"
+        )
+
+
+def _analytics_rows(payload: dict[str, object]) -> list[object]:
+    """Return Analytics rows, treating omitted rows as a clean zero-result."""
+    rows = payload.get("rows")
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise ParserError("rows must be a list")
+    return rows
+
+
+def _analytics_header_specs(column_headers: object) -> list[tuple[str, str]]:
+    """Validate column headers and keep declaration order for positional routing."""
+    if not isinstance(column_headers, list):
+        raise ParserError("columnHeaders must be a list")
+
+    header_specs: list[tuple[str, str]] = []
+    for header in column_headers:
+        if not isinstance(header, dict):
+            raise ParserError("each columnHeaders[*] must be an object")
+        column_type = header.get("columnType")
+        if column_type not in {"DIMENSION", "METRIC"}:
+            raise ParserError(f"unsupported columnHeaders[*].columnType: {column_type!r}")
+        name = header.get("name")
+        if not isinstance(name, str):
+            raise ParserError("each DIMENSION/METRIC header requires a string name")
+        if (column_type, name) in header_specs:
+            raise ParserError(f"duplicate columnHeaders entry: {column_type}.{name}")
+        header_specs.append((column_type, name))
+    return header_specs
+
+
+def _analytics_row_values(
+    data_row: object,
+    header_specs: list[tuple[str, str]],
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Route one Analytics tabular row into dimension and metric maps."""
+    if not isinstance(data_row, list):
+        raise ParserError("each rows[*] must be a list (tabular)")
+    if len(data_row) != len(header_specs):
+        raise ParserError(f"row length {len(data_row)} != columnHeaders length {len(header_specs)}")
+
+    dim_values: dict[str, object] = {}
+    metric_values: dict[str, object] = {}
+    for (column_type, name), value in zip(header_specs, data_row, strict=True):
+        if column_type == "DIMENSION":
+            dim_values[name] = value
+        else:
+            metric_values[name] = value
+    return dim_values, metric_values
+
+
+def _normalize_analytics_channel(dim_values: dict[str, object]) -> str:
+    """Normalize the required channel attribution dimension in-place."""
+    channel = dim_values.get("channel")
+    if not isinstance(channel, str) or not channel.strip():
+        raise ParserError("dimensions.channel must be a non-empty string")
+    channel = channel.strip()
+    dim_values["channel"] = channel
+    return channel
+
+
+def _iter_analytics_source_rows(
+    *,
+    source_system: str,
+    context: _AnalyticsParseContext,
+    metric_names: list[str],
+    dim_values: dict[str, object],
+    metric_values: dict[str, object],
+    channel: str,
+) -> Iterable[ParsedSourceRow]:
+    """Emit one ParsedSourceRow per monetary YouTube Analytics metric."""
+    for metric_name in metric_names:
+        if metric_name not in _MONETARY_METRICS:
+            continue
+        raw_value = metric_values[metric_name]
+        source_row_key = build_source_row_key(
+            source_system=source_system,
+            query_signature=f"{context.query_signature}|{metric_name}",
+            currency=context.currency,
+            filters=context.filters_key,
+            period_start=context.period_start.isoformat(),
+            period_end=context.period_end.isoformat(),
+            dimensions=dim_values,
+        )
+        yield ParsedSourceRow(
+            source_system=source_system,
+            source_row_key=source_row_key,
+            source_account_id=context.normalized_ids,
+            content_owner_id=context.content_owner_id,
+            youtube_channel_id=channel,
+            report_type="reports.query",
+            report_month=f"{context.period_start.year:04d}-{context.period_start.month:02d}",
+            period_start=context.period_start,
+            period_end=context.period_end,
+            metric_key=metric_name,
+            value_kind="estimated",
+            amount_native=parse_decimal_amount(raw_value, metric_key=metric_name),
+            currency_code=context.currency,
+            source_report_id=None,
+            raw_payload={"dimensions": dict(dim_values), "metric": metric_name, "value": raw_value},
+        )
+
+
 # ============================================================================
 # Purpose: Translate YouTube Analytics reports.query payloads into
 #          ParsedSourceRow rows, one per monetary metric per data row.
@@ -86,226 +290,18 @@ class YouTubeAnalyticsParser:
         tenant_id: UUID,
     ) -> Iterable[ParsedSourceRow]:
         request = require_dict(payload, "query_request")
-        column_headers = payload.get("columnHeaders")
-        # reports.query omits `rows` entirely when there is no data for the
-        # range; treat a missing/null rows as a clean zero-result (emit nothing)
-        # rather than failing ingestion for a sparse channel. A present
-        # non-list rows is still malformed.
-        rows = payload.get("rows")
-        if rows is None:
-            rows = []
-        if not isinstance(column_headers, list):
-            raise ParserError("columnHeaders must be a list")
-        if not isinstance(rows, list):
-            raise ParserError("rows must be a list")
-
-        period_start = parse_iso_date(require_str(request, "startDate"), field="startDate")
-        period_end = parse_iso_date(require_str(request, "endDate"), field="endDate")
-        # FIX: `currency` is an OPTIONAL reports.query request parameter — the
-        # YouTube Analytics API defaults financial metrics to USD when it is
-        # omitted, so a replay payload that drops the optional parameter is
-        # valid and must ingest as USD rather than fail closed. We default ONLY
-        # on true omission (matching the API contract); a present-but-malformed
-        # value (null/empty/non-string) is still rejected as a typed ParserError
-        # so a corrupt currency is never silently coerced.
-        if "currency" in request:
-            currency = request["currency"]
-            # FIX: reject a whitespace-only currency too — a present "   " is
-            # malformed (not a valid ISO code) and must fail closed rather than
-            # be stored/keyed as a blank currency. Store the trimmed value.
-            if not isinstance(currency, str) or not currency.strip():
-                raise ParserError("query_request.currency must be a non-empty string when present")
-            currency = currency.strip()
-        else:
-            currency = "USD"
-        # FIX: includeHistoricalChannelData is an OPTIONAL reports.query flag that
-        # changes the returned dataset for content-owner queries (true includes
-        # pre-link channel history), so two runs differing only in this flag
-        # return different revenue. Fold it into the row key (default False = the
-        # API default) so distinct-flag datasets cannot collide onto one upsert
-        # key and overwrite each other (CLAUDE.md rule 4). A present non-bool is
-        # malformed and fails closed (bool is checked before int since bool is an
-        # int subclass).
-        include_historical = request.get("includeHistoricalChannelData", False)
-        if not isinstance(include_historical, bool):
-            raise ParserError(
-                "query_request.includeHistoricalChannelData must be a boolean when present"
-            )
-        # `metrics` is validated for payload shape but intentionally NOT part of
-        # the row key: the parser persists only monetary metrics and tags each
-        # row with its own metric_key, so co-requesting an extra metric (e.g.
-        # estimatedRevenue vs estimatedRevenue,views) must not change the key of
-        # an existing revenue row — otherwise the rerun inserts duplicates.
-        require_str(request, "metrics")
-        dimensions_csv = require_str(request, "dimensions")
-        ids = require_str(request, "ids")
-        # FIX: Fail closed on a malformed `ids` selector. The YouTube Analytics
-        # API contract requires a structured selector — `channel==<id>` or
-        # `contentOwner==<id>`. Arbitrary text (unprefixed garbage, or a bare
-        # `contentOwner==`/`channel==` with an empty id) would otherwise persist
-        # a revenue row whose source_account_id/content_owner_id cannot be tied
-        # back to a real owner or channel, weakening account attribution.
-        # Mirrors the AdSense parser's accountId prefix/suffix guard.
-        selector_kind, sep, selector_id = ids.partition("==")
-        # FIX: trim the selector id before the non-empty check so a
-        # whitespace-only suffix (`channel==   `) fails closed too — it would
-        # otherwise pass and persist a blank/invalid attribution key.
-        selector_id = selector_id.strip()
-        if sep != "==" or selector_kind not in {"channel", "contentOwner"} or not selector_id:
-            raise ParserError(
-                f"query_request.ids must be 'channel==<id>' or 'contentOwner==<id>', got {ids!r}"
-            )
-        # content_owner_id holds the BARE id (the part after "==") so it is
-        # usable for joins/filters; source_account_id stores the NORMALISED
-        # `kind==id` selector (whitespace trimmed). A channel-scoped selector has
-        # no content owner.
-        content_owner_id = selector_id if selector_kind == "contentOwner" else None
-        normalized_ids = f"{selector_kind}=={selector_id}"
-        # FIX: Build query_signature from the CANONICAL account identity
-        # (content_owner_id), NOT the raw `ids` selector. The channel identity is
-        # already folded into the key via the required dim_values["channel"]
-        # below, and content_owner_id distinguishes CMS accounts in a multi-CMS
-        # tenant. Keying on raw `ids` broke idempotency: YouTube Analytics accepts
-        # equivalent channel selectors (`channel==MINE` and `channel==<id>`) for
-        # the same channel, so switching representation between runs hashed
-        # identical revenue rows to different source_row_keys and inserted
-        # duplicates on rerun. Canonicalise (sort) the dimension list so a
-        # reorder-only rerun hashes the same; metrics are deliberately excluded
-        # (see the require_str note above), folded in per-row via metric_name.
-        account_identity = content_owner_id or ""
-        # historical flag is part of the query identity: it selects a different
-        # dataset, so it must separate the row keys (see the include_historical
-        # guard above).
-        query_signature = (
-            f"{account_identity}|{_canonical_csv(dimensions_csv, ',')}"
-            f"|hist={'1' if include_historical else '0'}"
-        )
-        # A different currency or filter expression for the same
-        # ids/metrics/dimensions/period is a distinct dataset; fold both into
-        # the row key (as structured fields, below) so one cannot overwrite the
-        # other on the unique upsert key. filters is optional in the request.
-        filters = request.get("filters")
-        if filters is not None and not isinstance(filters, str):
-            raise ParserError("query_request.filters must be a string when present")
-        # Canonicalise filters for idempotency: an omitted filter and a
-        # present-but-empty filter both mean "unfiltered" (normalise to None),
-        # and clause / comma-separated multi-value order is semantically
-        # irrelevant (sorted) — see _canonical_filters.
-        filters_key = _canonical_filters(filters)
-        # Reject reversed ranges before month bucketing: endDate must be on or
-        # after startDate; fail closed so a malformed payload stays typed.
-        if period_end < period_start:
-            raise ParserError(
-                "reports.query endDate must be on or after startDate, got "
-                f"{period_start.isoformat()}..{period_end.isoformat()}"
-            )
-        # report_month is derived from period_start, so a range spanning more
-        # than one calendar month would mis-bucket every returned row; fail
-        # closed and require single-month queries.
-        if (period_start.year, period_start.month) != (period_end.year, period_end.month):
-            raise ParserError(
-                "reports.query range must fall within a single calendar month for "
-                f"report_month bucketing, got {period_start.isoformat()}..{period_end.isoformat()}"
-            )
-
-        # Keep each header's (type, name) in declaration order so row cells can
-        # be routed positionally (data_row[i] belongs to columnHeaders[i]). An
-        # unsupported columnType fails closed: silently skipping it would leave
-        # the positional routing misaligned and could associate a value with
-        # the wrong metric. A typed header missing its name likewise raises
-        # ParserError, not KeyError.
-        header_specs: list[tuple[str, str]] = []
-        for h in column_headers:
-            if not isinstance(h, dict):
-                raise ParserError("each columnHeaders[*] must be an object")
-            column_type = h.get("columnType")
-            if column_type not in {"DIMENSION", "METRIC"}:
-                raise ParserError(f"unsupported columnHeaders[*].columnType: {column_type!r}")
-            name = h.get("name")
-            if not isinstance(name, str):
-                raise ParserError("each DIMENSION/METRIC header requires a string name")
-            if (column_type, name) in header_specs:
-                # Duplicate header would overwrite the earlier cell in
-                # dim_values/metric_values and silently corrupt the row mapping.
-                raise ParserError(f"duplicate columnHeaders entry: {column_type}.{name}")
-            header_specs.append((column_type, name))
-
+        context = _analytics_parse_context(request)
+        header_specs = _analytics_header_specs(payload.get("columnHeaders"))
         metric_names = [name for column_type, name in header_specs if column_type == "METRIC"]
 
-        for data_row in rows:
-            if not isinstance(data_row, list):
-                raise ParserError("each rows[*] must be a list (tabular)")
-            if len(data_row) != len(header_specs):
-                raise ParserError(
-                    f"row length {len(data_row)} != columnHeaders length {len(header_specs)}"
-                )
-
-            # Route each value to its header by position; only DIMENSION values
-            # populate dim_values and only METRIC values populate metric_values.
-            dim_values: dict[str, object] = {}
-            metric_values: dict[str, object] = {}
-            for (column_type, name), value in zip(header_specs, data_row, strict=True):
-                if column_type == "DIMENSION":
-                    dim_values[name] = value
-                else:
-                    metric_values[name] = value
-
-            channel = dim_values.get("channel")
-            # FIX: channel is the attribution identity folded into the row key; a
-            # whitespace-only value passed the prior isinstance-only check and
-            # produced a blank youtube_channel_id. Require a non-blank string and
-            # write the trimmed id back into dim_values so the row key hashes the
-            # canonical channel (mirrors the currency / selector-id trimming above).
-            if not isinstance(channel, str) or not channel.strip():
-                raise ParserError("dimensions.channel must be a non-empty string")
-            channel = channel.strip()
-            dim_values["channel"] = channel
-
-            for metric_name in metric_names:
-                if metric_name not in _MONETARY_METRICS:
-                    continue  # B1 only tracks monetary metrics.
-                raw_value = metric_values[metric_name]
-                # FIX: reports.query returns FLOAT/INTEGER metric cells as JSON
-                # numbers (per columnHeaders[].dataType), not strings. The prior
-                # str-only guard raised ParserError on valid Analytics payloads,
-                # blocking ingestion. parse_decimal_amount now safely normalises
-                # str/int/float (rejecting bool and other types), so numeric
-                # cells parse correctly and the guard is removed.
-
-                source_row_key = build_source_row_key(
-                    source_system=self.source_system,
-                    query_signature=f"{query_signature}|{metric_name}",
-                    currency=currency,
-                    filters=filters_key,
-                    period_start=period_start.isoformat(),
-                    period_end=period_end.isoformat(),
-                    dimensions=dim_values,
-                )
-
-                yield ParsedSourceRow(
-                    source_system=self.source_system,
-                    source_row_key=source_row_key,
-                    source_account_id=normalized_ids,
-                    content_owner_id=content_owner_id,
-                    youtube_channel_id=channel,
-                    report_type="reports.query",
-                    report_month=f"{period_start.year:04d}-{period_start.month:02d}",
-                    period_start=period_start,
-                    period_end=period_end,
-                    metric_key=metric_name,
-                    value_kind="estimated",
-                    amount_native=parse_decimal_amount(raw_value, metric_key=metric_name),
-                    currency_code=currency,
-                    source_report_id=None,
-                    # FIX: store an OWNED copy of dim_values per yielded row. All
-                    # monetary metrics from one data_row share the same dim_values
-                    # object, so persisting it by reference would let a later
-                    # mutation of one row's raw_payload["dimensions"] silently
-                    # corrupt sibling metric rows' audit payloads (CLAUDE.md rule
-                    # 4). Cells are scalars, so a shallow dict() copy isolates it.
-                    raw_payload={
-                        "dimensions": dict(dim_values),
-                        "metric": metric_name,
-                        "value": raw_value,
-                    },
-                )
+        for data_row in _analytics_rows(payload):
+            dim_values, metric_values = _analytics_row_values(data_row, header_specs)
+            channel = _normalize_analytics_channel(dim_values)
+            yield from _iter_analytics_source_rows(
+                source_system=self.source_system,
+                context=context,
+                metric_names=metric_names,
+                dim_values=dim_values,
+                metric_values=metric_values,
+                channel=channel,
+            )

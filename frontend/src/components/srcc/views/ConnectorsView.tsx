@@ -857,31 +857,35 @@ function TokenHealth({ // skipcq: JS-0067
  */
 type TokenHealthFeedView = "error" | "loading" | "empty" | "list";
 
-function tokenHealthFeedView(
+const tokenHealthFeedView = (
   error: ApiError | Error | null,
   loading: boolean,
   rowCount: number,
-): TokenHealthFeedView {
+): TokenHealthFeedView => {
   if (error) return "error";
   if (loading && rowCount === 0) return "loading";
   if (rowCount === 0) return "empty";
   return "list";
-}
+};
 
 function TokenHealthFeed() { // skipcq: JS-0067
   const { data, loading, error } = useConnectorCredentialHealth();
   const rows = data ?? [];
+  const view = tokenHealthFeedView(error, loading, rows.length);
 
-  switch (tokenHealthFeedView(error, loading, rows.length)) {
-    case "error":
-      return <TokenHealthError error={error as ApiError | Error} />;
-    case "loading":
-      return <TokenHealthLoadingState />;
-    case "empty":
-      return <TokenHealthEmptyState />;
-    case "list":
-      return <TokenHealthList credentials={rows} />;
+  if (view === "error") {
+    return <TokenHealthError error={error as ApiError | Error} />;
   }
+
+  if (view === "loading") {
+    return <TokenHealthLoadingState />;
+  }
+
+  if (view === "empty") {
+    return <TokenHealthEmptyState />;
+  }
+
+  return <TokenHealthList credentials={rows} />;
 }
 
 /** Skeleton-free loading note for the initial credential-health fetch. */

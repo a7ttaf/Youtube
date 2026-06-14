@@ -575,27 +575,29 @@ class ConnectorJobExecutor:
             for report_type, error_class in outcome.per_report_failures
         ]
         try:
-            with self._session_factory() as session:
-                with connector_tenant_context(tenant_id, session=session):
-                    with platform_lane(session):
-                        sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
-                        record_audit_event(
-                            sink=sink,
-                            actor=actor,
-                            event_type=AuditEventType.CONNECTOR_JOB_RUN,
-                            entity_type="api_connector",
-                            entity_id=f"{connector_key}:{account_id}",
-                            scope=AccessScope.connector(connector_key),
-                            reason="connector dry-run completed",
-                            details={
-                                "action": "job_dry_run_completed",
-                                "report_month": report_month,
-                                "dry_run": True,
-                                "counts": dict(outcome.counts),
-                                "per_report_failures": per_report_failures,
-                            },
-                        )
-                        session.commit()
+            with (
+                self._session_factory() as session,
+                connector_tenant_context(tenant_id, session=session),
+                platform_lane(session),
+            ):
+                sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+                record_audit_event(
+                    sink=sink,
+                    actor=actor,
+                    event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                    entity_type="api_connector",
+                    entity_id=f"{connector_key}:{account_id}",
+                    scope=AccessScope.connector(connector_key),
+                    reason="connector dry-run completed",
+                    details={
+                        "action": "job_dry_run_completed",
+                        "report_month": report_month,
+                        "dry_run": True,
+                        "counts": dict(outcome.counts),
+                        "per_report_failures": per_report_failures,
+                    },
+                )
+                session.commit()
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
                 "Failed to persist job_dry_run_completed audit (tenant=%s)",

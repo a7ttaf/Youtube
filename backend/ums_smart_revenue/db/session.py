@@ -89,22 +89,19 @@ def build_session_factory(database_url: str, engine: Engine | None = None) -> Se
         "expire_on_commit": False,
         "info": {_SESSION_ROLE_KEY: APP_TENANT_ROLE},
     }
-    if database_url.startswith("sqlite"):
-        # NOTE: We deliberately do NOT set `join_transaction_mode` on the
-        # engine-bound sessionmaker. Codex P2 review on PR #88 confirmed
-        # that `join_transaction_mode="create_savepoint"` does not actually
-        # open a SAVEPOINT for engine-bound sessions on a StaticPool engine
-        # (each Session checkout gets a fresh SQLAlchemy Connection wrapper
-        # around the same DBAPI connection, so a Session's commit/rollback
-        # still acts on the shared underlying transaction). The audit /
-        # platform lane does not need a separate Session on SQLite: the app
-        # wires `_sqlite_platform_session_from_request` in `app.py` so the
-        # platform lane reuses the request session (the same Session object),
-        # which removes the multi-Session contention that would otherwise
-        # need SAVEPOINT isolation. Postgres keeps the default
-        # ("conditional_savepoint") because each Session gets a distinct
-        # pooled connection with its own outer transaction.
-        pass
+    # NOTE: We deliberately do NOT set `join_transaction_mode` on the
+    # engine-bound sessionmaker. Codex P2 review on PR #88 confirmed that
+    # `join_transaction_mode="create_savepoint"` does not actually open a
+    # SAVEPOINT for engine-bound sessions on a StaticPool engine (each Session
+    # checkout gets a fresh SQLAlchemy Connection wrapper around the same DBAPI
+    # connection, so a Session's commit/rollback still acts on the shared
+    # underlying transaction). The audit / platform lane does not need a
+    # separate Session on SQLite: the app wires
+    # `_sqlite_platform_session_from_request` in `app.py` so the platform lane
+    # reuses the request session (the same Session object), which removes the
+    # multi-Session contention that would otherwise need SAVEPOINT isolation.
+    # Postgres keeps the default ("conditional_savepoint") because each
+    # Session gets a distinct pooled connection with its own outer transaction.
     return sessionmaker(bind=engine, **kwargs)
 
 
