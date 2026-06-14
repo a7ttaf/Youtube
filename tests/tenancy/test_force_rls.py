@@ -115,11 +115,7 @@ def _build_owned_table(conn: sa.Connection, table: str, force: bool) -> None:
     same two seed rows; only the FORCE flag differs between them, so a read as
     the owner isolates exactly what FORCE changes.
     """
-    conn.execute(
-        sa.text(
-            f"CREATE TABLE {table} (id int PRIMARY KEY, tenant_id uuid NOT NULL)"
-        )
-    )
+    conn.execute(sa.text(f"CREATE TABLE {table} (id int PRIMARY KEY, tenant_id uuid NOT NULL)"))
     conn.execute(sa.text(f'ALTER TABLE {table} OWNER TO "{_OWNER_ROLE}"'))
     conn.execute(
         sa.text(f"INSERT INTO {table} VALUES (1, :t)"),
@@ -134,8 +130,7 @@ def _build_owned_table(conn: sa.Connection, table: str, force: bool) -> None:
         conn.execute(sa.text(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"))
     conn.execute(
         sa.text(
-            f"CREATE POLICY {table}_iso ON {table} "
-            f"USING (tenant_id = '{_VISIBLE_TENANT}'::uuid)"
+            f"CREATE POLICY {table}_iso ON {table} USING (tenant_id = '{_VISIBLE_TENANT}'::uuid)"
         )
     )
 
@@ -144,9 +139,7 @@ def _owner_visible_ids(conn: sa.Connection, table: str) -> set[int]:
     """Return the ids ``table`` exposes when read as the owner role."""
     conn.execute(sa.text(f'SET ROLE "{_OWNER_ROLE}"'))
     try:
-        return set(
-            conn.execute(sa.text(f"SELECT id FROM {table} ORDER BY id")).scalars()
-        )
+        return set(conn.execute(sa.text(f"SELECT id FROM {table} ORDER BY id")).scalars())
     finally:
         conn.execute(sa.text("RESET ROLE"))
 
@@ -161,9 +154,7 @@ def test_force_binds_non_superuser_owner_enable_only_does_not():
     # AUTOCOMMIT: CREATE/DROP ROLE and OWNER changes are not transaction-friendly.
     engine = sa.create_engine(url)
     try:
-        with engine.connect().execution_options(
-            isolation_level="AUTOCOMMIT"
-        ) as conn:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             _drop_owner(conn)
             conn.execute(
                 sa.text(
@@ -173,9 +164,7 @@ def test_force_binds_non_superuser_owner_enable_only_does_not():
             )
             # The owner needs schema USAGE to resolve its own relations once we
             # SET ROLE into it; without it the table reads as "does not exist".
-            conn.execute(
-                sa.text(f'GRANT USAGE ON SCHEMA public TO "{_OWNER_ROLE}"')
-            )
+            conn.execute(sa.text(f'GRANT USAGE ON SCHEMA public TO "{_OWNER_ROLE}"'))
             try:
                 _build_owned_table(conn, _FORCED_TABLE, force=True)
                 _build_owned_table(conn, _ENABLE_ONLY_TABLE, force=False)

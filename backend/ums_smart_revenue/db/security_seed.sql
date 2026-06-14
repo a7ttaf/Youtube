@@ -103,7 +103,7 @@ SET label = EXCLUDED.label,
     audit_on_use = EXCLUDED.audit_on_use;
 
 INSERT INTO role_permission_assignments (role_key, permission_key)
-SELECT 'super_owner', key FROM permissions
+SELECT 'super_owner' AS role_key, key AS permission_key FROM permissions
 ON CONFLICT DO NOTHING;
 
 INSERT INTO role_permission_assignments (role_key, permission_key)

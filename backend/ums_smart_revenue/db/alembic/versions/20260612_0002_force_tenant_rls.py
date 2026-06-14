@@ -113,9 +113,7 @@ def upgrade() -> None:
     _assert_no_drift(bind)
     for table in TENANT_SCOPED_TABLES:
         # Table names are internal constants from the vetted allowlist.
-        bind.execute(
-            sa.text(f"ALTER TABLE public.\"{table}\" FORCE ROW LEVEL SECURITY")
-        )
+        bind.execute(sa.text(f'ALTER TABLE public."{table}" FORCE ROW LEVEL SECURITY'))
 
 
 def downgrade() -> None:
@@ -124,6 +122,4 @@ def downgrade() -> None:
     if bind.dialect.name != "postgresql":
         return
     for table in TENANT_SCOPED_TABLES:
-        bind.execute(
-            sa.text(f"ALTER TABLE public.\"{table}\" NO FORCE ROW LEVEL SECURITY")
-        )
+        bind.execute(sa.text(f'ALTER TABLE public."{table}" NO FORCE ROW LEVEL SECURITY'))
