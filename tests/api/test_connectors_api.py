@@ -1766,6 +1766,26 @@ def test_derive_credential_health_state_missing_without_secret_ref():
     assert derive_credential_health_state(entry, as_of=as_of) == "missing"
 
 
+def test_derive_credential_health_state_auth_failed_precedence_over_missing():
+    """auth_failed is evaluated before missing: a failed refresh with no secret
+    still derives 'auth_failed' (locks the documented rule precedence)."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=False,
+        last_refresh_status="failed",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "auth_failed"
+
+
 def test_derive_credential_health_state_expiring_within_window():
     """token_expiry_at within 24h of as_of derives 'expiring'."""
     from ums_smart_revenue.connectors.credentials import (
