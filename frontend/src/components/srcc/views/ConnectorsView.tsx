@@ -76,6 +76,7 @@ import { describeError } from "./CommandView";
 // Hint shown wherever a connector-operations control is disabled because the
 // viewer's role cannot run connector jobs (mirrors the honest no-permission UX).
 const CONNECTOR_ROLE_HINT = "Requires a connector-operations role.";
+const clearCursorValue = (): undefined => undefined;
 
 /** Map a connector credential status to a tone for its display badge. */
 function credentialStatusTone(status: string): Severity { // skipcq: JS-0067, JS-R1005
@@ -646,8 +647,8 @@ function useRunHistoryFeedState(reloadToken: number): RunHistoryFeedState { // s
     if (reloadToken === 0) return;
     setRows([]);
     setPagination(null);
-    setCursorStartedAt(undefined);
-    setCursorId(undefined);
+    setCursorStartedAt(clearCursorValue);
+    setCursorId(clearCursorValue);
     reload();
   }, [reloadToken, reload]);
 
@@ -801,21 +802,16 @@ function RunHistoryRow({ run }: { run: ConnectorRun }) { // skipcq: JS-0067
   );
 }
 
-/** Map a server-derived credential health_state to a tone for its display badge. */
-const healthStateTone = (state: ConnectorCredentialHealthState): Severity => {
-  switch (state) {
-    case "healthy":
-      return "green";
-    case "expiring":
-      return "amber";
-    case "auth_failed":
-    case "missing":
-      return "red";
-    case "unknown":
-    default:
-      return "blue";
-  }
+const HEALTH_STATE_TONES: Record<ConnectorCredentialHealthState, Severity> = {
+  healthy: "green",
+  expiring: "amber",
+  auth_failed: "red",
+  missing: "red",
+  unknown: "blue",
 };
+
+/** Map a server-derived credential health_state to a tone for its display badge. */
+const healthStateTone = (state: ConnectorCredentialHealthState): Severity => HEALTH_STATE_TONES[state];
 
 /**
  * The token-health panel. Fail-closed: a viewer lacking the connector-health
@@ -859,20 +855,33 @@ function TokenHealth({ // skipcq: JS-0067
  * copy) / empty / loaded states from GET /connectors/credentials/health. The
  * health_state and telemetry are server-derived; the view never recomputes them.
  */
+type TokenHealthFeedView = "error" | "loading" | "empty" | "list";
+
+function tokenHealthFeedView(
+  error: ApiError | Error | null,
+  loading: boolean,
+  rowCount: number,
+): TokenHealthFeedView {
+  if (error) return "error";
+  if (loading && rowCount === 0) return "loading";
+  if (rowCount === 0) return "empty";
+  return "list";
+}
+
 function TokenHealthFeed() { // skipcq: JS-0067
   const { data, loading, error } = useConnectorCredentialHealth();
   const rows = data ?? [];
 
-  if (error) {
-    return <TokenHealthError error={error} />;
+  switch (tokenHealthFeedView(error, loading, rows.length)) {
+    case "error":
+      return <TokenHealthError error={error as ApiError | Error} />;
+    case "loading":
+      return <TokenHealthLoadingState />;
+    case "empty":
+      return <TokenHealthEmptyState />;
+    case "list":
+      return <TokenHealthList credentials={rows} />;
   }
-  if (loading && rows.length === 0) {
-    return <TokenHealthLoadingState />;
-  }
-  if (rows.length === 0) {
-    return <TokenHealthEmptyState />;
-  }
-  return <TokenHealthList credentials={rows} />;
 }
 
 /** Skeleton-free loading note for the initial credential-health fetch. */

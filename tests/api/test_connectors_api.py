@@ -119,7 +119,6 @@ class _FakeExecutor:
 
     def activate(self, reservation):
         self.activate_calls.append({"reservation": reservation})
-        return None
 
     def cancel_reservation(self, reservation):
         self.cancel_calls.append({"reservation": reservation})
@@ -418,10 +417,7 @@ def test_request_connector_job_missing_permission_403(tmp_path):
 
 def test_request_connector_job_503_when_executor_disabled(tmp_path):
     """Executor disabled -> 503 + a job_rejected/executor_disabled audit."""
-    import os
-
     os.environ.pop("UMS_CONNECTOR_JOB_EXECUTOR_ENABLED", None)
-    from ums_smart_revenue.config.settings import load_app_settings
 
     load_app_settings.cache_clear()
     database_url = build_database_url(tmp_path)

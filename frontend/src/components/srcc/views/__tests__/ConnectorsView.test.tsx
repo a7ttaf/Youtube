@@ -202,6 +202,13 @@ function fetchMock() { // skipcq: JS-0067
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
+const DEFAULT_ROUTE_RESPONSES = [
+  { prefix: "/connectors/runs", body: RUNS },
+  { prefix: "/connectors/credentials/health", body: HEALTH },
+  { prefix: "/connectors/credentials", body: CREDENTIALS },
+  { prefix: "/adsense/payments", body: PAYMENTS },
+] as const;
+
 // Route the two auto-fetch GETs (credentials + payments) to fixed bodies and let
 // callers override individual routes via the supplied responder.
 function routeBoth( // skipcq: JS-0067
@@ -211,22 +218,8 @@ function routeBoth( // skipcq: JS-0067
     const url = urlOf(input);
     const custom = responder(url, init);
     if (custom) return Promise.resolve(custom);
-    // /connectors/runs is checked BEFORE /connectors/credentials would never
-    // match it (different path), but keep it explicit and first.
-    if (url.startsWith("/connectors/runs")) {
-      return Promise.resolve(jsonResponse(RUNS));
-    }
-    // The credential-HEALTH path is a prefix-subset of /connectors/credentials,
-    // so it MUST be matched first or the list route would swallow it.
-    if (url.startsWith("/connectors/credentials/health")) {
-      return Promise.resolve(jsonResponse(HEALTH));
-    }
-    if (url.startsWith("/connectors/credentials")) {
-      return Promise.resolve(jsonResponse(CREDENTIALS));
-    }
-    if (url.startsWith("/adsense/payments")) {
-      return Promise.resolve(jsonResponse(PAYMENTS));
-    }
+    const route = DEFAULT_ROUTE_RESPONSES.find(({ prefix }) => url.startsWith(prefix));
+    if (route) return Promise.resolve(jsonResponse(route.body));
     return Promise.resolve(jsonResponse({}, 200));
   };
 }

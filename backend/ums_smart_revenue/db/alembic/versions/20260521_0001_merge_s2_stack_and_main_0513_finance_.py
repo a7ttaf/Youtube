@@ -12,8 +12,8 @@ depends_on = None
 
 
 def upgrade() -> None:
-    pass
+    """Merge-only revision; no schema operations are required."""
 
 
 def downgrade() -> None:
-    pass
+    """Merge-only revision; no schema operations are required."""

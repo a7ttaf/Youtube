@@ -109,12 +109,12 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
     #   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> close().
     # ========================================================================
     @asynccontextmanager
-    async def _lifespan(app: FastAPI):
+    async def _lifespan(fastapi_app: FastAPI):
         """Yield through serving, then close the connector-job executor if present."""
         try:
             yield
         finally:
-            executor = getattr(app.state, "connector_job_executor", None)
+            executor = getattr(fastapi_app.state, "connector_job_executor", None)
             if executor is not None:
                 executor.close()
 

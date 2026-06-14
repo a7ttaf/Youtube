@@ -309,8 +309,8 @@ class ReconciliationWorkflowService:
                 components.append(self._component(month, line, kind, amount, suffix, source_system))
         return components
 
+    @staticmethod
     def _component(
-        self,
         month: str,
         line: ChannelReconciliation,
         component_kind: str,

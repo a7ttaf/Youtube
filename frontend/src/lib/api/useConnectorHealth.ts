@@ -14,6 +14,25 @@ export type ConnectorCredentialHealthQuery = {
   offset?: number;
 };
 
+const appendOptionalCredentialHealthParam = (
+  params: URLSearchParams,
+  key: string,
+  value: number | undefined,
+): void => {
+  if (value != null) params.set(key, String(value));
+};
+
+export const buildConnectorCredentialHealthUrl = ({
+  limit,
+  offset,
+}: ConnectorCredentialHealthQuery = {}): string => {
+  const params = new URLSearchParams();
+  appendOptionalCredentialHealthParam(params, "limit", limit);
+  appendOptionalCredentialHealthParam(params, "offset", offset);
+  const qs = params.toString();
+  return `/connectors/credentials/health${qs ? `?${qs}` : ""}`;
+};
+
 // ============================================================================
 // Purpose: Typed auto-fetch hook for the read-only connector credential HEALTH
 //   surface. Builds GET /connectors/credentials/health (with optional
@@ -52,18 +71,8 @@ export function useConnectorCredentialHealth( // skipcq: JS-0067
   const { limit, offset } = query;
 
   const run = useCallback(() => {
-    const params = new URLSearchParams();
-    if (limit !== undefined && limit !== null) {
-      params.set("limit", String(limit));
-    }
-    if (offset !== undefined && offset !== null) {
-      params.set("offset", String(offset));
-    }
-    const qs = params.toString();
     return client
-      .get<ConnectorCredentialHealthResponse>(
-        `/connectors/credentials/health${qs ? `?${qs}` : ""}`,
-      )
+      .get<ConnectorCredentialHealthResponse>(buildConnectorCredentialHealthUrl({ limit, offset }))
       .then((response) => response.credentials);
   }, [client, limit, offset]);
 

@@ -445,9 +445,12 @@ def _resolve_getattr_call_args(
 
 
 def _is_getattr_call(call: ast.Call, context: _ScopeContext) -> bool:
-    if isinstance(call.func, ast.Name):
-        if call.func.id in context.shadowed_getattr_names and call.func.id not in context.aliases:
-            return False
+    if (
+        isinstance(call.func, ast.Name)
+        and call.func.id in context.shadowed_getattr_names
+        and call.func.id not in context.aliases
+    ):
+        return False
     return _qualified_name(call.func, context.aliases) in GETATTR_SYMBOLS
 
 
@@ -761,9 +764,8 @@ def _qualified_name(node: ast.AST, import_aliases: dict[str, str]) -> str:
     if isinstance(node, ast.Attribute):
         parent = _qualified_name(node.value, import_aliases)
         return f"{parent}.{node.attr}" if parent else node.attr
-    if isinstance(node, ast.Call):
-        if isinstance(node.func, ast.Name) and node.func.id == "super":
-            return "super"
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "super":
+        return "super"
     return ""
 
 

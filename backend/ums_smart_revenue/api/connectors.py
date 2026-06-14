@@ -1,5 +1,7 @@
 """FastAPI route handlers for connector credential management and test-connection probing."""
 
+from __future__ import annotations
+
 # pylint: disable=too-many-arguments, too-many-positional-arguments
 import logging
 from datetime import UTC, datetime, timedelta
@@ -978,8 +980,8 @@ def _reject_connector_job(
 #   - File: backend/ums_smart_revenue/api/connectors.py ->
 #     request_connector_job attaches the hooks.
 # ============================================================================
-_AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"
-_AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"
+_AFTER_COMMIT_FLAG_KEY = object()
+_AFTER_ROLLBACK_FLAG_KEY = object()
 
 
 def _attach_after_rollback_hook(
@@ -1046,7 +1048,7 @@ def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _Slo
             # best-effort: any error here is logged and never raised
             # into the request lifecycle.
             try:
-                executor._audit_failed_before_start(
+                executor.audit_failed_before_start(
                     tenant_id=reservation.tenant_id,
                     connector_key=reservation.connector_key,
                     account_id=reservation.account_id,

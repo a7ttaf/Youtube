@@ -39,7 +39,8 @@ class UsViewShareProvider(Protocol):
 class NullUsViewShareProvider:
     """Default provider: US-view data not yet ingested (refine-later)."""
 
-    def us_view_share(self, month: str, youtube_channel_id: str) -> Decimal | None:
+    @staticmethod
+    def us_view_share(month: str, youtube_channel_id: str) -> Decimal | None:
         """Always None until a real geography feed exists."""
         return None
 
