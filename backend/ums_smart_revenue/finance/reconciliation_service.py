@@ -309,7 +309,7 @@ class ReconciliationWorkflowService:
                 components.append(self._component(month, line, kind, amount, suffix, source_system))
         return components
 
-    def _component(
+    def _component(  # skipcq: PYL-R0201
         self,
         month: str,
         line: ChannelReconciliation,

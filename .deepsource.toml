@@ -1,5 +1,11 @@
 version = 1
 
+# Classify the test tree so the analyzers apply test-appropriate rules. Without
+# this, the 100-char reformat re-fingerprinted pre-existing test-only patterns
+# (nested-with, duplicate imports, useless returns) as newly introduced and
+# failed the Python check; these are acceptable in test code.
+test_patterns = ["tests/**"]
+
 [[analyzers]]
 name = "python"
 enabled = true

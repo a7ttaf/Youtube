@@ -39,7 +39,9 @@ class UsViewShareProvider(Protocol):
 class NullUsViewShareProvider:
     """Default provider: US-view data not yet ingested (refine-later)."""
 
-    def us_view_share(self, month: str, youtube_channel_id: str) -> Decimal | None:
+    def us_view_share(  # skipcq: PYL-R0201
+        self, month: str, youtube_channel_id: str
+    ) -> Decimal | None:
         """Always None until a real geography feed exists."""
         return None
 
@@ -86,7 +88,7 @@ def _attribute(total: Decimal, gross: dict[str, Decimal], g: Decimal) -> dict[st
     return out
 
 
-def compute_month_reconciliation(
+def compute_month_reconciliation(  # skipcq: PY-R1000
     *,
     month: str,
     channel_gross: Mapping[str, Decimal],

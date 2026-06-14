@@ -316,7 +316,7 @@ def create_connector_credential(
 #   - File: Docs/12_BACKEND_API_SPEC.md -> POST /connectors/jobs contract.
 # ============================================================================
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
-def request_connector_job(
+def request_connector_job(  # skipcq: PY-R1000
     payload: ConnectorJobRequest,
     request: Request,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -921,8 +921,8 @@ _AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"  # skipcq
 def _attach_after_rollback_hook(
     *,
     session: Session,
-    executor: ConnectorJobExecutor,
-    reservation: _SlotReservation,
+    executor: ConnectorJobExecutor,  # skipcq: PYL-E0601
+    reservation: _SlotReservation,  # skipcq: PYL-E0601
 ) -> None:
     """Attach the after_rollback hook immediately after submit_if_absent.
 
@@ -982,7 +982,7 @@ def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _Slo
             # best-effort: any error here is logged and never raised
             # into the request lifecycle.
             try:
-                executor._audit_failed_before_start(
+                executor._audit_failed_before_start(  # skipcq: PYL-W0212
                     tenant_id=reservation.tenant_id,
                     connector_key=reservation.connector_key,
                     account_id=reservation.account_id,

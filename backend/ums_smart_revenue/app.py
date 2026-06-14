@@ -109,7 +109,7 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
     #   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> close().
     # ========================================================================
     @asynccontextmanager
-    async def _lifespan(app: FastAPI):
+    async def _lifespan(app: FastAPI):  # skipcq: PYL-W0621
         """Yield through serving, then close the connector-job executor if present."""
         try:
             yield

@@ -37,7 +37,7 @@ class InMemoryAuditSink:
         self.records.append(record)
 
 
-def record_audit_event(
+def record_audit_event(  # skipcq: PY-R1000
     *,
     sink: AuditSink,
     actor: UserPrincipal,

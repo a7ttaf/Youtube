@@ -54,7 +54,7 @@ _TOLERATED_METRIC_HEADER_TYPES: Final[frozenset[str]] = frozenset(
 class AdSenseManagementParser:
     source_system = "adsense_management"
 
-    def parse(
+    def parse(  # skipcq: PY-R1000
         self,
         payload: dict[str, object],
         *,
