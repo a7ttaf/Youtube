@@ -20,7 +20,9 @@ def _p(name, date_obj, amount):
     d = {"name": name, "amount": amount}
     if date_obj is not None:
         d["date"] = {
-            "year": date_obj.year, "month": date_obj.month, "day": date_obj.day,
+            "year": date_obj.year,
+            "month": date_obj.month,
+            "day": date_obj.day,
         }
     return d
 
@@ -83,24 +85,41 @@ def test_classify_rejects_non_list_payments() -> None:
         classify_payments({"payments": {"oops": 1}}, account_id="pub-1")
 
 
-@pytest.mark.parametrize("raw,expected", [
-    ("£87.65", (Decimal("87.65"), "GBP")),
-    ("€87.65", (Decimal("87.65"), "EUR")),
-    ("¥1,235 JPY", (Decimal("1235"), "JPY")),
-    ("1,234.57 USD", (Decimal("1234.57"), "USD")),
-])
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("£87.65", (Decimal("87.65"), "GBP")),
+        ("€87.65", (Decimal("87.65"), "EUR")),
+        ("¥1,235 JPY", (Decimal("1235"), "JPY")),
+        ("1,234.57 USD", (Decimal("1234.57"), "USD")),
+    ],
+)
 def test_parse_amount_accepts(raw, expected) -> None:
     """Supported explicit ISO and allowlisted-symbol amounts parse exactly."""
     assert parse_amount(raw) == expected
 
 
-@pytest.mark.parametrize("raw", [
-    "$1,234.57", "¥1,235", "1.2.3 GBP", "-5.00 GBP", "kr 5", "",
-    # Regression: in the ISO-code branch, embedded junk inside the number must
-    # NOT be silently stripped into a fabricated amount — it must fail closed.
-    "1e3 GBP", "100x50 GBP", "1 234 GBP", "1#2#3 GBP", "abc 100 GBP",
-    "x100 GBP", "100 ABC", "ABC 100",
-])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "$1,234.57",
+        "¥1,235",
+        "1.2.3 GBP",
+        "-5.00 GBP",
+        "kr 5",
+        "",
+        # Regression: in the ISO-code branch, embedded junk inside the number must
+        # NOT be silently stripped into a fabricated amount — it must fail closed.
+        "1e3 GBP",
+        "100x50 GBP",
+        "1 234 GBP",
+        "1#2#3 GBP",
+        "abc 100 GBP",
+        "x100 GBP",
+        "100 ABC",
+        "ABC 100",
+    ],
+)
 def test_parse_amount_fails_closed(raw) -> None:
     """Ambiguous, negative, malformed, or junked amounts fail closed."""
     with pytest.raises(AdSensePaymentMappingError):

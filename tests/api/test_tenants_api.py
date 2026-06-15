@@ -284,7 +284,7 @@ def test_tenants_me_returns_404_for_unknown_slug(client_db_mode):
 def client_deny_authz(seeded_engine):
     """Isolated app whose tenant authorizer denies every resolution."""
     from fastapi import FastAPI
-    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.orm import sessionmaker  # skipcq: PYL-W0404
 
     from ums_smart_revenue.api.dependencies import (
         current_db_session,
@@ -317,7 +317,7 @@ def client_deny_authz(seeded_engine):
     app.dependency_overrides[current_principal_from_headers] = _stub_principal
     app.add_middleware(
         TrustedGatewayTenantResolverMiddleware,
-        session_factory=lambda: session_factory(),
+        session_factory=lambda: session_factory(),  # skipcq: PYL-W0108
         authorize_tenant=lambda *_: False,
     )
     with TestClient(app) as client:
@@ -442,7 +442,4 @@ def test_tenants_me_returns_503_when_tenant_middleware_missing(
         headers=_full_principal_headers(),
     )
     assert response.status_code == 503
-    assert (
-        response.json()["detail"]
-        == "Tenant resolver middleware is not installed"
-    )
+    assert response.json()["detail"] == "Tenant resolver middleware is not installed"

@@ -57,15 +57,17 @@ class _AdSenseParseContext:
 # Standards: Typed ParserError failures, stable source-row identity axes.
 # Blast Radius: Finance ingestion provenance; no graph projection impact detected.
 # Connections:
-#   - File: tests/connectors/google_source_parsers/test_adsense_management_parser.py -> Parser contract.
+#   - File: tests/connectors/google_source_parsers/test_adsense_management_parser.py
+#     -> Parser contract.
 #   - File: backend/ums_smart_revenue/connectors/google_source_rows.py -> ParsedSourceRow shape.
 # ============================================================================
 def _adsense_parse_context(payload: dict[str, object]) -> _AdSenseParseContext:
     """Extract request-level AdSense parser context from a validated payload."""
     request = require_dict(payload, "request")
     account_id = _adsense_account_id(require_str(request, "accountId"))
-    period_start = _parse_adsense_iso_date(require_dict(require_dict(request, "dateRange"), "startDate"))
-    period_end = _parse_adsense_iso_date(require_dict(require_dict(request, "dateRange"), "endDate"))
+    date_range = require_dict(request, "dateRange")
+    period_start = _parse_adsense_iso_date(require_dict(date_range, "startDate"))
+    period_end = _parse_adsense_iso_date(require_dict(date_range, "endDate"))
     currency = _adsense_currency(require_str(request, "currencyCode"))
     _require_single_month_range(period_start, period_end, prefix="dateRange")
     return _AdSenseParseContext(

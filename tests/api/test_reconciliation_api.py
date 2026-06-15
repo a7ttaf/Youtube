@@ -64,12 +64,18 @@ def seed_database(database_url: str, *, locked: bool = False) -> None:
                     status="ACTIVE",
                 ),
                 OrgUnitORM(
-                    id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV",
+                    id=SECTOR_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="TV",
                     active=True,
                 ),
                 OrgUnitORM(
-                    id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY",
-                    name="TV Company", active=True,
+                    id=COMPANY_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="TV Company",
+                    active=True,
                 ),
                 YouTubeChannelORM(
                     id=CHANNEL_ROW_ID,
@@ -169,25 +175,17 @@ def _principal(*grants: PermissionGrant) -> UserPrincipal:
 def _reconcile_principal() -> UserPrincipal:
     """Principal allowed to reconcile and read the resulting explanation."""
     return _principal(
-        PermissionGrant(
-            Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)
-        ),
+        PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)),
         PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
         PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.global_scope()),
-        PermissionGrant(
-            Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)
-        ),
-        PermissionGrant(
-            Permission.VIEW_BANK_RECONCILIATION, AccessScope.finance_month(MONTH)
-        ),
+        PermissionGrant(Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)),
+        PermissionGrant(Permission.VIEW_BANK_RECONCILIATION, AccessScope.finance_month(MONTH)),
     )
 
 
 def _with_principal(client, principal: UserPrincipal):
     """Install a principal override on the test client app."""
-    client.app.dependency_overrides[current_principal_from_headers] = (
-        lambda: principal
-    )
+    client.app.dependency_overrides[current_principal_from_headers] = lambda: principal
 
 
 def _clear_principal(client) -> None:
@@ -230,9 +228,7 @@ def test_reconcile_missing_permission_is_forbidden(tmp_path):
     client = TestClient(create_app(database_url=database_url))
     _with_principal(
         client,
-        _principal(
-            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope())
-        ),
+        _principal(PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope())),
     )
     try:
         response = client.post(
@@ -243,9 +239,7 @@ def test_reconcile_missing_permission_is_forbidden(tmp_path):
         _clear_principal(client)
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.change_allocation_rule"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.change_allocation_rule")
 
 
 def test_reconcile_requires_revenue_read_permission(tmp_path):
@@ -256,12 +250,8 @@ def test_reconcile_requires_revenue_read_permission(tmp_path):
     _with_principal(
         client,
         _principal(
-            PermissionGrant(
-                Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)
-            ),
-            PermissionGrant(
-                Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)
-            ),
+            PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)),
+            PermissionGrant(Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)),
         ),
     )
     try:
@@ -284,9 +274,7 @@ def test_reconcile_requires_payment_read_permission(tmp_path):
     _with_principal(
         client,
         _principal(
-            PermissionGrant(
-                Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)
-            ),
+            PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)),
             PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
         ),
     )
@@ -299,9 +287,7 @@ def test_reconcile_requires_payment_read_permission(tmp_path):
         _clear_principal(client)
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_finalized_payments"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_finalized_payments")
 
 
 def test_reconcile_locked_month_conflicts(tmp_path):
@@ -502,9 +488,7 @@ def test_get_reconciliation_requires_confidence_permission(tmp_path):
         _clear_principal(client)
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: analytics.view_confidence"
-    )
+    assert response.json()["detail"] == ("Missing permission: analytics.view_confidence")
 
 
 def test_get_reconciliation_requires_payment_permission(tmp_path):
@@ -527,9 +511,7 @@ def test_get_reconciliation_requires_payment_permission(tmp_path):
         _clear_principal(client)
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_finalized_payments"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_finalized_payments")
 
 
 def test_reconcile_requires_bank_reconciliation_permission(tmp_path):
@@ -540,14 +522,10 @@ def test_reconcile_requires_bank_reconciliation_permission(tmp_path):
     _with_principal(
         client,
         _principal(
-            PermissionGrant(
-                Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)
-            ),
+            PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)),
             PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
             PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.global_scope()),
-            PermissionGrant(
-                Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)
-            ),
+            PermissionGrant(Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)),
         ),
     )
     try:
@@ -559,9 +537,7 @@ def test_reconcile_requires_bank_reconciliation_permission(tmp_path):
         _clear_principal(client)
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_bank_reconciliation"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_bank_reconciliation")
 
 
 def test_reconcile_requires_confidence_permission(tmp_path):
@@ -572,16 +548,10 @@ def test_reconcile_requires_confidence_permission(tmp_path):
     _with_principal(
         client,
         _principal(
-            PermissionGrant(
-                Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)
-            ),
+            PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)),
             PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
-            PermissionGrant(
-                Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)
-            ),
-            PermissionGrant(
-                Permission.VIEW_BANK_RECONCILIATION, AccessScope.finance_month(MONTH)
-            ),
+            PermissionGrant(Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)),
+            PermissionGrant(Permission.VIEW_BANK_RECONCILIATION, AccessScope.finance_month(MONTH)),
         ),
     )
     try:
@@ -593,9 +563,7 @@ def test_reconcile_requires_confidence_permission(tmp_path):
         _clear_principal(client)
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: analytics.view_confidence"
-    )
+    assert response.json()["detail"] == ("Missing permission: analytics.view_confidence")
 
 
 def test_get_reconciliation_requires_bank_reconciliation_permission(tmp_path):
@@ -608,9 +576,7 @@ def test_get_reconciliation_requires_bank_reconciliation_permission(tmp_path):
         _principal(
             PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
             PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.global_scope()),
-            PermissionGrant(
-                Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)
-            ),
+            PermissionGrant(Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)),
         ),
     )
     try:
@@ -621,9 +587,7 @@ def test_get_reconciliation_requires_bank_reconciliation_permission(tmp_path):
         _clear_principal(client)
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_bank_reconciliation"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_bank_reconciliation")
 
 
 def test_generic_explain_rejects_reconciliation_metric(tmp_path):

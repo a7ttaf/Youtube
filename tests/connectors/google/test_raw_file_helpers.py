@@ -10,6 +10,7 @@ to raw_report_files (no such columns per PR #32 schema; spec §3 non-goal).
 Error context flows to connector_runs.error_summary (B2.3 finish_run)
 and the REPORT_IMPORTED audit payload (B2.6, error_class only).
 """
+
 from __future__ import annotations
 
 from uuid import UUID, uuid4
@@ -37,9 +38,7 @@ def session():
         yield session
 
 
-def _insert_raw_file(
-    session: Session, *, tenant_id: UUID, parse_status: str
-) -> UUID:
+def _insert_raw_file(session: Session, *, tenant_id: UUID, parse_status: str) -> UUID:
     # SQLite does not implement gen_random_uuid(); the production
     # server_default is Postgres-only, so tests supply the id explicitly.
     row = RawReportFileORM(

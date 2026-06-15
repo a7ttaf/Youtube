@@ -44,9 +44,7 @@ def build_session() -> Session:
     return Session(engine)
 
 
-def _payment_input(
-    *, payment_name: str, amount: str = "1234.56"
-) -> AdSensePaymentInput:
+def _payment_input(*, payment_name: str, amount: str = "1234.56") -> AdSensePaymentInput:
     """Build a default AdSense payment input for tenant-scope write tests."""
     return AdSensePaymentInput(
         source_account_id="pub-1",
@@ -129,9 +127,7 @@ def test_sync_payments_stamps_explicit_constructor_tenant() -> None:
     """Explicit constructor tenant ids are stamped onto every inserted row."""
     session = build_session()
 
-    SqlAlchemyAdSensePaymentRepository(
-        session, tenant_id=SECOND_TENANT_ID
-    ).sync_payments(
+    SqlAlchemyAdSensePaymentRepository(session, tenant_id=SECOND_TENANT_ID).sync_payments(
         payments=[_payment_input(payment_name="Second Tenant Payment")],
         actor_user_id=ACTOR_USER_ID,
         source_report_id=None,
@@ -163,9 +159,7 @@ def test_sync_payments_explicit_tenant_overrides_request_context() -> None:
     session = build_session()
     token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
     try:
-        SqlAlchemyAdSensePaymentRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        ).sync_payments(
+        SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID).sync_payments(
             payments=[_payment_input(payment_name="Explicit Wins Payment")],
             actor_user_id=ACTOR_USER_ID,
             source_report_id=None,
@@ -181,21 +175,13 @@ def test_sync_payments_allows_same_payment_name_in_two_tenants() -> None:
     """Per-tenant uniqueness lets two tenants share (month, payment_name)."""
     session = build_session()
 
-    SqlAlchemyAdSensePaymentRepository(
-        session, tenant_id=DEFAULT_TENANT_ID
-    ).sync_payments(
-        payments=[
-            _payment_input(payment_name="AdSense April Payment", amount="500.00")
-        ],
+    SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID).sync_payments(
+        payments=[_payment_input(payment_name="AdSense April Payment", amount="500.00")],
         actor_user_id=ACTOR_USER_ID,
         source_report_id=None,
     )
-    SqlAlchemyAdSensePaymentRepository(
-        session, tenant_id=SECOND_TENANT_ID
-    ).sync_payments(
-        payments=[
-            _payment_input(payment_name="AdSense April Payment", amount="900.00")
-        ],
+    SqlAlchemyAdSensePaymentRepository(session, tenant_id=SECOND_TENANT_ID).sync_payments(
+        payments=[_payment_input(payment_name="AdSense April Payment", amount="900.00")],
         actor_user_id=ACTOR_USER_ID,
         source_report_id=None,
     )
@@ -217,23 +203,17 @@ def test_sync_payments_upsert_is_scoped_to_one_tenant() -> None:
     """Re-syncing in tenant A must not touch tenant B's row with the same name."""
     session = build_session()
 
-    SqlAlchemyAdSensePaymentRepository(
-        session, tenant_id=DEFAULT_TENANT_ID
-    ).sync_payments(
+    SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID).sync_payments(
         payments=[_payment_input(payment_name="Cross Tenant Name", amount="100.00")],
         actor_user_id=ACTOR_USER_ID,
         source_report_id=None,
     )
-    SqlAlchemyAdSensePaymentRepository(
-        session, tenant_id=SECOND_TENANT_ID
-    ).sync_payments(
+    SqlAlchemyAdSensePaymentRepository(session, tenant_id=SECOND_TENANT_ID).sync_payments(
         payments=[_payment_input(payment_name="Cross Tenant Name", amount="200.00")],
         actor_user_id=ACTOR_USER_ID,
         source_report_id=None,
     )
-    SqlAlchemyAdSensePaymentRepository(
-        session, tenant_id=DEFAULT_TENANT_ID
-    ).sync_payments(
+    SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID).sync_payments(
         payments=[_payment_input(payment_name="Cross Tenant Name", amount="111.00")],
         actor_user_id=ACTOR_USER_ID,
         source_report_id=None,
@@ -259,16 +239,12 @@ def test_sync_payments_upsert_is_scoped_to_one_tenant() -> None:
 def test_list_payments_filters_to_explicit_tenant_id() -> None:
     """Explicit tenant injection isolates list_payments reads."""
     session = build_session()
-    _seed_payment(
-        session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row"
-    )
-    _seed_payment(
-        session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row"
-    )
+    _seed_payment(session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row")
+    _seed_payment(session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row")
 
-    page = SqlAlchemyAdSensePaymentRepository(
-        session, tenant_id=SECOND_TENANT_ID
-    ).list_payments(limit=10)
+    page = SqlAlchemyAdSensePaymentRepository(session, tenant_id=SECOND_TENANT_ID).list_payments(
+        limit=10
+    )
 
     assert [entry.payment_name for entry in page.items] == ["Second Tenant Row"]
     assert page.has_more is False
@@ -294,9 +270,9 @@ def test_list_payments_orders_account_scoped_duplicates_deterministically() -> N
         payment_id=UUID("00000000-0000-0000-0000-0000000000a1"),
     )
 
-    page = SqlAlchemyAdSensePaymentRepository(
-        session, tenant_id=DEFAULT_TENANT_ID
-    ).list_payments(limit=10)
+    page = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID).list_payments(
+        limit=10
+    )
 
     assert [(entry.source_account_id, entry.id) for entry in page.items] == [
         ("pub-a", "00000000-0000-0000-0000-0000000000a1"),
@@ -307,12 +283,8 @@ def test_list_payments_orders_account_scoped_duplicates_deterministically() -> N
 def test_list_payments_uses_default_tenant_without_context() -> None:
     """Bootstrap callers see only UMS-default rows on reads."""
     session = build_session()
-    _seed_payment(
-        session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row"
-    )
-    _seed_payment(
-        session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row"
-    )
+    _seed_payment(session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row")
+    _seed_payment(session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row")
 
     page = SqlAlchemyAdSensePaymentRepository(session).list_payments(limit=10)
 
@@ -322,16 +294,10 @@ def test_list_payments_uses_default_tenant_without_context() -> None:
 def test_list_payments_returns_empty_page_for_empty_tenant() -> None:
     """Tenant filters return an empty page instead of leaking rows."""
     session = build_session()
-    _seed_payment(
-        session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row"
-    )
-    _seed_payment(
-        session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row"
-    )
+    _seed_payment(session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row")
+    _seed_payment(session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row")
 
-    page = SqlAlchemyAdSensePaymentRepository(
-        session, tenant_id=uuid4()
-    ).list_payments(limit=10)
+    page = SqlAlchemyAdSensePaymentRepository(session, tenant_id=uuid4()).list_payments(limit=10)
 
     assert page.items == []
     assert page.has_more is False
@@ -340,12 +306,8 @@ def test_list_payments_returns_empty_page_for_empty_tenant() -> None:
 def test_list_payments_explicit_tenant_overrides_request_context() -> None:
     """Constructor tenant ids beat any ambient request context on reads."""
     session = build_session()
-    _seed_payment(
-        session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row"
-    )
-    _seed_payment(
-        session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row"
-    )
+    _seed_payment(session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row")
+    _seed_payment(session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row")
     token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
     try:
         page = SqlAlchemyAdSensePaymentRepository(
@@ -360,12 +322,8 @@ def test_list_payments_explicit_tenant_overrides_request_context() -> None:
 def test_list_payments_uses_request_tenant_context_by_default() -> None:
     """Ambient TENANT_CTX scopes reads when no explicit tenant is supplied."""
     session = build_session()
-    _seed_payment(
-        session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row"
-    )
-    _seed_payment(
-        session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row"
-    )
+    _seed_payment(session, tenant_id=DEFAULT_TENANT_ID, payment_name="Default Tenant Row")
+    _seed_payment(session, tenant_id=SECOND_TENANT_ID, payment_name="Second Tenant Row")
     token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
     try:
         page = SqlAlchemyAdSensePaymentRepository(session).list_payments(limit=10)
@@ -436,9 +394,7 @@ def test_list_month_payments_uses_default_tenant_without_context() -> None:
         month="2026-03",
     )
 
-    entries = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(
-        month="2026-03"
-    )
+    entries = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(month="2026-03")
 
     assert [entry.payment_name for entry in entries] == ["Default March"]
 
@@ -460,9 +416,7 @@ def test_list_month_payments_uses_request_tenant_context_by_default() -> None:
     )
     token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
     try:
-        entries = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(
-            month="2026-03"
-        )
+        entries = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(month="2026-03")
     finally:
         TENANT_CTX.reset(token)
 
@@ -504,9 +458,7 @@ def test_adsense_repository_rejects_invalid_tenant_id_string() -> None:
     """Malformed constructor tenant ids fail closed before any DB access."""
     session = build_session()
 
-    with pytest.raises(
-        AdSensePaymentValidationError, match="tenant_id must be a valid UUID"
-    ):
+    with pytest.raises(AdSensePaymentValidationError, match="tenant_id must be a valid UUID"):
         SqlAlchemyAdSensePaymentRepository(session, tenant_id="not-a-uuid")
 
 
@@ -537,11 +489,13 @@ def test_sync_allows_same_month_payment_name_across_accounts() -> None:
     repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
     repo.sync_payments(
         payments=[_payment(source_account_id="pub-1")],
-        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+        actor_user_id=ACTOR_USER_ID,
+        source_report_id=None,
     )
     repo.sync_payments(
         payments=[_payment(source_account_id="pub-2")],
-        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+        actor_user_id=ACTOR_USER_ID,
+        source_report_id=None,
     )
     session.commit()
     rows = session.scalars(
@@ -561,11 +515,13 @@ def test_sync_is_idempotent_per_account_month_name() -> None:
     repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
     first = repo.sync_payments(
         payments=[_payment(payment_amount=Decimal("930.000000"))],
-        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+        actor_user_id=ACTOR_USER_ID,
+        source_report_id=None,
     )
     second = repo.sync_payments(
         payments=[_payment(payment_amount=Decimal("931.000000"))],
-        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+        actor_user_id=ACTOR_USER_ID,
+        source_report_id=None,
     )
     session.commit()
     assert first[0].id == second[0].id  # same row updated in place
@@ -578,15 +534,15 @@ def test_within_batch_duplicate_keys_on_account_month_name() -> None:
     repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
     with pytest.raises(AdSensePaymentValidationError, match="duplicate"):
         repo.sync_payments(
-            payments=[_payment(source_account_id="pub-1"),
-                      _payment(source_account_id="pub-1")],
-            actor_user_id=ACTOR_USER_ID, source_report_id=None,
+            payments=[_payment(source_account_id="pub-1"), _payment(source_account_id="pub-1")],
+            actor_user_id=ACTOR_USER_ID,
+            source_report_id=None,
         )
     # Same month+name but different accounts in one batch is allowed:
     repo.sync_payments(
-        payments=[_payment(source_account_id="pub-1"),
-                  _payment(source_account_id="pub-2")],
-        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+        payments=[_payment(source_account_id="pub-1"), _payment(source_account_id="pub-2")],
+        actor_user_id=ACTOR_USER_ID,
+        source_report_id=None,
     )
 
 
@@ -597,6 +553,7 @@ def test_sync_rejects_blank_source_account_id() -> None:
     with pytest.raises(AdSensePaymentValidationError, match="source_account_id"):
         repo.sync_payments(
             payments=[_payment(source_account_id="   ")],
-            actor_user_id=ACTOR_USER_ID, source_report_id=None,
+            actor_user_id=ACTOR_USER_ID,
+            source_report_id=None,
         )
     assert session.scalars(select(AdSensePaymentORM)).all() == []  # fail closed

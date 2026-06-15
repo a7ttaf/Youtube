@@ -107,7 +107,10 @@ def seed_database(database_url: str) -> None:
 
 
 class _FakeExecutor:
-    """Records submit_if_absent / activate / cancel_reservation calls and answers has_active_job() from a flag set."""
+    """Records submit_if_absent / activate / cancel_reservation calls.
+
+    Answers has_active_job() from a flag set at construction time.
+    """
 
     def __init__(self, *, active=False):
         self.active = active
@@ -568,7 +571,10 @@ def test_request_connector_job_422_inactive_credential(tmp_path):
 
 
 def test_request_connector_job_409_duplicate_in_flight(tmp_path):
-    """submit_if_absent returns None for an in-flight slot -> 409 + job_rejected/duplicate_in_flight."""
+    """submit_if_absent returns None for an in-flight slot.
+
+    Expects 409 + job_rejected/duplicate_in_flight.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url)
@@ -668,7 +674,8 @@ def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
 
 
 def test_request_connector_job_503_service_principal_unavailable(tmp_path):
-    """Missing UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID -> 503 + job_rejected/service_principal_unavailable.
+    """Missing UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID -> 503 + job_rejected/
+    service_principal_unavailable.
 
     The pre-flight check rejects the request without reserving an executor
     slot, so the worker is never enqueued even though the executor is enabled.
@@ -865,7 +872,8 @@ def test_request_connector_job_after_rollback_cancels_reservation(
 def test_request_connector_job_activate_failure_writes_bucket_a_audit(
     tmp_path, monkeypatch
 ) -> None:
-    """If executor.activate() raises after the audit commits, a job_failed_before_start audit row is written.
+    """If executor.activate() raises after the audit commits, a job_failed_before_start
+    audit row is written.
 
     Pins the fix for: an accepted 202 with no worker enqueue (e.g. the
     ThreadPoolExecutor rejecting new work during app shutdown) must not

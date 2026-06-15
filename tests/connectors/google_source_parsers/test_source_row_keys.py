@@ -1,8 +1,8 @@
 """source_row_key derivation must be:
- - deterministic across repeated calls with the same inputs;
- - distinct across different inputs;
- - exactly 64 chars (SHA-256 hex digest);
- - source-system-specific (different prefix => different key).
+- deterministic across repeated calls with the same inputs;
+- distinct across different inputs;
+- exactly 64 chars (SHA-256 hex digest);
+- source-system-specific (different prefix => different key).
 """
 
 import pytest
@@ -44,9 +44,8 @@ def test_youtube_reporting_key_includes_currency() -> None:
         period_end="2026-04-30",
         dimensions={"channel": "UC_x"},
     )
-    assert (
-        build_source_row_key(currency="USD", **kwargs)
-        != build_source_row_key(currency="EUR", **kwargs)
+    assert build_source_row_key(currency="USD", **kwargs) != build_source_row_key(
+        currency="EUR", **kwargs
     )
 
 
@@ -97,9 +96,8 @@ def test_adsense_management_key_includes_currency() -> None:
         period_end="2026-04-30",
         dimensions={"product": "AFC"},
     )
-    assert (
-        build_source_row_key(currency="USD", **kwargs)
-        != build_source_row_key(currency="EUR", **kwargs)
+    assert build_source_row_key(currency="USD", **kwargs) != build_source_row_key(
+        currency="EUR", **kwargs
     )
 
 
@@ -140,13 +138,11 @@ def test_adsense_management_key_excludes_run_specific_report_id() -> None:
         period_end="2026-04-30",
         dimensions={"product": "AFC"},
     )
-    assert (
-        build_source_row_key(metric_key="PAID_AMOUNT", **kwargs)
-        != build_source_row_key(metric_key="ESTIMATED_EARNINGS", **kwargs)
+    assert build_source_row_key(metric_key="PAID_AMOUNT", **kwargs) != build_source_row_key(
+        metric_key="ESTIMATED_EARNINGS", **kwargs
     ), "different metrics for the same row must stay distinct"
-    assert (
-        build_source_row_key(metric_key="PAID_AMOUNT", **kwargs)
-        == build_source_row_key(metric_key="PAID_AMOUNT", **kwargs)
+    assert build_source_row_key(metric_key="PAID_AMOUNT", **kwargs) == build_source_row_key(
+        metric_key="PAID_AMOUNT", **kwargs
     ), "same logical identity must be stable"
 
 

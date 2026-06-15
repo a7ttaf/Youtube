@@ -1,4 +1,5 @@
 """The deduction ingestion audit event must be registered and sensitive."""
+
 from ums_smart_revenue.auth.audit import (
     AUDIT_EVENT_DEFINITIONS,
     AuditEventType,

@@ -71,9 +71,7 @@ def test_request_export_uses_ambient_tenant_context():
 
 def test_complete_artifact_does_not_update_other_tenants_job():
     with build_session() as session:
-        foreign_repo = SqlAlchemyExportJobRepository(
-            session, tenant_id=OTHER_TENANT_UUID
-        )
+        foreign_repo = SqlAlchemyExportJobRepository(session, tenant_id=OTHER_TENANT_UUID)
         foreign = request_default_export(foreign_repo)
         session.commit()
 
@@ -90,8 +88,6 @@ def test_complete_artifact_does_not_update_other_tenants_job():
 
 
 def test_repository_rejects_malformed_tenant_id():
-    with build_session() as session:
-        with pytest.raises(
-            ExportJobValidationError, match="tenant_id must be a valid UUID"
-        ):
+    with build_session() as session:  # skipcq: PTC-W0062
+        with pytest.raises(ExportJobValidationError, match="tenant_id must be a valid UUID"):
             SqlAlchemyExportJobRepository(session, tenant_id="not-a-uuid")

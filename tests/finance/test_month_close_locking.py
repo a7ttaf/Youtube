@@ -134,9 +134,7 @@ def test_get_or_create_month_close_row_acquires_guard_before_row_lock(
             calls.append(("select", statement))
             return ScalarRows()
 
-    def record_guard(
-        session: object, month: str, *, tenant_id: UUID | str | None = None
-    ) -> None:
+    def record_guard(session: object, month: str, *, tenant_id: UUID | str | None = None) -> None:
         """Record the month guard request."""
         calls.append(("guard", (month, tenant_id)))
 
@@ -194,7 +192,6 @@ def test_get_or_create_month_close_row_uses_request_tenant_context() -> None:
         TENANT_CTX.reset(token)
 
 
-
 def test_finance_month_advisory_lock_uses_request_tenant_context() -> None:
     """Omitted advisory-lock tenant ids resolve to the active request tenant."""
     default_session = _DialectSession("postgresql")
@@ -207,8 +204,7 @@ def test_finance_month_advisory_lock_uses_request_tenant_context() -> None:
         TENANT_CTX.reset(token)
 
     assert (
-        default_session.executed[0][1]["lock_key"]
-        != (request_session.executed[0][1]["lock_key"])
+        default_session.executed[0][1]["lock_key"] != (request_session.executed[0][1]["lock_key"])
     )
 
 
@@ -241,9 +237,7 @@ def test_for_update_readiness_acquires_guard_before_blocker_queries(
     """Lock-time readiness holds the month guard before blocker reads."""
     calls: list[tuple[str, object]] = []
 
-    def record_guard(
-        session: object, month: str, *, tenant_id: UUID | str | None = None
-    ) -> None:
+    def record_guard(session: object, month: str, *, tenant_id: UUID | str | None = None) -> None:
         """Record guard invocation for finance month lock."""
         calls.append(("guard", (month, tenant_id)))
 
@@ -319,9 +313,7 @@ def test_revenue_fact_writes_use_guarded_month_open_check(
         record_get_or_create,
     )
 
-    revenue_facts_module.SqlAlchemyRevenueFactRepository(object())._require_month_open(
-        "2026-03"
-    )
+    revenue_facts_module.SqlAlchemyRevenueFactRepository(object())._require_month_open("2026-03")
 
     assert calls == [("2026-03", DEFAULT_TENANT_ID, True)]
 
@@ -349,14 +341,15 @@ def test_manual_override_writes_use_guarded_month_open_check(
         record_get_or_create,
     )
 
-    manual_overrides_module.SqlAlchemyManualOverrideRepository(
-        object()
-    )._require_month_open("2026-03")
+    manual_overrides_module.SqlAlchemyManualOverrideRepository(object())._require_month_open(
+        "2026-03"
+    )
 
     assert calls == [("2026-03", DEFAULT_TENANT_ID, True)]
 
 
 # Finance tests for month close locking logic in AdSense payments.
+
 
 def test_adsense_payment_writes_use_context_tenant_in_month_open_check(
     monkeypatch: pytest.MonkeyPatch,

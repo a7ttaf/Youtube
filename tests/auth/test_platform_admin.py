@@ -169,9 +169,7 @@ def test_loader_uses_serializable_postgres_reads() -> None:
     session = FailingPlatformAdminSession(dialect_name="postgresql")
 
     with pytest.raises(RuntimeError):
-        SqlAlchemyPlatformAdminLoader(session).load(
-            admin_id="00000000-0000-0000-0000-000000000010"
-        )
+        SqlAlchemyPlatformAdminLoader(session).load(admin_id="00000000-0000-0000-0000-000000000010")
 
     assert PLATFORM_ADMIN_QUERY_TIMEOUT_MS == 5_000
     assert session.connection_count == 1

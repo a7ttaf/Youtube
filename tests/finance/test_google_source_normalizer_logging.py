@@ -29,6 +29,7 @@ def test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id
     caplog,
 ):
     from datetime import UTC, datetime
+
     engine = create_engine("sqlite+pysqlite:///:memory:")
     TenantBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
@@ -37,20 +38,37 @@ def test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id
     tenant_id = uuid4()
     with Session(engine) as session:
         session.add(TenantORM(id=tenant_id, slug="t-log", display_name="T Log"))
-        session.add(CurrencyORM(
-            code="USD", numeric_code="840", name="US Dollar",
-            minor_unit=2, is_supported=True, activated_at=datetime.now(UTC),
-        ))
-        session.add(CurrencyORM(
-            code="EGP", numeric_code="818", name="Egyptian Pound",
-            minor_unit=2, is_supported=True, activated_at=datetime.now(UTC),
-        ))
-        session.add(YouTubeChannelORM(
-            id=uuid4(),
-            tenant_id=tenant_id, youtube_channel_id="UC_test_log_42",
-            channel_name="Log Ch", cms_status="INSIDE_CMS",
-            revenue_required=True, active=True,
-        ))
+        session.add(
+            CurrencyORM(
+                code="USD",
+                numeric_code="840",
+                name="US Dollar",
+                minor_unit=2,
+                is_supported=True,
+                activated_at=datetime.now(UTC),
+            )
+        )
+        session.add(
+            CurrencyORM(
+                code="EGP",
+                numeric_code="818",
+                name="Egyptian Pound",
+                minor_unit=2,
+                is_supported=True,
+                activated_at=datetime.now(UTC),
+            )
+        )
+        session.add(
+            YouTubeChannelORM(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                youtube_channel_id="UC_test_log_42",
+                channel_name="Log Ch",
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                active=True,
+            )
+        )
         session.flush()
         SqlAlchemyGoogleRevenueSourceRowRepository(session).upsert_many(
             tenant_id,
@@ -92,14 +110,17 @@ def test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id
                     raw_payload={"dimensions": {"country": "EG"}},
                 ),
             ],
-            raw_file_id=None, imported_by=None,
+            raw_file_id=None,
+            imported_by=None,
         )
         session.commit()
 
-        with caplog.at_level(logging.INFO,
-                              logger="ums_smart_revenue.finance.google_source_normalizer"):
+        with caplog.at_level(
+            logging.INFO, logger="ums_smart_revenue.finance.google_source_normalizer"
+        ):
             result = GoogleSourceNormalizer(
-                session, tenant_id=tenant_id,
+                session,
+                tenant_id=tenant_id,
             ).normalize_month(month="2026-04", actor_user_id=ACTOR_USER_ID)
 
         log_text = "\n".join(rec.getMessage() for rec in caplog.records)
@@ -121,7 +142,8 @@ def test_normalize_month_logging_redacts_payload_amount_channel_id_source_row_id
         assert "UC_test_log_42" not in log_text  # individual channel id
         # source_row_id UUIDs are never emitted as individual values.
         for row_entry in SqlAlchemyGoogleRevenueSourceRowRepository(session).list(
-            tenant_id, report_month="2026-04",
+            tenant_id,
+            report_month="2026-04",
         ):
             assert row_entry.id not in log_text
 

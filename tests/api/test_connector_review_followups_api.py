@@ -70,17 +70,13 @@ def test_connector_credentials_reject_unknown_actor_id(tmp_path):
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
-            "encrypted_secret_ref": (
-                "secret-manager://ums/youtube-reporting/content-owner-1"
-            ),
+            "encrypted_secret_ref": ("secret-manager://ums/youtube-reporting/content-owner-1"),
             "reason": "Register OAuth credential reference",
         },
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == (
-        "actor_user_id does not reference an existing user"
-    )
+    assert response.json()["detail"] == ("actor_user_id does not reference an existing user")
 
 
 def test_connector_scoped_admin_lists_only_their_connector_credentials(tmp_path):
@@ -96,9 +92,7 @@ def test_connector_scoped_admin_lists_only_their_connector_credentials(tmp_path)
             json={
                 "connector_key": connector_key,
                 "account_id": "content-owner-1",
-                "encrypted_secret_ref": (
-                    f"secret-manager://ums/{connector_key}/content-owner-1"
-                ),
+                "encrypted_secret_ref": (f"secret-manager://ums/{connector_key}/content-owner-1"),
                 "reason": "Register OAuth credential reference",
             },
         )
@@ -114,9 +108,7 @@ def test_connector_scoped_admin_lists_only_their_connector_credentials(tmp_path)
     )
 
     assert response.status_code == 200
-    assert [item["connector_key"] for item in response.json()["items"]] == [
-        "youtube_reporting"
-    ]
+    assert [item["connector_key"] for item in response.json()["items"]] == ["youtube_reporting"]
 
 
 def test_disabled_connector_admin_cannot_list_connector_credentials(tmp_path):

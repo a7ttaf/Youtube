@@ -210,9 +210,7 @@ def test_user_account_list_can_filter_by_status(tmp_path):
     )
 
     assert response.status_code == 200
-    assert [item["email"] for item in response.json()["items"]] == [
-        "disabled@example.com"
-    ]
+    assert [item["email"] for item in response.json()["items"]] == ["disabled@example.com"]
 
 
 def test_user_account_list_returns_empty_page_for_large_offset(tmp_path):
@@ -271,12 +269,8 @@ def test_user_account_list_cursor_is_stable_when_new_users_arrive(tmp_path):
     )
 
     assert second_page.status_code == 200
-    assert [item["email"] for item in first_page.json()["items"]] == [
-        "admin@example.com"
-    ]
-    assert [item["email"] for item in second_page.json()["items"]] == [
-        "disabled@example.com"
-    ]
+    assert [item["email"] for item in first_page.json()["items"]] == ["admin@example.com"]
+    assert [item["email"] for item in second_page.json()["items"]] == ["disabled@example.com"]
 
 
 @pytest.mark.parametrize(

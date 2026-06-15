@@ -14,6 +14,7 @@ test, not just a smoke check.
 unset, preserving the no-skip policy; this module runs only in the clean-room PG
 gate.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

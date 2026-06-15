@@ -1,4 +1,5 @@
 """Tests for the Part 2 credential refresh telemetry stamp in resolve_*."""
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -53,16 +54,17 @@ def test_success_stamp_persists_after_caller_commit(tmp_path) -> None:
 
     factory = _factory(tmp_path)
     expiry = datetime(2026, 6, 1, tzinfo=UTC)
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
-        return_value={},
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.build_credentials_from_payload",
-        return_value=_fake_credentials(expiry),
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.ensure_default_resolvers"
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    with (  # skipcq: PTC-W0062
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
+            return_value={},
+        ),
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.build_credentials_from_payload",
+            return_value=_fake_credentials(expiry),
+        ),
+        patch("ums_smart_revenue.connectors.runs.orchestrator.ensure_default_resolvers"),
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"),
     ):
         with factory() as session:
             resolve_connector_credentials(
@@ -92,17 +94,20 @@ def test_failure_stamp_persists_and_reraises(tmp_path) -> None:
     def _boom(_creds):
         raise OAuthRefreshError(inner=RuntimeError("revoked"))
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
-        return_value={},
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.build_credentials_from_payload",
-        return_value=_fake_credentials(None),
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.ensure_default_resolvers"
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials",
-        _boom,
+    with (  # skipcq: PTC-W0062
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
+            return_value={},
+        ),
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.build_credentials_from_payload",
+            return_value=_fake_credentials(None),
+        ),
+        patch("ums_smart_revenue.connectors.runs.orchestrator.ensure_default_resolvers"),
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials",
+            _boom,
+        ),
     ):
         with factory() as session:
             with pytest.raises(OAuthRefreshError):
@@ -128,7 +133,7 @@ def test_not_found_does_not_stamp(tmp_path) -> None:
     )
 
     factory = _factory(tmp_path)
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with pytest.raises(CredentialNotFoundError):
             resolve_connector_credentials(
                 session=session,
@@ -148,16 +153,17 @@ def test_dry_run_success_not_persisted_without_caller_commit(tmp_path) -> None:
 
     factory = _factory(tmp_path)
     expiry = datetime(2026, 6, 1, tzinfo=UTC)
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
-        return_value={},
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.build_credentials_from_payload",
-        return_value=_fake_credentials(expiry),
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.ensure_default_resolvers"
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    with (  # skipcq: PTC-W0062
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
+            return_value={},
+        ),
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.build_credentials_from_payload",
+            return_value=_fake_credentials(expiry),
+        ),
+        patch("ums_smart_revenue.connectors.runs.orchestrator.ensure_default_resolvers"),
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"),
     ):
         with factory() as session:
             resolve_connector_credentials(

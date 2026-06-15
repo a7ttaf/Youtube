@@ -71,36 +71,56 @@ def _entry(
 
 
 def test_select_canonical_row_youtube_reporting_picks_estimatedRevenue():  # noqa: N802
-    rows = [_entry(source_system="youtube_reporting", metric_key="estimatedRevenue", source_row_key="a" * 64)]
+    rows = [
+        _entry(
+            source_system="youtube_reporting",
+            metric_key="estimatedRevenue",
+            source_row_key="a" * 64,
+        )
+    ]
     canonical, rest = select_canonical_row(rows)
     assert canonical is rows[0]
     assert rest == []
 
 
 def test_select_canonical_row_youtube_analytics_picks_estimatedRevenue():  # noqa: N802
-    rows = [_entry(source_system="youtube_analytics", metric_key="estimatedRevenue", source_row_key="b" * 64)]
+    rows = [
+        _entry(
+            source_system="youtube_analytics",
+            metric_key="estimatedRevenue",
+            source_row_key="b" * 64,
+        )
+    ]
     canonical, rest = select_canonical_row(rows)
     assert canonical is rows[0]
     assert rest == []
 
 
 def test_select_canonical_row_adsense_prefers_PAID_AMOUNT_over_ESTIMATED_EARNINGS():  # noqa: N802
-    paid = _entry(source_system="adsense_management", metric_key="PAID_AMOUNT", source_row_key="c" * 64)
-    earnings = _entry(source_system="adsense_management", metric_key="ESTIMATED_EARNINGS", source_row_key="d" * 64)
+    paid = _entry(
+        source_system="adsense_management", metric_key="PAID_AMOUNT", source_row_key="c" * 64
+    )
+    earnings = _entry(
+        source_system="adsense_management", metric_key="ESTIMATED_EARNINGS", source_row_key="d" * 64
+    )
     canonical, rest = select_canonical_row([earnings, paid])
     assert canonical is paid
     assert rest == [earnings]
 
 
 def test_select_canonical_row_adsense_falls_back_to_ESTIMATED_EARNINGS_when_no_PAID_AMOUNT():  # noqa: N802
-    earnings = _entry(source_system="adsense_management", metric_key="ESTIMATED_EARNINGS", source_row_key="e" * 64)
+    earnings = _entry(
+        source_system="adsense_management", metric_key="ESTIMATED_EARNINGS", source_row_key="e" * 64
+    )
     canonical, rest = select_canonical_row([earnings])
     assert canonical is earnings
     assert rest == []
 
 
 def test_select_canonical_row_returns_none_when_no_preferred_metric_present():
-    unpaid = _entry(source_system="adsense_management", metric_key="UNPAID_AMOUNT", source_row_key="f" * 64)
+    unpaid = _entry(
+        source_system="adsense_management", metric_key="UNPAID_AMOUNT", source_row_key="f" * 64
+    )
     canonical, rest = select_canonical_row([unpaid])
     assert canonical is None
     assert rest == [unpaid]
@@ -144,6 +164,8 @@ def test_select_canonical_row_non_canonical_rest_excludes_canonical():
 
 
 def test_select_canonical_row_raises_on_unsupported_source_system():
-    bogus = _entry(source_system="totally_bogus_system", metric_key="estimatedRevenue", source_row_key="z" * 64)
+    bogus = _entry(
+        source_system="totally_bogus_system", metric_key="estimatedRevenue", source_row_key="z" * 64
+    )
     with pytest.raises(RevenueFactValidationError, match="Unsupported source_system"):
         select_canonical_row([bogus])

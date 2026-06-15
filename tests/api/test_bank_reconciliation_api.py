@@ -5,6 +5,7 @@ This module contains helper functions for authentication headers, database setup
 sample payloads, as well as unit tests verifying bank reconciliation recording,
 retrieval, permissions, idempotency, and audit logging behaviors.
 """
+
 from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -107,7 +108,8 @@ def bank_payload(amount_usd: str = "928.50") -> dict[str, object]:
 
 def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
     """
-    Test that a finance admin can record a bank reconciliation entry and that it is audited correctly.
+    Test that a finance admin can record a bank reconciliation entry
+    and that it is audited correctly.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -122,18 +124,14 @@ def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         bank_row = (
-            session.execute(text("SELECT * FROM bank_reconciliation_entries"))
-            .mappings()
-            .one()
+            session.execute(text("SELECT * FROM bank_reconciliation_entries")).mappings().one()
         )
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 201
     assert response.json()["bank_reference"] == "bank-transfer-2026-04-22"
     assert response.json()["bank_received_amount_usd"] == "928.5"
-    assert (
-        response.json()["audit_event"]["event_type"] == "BANK_RECONCILIATION_RECORDED"
-    )
+    assert response.json()["audit_event"]["event_type"] == "BANK_RECONCILIATION_RECORDED"
     assert bank_row["bank_received_amount_usd"] == Decimal("928.500000")
     assert audit_log.event_type == "BANK_RECONCILIATION_RECORDED"
     assert audit_log.reason == "Record bank receipt for March AdSense payment"
@@ -142,7 +140,8 @@ def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
 
 def test_bank_reconciliation_record_is_idempotent_for_same_month_reference(tmp_path):
     """
-    Test that submitting bank reconciliation for the same month and reference is idempotent and updates correctly.
+    Test that submitting bank reconciliation for the same month
+    and reference is idempotent and updates correctly.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -177,7 +176,8 @@ def test_bank_reconciliation_record_is_idempotent_for_same_month_reference(tmp_p
 
 def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
     """
-    Test that a finance viewer can read the bank reconciliation summary and see the related audit events.
+    Test that a finance viewer can read the bank reconciliation
+    summary and see the related audit events.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -209,12 +209,8 @@ def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
     assert response.json()["adsense_paid_amount_usd"] == "930"
     assert response.json()["bank_received_amount_usd"] == "928.5"
     assert response.json()["bank_gap_usd"] == "1.5"
-    assert response.json()["entries"][0]["bank_reference"] == (
-        "bank-transfer-2026-04-22"
-    )
-    assert response.json()["audit_events"][0]["event_type"] == (
-        "BANK_RECONCILIATION_VIEWED"
-    )
+    assert response.json()["entries"][0]["bank_reference"] == ("bank-transfer-2026-04-22")
+    assert response.json()["audit_events"][0]["event_type"] == ("BANK_RECONCILIATION_VIEWED")
     assert response.json()["audit_events"][1]["event_type"] == "PAYMENT_VIEWED"
     assert [log.event_type for log in audit_logs] == [
         "BANK_RECONCILIATION_RECORDED",
@@ -226,7 +222,8 @@ def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
 
 def test_finance_month_scoped_admin_records_matching_month(tmp_path):
     """
-    Test that a finance-month scoped admin can record bank reconciliation for the matching month only.
+    Test that a finance-month scoped admin can record bank
+    reconciliation for the matching month only.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -256,14 +253,13 @@ def test_finance_month_scoped_viewer_cannot_read_another_month(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_bank_reconciliation"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_bank_reconciliation")
 
 
 def test_assistant_cannot_read_bank_reconciliation(tmp_path):
     """
-    Test that an assistant analyst cannot read bank reconciliation summary due to missing permission.
+    Test that an assistant analyst cannot read bank reconciliation
+    summary due to missing permission.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -275,9 +271,7 @@ def test_assistant_cannot_read_bank_reconciliation(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_bank_reconciliation"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_bank_reconciliation")
 
 
 def test_finance_viewer_cannot_record_bank_reconciliation(tmp_path):
@@ -295,9 +289,7 @@ def test_finance_viewer_cannot_record_bank_reconciliation(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.manage_bank_reconciliation"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.manage_bank_reconciliation")
 
 
 def test_locked_finance_month_rejects_bank_reconciliation_writes(tmp_path):
@@ -319,7 +311,5 @@ def test_locked_finance_month_rejects_bank_reconciliation_writes(tmp_path):
         ).scalar_one()
 
     assert response.status_code == 409
-    assert response.json()["detail"] == (
-        "Finance month is locked for bank reconciliation"
-    )
+    assert response.json()["detail"] == ("Finance month is locked for bank reconciliation")
     assert bank_count == 0

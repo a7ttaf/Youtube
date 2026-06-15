@@ -65,10 +65,8 @@ def test_rolls_channel_metrics_up_to_company_and_sector():
     """Company/sector totals sum their member channels' metrics."""
     summary = _summary(
         [
-            _channel("ch-a", gross=Decimal("100"), net=Decimal("80"),
-                     deduction=Decimal("20")),
-            _channel("ch-b", gross=Decimal("50"), net=Decimal("40"),
-                     deduction=Decimal("10")),
+            _channel("ch-a", gross=Decimal("100"), net=Decimal("80"), deduction=Decimal("20")),
+            _channel("ch-b", gross=Decimal("50"), net=Decimal("40"), deduction=Decimal("10")),
         ]
     )
     result = build_month_rankings(
@@ -96,10 +94,8 @@ def test_ranks_descending_by_selected_metric_with_rank_numbers():
     """Channels rank descending by the selected metric, rank starts at 1."""
     summary = _summary(
         [
-            _channel("ch-low", gross=Decimal("10"), net=Decimal("5"),
-                     deduction=Decimal("5")),
-            _channel("ch-high", gross=Decimal("90"), net=Decimal("80"),
-                     deduction=Decimal("10")),
+            _channel("ch-low", gross=Decimal("10"), net=Decimal("5"), deduction=Decimal("5")),
+            _channel("ch-high", gross=Decimal("90"), net=Decimal("80"), deduction=Decimal("10")),
         ]
     )
     result = build_month_rankings(
@@ -120,10 +116,8 @@ def test_metric_net_selects_net_for_ordering():
     """metric=net orders by net revenue, not gross."""
     summary = _summary(
         [
-            _channel("ch-a", gross=Decimal("100"), net=Decimal("1"),
-                     deduction=Decimal("99")),
-            _channel("ch-b", gross=Decimal("50"), net=Decimal("49"),
-                     deduction=Decimal("1")),
+            _channel("ch-a", gross=Decimal("100"), net=Decimal("1"), deduction=Decimal("99")),
+            _channel("ch-b", gross=Decimal("50"), net=Decimal("49"), deduction=Decimal("1")),
         ]
     )
     result = build_month_rankings(
@@ -143,12 +137,9 @@ def test_ties_break_by_entity_id_ascending():
     """Equal metric values tie-break by entity id ascending."""
     summary = _summary(
         [
-            _channel("ch-z", gross=Decimal("50"), net=Decimal("50"),
-                     deduction=Decimal("0")),
-            _channel("ch-a", gross=Decimal("50"), net=Decimal("50"),
-                     deduction=Decimal("0")),
-            _channel("ch-m", gross=Decimal("50"), net=Decimal("50"),
-                     deduction=Decimal("0")),
+            _channel("ch-z", gross=Decimal("50"), net=Decimal("50"), deduction=Decimal("0")),
+            _channel("ch-a", gross=Decimal("50"), net=Decimal("50"), deduction=Decimal("0")),
+            _channel("ch-m", gross=Decimal("50"), net=Decimal("50"), deduction=Decimal("0")),
         ]
     )
     result = build_month_rankings(
@@ -169,8 +160,7 @@ def test_none_metric_sinks_to_bottom():
     summary = _summary(
         [
             _channel("ch-none", gross=Decimal("100"), net=None, deduction=None),
-            _channel("ch-real", gross=Decimal("50"), net=Decimal("1"),
-                     deduction=Decimal("49")),
+            _channel("ch-real", gross=Decimal("50"), net=Decimal("1"), deduction=Decimal("49")),
         ]
     )
     result = build_month_rankings(
@@ -191,8 +181,7 @@ def test_group_metric_is_none_only_when_all_members_none():
     """A group's net sums non-None members; None only if every member is None."""
     summary = _summary(
         [
-            _channel("ch-a", gross=Decimal("100"), net=Decimal("80"),
-                     deduction=Decimal("20")),
+            _channel("ch-a", gross=Decimal("100"), net=Decimal("80"), deduction=Decimal("20")),
             _channel("ch-b", gross=Decimal("50"), net=None, deduction=None),
             _channel("ch-c", gross=Decimal("30"), net=None, deduction=None),
         ]
@@ -221,8 +210,7 @@ def test_group_metric_is_none_only_when_all_members_none():
 def test_top_limit_truncates_each_dimension():
     """Only the top `limit` ranked entries are returned per dimension."""
     channels = [
-        _channel(f"ch-{i:02d}", gross=Decimal(str(i)), net=Decimal(str(i)),
-                 deduction=Decimal("0"))
+        _channel(f"ch-{i:02d}", gross=Decimal(str(i)), net=Decimal(str(i)), deduction=Decimal("0"))
         for i in range(20)
     ]
     summary = _summary(channels)
@@ -243,8 +231,7 @@ def test_top_limit_truncates_each_dimension():
 def test_company_name_falls_back_to_raw_id():
     """A company id with no name entry falls back to the raw id."""
     summary = _summary(
-        [_channel("ch-a", gross=Decimal("10"), net=Decimal("10"),
-                  deduction=Decimal("0"))]
+        [_channel("ch-a", gross=Decimal("10"), net=Decimal("10"), deduction=Decimal("0"))]
     )
     result = build_month_rankings(
         summary=summary,
@@ -279,10 +266,8 @@ def test_channel_name_resolves_from_map_and_falls_back_to_raw_id():
     """Channel entity_name resolves from channel_names; missing id falls back."""
     summary = _summary(
         [
-            _channel("ch-named", gross=Decimal("100"), net=Decimal("90"),
-                     deduction=Decimal("10")),
-            _channel("ch-unnamed", gross=Decimal("50"), net=Decimal("40"),
-                     deduction=Decimal("10")),
+            _channel("ch-named", gross=Decimal("100"), net=Decimal("90"), deduction=Decimal("10")),
+            _channel("ch-unnamed", gross=Decimal("50"), net=Decimal("40"), deduction=Decimal("10")),
         ]
     )
     result = build_month_rankings(
@@ -305,8 +290,7 @@ def test_channel_name_resolves_from_map_and_falls_back_to_raw_id():
 def test_out_of_range_limit_raises_validation_error():
     """The service limit guard rejects limit<1 and limit>MAX independently."""
     summary = _summary(
-        [_channel("ch-a", gross=Decimal("10"), net=Decimal("10"),
-                  deduction=Decimal("0"))]
+        [_channel("ch-a", gross=Decimal("10"), net=Decimal("10"), deduction=Decimal("0"))]
     )
     with pytest.raises(RankingsValidationError):
         build_month_rankings(
@@ -334,9 +318,7 @@ def test_out_of_range_limit_raises_validation_error():
 
 def test_to_api_serializes_money_as_strings_and_preserves_none():
     """to_api() emits canonical money strings and preserves None metrics."""
-    summary = _summary(
-        [_channel("ch-a", gross=Decimal("100.50"), net=None, deduction=None)]
-    )
+    summary = _summary([_channel("ch-a", gross=Decimal("100.50"), net=None, deduction=None)])
     result = build_month_rankings(
         summary=summary,
         channel_company={},

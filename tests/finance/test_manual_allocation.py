@@ -1,4 +1,5 @@
 """Unit tests for the pure manual account-allocation builder."""
+
 from decimal import Decimal
 
 import pytest
@@ -66,8 +67,10 @@ def test_happy_path_two_components_two_channels():
         _line("ad-2", "chD", "40.00"),
     ]
     result = build_manual_account_allocation(
-        month=MONTH, components=components,
-        verified_channels=verified, manual_lines=lines,
+        month=MONTH,
+        components=components,
+        verified_channels=verified,
+        manual_lines=lines,
     )
     assert result.allocation_method == MANUAL_ALLOCATION_METHOD
     assert result.unallocated == ()
@@ -89,8 +92,10 @@ def test_line_order_is_deterministic():
     verified = {"pub-1": ("chA", "chB")}
     lines = [_line("ad-1", "chB", "30.00"), _line("ad-1", "chA", "70.00")]
     result = build_manual_account_allocation(
-        month=MONTH, components=components,
-        verified_channels=verified, manual_lines=lines,
+        month=MONTH,
+        components=components,
+        verified_channels=verified,
+        manual_lines=lines,
     )
     order = [(ln.component_key, ln.youtube_channel_id) for ln in result.lines]
     assert order == [("ad-1", "chA"), ("ad-1", "chB")]
@@ -103,8 +108,10 @@ def test_unknown_component_key_rejected():
     lines = [_line("ad-1", "chA", "100.00"), _line("ghost", "chA", "0.00")]
     with pytest.raises(AllocationValidationError) as exc:
         build_manual_account_allocation(
-            month=MONTH, components=components,
-            verified_channels=verified, manual_lines=lines,
+            month=MONTH,
+            components=components,
+            verified_channels=verified,
+            manual_lines=lines,
         )
     assert "ghost" in str(exc.value)
 
@@ -116,8 +123,10 @@ def test_channel_not_verified_rejected():
     lines = [_line("ad-1", "chZ", "100.00")]
     with pytest.raises(AllocationValidationError) as exc:
         build_manual_account_allocation(
-            month=MONTH, components=components,
-            verified_channels=verified, manual_lines=lines,
+            month=MONTH,
+            components=components,
+            verified_channels=verified,
+            manual_lines=lines,
         )
     assert "chZ" in str(exc.value)
 
@@ -129,8 +138,10 @@ def test_duplicate_pair_rejected():
     lines = [_line("ad-1", "chA", "60.00"), _line("ad-1", "chA", "40.00")]
     with pytest.raises(AllocationValidationError) as exc:
         build_manual_account_allocation(
-            month=MONTH, components=components,
-            verified_channels=verified, manual_lines=lines,
+            month=MONTH,
+            components=components,
+            verified_channels=verified,
+            manual_lines=lines,
         )
     assert "ad-1" in str(exc.value)
     assert "chA" in str(exc.value)
@@ -143,8 +154,10 @@ def test_negative_amount_rejected():
     lines = [_line("ad-1", "chA", "120.00"), _line("ad-1", "chB", "-20.00")]
     with pytest.raises(AllocationValidationError) as exc:
         build_manual_account_allocation(
-            month=MONTH, components=components,
-            verified_channels=verified, manual_lines=lines,
+            month=MONTH,
+            components=components,
+            verified_channels=verified,
+            manual_lines=lines,
         )
     assert "chB" in str(exc.value)
 
@@ -156,8 +169,10 @@ def test_over_precision_amount_rejected():
     lines = [_line("ad-1", "chA", "100.0000001")]
     with pytest.raises(AllocationValidationError) as exc:
         build_manual_account_allocation(
-            month=MONTH, components=components,
-            verified_channels=verified, manual_lines=lines,
+            month=MONTH,
+            components=components,
+            verified_channels=verified,
+            manual_lines=lines,
         )
     assert "chA" in str(exc.value)
 
@@ -175,8 +190,10 @@ def test_out_of_range_amount_rejected():
     lines = [_line("ad-1", "chA", "1e1000")]
     with pytest.raises(AllocationValidationError) as exc:
         build_manual_account_allocation(
-            month=MONTH, components=components,
-            verified_channels=verified, manual_lines=lines,
+            month=MONTH,
+            components=components,
+            verified_channels=verified,
+            manual_lines=lines,
         )
     assert "chA" in str(exc.value)
     assert "out of range" in str(exc.value)
@@ -189,8 +206,10 @@ def test_sum_mismatch_rejected():
     lines = [_line("ad-1", "chA", "70.00"), _line("ad-1", "chB", "20.00")]
     with pytest.raises(AllocationValidationError) as exc:
         build_manual_account_allocation(
-            month=MONTH, components=components,
-            verified_channels=verified, manual_lines=lines,
+            month=MONTH,
+            components=components,
+            verified_channels=verified,
+            manual_lines=lines,
         )
     message = str(exc.value)
     assert "ad-1" in message
@@ -208,8 +227,10 @@ def test_uncovered_component_rejected():
     lines = [_line("ad-1", "chA", "100.00")]
     with pytest.raises(AllocationValidationError) as exc:
         build_manual_account_allocation(
-            month=MONTH, components=components,
-            verified_channels=verified, manual_lines=lines,
+            month=MONTH,
+            components=components,
+            verified_channels=verified,
+            manual_lines=lines,
         )
     assert "ad-2" in str(exc.value)
 
@@ -219,7 +240,9 @@ def test_non_account_component_rejects_whole_request():
     components = [
         _component(component_key="ad-1", amount_usd="100.00"),
         _component(
-            component_key="ch-1", scope_kind="CHANNEL", scope_id="chA",
+            component_key="ch-1",
+            scope_kind="CHANNEL",
+            scope_id="chA",
             amount_usd="10.00",
         ),
     ]
@@ -227,8 +250,10 @@ def test_non_account_component_rejects_whole_request():
     lines = [_line("ad-1", "chA", "100.00")]
     with pytest.raises(AllocationValidationError) as exc:
         build_manual_account_allocation(
-            month=MONTH, components=components,
-            verified_channels=verified, manual_lines=lines,
+            month=MONTH,
+            components=components,
+            verified_channels=verified,
+            manual_lines=lines,
         )
     assert "ch-1" in str(exc.value)
 
@@ -237,14 +262,18 @@ def test_reconciliation_component_kind_not_net_applicable():
     """A non-net-applicable kind (e.g. FX_VARIANCE) sets net_applicable False."""
     components = [
         _component(
-            component_key="fx-1", amount_usd="100.00", component_kind="FX_VARIANCE",
+            component_key="fx-1",
+            amount_usd="100.00",
+            component_kind="FX_VARIANCE",
         ),
     ]
     verified = {"pub-1": ("chA",)}
     lines = [_line("fx-1", "chA", "100.00")]
     result = build_manual_account_allocation(
-        month=MONTH, components=components,
-        verified_channels=verified, manual_lines=lines,
+        month=MONTH,
+        components=components,
+        verified_channels=verified,
+        manual_lines=lines,
     )
     assert result.lines[0].net_applicable is False
     assert result.summary.net_applicable_total_usd == Decimal("0")

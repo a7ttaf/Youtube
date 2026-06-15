@@ -135,9 +135,7 @@ def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
     assert caps["canRunConnectorJobs"] is False
     assert caps["canManageConnectors"] is False
 
-    assert payload["roles"] == [
-        {"role": "finance_admin", "scope_type": "global", "scope_id": None}
-    ]
+    assert payload["roles"] == [{"role": "finance_admin", "scope_type": "global", "scope_id": None}]
     assert payload["permissions"] == []
 
     assert response.headers.get("Cache-Control") == "no-store"
@@ -155,9 +153,7 @@ def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(
     """revenue_operations_admin: canRunConnectorJobs true, canViewRevenue false."""
     response = client_headers_mode.get(
         "/session/me",
-        headers=_header_principal(
-            role="revenue_operations_admin", user_id=CONNECTOR_OPS_ID
-        ),
+        headers=_header_principal(role="revenue_operations_admin", user_id=CONNECTOR_OPS_ID),
     )
     assert response.status_code == 200, response.text
     caps = response.json()["capabilities"]
@@ -465,9 +461,7 @@ def test_session_me_db_mode_finance_admin_capabilities(client_db_mode):
     assert caps["canRunConnectorJobs"] is False
     assert caps["canManageConnectors"] is False
 
-    assert payload["roles"] == [
-        {"role": "finance_admin", "scope_type": "global", "scope_id": None}
-    ]
+    assert payload["roles"] == [{"role": "finance_admin", "scope_type": "global", "scope_id": None}]
     assert response.headers.get("Cache-Control") == "no-store"
 
 

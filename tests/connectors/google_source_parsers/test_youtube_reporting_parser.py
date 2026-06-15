@@ -31,12 +31,8 @@ def test_parse_preserves_amount_and_currency_exactly() -> None:
     payload = _load_fixture("sample_estimated_revenue_2026_04.json")
     rows = list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
     amounts_by_channel = {(r.youtube_channel_id, r.amount_native, r.currency_code) for r in rows}
-    assert (
-        ("UC_test_alpha", Decimal("1234.560000"), "USD") in amounts_by_channel
-    )
-    assert (
-        ("UC_test_beta", Decimal("456.780000"), "GBP") in amounts_by_channel
-    )
+    assert ("UC_test_alpha", Decimal("1234.560000"), "USD") in amounts_by_channel
+    assert ("UC_test_beta", Decimal("456.780000"), "GBP") in amounts_by_channel
 
 
 def test_parse_sets_value_kind_estimated_and_source_system_youtube_reporting() -> None:
@@ -64,12 +60,18 @@ def test_parse_carries_source_report_id_and_content_owner() -> None:
 
 
 def test_source_row_key_is_deterministic_across_reruns() -> None:
-    first = list(YouTubeReportingParser().parse(
-        _load_fixture("sample_estimated_revenue_2026_04.json"), tenant_id=TENANT_ID,
-    ))
-    second = list(YouTubeReportingParser().parse(
-        _load_fixture("sample_estimated_revenue_2026_04_rerun.json"), tenant_id=TENANT_ID,
-    ))
+    first = list(
+        YouTubeReportingParser().parse(
+            _load_fixture("sample_estimated_revenue_2026_04.json"),
+            tenant_id=TENANT_ID,
+        )
+    )
+    second = list(
+        YouTubeReportingParser().parse(
+            _load_fixture("sample_estimated_revenue_2026_04_rerun.json"),
+            tenant_id=TENANT_ID,
+        )
+    )
     first_keys = sorted(r.source_row_key for r in first)
     second_keys = sorted(r.source_row_key for r in second)
     assert first_keys == second_keys
@@ -150,12 +152,14 @@ def test_line_index_does_not_affect_source_row_key() -> None:
     payload = _load_fixture("sample_estimated_revenue_2026_04.json")
     shifted = {
         **payload,
-        "rows": [
-            {**row, "line_index": row["line_index"] + 100} for row in payload["rows"]
-        ],
+        "rows": [{**row, "line_index": row["line_index"] + 100} for row in payload["rows"]],
     }
-    a = sorted(r.source_row_key for r in YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
-    b = sorted(r.source_row_key for r in YouTubeReportingParser().parse(shifted, tenant_id=TENANT_ID))
+    a = sorted(
+        r.source_row_key for r in YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID)
+    )
+    b = sorted(
+        r.source_row_key for r in YouTubeReportingParser().parse(shifted, tenant_id=TENANT_ID)
+    )
     assert a == b
 
 
@@ -172,8 +176,12 @@ def test_report_id_does_not_affect_source_row_key() -> None:
             "report_id": "yt-rep-BACKFILL-correction-999",
         },
     }
-    a = sorted(r.source_row_key for r in YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
-    b = sorted(r.source_row_key for r in YouTubeReportingParser().parse(backfill, tenant_id=TENANT_ID))
+    a = sorted(
+        r.source_row_key for r in YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID)
+    )
+    b = sorted(
+        r.source_row_key for r in YouTubeReportingParser().parse(backfill, tenant_id=TENANT_ID)
+    )
     assert a == b
 
 
@@ -208,7 +216,9 @@ def test_blank_channel_raises(blank: str) -> None:
     payload = _load_fixture("sample_estimated_revenue_2026_04.json")
     bad = {
         **payload,
-        "rows": [{**r, "dimensions": {**r["dimensions"], "channel": blank}} for r in payload["rows"]],
+        "rows": [
+            {**r, "dimensions": {**r["dimensions"], "channel": blank}} for r in payload["rows"]
+        ],
     }
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(bad, tenant_id=TENANT_ID))
@@ -222,7 +232,10 @@ def test_blank_content_owner_falls_back_to_channel() -> None:
     payload = _load_fixture("sample_estimated_revenue_2026_04.json")
     blanked = {
         **payload,
-        "rows": [{**r, "dimensions": {**r["dimensions"], "content_owner": "   "}} for r in payload["rows"]],
+        "rows": [
+            {**r, "dimensions": {**r["dimensions"], "content_owner": "   "}}
+            for r in payload["rows"]
+        ],
     }
     rows = list(YouTubeReportingParser().parse(blanked, tenant_id=TENANT_ID))
     assert rows
@@ -240,7 +253,9 @@ def test_blank_and_absent_content_owner_hash_to_same_source_row_key() -> None:
     payload = _load_fixture("sample_estimated_revenue_2026_04.json")
     blanked = {
         **payload,
-        "rows": [{**r, "dimensions": {**r["dimensions"], "content_owner": "  "}} for r in payload["rows"]],
+        "rows": [
+            {**r, "dimensions": {**r["dimensions"], "content_owner": "  "}} for r in payload["rows"]
+        ],
     }
     absent = {
         **payload,
@@ -249,8 +264,12 @@ def test_blank_and_absent_content_owner_hash_to_same_source_row_key() -> None:
             for r in payload["rows"]
         ],
     }
-    a = sorted(r.source_row_key for r in YouTubeReportingParser().parse(blanked, tenant_id=TENANT_ID))
-    b = sorted(r.source_row_key for r in YouTubeReportingParser().parse(absent, tenant_id=TENANT_ID))
+    a = sorted(
+        r.source_row_key for r in YouTubeReportingParser().parse(blanked, tenant_id=TENANT_ID)
+    )
+    b = sorted(
+        r.source_row_key for r in YouTubeReportingParser().parse(absent, tenant_id=TENANT_ID)
+    )
     assert a == b
 
 
@@ -280,7 +299,9 @@ def test_blank_currency_raises() -> None:
     payload = _load_fixture("sample_estimated_revenue_2026_04.json")
     bad = {
         **payload,
-        "rows": [{**r, "metrics": {**r["metrics"], "currencyCode": "   "}} for r in payload["rows"]],
+        "rows": [
+            {**r, "metrics": {**r["metrics"], "currencyCode": "   "}} for r in payload["rows"]
+        ],
     }
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(bad, tenant_id=TENANT_ID))

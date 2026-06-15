@@ -43,7 +43,8 @@ class _ReportingRowContext:
 # Standards: Typed ParserError failures, stable source-row identity axes.
 # Blast Radius: Finance ingestion provenance; no graph projection impact detected.
 # Connections:
-#   - File: tests/connectors/google_source_parsers/test_youtube_reporting_parser.py -> Parser contract.
+#   - File: tests/connectors/google_source_parsers/test_youtube_reporting_parser.py
+#     -> Parser contract.
 #   - File: backend/ums_smart_revenue/connectors/google_source_rows.py -> ParsedSourceRow shape.
 # ============================================================================
 def _reporting_rows(payload: dict[str, object]) -> list[object]:
@@ -148,7 +149,9 @@ def _reporting_source_row(
     return ParsedSourceRow(
         source_system=source_system,
         source_row_key=source_row_key,
-        source_account_id=context.content_owner if context.content_owner is not None else context.channel,
+        source_account_id=(
+            context.content_owner if context.content_owner is not None else context.channel
+        ),
         content_owner_id=context.content_owner,
         youtube_channel_id=context.channel,
         report_type=report_type,

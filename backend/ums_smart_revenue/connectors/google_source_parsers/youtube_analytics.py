@@ -85,7 +85,8 @@ class _AnalyticsParseContext:
 # Standards: Typed ParserError failures, stable source-row identity axes.
 # Blast Radius: Finance ingestion provenance; no graph projection impact detected.
 # Connections:
-#   - File: tests/connectors/google_source_parsers/test_youtube_analytics_parser.py -> Parser contract.
+#   - File: tests/connectors/google_source_parsers/test_youtube_analytics_parser.py
+#     -> Parser contract.
 #   - File: backend/ums_smart_revenue/connectors/google_source_rows.py -> ParsedSourceRow shape.
 # ============================================================================
 def _analytics_parse_context(request: dict[str, object]) -> _AnalyticsParseContext:
@@ -129,7 +130,9 @@ def _analytics_include_historical(request: dict[str, object]) -> bool:
     """Validate includeHistoricalChannelData because it changes row-key identity."""
     include_historical = request.get("includeHistoricalChannelData", False)
     if not isinstance(include_historical, bool):
-        raise ParserError("query_request.includeHistoricalChannelData must be a boolean when present")
+        raise ParserError(
+            "query_request.includeHistoricalChannelData must be a boolean when present"
+        )
     return include_historical
 
 

@@ -62,7 +62,7 @@ def test_yt_adsense_fee_is_residual_attributed_by_gross():
     )
     by = {c.youtube_channel_id: c for c in res.channels}
     assert by["c1"].yt_adsense_fee_usd == D("12.000000")  # 20 * 60/100
-    assert by["c2"].yt_adsense_fee_usd == D("8.000000")   # 20 * 40/100
+    assert by["c2"].yt_adsense_fee_usd == D("8.000000")  # 20 * 40/100
     # fee total attributed exactly
     total_fee = by["c1"].yt_adsense_fee_usd + by["c2"].yt_adsense_fee_usd
     assert total_fee == D("20.000000")
@@ -104,9 +104,7 @@ def test_zero_gross_with_bank_evidence_warns_and_suppresses_hop_three_totals():
     # basis, so hop 3 now sees bank > effective_adsense and emits a
     # RECONCILIATION_ANOMALY warning instead of the older
     # ZERO_GROSS_RECONCILIATION_BASIS path.
-    assert any(
-        w["code"] == "RECONCILIATION_ANOMALY" for w in res.warnings
-    )
+    assert any(w["code"] == "RECONCILIATION_ANOMALY" for w in res.warnings)
 
 
 def test_negative_fx_variance_preserves_sign_and_adjusts_fee():
@@ -145,8 +143,7 @@ def test_positive_fx_above_adsense_bank_delta_is_suppressed_with_fee_clamp():
     assert res.adsense_bank_fee_total_usd == D("0.000000")
     assert res.fx_total_usd == D("0.000000")
     assert any(
-        w["code"] == "RECONCILIATION_ANOMALY"
-        and "unmatched FX suppressed" in w["message"]
+        w["code"] == "RECONCILIATION_ANOMALY" and "unmatched FX suppressed" in w["message"]
         for w in res.warnings
     )
 

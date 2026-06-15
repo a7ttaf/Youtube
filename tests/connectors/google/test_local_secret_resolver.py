@@ -1,4 +1,5 @@
 """local-secret:// resolver - test/dev backend backed by an injected mapping."""
+
 from __future__ import annotations
 
 import pytest
@@ -27,9 +28,9 @@ def test_resolve_raises_not_found_for_unknown_key() -> None:
 @pytest.mark.parametrize(
     "ref",
     [
-        "local-secret://",          # empty key
-        "local-secret:/yt-creds",   # missing one /
-        "not-local://yt-creds",     # wrong scheme
+        "local-secret://",  # empty key
+        "local-secret:/yt-creds",  # missing one /
+        "not-local://yt-creds",  # wrong scheme
     ],
 )
 def test_resolve_raises_malformed_uri(ref: str) -> None:

@@ -55,47 +55,76 @@ def _seed_missing_net_with_components(session):
     """
     session.add(
         YouTubeChannelORM(
-            id=uuid4(), tenant_id=TENANT, youtube_channel_id="chA",
-            channel_name="A", active=True,
+            id=uuid4(),
+            tenant_id=TENANT,
+            youtube_channel_id="chA",
+            channel_name="A",
+            active=True,
         )
     )
     session.add(
         MonthlyChannelRevenueFactORM(
-            id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id="chA",
-            source_kind="ADSENSE", gross_revenue_usd=Decimal("1000.00"),
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            youtube_channel_id="chA",
+            source_kind="ADSENSE",
+            gross_revenue_usd=Decimal("1000.00"),
             net_revenue_usd=None,
         )
     )
     session.add(
         DeductionComponentORM(
-            id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
-            scope_kind="CHANNEL", scope_id="chA", amount_usd=Decimal("30.00"),
-            currency_code="USD", source_system="adsense_management",
-            source_table="google_revenue_source_rows", component_key="cd-1",
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            component_kind="DEDUCTION",
+            scope_kind="CHANNEL",
+            scope_id="chA",
+            amount_usd=Decimal("30.00"),
+            currency_code="USD",
+            source_system="adsense_management",
+            source_table="google_revenue_source_rows",
+            component_key="cd-1",
             raw_payload={},
         )
     )
     session.add(
         AdsenseContentOwnerLinkORM(
-            id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-1",
-            content_owner_id="owner-1", verification_status="VERIFIED",
-            provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            id=uuid4(),
+            tenant_id=TENANT,
+            adsense_account_id="pub-1",
+            content_owner_id="owner-1",
+            verification_status="VERIFIED",
+            provenance_kind="OPERATOR_ASSERTED",
+            provenance_payload={},
             effective_month_start="2026-01",
         )
     )
     session.add(
         ContentOwnerChannelLinkORM(
-            id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
-            youtube_channel_id="chA", provenance_kind="SOURCE_ROW", active=True,
+            id=uuid4(),
+            tenant_id=TENANT,
+            content_owner_id="owner-1",
+            youtube_channel_id="chA",
+            provenance_kind="SOURCE_ROW",
+            active=True,
             effective_month_start="2026-01",
         )
     )
     session.add(
         DeductionComponentORM(
-            id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
-            scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("100.00"),
-            currency_code="USD", source_system="adsense_management",
-            source_table="google_revenue_source_rows", component_key="ad-1",
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            component_kind="DEDUCTION",
+            scope_kind="ACCOUNT",
+            scope_id="pub-1",
+            amount_usd=Decimal("100.00"),
+            currency_code="USD",
+            source_system="adsense_management",
+            source_table="google_revenue_source_rows",
+            component_key="ad-1",
             raw_payload={},
         )
     )
@@ -110,12 +139,20 @@ def _seed_missing_net_with_components(session):
 def _export_job(*, scope_type, scope_channel_ids):
     """Build a minimal ExportJobEntry for test scenarios."""
     return ExportJobEntry(
-        id="exp-1", export_type="FINANCE_EXCEL", scope_type=scope_type,
-        scope_id=None if scope_type == "global" else "company-a", month=MONTH,
-        currency="USD", requested_by="user-1", status="COMPLETED", file_url=None,
-        month_lock_status="OPEN", include_confidence_notes=False,
+        id="exp-1",
+        export_type="FINANCE_EXCEL",
+        scope_type=scope_type,
+        scope_id=None if scope_type == "global" else "company-a",
+        month=MONTH,
+        currency="USD",
+        requested_by="user-1",
+        status="COMPLETED",
+        file_url=None,
+        month_lock_status="OPEN",
+        include_confidence_notes=False,
         include_manual_override_notes=False,
-        created_at=datetime(2026, 4, 1, tzinfo=UTC), completed_at=None,
+        created_at=datetime(2026, 4, 1, tzinfo=UTC),
+        completed_at=None,
         scope_channel_ids=scope_channel_ids,
     )
 
@@ -127,38 +164,60 @@ def _seed_out_of_scope_account_allocation(session):
     """
     session.add(
         YouTubeChannelORM(
-            id=uuid4(), tenant_id=TENANT, youtube_channel_id="chB",
-            channel_name="B", active=True,
+            id=uuid4(),
+            tenant_id=TENANT,
+            youtube_channel_id="chB",
+            channel_name="B",
+            active=True,
         )
     )
     session.add(
         MonthlyChannelRevenueFactORM(
-            id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id="chB",
-            source_kind="ADSENSE", gross_revenue_usd=Decimal("500.00"),
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            youtube_channel_id="chB",
+            source_kind="ADSENSE",
+            gross_revenue_usd=Decimal("500.00"),
             net_revenue_usd=None,
         )
     )
     session.add(
         AdsenseContentOwnerLinkORM(
-            id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-2",
-            content_owner_id="owner-2", verification_status="VERIFIED",
-            provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            id=uuid4(),
+            tenant_id=TENANT,
+            adsense_account_id="pub-2",
+            content_owner_id="owner-2",
+            verification_status="VERIFIED",
+            provenance_kind="OPERATOR_ASSERTED",
+            provenance_payload={},
             effective_month_start="2026-01",
         )
     )
     session.add(
         ContentOwnerChannelLinkORM(
-            id=uuid4(), tenant_id=TENANT, content_owner_id="owner-2",
-            youtube_channel_id="chB", provenance_kind="SOURCE_ROW", active=True,
+            id=uuid4(),
+            tenant_id=TENANT,
+            content_owner_id="owner-2",
+            youtube_channel_id="chB",
+            provenance_kind="SOURCE_ROW",
+            active=True,
             effective_month_start="2026-01",
         )
     )
     session.add(
         DeductionComponentORM(
-            id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
-            scope_kind="ACCOUNT", scope_id="pub-2", amount_usd=Decimal("70.00"),
-            currency_code="USD", source_system="adsense_management",
-            source_table="google_revenue_source_rows", component_key="ad-2",
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            component_kind="DEDUCTION",
+            scope_kind="ACCOUNT",
+            scope_id="pub-2",
+            amount_usd=Decimal("70.00"),
+            currency_code="USD",
+            source_system="adsense_management",
+            source_table="google_revenue_source_rows",
+            component_key="ad-2",
             raw_payload={},
         )
     )
@@ -176,9 +235,7 @@ def test_scoped_export_excludes_out_of_scope_account_allocation(tmp_path):
         _seed_missing_net_with_components(session)
         _seed_out_of_scope_account_allocation(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(
-                scope_type="company", scope_channel_ids=("chA",)
-            ),
+            export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
@@ -219,16 +276,17 @@ def _commit_snapshot_and_lock(session):
     """
     committed = SqlAlchemyCommittedAllocationRepository(session)
     committed.commit_allocation(
-        month=MONTH, allocation_method="gross_revenue_proportional",
-        idempotency_key="k1", request_fingerprint="fp1", reason="close",
+        month=MONTH,
+        allocation_method="gross_revenue_proportional",
+        idempotency_key="k1",
+        request_fingerprint="fp1",
+        reason="close",
         committed_by=str(TENANT),
         deduction_repository=SqlAlchemyDeductionComponentRepository(session),
         revenue_repository=SqlAlchemyRevenueFactRepository(session),
         link_repository=SqlAlchemyChannelAccountLinkRepository(session),
     )
-    close = session.query(FinanceMonthCloseORM).filter_by(
-        tenant_id=TENANT, month=MONTH
-    ).one()
+    close = session.query(FinanceMonthCloseORM).filter_by(tenant_id=TENANT, month=MONTH).one()
     close.status = "LOCKED"
     session.commit()
 
@@ -308,16 +366,17 @@ def _commit_post_tax_snapshot_and_lock(session):
     session.commit()
     committed = SqlAlchemyCommittedAllocationRepository(session)
     committed.commit_allocation(
-        month=MONTH, allocation_method="post_tax_revenue_proportional",
-        idempotency_key="k-pt", request_fingerprint="fp-pt", reason="close",
+        month=MONTH,
+        allocation_method="post_tax_revenue_proportional",
+        idempotency_key="k-pt",
+        request_fingerprint="fp-pt",
+        reason="close",
         committed_by=str(TENANT),
         deduction_repository=SqlAlchemyDeductionComponentRepository(session),
         revenue_repository=SqlAlchemyRevenueFactRepository(session),
         link_repository=SqlAlchemyChannelAccountLinkRepository(session),
     )
-    close = session.query(FinanceMonthCloseORM).filter_by(
-        tenant_id=TENANT, month=MONTH
-    ).one()
+    close = session.query(FinanceMonthCloseORM).filter_by(tenant_id=TENANT, month=MONTH).one()
     close.status = "LOCKED"
     session.commit()
 
@@ -422,14 +481,14 @@ def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
         )
-    coverage_codes = [
-        alert.code
-        for alert in summaries.smart_alerts.alerts
-    ]
+    coverage_codes = [alert.code for alert in summaries.smart_alerts.alerts]
     assert "CHANNELS_MISSING_REVENUE_FACTS" in coverage_codes
     coverage = next(
-        (alert for alert in summaries.smart_alerts.alerts
-         if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"),
+        (
+            alert
+            for alert in summaries.smart_alerts.alerts
+            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+        ),
         None,
     )
     assert coverage is not None
@@ -438,7 +497,8 @@ def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):
 
 
 def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
-    """Scoped export's CHANNELS_MISSING_REVENUE_FACTS sample is restricted to channel_ids (review #98 T13).
+    """Scoped export's CHANNELS_MISSING_REVENUE_FACTS sample
+    is restricted to channel_ids (review #98 T13).
 
     A company/sector/group export must never include channel ids outside its
     frozen channel set, even when those channels are factless. The export
@@ -464,9 +524,7 @@ def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
         session.commit()
         # Scoped export: frozen channel_ids = ("chA",) only.
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(
-                scope_type="company", scope_channel_ids=("chA",)
-            ),
+            export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),

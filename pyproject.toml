@@ -43,8 +43,17 @@ testpaths = ["tests"]
 pythonpath = ["backend"]
 
 [tool.ruff]
-line-length = 120
+line-length = 100
 src = ["backend"]
+# Pin the formatter/linter grammar to 3.13 even though the runtime requires
+# 3.14. Python 3.14 made parentheses optional for multi-type `except (A, B)`
+# handlers; with an inferred py314 target, `ruff format` rewrites them to the
+# bare `except A, B` spelling, which the DeepSource analyzer and any sub-3.14
+# parser reject as a SyntaxError (FLK-E999). Targeting py313 keeps ruff emitting
+# the parenthesized form — valid on 3.14 too — so the formatter, the linter, and
+# the static analyzers stay coherent. The py313 linter also flags the bare form
+# as invalid-syntax, guarding against future regressions.
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]

@@ -1,4 +1,5 @@
 """Repository behavior for committed account allocation (write path)."""
+
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -53,10 +54,15 @@ def _session(tmp_path) -> Session:
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     session = Session(engine)
-    session.add(TenantORM(
-        id=TENANT, slug="ums", display_name="UMS",
-        primary_currency="USD", status="ACTIVE",
-    ))
+    session.add(
+        TenantORM(
+            id=TENANT,
+            slug="ums",
+            display_name="UMS",
+            primary_currency="USD",
+            status="ACTIVE",
+        )
+    )
     session.commit()
     return session
 
@@ -74,42 +80,79 @@ def _seed_account_deduction(session, *, mapped: bool, status: str = "OPEN") -> N
     ("OPEN" or "LOCKED") so the OPEN-month guard can be exercised without going
     through the month-close readiness path.
     """
-    session.add(YouTubeChannelORM(
-        id=uuid4(), tenant_id=TENANT, youtube_channel_id="chA",
-        channel_name="A", active=True,
-    ))
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            youtube_channel_id="chA",
+            channel_name="A",
+            active=True,
+        )
+    )
     # Flush the channel before the fact: monthly_channel_revenue_facts has a
     # composite FK (tenant_id, youtube_channel_id) -> youtube_channels that crosses
     # the Org/Finance registries, so the unit-of-work does NOT order the channel
     # insert before the dependent fact on its own. Required under FK enforcement.
     session.flush()
-    session.add(MonthlyChannelRevenueFactORM(
-        id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id="chA",
-        source_kind="ADSENSE", gross_revenue_usd=Decimal("1000.00"),
-        net_revenue_usd=None,
-    ))
-    session.add(DeductionComponentORM(
-        id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
-        scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("100.00"),
-        currency_code="USD", source_system="adsense_management",
-        source_table="google_revenue_source_rows", component_key="ad-1",
-        raw_payload={},
-    ))
+    session.add(
+        MonthlyChannelRevenueFactORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            youtube_channel_id="chA",
+            source_kind="ADSENSE",
+            gross_revenue_usd=Decimal("1000.00"),
+            net_revenue_usd=None,
+        )
+    )
+    session.add(
+        DeductionComponentORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            component_kind="DEDUCTION",
+            scope_kind="ACCOUNT",
+            scope_id="pub-1",
+            amount_usd=Decimal("100.00"),
+            currency_code="USD",
+            source_system="adsense_management",
+            source_table="google_revenue_source_rows",
+            component_key="ad-1",
+            raw_payload={},
+        )
+    )
     if mapped:
-        session.add(AdsenseContentOwnerLinkORM(
-            id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-1",
-            content_owner_id="owner-1", verification_status="VERIFIED",
-            provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
-            effective_month_start="2026-01",
-        ))
-        session.add(ContentOwnerChannelLinkORM(
-            id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
-            youtube_channel_id="chA", provenance_kind="SOURCE_ROW", active=True,
-            effective_month_start="2026-01",
-        ))
-    session.add(FinanceMonthCloseORM(
-        tenant_id=TENANT, month=MONTH, status=status, allocation_rule_payload={},
-    ))
+        session.add(
+            AdsenseContentOwnerLinkORM(
+                id=uuid4(),
+                tenant_id=TENANT,
+                adsense_account_id="pub-1",
+                content_owner_id="owner-1",
+                verification_status="VERIFIED",
+                provenance_kind="OPERATOR_ASSERTED",
+                provenance_payload={},
+                effective_month_start="2026-01",
+            )
+        )
+        session.add(
+            ContentOwnerChannelLinkORM(
+                id=uuid4(),
+                tenant_id=TENANT,
+                content_owner_id="owner-1",
+                youtube_channel_id="chA",
+                provenance_kind="SOURCE_ROW",
+                active=True,
+                effective_month_start="2026-01",
+            )
+        )
+    session.add(
+        FinanceMonthCloseORM(
+            tenant_id=TENANT,
+            month=MONTH,
+            status=status,
+            allocation_rule_payload={},
+        )
+    )
     session.commit()
 
 
@@ -123,13 +166,28 @@ def _repos(session):
     )
 
 
-def _commit(committed, ded, rev, link, *, key="k1", fp="fp1", reason="close",
-            method="gross_revenue_proportional"):
+def _commit(
+    committed,
+    ded,
+    rev,
+    link,
+    *,
+    key="k1",
+    fp="fp1",
+    reason="close",
+    method="gross_revenue_proportional",
+):
     """Invoke commit_allocation with the standard test wiring + overridable knobs."""
     return committed.commit_allocation(
-        month=MONTH, allocation_method=method, idempotency_key=key,
-        request_fingerprint=fp, reason=reason, committed_by=ACTOR,
-        deduction_repository=ded, revenue_repository=rev, link_repository=link,
+        month=MONTH,
+        allocation_method=method,
+        idempotency_key=key,
+        request_fingerprint=fp,
+        reason=reason,
+        committed_by=ACTOR,
+        deduction_repository=ded,
+        revenue_repository=rev,
+        link_repository=link,
     )
 
 
@@ -210,7 +268,12 @@ def test_commit_post_tax_persists_method_and_basis_amount(tmp_path):
     session.commit()
     committed, ded, rev, link = _repos(session)
     outcome = _commit(
-        committed, ded, rev, link, key="k-pt", fp="fp-pt",
+        committed,
+        ded,
+        rev,
+        link,
+        key="k-pt",
+        fp="fp-pt",
         method="post_tax_revenue_proportional",
     )
     assert outcome.created is True
@@ -225,7 +288,12 @@ def test_commit_rejects_unsupported_method(tmp_path):
     committed, ded, rev, link = _repos(session)
     with pytest.raises(CommittedAllocationValidationError):
         _commit(
-            committed, ded, rev, link, key="k-bad", fp="fp-bad",
+            committed,
+            ded,
+            rev,
+            link,
+            key="k-bad",
+            fp="fp-bad",
             method="company_level",
         )
 

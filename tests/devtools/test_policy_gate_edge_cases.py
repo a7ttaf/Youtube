@@ -216,10 +216,7 @@ def test_payment_contract_is_checked():
 """,
     )
     violations = find_policy_violations(tmp_path)
-    assert any(
-        violation.symbol == "pytest.skip" and violation.line > 5
-        for violation in violations
-    )
+    assert any(violation.symbol == "pytest.skip" and violation.line > 5 for violation in violations)
 
 
 def test_catches_aliased_builtin_getattr(tmp_path):
@@ -588,10 +585,7 @@ pytest.xfail("not ready")
         encoding="utf-8",
     )
     violations = find_policy_violations(tmp_path)
-    assert {
-        (violation.relative_path.as_posix(), violation.symbol)
-        for violation in violations
-    } == {
+    assert {(violation.relative_path.as_posix(), violation.symbol) for violation in violations} == {
         ("backend/ums_smart_revenue/testing/policy_plugin.py", "pytest.skip"),
         (
             "backend/ums_smart_revenue/testing/second_policy_plugin.py",
@@ -633,10 +627,7 @@ pytest.xfail("not ready")
         encoding="utf-8",
     )
     violations = find_policy_violations(tmp_path)
-    assert {
-        (violation.relative_path.as_posix(), violation.symbol)
-        for violation in violations
-    } == {
+    assert {(violation.relative_path.as_posix(), violation.symbol) for violation in violations} == {
         ("backend/ums_smart_revenue/testing/policy_plugin.py", "pytest.skip"),
         (
             "backend/ums_smart_revenue/testing/second_policy_plugin.py",
@@ -653,13 +644,7 @@ def test_resolves_backend_pytest_plugin_modules(tmp_path):
 pytest_plugins = ("ums_smart_revenue.testing.policy_plugin",)
 """,
     )
-    plugin_path = (
-        tmp_path
-        / "backend"
-        / "ums_smart_revenue"
-        / "testing"
-        / "policy_plugin.py"
-    )
+    plugin_path = tmp_path / "backend" / "ums_smart_revenue" / "testing" / "policy_plugin.py"
     plugin_path.parent.mkdir(parents=True, exist_ok=True)
     plugin_path.write_text(
         """

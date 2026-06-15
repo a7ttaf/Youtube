@@ -1,13 +1,16 @@
-from playwright.sync_api import sync_playwright
 from pathlib import Path
+
+from playwright.sync_api import sync_playwright
 
 html_path = Path(__file__).parent.parent / "ums-smart-revenue-command-center.html"
 qa_dir = Path(__file__).parent
 base_url = f"file:///{html_path.resolve().as_posix()}"
 
+
 def wait_for_stable(page):
     page.wait_for_load_state("networkidle")
     page.evaluate("document.fonts.ready")
+
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)

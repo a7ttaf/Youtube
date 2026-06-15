@@ -21,6 +21,7 @@ normalization write-set denial) were observed failing before the
 ``platform_lane`` wiring landed -- run-to-fail evidence is recorded in the
 implementation task.
 """
+
 from __future__ import annotations
 
 import json
@@ -62,9 +63,7 @@ def _alembic_config(url: str) -> Config:
     """Alembic config bound to ``url`` without an ini path (no logging poison)."""
     cfg = Config()
     cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option(
-        "script_location", "backend/ums_smart_revenue/db/alembic"
-    )
+    cfg.set_main_option("script_location", "backend/ums_smart_revenue/db/alembic")
     return cfg
 
 
@@ -183,8 +182,10 @@ def _seed_owner(url: str, *, tenant_id: UUID, with_channel: bool = True) -> None
                     "VALUES (:id, :tid, :email, :name)"
                 ),
                 {
-                    "id": actor_id, "tid": tenant_id,
-                    "email": f"seed-{actor_id}@example.com", "name": "Seed",
+                    "id": actor_id,
+                    "tid": tenant_id,
+                    "email": f"seed-{actor_id}@example.com",
+                    "name": "Seed",
                 },
             )
             if with_channel:
@@ -198,8 +199,11 @@ def _seed_owner(url: str, *, tenant_id: UUID, with_channel: bool = True) -> None
                         "(tenant_id, youtube_channel_id) DO NOTHING"
                     ),
                     {
-                        "id": uuid4(), "tid": tenant_id, "cid": CHANNEL_ID,
-                        "name": "Chan", "owner": ACCOUNT_ID,
+                        "id": uuid4(),
+                        "tid": tenant_id,
+                        "cid": CHANNEL_ID,
+                        "name": "Chan",
+                        "owner": ACCOUNT_ID,
                     },
                 )
             conn.execute(
@@ -210,8 +214,12 @@ def _seed_owner(url: str, *, tenant_id: UUID, with_channel: bool = True) -> None
                     ":ref, 'active', :by, :by)"
                 ),
                 {
-                    "id": uuid4(), "tid": tenant_id, "key": YT_REPORTING_KEY,
-                    "acct": ACCOUNT_ID, "ref": RESOLVER_REF, "by": actor_id,
+                    "id": uuid4(),
+                    "tid": tenant_id,
+                    "key": YT_REPORTING_KEY,
+                    "acct": ACCOUNT_ID,
+                    "ref": RESOLVER_REF,
+                    "by": actor_id,
                 },
             )
     finally:
@@ -229,31 +237,24 @@ def _run_yt_reporting(session: Session, tenant_id: UUID):
     """Drive ``run_one`` for YT Reporting with the network/blob layer mocked."""
     from unittest.mock import patch
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls:
+    with (
+        patch("ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient") as yt_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
         client = yt_cls.return_value
         client.list_supported_jobs.return_value = [
             {"id": "job-1", "reportTypeId": "channel_basic_a2"}
         ]
-        client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
+        client.list_reports_for_month.return_value = [{"id": "r1", "downloadUrl": "https://yt/r1"}]
         client.fetch_report.return_value = _yt_reporting_csv()
         store: dict[str, bytes] = {}
         backend = local_cls.return_value
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(
-                storage_uri, content
-            )
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
         return run_one(
@@ -280,7 +281,7 @@ def test_run_without_tenant_context_fails_closed_at_credential(
     factory = build_session_factory(pg_url)
     # No connector_tenant_context: TENANT_CTX is unset, the hook pins app_tenant
     # with no trusted context row, and the credential SELECT returns nothing.
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with pytest.raises(CredentialNotFoundError):
             _run_yt_reporting(session, fresh_tenant)
 
@@ -291,7 +292,7 @@ def test_run_with_tenant_context_resolves_credential_and_succeeds(
     """With connector_tenant_context the credential resolves and the run runs."""
     _seed_owner(pg_url, tenant_id=fresh_tenant)
     factory = build_session_factory(pg_url)
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with connector_tenant_context(fresh_tenant, session=session):
             outcome = _run_yt_reporting(session, fresh_tenant)
     assert outcome.run is not None
@@ -319,7 +320,7 @@ def test_run_one_persists_lifecycle_facts_and_audit_on_postgres(
 
     _seed_owner(pg_url, tenant_id=fresh_tenant)
     factory = build_session_factory(pg_url)
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with connector_tenant_context(fresh_tenant, session=session):
             outcome = _run_yt_reporting(session, fresh_tenant)
     assert outcome.run is not None
@@ -332,9 +333,7 @@ def test_run_one_persists_lifecycle_facts_and_audit_on_postgres(
         with Session(engine) as read:
             run_rows = list(
                 read.scalars(
-                    select(ConnectorRunORM).where(
-                        ConnectorRunORM.tenant_id == fresh_tenant
-                    )
+                    select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == fresh_tenant)
                 )
             )
             assert len(run_rows) == 1
@@ -377,10 +376,7 @@ def test_run_one_persists_lifecycle_facts_and_audit_on_postgres(
                     select(AuditLogORM)
                     .where(AuditLogORM.tenant_id == fresh_tenant)
                     .where(AuditLogORM.event_type == "REPORT_IMPORTED")
-                    .where(
-                        AuditLogORM.entity_type
-                        == "monthly_channel_revenue_fact"
-                    )
+                    .where(AuditLogORM.entity_type == "monthly_channel_revenue_fact")
                 )
             )
             assert fact_audit, "expected a normalize REPORT_IMPORTED audit row"
@@ -391,9 +387,7 @@ def test_run_one_persists_lifecycle_facts_and_audit_on_postgres(
 # ---------------------------------------------------------------------------
 # Obligation 3: cross-tenant isolation.
 # ---------------------------------------------------------------------------
-def test_cross_tenant_isolation_under_run_context(
-    pg_url: str, _stub_secret_resolver: None
-) -> None:
+def test_cross_tenant_isolation_under_run_context(pg_url: str, _stub_secret_resolver: None) -> None:
     """Tenant B's rows stay invisible/unwritable while tenant A's run executes."""
     from ums_smart_revenue.db.connector_models import ConnectorRunORM
 
@@ -402,7 +396,7 @@ def test_cross_tenant_isolation_under_run_context(
     _seed_owner(pg_url, tenant_id=tenant_a)
     _seed_owner(pg_url, tenant_id=tenant_b)
     factory = build_session_factory(pg_url)
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with connector_tenant_context(tenant_a, session=session):
             outcome = _run_yt_reporting(session, tenant_a)
             # While in tenant A's context, tenant B's credential is invisible.
@@ -461,12 +455,11 @@ def test_cross_tenant_platform_write_denied_under_elevation(
     factory = build_session_factory(pg_url)
 
     insert_close = sa.text(
-        "INSERT INTO finance_month_close (tenant_id, month, status) "
-        "VALUES (:tid, :month, 'OPEN')"
+        "INSERT INTO finance_month_close (tenant_id, month, status) VALUES (:tid, :month, 'OPEN')"
     )
 
     # (a) cross-tenant write under tenant-A context is rejected by WITH CHECK.
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with connector_tenant_context(tenant_a, session=session):
             with platform_lane(session):
                 with pytest.raises(Exception) as cross_tenant_exc:
@@ -483,7 +476,7 @@ def test_cross_tenant_platform_write_denied_under_elevation(
     )
 
     # (b) with NO tenant context the same elevated INSERT is also rejected.
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with platform_lane(session):
             with pytest.raises(Exception) as no_context_exc:
                 session.execute(
@@ -492,9 +485,7 @@ def test_cross_tenant_platform_write_denied_under_elevation(
                 )
                 session.flush()
             session.rollback()
-    assert "row-level security" in str(
-        getattr(no_context_exc.value, "orig", no_context_exc.value)
-    )
+    assert "row-level security" in str(getattr(no_context_exc.value, "orig", no_context_exc.value))
 
     # Neither rejected INSERT left a durable row (read back via the owner login).
     engine = sa.create_engine(pg_url)
@@ -502,8 +493,7 @@ def test_cross_tenant_platform_write_denied_under_elevation(
         with engine.connect() as read:
             leaked = read.scalar(
                 sa.text(
-                    "SELECT count(*) FROM finance_month_close "
-                    "WHERE month IN ('2026-05', '2026-06')"
+                    "SELECT count(*) FROM finance_month_close WHERE month IN ('2026-05', '2026-06')"
                 )
             )
             assert leaked == 0
@@ -540,14 +530,14 @@ def test_projection_failure_rewrites_run_failed_and_persists_audit(
     class _BoomError(RuntimeError):
         pass
 
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with connector_tenant_context(fresh_tenant, session=session):
             with patch.object(
                 normalization,
                 "GoogleSourceNormalizer",
             ) as normalizer_cls:
-                normalizer_cls.return_value.normalize_month.side_effect = (
-                    _BoomError("forced normalize failure")
+                normalizer_cls.return_value.normalize_month.side_effect = _BoomError(
+                    "forced normalize failure"
                 )
                 with pytest.raises(_BoomError, match="forced normalize failure"):
                     _run_yt_reporting(session, fresh_tenant)
@@ -557,9 +547,7 @@ def test_projection_failure_rewrites_run_failed_and_persists_audit(
         with Session(engine) as read:
             run_rows = list(
                 read.scalars(
-                    select(ConnectorRunORM).where(
-                        ConnectorRunORM.tenant_id == fresh_tenant
-                    )
+                    select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == fresh_tenant)
                 )
             )
             assert len(run_rows) == 1
@@ -580,9 +568,7 @@ def test_projection_failure_rewrites_run_failed_and_persists_audit(
         engine.dispose()
 
 
-def _run_yt_reporting_two_reports_second_parse_fails(
-    session: Session, tenant_id: UUID
-):
+def _run_yt_reporting_two_reports_second_parse_fails(session: Session, tenant_id: UUID):
     """Drive ``run_one`` with 2 reports; the parser fails on the second.
 
     Mirrors the SQLite bucket-B scenario
@@ -616,24 +602,18 @@ def _run_yt_reporting_two_reports_second_parse_fails(
             return list(real_parser.parse(payload, tenant_id=tenant_id))
 
     header = b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
-    csv_a = header + (
-        f"2026-04-01,{CHANNEL_ID},{ACCOUNT_ID},10.000000,USD\n".encode()
-    )
-    csv_b = header + (
-        f"2026-04-02,{CHANNEL_ID},{ACCOUNT_ID},20.000000,USD\n".encode()
-    )
+    csv_a = header + (f"2026-04-01,{CHANNEL_ID},{ACCOUNT_ID},10.000000,USD\n".encode())
+    csv_b = header + (f"2026-04-02,{CHANNEL_ID},{ACCOUNT_ID},20.000000,USD\n".encode())
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ) as yt_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ) as local_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-    ) as refresh, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ) as http_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
-        return_value=_FlakyParser(),
+    with (
+        patch("ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient") as yt_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
+            return_value=_FlakyParser(),
+        ),
     ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
@@ -646,19 +626,15 @@ def _run_yt_reporting_two_reports_second_parse_fails(
             "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
             "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
         }
-        client.list_reports_for_month.side_effect = (
-            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        client.list_reports_for_month.side_effect = lambda *, account_id, job_id, report_month: (
+            reports_by_job[job_id]
         )
         bytes_by_url = {"https://yt/r1": csv_a, "https://yt/r2": csv_b}
-        client.fetch_report.side_effect = (
-            lambda *, download_url: bytes_by_url[download_url]
-        )
+        client.fetch_report.side_effect = lambda *, download_url: bytes_by_url[download_url]
         store: dict[str, bytes] = {}
         backend = local_cls.return_value
-        backend.upload.side_effect = (
-            lambda *, storage_uri, content: store.__setitem__(
-                storage_uri, content
-            )
+        backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+            storage_uri, content
         )
         backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
         return run_one(
@@ -692,11 +668,9 @@ def test_per_report_failure_persists_failed_raw_file_and_audit_on_postgres(
 
     _seed_owner(pg_url, tenant_id=fresh_tenant, with_channel=True)
     factory = build_session_factory(pg_url)
-    with factory() as session:
+    with factory() as session:  # skipcq: PTC-W0062
         with connector_tenant_context(fresh_tenant, session=session):
-            outcome = _run_yt_reporting_two_reports_second_parse_fails(
-                session, fresh_tenant
-            )
+            outcome = _run_yt_reporting_two_reports_second_parse_fails(session, fresh_tenant)
     assert outcome.run is not None
     assert outcome.run.status == "PARTIAL"
     assert outcome.counts["reports_failed"] == 1
@@ -707,9 +681,7 @@ def test_per_report_failure_persists_failed_raw_file_and_audit_on_postgres(
         with Session(engine) as read:
             run_rows = list(
                 read.scalars(
-                    select(ConnectorRunORM).where(
-                        ConnectorRunORM.tenant_id == fresh_tenant
-                    )
+                    select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == fresh_tenant)
                 )
             )
             assert len(run_rows) == 1
@@ -717,9 +689,7 @@ def test_per_report_failure_persists_failed_raw_file_and_audit_on_postgres(
 
             raw_files = list(
                 read.scalars(
-                    select(RawReportFileORM).where(
-                        RawReportFileORM.tenant_id == fresh_tenant
-                    )
+                    select(RawReportFileORM).where(RawReportFileORM.tenant_id == fresh_tenant)
                 )
             )
             statuses = {rf.report_type: rf.parse_status for rf in raw_files}
@@ -736,9 +706,7 @@ def test_per_report_failure_persists_failed_raw_file_and_audit_on_postgres(
                     .where(AuditLogORM.entity_type == "raw_report_file")
                 )
             )
-            failed_lifecycles = [
-                r.details.get("lifecycle") for r in failed_edges
-            ]
+            failed_lifecycles = [r.details.get("lifecycle") for r in failed_edges]
             assert "FAILED" in failed_lifecycles
     finally:
         engine.dispose()

@@ -400,7 +400,10 @@ class ConnectorJobExecutor:
         key = (tenant_id, connector_key, account_id, report_month)
         outcome: ConnectorRunOutcome | None = None
         try:
-            with self._session_factory() as session, connector_tenant_context(tenant_id, session=session):
+            with (
+                self._session_factory() as session,
+                connector_tenant_context(tenant_id, session=session),
+            ):
                 outcome = run_one(
                     session,
                     tenant_id=tenant_id,
