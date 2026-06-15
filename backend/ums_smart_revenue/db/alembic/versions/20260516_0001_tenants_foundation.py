@@ -142,9 +142,7 @@ def upgrade() -> None:
         "VALUES (:tenant_id, 'ums', 'UMS', 'USD', 'ACTIVE') "
         "ON CONFLICT (slug) DO NOTHING"
     )
-    op.execute(
-        sa.text(tenant_seed_sql).bindparams(tenant_id=UMS_TENANT_ID)
-    )
+    op.execute(sa.text(tenant_seed_sql).bindparams(tenant_id=UMS_TENANT_ID))
 
 
 def downgrade() -> None:

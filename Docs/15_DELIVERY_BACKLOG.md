@@ -730,9 +730,26 @@ single P-tier above.
   `assert_tenant_match` write-path helper (write-path classification =
   all COVERED-ELSEWHERE). Runtime login needs
   `GRANT app_tenant/app_platform TO <login> WITH INHERIT FALSE, SET TRUE`;
-  migration is idempotent and does not assume superuser. `FORCE ROW LEVEL
-  SECURITY` is a named follow-up. See
+  migration is idempotent and does not assume superuser. See
   `Docs/superpowers/plans/2026-06-08-track-e-tenant-rls-source-currency.md`.
+- ✅ FORCE RLS (2026-06-14, branch `feat/force-row-level-security`) —
+  **`FORCE ROW LEVEL SECURITY` DONE** (S3 tenant-hardening follow-up to Track E).
+  Migration `20260612_0002_force_tenant_rls` runs
+  `ALTER TABLE ... FORCE ROW LEVEL SECURITY` on all 25
+  `db.rls.TENANT_SCOPED_TABLES`, reusing the ENABLE migration's drift primitive
+  (`discover_tenant_tables_sql` vs `TENANT_SCOPED_TABLES`, subtracting the
+  `app_tenant_context` helper via `TENANT_CONTEXT_TABLE`) so a new tenant table
+  cannot ship un-`FORCE`d. ENABLE (20260608_0001) already bound the non-owner app
+  roles; `FORCE` additionally binds the **non-superuser table owner** (which
+  Postgres otherwise lets bypass RLS), closing the owner-bypass gap as
+  defense-in-depth that completes Track-E isolation. Superuser / `BYPASSRLS`
+  roles still bypass by Postgres design (so the postgres test-login owner is
+  unaffected and existing PG RLS tests stay green); Postgres-only (dialect-guarded
+  no-op off Postgres), idempotent, rolls back with `NO FORCE` leaving the
+  isolation policies in place. Behavioural A/B proof (throwaway non-superuser
+  owner) in `tests/tenancy/test_force_rls.py`; migration-state proof
+  (`relforcerowsecurity`) alongside it. See
+  `Docs/17_MULTI_TENANT_ARCHITECTURE.md` "FORCE ROW LEVEL SECURITY follow-up".
 - ✅ Track E (2026-06-08) — **B1 source-rows read API DONE.**
   `GET /revenue/source-rows?month=&source_system=` + `/{id}`,
   `finance.view_revenue`-gated, tenant-scoped, keyset-paged

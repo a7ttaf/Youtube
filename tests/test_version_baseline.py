@@ -16,7 +16,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
     dependencies = set(pyproject["project"]["dependencies"])
     test_dependencies = set(pyproject["project"]["optional-dependencies"]["test"])
     expected_dependencies = {
-        "fastapi==0.136.3",
+        "fastapi==0.137.1",
         "pydantic==2.13.4",
         "uvicorn[standard]==0.49.0",
         "SQLAlchemy==2.0.50",
@@ -32,7 +32,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "google-cloud-storage==3.12.0",
     }
     expected_test_dependencies = {
-        "pytest==9.0.3",
+        "pytest==9.1.0",
         "httpx==0.28.1",
         "pypdf==6.13.2",
     }
@@ -45,7 +45,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
 def test_stack_version_baseline_records_runtime_and_frontend_targets():
     assert STACK_VERSION_BASELINE["runtime"]["python"] == "3.14.5"
     assert STACK_VERSION_BASELINE["runtime"]["node_lts"] == "24.15.0"
-    assert STACK_VERSION_BASELINE["backend"]["fastapi"] == "0.136.3"
+    assert STACK_VERSION_BASELINE["backend"]["fastapi"] == "0.137.1"
     assert STACK_VERSION_BASELINE["backend"]["pydantic"] == "2.13.4"
     assert STACK_VERSION_BASELINE["backend"]["sqlalchemy"] == "2.0.50"
     assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.18.4"

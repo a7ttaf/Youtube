@@ -121,8 +121,7 @@ def _compute_us_tax(
 ) -> _UsTaxResult:
     """Compute per-channel US tax and append the missing-data warning."""
     by_channel = {
-        c: _q((us_view_shares.get(c) or Decimal("0")) * gross[c] * withholding_rate)
-        for c in gross
+        c: _q((us_view_shares.get(c) or Decimal("0")) * gross[c] * withholding_rate) for c in gross
     }
     if any(us_view_shares.get(c) is None for c in gross):
         warnings.append(
@@ -208,8 +207,7 @@ def _clamp_negative_bank_fee(
         # evidence-backed delta so net does not drift below bank cash.
         fx_part = _q(max(delta, Decimal("0")))
         warning_message = (
-            "FX exceeds AdSense-bank delta; unmatched FX suppressed "
-            "and bank fee clamped to 0"
+            "FX exceeds AdSense-bank delta; unmatched FX suppressed and bank fee clamped to 0"
         )
     elif fx_part > delta:
         # FIX: A favorable (negative) FX variance smaller than the

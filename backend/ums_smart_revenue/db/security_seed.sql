@@ -1,5 +1,28 @@
 -- Initial UMS security seed data.
 -- Safe to re-run after security_schema.sql.
+--
+-- RUNTIME CONTRACT (Track-E, post-FORCE migration 20260612_0002):
+-- After migration 20260612_0002 the tenant-scoped tables carry FORCE ROW LEVEL
+-- SECURITY, so their owner is policy-subject too. The tenant-scoped writes in
+-- this script (access_scopes, user_role_assignments, user_permission_grants)
+-- are therefore governed by `tenant_id = app_current_tenant_id()`; the global
+-- reference writes (roles, permissions, role_permission_assignments) are NOT
+-- in TENANT_SCOPED_TABLES and are unaffected by FORCE.
+--
+-- Run this raw reseed as one of:
+--   (a) a superuser or BYPASSRLS role -- both bypass FORCE; this is what the
+--       current deployment uses (the postgres superuser), OR
+--   (b) the non-superuser table owner AFTER establishing a real tenant context
+--       with the privileged setter, e.g.
+--         SELECT set_app_current_tenant_id('<tenant-uuid>');
+--       so the FORCEd policies match a concrete tenant instead of seeing NULL.
+--
+-- NOTE: `SET row_security = OFF` is NOT a bypass -- PostgreSQL raises an error
+-- instead of filtering when a policy would otherwise apply, and `SET LOCAL` is
+-- a no-op outside an explicit transaction block, so neither helps an owner
+-- reseed FORCEd tables. The tenant-aware in-repo source of truth is the Python
+-- seed path (backend/ums_smart_revenue/auth/seed.py); prefer it for
+-- tenant-scoped seeding.
 
 INSERT INTO access_scopes (scope_type, scope_id, label)
 VALUES ('global', NULL, 'Global')
@@ -78,7 +101,7 @@ SET label = EXCLUDED.label,
     audit_on_use = EXCLUDED.audit_on_use;
 
 INSERT INTO role_permission_assignments (role_key, permission_key)
-SELECT 'super_owner', key FROM permissions
+SELECT 'super_owner' AS role_key, key AS permission_key FROM permissions
 ON CONFLICT DO NOTHING;
 
 INSERT INTO role_permission_assignments (role_key, permission_key)

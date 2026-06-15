@@ -4,6 +4,12 @@
 # core.autocrlf is intentionally false in this repo.
 * text=auto eol=lf
 
+# Force LF on this one Python file: the repo accidentally shipped it CRLF,
+# which makes `git diff --check` flag every touched line as "trailing
+# whitespace" on Windows checkouts. Lock it to LF so the whitespace gate
+# is clean regardless of core.autocrlf on the developer's machine.
+backend/ums_smart_revenue/auth/audit_service.py text eol=lf
+
 # Vendored agent content (Claude Code / Codex agents skills + GitHub theme
 # JSON5 files + GitHub font licenses). Sources tracked in skills-lock.json
 # and mockups/FontsGH/README.md. Trailing whitespace and indentation may

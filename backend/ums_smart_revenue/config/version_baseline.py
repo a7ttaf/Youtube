@@ -4,7 +4,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "node_lts": "24.15.0",
     },
     "backend": {
-        "fastapi": "0.136.3",
+        "fastapi": "0.137.1",
         "pydantic": "2.13.4",
         "uvicorn": "0.49.0",
         "sqlalchemy": "2.0.50",
@@ -17,7 +17,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "python_pptx": "1.0.2",
         "google_cloud_secret_manager": "2.29.0",
         "google_cloud_storage": "3.12.0",
-        "pytest": "9.0.3",
+        "pytest": "9.1.0",
         "httpx": "0.28.1",
         "pypdf": "6.13.2",
     },

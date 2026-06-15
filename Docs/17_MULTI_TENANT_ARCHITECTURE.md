@@ -113,13 +113,29 @@ immaterial here — only its grant surface matters.
 > FK to `committed_allocation_runs` (which IS RLS-protected). A future spec
 > should add `tenant_id` to these child tables for direct DB-level isolation.
 
-### FORCE ROW LEVEL SECURITY follow-up
+### FORCE ROW LEVEL SECURITY follow-up — DELIVERED (2026-06-14, `feat/force-row-level-security`)
 
-RLS is enabled but **not** `FORCE`d yet. Evaluate `FORCE ROW LEVEL SECURITY`
-after `app_tenant`/`app_platform` rollout, the Alembic role strategy, the seed
-scripts, and the Postgres test fixtures make privileged-data work explicit (so
-the migration/bootstrap/seed paths that legitimately need to write across the
-policy are accounted for before forcing RLS on table owners too).
+RLS is now **`FORCE`d** in addition to being enabled. Migration
+`20260612_0002_force_tenant_rls` runs `ALTER TABLE ... FORCE ROW LEVEL SECURITY`
+on **every** table in `TENANT_SCOPED_TABLES` (the same 25-table allowlist in
+`db/rls.py`), reusing the ENABLE migration's drift primitive
+(`discover_tenant_tables_sql` vs `TENANT_SCOPED_TABLES`, subtracting the
+`app_tenant_context` backend-PID helper via `TENANT_CONTEXT_TABLE`) so a new
+tenant table cannot ship un-`FORCE`d. It is Postgres-only (dialect-guarded
+no-op off Postgres), idempotent, and rolls back with `NO FORCE` while leaving
+ENABLE + the isolation policies in place.
+
+What `FORCE` changes vs ENABLE: ENABLE already bound the non-owner app roles
+(`app_tenant`/`app_platform` are non-superuser, non-`BYPASSRLS`, non-owner).
+`FORCE` additionally binds the **non-superuser table owner**, which by Postgres
+design bypasses RLS otherwise — so a non-superuser owner would silently read
+across the policy. This is defense-in-depth that **completes Track-E** isolation
+at the owner boundary. A **superuser** and any **`BYPASSRLS`** role still bypass
+`FORCE` (unchanged Postgres semantics); in the disposable test DB the login is
+the postgres superuser that owns the tables, so `FORCE` is invisible to it and
+the existing PG RLS tests are unaffected. The behavioural proof lives in
+`tests/tenancy/test_force_rls.py`, which stands up a throwaway non-superuser
+owner and A/B-contrasts a `FORCE`d table against an ENABLE-only one.
 
 ---
 
