@@ -813,6 +813,17 @@ now wired to `GET /audit/events` (see below).
   probe; `/session/me` gains `canViewConnectorHealth` so the SPA gate mirrors the
   route. No migration. Remaining Track D (OAuth consent, live pulls, token-expiry
   schema + background monitoring) stays creds/schema-blocked.
+- ✅ Connector credential token-health surface — branch
+  `feat/connector-credential-health`: new read-only `GET
+  /connectors/credentials/health` (`VIEW_CONNECTOR_HEALTH` gate, fail-closed;
+  distinct from the `MANAGE_CONNECTORS`-gated credential list) returns
+  `{credentials: [{...telemetry, health_state}]}`, deriving a coarse
+  `health_state` (`healthy`/`expiring`/`auth_failed`/`missing`/`unknown`) purely
+  from the already-persisted refresh-telemetry columns via a pure
+  `derive_credential_health_state` helper. Connector-scoped viewers are narrowed
+  to their granted connector ids (no foreign-credential leak); offset-paginated
+  (`limit` ≤ `100`). ConnectorsView surfaces the per-credential health badges;
+  read-only, no audit, no migration.
 - ✅ Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the Channel
   Registry table is wired to `GET /channels` (replacing `REGISTRY_ROWS` mock).
   Client-side derivation: avatar initials, CMS badge tone from `cms_status`,

@@ -69,6 +69,14 @@ class _SlotReservation:
     actor_identity: ConnectorJobActor
 
 
+@dataclass(frozen=True)
+class _ActiveJob:
+    """Registry entry for an enqueued worker plus shutdown-audit metadata."""
+
+    future: Future
+    actor_identity: ConnectorJobActor
+
+
 # ============================================================================
 # Purpose: Own a bounded ThreadPoolExecutor + an in-process registry of live
 #   jobs keyed (tenant, connector_key, account_id, report_month), and run each
@@ -117,7 +125,7 @@ class _SlotReservation:
 class ConnectorJobExecutor:
     """Bounded in-process runner for connector pull jobs with a dup registry.
 
-    Registry values are either a :class:`Future` (the worker has been
+    Registry values are either a :class:`_ActiveJob` (the worker has been
     enqueued) or a :class:`_SlotReservation` (the route has claimed the
     slot but the audit row has not yet committed). Both count as
     ``active`` for dedup purposes (``has_active_job`` checks membership).
@@ -134,7 +142,7 @@ class ConnectorJobExecutor:
         self._session_factory = session_factory
         self._stale_running_hours = stale_running_hours
         self._lock = threading.Lock()
-        self._registry: dict[_JobKey, Future | _SlotReservation] = {}
+        self._registry: dict[_JobKey, Future | _SlotReservation | _ActiveJob] = {}
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="ums-connector-job",
@@ -231,6 +239,8 @@ class ConnectorJobExecutor:
         key = reservation.key
         with self._lock:
             current = self._registry.get(key)
+            if isinstance(current, _ActiveJob):
+                return current.future
             if isinstance(current, Future):
                 return current
             if current is not reservation:
@@ -336,9 +346,7 @@ class ConnectorJobExecutor:
 
         Must be called while holding ``self._lock``.
         """
-        future._actor_identity = actor_identity  # type: ignore[attr-defined]  # skipcq: PYL-W0212
-        future._job_key = key  # type: ignore[attr-defined]  # skipcq: PYL-W0212
-        self._registry[key] = future
+        self._registry[key] = _ActiveJob(future=future, actor_identity=actor_identity)
 
     def _audit_pending_on_shutdown(self) -> None:
         """Audit every accepted job that was cancelled before it started.
@@ -359,16 +367,12 @@ class ConnectorJobExecutor:
             self._registry.clear()
 
         cancelled: list[tuple[_JobKey, ConnectorJobActor]] = []
-        for _key, entry in entries:
-            if not isinstance(entry, Future):
+        for job_key, entry in entries:
+            if not isinstance(entry, _ActiveJob):
                 continue
-            if not entry.cancelled():
+            if not entry.future.cancelled():
                 continue
-            actor_identity = getattr(entry, "_actor_identity", None)
-            job_key = getattr(entry, "_job_key", None)
-            if actor_identity is None or job_key is None:
-                continue
-            cancelled.append((job_key, actor_identity))
+            cancelled.append((job_key, entry.actor_identity))
 
         for job_key, actor_identity in cancelled:
             tenant_id, connector_key, account_id, report_month = job_key
@@ -396,17 +400,19 @@ class ConnectorJobExecutor:
         key = (tenant_id, connector_key, account_id, report_month)
         outcome: ConnectorRunOutcome | None = None
         try:
-            with self._session_factory() as session:  # skipcq: PTC-W0062
-                with connector_tenant_context(tenant_id, session=session):
-                    outcome = run_one(
-                        session,
-                        tenant_id=tenant_id,
-                        connector_key=connector_key,
-                        account_id=account_id,
-                        report_month=report_month,
-                        dry_run=dry_run,
-                        triggered_by_user_id=triggered_by_user_id,
-                    )
+            with (
+                self._session_factory() as session,
+                connector_tenant_context(tenant_id, session=session),
+            ):
+                outcome = run_one(
+                    session,
+                    tenant_id=tenant_id,
+                    connector_key=connector_key,
+                    account_id=account_id,
+                    report_month=report_month,
+                    dry_run=dry_run,
+                    triggered_by_user_id=triggered_by_user_id,
+                )
             if dry_run and outcome is not None:
                 # FIX: dry-run writes no connector_runs row (run_one skips
                 # start_run entirely), so the only durable record of what
@@ -450,6 +456,26 @@ class ConnectorJobExecutor:
             )
         finally:
             self._deregister(key)
+
+    def audit_failed_before_start(
+        self,
+        *,
+        tenant_id: UUID,
+        connector_key: str,
+        account_id: str,
+        report_month: str,
+        error_class: str,
+        actor_identity: ConnectorJobActor,
+    ) -> None:
+        """Public hook for request-session after_commit activation failures."""
+        self._audit_failed_before_start(
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            account_id=account_id,
+            report_month=report_month,
+            error_class=error_class,
+            actor_identity=actor_identity,
+        )
 
     def _audit_failed_before_start(
         self,
@@ -499,27 +525,26 @@ class ConnectorJobExecutor:
         )
         token = TENANT_CTX.set(minimal_tenant)
         try:
-            with self._session_factory() as session:
+            with self._session_factory() as session, platform_lane(session):
                 # audit_logs is platform-only-write: elevate to app_platform for
                 # this standalone audit (run_one does its own elevation; this
                 # audit runs OUTSIDE run_one). No-op off Postgres.
-                with platform_lane(session):
-                    sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
-                    record_audit_event(
-                        sink=sink,
-                        actor=actor,
-                        event_type=AuditEventType.CONNECTOR_JOB_RUN,
-                        entity_type="api_connector",
-                        entity_id=f"{connector_key}:{account_id}",
-                        scope=AccessScope.connector(connector_key),
-                        reason="connector job failed before start",
-                        details={
-                            "action": "job_failed_before_start",
-                            "report_month": report_month,
-                            "error_class": error_class,
-                        },
-                    )
-                    session.commit()
+                sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+                record_audit_event(
+                    sink=sink,
+                    actor=actor,
+                    event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                    entity_type="api_connector",
+                    entity_id=f"{connector_key}:{account_id}",
+                    scope=AccessScope.connector(connector_key),
+                    reason="connector job failed before start",
+                    details={
+                        "action": "job_failed_before_start",
+                        "report_month": report_month,
+                        "error_class": error_class,
+                    },
+                )
+                session.commit()
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
                 "Failed to persist job_failed_before_start audit (tenant=%s)",
@@ -553,35 +578,37 @@ class ConnectorJobExecutor:
             for report_type, error_class in outcome.per_report_failures
         ]
         try:
-            with self._session_factory() as session:  # skipcq: PTC-W0062
-                with connector_tenant_context(tenant_id, session=session):
-                    with platform_lane(session):
-                        sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
-                        record_audit_event(
-                            sink=sink,
-                            actor=actor,
-                            event_type=AuditEventType.CONNECTOR_JOB_RUN,
-                            entity_type="api_connector",
-                            entity_id=f"{connector_key}:{account_id}",
-                            scope=AccessScope.connector(connector_key),
-                            reason="connector dry-run completed",
-                            details={
-                                "action": "job_dry_run_completed",
-                                "report_month": report_month,
-                                "dry_run": True,
-                                "counts": dict(outcome.counts),
-                                "per_report_failures": per_report_failures,
-                            },
-                        )
-                        session.commit()
+            with (
+                self._session_factory() as session,
+                connector_tenant_context(tenant_id, session=session),
+                platform_lane(session),
+            ):
+                sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+                record_audit_event(
+                    sink=sink,
+                    actor=actor,
+                    event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                    entity_type="api_connector",
+                    entity_id=f"{connector_key}:{account_id}",
+                    scope=AccessScope.connector(connector_key),
+                    reason="connector dry-run completed",
+                    details={
+                        "action": "job_dry_run_completed",
+                        "report_month": report_month,
+                        "dry_run": True,
+                        "counts": dict(outcome.counts),
+                        "per_report_failures": per_report_failures,
+                    },
+                )
+                session.commit()
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
                 "Failed to persist job_dry_run_completed audit (tenant=%s)",
                 tenant_id,
             )
 
-    def _build_audit_actor(  # skipcq: PYL-R0201
-        self,
+    @staticmethod
+    def _build_audit_actor(
         *,
         tenant_id: UUID,
         actor_identity: ConnectorJobActor,

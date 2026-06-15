@@ -12,7 +12,7 @@ See: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.m
 import logging
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -156,6 +156,296 @@ def select_canonical_row(
     return None, list(rows)
 
 
+@dataclass
+class _NormalizationWork:
+    """Mutable result accumulator for one normalization pass."""
+
+    facts_repo: SqlAlchemyRevenueFactRepository
+    created: list[RevenueFactEntry] = field(default_factory=list)
+    updated: list[RevenueFactEntry] = field(default_factory=list)
+    unchanged: list[RevenueFactEntry] = field(default_factory=list)
+    skipped: list[SkippedSourceRow] = field(default_factory=list)
+    facts_by_channel: dict[str, list[RevenueFactEntry]] = field(default_factory=dict)
+
+
+def _channel_scope_label(channel_ids: set[str] | None) -> str:
+    """Return the stable scope label used by normalizer logging."""
+    return "all" if channel_ids is None else f"n_channels={len(channel_ids)}"
+
+
+def _scoped_source_rows(
+    rows: list[GoogleRevenueSourceRowEntry],
+    channel_ids: set[str] | None,
+) -> list[GoogleRevenueSourceRowEntry]:
+    """Drop out-of-scope rows without counting them as skipped records."""
+    if channel_ids is None:
+        return rows
+    return [row for row in rows if row.youtube_channel_id in channel_ids]
+
+
+def _active_channel_ids(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    rows: list[GoogleRevenueSourceRowEntry],
+) -> set[str]:
+    """Load active channel IDs referenced by scoped source rows in one query."""
+    in_scope_channel_ids = {row.youtube_channel_id for row in rows if row.youtube_channel_id}
+    if not in_scope_channel_ids:
+        return set()
+    return set(
+        session.scalars(
+            select(YouTubeChannelORM.youtube_channel_id).where(
+                YouTubeChannelORM.tenant_id == tenant_id,
+                YouTubeChannelORM.active.is_(True),
+                YouTubeChannelORM.youtube_channel_id.in_(in_scope_channel_ids),
+            )
+        ).all()
+    )
+
+
+def _source_row_buckets(
+    rows: list[GoogleRevenueSourceRowEntry],
+) -> dict[tuple[str | None, str], list[GoogleRevenueSourceRowEntry]]:
+    """Bucket source rows by normalized fact identity: channel and source system."""
+    buckets: dict[tuple[str | None, str], list[GoogleRevenueSourceRowEntry]] = {}
+    for row in rows:
+        key = (row.youtube_channel_id, row.source_system)
+        buckets.setdefault(key, []).append(row)
+    return buckets
+
+
+def _append_skipped(
+    skipped: list[SkippedSourceRow],
+    rows: list[GoogleRevenueSourceRowEntry],
+    reason: SkipReason,
+) -> None:
+    """Record one skip reason for each source row in a bucket subset."""
+    skipped.extend(SkippedSourceRow(source_row_id=row.id, reason=reason) for row in rows)
+
+
+def _bucket_rejection_reason(
+    channel_id: str | None,
+    active_channel_ids: set[str],
+) -> SkipReason | None:
+    """Return the channel-level skip reason for a bucket, if any."""
+    if channel_id is None:
+        return SkipReason.MISSING_CHANNEL_ID
+    if channel_id not in active_channel_ids:
+        return SkipReason.UNKNOWN_CHANNEL
+    return None
+
+
+def _eligible_usd_rows(
+    bucket_rows: list[GoogleRevenueSourceRowEntry],
+    skipped: list[SkippedSourceRow],
+) -> list[GoogleRevenueSourceRowEntry]:
+    """Filter unsupported value kinds and non-USD rows, recording exact skips."""
+    usd_rows: list[GoogleRevenueSourceRowEntry] = []
+    for row in bucket_rows:
+        if row.value_kind in _UNSUPPORTED_VALUE_KINDS:
+            skipped.append(
+                SkippedSourceRow(source_row_id=row.id, reason=SkipReason.UNSUPPORTED_VALUE_KIND)
+            )
+            continue
+        if row.currency_code != "USD":
+            skipped.append(
+                SkippedSourceRow(source_row_id=row.id, reason=SkipReason.NON_USD_CURRENCY)
+            )
+            continue
+        usd_rows.append(row)
+    return usd_rows
+
+
+def _canonical_source_row(
+    usd_rows: list[GoogleRevenueSourceRowEntry],
+    skipped: list[SkippedSourceRow],
+) -> GoogleRevenueSourceRowEntry | None:
+    """Select the canonical USD row and record non-canonical USD siblings."""
+    canonical, non_canonical_rest = select_canonical_row(usd_rows)
+    if canonical is None:
+        _append_skipped(skipped, usd_rows, SkipReason.NO_CANONICAL_ROW)
+        return None
+    _append_skipped(skipped, non_canonical_rest, SkipReason.NON_CANONICAL_METRIC)
+    return canonical
+
+
+def _source_kind_for_system(source_system: str) -> RevenueFactSourceKind:
+    """Map source-system keys to the revenue fact source kind enum."""
+    mapped_source_kind = SOURCE_SYSTEM_TO_SOURCE_KIND.get(source_system)
+    if mapped_source_kind is None:
+        raise RevenueFactValidationError(
+            f"Unsupported source_system for source kind mapping: {source_system!r}"
+        )
+    return mapped_source_kind
+
+
+def _existing_fact_for_bucket(
+    work: _NormalizationWork,
+    *,
+    month: str,
+    channel_id: str,
+    source_kind: RevenueFactSourceKind,
+) -> RevenueFactEntry | None:
+    """Read and cache existing revenue facts for a channel-month bucket."""
+    if channel_id not in work.facts_by_channel:
+        work.facts_by_channel[channel_id] = work.facts_repo.list_channel_month_facts(
+            month=month,
+            youtube_channel_id=channel_id,
+        )
+    existing_facts = work.facts_by_channel[channel_id]
+    return next(
+        (fact for fact in existing_facts if fact.source_kind == source_kind.value),
+        None,
+    )
+
+
+def _record_canonical_fact(
+    work: _NormalizationWork,
+    *,
+    month: str,
+    channel_id: str,
+    source_kind: RevenueFactSourceKind,
+    canonical: GoogleRevenueSourceRowEntry,
+    actor_user_id: str,
+) -> RevenueFactEntry:
+    """Write the normalized canonical row through the finance repository."""
+    return work.facts_repo.record_fact(
+        month=month,
+        youtube_channel_id=channel_id,
+        source_kind=source_kind.value,
+        source_report_id=canonical.source_report_id,
+        gross_revenue_usd=canonical.amount_native,
+        net_revenue_usd=None,
+        shorts_revenue_usd=None,
+        longform_revenue_usd=None,
+        subscription_revenue_usd=None,
+        views=0,
+        watch_time_minutes=Decimal("0"),
+        confidence_score=Decimal("1.0"),
+        actor_user_id=actor_user_id,
+    )
+
+
+def _classify_canonical_fact(
+    work: _NormalizationWork,
+    *,
+    month: str,
+    channel_id: str,
+    source_kind: RevenueFactSourceKind,
+    canonical: GoogleRevenueSourceRowEntry,
+    actor_user_id: str,
+) -> None:
+    """Classify the canonical row as created, updated, or unchanged."""
+    existing = _existing_fact_for_bucket(
+        work,
+        month=month,
+        channel_id=channel_id,
+        source_kind=source_kind,
+    )
+    if existing is None:
+        work.created.append(
+            _record_canonical_fact(
+                work,
+                month=month,
+                channel_id=channel_id,
+                source_kind=source_kind,
+                canonical=canonical,
+                actor_user_id=actor_user_id,
+            )
+        )
+        return
+    if _payload_matches(
+        existing,
+        proposed_gross=canonical.amount_native,
+        proposed_source_report_id=canonical.source_report_id,
+    ):
+        work.unchanged.append(existing)
+        return
+    work.updated.append(
+        _record_canonical_fact(
+            work,
+            month=month,
+            channel_id=channel_id,
+            source_kind=source_kind,
+            canonical=canonical,
+            actor_user_id=actor_user_id,
+        )
+    )
+
+
+# ============================================================================
+# Purpose: Process one source-row bucket through skip classification,
+#          canonical selection, and revenue-fact write classification.
+# Database/ORM: Writes only through SqlAlchemyRevenueFactRepository.record_fact().
+# Standards: Exact skip reasons, actor-insensitive unchanged comparison, typed
+#            RevenueFactValidationError for unsupported source systems.
+# Blast Radius: Finance totals, audit trail, month-lock integrity.
+# ============================================================================
+def _process_source_bucket(
+    work: _NormalizationWork,
+    *,
+    month: str,
+    channel_id: str | None,
+    source_system: str,
+    bucket_rows: list[GoogleRevenueSourceRowEntry],
+    active_channel_ids: set[str],
+    actor_user_id: str,
+) -> None:
+    """Normalize one homogeneous channel/source-system bucket."""
+    rejection_reason = _bucket_rejection_reason(channel_id, active_channel_ids)
+    if rejection_reason is not None:
+        _append_skipped(work.skipped, bucket_rows, rejection_reason)
+        return
+    assert channel_id is not None
+    usd_rows = _eligible_usd_rows(bucket_rows, work.skipped)
+    if not usd_rows:
+        return
+    canonical = _canonical_source_row(usd_rows, work.skipped)
+    if canonical is None:
+        return
+    _classify_canonical_fact(
+        work,
+        month=month,
+        channel_id=channel_id,
+        source_kind=_source_kind_for_system(source_system),
+        canonical=canonical,
+        actor_user_id=actor_user_id,
+    )
+
+
+def _normalization_result(work: _NormalizationWork) -> NormalizationResult:
+    """Freeze accumulated normalization lists into the public result shape."""
+    return NormalizationResult(
+        created=work.created,
+        updated=work.updated,
+        unchanged=work.unchanged,
+        skipped=work.skipped,
+    )
+
+
+def _log_normalization_complete(
+    *,
+    tenant_id: UUID,
+    month: str,
+    result: NormalizationResult,
+) -> None:
+    """Emit stable completion telemetry without source-row identifiers."""
+    reason_counts = Counter(s.reason.value for s in result.skipped)
+    logger.info(
+        "normalize_month complete tenant_id=%s month=%s "
+        "created=%d updated=%d unchanged=%d skipped=%d "
+        "skipped_by_reason=%s",
+        tenant_id,
+        month,
+        len(result.created),
+        len(result.updated),
+        len(result.unchanged),
+        len(result.skipped),
+        dict(reason_counts),
+    )
+
+
 class GoogleSourceNormalizer:
     """Bridge google_revenue_source_rows -> MonthlyChannelRevenueFactORM.
 
@@ -186,14 +476,13 @@ class GoogleSourceNormalizer:
     #   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> write path.
     #   - File: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md
     # ============================================================================
-    def normalize_month(  # skipcq: PY-R1000
+    def normalize_month(
         self,
         *,
         month: str,
         channel_ids: list[str] | None = None,
         actor_user_id: str,
     ) -> NormalizationResult:
-        # Step 0 - Input normalization.
         _validate_month(month)
         normalized_channel_ids: set[str] | None = (
             set(channel_ids) if channel_ids is not None else None
@@ -203,17 +492,10 @@ class GoogleSourceNormalizer:
             "normalize_month start tenant_id=%s month=%s channel_scope=%s actor_user_id=%s",
             self._tenant_id,
             month,
-            (
-                "all"
-                if normalized_channel_ids is None
-                else f"n_channels={len(normalized_channel_ids)}"
-            ),
+            _channel_scope_label(normalized_channel_ids),
             actor_user_id,
         )
 
-        # Step 1 - Upfront locked-month gate. Acquires the finance-month
-        # advisory lock + SELECT ... FOR UPDATE on the close row; may create
-        # an OPEN close row when none exists.
         close_row = get_or_create_month_close_row(
             self._session,
             month,
@@ -228,209 +510,35 @@ class GoogleSourceNormalizer:
             )
             raise RevenueFactLockedMonthError("Finance month is locked for revenue fact imports")
 
-        # Step 2 - Fetch source rows for this tenant + month.
         source_repo = SqlAlchemyGoogleRevenueSourceRowRepository(self._session)
-        all_rows = source_repo.list(self._tenant_id, report_month=month)
-
-        # Step 3 - Apply channel_ids scope filter.
-        # When channel_ids is provided, out-of-scope rows (including null-
-        # channel rows) are silently dropped, NOT classified as skips. The
-        # caller restricted scope; "not requested" is not "broken".
-        if normalized_channel_ids is not None:
-            in_scope_rows = [
-                row for row in all_rows if row.youtube_channel_id in normalized_channel_ids
-            ]
-        else:
-            in_scope_rows = all_rows
-
-        # Step 4 - Resolve active channels for this tenant in one batched query.
-        in_scope_channel_ids = {
-            row.youtube_channel_id for row in in_scope_rows if row.youtube_channel_id is not None
-        }
-        active_channel_ids: set[str] = set()
-        if in_scope_channel_ids:
-            active_channel_ids = set(
-                self._session.scalars(
-                    select(YouTubeChannelORM.youtube_channel_id).where(
-                        YouTubeChannelORM.tenant_id == self._tenant_id,
-                        YouTubeChannelORM.active.is_(True),
-                        YouTubeChannelORM.youtube_channel_id.in_(in_scope_channel_ids),
-                    )
-                ).all()
-            )
-
-        # Step 5 - Bucket by (channel_id, source_system).
-        buckets: dict[tuple[str | None, str], list[GoogleRevenueSourceRowEntry]] = {}
-        for row in in_scope_rows:
-            key = (row.youtube_channel_id, row.source_system)
-            buckets.setdefault(key, []).append(row)
-
-        created: list[RevenueFactEntry] = []
-        updated: list[RevenueFactEntry] = []
-        unchanged: list[RevenueFactEntry] = []
-        skipped: list[SkippedSourceRow] = []
-        facts_repo = SqlAlchemyRevenueFactRepository(
+        in_scope_rows = _scoped_source_rows(
+            source_repo.list(self._tenant_id, report_month=month),
+            normalized_channel_ids,
+        )
+        active_channel_ids = _active_channel_ids(
             self._session,
             tenant_id=self._tenant_id,
+            rows=in_scope_rows,
         )
-        facts_by_channel: dict[str, list[RevenueFactEntry]] = {}
+        buckets = _source_row_buckets(in_scope_rows)
+        work = _NormalizationWork(
+            facts_repo=SqlAlchemyRevenueFactRepository(
+                self._session,
+                tenant_id=self._tenant_id,
+            )
+        )
 
-        # Step 6 - Per-bucket processing.
         for (channel_id, source_system), bucket_rows in buckets.items():
-            if channel_id is None:
-                # Step 6(a) - missing channel id.
-                skipped.extend(
-                    SkippedSourceRow(source_row_id=r.id, reason=SkipReason.MISSING_CHANNEL_ID)
-                    for r in bucket_rows
-                )
-                continue
-            if channel_id not in active_channel_ids:
-                # Step 6(b) - unknown / inactive channel.
-                skipped.extend(
-                    SkippedSourceRow(source_row_id=r.id, reason=SkipReason.UNKNOWN_CHANNEL)
-                    for r in bucket_rows
-                )
-                continue
-            # Step 6(c) - drop tax/deduction/adjustment rows.
-            unsupported_in_bucket = [
-                r for r in bucket_rows if r.value_kind in _UNSUPPORTED_VALUE_KINDS
-            ]
-            for r in unsupported_in_bucket:
-                skipped.append(
-                    SkippedSourceRow(source_row_id=r.id, reason=SkipReason.UNSUPPORTED_VALUE_KIND)
-                )
-            remaining = [r for r in bucket_rows if r.value_kind not in _UNSUPPORTED_VALUE_KINDS]
-            if not remaining:
-                continue
-            # Step 6(d) - USD-only filter; runs BEFORE canonical selection so
-            # a non-USD row cannot win canonical and starve an eligible USD
-            # sibling (spec Section 5 Step 6(d)).
-            non_usd = [r for r in remaining if r.currency_code != "USD"]
-            for r in non_usd:
-                skipped.append(
-                    SkippedSourceRow(source_row_id=r.id, reason=SkipReason.NON_USD_CURRENCY)
-                )
-            usd_rows = [r for r in remaining if r.currency_code == "USD"]
-            if not usd_rows:
-                continue
-            # Step 6(e) - apply pure canonical-metric rule on USD-eligible rows.
-            canonical, non_canonical_rest = select_canonical_row(usd_rows)
-
-            if canonical is None:
-                # Step 6(f) - USD candidates existed but none matched the
-                # preferred metric_keys for this source_system.
-                skipped.extend(
-                    SkippedSourceRow(
-                        source_row_id=r.id,
-                        reason=SkipReason.NO_CANONICAL_ROW,
-                    )
-                    for r in usd_rows
-                )
-                continue
-
-            # Step 6(g) - non-canonical USD siblings.
-            skipped.extend(
-                SkippedSourceRow(
-                    source_row_id=r.id,
-                    reason=SkipReason.NON_CANONICAL_METRIC,
-                )
-                for r in non_canonical_rest
-            )
-            # Step 6(h) - build proposed payload from canonical row + defaults.
-            mapped_source_kind = SOURCE_SYSTEM_TO_SOURCE_KIND.get(source_system)
-            if mapped_source_kind is None:
-                raise RevenueFactValidationError(
-                    f"Unsupported source_system for source kind mapping: {source_system!r}"
-                )
-
-            # Step 6(i) - read existing fact for (tenant, month, channel, source_kind).
-            # Cache facts per channel to avoid N+1 queries when the same
-            # channel_id appears across multiple source_system buckets.
-            if channel_id not in facts_by_channel:
-                facts_by_channel[channel_id] = facts_repo.list_channel_month_facts(
-                    month=month,
-                    youtube_channel_id=channel_id,
-                )
-            existing_facts = facts_by_channel[channel_id]
-            existing = next(
-                (fact for fact in existing_facts if fact.source_kind == mapped_source_kind.value),
-                None,
-            )
-
-            # ============================================================================
-            # Purpose: Classify the canonical row as CREATED, UPDATED, or UNCHANGED
-            #          and write to MonthlyChannelRevenueFactORM via record_fact().
-            #          Byte-identical payloads (even from different actors) yield UNCHANGED.
-            # Database/ORM: Writes via SqlAlchemyRevenueFactRepository.record_fact().
-            # Standards: Fails closed on locked months. Actor-insensitive for UNCHANGED.
-            # Blast Radius: Revenue totals, payment matching, audit trail.
-            # ============================================================================
-            # Step 6(j) - classify via payload-only comparison.
-            if existing is None:
-                # CREATED path.
-                written = facts_repo.record_fact(
-                    month=month,
-                    youtube_channel_id=channel_id,
-                    source_kind=mapped_source_kind.value,
-                    source_report_id=canonical.source_report_id,
-                    gross_revenue_usd=canonical.amount_native,
-                    net_revenue_usd=None,
-                    shorts_revenue_usd=None,
-                    longform_revenue_usd=None,
-                    subscription_revenue_usd=None,
-                    views=0,
-                    watch_time_minutes=Decimal("0"),
-                    confidence_score=Decimal("1.0"),
-                    actor_user_id=actor_user_id,
-                )
-                created.append(written)
-                continue
-            # Existing fact present: compare and classify.
-            if _payload_matches(
-                existing,
-                proposed_gross=canonical.amount_native,
-                proposed_source_report_id=canonical.source_report_id,
-            ):
-                unchanged.append(existing)
-                continue
-            written = facts_repo.record_fact(
+            _process_source_bucket(
+                work,
                 month=month,
-                youtube_channel_id=channel_id,
-                source_kind=mapped_source_kind.value,
-                source_report_id=canonical.source_report_id,
-                gross_revenue_usd=canonical.amount_native,
-                net_revenue_usd=None,
-                shorts_revenue_usd=None,
-                longform_revenue_usd=None,
-                subscription_revenue_usd=None,
-                views=0,
-                watch_time_minutes=Decimal("0"),
-                confidence_score=Decimal("1.0"),
+                channel_id=channel_id,
+                source_system=source_system,
+                bucket_rows=bucket_rows,
+                active_channel_ids=active_channel_ids,
                 actor_user_id=actor_user_id,
             )
-            updated.append(written)
 
-        result = NormalizationResult(
-            created=created,
-            updated=updated,
-            unchanged=unchanged,
-            skipped=skipped,
-        )
-        # Aggregate skip-reason distribution (counts only, no source_row_id
-        # values) per spec Section 6.5 "Observability". Empty dict when
-        # nothing was skipped — kept in the line so log-parsers see a
-        # stable structure regardless of outcome.
-        reason_counts = Counter(s.reason.value for s in result.skipped)
-        logger.info(
-            "normalize_month complete tenant_id=%s month=%s "
-            "created=%d updated=%d unchanged=%d skipped=%d "
-            "skipped_by_reason=%s",
-            self._tenant_id,
-            month,
-            len(result.created),
-            len(result.updated),
-            len(result.unchanged),
-            len(result.skipped),
-            dict(reason_counts),
-        )
+        result = _normalization_result(work)
+        _log_normalization_complete(tenant_id=self._tenant_id, month=month, result=result)
         return result

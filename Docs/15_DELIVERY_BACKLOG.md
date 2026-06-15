@@ -1,6 +1,6 @@
 # Delivery Backlog
 
-## Status (2026-06-13)
+## Status (2026-06-15)
 
 Reconciled through PR #97 (executor Bucket-A audit RLS fix). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
@@ -641,6 +641,18 @@ single P-tier above.
   No migration; no live credentials needed. Remaining Track D is creds/schema
   blocked: OAuth consent flow, live pulls, token-expiry/last-error schema +
   background monitoring (the refresh-telemetry columns landed in PR #95 Part 2).
+- ✅ Connector credential token-health surface — branch
+  `feat/connector-credential-health`: new read-only `GET
+  /connectors/credentials/health` (`VIEW_CONNECTOR_HEALTH` gate, fail-closed;
+  distinct from the `MANAGE_CONNECTORS`-gated `GET /connectors/credentials`)
+  returns `{credentials: [{...telemetry, health_state}]}` — each entry repeats
+  the credential metadata + four refresh-telemetry fields and appends a derived
+  `health_state` (`healthy`/`expiring`/`auth_failed`/`missing`/`unknown`) from a
+  pure, unit-testable `derive_credential_health_state(entry, *, as_of)` helper
+  over already-persisted columns (no live OAuth refresh). Connector-scoped
+  viewers narrowed to their granted connector ids (no foreign-credential leak);
+  offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
+  ConnectorsView. Read-only: no audit write, no migration.
 - ✅ Channel Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the
   Registry table is wired to `GET /channels` (replacing the `REGISTRY_ROWS`
   mock). All display fields derived client-side (avatar, CMS badge, source

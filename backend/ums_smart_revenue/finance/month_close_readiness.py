@@ -10,11 +10,11 @@ from ums_smart_revenue.db.finance_models import (
     RevenueManualOverrideORM,
 )
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
-from ums_smart_revenue.finance.month_close import acquire_finance_month_advisory_lock
+from ums_smart_revenue.finance.month_close_locks import acquire_finance_month_advisory_lock
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
 )
-from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
+from ums_smart_revenue.finance.revenue_fact_entries import RevenueFactEntry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 

@@ -1,5 +1,7 @@
 """FastAPI route handlers for connector credential management and test-connection probing."""
 
+from __future__ import annotations
+
 # pylint: disable=too-many-arguments, too-many-positional-arguments
 import logging
 from datetime import UTC, datetime, timedelta
@@ -30,6 +32,7 @@ from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialEntry,
     ConnectorCredentialValidationError,
     SqlAlchemyConnectorCredentialRepository,
+    derive_credential_health_state,
     is_external_secret_ref,
 )
 from ums_smart_revenue.connectors.google.errors import (
@@ -234,6 +237,73 @@ def list_connector_runs(
     }
 
 
+@router.get("/credentials/health")
+def list_connector_credential_health(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)
+    ],
+    limit: Annotated[int, Query(ge=1, le=MAX_CREDENTIAL_PAGE_SIZE)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, object]:
+    """Return credential refresh telemetry plus a derived health_state per credential."""
+    # ========================================================================
+    # Purpose: Surface read-only OAuth credential health (the four already-
+    #   persisted refresh-telemetry columns plus a derived coarse health_state)
+    #   for the dashboard. Fail-closed behind VIEW_CONNECTOR_HEALTH at global or
+    #   connector scope; connector-scoped callers are narrowed to their granted
+    #   connector ids (no foreign-credential leak). Distinct from the
+    #   MANAGE_CONNECTORS-gated GET /connectors/credentials list, which is
+    #   unchanged. No audit emission (operational metadata read, mirrors the
+    #   credential-list and run-history routes).
+    # Database/ORM: ApiConnectorCredentialORM via
+    #   SqlAlchemyConnectorCredentialRepository.for_tenant + list_credentials
+    #   (read only).
+    # Standards: Boundary permission gate via connector_health_connector_ids +
+    #   _require_connector_health; typed ConnectorCredentialValidationError ->
+    #   HTTP 422; health_state is additive (all raw to_api fields preserved);
+    #   as_of is an explicit aware-UTC instant passed to the pure deriver;
+    #   reads are bound to the resolved request tenant before listing.
+    # Blast Radius: Connector credential read surface only. Finance/auth-
+    #   mutation/audit/Neo4j untouched.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/credentials.py ->
+    #     derive_credential_health_state + list_credentials.
+    #   - File: backend/ums_smart_revenue/auth/policy.py ->
+    #     connector_health_connector_ids.
+    # ========================================================================
+    allowed_connector_ids = connector_health_connector_ids(user)
+    _require_connector_health(allowed_connector_ids)
+    tenant_repository = repository.for_tenant(_resolve_tenant_uuid(user))
+
+    try:
+        page = tenant_repository.list_credentials(
+            limit=limit,
+            offset=offset,
+            connector_keys=allowed_connector_ids,
+        )
+    except ConnectorCredentialValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+    as_of = datetime.now(UTC)
+    credentials: list[dict[str, object]] = []
+    for credential in page.items:
+        record = credential.to_api()
+        record["health_state"] = derive_credential_health_state(credential, as_of=as_of)
+        credentials.append(record)
+    return {
+        "credentials": credentials,
+        "pagination": {
+            "limit": page.limit,
+            "offset": page.offset,
+            "returned": len(credentials),
+            "has_more": page.has_more,
+        },
+    }
+
+
 @router.post("/credentials", status_code=status.HTTP_201_CREATED)
 def create_connector_credential(
     payload: ConnectorCredentialCreateRequest,
@@ -280,6 +350,209 @@ def create_connector_credential(
     return _with_audit_event(credential, record)
 
 
+def _require_connector_job_permission(user: UserPrincipal, connector_key: str) -> None:
+    """Authorize connector-job submission against the submitted key and aliases."""
+    try:
+        candidate_keys = _credential_key_candidates(connector_key)
+    except ValueError:
+        candidate_keys = (connector_key,)
+    alias_scopes = [AccessScope.connector(key) for key in candidate_keys]
+    if any(has_permission(user, Permission.RUN_CONNECTOR_JOBS, scope) for scope in alias_scopes):
+        return
+    _raise_missing_connector_permission(Permission.RUN_CONNECTOR_JOBS)
+
+
+# ============================================================================
+# Purpose: Keep POST /connectors/jobs thin by grouping local preflight decisions
+#   while preserving the route's rejection order and audit responses.
+# Database/ORM: ApiConnectorCredentialORM reads through repository methods only.
+# Standards: no direct commits; typed JSONResponse rejections keep audit rows.
+# Blast Radius: Authorization, connector-job audit, and executor reservation.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> reservation.
+#   - File: tests/api/test_connectors_api.py -> route rejection and submit matrix.
+# ============================================================================
+def _canonicalize_connector_job_payload(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    payload: ConnectorJobRequest,
+) -> ConnectorJobRequest | JSONResponse:
+    """Reject unknown connector keys or return the canonical source-system key."""
+    if payload.connector_key not in known_keys():
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            rejection="unknown_connector",
+            detail="Unknown connector key",
+        )
+    return payload.model_copy(
+        update={"connector_key": _source_system_for_connector(payload.connector_key)}
+    )
+
+
+def _connector_job_preflight_rejection(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    payload: ConnectorJobRequest,
+    executor: ConnectorJobExecutor | None,
+    service_actor_configured: bool,
+) -> JSONResponse | None:
+    """Return the audited preflight rejection for disabled executor/config/month."""
+    if executor is None:
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            rejection="executor_disabled",
+            detail="Connector job executor is disabled",
+        )
+    if not payload.dry_run and not service_actor_configured:
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            rejection="service_principal_unavailable",
+            detail=(
+                "Connector service principal is not configured;"
+                " set UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
+            ),
+        )
+    try:
+        validate_report_month(payload.report_month)
+    except ConnectorRunValidationError:
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            rejection="invalid_month",
+            detail="report_month must use YYYY-MM",
+        )
+    return None
+
+
+def _find_connector_job_credential(
+    *,
+    repository: SqlAlchemyConnectorCredentialRepository,
+    session: Session,
+    tenant_id: UUID,
+    payload: ConnectorJobRequest,
+) -> ConnectorCredentialEntry | None:
+    """Resolve a credential using the same alias-aware keys as the worker."""
+    for candidate_key in _credential_key_candidates(payload.connector_key):
+        credential = repository.get_credential(
+            session,
+            tenant_id=tenant_id,
+            connector_key=candidate_key,
+            account_id=payload.account_id,
+        )
+        if credential is not None:
+            return credential
+    return None
+
+
+def _connector_job_credential_rejection(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    payload: ConnectorJobRequest,
+    credential: ConnectorCredentialEntry | None,
+) -> JSONResponse | None:
+    """Return the audited credential rejection, if credential state blocks submit."""
+    if credential is None:
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            rejection="credential_not_found",
+            detail="Connector credential not found",
+        )
+    if credential.status != "active":
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            rejection="credential_inactive",
+            detail="Connector credential is not active",
+        )
+    return None
+
+
+def _reserve_connector_job_or_reject(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    session: Session,
+    executor: ConnectorJobExecutor,
+    tenant_id: UUID,
+    payload: ConnectorJobRequest,
+) -> _SlotReservation | JSONResponse:
+    """Reserve the executor slot or return the audited duplicate rejection."""
+    triggered_by = _resolve_triggered_by_user_id(session, user, tenant_id)
+    actor_identity = ConnectorJobActor(user_id=user.user_id, email=user.email)
+    reservation = executor.submit_if_absent(
+        tenant_id=tenant_id,
+        connector_key=payload.connector_key,
+        account_id=payload.account_id,
+        report_month=payload.report_month,
+        dry_run=payload.dry_run,
+        triggered_by_user_id=triggered_by,
+        actor_identity=actor_identity,
+    )
+    if reservation is not None:
+        return reservation
+    return _reject_connector_job(
+        audit_sink=audit_sink,
+        user=user,
+        payload=payload,
+        status_code=status.HTTP_409_CONFLICT,
+        rejection="duplicate_in_flight",
+        detail="A connector job for this scope is already in flight",
+    )
+
+
+def _submitted_connector_job_response(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    payload: ConnectorJobRequest,
+    superseded_run_id: str | None,
+) -> dict[str, object]:
+    """Build the successful route response and matching audit details."""
+    details: dict[str, object] = {
+        "action": "job_submitted",
+        "report_month": payload.report_month,
+        "dry_run": payload.dry_run,
+    }
+    if superseded_run_id is not None:
+        details["superseded_run_id"] = superseded_run_id
+    record = _audit_connector_change(
+        audit_sink=audit_sink,
+        user=user,
+        event_type=AuditEventType.CONNECTOR_JOB_RUN,
+        connector_key=payload.connector_key,
+        account_id=payload.account_id,
+        reason=payload.reason,
+        details=details,
+    )
+    return {
+        "connector_key": payload.connector_key,
+        "account_id": payload.account_id,
+        "report_month": payload.report_month,
+        "dry_run": payload.dry_run,
+        "execution_status": "submitted",
+        "audit_event": audit_record_to_api(record),
+    }
+
+
 # ============================================================================
 # Purpose: Submit a real Google ingest pull to the module-owned
 #   ConnectorJobExecutor and return 202 "submitted" immediately. Cheap
@@ -315,129 +588,57 @@ def create_connector_credential(
 #   - File: backend/ums_smart_revenue/app.py -> app.state.connector_job_executor.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> POST /connectors/jobs contract.
 # ============================================================================
-@router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
-def request_connector_job(  # skipcq: PY-R1000
+@router.post("/jobs", status_code=status.HTTP_202_ACCEPTED, response_model=None)
+def request_connector_job(
     payload: ConnectorJobRequest,
     request: Request,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
-) -> dict[str, object]:
+) -> dict[str, object] | JSONResponse:
     """Validate cheaply, reserve an executor slot, write the audit, and return 202 submitted."""
-    # Authorize first against the submitted key OR any hyphen/underscore
-    # alias, so a grant scoped to ``youtube-reporting`` works when the
-    # credential and orchestrator canonicalize to ``youtube_reporting``.
-    # This gate runs BEFORE any auditable rejection so unauthorized callers
-    # cannot create connector-job audit events. For unknown keys fall back
-    # to the submitted key; the unknown-key check below will reject them.
-    try:
-        candidate_keys = _credential_key_candidates(payload.connector_key)
-    except ValueError:
-        candidate_keys = (payload.connector_key,)
-    alias_scopes = [AccessScope.connector(key) for key in candidate_keys]
-    if not any(
-        has_permission(user, Permission.RUN_CONNECTOR_JOBS, scope) for scope in alias_scopes
-    ):
-        _raise_missing_connector_permission(Permission.RUN_CONNECTOR_JOBS)
-
-    if payload.connector_key not in known_keys():
-        return _reject_connector_job(
-            audit_sink=audit_sink,
-            user=user,
-            payload=payload,
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            rejection="unknown_connector",
-            detail="Unknown connector key",
-        )
+    _require_connector_job_permission(user, payload.connector_key)
 
     # Canonicalize so credential lookup, the executor registry key, and the
     # downstream orchestrator all agree on the source-system underscore key.
-    connector_key = _source_system_for_connector(payload.connector_key)
-    payload = payload.model_copy(update={"connector_key": connector_key})
+    payload_or_rejection = _canonicalize_connector_job_payload(
+        audit_sink=audit_sink,
+        user=user,
+        payload=payload,
+    )
+    if isinstance(payload_or_rejection, JSONResponse):
+        return payload_or_rejection
+    payload = payload_or_rejection
 
     settings = load_app_settings()
     tenant_id = _resolve_tenant_uuid(user)
     executor = getattr(request.app.state, "connector_job_executor", None)
-    if executor is None:
-        return _reject_connector_job(
-            audit_sink=audit_sink,
-            user=user,
-            payload=payload,
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            rejection="executor_disabled",
-            detail="Connector job executor is disabled",
-        )
-
-    # FIX: fail-closed pre-flight for the connector service principal. Without
-    # this, a submit would still return 202 (the executor reserves a slot
-    # eagerly) and the worker would raise ValueError before start_run, which
-    # landed in the catch-all log-only branch and left operators with no run
-    # row and no failure audit. Reject here so the audit trail is complete
-    # AND the executor slot is never wasted.
-    # Dry-runs are exempt: the dry-run path does NOT create a connector_runs
-    # row and does NOT emit the live-run STARTED/FINISHED service-principal
-    # audit edges, so the service principal is never needed for a dry-run.
-    # The executor's job_dry_run_completed audit row is attributed to the
-    # submitting actor snapshot instead.
-    if not payload.dry_run and settings.google_connector_service_actor_id is None:
-        return _reject_connector_job(
-            audit_sink=audit_sink,
-            user=user,
-            payload=payload,
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            rejection="service_principal_unavailable",
-            detail=(
-                "Connector service principal is not configured;"
-                " set UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
-            ),
-        )
-
-    try:
-        validate_report_month(payload.report_month)
-    except ConnectorRunValidationError:
-        return _reject_connector_job(
-            audit_sink=audit_sink,
-            user=user,
-            payload=payload,
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            rejection="invalid_month",
-            detail="report_month must use YYYY-MM",
-        )
+    preflight_rejection = _connector_job_preflight_rejection(
+        audit_sink=audit_sink,
+        user=user,
+        payload=payload,
+        executor=executor,
+        service_actor_configured=settings.google_connector_service_actor_id is not None,
+    )
+    if preflight_rejection is not None:
+        return preflight_rejection
+    assert executor is not None
 
     repository = SqlAlchemyConnectorCredentialRepository(session, tenant_id=tenant_id)
-    # FIX: credential rows may be stored under the source-system underscore
-    # alias (e.g. ``youtube_reporting``) while callers submit the public
-    # hyphen key (``youtube-reporting``). Use the same alias-aware lookup
-    # that ``run_one`` / ``_load_credential`` uses so the executing endpoint
-    # does not narrow supported keys.
-    credential = None
-    for candidate_key in _credential_key_candidates(payload.connector_key):
-        credential = repository.get_credential(
-            session,
-            tenant_id=tenant_id,
-            connector_key=candidate_key,
-            account_id=payload.account_id,
-        )
-        if credential is not None:
-            break
-    if credential is None:
-        return _reject_connector_job(
-            audit_sink=audit_sink,
-            user=user,
-            payload=payload,
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            rejection="credential_not_found",
-            detail="Connector credential not found",
-        )
-    if credential.status != "active":
-        return _reject_connector_job(
-            audit_sink=audit_sink,
-            user=user,
-            payload=payload,
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            rejection="credential_inactive",
-            detail="Connector credential is not active",
-        )
+    credential = _find_connector_job_credential(
+        repository=repository,
+        session=session,
+        tenant_id=tenant_id,
+        payload=payload,
+    )
+    credential_rejection = _connector_job_credential_rejection(
+        audit_sink=audit_sink,
+        user=user,
+        payload=payload,
+        credential=credential,
+    )
+    if credential_rejection is not None:
+        return credential_rejection
 
     # FIX: atomic dedup. The previous has_active_job() -> submit() pair was a
     # check-then-act race: two concurrent requests for the same scope could
@@ -445,26 +646,17 @@ def request_connector_job(  # skipcq: PY-R1000
     # holds the executor's registry lock across the membership check and the
     # insert, so the second concurrent caller sees the in-flight slot and
     # returns None -> 409.
-    triggered_by = _resolve_triggered_by_user_id(session, user, tenant_id)
-    actor_identity = ConnectorJobActor(user_id=user.user_id, email=user.email)
-    reservation = executor.submit_if_absent(
+    reservation_or_rejection = _reserve_connector_job_or_reject(
+        audit_sink=audit_sink,
+        user=user,
+        session=session,
+        executor=executor,
         tenant_id=tenant_id,
-        connector_key=payload.connector_key,
-        account_id=payload.account_id,
-        report_month=payload.report_month,
-        dry_run=payload.dry_run,
-        triggered_by_user_id=triggered_by,
-        actor_identity=actor_identity,
+        payload=payload,
     )
-    if reservation is None:
-        return _reject_connector_job(
-            audit_sink=audit_sink,
-            user=user,
-            payload=payload,
-            status_code=status.HTTP_409_CONFLICT,
-            rejection="duplicate_in_flight",
-            detail="A connector job for this scope is already in flight",
-        )
+    if isinstance(reservation_or_rejection, JSONResponse):
+        return reservation_or_rejection
+    reservation = reservation_or_rejection
 
     # FIX: register the after_rollback hook IMMEDIATELY after submit_if_absent
     # so a DB error in find_active_runs_for_scope() / finish_run() / the route
@@ -483,11 +675,6 @@ def request_connector_job(  # skipcq: PY-R1000
         user=user,
     )
     if isinstance(superseded_run_id, _DuplicateRunBlock):
-        # The in-process guard let us through but the DB has a fresh RUNNING
-        # row. The after_rollback hook would not fire here (we are still
-        # in-request and the session is healthy); cancel explicitly so the
-        # executor does not block the scope on a request that will not
-        # activate.
         executor.cancel_reservation(reservation)
         return _reject_connector_job(
             audit_sink=audit_sink,
@@ -498,21 +685,11 @@ def request_connector_job(  # skipcq: PY-R1000
             detail="A connector job for this scope is already in flight",
         )
 
-    details: dict[str, object] = {
-        "action": "job_submitted",
-        "report_month": payload.report_month,
-        "dry_run": payload.dry_run,
-    }
-    if superseded_run_id is not None:
-        details["superseded_run_id"] = superseded_run_id
-    record = _audit_connector_change(
+    response = _submitted_connector_job_response(
         audit_sink=audit_sink,
         user=user,
-        event_type=AuditEventType.CONNECTOR_JOB_RUN,
-        connector_key=payload.connector_key,
-        account_id=payload.account_id,
-        reason=payload.reason,
-        details=details,
+        payload=payload,
+        superseded_run_id=superseded_run_id,
     )
 
     # FIX: defer the worker enqueue to AFTER the request session commits the
@@ -529,14 +706,7 @@ def request_connector_job(  # skipcq: PY-R1000
         reservation=reservation,
     )
 
-    return {
-        "connector_key": payload.connector_key,
-        "account_id": payload.account_id,
-        "report_month": payload.report_month,
-        "dry_run": payload.dry_run,
-        "execution_status": "submitted",
-        "audit_event": audit_record_to_api(record),
-    }
+    return response
 
 
 @router.post("/credentials/{connector_key}/{account_id}/test")
@@ -911,18 +1081,15 @@ def _reject_connector_job(
 #   - File: backend/ums_smart_revenue/api/connectors.py ->
 #     request_connector_job attaches the hooks.
 # ============================================================================
-# These are SQLAlchemy `session.info` flag keys (idempotency markers for the
-# event hooks below), not credentials. DeepSource's secret scanner (SCT-A000)
-# false-positives on the `_KEY` suffix; the string values are static identifiers.
-_AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"  # skipcq: SCT-A000
-_AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"  # skipcq: SCT-A000
+_AFTER_COMMIT_FLAG_KEY = object()
+_AFTER_ROLLBACK_FLAG_KEY = object()
 
 
 def _attach_after_rollback_hook(
     *,
     session: Session,
-    executor: ConnectorJobExecutor,  # skipcq: PYL-E0601
-    reservation: _SlotReservation,  # skipcq: PYL-E0601
+    executor: ConnectorJobExecutor,
+    reservation: _SlotReservation,
 ) -> None:
     """Attach the after_rollback hook immediately after submit_if_absent.
 
@@ -982,7 +1149,7 @@ def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _Slo
             # best-effort: any error here is logged and never raised
             # into the request lifecycle.
             try:
-                executor._audit_failed_before_start(  # skipcq: PYL-W0212
+                executor.audit_failed_before_start(
                     tenant_id=reservation.tenant_id,
                     connector_key=reservation.connector_key,
                     account_id=reservation.account_id,

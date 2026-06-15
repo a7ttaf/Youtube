@@ -1,4 +1,8 @@
-# Default: respect core.whitespace and Git's standard line-ending normalization.
+# Default: normalize tracked text files to LF in the repository. `text=auto`
+# lets Git auto-detect binary files and leave them untouched. This prevents
+# CRLF from leaking into committed source on Windows checkouts, since
+# core.autocrlf is intentionally false in this repo.
+* text=auto eol=lf
 
 # Force LF on this one Python file: the repo accidentally shipped it CRLF,
 # which makes `git diff --check` flag every touched line as "trailing

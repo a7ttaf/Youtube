@@ -41,6 +41,8 @@ const CREDENTIALS: ConnectorCredentialListResponse = {
 const JOB_RESULT: ConnectorJobResponse = {
   connector_key: "youtube_reporting",
   account_id: "acct-1",
+  report_month: "2026-03",
+  dry_run: false,
   execution_status: "submitted",
   audit_event: {},
 };
