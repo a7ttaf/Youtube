@@ -119,9 +119,7 @@ def build_revenue_reconciliation_preview(
                 ReconciliationIssue(
                     issue_type="NO_REVENUE_FACTS",
                     severity="HIGH",
-                    message=(
-                        f"No revenue facts are available for {youtube_channel_id} in {month}."
-                    ),
+                    message=(f"no revenue facts are available for {youtube_channel_id} in {month}"),
                 )
             ],
         )

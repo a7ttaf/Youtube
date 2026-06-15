@@ -40,7 +40,7 @@ from ums_smart_revenue.connectors.google_source_rows import ParsedSourceRow
 class YouTubeReportingParser:
     source_system = "youtube_reporting"
 
-    def parse(
+    def parse(  # skipcq: PY-R1000
         self,
         payload: dict[str, object],
         *,

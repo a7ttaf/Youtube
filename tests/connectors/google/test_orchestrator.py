@@ -677,8 +677,8 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
     calls = {"n": 0}
 
     def racing_find(db_session, *, tenant_id, source, report_type, report_month, checksum):
-        """Race the duplicate-row lookup with a sibling insert to exercise the
-        IntegrityError fallback."""
+        """Race the duplicate-row lookup with a sibling insert
+        to exercise the IntegrityError fallback."""
         calls["n"] += 1
         if calls["n"] == 1:
             db_session.add(
@@ -1816,8 +1816,8 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
     call_state = {"n": 0}
 
     class FlakyParser:
-        """Parser that fails the first call and succeeds on retry; exercises parser
-        retry semantics."""
+        """Parser that fails the first call and succeeds on retry;
+        exercises parser retry semantics."""
 
         @staticmethod
         def parse(payload, *, tenant_id):
@@ -2497,8 +2497,8 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
             report_month,
             account_id,
         ):
-            """Yield one ``ProducedReportSuccess`` carrying the canned parser
-            payload + raw report."""
+            """Yield one ``ProducedReportSuccess`` carrying the canned parser payload\
+            + raw report."""
             _ = (run, credentials, report_month, account_id)
             marker_id = uuid4()
             session.add(

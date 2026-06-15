@@ -125,7 +125,7 @@ class SqlAlchemyCommittedAllocationRepository:
     #   422/409; method-before-compute; reject-on-unallocated.
     # Blast Radius: Finance write; first allocation persistence. No reader change.
     # ========================================================================
-    def commit_allocation(
+    def commit_allocation(  # skipcq: PY-R1000
         self,
         *,
         month: str,

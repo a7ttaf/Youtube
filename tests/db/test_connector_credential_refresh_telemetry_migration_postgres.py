@@ -110,7 +110,7 @@ def test_last_refresh_status_check_positive_and_negative(
             {"id": credential_id},
         ).scalar()
     assert value == "failed"
-    with pytest.raises(DatabaseError):
+    with pytest.raises(DatabaseError):  # skipcq: PTC-W0062
         with fresh_engine.begin() as conn:
             conn.execute(
                 text(

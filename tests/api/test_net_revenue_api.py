@@ -174,8 +174,8 @@ def seed_database(database_url: str) -> None:
 
 
 def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
-    """Finance viewer reads the company-scoped monthly net-revenue summary and
-    emits a REVENUE_VIEWED audit event."""
+    """Finance viewer reads the company-scoped monthly net-revenue
+    summary and emits a REVENUE_VIEWED audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     app = create_app(database_url=database_url)
@@ -205,8 +205,8 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
 
 
 def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
-    """assistant_analyst lacks VIEW_REVENUE and is rejected with HTTP 403 on the
-    net-revenue endpoint."""
+    """assistant_analyst lacks VIEW_REVENUE and is rejected
+    with HTTP 403 on the net-revenue endpoint."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -221,8 +221,8 @@ def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
 
 
 def test_month_net_revenue_summary_rejects_non_usd_until_fx_support(tmp_path):
-    """Requesting a non-USD currency is rejected with HTTP 422 until exchange-rate
-    support is implemented."""
+    """Requesting a non-USD currency is rejected with HTTP 422
+    until exchange-rate support is implemented."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -239,8 +239,8 @@ def test_month_net_revenue_summary_rejects_non_usd_until_fx_support(tmp_path):
 
 
 def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_path):
-    """Net-revenue endpoint derives COMPONENT_DERIVED net via youtube_reporting
-    component when source net is absent."""
+    """Net-revenue endpoint derives COMPONENT_DERIVED net via
+    youtube_reporting component when source net is absent."""
     # channel-tv-b has 2026-03 fact with net_revenue_usd=None, gross=200.00,
     # source_kind=YOUTUBE_CMS. A youtube_reporting component (maps to YOUTUBE_CMS)
     # of 20.00 must derive net=180.00 and flip the channel to COMPONENT_DERIVED.

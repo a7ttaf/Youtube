@@ -186,7 +186,7 @@ class GoogleSourceNormalizer:
     #   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> write path.
     #   - File: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md
     # ============================================================================
-    def normalize_month(
+    def normalize_month(  # skipcq: PY-R1000
         self,
         *,
         month: str,

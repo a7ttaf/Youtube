@@ -80,7 +80,7 @@ class _StubConnection:
         self.calls: list[str] = []
         self.connection = _StubDbapiConnection(txn_status)
 
-    def exec_driver_sql(self, sql: str, parameters=None):
+    def exec_driver_sql(self, sql: str, parameters=None):  # skipcq: PYL-R1711
         self.calls.append(sql)
         return None
 
@@ -267,7 +267,7 @@ def test_platform_lane_skips_role_restore_on_exception() -> None:
     successful child write). The active-lane flag is still cleared.
     """
     session = _StubSession(role=APP_TENANT_ROLE, dialect_name="postgresql")
-    with pytest.raises(ValueError, match="boom"):
+    with pytest.raises(ValueError, match="boom"):  # skipcq: PTC-W0062
         with platform_lane(session):
             raise ValueError("boom")
     # Only the elevation was issued; no restore statement on the failure path.
@@ -277,7 +277,7 @@ def test_platform_lane_skips_role_restore_on_exception() -> None:
 def test_platform_lane_noop_off_postgres_on_exception() -> None:
     """An exception on SQLite still emits no role statements."""
     session = _StubSession(role=APP_TENANT_ROLE, dialect_name="sqlite")
-    with pytest.raises(ValueError, match="boom"):
+    with pytest.raises(ValueError, match="boom"):  # skipcq: PTC-W0062
         with platform_lane(session):
             raise ValueError("boom")
     assert session._connection.calls == []
@@ -296,7 +296,7 @@ def test_platform_lane_sets_active_flag_inside_and_clears_after() -> None:
         assert session.info.get(_PLATFORM_LANE_ACTIVE_KEY) is True
     assert _PLATFORM_LANE_ACTIVE_KEY not in session.info
 
-    with pytest.raises(ValueError, match="boom"):
+    with pytest.raises(ValueError, match="boom"):  # skipcq: PTC-W0062
         with platform_lane(session):
             assert session.info.get(_PLATFORM_LANE_ACTIVE_KEY) is True
             raise ValueError("boom")

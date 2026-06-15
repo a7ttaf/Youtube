@@ -497,8 +497,8 @@ def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):
 
 
 def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
-    """Scoped export's CHANNELS_MISSING_REVENUE_FACTS sample is restricted to
-    channel_ids (review #98 T13).
+    """Scoped export's CHANNELS_MISSING_REVENUE_FACTS sample
+    is restricted to channel_ids (review #98 T13).
 
     A company/sector/group export must never include channel ids outside its
     frozen channel set, even when those channels are factless. The export

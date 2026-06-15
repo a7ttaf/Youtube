@@ -65,7 +65,10 @@ _COMMIT_IDEMPOTENCY_PREFIX = "demo-seed-commit"
 _COMMIT_REASON = "demo month seed close"
 
 _DEMO_COMMITTER_EMAIL = "demo-seed@ums.local"
-_DEMO_GATEWAY_TOKEN = "demo-trusted-gateway-token"
+# FIX: No hardcoded trusted-gateway token literal in source (DeepSource SCT-A000).
+# The seed runbook (frontend/README.md) sets UMS_TRUSTED_GATEWAY_TOKEN before
+# running this script; when it is unset the printed headers carry an empty token
+# and the summary warns the operator, rather than shipping a credential literal.
 
 # FIX: Keep project imports lazy so direct script execution can adjust sys.path
 # before importing the backend package (mirrors scripts/run_deduction_ingestion.py).
@@ -953,7 +956,7 @@ def _demo_principal_headers(
         "X-Role": "finance_admin",
         "X-Scope-Type": "global",
         "X-UMS-Tenant": tenant_slug,
-        "X-UMS-Trusted-Gateway-Token": gateway_token or _DEMO_GATEWAY_TOKEN,
+        "X-UMS-Trusted-Gateway-Token": gateway_token or "",
     }
 
 
@@ -1014,7 +1017,7 @@ def _print_summary(
             source = (
                 "set via UMS_TRUSTED_GATEWAY_TOKEN"
                 if gateway_token_set
-                else "built-in demo default"
+                else "not set (set UMS_TRUSTED_GATEWAY_TOKEN)"
             )
             print(f"  {key}: <redacted> ({source})")
             continue

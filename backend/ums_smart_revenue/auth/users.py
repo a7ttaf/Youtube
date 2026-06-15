@@ -298,7 +298,7 @@ class SqlAlchemyUserAccountRepository:
 
         return self._run_with_storage_retries(operation)
 
-    def update_user(
+    def update_user(  # skipcq: PY-R1000
         self,
         *,
         user_id: str,

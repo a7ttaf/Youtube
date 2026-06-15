@@ -78,8 +78,8 @@ def test_page_returns_all_with_total_when_unfiltered(tmp_path):
 
 
 def test_page_component_kind_filter_counts_only_matches(tmp_path):
-    """component_kind filter returns only matching rows and sets total_count to the
-    filtered count."""
+    """component_kind filter returns only matching rows and sets
+    total_count to the filtered count."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -126,8 +126,8 @@ def test_page_scope_id_filter_counts_only_matches(tmp_path):
 
 
 def test_page_limit_offset_paginates_but_total_is_full_match_count(tmp_path):
-    """limit/offset slices the returned rows while total_count always reflects the
-    full filtered set."""
+    """limit/offset slices the returned rows while total_count
+    always reflects the full filtered set."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)

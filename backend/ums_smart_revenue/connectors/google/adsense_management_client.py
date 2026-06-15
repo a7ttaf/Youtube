@@ -58,7 +58,10 @@ _REPORTING_TIME_ZONE = "GOOGLE_TIME_ZONE"
 # report_id stamp. Locked at ship: widening this set requires both a parser
 # contract update and a new adapter branch.
 SUPPORTED_ADSENSE_REPORTS: frozenset[str] = frozenset({"monthly_account_earnings"})
-_REPORT_KEY = "monthly_account_earnings"
+# Report-kind identifier folded into the deterministic report_id stamp, not a
+# secret. DeepSource's secret scanner (SCT-A000) false-positives on the `_KEY`
+# suffix; the value mirrors SUPPORTED_ADSENSE_REPORTS above.
+_REPORT_KEY = "monthly_account_earnings"  # skipcq: SCT-A000
 _MAX_REPORT_RESULT_ROWS = 100_000
 _ACCOUNT_RESOURCE_PREFIX = "accounts/"
 _ACCOUNT_ID_RESERVED_CHARS = frozenset("/?#%")

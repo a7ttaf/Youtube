@@ -142,8 +142,8 @@ def _ums_tenant() -> UUID:
 
 
 def _service(session):
-    """Initialize and return the DeductionIngestionService with an in-memory audit
-    sink for testing."""
+    """Initialize and return the DeductionIngestionService
+    with an in-memory audit sink for testing."""
     return _mod().DeductionIngestionService(session, audit_sink=InMemoryAuditSink())
 
 
@@ -167,8 +167,8 @@ def _component(component_key: str, *, amount: str = "1.00"):
 
 
 def test_ingest_creates_components_from_all_sources(tmp_path):
-    """Test that ingest creates deduction components for all expected source kinds
-    and records an audit event."""
+    """Test that ingest creates deduction components for all
+    expected source kinds and records an audit event."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -211,8 +211,8 @@ def test_ingest_refuses_locked_month(tmp_path):
 
 
 def test_ingest_refuses_locked_month_even_with_zero_components(tmp_path):
-    """Test that a locked month with no source evidence still raises an error and
-    writes no audit records."""
+    """Test that a locked month with no source evidence still
+    raises an error and writes no audit records."""
     # Lock the month but seed NO source evidence -> zero mapped components. Live
     # ingestion must still fail closed (no audit write) — the lock check must
     # precede the empty-component short-circuit in upsert_components.
@@ -266,8 +266,8 @@ def test_ingest_skips_non_usd_and_counts_it(tmp_path):
 
 
 def test_dry_run_writes_nothing_and_records_no_audit(tmp_path):
-    """Test that dry run mode does not persist components or write audit records,
-    but reports potential upserts."""
+    """Test that dry run mode does not persist components or write
+    audit records, but reports potential upserts."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)

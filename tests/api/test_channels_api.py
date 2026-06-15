@@ -107,8 +107,8 @@ class ScopedListRegistry:
 
 
 def create_bootstrap_app():
-    """Create an application with bootstrap channel registry and org access index
-    overrides for testing."""
+    """Create an application with bootstrap channel registry and
+    org access index overrides for testing."""
     app = create_app()
     registry = bootstrap_channel_registry()
     app.dependency_overrides[current_channel_registry] = lambda: registry
@@ -117,8 +117,8 @@ def create_bootstrap_app():
 
 
 def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
-    """Generate authentication headers for a test client given role, scope type,
-    and optional scope ID."""
+    """Generate authentication headers for a test client given
+    role, scope type, and optional scope ID."""
     headers = {
         "x-user-id": "user-1",
         "x-user-email": "user@example.com",
@@ -161,8 +161,8 @@ def test_company_channel_listing_uses_scoped_registry_query():
 
 
 def test_company_manager_reads_scoped_outside_cms_monitor():
-    """Test that a company manager can read channels with OUTSIDE_CMS status using
-    scoped registry."""
+    """Test that a company manager can read channels with
+    OUTSIDE_CMS status using scoped registry."""
     app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: ChannelRegistry(
         [

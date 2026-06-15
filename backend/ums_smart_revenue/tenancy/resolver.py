@@ -332,10 +332,7 @@ class TenantResolverMiddleware:
         if remaining <= 0:
             raise TimeoutError
         future = asyncio.wrap_future(worker_future, loop=loop)
-        try:
-            return await asyncio.wait_for(future, timeout=remaining)
-        except TimeoutError:
-            raise
+        return await asyncio.wait_for(future, timeout=remaining)
 
     def _submit_blocking(
         self,

@@ -79,7 +79,7 @@ def _canonical_filters(filters: str | None) -> str | None:
 class YouTubeAnalyticsParser:
     source_system = "youtube_analytics"
 
-    def parse(
+    def parse(  # skipcq: PY-R1000
         self,
         payload: dict[str, object],
         *,

@@ -108,8 +108,8 @@ def bank_payload(amount_usd: str = "928.50") -> dict[str, object]:
 
 def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
     """
-    Test that a finance admin can record a bank reconciliation entry and that it
-    is audited correctly.
+    Test that a finance admin can record a bank reconciliation entry
+    and that it is audited correctly.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -140,8 +140,8 @@ def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
 
 def test_bank_reconciliation_record_is_idempotent_for_same_month_reference(tmp_path):
     """
-    Test that submitting bank reconciliation for the same month and reference is
-    idempotent and updates correctly.
+    Test that submitting bank reconciliation for the same month
+    and reference is idempotent and updates correctly.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -176,8 +176,8 @@ def test_bank_reconciliation_record_is_idempotent_for_same_month_reference(tmp_p
 
 def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
     """
-    Test that a finance viewer can read the bank reconciliation summary and see
-    the related audit events.
+    Test that a finance viewer can read the bank reconciliation
+    summary and see the related audit events.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -222,8 +222,8 @@ def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
 
 def test_finance_month_scoped_admin_records_matching_month(tmp_path):
     """
-    Test that a finance-month scoped admin can record bank reconciliation for the
-    matching month only.
+    Test that a finance-month scoped admin can record bank
+    reconciliation for the matching month only.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -258,8 +258,8 @@ def test_finance_month_scoped_viewer_cannot_read_another_month(tmp_path):
 
 def test_assistant_cannot_read_bank_reconciliation(tmp_path):
     """
-    Test that an assistant analyst cannot read bank reconciliation summary due to
-    missing permission.
+    Test that an assistant analyst cannot read bank reconciliation
+    summary due to missing permission.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

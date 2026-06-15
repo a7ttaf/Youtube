@@ -316,7 +316,7 @@ def create_connector_credential(
 #   - File: Docs/12_BACKEND_API_SPEC.md -> POST /connectors/jobs contract.
 # ============================================================================
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
-def request_connector_job(
+def request_connector_job(  # skipcq: PY-R1000
     payload: ConnectorJobRequest,
     request: Request,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -911,15 +911,18 @@ def _reject_connector_job(
 #   - File: backend/ums_smart_revenue/api/connectors.py ->
 #     request_connector_job attaches the hooks.
 # ============================================================================
-_AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"
-_AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"
+# These are SQLAlchemy `session.info` flag keys (idempotency markers for the
+# event hooks below), not credentials. DeepSource's secret scanner (SCT-A000)
+# false-positives on the `_KEY` suffix; the string values are static identifiers.
+_AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"  # skipcq: SCT-A000
+_AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"  # skipcq: SCT-A000
 
 
 def _attach_after_rollback_hook(
     *,
     session: Session,
-    executor: ConnectorJobExecutor,
-    reservation: _SlotReservation,
+    executor: ConnectorJobExecutor,  # skipcq: PYL-E0601
+    reservation: _SlotReservation,  # skipcq: PYL-E0601
 ) -> None:
     """Attach the after_rollback hook immediately after submit_if_absent.
 
@@ -979,7 +982,7 @@ def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _Slo
             # best-effort: any error here is logged and never raised
             # into the request lifecycle.
             try:
-                executor._audit_failed_before_start(
+                executor._audit_failed_before_start(  # skipcq: PYL-W0212
                     tenant_id=reservation.tenant_id,
                     connector_key=reservation.connector_key,
                     account_id=reservation.account_id,

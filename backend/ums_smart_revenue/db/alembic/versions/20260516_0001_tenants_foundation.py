@@ -126,7 +126,10 @@ def upgrade() -> None:
     # Seed UMS as tenant #1. Idempotent across re-runs and test fixtures.
     op.execute(
         sa.text(
-            "INSERT INTO tenants (id, slug, display_name, primary_currency, status) "
+            # BAN-B608: UMS_TENANT_ID is a fixed module constant UUID (not user
+            # input); this one-row idempotent seed is not SQL-injectable.
+            "INSERT INTO tenants "  # skipcq: BAN-B608
+            "(id, slug, display_name, primary_currency, status) "
             f"VALUES ('{UMS_TENANT_ID}', 'ums', 'UMS', 'USD', 'ACTIVE') "
             "ON CONFLICT (slug) DO NOTHING"
         )

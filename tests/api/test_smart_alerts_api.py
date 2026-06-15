@@ -42,8 +42,8 @@ def auth_headers(
         scope_id: Optional scope identifier to include.
 
     Returns:
-        A dictionary of HTTP headers containing user identity, role, scope, and a
-        trusted gateway token.
+        A dictionary of HTTP headers containing user identity,
+        role, scope, and a trusted gateway token.
     """
     headers = {
         "x-user-id": str(USER_ID),

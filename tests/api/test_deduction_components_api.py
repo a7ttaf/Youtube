@@ -197,8 +197,8 @@ def _seed_extra_component(
 
 
 def test_finance_viewer_reads_components_grouped_with_audit(tmp_path):
-    """Finance viewer with global grants reads all components, grouped by scope,
-    with three audit events."""
+    """Finance viewer with global grants reads all components,
+    grouped by scope, with three audit events."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_components(database_url)
@@ -306,8 +306,8 @@ def test_scope_id_filter_and_channel_only_audit(tmp_path):
 
 
 def test_pagination_limit_and_offset(tmp_path):
-    """Limit+offset pagination returns one row per page while total_count reflects
-    the full match set."""
+    """Limit+offset pagination returns one row per page
+    while total_count reflects the full match set."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_components(database_url)
@@ -370,8 +370,8 @@ def test_malformed_month_returns_422(tmp_path):
 
 
 def test_net_revenue_endpoint_uses_channel_component_when_net_missing(tmp_path):
-    """Net-revenue endpoint derives COMPONENT_DERIVED net from an ADSENSE channel
-    component when net is absent."""
+    """Net-revenue endpoint derives COMPONENT_DERIVED net from
+    an ADSENSE channel component when net is absent."""
     # PR-B integration: a channel whose only fact has net=NULL plus a CHANNEL
     # DEDUCTION component -> /net-revenue derives COMPONENT_DERIVED net.
     # Uses ADSENSE source_kind + adsense_management source_system (distinct from
@@ -392,8 +392,8 @@ def test_net_revenue_endpoint_uses_channel_component_when_net_missing(tmp_path):
 
 
 def test_assistant_without_view_revenue_is_403(tmp_path):
-    """assistant_analyst lacks VIEW_REVENUE and receives HTTP 403 on the
-    deduction-components endpoint."""
+    """assistant_analyst lacks VIEW_REVENUE and receives
+    HTTP 403 on the deduction-components endpoint."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

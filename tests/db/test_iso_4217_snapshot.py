@@ -51,8 +51,8 @@ def test_v1_supported_codes_have_known_minor_unit() -> None:
     by_code = {row["code"]: row for row in ISO_4217_CURRENCIES_2026_05}
     for code in SUPPORTED_V1:
         assert by_code[code]["minor_unit"] is not None, (
-            f"v1 supported currency {code} must declare minor_unit so it can be "
-            "flipped is_supported"
+            f"v1 supported currency {code} must declare minor_unit so it can be flipped\
+            is_supported"
         )
 
 

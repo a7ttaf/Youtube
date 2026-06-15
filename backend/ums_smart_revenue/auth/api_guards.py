@@ -45,7 +45,7 @@ def require_predicate(
 def guarded_call[T](
     guard: Callable[[GuardContext], None],
     context: GuardContext,
-    handler: Callable[[], T],
-) -> T:
+    handler: Callable[[], T],  # skipcq: PYL-E0602
+) -> T:  # skipcq: PYL-E0602
     guard(context)
     return handler()

@@ -106,7 +106,7 @@ def test_earnings_and_payment_keys_differ() -> None:
             _load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID
         )
     )
-    assert not (set(r.source_row_key for r in e) & set(r.source_row_key for r in p))
+    assert not ({r.source_row_key for r in e} & {r.source_row_key for r in p})
 
 
 def test_mixed_settled_and_estimated_metrics_are_labeled_per_metric() -> None:
@@ -192,7 +192,7 @@ def test_rejects_non_finite_amount() -> None:
     bad = {**payload}
     # headers order is [PRODUCT_CODE, COUNTRY_CODE, ESTIMATED_EARNINGS];
     # mutate the first row's metric cell (index 2) value to NaN.
-    first_row = {**bad["rows"][0]}
+    first_row = {**bad["rows"][0]}  # skipcq: PY-W0072
     first_row["cells"] = [*bad["rows"][0]["cells"]]
     first_row["cells"][2] = {**first_row["cells"][2], "value": "NaN"}
     bad["rows"] = [first_row, *bad["rows"][1:]]

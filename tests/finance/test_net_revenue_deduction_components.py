@@ -73,8 +73,8 @@ def _channel(*, facts, components=()):
 
 
 def test_net_present_path_unchanged_components_ignored_for_net():
-    """When a source net is present, components are ignored and the official net
-    path is used unchanged."""
+    """When a source net is present, components are ignored and
+    the official net path is used unchanged."""
     # Source net present -> official net path untouched; components do NOT subtract.
     summary = _channel(
         facts=[fact(net="900.00")],
@@ -86,8 +86,8 @@ def test_net_present_path_unchanged_components_ignored_for_net():
 
 
 def test_missing_net_with_channel_components_is_component_derived():
-    """Missing source net + applicable CHANNEL components yields COMPONENT_DERIVED
-    status and derived net."""
+    """Missing source net + applicable CHANNEL components yields
+    COMPONENT_DERIVED status and derived net."""
     summary = _channel(
         facts=[fact(net=None, gross="1000.00")],
         components=[
@@ -111,8 +111,8 @@ def test_missing_net_without_applicable_components_stays_missing():
 
 
 def test_cross_source_components_excluded_from_derived_net():
-    """A component from a different source_system than the primary fact is excluded
-    from net derivation."""
+    """A component from a different source_system than the primary
+    fact is excluded from net derivation."""
     # Primary is ADSENSE; a youtube_reporting (YOUTUBE_CMS) component must NOT apply.
     summary = _channel(
         facts=[fact(source_kind="ADSENSE", net=None)],
@@ -143,8 +143,8 @@ def test_account_scoped_components_never_affect_net():
 
 
 def test_payment_and_fee_fx_gap_components_never_affect_net():
-    """TRANSFER_FEE, FX_VARIANCE, and UNRESOLVED_PAYMENT_GAP component kinds never
-    reduce channel net."""
+    """TRANSFER_FEE, FX_VARIANCE, and UNRESOLVED_PAYMENT_GAP
+    component kinds never reduce channel net."""
     summary = _channel(
         facts=[fact(net=None)],
         components=[
@@ -171,8 +171,8 @@ def test_other_channel_components_excluded():
 
 
 def test_month_summary_includes_component_derived_channel_in_totals():
-    """build_month_net_revenue_summary counts COMPONENT_DERIVED channels in totals
-    and not in missing count."""
+    """build_month_net_revenue_summary counts COMPONENT_DERIVED
+    channels in totals and not in missing count."""
     mod = _mod()
     summary = mod.build_month_net_revenue_summary(
         month=MONTH,

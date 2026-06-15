@@ -137,8 +137,8 @@ def _seed_user(session: Session, user_id: UUID, tenant_id: UUID) -> None:
 
 
 def test_grant_permission_uses_ambient_tenant_context(tmp_path):
-    """Ensure that grant_permission uses the ambient tenant context when creating
-    permission grants."""
+    """Ensure that grant_permission uses the ambient tenant context
+    when creating permission grants."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / 'permissions.db').as_posix()}")
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as setup:
@@ -168,8 +168,8 @@ def test_grant_permission_uses_ambient_tenant_context(tmp_path):
 
 
 def test_grant_permission_translates_target_user_fk_race_with_db_backed_lookup():
-    """Test that grant_permission raises UserPermissionGrantNotFoundError when
-    target user FK race occurs."""
+    """Test that grant_permission raises UserPermissionGrantNotFoundError
+    when target user FK race occurs."""
     session = _FkRaceSession(
         scalars_results=[
             AccessScopeORM(
@@ -197,8 +197,8 @@ def test_grant_permission_translates_target_user_fk_race_with_db_backed_lookup()
 
 
 def test_grant_permission_translates_actor_fk_race_with_db_backed_lookup():
-    """Test that grant_permission raises UserPermissionGrantNotFoundError when
-    actor FK race occurs."""
+    """Test that grant_permission raises UserPermissionGrantNotFoundError
+    when actor FK race occurs."""
     session = _FkRaceSession(
         scalars_results=[
             AccessScopeORM(
@@ -226,8 +226,8 @@ def test_grant_permission_translates_actor_fk_race_with_db_backed_lookup():
 
 
 def test_revoke_permission_translates_actor_fk_race_with_db_backed_lookup():
-    """Test that revoke_permission raises UserPermissionGrantNotFoundError when
-    actor FK race occurs during revoke."""
+    """Test that revoke_permission raises UserPermissionGrantNotFoundError
+    when actor FK race occurs during revoke."""
     scope_id = uuid4()
     grant = UserPermissionGrantORM(
         id=uuid4(),

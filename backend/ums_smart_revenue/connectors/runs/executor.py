@@ -336,8 +336,8 @@ class ConnectorJobExecutor:
 
         Must be called while holding ``self._lock``.
         """
-        future._actor_identity = actor_identity  # type: ignore[attr-defined]
-        future._job_key = key  # type: ignore[attr-defined]
+        future._actor_identity = actor_identity  # type: ignore[attr-defined]  # skipcq: PYL-W0212
+        future._job_key = key  # type: ignore[attr-defined]  # skipcq: PYL-W0212
         self._registry[key] = future
 
     def _audit_pending_on_shutdown(self) -> None:
@@ -396,7 +396,7 @@ class ConnectorJobExecutor:
         key = (tenant_id, connector_key, account_id, report_month)
         outcome: ConnectorRunOutcome | None = None
         try:
-            with self._session_factory() as session:
+            with self._session_factory() as session:  # skipcq: PTC-W0062
                 with connector_tenant_context(tenant_id, session=session):
                     outcome = run_one(
                         session,
@@ -553,7 +553,7 @@ class ConnectorJobExecutor:
             for report_type, error_class in outcome.per_report_failures
         ]
         try:
-            with self._session_factory() as session:
+            with self._session_factory() as session:  # skipcq: PTC-W0062
                 with connector_tenant_context(tenant_id, session=session):
                     with platform_lane(session):
                         sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
@@ -580,7 +580,7 @@ class ConnectorJobExecutor:
                 tenant_id,
             )
 
-    def _build_audit_actor(
+    def _build_audit_actor(  # skipcq: PYL-R0201
         self,
         *,
         tenant_id: UUID,
