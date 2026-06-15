@@ -40,9 +40,7 @@ REVENUE_RECONCILIATION_METRIC = "revenue_reconciliation_usd"
 # path to a caller with only VIEW_REVENUE+VIEW_CONFIDENCE@channel, letting them
 # overwrite the smart reconciliation row with an adjusted-gross explanation and
 # corrupt the persisted explanation returned by the new GET endpoint.
-SUPPORTED_METRICS = frozenset(
-    {ADJUSTED_GROSS_REVENUE_METRIC, NET_REVENUE_METRIC}
-)
+SUPPORTED_METRICS = frozenset({ADJUSTED_GROSS_REVENUE_METRIC, NET_REVENUE_METRIC})
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 _NET_CONFIDENCE_TO_EXPLAIN: dict[str, dict[str, str]] = {
@@ -62,9 +60,7 @@ def map_net_confidence(net_confidence_label: str) -> dict[str, str]:
     # Standards: Pure; total function (unknown labels -> LOW/0).
     # Blast Radius: Finance confidence labels on persisted net explanations.
     # ========================================================================
-    return _NET_CONFIDENCE_TO_EXPLAIN.get(
-        net_confidence_label, {"label": "LOW", "score": "0"}
-    )
+    return _NET_CONFIDENCE_TO_EXPLAIN.get(net_confidence_label, {"label": "LOW", "score": "0"})
 
 
 @dataclass(frozen=True)
@@ -104,6 +100,7 @@ class NumberExplanationError(ValueError):
 
 class NumberExplanationValidationError(NumberExplanationError):
     """Exception raised when a NumberExplanationEntry fails validation checks."""
+
 
 # This module provides functionality to build and record detailed
 # revenue explanations for YouTube channels, using SQLAlchemy for
@@ -150,9 +147,7 @@ class SqlAlchemyNumberExplanationRepository:
             warnings=list(row.warnings),
         )
 
-    def record_explanation(
-        self, explanation: NumberExplanationEntry
-    ) -> NumberExplanationEntry:
+    def record_explanation(self, explanation: NumberExplanationEntry) -> NumberExplanationEntry:
         """Record or update a number explanation entry."""
         row = self._session.scalars(
             select(NumberExplanationORM).where(
@@ -247,9 +242,7 @@ def build_channel_month_revenue_explanation(
             account_allocation_provenance=account_allocation_provenance,
         )
     if metric not in SUPPORTED_METRICS:
-        raise NumberExplanationValidationError(
-            f"Unsupported explanation metric: {metric}"
-        )
+        raise NumberExplanationValidationError(f"Unsupported explanation metric: {metric}")
 
     summary = build_adjusted_revenue_summary(
         facts=facts,
@@ -258,9 +251,7 @@ def build_channel_month_revenue_explanation(
         youtube_channel_id=youtube_channel_id,
     )
     primary_fact = _primary_fact(facts)
-    approved_count = sum(
-        1 for override in manual_overrides if override.status == "APPROVED"
-    )
+    approved_count = sum(1 for override in manual_overrides if override.status == "APPROVED")
     pending_count = summary.pending_manual_override_count
 
     components: list[dict[str, object]] = [
@@ -284,20 +275,14 @@ def build_channel_month_revenue_explanation(
         warnings.append(
             {
                 "code": "PENDING_MANUAL_OVERRIDES",
-                "message": (
-                    f"{pending_count} pending manual {subject} "
-                    f"not included in {metric}."
-                ),
+                "message": (f"{pending_count} pending manual {subject} not included in {metric}."),
             }
         )
     if primary_fact is None:
         warnings.append(
             {
                 "code": "NO_REVENUE_FACTS",
-                "message": (
-                    f"No revenue facts are available for {youtube_channel_id} "
-                    f"in {month}."
-                ),
+                "message": (f"No revenue facts are available for {youtube_channel_id} in {month}."),
             }
         )
 
@@ -386,30 +371,28 @@ def _build_net_revenue_explanation(
             primary_source_kind=summary.primary_source_kind,
         )
         channel_direct = sorted(
-            channel_direct, key=lambda component: (
-                component.source_system, component.component_key
-            )
+            channel_direct, key=lambda component: (component.source_system, component.component_key)
         )
         account_allocated = sorted(
-            account_allocated, key=lambda line: (
-                line.adsense_account_id, line.component_key
-            )
+            account_allocated, key=lambda line: (line.adsense_account_id, line.component_key)
         )
-        components.append({
-            "key": "channel_direct_deduction_usd",
-            "label": "Channel-direct deductions",
-            "value": _decimal_to_api(summary.channel_direct_deduction_amount_usd),
-            "count": len(channel_direct),
-            "components": [
-                {
-                    "component_kind": component.component_kind,
-                    "source_system": component.source_system,
-                    "component_key": component.component_key,
-                    "amount_usd": _decimal_to_api(component.amount_usd),
-                }
-                for component in channel_direct
-            ],
-        })
+        components.append(
+            {
+                "key": "channel_direct_deduction_usd",
+                "label": "Channel-direct deductions",
+                "value": _decimal_to_api(summary.channel_direct_deduction_amount_usd),
+                "count": len(channel_direct),
+                "components": [
+                    {
+                        "component_kind": component.component_kind,
+                        "source_system": component.source_system,
+                        "component_key": component.component_key,
+                        "amount_usd": _decimal_to_api(component.amount_usd),
+                    }
+                    for component in channel_direct
+                ],
+            }
+        )
         account_component = {
             "key": "account_allocated_deduction_usd",
             "label": "Account-allocated deductions",
@@ -429,9 +412,7 @@ def _build_net_revenue_explanation(
             ],
         }
         if account_allocation_provenance is not None:
-            account_component.update(
-                allocation_provenance_to_api(account_allocation_provenance)
-            )
+            account_component.update(allocation_provenance_to_api(account_allocation_provenance))
         components.append(account_component)
         formula = (
             "net_revenue_usd = adjusted_gross_revenue_usd "
@@ -439,12 +420,14 @@ def _build_net_revenue_explanation(
             "- account_allocated_deduction_amount_usd"
         )
     else:
-        components.append({
-            "key": "source_reported_deduction_usd",
-            "label": "Source-reported deductions",
-            "value": _decimal_to_api(summary.deduction_amount_usd),
-            "source_kind": summary.primary_source_kind,
-        })
+        components.append(
+            {
+                "key": "source_reported_deduction_usd",
+                "label": "Source-reported deductions",
+                "value": _decimal_to_api(summary.deduction_amount_usd),
+                "source_kind": summary.primary_source_kind,
+            }
+        )
         # FIX: the source-net value is adjusted_net = source-reported net +
         # approved_manual_override_total_usd, so a literal "net = source-reported
         # net" formula no longer reconciles to the persisted value once an approved
@@ -461,13 +444,15 @@ def _build_net_revenue_explanation(
         for issue in summary.issues
     ]
     if summary.pending_manual_override_count:
-        warnings.append({
-            "code": "PENDING_MANUAL_OVERRIDES",
-            "message": (
-                f"{summary.pending_manual_override_count} pending manual override(s) "
-                f"not included in {NET_REVENUE_METRIC}."
-            ),
-        })
+        warnings.append(
+            {
+                "code": "PENDING_MANUAL_OVERRIDES",
+                "message": (
+                    f"{summary.pending_manual_override_count} pending manual override(s) "
+                    f"not included in {NET_REVENUE_METRIC}."
+                ),
+            }
+        )
 
     return NumberExplanationEntry(
         month=month,
@@ -501,11 +486,7 @@ def _confidence(
     if warnings and score > Decimal("0.9000"):
         score = Decimal("0.9000")
     label = (
-        "HIGH"
-        if score >= Decimal("0.9000")
-        else "MEDIUM"
-        if score >= Decimal("0.7000")
-        else "LOW"
+        "HIGH" if score >= Decimal("0.9000") else "MEDIUM" if score >= Decimal("0.7000") else "LOW"
     )
     return {
         "label": label,
@@ -559,6 +540,4 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
     try:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
-        raise NumberExplanationValidationError(
-            "tenant_id must be a valid UUID"
-        ) from exc
+        raise NumberExplanationValidationError("tenant_id must be a valid UUID") from exc

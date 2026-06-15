@@ -8,6 +8,7 @@ method validation, compute, reject-on-unallocated, version assignment, and the
 row inserts. It NEVER opens or commits its own session/transaction — the FastAPI
 session dependency commits after the route returns.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -75,9 +76,7 @@ def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
     try:
         return UUID(str(tenant_id).strip())
     except ValueError as exc:
-        raise CommittedAllocationValidationError(
-            f"invalid tenant_id: {tenant_id!r}"
-        ) from exc
+        raise CommittedAllocationValidationError(f"invalid tenant_id: {tenant_id!r}") from exc
 
 
 def _actor_identity_uuid(value: str) -> UUID:
@@ -97,6 +96,100 @@ class CommitAllocationOutcome:
     unallocated: tuple[CommittedAllocationUnallocatedORM, ...]
     notes: tuple[CommittedAllocationNoteORM, ...]
     created: bool
+
+
+@dataclass(frozen=True)
+class _CommittedAllocationChildren:
+    """Child evidence rows prepared for one committed allocation run."""
+
+    lines: tuple[CommittedAllocationLineORM, ...]
+    unallocated: tuple[CommittedAllocationUnallocatedORM, ...]
+    notes: tuple[CommittedAllocationNoteORM, ...]
+
+
+def _validate_commit_request(
+    *,
+    month: str,
+    close_status: str,
+    allocation_method: str,
+    channel_company: Mapping[str, str] | None,
+) -> None:
+    """Validate lock state and method preconditions before finance compute."""
+    if close_status == "LOCKED":
+        raise CommittedAllocationLockedMonthError(f"Finance month is locked: {month}")
+    if allocation_method not in SERVICE_COMMITTABLE_METHODS:
+        raise CommittedAllocationValidationError(
+            f"unsupported allocation method: {allocation_method}"
+        )
+    # Service-layer mirror of the engine's company_level precondition so the
+    # route gets a typed 422 (the engine's AllocationValidationError would
+    # surface as a 500 from this path).
+    if allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD and channel_company is None:
+        raise CommittedAllocationValidationError(
+            "channel_company mapping is required for company_level"
+        )
+
+
+def _validate_commit_result(
+    *,
+    result: AccountAllocationResult,
+    allocation_method: str,
+) -> None:
+    """Reject accidental unallocated components for committable allocation modes."""
+    # no_allocation withholds EVERY component by design: its snapshot persists
+    # the full unallocated set as evidence instead of rejecting.
+    if result.unallocated and allocation_method != NO_ALLOCATION_METHOD:
+        raise CommittedAllocationValidationError(
+            f"cannot commit: {len(result.unallocated)} unallocated component(s)"
+        )
+
+
+def _build_committed_allocation_children(
+    *,
+    run_id: UUID,
+    result: AccountAllocationResult,
+) -> _CommittedAllocationChildren:
+    """Materialize child evidence rows from the computed allocation result."""
+    lines = tuple(
+        CommittedAllocationLineORM(
+            run_id=run_id,
+            adsense_account_id=ln.adsense_account_id,
+            youtube_channel_id=ln.youtube_channel_id,
+            component_kind=ln.component_kind,
+            source_system=ln.source_system,
+            component_key=ln.component_key,
+            basis_source_kind=ln.basis_source_kind,
+            basis_amount_usd=ln.basis_amount_usd,
+            basis_share=ln.basis_share,
+            allocated_amount_usd=ln.allocated_amount_usd,
+            net_applicable=ln.net_applicable,
+        )
+        for ln in result.lines
+    )
+    notes = tuple(
+        CommittedAllocationNoteORM(
+            run_id=run_id,
+            note_code=note.note_code,
+            youtube_channel_id=note.youtube_channel_id,
+            detail=note.detail,
+        )
+        for note in result.notes
+    )
+    # result.unallocated is empty here for every method except no_allocation
+    # after validation; no_allocation records intentional withholds as evidence.
+    unallocated = tuple(
+        CommittedAllocationUnallocatedORM(
+            run_id=run_id,
+            scope_id=iss.scope_id,
+            component_kind=iss.component_kind,
+            component_key=iss.component_key,
+            amount_usd=iss.amount_usd,
+            issue_code=iss.issue_code,
+            detail=iss.detail,
+        )
+        for iss in result.unallocated
+    )
+    return _CommittedAllocationChildren(lines=lines, unallocated=unallocated, notes=notes)
 
 
 class SqlAlchemyCommittedAllocationRepository:
@@ -158,37 +251,20 @@ class SqlAlchemyCommittedAllocationRepository:
             self._session, month, tenant_id=self._tenant_id, for_update=True
         )
 
-        existing = self._session.scalars(
-            select(CommittedAllocationRunORM).where(
-                CommittedAllocationRunORM.tenant_id == self._tenant_id,
-                CommittedAllocationRunORM.month == month,
-                CommittedAllocationRunORM.idempotency_key == idempotency_key,
-            )
-        ).one_or_none()
-        if existing is not None:
-            if existing.request_fingerprint != request_fingerprint:
-                raise CommittedAllocationIdempotencyConflictError(
-                    "idempotency key reused with a different request"
-                )
-            return self._replay(existing)
+        replayed = self._replay_existing_commit(
+            month=month,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+        )
+        if replayed is not None:
+            return replayed
 
-        if close_row.status == "LOCKED":
-            raise CommittedAllocationLockedMonthError(f"Finance month is locked: {month}")
-
-        if allocation_method not in SERVICE_COMMITTABLE_METHODS:
-            raise CommittedAllocationValidationError(
-                f"unsupported allocation method: {allocation_method}"
-            )
-        # Service-layer mirror of the engine's company_level precondition so the
-        # route gets a typed 422 (the engine's AllocationValidationError would
-        # surface as a 500 from this path).
-        if (
-            allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD
-            and channel_company is None
-        ):
-            raise CommittedAllocationValidationError(
-                "channel_company mapping is required for company_level"
-            )
+        _validate_commit_request(
+            month=month,
+            close_status=close_row.status,
+            allocation_method=allocation_method,
+            channel_company=channel_company,
+        )
 
         result = self._compute_result(
             month=month,
@@ -199,27 +275,81 @@ class SqlAlchemyCommittedAllocationRepository:
             channel_company=channel_company,
             manual_lines=manual_lines,
         )
-        # no_allocation withholds EVERY component by design — its snapshot
-        # persists the full unallocated set as evidence instead of rejecting.
-        if result.unallocated and allocation_method != NO_ALLOCATION_METHOD:
-            raise CommittedAllocationValidationError(
-                f"cannot commit: {len(result.unallocated)} unallocated component(s)"
+        _validate_commit_result(result=result, allocation_method=allocation_method)
+
+        run = self._build_commit_run(
+            month=month,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+            reason=reason,
+            committed_by=committed_by_uuid,
+            result=result,
+        )
+        self._session.add(run)
+        self._session.flush()  # assign run.id
+
+        children = self._write_child_evidence(run=run, result=result)
+        return CommitAllocationOutcome(
+            run=run,
+            lines=children.lines,
+            unallocated=children.unallocated,
+            notes=children.notes,
+            created=True,
+        )
+
+    def _replay_existing_commit(
+        self,
+        *,
+        month: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+    ) -> CommitAllocationOutcome | None:
+        """Return an idempotent replay if this key already committed."""
+        existing = self._session.scalars(
+            select(CommittedAllocationRunORM).where(
+                CommittedAllocationRunORM.tenant_id == self._tenant_id,
+                CommittedAllocationRunORM.month == month,
+                CommittedAllocationRunORM.idempotency_key == idempotency_key,
             )
+        ).one_or_none()
+        if existing is None:
+            return None
+        if existing.request_fingerprint != request_fingerprint:
+            raise CommittedAllocationIdempotencyConflictError(
+                "idempotency key reused with a different request"
+            )
+        return self._replay(existing)
 
-        next_version = (
-            self._session.scalars(
-                select(CommittedAllocationRunORM.commit_version).where(
-                    CommittedAllocationRunORM.tenant_id == self._tenant_id,
-                    CommittedAllocationRunORM.month == month,
-                ).order_by(CommittedAllocationRunORM.commit_version.desc())
-            ).first()
-            or 0
-        ) + 1
+    def _next_commit_version(self, *, month: str) -> int:
+        """Return the next monotonically increasing commit version for a month."""
+        latest_version = self._session.scalars(
+            select(CommittedAllocationRunORM.commit_version)
+            .where(
+                CommittedAllocationRunORM.tenant_id == self._tenant_id,
+                CommittedAllocationRunORM.month == month,
+            )
+            .order_by(CommittedAllocationRunORM.commit_version.desc())
+        ).first()
+        return (latest_version or 0) + 1
 
-        run = CommittedAllocationRunORM(
-            tenant_id=self._tenant_id, month=month, commit_version=next_version,
+    def _build_commit_run(
+        self,
+        *,
+        month: str,
+        idempotency_key: str,
+        request_fingerprint: str,
+        reason: str,
+        committed_by: UUID,
+        result: AccountAllocationResult,
+    ) -> CommittedAllocationRunORM:
+        """Build the parent run row before child evidence is inserted."""
+        return CommittedAllocationRunORM(
+            tenant_id=self._tenant_id,
+            month=month,
+            commit_version=self._next_commit_version(month=month),
             allocation_method=result.allocation_method,
-            idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
             component_count=result.summary.component_count,
             allocated_component_count=result.summary.allocated_component_count,
             unallocated_component_count=result.summary.unallocated_component_count,
@@ -227,10 +357,25 @@ class SqlAlchemyCommittedAllocationRepository:
             unallocated_total_usd=result.summary.unallocated_total_usd,
             net_applicable_total_usd=result.summary.net_applicable_total_usd,
             reconciliation_total_usd=result.summary.reconciliation_total_usd,
-            committed_by=committed_by_uuid, reason=reason,
+            committed_by=committed_by,
+            reason=reason,
         )
-        self._session.add(run)
-        self._session.flush()  # assign run.id
+
+    # ========================================================================
+    # Purpose: Persist child evidence rows under the restricted platform role
+    #   while keeping the parent run write tenant-scoped and atomic.
+    # Database/ORM: committed_allocation_lines/_notes/_unallocated.
+    # Standards: Postgres-only role swap, shared transaction, typed finance
+    #   entities, no direct commit.
+    # Blast Radius: Authorization role grants and finance evidence writes.
+    # ========================================================================
+    def _write_child_evidence(
+        self,
+        *,
+        run: CommittedAllocationRunORM,
+        result: AccountAllocationResult,
+    ) -> _CommittedAllocationChildren:
+        """Write line, note, and unallocated evidence rows for one run."""
         # ====================================================================
         # Purpose: Elevate only the child-row evidence writes that live outside
         #   the tenant RLS surface. The run row itself stays on app_tenant; the
@@ -247,48 +392,15 @@ class SqlAlchemyCommittedAllocationRepository:
             self._session.connection().exec_driver_sql('SET LOCAL ROLE "app_platform"')
         wrote_children = False
         try:
-            lines = tuple(
-                CommittedAllocationLineORM(
-                    run_id=run.id, adsense_account_id=ln.adsense_account_id,
-                    youtube_channel_id=ln.youtube_channel_id,
-                    component_kind=ln.component_kind, source_system=ln.source_system,
-                    component_key=ln.component_key,
-                    basis_source_kind=ln.basis_source_kind,
-                    basis_amount_usd=ln.basis_amount_usd, basis_share=ln.basis_share,
-                    allocated_amount_usd=ln.allocated_amount_usd,
-                    net_applicable=ln.net_applicable,
-                )
-                for ln in result.lines
-            )
-            notes = tuple(
-                CommittedAllocationNoteORM(
-                    run_id=run.id, note_code=note.note_code,
-                    youtube_channel_id=note.youtube_channel_id, detail=note.detail,
-                )
-                for note in result.notes
-            )
-            # result.unallocated is empty here for every method except
-            # no_allocation (reject-on-unallocated above); a no_allocation run
-            # snapshots its full INTENTIONAL_NO_ALLOCATION set as evidence.
-            unallocated = tuple(
-                CommittedAllocationUnallocatedORM(
-                    run_id=run.id, scope_id=iss.scope_id,
-                    component_kind=iss.component_kind,
-                    component_key=iss.component_key, amount_usd=iss.amount_usd,
-                    issue_code=iss.issue_code, detail=iss.detail,
-                )
-                for iss in result.unallocated
-            )
-            for child in (*lines, *notes, *unallocated):
+            children = _build_committed_allocation_children(run_id=run.id, result=result)
+            for child in (*children.lines, *children.notes, *children.unallocated):
                 self._session.add(child)
             self._session.flush()
             wrote_children = True
         finally:
             if is_postgres and wrote_children:
                 self._session.connection().exec_driver_sql('SET LOCAL ROLE "app_tenant"')
-        return CommitAllocationOutcome(
-            run=run, lines=lines, unallocated=unallocated, notes=notes, created=True
-        )
+        return children
 
     # ========================================================================
     # Purpose: Resolve the AccountAllocationResult to persist for one commit.
@@ -370,28 +482,34 @@ class SqlAlchemyCommittedAllocationRepository:
     # ========================================================================
     def _replay(self, run: CommittedAllocationRunORM) -> CommitAllocationOutcome:
         """Load an existing run's children (deterministically ordered) for replay."""
-        lines = tuple(self._session.scalars(
-            select(CommittedAllocationLineORM).where(
-                CommittedAllocationLineORM.run_id == run.id
-            ).order_by(
-                CommittedAllocationLineORM.adsense_account_id,
-                CommittedAllocationLineORM.youtube_channel_id,
-                CommittedAllocationLineORM.component_key,
-            )
-        ).all())
-        unallocated = tuple(self._session.scalars(
-            select(CommittedAllocationUnallocatedORM).where(
-                CommittedAllocationUnallocatedORM.run_id == run.id
-            ).order_by(
-                CommittedAllocationUnallocatedORM.scope_id,
-                CommittedAllocationUnallocatedORM.component_key,
-            )
-        ).all())
-        notes = tuple(self._session.scalars(
-            select(CommittedAllocationNoteORM).where(
-                CommittedAllocationNoteORM.run_id == run.id
-            ).order_by(CommittedAllocationNoteORM.youtube_channel_id)
-        ).all())
+        lines = tuple(
+            self._session.scalars(
+                select(CommittedAllocationLineORM)
+                .where(CommittedAllocationLineORM.run_id == run.id)
+                .order_by(
+                    CommittedAllocationLineORM.adsense_account_id,
+                    CommittedAllocationLineORM.youtube_channel_id,
+                    CommittedAllocationLineORM.component_key,
+                )
+            ).all()
+        )
+        unallocated = tuple(
+            self._session.scalars(
+                select(CommittedAllocationUnallocatedORM)
+                .where(CommittedAllocationUnallocatedORM.run_id == run.id)
+                .order_by(
+                    CommittedAllocationUnallocatedORM.scope_id,
+                    CommittedAllocationUnallocatedORM.component_key,
+                )
+            ).all()
+        )
+        notes = tuple(
+            self._session.scalars(
+                select(CommittedAllocationNoteORM)
+                .where(CommittedAllocationNoteORM.run_id == run.id)
+                .order_by(CommittedAllocationNoteORM.youtube_channel_id)
+            ).all()
+        )
         return CommitAllocationOutcome(
             run=run, lines=lines, unallocated=unallocated, notes=notes, created=False
         )
@@ -399,10 +517,12 @@ class SqlAlchemyCommittedAllocationRepository:
     def get_latest_run(self, month: str) -> CommittedAllocationRunORM | None:
         """Return the highest-version run for a month (NOT wired into readers)."""
         return self._session.scalars(
-            select(CommittedAllocationRunORM).where(
+            select(CommittedAllocationRunORM)
+            .where(
                 CommittedAllocationRunORM.tenant_id == self._tenant_id,
                 CommittedAllocationRunORM.month == month,
-            ).order_by(CommittedAllocationRunORM.commit_version.desc())
+            )
+            .order_by(CommittedAllocationRunORM.commit_version.desc())
         ).first()
 
     def get_run_by_idempotency_key(

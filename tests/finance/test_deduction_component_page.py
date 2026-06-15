@@ -1,4 +1,5 @@
 """Repository-layer filtering + pagination for deduction components (SQLite)."""
+
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -19,9 +20,7 @@ TENANT = UUID(UMS_TENANT_ID)
 
 def _engine(tmp_path):
     """Create a fresh SQLite engine with FinanceBase tables for one test run."""
-    engine = create_engine(
-        f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
-    )
+    engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
     FinanceBase.metadata.create_all(engine)
     return engine
 
@@ -30,12 +29,22 @@ def _add(session, *, kind, scope_kind, scope_id, key):
     """Insert one DeductionComponentORM row with fixed USD amounts into the session."""
     session.add(
         DeductionComponentORM(
-            id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind=kind,
-            scope_kind=scope_kind, scope_id=scope_id, amount_usd=Decimal("10.00"),
-            amount_native=None, currency_code="USD",
-            source_system="adsense_management", source_table="google_revenue_source_rows",
-            source_id=None, source_key=key, source_report_id=None,
-            raw_payload={"k": "v"}, component_key=key,
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            component_kind=kind,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            amount_usd=Decimal("10.00"),
+            amount_native=None,
+            currency_code="USD",
+            source_system="adsense_management",
+            source_table="google_revenue_source_rows",
+            source_id=None,
+            source_key=key,
+            source_report_id=None,
+            raw_payload={"k": "v"},
+            component_key=key,
         )
     )
 
@@ -43,7 +52,9 @@ def _add(session, *, kind, scope_kind, scope_id, key):
 def _seed(session):
     """Seed one CHANNEL, ACCOUNT, and PAYMENT component covering all three scope kinds."""
     _add(session, kind="DEDUCTION", scope_kind="CHANNEL", scope_id="chan-1", key="k-chan")
-    _add(session, kind="UNRESOLVED_PAYMENT_GAP", scope_kind="ACCOUNT", scope_id="pub-1", key="k-acct")
+    _add(
+        session, kind="UNRESOLVED_PAYMENT_GAP", scope_kind="ACCOUNT", scope_id="pub-1", key="k-acct"
+    )
     _add(session, kind="TRANSFER_FEE", scope_kind="PAYMENT", scope_id="BANK-1", key="k-pay")
     session.commit()
 
@@ -67,7 +78,8 @@ def test_page_returns_all_with_total_when_unfiltered(tmp_path):
 
 
 def test_page_component_kind_filter_counts_only_matches(tmp_path):
-    """component_kind filter returns only matching rows and sets total_count to the filtered count."""
+    """component_kind filter returns only matching rows and sets
+    total_count to the filtered count."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -114,7 +126,8 @@ def test_page_scope_id_filter_counts_only_matches(tmp_path):
 
 
 def test_page_limit_offset_paginates_but_total_is_full_match_count(tmp_path):
-    """limit/offset slices the returned rows while total_count always reflects the full filtered set."""
+    """limit/offset slices the returned rows while total_count
+    always reflects the full filtered set."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)

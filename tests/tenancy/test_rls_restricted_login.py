@@ -42,17 +42,13 @@ def _login_url(admin_url: str) -> str:
     # Swap the userinfo of the admin URL for the throwaway login's credentials,
     # keeping host/port/db identical.
     eng_url = sa.make_url(admin_url)
-    return eng_url.set(username=_LOGIN, password=_LOGIN_PW).render_as_string(
-        hide_password=False
-    )
+    return eng_url.set(username=_LOGIN, password=_LOGIN_PW).render_as_string(hide_password=False)
 
 
 def _create_login(admin_engine: sa.Engine) -> None:
     """Create the throwaway restricted login and grant its lane memberships."""
     # AUTOCOMMIT: CREATE/DROP ROLE and GRANT are not transactional-friendly here.
-    with admin_engine.connect().execution_options(
-        isolation_level="AUTOCOMMIT"
-    ) as conn:
+    with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         _drop_login(conn)
         conn.execute(
             sa.text(
@@ -61,16 +57,8 @@ def _create_login(admin_engine: sa.Engine) -> None:
             )
         )
         # PG 16+ membership options: no passive inheritance, but may SET ROLE.
-        conn.execute(
-            sa.text(
-                f"GRANT app_tenant TO {_LOGIN} WITH INHERIT FALSE, SET TRUE"
-            )
-        )
-        conn.execute(
-            sa.text(
-                f"GRANT app_platform TO {_LOGIN} WITH INHERIT FALSE, SET TRUE"
-            )
-        )
+        conn.execute(sa.text(f"GRANT app_tenant TO {_LOGIN} WITH INHERIT FALSE, SET TRUE"))
+        conn.execute(sa.text(f"GRANT app_platform TO {_LOGIN} WITH INHERIT FALSE, SET TRUE"))
 
 
 def _drop_login(conn: sa.Connection) -> None:
@@ -106,9 +94,7 @@ def test_restricted_login_lane_model_end_to_end():
                 conn.execute(sa.text("SELECT 1 FROM org_units LIMIT 1"))
             except sa.exc.ProgrammingError as exc:
                 msg = str(exc).lower()
-                assert (
-                    "permission denied" in msg or "does not exist" in msg
-                ), str(exc)
+                assert "permission denied" in msg or "does not exist" in msg, str(exc)
                 denied = True
         assert denied, (
             "bare login (INHERIT FALSE) unexpectedly read a tenant table "
@@ -118,29 +104,21 @@ def test_restricted_login_lane_model_end_to_end():
         # (b) platform lane: SET ROLE app_platform -> read tenants (resolver).
         with login_engine.connect() as conn:
             conn.execute(sa.text('SET ROLE "app_platform"'))
-            count = conn.execute(
-                sa.text("SELECT count(*) FROM tenants")
-            ).scalar()
+            count = conn.execute(sa.text("SELECT count(*) FROM tenants")).scalar()
             assert count is not None
 
         # (c) tenant lane: populate trusted context, then SET ROLE app_tenant.
         with login_engine.connect() as conn:
             conn.execute(sa.text('SET ROLE "app_platform"'))
             conn.execute(
-                sa.text(
-                    "SELECT set_app_current_tenant_id(:t)"
-                ),
+                sa.text("SELECT set_app_current_tenant_id(:t)"),
                 {"t": _UMS_TENANT},
             )
             conn.execute(sa.text('SET ROLE "app_tenant"'))
-            count = conn.execute(
-                sa.text("SELECT count(*) FROM org_units")
-            ).scalar()
+            count = conn.execute(sa.text("SELECT count(*) FROM org_units")).scalar()
             assert count is not None
     finally:
         login_engine.dispose()
-        with admin_engine.connect().execution_options(
-            isolation_level="AUTOCOMMIT"
-        ) as conn:
+        with admin_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             _drop_login(conn)
         admin_engine.dispose()

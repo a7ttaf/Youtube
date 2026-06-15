@@ -27,13 +27,17 @@ def principal() -> UserPrincipal:
     return UserPrincipal(
         user_id=str(USER_ID),
         email="admin@example.com",
-        role_assignments=[RoleAssignment(role=RoleKey.CORPORATE_ADMIN, scope=AccessScope.global_scope())],
+        role_assignments=[
+            RoleAssignment(role=RoleKey.CORPORATE_ADMIN, scope=AccessScope.global_scope())
+        ],
     )
 
 
 def test_sql_audit_sink_persists_sensitive_audit_record():
     session = build_session()
-    session.add(UserORM(id=USER_ID, email="admin@example.com", display_name="Admin", status="active"))
+    session.add(
+        UserORM(id=USER_ID, email="admin@example.com", display_name="Admin", status="active")
+    )
     session.commit()
     sink = SqlAlchemyAuditSink(session)
 
@@ -66,7 +70,9 @@ def test_sql_audit_sink_tolerates_malformed_actor_id_with_details():
         actor=UserPrincipal(
             user_id="not-a-uuid",
             email="admin@example.com",
-            role_assignments=[RoleAssignment(role=RoleKey.CORPORATE_ADMIN, scope=AccessScope.global_scope())],
+            role_assignments=[
+                RoleAssignment(role=RoleKey.CORPORATE_ADMIN, scope=AccessScope.global_scope())
+            ],
         ),
         event_type=AuditEventType.CHANNEL_UPDATED,
         entity_type="youtube_channel",

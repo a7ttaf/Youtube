@@ -499,14 +499,49 @@ export type PaginationMeta = {
 };
 
 // One configured connector credential row ("data source").
-// Source: ConnectorCredentialEntry.to_api() (credentials.py:35-42). The secret
+// Source: ConnectorCredentialEntry.to_api() (credentials.py:40-59). The secret
 // itself is NEVER serialized — only a has_secret_ref boolean is exposed.
+// The four refresh-telemetry columns are OPTIONAL (null until the OAuth refresh
+// path records them) and are surfaced together by the credential-HEALTH route
+// (GET /connectors/credentials/health); the MANAGE-gated credential LIST route
+// returns the same shape. ISO-8601 timestamps; nullable fields serialize as null.
 export type ConnectorCredential = {
   id: string;
   connector_key: string;
   account_id: string;
   status: string;
   has_secret_ref: boolean;
+  // OAuth refresh telemetry (credentials.py to_api()); null until a refresh runs.
+  last_refresh_attempt_at?: string | null; // ISO-8601
+  token_expiry_at?: string | null; // ISO-8601
+  last_refresh_status?: string | null;
+  last_refresh_error_class?: string | null;
+};
+
+// Coarse, server-derived credential health label. Source: the fixed literal set
+// returned by derive_credential_health_state() (credentials.py). Read-only — the
+// UI never derives or overrides it (no client-side finance/auth logic).
+export type ConnectorCredentialHealthState =
+  | "healthy"
+  | "expiring"
+  | "auth_failed"
+  | "missing"
+  | "unknown";
+
+// One credential-health row: the ConnectorCredential telemetry fields plus the
+// server-derived health_state. Source: list_connector_credential_health()
+// (connectors.py) appends health_state to each credential's to_api() shape.
+export type ConnectorCredentialHealth = ConnectorCredential & {
+  health_state: ConnectorCredentialHealthState;
+};
+
+// GET /connectors/credentials/health. VIEW_CONNECTOR_HEALTH-gated (a 403 surfaces
+// as the typed ApiError for the view to translate). Connector-scoped callers are
+// narrowed server-side to their granted connector ids (no foreign-credential
+// leak). Source: list_connector_credential_health() (connectors.py).
+export type ConnectorCredentialHealthResponse = {
+  credentials: ConnectorCredentialHealth[];
+  pagination: PaginationMeta;
 };
 
 // GET /connectors/credentials. Source: list_connector_credentials() (connectors.py:73-81).

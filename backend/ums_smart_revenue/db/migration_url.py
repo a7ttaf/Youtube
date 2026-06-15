@@ -4,6 +4,7 @@ Extracted from ``alembic/env.py`` so the precedence logic can be unit-tested
 without an Alembic runtime context (``env.py`` runs migrations at import time and
 cannot be imported directly).
 """
+
 from __future__ import annotations
 
 import configparser

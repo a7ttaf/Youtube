@@ -10,11 +10,11 @@ from ums_smart_revenue.db.finance_models import (
     RevenueManualOverrideORM,
 )
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
-from ums_smart_revenue.finance.month_close import acquire_finance_month_advisory_lock
+from ums_smart_revenue.finance.month_close_locks import acquire_finance_month_advisory_lock
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
 )
-from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
+from ums_smart_revenue.finance.revenue_fact_entries import RevenueFactEntry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -76,9 +76,7 @@ class SqlAlchemyFinanceCloseReadinessService:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
-    def check_month(
-        self, month: str, *, for_update: bool = False
-    ) -> FinanceCloseReadiness:
+    def check_month(self, month: str, *, for_update: bool = False) -> FinanceCloseReadiness:
         """Return readiness, optionally guarding the close attempt transaction."""
         _validate_month(month)
         if for_update:
@@ -88,9 +86,7 @@ class SqlAlchemyFinanceCloseReadinessService:
                 tenant_id=self._tenant_id,
             )
         blockers: list[FinanceCloseBlocker] = []
-        pending_override_count = self._pending_manual_override_count(
-            month, for_update=for_update
-        )
+        pending_override_count = self._pending_manual_override_count(month, for_update=for_update)
         if pending_override_count:
             blockers.append(
                 FinanceCloseBlocker(
@@ -101,9 +97,7 @@ class SqlAlchemyFinanceCloseReadinessService:
                 )
             )
 
-        missing_fact_count = self._missing_required_revenue_fact_count(
-            month, for_update=for_update
-        )
+        missing_fact_count = self._missing_required_revenue_fact_count(month, for_update=for_update)
         if missing_fact_count:
             blockers.append(
                 FinanceCloseBlocker(
@@ -138,14 +132,10 @@ class SqlAlchemyFinanceCloseReadinessService:
             RevenueManualOverrideORM.status == "PENDING",
         )
         if for_update:
-            return self._count_locked_rows(
-                pending_overrides_statement.with_for_update()
-            )
+            return self._count_locked_rows(pending_overrides_statement.with_for_update())
         return self._count_statement_rows(pending_overrides_statement)
 
-    def _missing_required_revenue_fact_count(
-        self, month: str, *, for_update: bool
-    ) -> int:
+    def _missing_required_revenue_fact_count(self, month: str, *, for_update: bool) -> int:
         """Count active revenue-required channels missing facts for the month."""
         missing_channels_statement = (
             select(YouTubeChannelORM.youtube_channel_id)
@@ -176,16 +166,12 @@ class SqlAlchemyFinanceCloseReadinessService:
     def _count_statement_rows(self, statement) -> int:
         """Count rows returned by a selectable without duplicating its filters."""
         return int(
-            self._session.scalar(select(func.count()).select_from(statement.subquery()))
-            or 0
+            self._session.scalar(select(func.count()).select_from(statement.subquery())) or 0
         )
 
     def _count_locked_rows(self, statement) -> int:
         """Count a row-locking scalar query without materializing all rows."""
-        return sum(
-            1
-            for _ in self._session.scalars(statement.execution_options(yield_per=1000))
-        )
+        return sum(1 for _ in self._session.scalars(statement.execution_options(yield_per=1000)))
 
     def _month_facts(self, month: str, *, for_update: bool) -> list[RevenueFactEntry]:
         """Load month facts used for reconciliation, locking them for close attempts."""

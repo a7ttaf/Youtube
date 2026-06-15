@@ -2,6 +2,7 @@
 
 Finance-gated, tenant-scoped, raw_payload never returned.
 """
+
 from __future__ import annotations
 
 from typing import Annotated
@@ -118,15 +119,11 @@ def get_revenue_source_row(
     """Return one tenant-scoped source row; 404 if absent or cross-tenant."""
     _require_view_revenue(user)
     try:
-        entry = get_source_row(
-            session, tenant_id=_tenant_uuid(user), row_id=row_id
-        )
+        entry = get_source_row(session, tenant_id=_tenant_uuid(user), row_id=row_id)
     except SourceRowValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     if entry is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="source row not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="source row not found")
     return entry.to_api()

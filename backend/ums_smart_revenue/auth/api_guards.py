@@ -1,10 +1,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+
+T = TypeVar("T")
 
 
 class AccessDeniedError(PermissionError):
@@ -24,12 +27,8 @@ def require_permission(
     message: str | None = None,
 ) -> Callable[[GuardContext], None]:
     def guard(context: GuardContext) -> None:
-        if not has_permission(
-            context.user, permission, context.scope, context.org_index
-        ):
-            raise AccessDeniedError(
-                message or f"Missing permission: {permission.value}"
-            )
+        if not has_permission(context.user, permission, context.scope, context.org_index):
+            raise AccessDeniedError(message or f"Missing permission: {permission.value}")
 
     return guard
 
@@ -46,10 +45,10 @@ def require_predicate(
     return guard
 
 
-def guarded_call[T](
+def guarded_call(  # noqa: UP047 - DeepSource/Pylint does not parse PEP 695 syntax yet.
     guard: Callable[[GuardContext], None],
     context: GuardContext,
-    handler: Callable[[], T],
-) -> T:
+    handler: Callable[[], T],  # skipcq: PYL-E0602
+) -> T:  # skipcq: PYL-E0602
     guard(context)
     return handler()

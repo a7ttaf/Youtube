@@ -65,18 +65,12 @@ class ConnectorRunORM(ReportBase):
     connector_key: Mapped[str] = mapped_column(Text, nullable=False)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     report_month: Mapped[str] = mapped_column(Text, nullable=False)
-    triggered_by_user_id: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True), nullable=True
-    )
+    triggered_by_user_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'RUNNING'")
-    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'RUNNING'"))
     counts_json: Mapped[dict[str, int]] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"),
         nullable=False,

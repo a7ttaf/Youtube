@@ -15,9 +15,7 @@ CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000001301")
 USER_ID = UUID("00000000-0000-0000-0000-000000001401")
 
 
-def auth_headers(
-    role: str, scope_type: str, scope_id: str | None = None
-) -> dict[str, str]:
+def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "sql-user@example.com",
@@ -41,9 +39,7 @@ def seed_database(database_url: str) -> None:
     with Session(engine) as session:
         session.add_all(
             [
-                OrgUnitORM(
-                    id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True
-                ),
+                OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
                 OrgUnitORM(
                     id=COMPANY_ID,
                     parent_id=SECTOR_ID,
@@ -160,6 +156,4 @@ def test_app_uses_database_url_from_environment(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert [channel["youtube_channel_id"] for channel in response.json()] == [
-        "sql-channel-tv-a"
-    ]
+    assert [channel["youtube_channel_id"] for channel in response.json()] == ["sql-channel-tv-a"]

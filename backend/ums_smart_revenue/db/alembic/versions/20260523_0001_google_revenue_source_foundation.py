@@ -51,9 +51,7 @@ def _create_currencies_table() -> None:
         sa.Column("numeric_code", sa.Text(), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("minor_unit", sa.Integer(), nullable=True),
-        sa.Column(
-            "is_supported", sa.Boolean(), nullable=False, server_default=sa.text("false")
-        ),
+        sa.Column("is_supported", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("activated_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
             "length(code) = 3 "
@@ -176,21 +174,26 @@ def _create_google_revenue_source_rows_table() -> None:
             server_default=sa.func.now(),
         ),
         sa.ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.id"],
+            ["tenant_id"],
+            ["tenants.id"],
             name="fk_google_revenue_source_rows_tenant",
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["currency_code"], ["currencies.code"],
+            ["currency_code"],
+            ["currencies.code"],
             name="fk_google_revenue_source_rows_currency",
         ),
         sa.ForeignKeyConstraint(
-            ["raw_file_id"], ["raw_report_files.id"],
+            ["raw_file_id"],
+            ["raw_report_files.id"],
             name="fk_google_revenue_source_rows_raw_file",
             ondelete="RESTRICT",
         ),
         sa.UniqueConstraint(
-            "tenant_id", "source_system", "source_row_key",
+            "tenant_id",
+            "source_system",
+            "source_row_key",
             name="uq_google_revenue_source_rows_source_key",
         ),
         sa.CheckConstraint(

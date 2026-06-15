@@ -107,9 +107,7 @@ class MonthBankReconciliationSummary:
             "payment_count": self.payment_count,
             "paid_payment_count": self.paid_payment_count,
             "non_paid_payment_count": self.non_paid_payment_count,
-            "unsupported_payment_currency_count": (
-                self.unsupported_payment_currency_count
-            ),
+            "unsupported_payment_currency_count": (self.unsupported_payment_currency_count),
             "entry_count": self.entry_count,
             "tolerance_usd": _decimal_to_api(self.tolerance_usd),
             "issues": [issue.to_api() for issue in self.issues],
@@ -273,9 +271,7 @@ class SqlAlchemyBankReconciliationRepository:
         )
 
 
-_MonthFilterEntry = TypeVar(
-    "_MonthFilterEntry", AdSensePaymentEntry, BankReconciliationEntry
-)
+_MonthFilterEntry = TypeVar("_MonthFilterEntry", AdSensePaymentEntry, BankReconciliationEntry)
 
 
 # DeepSource's Python analyzer rejects PEP 695 generic function syntax here.
@@ -333,9 +329,7 @@ def _sum_and_quantize(items: Iterable[object], attr: str) -> Decimal:
     Returns:
         Decimal: Sum of the attribute quantized to two decimal places.
     """
-    return _quantize_money(
-        sum((getattr(item, attr) for item in items), Decimal("0"))
-    )
+    return _quantize_money(sum((getattr(item, attr) for item in items), Decimal("0")))
 
 
 def build_month_bank_reconciliation_summary(
@@ -366,9 +360,7 @@ def build_month_bank_reconciliation_summary(
     unsupported_payment_currency_count = len(month_payments) - len(usd_payments)
 
     adsense_paid_amount = _sum_and_quantize(paid_payments, "payment_amount")
-    bank_received_amount_usd = _sum_and_quantize(
-        month_entries, "bank_received_amount_usd"
-    )
+    bank_received_amount_usd = _sum_and_quantize(month_entries, "bank_received_amount_usd")
     transfer_fee_usd = _sum_and_quantize(month_entries, "transfer_fee_usd")
     fx_difference_usd = _quantize_money(
         sum((entry.fx_difference_usd for entry in month_entries), Decimal("0"))
@@ -522,9 +514,7 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise BankReconciliationValidationError(
-            f"{field_name} must be a valid UUID"
-        ) from exc
+        raise BankReconciliationValidationError(f"{field_name} must be a valid UUID") from exc
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
@@ -544,9 +534,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
     try:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
-        raise BankReconciliationValidationError(
-            "tenant_id must be a valid UUID"
-        ) from exc
+        raise BankReconciliationValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _quantize_money(value: Decimal) -> Decimal:

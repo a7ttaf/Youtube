@@ -40,9 +40,7 @@ def test_finance_workbook_preview_builds_sheet_manifest_from_source_summaries():
 
     assert payload["artifact_type"] == "FINANCE_EXCEL_WORKBOOK_PREVIEW"
     assert payload["status"] == "READY_FOR_GENERATION"
-    assert [sheet["name"] for sheet in payload["sheets"]] == list(
-        FINANCE_WORKBOOK_SHEET_NAMES
-    )
+    assert [sheet["name"] for sheet in payload["sheets"]] == list(FINANCE_WORKBOOK_SHEET_NAMES)
     # Provenance: every sheet that surfaces the channel-direct / account-allocated
     # deduction split must disclose the account-allocation inputs, not just the
     # dedicated Deductions sheet. The Executive Summary sheet writes the
@@ -98,9 +96,7 @@ def test_finance_workbook_preview_rejects_non_workbook_export_type():
             smart_alerts=_smart_alert_summary(alert_count=0),
         )
 
-    assert str(exc_info.value) == (
-        "finance workbook preview only supports FINANCE_EXCEL exports"
-    )
+    assert str(exc_info.value) == ("finance workbook preview only supports FINANCE_EXCEL exports")
 
 
 def test_finance_workbook_xlsx_contains_expected_sheets_and_source_values():
@@ -334,17 +330,16 @@ def test_finance_workbook_renders_deduction_breakdown_columns_and_rows():
 def _committed_provenance() -> AllocationProvenance:
     """A committed-snapshot provenance with a fixed commit date for token assertions."""
     return AllocationProvenance(
-        source="committed_snapshot", commit_version=1,
-        committed_at=datetime(2026, 4, 2, tzinfo=UTC), run_id=UUID(int=7),
+        source="committed_snapshot",
+        commit_version=1,
+        committed_at=datetime(2026, 4, 2, tzinfo=UTC),
+        run_id=UUID(int=7),
     )
 
 
 def _exec_summary_keys(workbook) -> dict[str, object]:
     """Read the Executive Summary key/value sheet into a metric->value mapping."""
-    return {
-        row[0].value: row[1].value
-        for row in workbook["Executive Summary"].iter_rows()
-    }
+    return {row[0].value: row[1].value for row in workbook["Executive Summary"].iter_rows()}
 
 
 def test_finance_workbook_renders_committed_snapshot_disclosure_token():

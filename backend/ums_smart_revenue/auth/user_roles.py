@@ -129,9 +129,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
             )
         ).one_or_none()
         if existing is not None:
-            raise UserRoleAssignmentConflictError(
-                "Active role assignment already exists"
-            )
+            raise UserRoleAssignmentConflictError("Active role assignment already exists")
 
         row = UserRoleAssignmentORM(
             id=uuid4(),
@@ -164,9 +162,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
             raise
         return self._to_entry(row, scope)
 
-    def get_assignment(
-        self, *, user_id: str, assignment_id: str
-    ) -> UserRoleAssignmentEntry:
+    def get_assignment(self, *, user_id: str, assignment_id: str) -> UserRoleAssignmentEntry:
         """
         Retrieve a role assignment entry by user and assignment IDs.
 
@@ -284,18 +280,14 @@ class SqlAlchemyUserRoleAssignmentRepository:
                 "Service-only roles require a service account user"
             )
 
-    def _get_or_create_scope(
-        self, *, scope_type: str, scope_id: str | None
-    ) -> AccessScopeORM:
+    def _get_or_create_scope(self, *, scope_type: str, scope_id: str | None) -> AccessScopeORM:
         """
         Retrieve or create an access scope based on type and optional ID.
 
         Normalize inputs, attempt to fetch an existing scope, or create a new one
         if none exists, handling concurrent writers gracefully.
         """
-        normalized_scope_type, normalized_scope_id = _normalize_scope(
-            scope_type, scope_id
-        )
+        normalized_scope_type, normalized_scope_id = _normalize_scope(scope_type, scope_id)
         scope_filter = (
             AccessScopeORM.tenant_id == self._tenant_id,
             AccessScopeORM.scope_type == normalized_scope_type,
@@ -303,9 +295,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
             if normalized_scope_id is None
             else AccessScopeORM.scope_id == normalized_scope_id,
         )
-        row = self._session.scalars(
-            select(AccessScopeORM).where(*scope_filter)
-        ).one_or_none()
+        row = self._session.scalars(select(AccessScopeORM).where(*scope_filter)).one_or_none()
         if row is not None:
             return row
 
@@ -323,15 +313,11 @@ class SqlAlchemyUserRoleAssignmentRepository:
         except IntegrityError:
             # Another concurrent writer created this scope after our SELECT.
             # The savepoint was rolled back; re-query to return the winning row.
-            return self._session.scalars(
-                select(AccessScopeORM).where(*scope_filter)
-            ).one()
+            return self._session.scalars(select(AccessScopeORM).where(*scope_filter)).one()
         return new_row
 
     @staticmethod
-    def _to_entry(
-        row: UserRoleAssignmentORM, scope: AccessScopeORM
-    ) -> UserRoleAssignmentEntry:
+    def _to_entry(row: UserRoleAssignmentORM, scope: AccessScopeORM) -> UserRoleAssignmentEntry:
         """
         Convert ORM row and scope into a UserRoleAssignmentEntry.
 
@@ -361,9 +347,7 @@ def _parse_uuid(value: str, *, field_name: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise UserRoleAssignmentValidationError(
-            f"{field_name} must be a valid UUID"
-        ) from exc
+        raise UserRoleAssignmentValidationError(f"{field_name} must be a valid UUID") from exc
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
@@ -383,9 +367,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
     try:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
-        raise UserRoleAssignmentValidationError(
-            "tenant_id must be a valid UUID"
-        ) from exc
+        raise UserRoleAssignmentValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _parse_role(value: str) -> RoleKey:
@@ -423,19 +405,13 @@ def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | 
     Validate that scope ID requirements are met for the specified scope type.
     """
     try:
-        parsed_scope_type = ScopeType(
-            _normalize_required_string(scope_type, "scope_type")
-        )
+        parsed_scope_type = ScopeType(_normalize_required_string(scope_type, "scope_type"))
     except ValueError as exc:
-        raise UserRoleAssignmentValidationError(
-            f"Unknown scope_type: {scope_type}"
-        ) from exc
+        raise UserRoleAssignmentValidationError(f"Unknown scope_type: {scope_type}") from exc
     normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
     if parsed_scope_type == ScopeType.GLOBAL:
         if normalized_scope_id is not None:
-            raise UserRoleAssignmentValidationError(
-                "scope_id must be omitted for global scope"
-            )
+            raise UserRoleAssignmentValidationError("scope_id must be omitted for global scope")
         return parsed_scope_type.value, None
     if not normalized_scope_id:
         raise UserRoleAssignmentValidationError(

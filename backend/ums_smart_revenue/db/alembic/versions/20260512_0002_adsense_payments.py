@@ -18,7 +18,12 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "adsense_payments",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id",
+            postgresql.UUID(as_uuid=True),
+            primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
         sa.Column("month", sa.Text(), nullable=False),
         sa.Column("payment_name", sa.Text(), nullable=False),
         sa.Column("payment_date", sa.Date(), nullable=False),
@@ -32,8 +37,12 @@ def upgrade() -> None:
         ),
         sa.Column("source_report_id", sa.Text(), nullable=True),
         sa.Column("imported_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("imported_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "imported_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.UniqueConstraint("month", "payment_name", name="uq_adsense_payments_month_name"),
         sa.CheckConstraint(
             _month_format_check_sql(),

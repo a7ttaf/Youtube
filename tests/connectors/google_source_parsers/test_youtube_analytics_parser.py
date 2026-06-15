@@ -57,12 +57,18 @@ def test_period_uses_query_start_end() -> None:
 
 
 def test_source_row_key_stable_across_reruns() -> None:
-    a = list(YouTubeAnalyticsParser().parse(
-        _load_fixture("sample_query_response_2026_04.json"), tenant_id=TENANT_ID,
-    ))
-    b = list(YouTubeAnalyticsParser().parse(
-        _load_fixture("sample_query_response_2026_04_rerun.json"), tenant_id=TENANT_ID,
-    ))
+    a = list(
+        YouTubeAnalyticsParser().parse(
+            _load_fixture("sample_query_response_2026_04.json"),
+            tenant_id=TENANT_ID,
+        )
+    )
+    b = list(
+        YouTubeAnalyticsParser().parse(
+            _load_fixture("sample_query_response_2026_04_rerun.json"),
+            tenant_id=TENANT_ID,
+        )
+    )
     assert sorted(r.source_row_key for r in a) == sorted(r.source_row_key for r in b)
 
 
@@ -80,10 +86,17 @@ def test_different_ids_produce_distinct_keys() -> None:
     cross-account data in a multi-CMS or multi-channel-account tenant.
     """
     base = _load_fixture("sample_query_response_2026_04.json")
-    other = {**base, "query_request": {**base["query_request"], "ids": "contentOwner==cms-test-OTHER"}}
+    other = {
+        **base,
+        "query_request": {**base["query_request"], "ids": "contentOwner==cms-test-OTHER"},
+    }
 
-    a_keys = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID))
-    b_keys = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(other, tenant_id=TENANT_ID))
+    a_keys = sorted(
+        r.source_row_key for r in YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID)
+    )
+    b_keys = sorted(
+        r.source_row_key for r in YouTubeAnalyticsParser().parse(other, tenant_id=TENANT_ID)
+    )
 
     assert set(a_keys).isdisjoint(set(b_keys)), (
         "source_row_keys must differ when `ids` differs (per-account scope)"
@@ -114,9 +127,7 @@ def test_missing_currency_defaults_to_usd() -> None:
     failing closed.
     """
     base = _load_fixture("sample_query_response_2026_04.json")
-    request_without_currency = {
-        k: v for k, v in base["query_request"].items() if k != "currency"
-    }
+    request_without_currency = {k: v for k, v in base["query_request"].items() if k != "currency"}
     payload = {**base, "query_request": request_without_currency}
     rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
     assert rows  # ingests rather than failing closed
@@ -151,8 +162,7 @@ def test_channel_selector_representation_does_not_change_keys() -> None:
         r.source_row_key for r in YouTubeAnalyticsParser().parse(mine, tenant_id=TENANT_ID)
     )
     explicit_keys = sorted(
-        r.source_row_key
-        for r in YouTubeAnalyticsParser().parse(explicit, tenant_id=TENANT_ID)
+        r.source_row_key for r in YouTubeAnalyticsParser().parse(explicit, tenant_id=TENANT_ID)
     )
     assert mine_keys == explicit_keys
 
@@ -250,18 +260,31 @@ def test_reordered_metrics_produce_same_key() -> None:
     """Reordering the metrics CSV must not change source_row_key — the same
     dataset re-requested with reordered metrics must upsert, not duplicate.
     """
-    base = _load_fixture("sample_query_response_2026_04.json")  # metrics: estimatedRevenue,grossRevenue
-    reordered = {**base, "query_request": {**base["query_request"], "metrics": "grossRevenue,estimatedRevenue"}}
+    base = _load_fixture(
+        "sample_query_response_2026_04.json"
+    )  # metrics: estimatedRevenue,grossRevenue
+    reordered = {
+        **base,
+        "query_request": {**base["query_request"], "metrics": "grossRevenue,estimatedRevenue"},
+    }
     a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID))
-    b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(reordered, tenant_id=TENANT_ID))
+    b = sorted(
+        r.source_row_key for r in YouTubeAnalyticsParser().parse(reordered, tenant_id=TENANT_ID)
+    )
     assert a == b
 
 
 def test_reordered_filters_produce_same_key() -> None:
     """Reordering filter clauses must not change source_row_key (idempotency)."""
     base = _load_fixture("sample_query_response_2026_04.json")
-    p1 = {**base, "query_request": {**base["query_request"], "filters": "country==US;day==2026-04-01"}}
-    p2 = {**base, "query_request": {**base["query_request"], "filters": "day==2026-04-01;country==US"}}
+    p1 = {
+        **base,
+        "query_request": {**base["query_request"], "filters": "country==US;day==2026-04-01"},
+    }
+    p2 = {
+        **base,
+        "query_request": {**base["query_request"], "filters": "day==2026-04-01;country==US"},
+    }
     a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(p1, tenant_id=TENANT_ID))
     b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(p2, tenant_id=TENANT_ID))
     assert a == b
@@ -376,6 +399,8 @@ def test_whitespace_padded_channel_is_trimmed_and_keyed_consistently() -> None:
     clean = list(YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID))
     # Pad the channel cell (index 0) of every data row.
     padded_rows = [[f"  {row[0]}  ", *row[1:]] for row in base["rows"]]
-    padded = list(YouTubeAnalyticsParser().parse({**base, "rows": padded_rows}, tenant_id=TENANT_ID))
+    padded = list(
+        YouTubeAnalyticsParser().parse({**base, "rows": padded_rows}, tenant_id=TENANT_ID)
+    )
     assert {r.youtube_channel_id for r in padded} == {r.youtube_channel_id for r in clean}
     assert sorted(r.source_row_key for r in padded) == sorted(r.source_row_key for r in clean)

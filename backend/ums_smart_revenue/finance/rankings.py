@@ -83,9 +83,7 @@ class _Aggregate:
     def add(self, channel: ChannelNetRevenueSummary) -> None:
         """Add one channel's metrics; None members never poison a non-None sum."""
         self.gross_revenue_usd += channel.adjusted_gross_revenue_usd
-        self.net_revenue_usd = _add_optional(
-            self.net_revenue_usd, channel.net_revenue_usd
-        )
+        self.net_revenue_usd = _add_optional(self.net_revenue_usd, channel.net_revenue_usd)
         self.deduction_amount_usd = _add_optional(
             self.deduction_amount_usd, channel.deduction_amount_usd
         )
@@ -142,21 +140,15 @@ def build_month_rankings(
         RankedEntry(
             rank=0,
             entity_id=channel.youtube_channel_id,
-            entity_name=channel_names.get(
-                channel.youtube_channel_id, channel.youtube_channel_id
-            ),
+            entity_name=channel_names.get(channel.youtube_channel_id, channel.youtube_channel_id),
             gross_revenue_usd=channel.adjusted_gross_revenue_usd,
             net_revenue_usd=channel.net_revenue_usd,
             deduction_amount_usd=channel.deduction_amount_usd,
         )
         for channel in summary.channels
     ]
-    company_entries = _roll_up(
-        summary.channels, channel_company, company_names
-    )
-    sector_entries = _roll_up(
-        summary.channels, channel_sector, sector_names
-    )
+    company_entries = _roll_up(summary.channels, channel_company, company_names)
+    sector_entries = _roll_up(summary.channels, channel_sector, sector_names)
 
     return MonthRankingsSummary(
         month=summary.month,

@@ -26,6 +26,7 @@ normalizer dependencies. They pin the gate matrix the spec locks:
 The end-to-end proof that real source rows actually become facts lives in
 ``test_ingestion_gate.py``; this module proves the surrounding control flow.
 """
+
 from __future__ import annotations
 
 import logging
@@ -164,33 +165,27 @@ def _invoke_run_one(
     audit_actor_mock = MagicMock(name="audit_actor")
     audit_actor_mock.user_id = SERVICE_ACTOR_ID
     if get_month_close_status_side_effect is not None:
-        get_month_close_status_mock = MagicMock(
-            side_effect=get_month_close_status_side_effect
-        )
+        get_month_close_status_mock = MagicMock(side_effect=get_month_close_status_side_effect)
     else:
-        get_month_close_status_mock = MagicMock(
-            return_value=month_close_status
-        )
-    with patch.object(
-        orchestrator, "_run_one_with_credentials", return_value=outcome
-    ), patch.object(
-        orchestrator, "_credentials_for_run", return_value=MagicMock()
-    ), patch.object(
-        orchestrator, "validate_report_month", return_value=None
-    ), patch.object(
-        normalization, "get_month_close_status", get_month_close_status_mock
-    ), patch.object(
-        normalization, "GoogleSourceNormalizer", normalizer_cls
-    ), patch.object(
-        normalization, "record_projection_failure", record_failure_mock
-    ), patch.object(
-        normalization, "SqlAlchemyAuditSink", return_value=audit_sink_mock
-    ), patch.object(
-        orchestrator, "build_connector_service_principal",
-        return_value=audit_actor_mock,
-    ), patch.object(
-        normalization, "build_connector_service_principal",
-        return_value=audit_actor_mock,
+        get_month_close_status_mock = MagicMock(return_value=month_close_status)
+    with (
+        patch.object(orchestrator, "_run_one_with_credentials", return_value=outcome),
+        patch.object(orchestrator, "_credentials_for_run", return_value=MagicMock()),
+        patch.object(orchestrator, "validate_report_month", return_value=None),
+        patch.object(normalization, "get_month_close_status", get_month_close_status_mock),
+        patch.object(normalization, "GoogleSourceNormalizer", normalizer_cls),
+        patch.object(normalization, "record_projection_failure", record_failure_mock),
+        patch.object(normalization, "SqlAlchemyAuditSink", return_value=audit_sink_mock),
+        patch.object(
+            orchestrator,
+            "build_connector_service_principal",
+            return_value=audit_actor_mock,
+        ),
+        patch.object(
+            normalization,
+            "build_connector_service_principal",
+            return_value=audit_actor_mock,
+        ),
     ):
         returned = run_one(
             session,
@@ -232,9 +227,7 @@ def test_failed_run_does_not_invoke_normalize(reports_succeeded: int) -> None:
     do not normalize.
     """
     _, normalizer_cls, session, _, _ = _invoke_run_one(
-        outcome=_outcome(
-            run=_run_entry(status="FAILED"), reports_succeeded=reports_succeeded
-        )
+        outcome=_outcome(run=_run_entry(status="FAILED"), reports_succeeded=reports_succeeded)
     )
     normalizer_cls.assert_not_called()
     session.commit.assert_not_called()
@@ -301,21 +294,18 @@ def test_terminal_success_delegates_projection_to_adapter() -> None:
     session = MagicMock(name="session")
     adapter = MagicMock(name="normalization_adapter")
     adapter_cls = MagicMock(return_value=adapter)
-    with patch.object(
-        orchestrator, "_run_one_with_credentials", return_value=outcome
-    ), patch.object(
-        orchestrator, "_credentials_for_run", return_value=MagicMock()
-    ), patch.object(
-        orchestrator, "validate_report_month", return_value=None
-    ), patch.object(
-        orchestrator,
-        "SqlAlchemyIngestedSourceRowNormalizationAdapter",
-        adapter_cls,
-        create=True,
-    ), patch.object(
-        orchestrator, "GoogleSourceNormalizer", create=True
-    ) as normalizer_cls, patch.object(
-        orchestrator, "get_month_close_status", return_value="OPEN", create=True
+    with (
+        patch.object(orchestrator, "_run_one_with_credentials", return_value=outcome),
+        patch.object(orchestrator, "_credentials_for_run", return_value=MagicMock()),
+        patch.object(orchestrator, "validate_report_month", return_value=None),
+        patch.object(
+            orchestrator,
+            "SqlAlchemyIngestedSourceRowNormalizationAdapter",
+            adapter_cls,
+            create=True,
+        ),
+        patch.object(orchestrator, "GoogleSourceNormalizer", create=True) as normalizer_cls,
+        patch.object(orchestrator, "get_month_close_status", return_value="OPEN", create=True),
     ):
         run_one(
             session,
@@ -447,13 +437,9 @@ def test_actor_is_triggering_user_when_supplied() -> None:
     _, kwargs = normalizer.normalize_month.call_args
     assert kwargs["actor_user_id"] == str(TRIGGERED_BY)
     # The audit_sink also received the user attribution.
-    audit_actor_for_appends = [
-        call.args[0].user_id for call in audit_sink.append.call_args_list
-    ]
+    audit_actor_for_appends = [call.args[0].user_id for call in audit_sink.append.call_args_list]
     assert audit_actor_for_appends, "expected at least one audit append"
-    assert all(
-        actor_id == str(TRIGGERED_BY) for actor_id in audit_actor_for_appends
-    )
+    assert all(actor_id == str(TRIGGERED_BY) for actor_id in audit_actor_for_appends)
 
 
 def test_actor_falls_back_to_service_principal_when_no_triggering_user() -> None:
@@ -567,14 +553,16 @@ def test_projection_failure_records_on_run_when_normalize_raises() -> None:
     audit_sink_mock = MagicMock(name="audit_sink")
     audit_actor_mock = MagicMock(name="audit_actor")
     audit_actor_mock.user_id = SERVICE_ACTOR_ID
-    with patch.object(
-        normalization, "SqlAlchemyAuditSink", return_value=audit_sink_mock
-    ), patch.object(
-        normalization, "build_connector_service_principal",
-        return_value=audit_actor_mock,
-    ), patch(
-        "ums_smart_revenue.auth.audit_service.record_audit_event"
-    ) as record_audit_event_mock, pytest.raises(ValueError, match="unknown channel"):
+    with (
+        patch.object(normalization, "SqlAlchemyAuditSink", return_value=audit_sink_mock),
+        patch.object(
+            normalization,
+            "build_connector_service_principal",
+            return_value=audit_actor_mock,
+        ),
+        patch("ums_smart_revenue.auth.audit_service.record_audit_event") as record_audit_event_mock,
+        pytest.raises(ValueError, match="unknown channel"),
+    ):
         _invoke_run_one(
             outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
             normalizer=normalizer,
@@ -616,14 +604,11 @@ def test_failed_facts_txn_is_rolled_back_before_run_rewrite() -> None:
     session = MagicMock(name="session")
     normalizer_cls = MagicMock(name="GoogleSourceNormalizer")
     normalizer_cls.return_value = normalizer
-    with patch.object(
-        normalization, "get_month_close_status", return_value="OPEN"
-    ), patch.object(
-        normalization, "GoogleSourceNormalizer", normalizer_cls
-    ), patch.object(
-        normalization, "record_projection_failure", record_failure
-    ), patch.object(
-        normalization, "SqlAlchemyAuditSink", return_value=MagicMock()
+    with (  # skipcq: PTC-W0062
+        patch.object(normalization, "get_month_close_status", return_value="OPEN"),
+        patch.object(normalization, "GoogleSourceNormalizer", normalizer_cls),
+        patch.object(normalization, "record_projection_failure", record_failure),
+        patch.object(normalization, "SqlAlchemyAuditSink", return_value=MagicMock()),
     ):
         with pytest.raises(ValueError, match="unknown channel"):
             orchestrator._normalize_ingested_source_rows(
@@ -659,19 +644,18 @@ def test_dry_run_does_not_require_service_principal_env() -> None:
 
     monkeypatch = pytest.MonkeyPatch()
     try:
-        monkeypatch.delenv(
-            GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, raising=False
-        )
+        monkeypatch.delenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, raising=False)
         load_app_settings.cache_clear()
         try:
             session = MagicMock(name="session")
-            with patch.object(
-                orchestrator, "_run_one_with_credentials",
-                return_value=_outcome(run=None),
-            ), patch.object(
-                orchestrator, "_credentials_for_run", return_value=MagicMock()
-            ), patch.object(
-                orchestrator, "validate_report_month", return_value=None
+            with (
+                patch.object(
+                    orchestrator,
+                    "_run_one_with_credentials",
+                    return_value=_outcome(run=None),
+                ),
+                patch.object(orchestrator, "_credentials_for_run", return_value=MagicMock()),
+                patch.object(orchestrator, "validate_report_month", return_value=None),
             ):
                 # No exception should be raised on the dry-run path.
                 returned = run_one(
@@ -705,9 +689,7 @@ def test_lock_prefilter_failure_records_on_run() -> None:
     record_failure.assert_called_once()
     kwargs = record_failure.call_args.kwargs
     assert "db down" in kwargs["error_summary"]
-    assert kwargs["error_summary"].startswith(
-        "normalize failed: RuntimeError:"
-    )
+    assert kwargs["error_summary"].startswith("normalize failed: RuntimeError:")
 
 
 def test_partial_with_failed_report_scopes_skips_normalize(
@@ -729,6 +711,7 @@ def test_partial_with_failed_report_scopes_skips_normalize(
     the orchestrator source.
     """
     from dataclasses import replace
+
     caplog.set_level(logging.INFO, logger=orchestrator.logger.name)
     run = _run_entry(status="PARTIAL")
     outcome = replace(
@@ -756,6 +739,7 @@ def test_partial_with_clean_failures_normalizes() -> None:
     a per-report failure), the gate does not skip normalize.
     """
     from dataclasses import replace
+
     run = _run_entry(status="PARTIAL")
     outcome = replace(
         _outcome(run=run),
@@ -764,7 +748,8 @@ def test_partial_with_clean_failures_normalizes() -> None:
     )
     normalizer = MagicMock(name="normalizer_instance")
     _, normalizer_cls, session, _, _ = _invoke_run_one(
-        outcome=outcome, normalizer=normalizer,
+        outcome=outcome,
+        normalizer=normalizer,
     )
     normalizer_cls.assert_called_once()
     normalizer.normalize_month.assert_called_once()
@@ -787,6 +772,7 @@ def test_partial_with_blocked_cleanup_and_empty_failures_skips_normalize(
     mirroring the neighboring skip tests.
     """
     from dataclasses import replace
+
     caplog.set_level(logging.INFO, logger=orchestrator.logger.name)
     run = _run_entry(status="PARTIAL")
     outcome = replace(
@@ -802,6 +788,4 @@ def test_partial_with_blocked_cleanup_and_empty_failures_skips_normalize(
     record_failure.assert_not_called()
     session.rollback.assert_not_called()
     assert returned.run is not None and returned.run.status == "PARTIAL"
-    assert (
-        "ingestion normalize skipped (analytics cleanup blocked)" in caplog.text
-    )
+    assert "ingestion normalize skipped (analytics cleanup blocked)" in caplog.text

@@ -54,9 +54,7 @@ def test_bank_reconciliation_migration_creates_bank_reconciliation_table():
         }
         check_constraints = {
             constraint["name"]: constraint["sqltext"]
-            for constraint in inspector.get_check_constraints(
-                "bank_reconciliation_entries"
-            )
+            for constraint in inspector.get_check_constraints("bank_reconciliation_entries")
         }
         indexes = {
             index["name"]: tuple(index["column_names"])
@@ -64,9 +62,7 @@ def test_bank_reconciliation_migration_creates_bank_reconciliation_table():
         }
         unique_constraints = {
             constraint["name"]: tuple(constraint["column_names"])
-            for constraint in inspector.get_unique_constraints(
-                "bank_reconciliation_entries"
-            )
+            for constraint in inspector.get_unique_constraints("bank_reconciliation_entries")
         }
 
     assert "bank_reconciliation_entries" in table_names

@@ -19,6 +19,7 @@ log rows. Tests in this module pin three contracts:
 All tests use ``InMemoryAuditSink`` from the auth layer so no DB session
 is required and the contract is asserted on what reaches the sink.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -214,7 +215,10 @@ def test_emit_raw_file_downloaded_uses_report_imported_with_downloaded_lifecycle
     raw_file = _make_raw_file_mock()
 
     emit_raw_file_downloaded(
-        sink=sink, actor=service_principal, run=run, raw_file=raw_file,
+        sink=sink,
+        actor=service_principal,
+        run=run,
+        raw_file=raw_file,
     )
 
     assert len(sink.records) == 1
@@ -298,9 +302,7 @@ def test_emitters_do_not_leak_secret_material(service_principal) -> None:
 
     emit_run_started(sink=sink, actor=service_principal, run=run, dry_run=False)
     emit_run_finished(sink=sink, actor=service_principal, run=run)
-    emit_raw_file_downloaded(
-        sink=sink, actor=service_principal, run=run, raw_file=raw_file
-    )
+    emit_raw_file_downloaded(sink=sink, actor=service_principal, run=run, raw_file=raw_file)
     emit_raw_file_parsed(
         sink=sink,
         actor=service_principal,

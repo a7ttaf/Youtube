@@ -12,6 +12,7 @@ unset, preserving the no-skip policy. This test EXECUTES only in the clean-room
 PG gate (a disposable ``postgres:18-alpine`` container), not the per-task SQLite
 run.
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -46,9 +47,7 @@ def _alembic_config(url: str) -> Config:
     """Alembic config bound to ``url`` without an ini path (no logging poison)."""
     cfg = Config()
     cfg.set_main_option("sqlalchemy.url", url)
-    cfg.set_main_option(
-        "script_location", "backend/ums_smart_revenue/db/alembic"
-    )
+    cfg.set_main_option("script_location", "backend/ums_smart_revenue/db/alembic")
     return cfg
 
 
@@ -143,17 +142,13 @@ def test_bucket_a_audit_persists_under_platform_lane_on_postgres(
         email="ops@example.com",
     )
     factory = build_session_factory(pg_url)
-    executor = ConnectorJobExecutor(
-        session_factory=factory, max_workers=1, stale_running_hours=6
-    )
+    executor = ConnectorJobExecutor(session_factory=factory, max_workers=1, stale_running_hours=6)
 
     def _boom(session, **kwargs):
         raise OAuthRefreshError(inner=RuntimeError("revoked"))
 
     try:
-        with patch(
-            "ums_smart_revenue.connectors.runs.executor.run_one", _boom
-        ):
+        with patch("ums_smart_revenue.connectors.runs.executor.run_one", _boom):
             # Synchronous (no thread) so the assertion is deterministic.
             executor._run_job(
                 tenant_id=fresh_tenant,

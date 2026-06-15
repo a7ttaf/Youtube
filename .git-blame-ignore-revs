@@ -1,0 +1,8 @@
+# Revisions to ignore in `git blame` (bulk style-only sweeps, no behavior change).
+#
+# Enable locally:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub applies this file automatically.
+
+# style(ruff): adopt line-length 100 and format backend (no behavior change)
+21b0e7e09e623e807321232532b0aef20792eae4

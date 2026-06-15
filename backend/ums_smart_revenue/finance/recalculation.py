@@ -99,9 +99,7 @@ class RevenueRecalculationPreview:
             "write_status": self.write_status,
             "source_summary": self.source_summary.to_api(),
             "steps": list(self.steps),
-            "blocking_issues": [
-                issue.to_api() for issue in self.blocking_issues
-            ],
+            "blocking_issues": [issue.to_api() for issue in self.blocking_issues],
         }
 
 
@@ -146,13 +144,9 @@ def build_recalculation_preview(
     normalized_currency = normalize_recalculation_currency(currency)
 
     fact_list = [fact for fact in facts if fact.month == month]
-    override_list = [
-        override for override in manual_overrides if override.month == month
-    ]
+    override_list = [override for override in manual_overrides if override.month == month]
     source_channel_ids = {fact.youtube_channel_id for fact in fact_list}
-    source_keys = {
-        (fact.youtube_channel_id, fact.source_kind) for fact in fact_list
-    }
+    source_keys = {(fact.youtube_channel_id, fact.source_kind) for fact in fact_list}
     # A (channel, source_kind) key is missing-net if ANY fact in that group has
     # null net (mirrors the commit engine's fail-closed null-net omission), so
     # the dry-run cannot report READY while commit would go UNALLOCATED.
@@ -253,10 +247,7 @@ def _build_blocking_issues(
 ) -> list[RecalculationIssue]:
     """Collect blocking RecalculationIssues for the given method and source counts."""
     issues: list[RecalculationIssue] = []
-    if (
-        source_channel_count == 0
-        and allocation_method not in SOURCE_FACTS_OPTIONAL_METHODS
-    ):
+    if source_channel_count == 0 and allocation_method not in SOURCE_FACTS_OPTIONAL_METHODS:
         issues.append(
             RecalculationIssue(
                 issue_type="NO_REVENUE_FACTS",
@@ -264,10 +255,7 @@ def _build_blocking_issues(
                 message=f"No scoped revenue facts are available for {month}.",
             )
         )
-    if (
-        allocation_method in NET_REVENUE_REQUIRED_METHODS
-        and missing_net_revenue_source_count
-    ):
+    if allocation_method in NET_REVENUE_REQUIRED_METHODS and missing_net_revenue_source_count:
         issues.append(
             RecalculationIssue(
                 issue_type="NET_REVENUE_SOURCE_MISSING",

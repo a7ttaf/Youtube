@@ -63,62 +63,94 @@ def seed(database_url, *, add_unmapped=False, add_payment=False):
         session.add(UserORM(id=USER_ID, email="alloc@example.com", display_name="Alloc"))
         session.add(
             YouTubeChannelORM(
-                id=uuid4(), tenant_id=TENANT, youtube_channel_id="chA",
-                channel_name="Channel A", active=True,
+                id=uuid4(),
+                tenant_id=TENANT,
+                youtube_channel_id="chA",
+                channel_name="Channel A",
+                active=True,
             )
         )
         session.add(
             AdsenseContentOwnerLinkORM(
-                id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-1",
-                content_owner_id="owner-1", verification_status="VERIFIED",
-                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+                id=uuid4(),
+                tenant_id=TENANT,
+                adsense_account_id="pub-1",
+                content_owner_id="owner-1",
+                verification_status="VERIFIED",
+                provenance_kind="OPERATOR_ASSERTED",
+                provenance_payload={},
                 effective_month_start="2026-01",
             )
         )
         session.add(
             ContentOwnerChannelLinkORM(
-                id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
-                youtube_channel_id="chA", provenance_kind="SOURCE_ROW",
-                active=True, effective_month_start="2026-01",
+                id=uuid4(),
+                tenant_id=TENANT,
+                content_owner_id="owner-1",
+                youtube_channel_id="chA",
+                provenance_kind="SOURCE_ROW",
+                active=True,
+                effective_month_start="2026-01",
             )
         )
         session.add(
             MonthlyChannelRevenueFactORM(
-                id=uuid4(), tenant_id=TENANT, month=MONTH,
-                youtube_channel_id="chA", source_kind="ADSENSE",
+                id=uuid4(),
+                tenant_id=TENANT,
+                month=MONTH,
+                youtube_channel_id="chA",
+                source_kind="ADSENSE",
                 gross_revenue_usd=Decimal("500.00"),
             )
         )
         session.add(
             DeductionComponentORM(
-                id=uuid4(), tenant_id=TENANT, month=MONTH,
-                component_kind="DEDUCTION", scope_kind="ACCOUNT", scope_id="pub-1",
-                amount_usd=Decimal("100.00"), currency_code="USD",
+                id=uuid4(),
+                tenant_id=TENANT,
+                month=MONTH,
+                component_kind="DEDUCTION",
+                scope_kind="ACCOUNT",
+                scope_id="pub-1",
+                amount_usd=Decimal("100.00"),
+                currency_code="USD",
                 source_system="adsense_management",
                 source_table="google_revenue_source_rows",
-                component_key="acct-ded-1", raw_payload={},
+                component_key="acct-ded-1",
+                raw_payload={},
             )
         )
         if add_unmapped:
             session.add(
                 DeductionComponentORM(
-                    id=uuid4(), tenant_id=TENANT, month=MONTH,
-                    component_kind="DEDUCTION", scope_kind="ACCOUNT", scope_id="pub-x",
-                    amount_usd=Decimal("9.00"), currency_code="USD",
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    month=MONTH,
+                    component_kind="DEDUCTION",
+                    scope_kind="ACCOUNT",
+                    scope_id="pub-x",
+                    amount_usd=Decimal("9.00"),
+                    currency_code="USD",
                     source_system="adsense_management",
                     source_table="google_revenue_source_rows",
-                    component_key="acct-ded-x", raw_payload={},
+                    component_key="acct-ded-x",
+                    raw_payload={},
                 )
             )
         if add_payment:
             session.add(
                 DeductionComponentORM(
-                    id=uuid4(), tenant_id=TENANT, month=MONTH,
-                    component_kind="TRANSFER_FEE", scope_kind="PAYMENT",
-                    scope_id="BANK-1", amount_usd=Decimal("2.50"),
-                    currency_code="USD", source_system="bank_reconciliation",
+                    id=uuid4(),
+                    tenant_id=TENANT,
+                    month=MONTH,
+                    component_kind="TRANSFER_FEE",
+                    scope_kind="PAYMENT",
+                    scope_id="BANK-1",
+                    amount_usd=Decimal("2.50"),
+                    currency_code="USD",
+                    source_system="bank_reconciliation",
                     source_table="bank_reconciliation_entries",
-                    component_key="pay-fee-1", raw_payload={},
+                    component_key="pay-fee-1",
+                    raw_payload={},
                 )
             )
         session.commit()
@@ -253,10 +285,15 @@ def _seed_tenant(database_url):
     engine = create_engine(database_url)
     TenantBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(TenantORM(
-            id=TENANT, slug="ums", display_name="UMS",
-            primary_currency="USD", status="ACTIVE",
-        ))
+        session.add(
+            TenantORM(
+                id=TENANT,
+                slug="ums",
+                display_name="UMS",
+                primary_currency="USD",
+                status="ACTIVE",
+            )
+        )
         session.commit()
 
 
@@ -265,8 +302,11 @@ def _commit_snapshot(database_url):
     engine = create_engine(database_url)
     with Session(engine) as session:
         SqlAlchemyCommittedAllocationRepository(session).commit_allocation(
-            month=MONTH, allocation_method="gross_revenue_proportional",
-            idempotency_key="k1", request_fingerprint="fp1", reason="close",
+            month=MONTH,
+            allocation_method="gross_revenue_proportional",
+            idempotency_key="k1",
+            request_fingerprint="fp1",
+            reason="close",
             committed_by=str(TENANT),
             deduction_repository=SqlAlchemyDeductionComponentRepository(session),
             revenue_repository=SqlAlchemyRevenueFactRepository(session),
@@ -290,9 +330,14 @@ def _lock(database_url):
             )
         ).one_or_none()
         if row is None:
-            session.add(FinanceMonthCloseORM(
-                tenant_id=TENANT, month=MONTH, status="LOCKED", allocation_rule_payload={},
-            ))
+            session.add(
+                FinanceMonthCloseORM(
+                    tenant_id=TENANT,
+                    month=MONTH,
+                    status="LOCKED",
+                    allocation_rule_payload={},
+                )
+            )
         else:
             row.status = "LOCKED"
         session.commit()

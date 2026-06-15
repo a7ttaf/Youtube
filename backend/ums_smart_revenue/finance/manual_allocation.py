@@ -77,9 +77,7 @@ def build_manual_account_allocation(
     """
     component_list = list(components)
     non_account = sorted(
-        component.component_key
-        for component in component_list
-        if component.scope_kind != "ACCOUNT"
+        component.component_key for component in component_list if component.scope_kind != "ACCOUNT"
     )
     if non_account:
         # Reject the whole request: a non-ACCOUNT component cannot be covered by

@@ -99,9 +99,7 @@ class FinanceMonthCloseORM(FinanceBase):
             "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_finance_month_close_month_format",
         ),
-        CheckConstraint(
-            "status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"
-        ),
+        CheckConstraint("status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"),
         Index("ix_finance_month_close_tenant_id", "tenant_id"),
     )
 
@@ -242,9 +240,7 @@ class RevenueManualOverrideORM(FinanceBase):
         Text,
         nullable=False,
     )
-    adjustment_revenue_usd: Mapped[Decimal] = mapped_column(
-        Numeric(18, 6), nullable=False
-    )
+    adjustment_revenue_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default="PENDING", server_default=text("'PENDING'")
@@ -254,9 +250,7 @@ class RevenueManualOverrideORM(FinanceBase):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     approved_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
-    approved_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approval_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -306,9 +300,7 @@ class RevenueManualOverrideORM(FinanceBase):
             name="ck_revenue_manual_overrides_approval_fields",
         ),
         Index("ix_revenue_manual_overrides_month_status", "month", "status"),
-        Index(
-            "ix_revenue_manual_overrides_channel_month", "youtube_channel_id", "month"
-        ),
+        Index("ix_revenue_manual_overrides_channel_month", "youtube_channel_id", "month"),
         Index("ix_revenue_manual_overrides_tenant_id", "tenant_id"),
     )
 
@@ -457,7 +449,10 @@ class AdSensePaymentORM(FinanceBase):
 
     __table_args__ = (
         UniqueConstraint(
-            "tenant_id", "source_account_id", "month", "payment_name",
+            "tenant_id",
+            "source_account_id",
+            "month",
+            "payment_name",
             name="uq_adsense_payments_account_month_name",
         ),
         CheckConstraint(
@@ -631,13 +626,12 @@ class DeductionComponentORM(FinanceBase):
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["tenant_id"], [TenantORM.id],
+            ["tenant_id"],
+            [TenantORM.id],
             name="fk_deduction_components_tenant",
             ondelete="RESTRICT",
         ),
-        UniqueConstraint(
-            "tenant_id", "component_key", name="uq_deduction_components_key"
-        ),
+        UniqueConstraint("tenant_id", "component_key", name="uq_deduction_components_key"),
         CheckConstraint(
             "length(month) = 7 AND substr(month, 5, 1) = '-' "
             "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
@@ -662,9 +656,7 @@ class DeductionComponentORM(FinanceBase):
             "currency_code = 'USD'",
             name="ck_deduction_components_currency_code",
         ),
-        CheckConstraint(
-            "length(scope_id) >= 1", name="ck_deduction_components_scope_id_nonempty"
-        ),
+        CheckConstraint("length(scope_id) >= 1", name="ck_deduction_components_scope_id_nonempty"),
         CheckConstraint(
             "length(component_key) >= 1",
             name="ck_deduction_components_component_key_nonempty",
@@ -688,11 +680,15 @@ class DeductionComponentORM(FinanceBase):
         Index("ix_deduction_components_tenant_month", "tenant_id", "month"),
         Index(
             "ix_deduction_components_tenant_scope",
-            "tenant_id", "scope_kind", "scope_id",
+            "tenant_id",
+            "scope_kind",
+            "scope_id",
         ),
         Index(
             "ix_deduction_components_tenant_month_kind",
-            "tenant_id", "month", "component_kind",
+            "tenant_id",
+            "month",
+            "component_kind",
         ),
     )
 
@@ -716,12 +712,16 @@ class AdsenseContentOwnerLinkORM(FinanceBase):
     __tablename__ = "adsense_content_owner_links"
 
     id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True,
-        default=uuid4, server_default=text("gen_random_uuid()"),
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False,
-        default=_TENANT_ID_DEFAULT_VALUE, server_default=_TENANT_ID_DEFAULT,
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
     adsense_account_id: Mapped[str] = mapped_column(Text, nullable=False)
     content_owner_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -731,12 +731,11 @@ class AdsenseContentOwnerLinkORM(FinanceBase):
     provenance_kind: Mapped[str] = mapped_column(Text, nullable=False)
     provenance_payload: Mapped[dict[str, object]] = mapped_column(
         JSON().with_variant(postgresql.JSONB(), "postgresql"),
-        nullable=False, server_default=text("'{}'"),
+        nullable=False,
+        server_default=text("'{}'"),
     )
     verified_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
-    verified_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     verification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     effective_month_start: Mapped[str] = mapped_column(Text, nullable=False)
     effective_month_end: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -744,18 +743,25 @@ class AdsenseContentOwnerLinkORM(FinanceBase):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["tenant_id"], [TenantORM.id],
-            name="fk_adsense_content_owner_links_tenant", ondelete="RESTRICT",
+            ["tenant_id"],
+            [TenantORM.id],
+            name="fk_adsense_content_owner_links_tenant",
+            ondelete="RESTRICT",
         ),
         UniqueConstraint(
-            "tenant_id", "adsense_account_id", "content_owner_id",
-            "effective_month_start", name="uq_adsense_content_owner_links_key",
+            "tenant_id",
+            "adsense_account_id",
+            "content_owner_id",
+            "effective_month_start",
+            name="uq_adsense_content_owner_links_key",
         ),
         CheckConstraint(
             "verification_status IN ('UNVERIFIED', 'VERIFIED', 'REJECTED', 'CONFLICT')",
@@ -787,7 +793,9 @@ class AdsenseContentOwnerLinkORM(FinanceBase):
         ).ddl_if(dialect="postgresql"),
         Index(
             "ix_adsense_content_owner_links_account_status",
-            "tenant_id", "adsense_account_id", "verification_status",
+            "tenant_id",
+            "adsense_account_id",
+            "verification_status",
         ),
     )
 
@@ -807,38 +815,47 @@ class ContentOwnerChannelLinkORM(FinanceBase):
     __tablename__ = "content_owner_channel_links"
 
     id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True,
-        default=uuid4, server_default=text("gen_random_uuid()"),
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False,
-        default=_TENANT_ID_DEFAULT_VALUE, server_default=_TENANT_ID_DEFAULT,
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
     content_owner_id: Mapped[str] = mapped_column(Text, nullable=False)
     youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     provenance_kind: Mapped[str] = mapped_column(Text, nullable=False)
     provenance_source_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true")
-    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     effective_month_start: Mapped[str] = mapped_column(Text, nullable=False)
     effective_month_end: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["tenant_id"], [TenantORM.id],
-            name="fk_content_owner_channel_links_tenant", ondelete="RESTRICT",
+            ["tenant_id"],
+            [TenantORM.id],
+            name="fk_content_owner_channel_links_tenant",
+            ondelete="RESTRICT",
         ),
         UniqueConstraint(
-            "tenant_id", "content_owner_id", "youtube_channel_id",
-            "effective_month_start", name="uq_content_owner_channel_links_key",
+            "tenant_id",
+            "content_owner_id",
+            "youtube_channel_id",
+            "effective_month_start",
+            name="uq_content_owner_channel_links_key",
         ),
         CheckConstraint(
             "provenance_kind IN ('SOURCE_ROW', 'CHANNEL_REGISTRY', 'MANUAL')",
@@ -866,7 +883,9 @@ class ContentOwnerChannelLinkORM(FinanceBase):
         ),
         Index(
             "ix_content_owner_channel_links_owner",
-            "tenant_id", "content_owner_id", "effective_month_start",
+            "tenant_id",
+            "content_owner_id",
+            "effective_month_start",
         ),
     )
 
@@ -893,12 +912,16 @@ class CommittedAllocationRunORM(FinanceBase):
     __tablename__ = "committed_allocation_runs"
 
     id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True,
-        default=uuid4, server_default=text("gen_random_uuid()"),
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False,
-        default=_TENANT_ID_DEFAULT_VALUE, server_default=_TENANT_ID_DEFAULT,
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
     month: Mapped[str] = mapped_column(Text, nullable=False)
     commit_version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -921,21 +944,29 @@ class CommittedAllocationRunORM(FinanceBase):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False,
-        server_default=func.now(), onupdate=func.now(),
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["tenant_id"], [TenantORM.id],
-            name="fk_committed_allocation_runs_tenant", ondelete="RESTRICT",
+            ["tenant_id"],
+            [TenantORM.id],
+            name="fk_committed_allocation_runs_tenant",
+            ondelete="RESTRICT",
         ),
         UniqueConstraint(
-            "tenant_id", "month", "commit_version",
+            "tenant_id",
+            "month",
+            "commit_version",
             name="uq_committed_allocation_runs_version",
         ),
         UniqueConstraint(
-            "tenant_id", "month", "idempotency_key",
+            "tenant_id",
+            "month",
+            "idempotency_key",
             name="uq_committed_allocation_runs_idempotency",
         ),
         CheckConstraint(
@@ -955,9 +986,7 @@ class CommittedAllocationRunORM(FinanceBase):
             "length(idempotency_key) >= 1",
             name="ck_committed_allocation_runs_idempotency_nonempty",
         ),
-        CheckConstraint(
-            "length(reason) >= 1", name="ck_committed_allocation_runs_reason_nonempty"
-        ),
+        CheckConstraint("length(reason) >= 1", name="ck_committed_allocation_runs_reason_nonempty"),
         CheckConstraint(
             "allocated_total_usd > '-Infinity'::numeric "
             "AND allocated_total_usd < 'Infinity'::numeric",
@@ -988,8 +1017,10 @@ class CommittedAllocationLineORM(FinanceBase):
     __tablename__ = "committed_allocation_lines"
 
     id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True,
-        default=uuid4, server_default=text("gen_random_uuid()"),
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
     )
     run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     adsense_account_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1008,8 +1039,10 @@ class CommittedAllocationLineORM(FinanceBase):
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["run_id"], ["committed_allocation_runs.id"],
-            name="fk_committed_allocation_lines_run", ondelete="CASCADE",
+            ["run_id"],
+            ["committed_allocation_runs.id"],
+            name="fk_committed_allocation_lines_run",
+            ondelete="CASCADE",
         ),
         CheckConstraint(
             "basis_amount_usd > '-Infinity'::numeric "
@@ -1038,7 +1071,8 @@ class CommittedAllocationLineORM(FinanceBase):
         Index("ix_committed_allocation_lines_run", "run_id"),
         Index(
             "ix_committed_allocation_lines_run_channel",
-            "run_id", "youtube_channel_id",
+            "run_id",
+            "youtube_channel_id",
         ),
     )
 
@@ -1049,8 +1083,10 @@ class CommittedAllocationUnallocatedORM(FinanceBase):
     __tablename__ = "committed_allocation_unallocated"
 
     id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True,
-        default=uuid4, server_default=text("gen_random_uuid()"),
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
     )
     run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1065,8 +1101,10 @@ class CommittedAllocationUnallocatedORM(FinanceBase):
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["run_id"], ["committed_allocation_runs.id"],
-            name="fk_committed_allocation_unallocated_run", ondelete="CASCADE",
+            ["run_id"],
+            ["committed_allocation_runs.id"],
+            name="fk_committed_allocation_unallocated_run",
+            ondelete="CASCADE",
         ),
         # Non-empty identity guards (scope_id + component_key) mirror the source
         # deduction_components non-empty CHECKs, so a snapshot row can never carry a
@@ -1095,8 +1133,10 @@ class CommittedAllocationNoteORM(FinanceBase):
     __tablename__ = "committed_allocation_notes"
 
     id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True,
-        default=uuid4, server_default=text("gen_random_uuid()"),
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
     )
     run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     note_code: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1108,8 +1148,10 @@ class CommittedAllocationNoteORM(FinanceBase):
 
     __table_args__ = (
         ForeignKeyConstraint(
-            ["run_id"], ["committed_allocation_runs.id"],
-            name="fk_committed_allocation_notes_run", ondelete="CASCADE",
+            ["run_id"],
+            ["committed_allocation_runs.id"],
+            name="fk_committed_allocation_notes_run",
+            ondelete="CASCADE",
         ),
         # Non-empty channel-id guard: a snapshot note must point at a real channel
         # (SQLite + PG), mirroring deduction_components' non-empty identifier CHECKs.

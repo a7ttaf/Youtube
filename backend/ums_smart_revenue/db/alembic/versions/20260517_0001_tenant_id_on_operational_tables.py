@@ -532,9 +532,7 @@ def _scope_org_units_parent_fk() -> None:
     # temporary table used for the FK rewrite, so the composite target must
     # exist before the self-referential composite FK is introduced.
     with op.batch_alter_table("org_units") as batch_op:
-        batch_op.create_unique_constraint(
-            "uq_org_units_tenant_id_id", ["tenant_id", "id"]
-        )
+        batch_op.create_unique_constraint("uq_org_units_tenant_id_id", ["tenant_id", "id"])
 
     with op.batch_alter_table("org_units") as batch_op:
         batch_op.drop_constraint("org_units_parent_id_fkey", type_="foreignkey")
@@ -566,9 +564,7 @@ def _scope_youtube_channel_org_unit_fk() -> None:
     # so a channel cannot reference an org_unit from a different tenant.
     # Requires uq_org_units_tenant_id_id created by _scope_org_units_parent_fk.
     with op.batch_alter_table("youtube_channels") as batch_op:
-        batch_op.drop_constraint(
-            "youtube_channels_primary_org_unit_id_fkey", type_="foreignkey"
-        )
+        batch_op.drop_constraint("youtube_channels_primary_org_unit_id_fkey", type_="foreignkey")
         batch_op.create_foreign_key(
             "fk_youtube_channels_tenant_org_unit",
             "org_units",
@@ -580,9 +576,7 @@ def _scope_youtube_channel_org_unit_fk() -> None:
 
 def _unscope_youtube_channel_org_unit_fk() -> None:
     with op.batch_alter_table("youtube_channels") as batch_op:
-        batch_op.drop_constraint(
-            "fk_youtube_channels_tenant_org_unit", type_="foreignkey"
-        )
+        batch_op.drop_constraint("fk_youtube_channels_tenant_org_unit", type_="foreignkey")
         batch_op.create_foreign_key(
             "youtube_channels_primary_org_unit_id_fkey",
             "org_units",
@@ -618,15 +612,9 @@ def _scope_user_fks() -> None:
     #              Hard-deleting a user now fails (use soft-delete / disable).
     # ============================================================================
     with op.batch_alter_table("user_role_assignments") as batch_op:
-        batch_op.drop_constraint(
-            "user_role_assignments_user_id_fkey", type_="foreignkey"
-        )
-        batch_op.drop_constraint(
-            "user_role_assignments_assigned_by_fkey", type_="foreignkey"
-        )
-        batch_op.drop_constraint(
-            "user_role_assignments_revoked_by_fkey", type_="foreignkey"
-        )
+        batch_op.drop_constraint("user_role_assignments_user_id_fkey", type_="foreignkey")
+        batch_op.drop_constraint("user_role_assignments_assigned_by_fkey", type_="foreignkey")
+        batch_op.drop_constraint("user_role_assignments_revoked_by_fkey", type_="foreignkey")
         batch_op.create_foreign_key(
             "fk_user_role_assignments_tenant_user",
             "users",
@@ -650,15 +638,9 @@ def _scope_user_fks() -> None:
         )
 
     with op.batch_alter_table("user_permission_grants") as batch_op:
-        batch_op.drop_constraint(
-            "user_permission_grants_user_id_fkey", type_="foreignkey"
-        )
-        batch_op.drop_constraint(
-            "user_permission_grants_granted_by_fkey", type_="foreignkey"
-        )
-        batch_op.drop_constraint(
-            "user_permission_grants_revoked_by_fkey", type_="foreignkey"
-        )
+        batch_op.drop_constraint("user_permission_grants_user_id_fkey", type_="foreignkey")
+        batch_op.drop_constraint("user_permission_grants_granted_by_fkey", type_="foreignkey")
+        batch_op.drop_constraint("user_permission_grants_revoked_by_fkey", type_="foreignkey")
         batch_op.create_foreign_key(
             "fk_user_permission_grants_tenant_user",
             "users",
@@ -692,12 +674,8 @@ def _scope_user_fks() -> None:
         )
 
     with op.batch_alter_table("api_connector_credentials") as batch_op:
-        batch_op.drop_constraint(
-            "api_connector_credentials_created_by_fkey", type_="foreignkey"
-        )
-        batch_op.drop_constraint(
-            "api_connector_credentials_updated_by_fkey", type_="foreignkey"
-        )
+        batch_op.drop_constraint("api_connector_credentials_created_by_fkey", type_="foreignkey")
+        batch_op.drop_constraint("api_connector_credentials_updated_by_fkey", type_="foreignkey")
         batch_op.create_foreign_key(
             "fk_api_connector_credentials_tenant_created_by",
             "users",
@@ -748,15 +726,9 @@ def _unscope_user_fks() -> None:
         )
 
     with op.batch_alter_table("user_permission_grants") as batch_op:
-        batch_op.drop_constraint(
-            "fk_user_permission_grants_tenant_revoked_by", type_="foreignkey"
-        )
-        batch_op.drop_constraint(
-            "fk_user_permission_grants_tenant_granted_by", type_="foreignkey"
-        )
-        batch_op.drop_constraint(
-            "fk_user_permission_grants_tenant_user", type_="foreignkey"
-        )
+        batch_op.drop_constraint("fk_user_permission_grants_tenant_revoked_by", type_="foreignkey")
+        batch_op.drop_constraint("fk_user_permission_grants_tenant_granted_by", type_="foreignkey")
+        batch_op.drop_constraint("fk_user_permission_grants_tenant_user", type_="foreignkey")
         batch_op.create_foreign_key(
             "user_permission_grants_user_id_fkey",
             "users",
@@ -780,15 +752,9 @@ def _unscope_user_fks() -> None:
         )
 
     with op.batch_alter_table("user_role_assignments") as batch_op:
-        batch_op.drop_constraint(
-            "fk_user_role_assignments_tenant_revoked_by", type_="foreignkey"
-        )
-        batch_op.drop_constraint(
-            "fk_user_role_assignments_tenant_assigned_by", type_="foreignkey"
-        )
-        batch_op.drop_constraint(
-            "fk_user_role_assignments_tenant_user", type_="foreignkey"
-        )
+        batch_op.drop_constraint("fk_user_role_assignments_tenant_revoked_by", type_="foreignkey")
+        batch_op.drop_constraint("fk_user_role_assignments_tenant_assigned_by", type_="foreignkey")
+        batch_op.drop_constraint("fk_user_role_assignments_tenant_user", type_="foreignkey")
         batch_op.create_foreign_key(
             "user_role_assignments_user_id_fkey",
             "users",

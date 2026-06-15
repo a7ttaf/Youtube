@@ -23,6 +23,7 @@ Rollback: drops policies, disables RLS, revokes grants, and drops the two roles
 (guarded). Like the prior tenant_id NOT NULL work, the practical rollback is the
 RLS-state reversal only.
 """
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -64,9 +65,7 @@ PLATFORM_ONLY_WRITE_TABLES: tuple[str, ...] = (
 
 def _create_role(bind, role: str) -> None:
     """Create a NOLOGIN role idempotently without special RLS bypass."""
-    exists = bind.execute(
-        sa.text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": role}
-    ).first()
+    exists = bind.execute(sa.text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": role}).first()
     if exists is None:
         # Role names are internal constants, not user input.
         bind.execute(sa.text(f'CREATE ROLE "{role}" NOLOGIN'))
@@ -180,11 +179,7 @@ def _create_tenant_context_helpers(bind) -> None:
     # to the caller's own backend row; without the grant, no-context
     # sessions on a fresh 20260608_0001 install would permission-deny on
     # the missing-helper fallback flagged by Codex P2 review on PR #88.
-    bind.execute(
-        sa.text(
-            f'GRANT DELETE ON {TENANT_CONTEXT_TABLE} TO "{APP_PLATFORM_ROLE}"'
-        )
-    )
+    bind.execute(sa.text(f'GRANT DELETE ON {TENANT_CONTEXT_TABLE} TO "{APP_PLATFORM_ROLE}"'))
     bind.execute(
         sa.text(
             f"""
@@ -238,30 +233,16 @@ def _create_tenant_context_helpers(bind) -> None:
     # `app_tenant_context` to `app_platform` is installed in
     # `_create_tenant_context_helpers` (above), so the fallback path
     # permission-succeeds during a rolling migration gap.
+    bind.execute(sa.text(f"REVOKE ALL ON FUNCTION {TENANT_CONTEXT_SETTER}(uuid) FROM PUBLIC"))
+    bind.execute(sa.text(f"REVOKE ALL ON FUNCTION {TENANT_CONTEXT_GETTER}() FROM PUBLIC"))
     bind.execute(
-        sa.text(
-            f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_SETTER}(uuid) FROM PUBLIC'
-        )
+        sa.text(f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_SETTER}(uuid) TO "{APP_PLATFORM_ROLE}"')
     )
     bind.execute(
-        sa.text(
-            f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_GETTER}() FROM PUBLIC'
-        )
+        sa.text(f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_GETTER}() TO "{APP_TENANT_ROLE}"')
     )
     bind.execute(
-        sa.text(
-            f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_SETTER}(uuid) TO "{APP_PLATFORM_ROLE}"'
-        )
-    )
-    bind.execute(
-        sa.text(
-            f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_GETTER}() TO "{APP_TENANT_ROLE}"'
-        )
-    )
-    bind.execute(
-        sa.text(
-            f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_GETTER}() TO "{APP_PLATFORM_ROLE}"'
-        )
+        sa.text(f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_GETTER}() TO "{APP_PLATFORM_ROLE}"')
     )
 
 
@@ -274,17 +255,11 @@ def upgrade() -> None:
     _create_role(bind, APP_TENANT_ROLE)
     _create_role(bind, APP_PLATFORM_ROLE)
     _create_tenant_context_helpers(bind)
-    bind.execute(
-        sa.text(f'GRANT USAGE ON SCHEMA public TO "{APP_TENANT_ROLE}"')
-    )
-    bind.execute(
-        sa.text(f'GRANT USAGE ON SCHEMA public TO "{APP_PLATFORM_ROLE}"')
-    )
+    bind.execute(sa.text(f'GRANT USAGE ON SCHEMA public TO "{APP_TENANT_ROLE}"'))
+    bind.execute(sa.text(f'GRANT USAGE ON SCHEMA public TO "{APP_PLATFORM_ROLE}"'))
     for table in TENANT_SCOPED_TABLES:
         policy = tenant_rls_policy_name(table)
-        bind.execute(
-            sa.text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-        )
+        bind.execute(sa.text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
         # DROP-then-CREATE so a half-applied dev run / re-run does not wedge on
         # an existing policy (CREATE POLICY has no IF NOT EXISTS).
         bind.execute(sa.text(f"DROP POLICY IF EXISTS {policy} ON {table}"))
@@ -296,19 +271,11 @@ def upgrade() -> None:
                 f"(tenant_id = {TENANT_CONTEXT_GETTER}())"
             )
         )
-        bind.execute(sa.text(f"GRANT SELECT ON {table} TO \"{APP_TENANT_ROLE}\""))
+        bind.execute(sa.text(f'GRANT SELECT ON {table} TO "{APP_TENANT_ROLE}"'))
         if table not in TENANT_PLATFORM_ONLY_WRITE_TABLES:
-            bind.execute(
-                sa.text(
-                    f"GRANT INSERT, UPDATE, DELETE ON {table} "
-                    f'TO "{APP_TENANT_ROLE}"'
-                )
-            )
+            bind.execute(sa.text(f'GRANT INSERT, UPDATE, DELETE ON {table} TO "{APP_TENANT_ROLE}"'))
         bind.execute(
-            sa.text(
-                f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} "
-                f'TO "{APP_PLATFORM_ROLE}"'
-            )
+            sa.text(f'GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO "{APP_PLATFORM_ROLE}"')
         )
     # ========================================================================
     # Purpose: Least-privilege grant surface for the app roles. The 25 tenant
@@ -330,35 +297,14 @@ def upgrade() -> None:
     #   checks unchanged); finance/audit reads of platform-shared catalogs.
     # ========================================================================
     for role in (APP_TENANT_ROLE, APP_PLATFORM_ROLE):
-        bind.execute(
-            sa.text(f'GRANT SELECT ON ALL TABLES IN SCHEMA public TO "{role}"')
-        )
-        bind.execute(
-            sa.text(
-                "GRANT USAGE, SELECT "
-                f'ON ALL SEQUENCES IN SCHEMA public TO "{role}"'
-            )
-        )
+        bind.execute(sa.text(f'GRANT SELECT ON ALL TABLES IN SCHEMA public TO "{role}"'))
+        bind.execute(sa.text(f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO "{role}"'))
         for table in NON_TENANT_WRITE_TABLES:
-            bind.execute(
-                sa.text(
-                    f"GRANT INSERT, UPDATE, DELETE ON {table} TO \"{role}\""
-                )
-            )
+            bind.execute(sa.text(f'GRANT INSERT, UPDATE, DELETE ON {table} TO "{role}"'))
     for table in TENANT_PLATFORM_ONLY_WRITE_TABLES:
-        bind.execute(
-            sa.text(
-                f"GRANT INSERT, UPDATE, DELETE ON {table} "
-                f'TO "{APP_PLATFORM_ROLE}"'
-            )
-        )
+        bind.execute(sa.text(f'GRANT INSERT, UPDATE, DELETE ON {table} TO "{APP_PLATFORM_ROLE}"'))
     for table in PLATFORM_ONLY_WRITE_TABLES:
-        bind.execute(
-            sa.text(
-                f"GRANT INSERT, UPDATE, DELETE ON {table} "
-                f'TO "{APP_PLATFORM_ROLE}"'
-            )
-        )
+        bind.execute(sa.text(f'GRANT INSERT, UPDATE, DELETE ON {table} TO "{APP_PLATFORM_ROLE}"'))
 
 
 def downgrade() -> None:
@@ -369,17 +315,9 @@ def downgrade() -> None:
     for table in TENANT_SCOPED_TABLES:
         policy = tenant_rls_policy_name(table)
         bind.execute(sa.text(f"DROP POLICY IF EXISTS {policy} ON {table}"))
-        bind.execute(
-            sa.text(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY")
-        )
-    bind.execute(
-        sa.text(
-            f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_SETTER}(uuid)'
-        )
-    )
-    bind.execute(
-        sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_GETTER}()')
-    )
+        bind.execute(sa.text(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY"))
+    bind.execute(sa.text(f"DROP FUNCTION IF EXISTS {TENANT_CONTEXT_SETTER}(uuid)"))
+    bind.execute(sa.text(f"DROP FUNCTION IF EXISTS {TENANT_CONTEXT_GETTER}()"))
     # FIX: The privileged clearer is owned by `20260609_0002`, not by this
     # migration. Its downgrade in `20260609_0002` will drop it as part of
     # rolling back past that revision; we must NOT drop it here as part of
@@ -395,13 +333,9 @@ def downgrade() -> None:
     # missing `app_tenant_context` instead of taking the absent-helper
     # fallback (Codex P2 review on PR #88). The IF EXISTS makes this a
     # no-op for new installs that never created the helper here.
-    bind.execute(
-        sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()')
-    )
-    bind.execute(sa.text(f'DROP TABLE IF EXISTS {TENANT_CONTEXT_TABLE}'))
-    bind.execute(
-        sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}_guard_delete()')
-    )
+    bind.execute(sa.text(f"DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()"))
+    bind.execute(sa.text(f"DROP TABLE IF EXISTS {TENANT_CONTEXT_TABLE}"))
+    bind.execute(sa.text(f"DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}_guard_delete()"))
     # ========================================================================
     # Purpose: Strip every dependent privilege/object before DROP ROLE.
     #   Postgres refuses DROP ROLE while the role still holds (or was granted)
@@ -434,24 +368,12 @@ def downgrade() -> None:
             {"role": role},
         ).scalars()
         for member_role in member_roles:
-            bind.execute(
-                sa.text(f'REVOKE "{role}" FROM "{member_role}"')
-            )
+            bind.execute(sa.text(f'REVOKE "{role}" FROM "{member_role}"'))
+        bind.execute(sa.text(f'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM "{role}"'))
         bind.execute(
-            sa.text(
-                "REVOKE ALL PRIVILEGES "
-                f'ON ALL TABLES IN SCHEMA public FROM "{role}"'
-            )
+            sa.text(f'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM "{role}"')
         )
-        bind.execute(
-            sa.text(
-                "REVOKE ALL PRIVILEGES "
-                f'ON ALL SEQUENCES IN SCHEMA public FROM "{role}"'
-            )
-        )
-        bind.execute(
-            sa.text(f'REVOKE USAGE ON SCHEMA public FROM "{role}"')
-        )
+        bind.execute(sa.text(f'REVOKE USAGE ON SCHEMA public FROM "{role}"'))
         # FIX: DROP OWNED BY clears the function EXECUTE grants (and any other
         # privilege granted to the role) that the blanket REVOKEs above miss;
         # without it DROP ROLE raised DependentObjectsStillExist.

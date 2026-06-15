@@ -58,9 +58,7 @@ def test_reconciliation_preview_detects_material_source_variance():
             {
                 "issue_type": "GROSS_REVENUE_VARIANCE",
                 "severity": "HIGH",
-                "message": (
-                    "Gross revenue sources differ by 7.00% for channel-tv-a in 2026-03."
-                ),
+                "message": ("Gross revenue sources differ by 7.00% for channel-tv-a in 2026-03."),
             }
         ],
     }
@@ -144,8 +142,7 @@ def test_issue_queue_groups_month_facts_and_returns_only_unresolved_channels():
                         "issue_type": "GROSS_REVENUE_VARIANCE",
                         "severity": "HIGH",
                         "message": (
-                            "Gross revenue sources differ by 7.00% "
-                            "for channel-tv-a in 2026-03."
+                            "Gross revenue sources differ by 7.00% for channel-tv-a in 2026-03."
                         ),
                     }
                 ],

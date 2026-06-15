@@ -74,7 +74,7 @@ def build_session() -> Session:
 
     @event.listens_for(engine, "connect")
     def _enable_foreign_keys(dbapi_connection, connection_record) -> None:
-        del connection_record
+        del connection_record  # skipcq: PTC-W0043
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     OrgBase.metadata.create_all(engine)
@@ -296,9 +296,7 @@ def test_create_group_explicit_tenant_overrides_request_context() -> None:
     seed_org(session)
     token = TENANT_CTX.set(_tenant(OTHER_TENANT_ID, slug="other"))
     try:
-        SqlAlchemyChannelGroupRegistry(
-            session, tenant_id=DEFAULT_TENANT_ID
-        ).create_group(
+        SqlAlchemyChannelGroupRegistry(session, tenant_id=DEFAULT_TENANT_ID).create_group(
             name="Explicit Wins Group",
             group_type="CUSTOM_GROUP",
             channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL],
@@ -342,9 +340,7 @@ def test_create_group_allows_empty_channel_id_list_without_member_rows() -> None
         select(ChannelGroupORM).where(ChannelGroupORM.name == "Empty Group")
     ).one()
     member_rows = session.scalars(
-        select(ChannelGroupMemberORM).where(
-            ChannelGroupMemberORM.group_id == group_row.id
-        )
+        select(ChannelGroupMemberORM).where(ChannelGroupMemberORM.group_id == group_row.id)
     ).all()
 
     assert group.channel_ids == ()
@@ -373,9 +369,7 @@ def test_list_groups_filters_to_bound_tenant_only() -> None:
         channel_ids=[CHANNEL_OTHER_EXTERNAL],
     )
 
-    default_names = [
-        entry.name for entry in SqlAlchemyChannelGroupRegistry(session).list_groups()
-    ]
+    default_names = [entry.name for entry in SqlAlchemyChannelGroupRegistry(session).list_groups()]
     other_names = [
         entry.name
         for entry in SqlAlchemyChannelGroupRegistry(
@@ -424,10 +418,7 @@ def test_list_groups_uses_request_tenant_context_by_default() -> None:
 
     token = TENANT_CTX.set(_tenant(OTHER_TENANT_ID, slug="other"))
     try:
-        names = [
-            entry.name
-            for entry in SqlAlchemyChannelGroupRegistry(session).list_groups()
-        ]
+        names = [entry.name for entry in SqlAlchemyChannelGroupRegistry(session).list_groups()]
     finally:
         TENANT_CTX.reset(token)
 
@@ -444,9 +435,7 @@ def test_get_group_returns_none_for_cross_tenant_group_id() -> None:
     session = build_session()
     seed_org(session)
 
-    other_group = SqlAlchemyChannelGroupRegistry(
-        session, tenant_id=OTHER_TENANT_ID
-    ).create_group(
+    other_group = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID).create_group(
         name="Other Group",
         group_type="CUSTOM_GROUP",
         channel_ids=[CHANNEL_OTHER_EXTERNAL],
@@ -475,9 +464,7 @@ def test_add_members_for_cross_tenant_group_raises_keyerror() -> None:
     session = build_session()
     seed_org(session)
 
-    other_group = SqlAlchemyChannelGroupRegistry(
-        session, tenant_id=OTHER_TENANT_ID
-    ).create_group(
+    other_group = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID).create_group(
         name="Other Group",
         group_type="CUSTOM_GROUP",
         channel_ids=[CHANNEL_OTHER_EXTERNAL],
@@ -516,9 +503,7 @@ def test_add_members_stamps_bound_tenant_on_new_member_rows() -> None:
     )
 
     member_rows = session.scalars(
-        select(ChannelGroupMemberORM).where(
-            ChannelGroupMemberORM.group_id == UUID(group.id)
-        )
+        select(ChannelGroupMemberORM).where(ChannelGroupMemberORM.group_id == UUID(group.id))
     ).all()
     assert {row.tenant_id for row in member_rows} == {DEFAULT_TENANT_ID}
     assert {row.channel_id for row in member_rows} == {
@@ -542,9 +527,7 @@ def test_add_members_with_empty_channel_id_list_keeps_existing_members() -> None
 
     assert updated.channel_ids == (CHANNEL_DEFAULT_A_EXTERNAL,)
     member_rows = session.scalars(
-        select(ChannelGroupMemberORM).where(
-            ChannelGroupMemberORM.group_id == UUID(group.id)
-        )
+        select(ChannelGroupMemberORM).where(ChannelGroupMemberORM.group_id == UUID(group.id))
     ).all()
     assert len(member_rows) == 1
     assert member_rows[0].tenant_id == DEFAULT_TENANT_ID
@@ -570,8 +553,7 @@ def test_add_members_recovers_from_duplicate_member_integrity_error(
     def flaky_flush(*args, **kwargs):
         nonlocal duplicate_error_seen
         has_pending_new_member = any(
-            isinstance(obj, ChannelGroupMemberORM)
-            and obj.channel_id == CHANNEL_DEFAULT_B_ID
+            isinstance(obj, ChannelGroupMemberORM) and obj.channel_id == CHANNEL_DEFAULT_B_ID
             for obj in session.new
         )
         if has_pending_new_member and not duplicate_error_seen:
@@ -595,9 +577,7 @@ def test_add_members_recovers_from_duplicate_member_integrity_error(
     )
 
     member_rows = session.scalars(
-        select(ChannelGroupMemberORM).where(
-            ChannelGroupMemberORM.group_id == UUID(group.id)
-        )
+        select(ChannelGroupMemberORM).where(ChannelGroupMemberORM.group_id == UUID(group.id))
     ).all()
 
     assert duplicate_error_seen is True
@@ -617,9 +597,7 @@ def test_remove_member_for_cross_tenant_group_raises_keyerror() -> None:
     session = build_session()
     seed_org(session)
 
-    other_group = SqlAlchemyChannelGroupRegistry(
-        session, tenant_id=OTHER_TENANT_ID
-    ).create_group(
+    other_group = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID).create_group(
         name="Other Group",
         group_type="CUSTOM_GROUP",
         channel_ids=[CHANNEL_OTHER_EXTERNAL],
@@ -646,9 +624,7 @@ def test_update_group_for_cross_tenant_group_raises_keyerror() -> None:
     session = build_session()
     seed_org(session)
 
-    other_group = SqlAlchemyChannelGroupRegistry(
-        session, tenant_id=OTHER_TENANT_ID
-    ).create_group(
+    other_group = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID).create_group(
         name="Other Group",
         group_type="CUSTOM_GROUP",
         channel_ids=[CHANNEL_OTHER_EXTERNAL],

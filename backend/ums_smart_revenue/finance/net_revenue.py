@@ -55,16 +55,12 @@ class ChannelNetRevenueSummary:
             "youtube_channel_id": self.youtube_channel_id,
             "status": self.status,
             "primary_source_kind": self.primary_source_kind,
-            "baseline_gross_revenue_usd": _decimal_to_api(
-                self.baseline_gross_revenue_usd
-            ),
+            "baseline_gross_revenue_usd": _decimal_to_api(self.baseline_gross_revenue_usd),
             "baseline_net_revenue_usd": _decimal_to_api(self.baseline_net_revenue_usd),
             "approved_manual_override_total_usd": _decimal_to_api(
                 self.approved_manual_override_total_usd
             ),
-            "adjusted_gross_revenue_usd": _decimal_to_api(
-                self.adjusted_gross_revenue_usd
-            ),
+            "adjusted_gross_revenue_usd": _decimal_to_api(self.adjusted_gross_revenue_usd),
             "net_revenue_usd": _decimal_to_api(self.net_revenue_usd),
             "deduction_amount_usd": _decimal_to_api(self.deduction_amount_usd),
             "channel_direct_deduction_amount_usd": _decimal_to_api(
@@ -113,9 +109,7 @@ class MonthNetRevenueSummary:
                 self.total_adjusted_gross_revenue_usd
             ),
             "total_net_revenue_usd": _decimal_to_api(self.total_net_revenue_usd),
-            "total_deduction_amount_usd": _decimal_to_api(
-                self.total_deduction_amount_usd
-            ),
+            "total_deduction_amount_usd": _decimal_to_api(self.total_deduction_amount_usd),
             "total_channel_direct_deduction_amount_usd": _decimal_to_api(
                 self.total_channel_direct_deduction_amount_usd
             ),
@@ -196,8 +190,7 @@ def _applicable_deduction_components(
         and component.scope_kind == "CHANNEL"
         and component.scope_id == youtube_channel_id
         and component.component_kind in NET_APPLICABLE_COMPONENT_KINDS
-        and SOURCE_SYSTEM_TO_SOURCE_KIND.get(component.source_system)
-        == primary_source_kind
+        and SOURCE_SYSTEM_TO_SOURCE_KIND.get(component.source_system) == primary_source_kind
     ]
 
 
@@ -561,12 +554,8 @@ def _month_net_revenue_counts(
     channels: list[ChannelNetRevenueSummary],
 ) -> tuple[list[ChannelNetRevenueSummary], int, int]:
     """Return calculated channels, missing-net count, and pending override count."""
-    calculated = [
-        channel for channel in channels if channel.net_revenue_usd is not None
-    ]
-    missing_count = sum(
-        1 for channel in channels if channel.status == "NET_REVENUE_SOURCE_MISSING"
-    )
+    calculated = [channel for channel in channels if channel.net_revenue_usd is not None]
+    missing_count = sum(1 for channel in channels if channel.status == "NET_REVENUE_SOURCE_MISSING")
     pending_count = sum(channel.pending_manual_override_count for channel in channels)
     return calculated, missing_count, pending_count
 
@@ -600,9 +589,7 @@ def filter_account_allocations_to_scope(
     if channel_ids is None:
         return list(account_allocations)
     allowed = set(channel_ids)
-    return [
-        line for line in account_allocations if line.youtube_channel_id in allowed
-    ]
+    return [line for line in account_allocations if line.youtube_channel_id in allowed]
 
 
 def build_month_net_revenue_summary(
@@ -756,9 +743,7 @@ def _empty_channel_summary(
             {
                 "issue_type": "NO_REVENUE_FACTS",
                 "severity": "HIGH",
-                "message": (
-                    f"No revenue facts exist for {youtube_channel_id} in {month}."
-                ),
+                "message": (f"No revenue facts exist for {youtube_channel_id} in {month}."),
             }
         ],
     )

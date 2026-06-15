@@ -37,9 +37,7 @@ def upgrade() -> None:
         WHERE permission_key IN ('graph.view', 'graph.view_finance')
         """
     )
-    op.execute(
-        "DELETE FROM permissions WHERE key IN ('graph.view', 'graph.view_finance')"
-    )
+    op.execute("DELETE FROM permissions WHERE key IN ('graph.view', 'graph.view_finance')")
     op.execute("DELETE FROM access_scopes WHERE scope_type = 'graph-read'")
 
     op.drop_constraint(

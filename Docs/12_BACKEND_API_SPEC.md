@@ -377,6 +377,7 @@ API group: `/connectors`.
 
 ```http
 GET /connectors/credentials
+GET /connectors/credentials/health?limit=50&offset=0
 POST /connectors/credentials
 POST /connectors/credentials/{connector_key}/{account_id}/test
 POST /connectors/jobs
@@ -424,6 +425,25 @@ lifecycle edges and, on a pre-start (Bucket-A) failure, a
 `token_expiry_at`, `last_refresh_status` (`succeeded`/`failed`/null), and
 `last_refresh_error_class` (nullable; ISO-8601 timestamps), stamped at the single
 `resolve_connector_credentials` refresh chokepoint.
+
+`GET /connectors/credentials/health` is a read-only credential token-health
+surface gated by `connectors.view_health` (fail-closed; this is the same
+`VIEW_CONNECTOR_HEALTH` gate as `GET /connectors/runs`, and is **distinct** from
+the `connectors.manage` gate on `GET /connectors/credentials`). The response is
+`{credentials: [{...telemetry, health_state}]}` — each entry repeats the
+credential metadata shape (`id`, `connector_key`, `account_id`, `status`,
+`has_secret_ref`, plus the four refresh-telemetry fields above) and appends a
+derived `health_state`. `health_state` is one of `healthy`, `expiring`
+(token at or within 24h of expiry), `auth_failed` (last refresh failed or an
+error class is recorded), `missing` (no stored secret reference), or `unknown`
+(not yet determinable). The list is offset-paginated (`limit` defaults to `50`,
+capped at `100`; `offset` defaults to `0`). Authorization mirrors
+`GET /connectors/runs`: a connector-scoped viewer is **narrowed to only the
+connector ids they are granted** (no foreign-credential leak), and a caller
+without `connectors.view_health` at any scope (or a disabled principal) is
+rejected `403`. The endpoint is read-only: no audit write, no migration, and it
+derives `health_state` purely from already-persisted columns (no live OAuth
+refresh is performed).
 
 `GET /connectors/runs` lists connector run history (read-only operational
 metadata) and requires `connectors.view_health`. It is tenant-scoped, accepts

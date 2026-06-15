@@ -52,14 +52,30 @@ def test_account_id_is_normalized_from_request() -> None:
 
 
 def test_source_row_key_stable_across_reruns_for_earnings() -> None:
-    a = list(AdSenseManagementParser().parse(_load("sample_earnings_report_2026_04.json"), tenant_id=TENANT_ID))
-    b = list(AdSenseManagementParser().parse(_load("sample_earnings_report_2026_04_rerun.json"), tenant_id=TENANT_ID))
+    a = list(
+        AdSenseManagementParser().parse(
+            _load("sample_earnings_report_2026_04.json"), tenant_id=TENANT_ID
+        )
+    )
+    b = list(
+        AdSenseManagementParser().parse(
+            _load("sample_earnings_report_2026_04_rerun.json"), tenant_id=TENANT_ID
+        )
+    )
     assert sorted(r.source_row_key for r in a) == sorted(r.source_row_key for r in b)
 
 
 def test_source_row_key_stable_across_reruns_for_payments() -> None:
-    a = list(AdSenseManagementParser().parse(_load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID))
-    b = list(AdSenseManagementParser().parse(_load("sample_payment_report_2026_04_rerun.json"), tenant_id=TENANT_ID))
+    a = list(
+        AdSenseManagementParser().parse(
+            _load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID
+        )
+    )
+    b = list(
+        AdSenseManagementParser().parse(
+            _load("sample_payment_report_2026_04_rerun.json"), tenant_id=TENANT_ID
+        )
+    )
     assert sorted(r.source_row_key for r in a) == sorted(r.source_row_key for r in b)
 
 
@@ -80,9 +96,17 @@ def test_source_row_key_ignores_run_specific_report_id() -> None:
 
 
 def test_earnings_and_payment_keys_differ() -> None:
-    e = list(AdSenseManagementParser().parse(_load("sample_earnings_report_2026_04.json"), tenant_id=TENANT_ID))
-    p = list(AdSenseManagementParser().parse(_load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID))
-    assert not (set(r.source_row_key for r in e) & set(r.source_row_key for r in p))
+    e = list(
+        AdSenseManagementParser().parse(
+            _load("sample_earnings_report_2026_04.json"), tenant_id=TENANT_ID
+        )
+    )
+    p = list(
+        AdSenseManagementParser().parse(
+            _load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID
+        )
+    )
+    assert not ({r.source_row_key for r in e} & {r.source_row_key for r in p})
 
 
 def test_mixed_settled_and_estimated_metrics_are_labeled_per_metric() -> None:
@@ -168,7 +192,7 @@ def test_rejects_non_finite_amount() -> None:
     bad = {**payload}
     # headers order is [PRODUCT_CODE, COUNTRY_CODE, ESTIMATED_EARNINGS];
     # mutate the first row's metric cell (index 2) value to NaN.
-    first_row = {**bad["rows"][0]}
+    first_row = {**bad["rows"][0]}  # skipcq: PY-W0072
     first_row["cells"] = [*bad["rows"][0]["cells"]]
     first_row["cells"][2] = {**first_row["cells"][2], "value": "NaN"}
     bad["rows"] = [first_row, *bad["rows"][1:]]

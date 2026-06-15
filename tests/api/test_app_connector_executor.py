@@ -1,4 +1,5 @@
 """Tests for ConnectorJobExecutor wiring + lifespan teardown in create_app."""
+
 from __future__ import annotations
 
 import os

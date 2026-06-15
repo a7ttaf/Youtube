@@ -141,9 +141,7 @@ class SqlAlchemyPlatformAdminLoader:
     def _prepare_read_connection(self) -> None:
         """Apply principal read isolation and timeout settings to the transaction."""
         bind = self._session.get_bind()
-        connection = self._session.connection(
-            execution_options={"isolation_level": "SERIALIZABLE"}
-        )
+        connection = self._session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
         if bind.dialect.name == "postgresql":
             connection.exec_driver_sql(
                 f"SET LOCAL statement_timeout = {PLATFORM_ADMIN_QUERY_TIMEOUT_MS}"

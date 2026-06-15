@@ -504,16 +504,22 @@ def _commit_recalculation_write(
         commit_request_fingerprint,
         emit_allocation_committed_audit,
     )
+
     fingerprint = commit_request_fingerprint(
-        allocation_method=normalized_method, reason=payload.reason,
+        allocation_method=normalized_method,
+        reason=payload.reason,
     )
     try:
         outcome = committed_repository.commit_allocation(
-            month=payload.month, allocation_method=normalized_method,
-            idempotency_key=payload.idempotency_key, request_fingerprint=fingerprint,
-            reason=payload.reason, committed_by=user.user_id,  # str; repo -> UUID
+            month=payload.month,
+            allocation_method=normalized_method,
+            idempotency_key=payload.idempotency_key,
+            request_fingerprint=fingerprint,
+            reason=payload.reason,
+            committed_by=user.user_id,  # str; repo -> UUID
             deduction_repository=deduction_repository,
-            revenue_repository=revenue_repository, link_repository=link_repository,
+            revenue_repository=revenue_repository,
+            link_repository=link_repository,
             channel_company=org_index.channel_company,
         )
     except CommittedAllocationValidationError as exc:
@@ -524,18 +530,18 @@ def _commit_recalculation_write(
         CommittedAllocationLockedMonthError,
         CommittedAllocationIdempotencyConflictError,
     ) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     write_status = "COMMITTED" if outcome.created else "IDEMPOTENT_REPLAY"
     commit_audit_event = emit_allocation_committed_audit(
-        sink=audit_sink, actor=user, month=payload.month, scope=month_scope,
-        reason=payload.reason, outcome=outcome,
+        sink=audit_sink,
+        actor=user,
+        month=payload.month,
+        scope=month_scope,
+        reason=payload.reason,
+        outcome=outcome,
     )
-    response.status_code = (
-        status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK
-    )
+    response.status_code = status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK
     return {
         "write_status": write_status,
         "committed_run": _run_to_api(outcome.run),
@@ -655,9 +661,7 @@ def request_revenue_recalculation(
             # Pass the scoped channel set so verified channels without fact
             # rows are also checked against the company mapping, preventing
             # false READY_FOR_REVIEW before a company_level commit.
-            verified_channel_ids=(
-                frozenset(channel_ids) if channel_ids is not None else None
-            ),
+            verified_channel_ids=(frozenset(channel_ids) if channel_ids is not None else None),
         )
     except (
         ManualOverrideValidationError,
@@ -678,7 +682,8 @@ def request_revenue_recalculation(
         # facts change (e.g. a net-revenue row is removed), which is wrong because
         # the key/fingerprint already identifies a completed write.
         _existing_run = committed_repository.get_run_by_idempotency_key(
-            month=payload.month, idempotency_key=payload.idempotency_key,
+            month=payload.month,
+            idempotency_key=payload.idempotency_key,
         )
         if _existing_run is None:
             # No existing run — enforce the preflight gate before any write.
@@ -687,9 +692,7 @@ def request_revenue_recalculation(
                     status_code=status.HTTP_409_CONFLICT,
                     detail={
                         "write_status": "BLOCKED_BY_ISSUES",
-                        "blocking_issues": [
-                            issue.to_api() for issue in preview.blocking_issues
-                        ],
+                        "blocking_issues": [issue.to_api() for issue in preview.blocking_issues],
                     },
                 )
         write_fragment = _commit_recalculation_write(
@@ -706,9 +709,7 @@ def request_revenue_recalculation(
             response=response,
         )
 
-    final_write_status = (
-        write_fragment["write_status"] if write_fragment else preview.write_status
-    )
+    final_write_status = write_fragment["write_status"] if write_fragment else preview.write_status
     summary = preview.source_summary.to_api()
     record = record_audit_event(
         sink=audit_sink,
@@ -789,9 +790,7 @@ def import_revenue_fact(
             "gross_revenue_usd": fact.to_api()["gross_revenue_usd"],
             "shorts_revenue_usd": fact.to_api()["shorts_revenue_usd"],
             "longform_revenue_usd": fact.to_api()["longform_revenue_usd"],
-            "subscription_revenue_usd": fact.to_api()[
-                "subscription_revenue_usd"
-            ],
+            "subscription_revenue_usd": fact.to_api()["subscription_revenue_usd"],
         },
     )
     return _with_audit_event(fact, record)
@@ -1102,9 +1101,7 @@ def get_month_smart_alerts(
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
     try:
         facts = revenue_repository.list_month_facts(month=month)
-        previous_facts = revenue_repository.list_month_facts(
-            month=_previous_month(month)
-        )
+        previous_facts = revenue_repository.list_month_facts(month=_previous_month(month))
         payments = payment_repository.list_month_payments(month=month)
         bank_entries = bank_repository.list_month_entries(month=month)
         manual_overrides = override_repository.list_month_overrides(month=month)
@@ -1117,9 +1114,7 @@ def get_month_smart_alerts(
         (
             missing_fact_channel_count,
             missing_fact_channel_sample,
-        ) = missing_revenue_fact_channel_count_and_sample(
-            session, month=month
-        )
+        ) = missing_revenue_fact_channel_count_and_sample(session, month=month)
         payment_match = build_monthly_payment_match_summary(
             month=month,
             facts=facts,
@@ -1421,9 +1416,7 @@ def get_month_net_revenue(
     )
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
-    _require_permission(
-        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
-    )
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
     # FIX: Derive the global-surface gate and audit entity ids from the resolved
     # AccessScope, not the raw scope_type/scope_id query strings. The permission
     # checks above already run on the normalized target_scope, so keying the
@@ -1471,9 +1464,7 @@ def get_month_net_revenue(
             manual_overrides=overrides,
             deduction_components=deduction_components,
             account_allocations=scoped_account_lines,
-            unallocated_account_issues=(
-                account_result.unallocated if is_global_scope else None
-            ),
+            unallocated_account_issues=(account_result.unallocated if is_global_scope else None),
         )
     except (
         DeductionComponentValidationError,
@@ -1583,9 +1574,7 @@ def get_month_rankings(
     )
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
-    _require_permission(
-        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
-    )
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
     normalized_scope_type = target_scope.type.value
     normalized_scope_id = target_scope.id or "global"
     try:
@@ -1716,15 +1705,12 @@ def _org_unit_name_maps(
 def _channel_name_map(session: Session) -> dict[str, str]:
     """Return active channel id->name for the current tenant (raw-id fallback)."""
     tenant_id = _resolve_smart_alert_tenant_id()
-    statement = (
-        select(
-            YouTubeChannelORM.youtube_channel_id,
-            YouTubeChannelORM.channel_name,
-        )
-        .where(
-            YouTubeChannelORM.tenant_id == tenant_id,
-            YouTubeChannelORM.active.is_(True),
-        )
+    statement = select(
+        YouTubeChannelORM.youtube_channel_id,
+        YouTubeChannelORM.channel_name,
+    ).where(
+        YouTubeChannelORM.tenant_id == tenant_id,
+        YouTubeChannelORM.active.is_(True),
     )
     return dict(session.execute(statement).all())
 
@@ -1781,9 +1767,7 @@ def record_month_bank_reconciliation(
         reason=payload.reason,
         details={
             "bank_reference": entry.bank_reference,
-            "bank_received_amount_usd": entry.to_api()[
-                "bank_received_amount_usd"
-            ],
+            "bank_received_amount_usd": entry.to_api()["bank_received_amount_usd"],
         },
     )
     response = entry.to_api()
@@ -1834,9 +1818,7 @@ def get_month_bank_reconciliation(
         details={
             "status": summary.status,
             "entry_count": summary.entry_count,
-            "bank_received_amount_usd": summary_api[
-                "bank_received_amount_usd"
-            ],
+            "bank_received_amount_usd": summary_api["bank_received_amount_usd"],
         },
     )
     payment_record = record_audit_event(
@@ -1937,8 +1919,7 @@ def explain_channel_month_revenue_metric(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
-                f"Unsupported explanation metric: {metric}. Supported: "
-                f"{sorted(SUPPORTED_METRICS)}."
+                f"Unsupported explanation metric: {metric}. Supported: {sorted(SUPPORTED_METRICS)}."
             ),
         )
     is_net_metric = metric == NET_REVENUE_METRIC
@@ -2275,9 +2256,7 @@ def _authorized_channel_ids_for_permission(
     return channel_ids
 
 
-def _direct_scopes_for_permission(
-    user: UserPrincipal, permission: Permission
-) -> list[AccessScope]:
+def _direct_scopes_for_permission(user: UserPrincipal, permission: Permission) -> list[AccessScope]:
     """Yield active direct scopes granting the permission."""
     return [
         grant.scope
@@ -2286,15 +2265,12 @@ def _direct_scopes_for_permission(
     ]
 
 
-def _role_scopes_for_permission(
-    user: UserPrincipal, permission: Permission
-) -> list[AccessScope]:
+def _role_scopes_for_permission(user: UserPrincipal, permission: Permission) -> list[AccessScope]:
     """Yield active role-derived scopes granting the permission."""
     return [
         assignment.scope
         for assignment in user.role_assignments
-        if assignment.active
-        and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
     ]
 
 
@@ -2389,10 +2365,7 @@ def missing_revenue_fact_channel_count_and_sample(
     tenant_id = _resolve_smart_alert_tenant_id()
     join_predicates = (
         (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
-        & (
-            MonthlyChannelRevenueFactORM.youtube_channel_id
-            == YouTubeChannelORM.youtube_channel_id
-        )
+        & (MonthlyChannelRevenueFactORM.youtube_channel_id == YouTubeChannelORM.youtube_channel_id)
         & (MonthlyChannelRevenueFactORM.tenant_id == tenant_id)
         & (MonthlyChannelRevenueFactORM.month == month),
     )
@@ -2403,9 +2376,7 @@ def missing_revenue_fact_channel_count_and_sample(
         MonthlyChannelRevenueFactORM.id.is_(None),
     ]
     if youtube_channel_ids is not None:
-        where_predicates.append(
-            YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids)
-        )
+        where_predicates.append(YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids))
     count_statement = (
         select(func.count())
         .select_from(YouTubeChannelORM)
@@ -2441,9 +2412,7 @@ def _revenue_read_scope_to_channel_ids(
 ) -> tuple[AccessScope, set[str] | None]:
     """Translate a revenue read scope into an AccessScope and channel filter."""
     normalized_scope_type = scope_type.strip()
-    normalized_scope_id = (
-        scope_id.strip() if isinstance(scope_id, str) else scope_id
-    )
+    normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
     if normalized_scope_type == "global":
         if normalized_scope_id:
             raise HTTPException(
@@ -2454,10 +2423,7 @@ def _revenue_read_scope_to_channel_ids(
     if not normalized_scope_id:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                "scope_id is required for revenue scope_type: "
-                f"{normalized_scope_type}"
-            ),
+            detail=(f"scope_id is required for revenue scope_type: {normalized_scope_type}"),
         )
     if normalized_scope_type == "sector":
         return (

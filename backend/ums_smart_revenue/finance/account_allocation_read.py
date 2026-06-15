@@ -6,6 +6,7 @@ LOCKED with no run -> live_fallback; OPEN / no close row -> live_compute. The on
 tenant is taken from committed_repository.tenant_id so the close-status read and the
 committed-run lookup cannot diverge cross-tenant.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -115,9 +116,7 @@ def filter_committed_result_to_account(
     not counted (monetary totals stay exact).
     """
     lines = tuple(ln for ln in result.lines if ln.adsense_account_id == adsense_account_id)
-    unallocated = tuple(
-        iss for iss in result.unallocated if iss.scope_id == adsense_account_id
-    )
+    unallocated = tuple(iss for iss in result.unallocated if iss.scope_id == adsense_account_id)
     component_count = len(
         {ln.component_key for ln in lines} | {iss.component_key for iss in unallocated}
     )
@@ -168,8 +167,10 @@ def resolve_month_account_allocation(
     else:
         source = "live_compute"
     result = compute_month_account_allocation(
-        month=month, deduction_repository=deduction_repository,
-        revenue_repository=revenue_repository, link_repository=link_repository,
+        month=month,
+        deduction_repository=deduction_repository,
+        revenue_repository=revenue_repository,
+        link_repository=link_repository,
         adsense_account_id=adsense_account_id,
     )
     return result, AllocationProvenance(source=source)

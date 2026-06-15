@@ -1,4 +1,5 @@
 """PostgreSQL round-trip for 20260602_0001 (committed account allocation)."""
+
 from pathlib import Path
 
 import pytest
@@ -77,8 +78,12 @@ _RUN_COLS = (
 def _insert_run_sql(**ov) -> tuple[str, dict]:
     """Build the INSERT SQL + params for a committed_allocation_runs row (overridable)."""
     params = dict(
-        tenant=UMS_TENANT_ID, month="2026-04", version=1,
-        method="gross_revenue_proportional", key="k1", fp="fp1",
+        tenant=UMS_TENANT_ID,
+        month="2026-04",
+        version=1,
+        method="gross_revenue_proportional",
+        key="k1",
+        fp="fp1",
         reason="close",
     )
     params.update(ov)
@@ -96,18 +101,24 @@ def test_upgrade_creates_tables_constraints_indexes(alembic_config, fresh_engine
     inspector = inspect(fresh_engine)
     names = set(inspector.get_table_names())
     assert {
-        "committed_allocation_runs", "committed_allocation_lines",
-        "committed_allocation_unallocated", "committed_allocation_notes",
+        "committed_allocation_runs",
+        "committed_allocation_lines",
+        "committed_allocation_unallocated",
+        "committed_allocation_notes",
     } <= names
     uniques = {
         c["name"]: tuple(c["column_names"])
         for c in inspector.get_unique_constraints("committed_allocation_runs")
     }
     assert uniques["uq_committed_allocation_runs_version"] == (
-        "tenant_id", "month", "commit_version"
+        "tenant_id",
+        "month",
+        "commit_version",
     )
     assert uniques["uq_committed_allocation_runs_idempotency"] == (
-        "tenant_id", "month", "idempotency_key"
+        "tenant_id",
+        "month",
+        "idempotency_key",
     )
     run_fks = {c["name"]: c for c in inspector.get_foreign_keys("committed_allocation_runs")}
     assert run_fks["fk_committed_allocation_runs_tenant"]["referred_table"] == "tenants"
@@ -121,22 +132,15 @@ def test_upgrade_creates_tables_constraints_indexes(alembic_config, fresh_engine
     # (unallocated, notes) carry the same ON DELETE CASCADE contract so a run
     # delete fully tears down its snapshot. Pin their FK ondelete too.
     unallocated_fks = {
-        c["name"]: c
-        for c in inspector.get_foreign_keys("committed_allocation_unallocated")
+        c["name"]: c for c in inspector.get_foreign_keys("committed_allocation_unallocated")
     }
     assert (
         unallocated_fks["fk_committed_allocation_unallocated_run"]["options"]["ondelete"]
         == "CASCADE"
     )
-    notes_fks = {
-        c["name"]: c for c in inspector.get_foreign_keys("committed_allocation_notes")
-    }
-    assert (
-        notes_fks["fk_committed_allocation_notes_run"]["options"]["ondelete"] == "CASCADE"
-    )
-    checks = {
-        c["name"] for c in inspector.get_check_constraints("committed_allocation_runs")
-    }
+    notes_fks = {c["name"]: c for c in inspector.get_foreign_keys("committed_allocation_notes")}
+    assert notes_fks["fk_committed_allocation_notes_run"]["options"]["ondelete"] == "CASCADE"
+    checks = {c["name"] for c in inspector.get_check_constraints("committed_allocation_runs")}
     assert "ck_committed_allocation_runs_method" in checks
     assert "ck_committed_allocation_runs_version_positive" in checks
     assert "ck_committed_allocation_runs_month_format" in checks
@@ -152,9 +156,7 @@ def test_upgrade_creates_tables_constraints_indexes(alembic_config, fresh_engine
     columns = {c["name"] for c in inspector.get_columns("committed_allocation_lines")}
     assert "basis_amount_usd" in columns
     assert "basis_gross_usd" not in columns
-    line_checks = {
-        c["name"] for c in inspector.get_check_constraints("committed_allocation_lines")
-    }
+    line_checks = {c["name"] for c in inspector.get_check_constraints("committed_allocation_lines")}
     assert "ck_committed_allocation_lines_amounts_finite" in line_checks
     # Non-empty identity guards on the line identifier columns (account/channel/
     # component key), mirroring deduction_components' non-empty identifier CHECKs.
@@ -162,16 +164,12 @@ def test_upgrade_creates_tables_constraints_indexes(alembic_config, fresh_engine
     assert "ck_committed_allocation_lines_youtube_channel_id_nonempty" in line_checks
     assert "ck_committed_allocation_lines_component_key_nonempty" in line_checks
     unallocated_checks = {
-        c["name"]
-        for c in inspector.get_check_constraints("committed_allocation_unallocated")
+        c["name"] for c in inspector.get_check_constraints("committed_allocation_unallocated")
     }
     # PG-only finite guard + non-empty identity guards on the unallocated table.
     assert "ck_committed_allocation_unallocated_amount_usd_finite" in unallocated_checks
     assert "ck_committed_allocation_unallocated_scope_id_nonempty" in unallocated_checks
-    assert (
-        "ck_committed_allocation_unallocated_component_key_nonempty"
-        in unallocated_checks
-    )
+    assert "ck_committed_allocation_unallocated_component_key_nonempty" in unallocated_checks
     notes_checks = {
         c["name"] for c in inspector.get_check_constraints("committed_allocation_notes")
     }
@@ -180,18 +178,14 @@ def test_upgrade_creates_tables_constraints_indexes(alembic_config, fresh_engine
     # composite run+channel index on lines). PK-backed indexes are not asserted.
     runs_indexes = {c["name"] for c in inspector.get_indexes("committed_allocation_runs")}
     assert "ix_committed_allocation_runs_tenant_month" in runs_indexes
-    lines_indexes = {
-        c["name"] for c in inspector.get_indexes("committed_allocation_lines")
-    }
+    lines_indexes = {c["name"] for c in inspector.get_indexes("committed_allocation_lines")}
     assert "ix_committed_allocation_lines_run" in lines_indexes
     assert "ix_committed_allocation_lines_run_channel" in lines_indexes
     unallocated_indexes = {
         c["name"] for c in inspector.get_indexes("committed_allocation_unallocated")
     }
     assert "ix_committed_allocation_unallocated_run" in unallocated_indexes
-    notes_indexes = {
-        c["name"] for c in inspector.get_indexes("committed_allocation_notes")
-    }
+    notes_indexes = {c["name"] for c in inspector.get_indexes("committed_allocation_notes")}
     assert "ix_committed_allocation_notes_run" in notes_indexes
 
 
@@ -272,9 +266,7 @@ def test_run_delete_cascades_to_lines(alembic_config, fresh_engine):
     sql, params = _insert_run_sql(key="x")
     with fresh_engine.begin() as conn:
         conn.execute(sql, params)
-        run_id = conn.execute(
-            text("SELECT id FROM committed_allocation_runs LIMIT 1")
-        ).scalar_one()
+        run_id = conn.execute(text("SELECT id FROM committed_allocation_runs LIMIT 1")).scalar_one()
         conn.execute(
             text(
                 "INSERT INTO committed_allocation_lines "
@@ -286,9 +278,7 @@ def test_run_delete_cascades_to_lines(alembic_config, fresh_engine):
             ),
             {"rid": run_id},
         )
-        conn.execute(
-            text("DELETE FROM committed_allocation_runs WHERE id = :rid"), {"rid": run_id}
-        )
+        conn.execute(text("DELETE FROM committed_allocation_runs WHERE id = :rid"), {"rid": run_id})
         remaining = conn.execute(
             text("SELECT count(*) FROM committed_allocation_lines")
         ).scalar_one()
@@ -302,7 +292,8 @@ def _insert_line_sql(allocated_amount: str = "100.000000", **ov) -> tuple[str, d
     can be exercised on the raw-SQL path that bypasses the repository guards).
     """
     cols = dict(
-        basis_amount="1000.000000", basis_share="1.000000",
+        basis_amount="1000.000000",
+        basis_share="1.000000",
         allocated_amount=allocated_amount,
     )
     cols.update(ov)
@@ -333,8 +324,12 @@ def test_runs_total_nan_rejected_by_finite_check(alembic_config, fresh_engine):
         "'NaN'::numeric, 0, 100.000000, 0, :tenant, :reason)"
     )
     params = dict(
-        tenant=UMS_TENANT_ID, month="2026-04", version=1,
-        method="gross_revenue_proportional", key="nan-run", fp="fp1",
+        tenant=UMS_TENANT_ID,
+        month="2026-04",
+        version=1,
+        method="gross_revenue_proportional",
+        key="nan-run",
+        fp="fp1",
         reason="close",
     )
     with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
@@ -350,8 +345,12 @@ def test_runs_total_infinity_rejected_by_numeric_type(alembic_config, fresh_engi
         "'Infinity'::numeric, 0, 100.000000, 0, :tenant, :reason)"
     )
     params = dict(
-        tenant=UMS_TENANT_ID, month="2026-04", version=1,
-        method="gross_revenue_proportional", key="inf-run", fp="fp1",
+        tenant=UMS_TENANT_ID,
+        month="2026-04",
+        version=1,
+        method="gross_revenue_proportional",
+        key="inf-run",
+        fp="fp1",
         reason="close",
     )
     with pytest.raises(DataError), fresh_engine.begin() as conn:
@@ -368,9 +367,7 @@ def test_lines_amount_nan_rejected_by_finite_check(alembic_config, fresh_engine)
     run_sql, run_params = _insert_run_sql(key="line-nan")
     with fresh_engine.begin() as conn:
         conn.execute(run_sql, run_params)
-        run_id = conn.execute(
-            text("SELECT id FROM committed_allocation_runs LIMIT 1")
-        ).scalar_one()
+        run_id = conn.execute(text("SELECT id FROM committed_allocation_runs LIMIT 1")).scalar_one()
     line_sql, _ = _insert_line_sql(basis_amount="'NaN'")
     with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
         conn.execute(line_sql, {"rid": run_id})
@@ -419,9 +416,7 @@ def test_lines_amount_infinity_rejected_by_numeric_type(alembic_config, fresh_en
     run_sql, run_params = _insert_run_sql(key="line-inf")
     with fresh_engine.begin() as conn:
         conn.execute(run_sql, run_params)
-        run_id = conn.execute(
-            text("SELECT id FROM committed_allocation_runs LIMIT 1")
-        ).scalar_one()
+        run_id = conn.execute(text("SELECT id FROM committed_allocation_runs LIMIT 1")).scalar_one()
     line_sql, _ = _insert_line_sql(basis_amount="'Infinity'")
     with pytest.raises(DataError), fresh_engine.begin() as conn:
         conn.execute(line_sql, {"rid": run_id})
@@ -432,9 +427,7 @@ def _seed_run(fresh_engine, key: str):
     run_sql, run_params = _insert_run_sql(key=key)
     with fresh_engine.begin() as conn:
         conn.execute(run_sql, run_params)
-        return conn.execute(
-            text("SELECT id FROM committed_allocation_runs LIMIT 1")
-        ).scalar_one()
+        return conn.execute(text("SELECT id FROM committed_allocation_runs LIMIT 1")).scalar_one()
 
 
 def test_unallocated_amount_nan_rejected_by_finite_check(alembic_config, fresh_engine):

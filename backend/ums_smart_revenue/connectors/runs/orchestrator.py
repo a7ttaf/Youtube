@@ -46,6 +46,7 @@ lands in B2.6 (T37). Existing files under
 oauth, blob storage, raw-file helpers, the YT client) and the existing
 parser/repo (PR #43) are *not* touched here — T27 is additive.
 """
+
 from __future__ import annotations
 
 import json
@@ -270,9 +271,7 @@ class ProducedReportSuccess:
 
 
 ProducedReport = (
-    ProducedReportSuccess
-    | tuple[str, dict[str, object], bytes]
-    | ProducedReportFailure
+    ProducedReportSuccess | tuple[str, dict[str, object], bytes] | ProducedReportFailure
 )
 
 
@@ -533,8 +532,7 @@ def _normalize_ingested_source_rows(
     rows_deleted_stale = int(outcome.counts.get("rows_deleted_stale") or 0)
     if rows_upserted_total <= 0 and rows_deleted_stale <= 0:
         logger.info(
-            "ingestion normalize skipped (no source row mutations) "
-            "tenant_id=%s month=%s run_id=%s",
+            "ingestion normalize skipped (no source row mutations) tenant_id=%s month=%s run_id=%s",
             tenant_id,
             report_month,
             run.id,
@@ -564,9 +562,7 @@ def _normalize_ingested_source_rows(
     )
 
 
-def _principal_for_triggered_user(
-    *, triggered_by_user_id: str, tenant_id: UUID
-) -> UserPrincipal:
+def _principal_for_triggered_user(*, triggered_by_user_id: str, tenant_id: UUID) -> UserPrincipal:
     """Build a minimal UserPrincipal for the user that triggered the run.
 
     The post-run normalize audit rows are attributed to the triggering
@@ -684,13 +680,9 @@ def resolve_connector_credentials(
         account_id=account_id,
     )
     if credential is None:
-        raise CredentialNotFoundError(
-            connector_key=connector_key, account_id=account_id
-        )
+        raise CredentialNotFoundError(connector_key=connector_key, account_id=account_id)
     if credential.status != "active":
-        raise InactiveCredentialError(
-            credential_id=str(credential.id), status=credential.status
-        )
+        raise InactiveCredentialError(credential_id=str(credential.id), status=credential.status)
 
     ensure_default_resolvers()
     # FIX: Admin/API-created credentials may persist surrounding whitespace in
@@ -828,9 +820,7 @@ def _run_dry_run(
                 counts["reports_succeeded"] += 1
             except Exception as exc:
                 counts["reports_failed"] += 1
-                per_report_failures.append(
-                    (report_type, type(exc).__name__)
-                )
+                per_report_failures.append((report_type, type(exc).__name__))
     finally:
         savepoint.rollback()
     return ConnectorRunOutcome(
@@ -901,7 +891,10 @@ def _run_live(
         # between the two writes cannot leave a RUNNING run without its STARTED
         # audit edge.
         emit_run_started(
-            sink=audit_sink, actor=audit_actor, run=run_entry, dry_run=False,
+            sink=audit_sink,
+            actor=audit_actor,
+            run=run_entry,
+            dry_run=False,
         )
         session.commit()
 
@@ -1054,10 +1047,7 @@ def _process_live_reports(
             tenant_id=tenant_id,
             deferred_cleanup=deferred_analytics_cleanup,
         )
-    return bool(
-        deferred_analytics_cleanup is not None
-        and deferred_analytics_cleanup.blocked
-    )
+    return bool(deferred_analytics_cleanup is not None and deferred_analytics_cleanup.blocked)
 
 
 def _unpack_produced_report(
@@ -1084,16 +1074,15 @@ def _unpack_produced_report(
     report_type, parser_payload, raw_bytes = produced
     raw_report = _CsvReportDownload(
         report_id=_legacy_report_id(
-            parser_payload=parser_payload, report_type=report_type,
+            parser_payload=parser_payload,
+            report_type=report_type,
         ),
         raw_bytes=raw_bytes,
     )
     return report_type, parser_payload, (raw_report,), None
 
 
-def _legacy_report_id(
-    *, parser_payload: dict[str, object], report_type: str
-) -> str:
+def _legacy_report_id(*, parser_payload: dict[str, object], report_type: str) -> str:
     """
     Recover the connector's legacy report_id from
     ``parser_payload.report_metadata`` if present.
@@ -1130,9 +1119,7 @@ def _handle_live_produced_report(
     audit_actor: UserPrincipal,
 ) -> int:
     """Persist one produced report (raw upload, parse, upsert) and update counts."""
-    report_type, parser_payload, raw_reports, produced_error = _unpack_produced_report(
-        produced
-    )
+    report_type, parser_payload, raw_reports, produced_error = _unpack_produced_report(produced)
     counts["reports_attempted"] += 1
     report_state: dict[str, object] = {}
     try:
@@ -1185,9 +1172,7 @@ def _handle_live_produced_report(
             _merge_deferred_stale_cleanup_plans(
                 deferred_cleanup=deferred_analytics_cleanup,
                 plans=processed.deferred_cleanup_plans,
-                attempted_channel_id=_youtube_channel_id_from_parser_payload(
-                    parser_payload
-                ),
+                attempted_channel_id=_youtube_channel_id_from_parser_payload(parser_payload),
             )
         counts["reports_succeeded"] += 1
         counts["rows_upserted_total"] += processed.rows_total
@@ -1242,9 +1227,7 @@ def _record_live_report_failure(
     """Persist a bucket-B per-report failure into ``connector_run_reports`` mid-run."""
     error_class = type(exc).__name__
     per_report_failures.append((report_type, error_class))
-    per_report_failure_details.append(
-        (report_type, error_class, _safe_failure_detail(exc))
-    )
+    per_report_failure_details.append((report_type, error_class, _safe_failure_detail(exc)))
     counts["reports_failed"] += 1
     in_flight_raw_file_ids = _raw_file_ids_from_state(report_state)
     if not in_flight_raw_file_ids:
@@ -1394,9 +1377,7 @@ def _sweep_unfinished_live_run(
             # Best-effort: even the fail-safe sweep emits FINISHED so the audit
             # trail records the lifecycle terminus. A sink error here is
             # swallowed by the outer except so the sweep stays best-effort.
-            emit_run_finished(
-                sink=audit_sink, actor=audit_actor, run=finished_run
-            )
+            emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
             session.commit()
     except Exception:
         session.rollback()
@@ -1737,9 +1718,12 @@ def _flush_deferred_stale_cleanup_plans(
     # different source_account_id, so hoisting the fetch keeps the flush at one
     # query per source/month even on multi-owner batches.
     existing_rows_cache: dict[tuple[str, str], list] = {}
-    for (source_system, report_type, report_month, source_account_id), keys in (
-        deferred_cleanup.keep_source_row_keys_by_scope.items()
-    ):
+    for (
+        source_system,
+        report_type,
+        report_month,
+        source_account_id,
+    ), keys in deferred_cleanup.keep_source_row_keys_by_scope.items():
         preserved_keys = set(keys)
         cache_key = (source_system, report_month)
         if cache_key not in existing_rows_cache:
@@ -1852,7 +1836,9 @@ def _youtube_channel_id_from_parser_payload(
 #     accounts/ prefix.
 # ============================================================================
 def _fallback_source_account_id(
-    *, parser_payload: dict[str, object], default_account_id: str,
+    *,
+    parser_payload: dict[str, object],
+    default_account_id: str,
 ) -> str:
     """Return the canonical source_account_id used by the parser for cleanup scope."""
     query_request = parser_payload.get("query_request")
@@ -1866,9 +1852,7 @@ def _fallback_source_account_id(
         if isinstance(request_account_id, str):
             adsense_account_id = request_account_id.strip()
             if adsense_account_id.startswith("accounts/"):
-                adsense_account_id = adsense_account_id.removeprefix(
-                    "accounts/"
-                ).strip()
+                adsense_account_id = adsense_account_id.removeprefix("accounts/").strip()
                 if adsense_account_id:
                     # FIX: AdSense can be invoked with a full
                     # ``accounts/<id>`` run selector, while the parser persists
@@ -2413,9 +2397,7 @@ def _build_youtube_report_success(
             )
         if not csv_reports:
             return None
-        raw_reports = tuple(
-            csv_reports[report_id] for report_id in sorted(csv_reports)
-        )
+        raw_reports = tuple(csv_reports[report_id] for report_id in sorted(csv_reports))
         parser_payload = _parser_payload_from_csv_totals(
             totals=totals,
             report_ids=[raw_report.report_id for raw_report in raw_reports],
@@ -2633,16 +2615,12 @@ def _accumulate_csv_report_bytes(
     import csv
     import io
 
-    month_start, _month_end = _month_bounds(
-        report_month=report_month, report_id=report_id
-    )
+    month_start, _month_end = _month_bounds(report_month=report_month, report_id=report_id)
     expected_month = f"{month_start.year:04d}-{month_start.month:02d}"
     try:
         text = raw_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise _parser_payload_error(
-            report_id=report_id, reason="csv is not valid utf-8"
-        ) from exc
+        raise _parser_payload_error(report_id=report_id, reason="csv is not valid utf-8") from exc
     reader = csv.DictReader(io.StringIO(text))
     default_currency = _validate_csv_headers(
         reader.fieldnames, report_id=report_id, report_type=report_type
@@ -2679,9 +2657,7 @@ def _validate_csv_headers(
             reason="csv missing header row",
         )
     headers = {
-        field.strip().lower()
-        for field in fieldnames
-        if isinstance(field, str) and field.strip()
+        field.strip().lower() for field in fieldnames if isinstance(field, str) and field.strip()
     }
     for group_name, aliases in (
         ("date", _CSV_DATE_COLUMNS),
@@ -2700,8 +2676,7 @@ def _validate_csv_headers(
         return default_currency
     raise _parser_payload_error(
         report_id=report_id,
-        reason="csv missing currency column "
-        "(expected one of: currency_code, currencyCode)",
+        reason="csv missing currency column (expected one of: currency_code, currencyCode)",
     )
 
 
@@ -2714,9 +2689,7 @@ def _parser_payload_from_csv_totals(
 ) -> dict[str, object]:
     """Render the aggregated ``totals`` map into the parser payload shape used downstream."""
     report_id = _combined_report_id(report_ids)
-    month_start, month_end = _month_bounds(
-        report_month=report_month, report_id=report_id
-    )
+    month_start, month_end = _month_bounds(report_month=report_month, report_id=report_id)
 
     rows: list[dict[str, object]] = []
     for line_index, ((channel, content_owner, currency), total) in enumerate(
@@ -2783,8 +2756,7 @@ def _accumulate_csv_row(
         raise _parser_payload_error(
             report_id=report_id,
             reason=(
-                f"csv row date {date_value!r} outside requested "
-                f"report_month {expected_month!r}"
+                f"csv row date {date_value!r} outside requested report_month {expected_month!r}"
             ),
         )
 
@@ -2836,8 +2808,7 @@ def _accumulate_csv_row(
     if not currency:
         raise _parser_payload_error(
             report_id=report_id,
-            reason="csv row missing currency column "
-            "(expected one of: currency_code, currencyCode)",
+            reason="csv row missing currency column (expected one of: currency_code, currencyCode)",
         )
 
     key = (channel, content_owner, currency)
@@ -3240,17 +3211,16 @@ def _parser_for_connector(
 #     keys.
 # ============================================================================
 def _synthesise_analytics_channel_dimension(
-    *, response: dict[str, object], channel_id: str,
+    *,
+    response: dict[str, object],
+    channel_id: str,
 ) -> dict[str, object]:
     """Prepend the `channel` DIMENSION header and value to a month-only response."""
     column_headers = response.get("columnHeaders")
     if not isinstance(column_headers, list):
         # Let the parser raise a typed ParserError on the malformed payload.
         return response
-    if any(
-        isinstance(h, dict) and h.get("name") == "channel"
-        for h in column_headers
-    ):
+    if any(isinstance(h, dict) and h.get("name") == "channel" for h in column_headers):
         # Already carries the dimension (mocked fixtures); pass through.
         return response
     rows = response.get("rows")
@@ -3323,7 +3293,9 @@ class YouTubeAnalyticsRunner:
         try:
             client = YouTubeAnalyticsClient(http=http)
             channel_ids = list_target_channels(
-                session, tenant_id=tenant_id, account_id=account_id,
+                session,
+                tenant_id=tenant_id,
+                account_id=account_id,
             )
             # FIX: end the read-only channel-list transaction now so the
             # orchestrator's per-report `with platform_lane(session):` block
@@ -3379,7 +3351,8 @@ class YouTubeAnalyticsRunner:
                     # mark the run PARTIAL and continue with the remaining
                     # channels.
                     yield ProducedReportFailure(
-                        report_type="youtube_analytics", error=exc,
+                        report_type="youtube_analytics",
+                        error=exc,
                     )
                     continue
                 # Synthesise the `channel` dimension into the response. The
@@ -3393,7 +3366,8 @@ class YouTubeAnalyticsRunner:
                 # header is passed through unchanged, which keeps mocked tests
                 # that return a `channel,month` payload working.
                 augmented_response = _synthesise_analytics_channel_dimension(
-                    response=response, channel_id=channel_id,
+                    response=response,
+                    channel_id=channel_id,
                 )
                 # FIX: stamp the parser-payload query_request with the calendar
                 # month's last day as endDate. The wire request keeps the
@@ -3507,7 +3481,8 @@ class AdSenseManagementRunner:
                 raise
             except GoogleConnectorError as exc:
                 yield ProducedReportFailure(
-                    report_type="adsense_management", error=exc,
+                    report_type="adsense_management",
+                    error=exc,
                 )
                 return
             # Stored blob is the parser-ready payload JSON: the adapter already

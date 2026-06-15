@@ -55,9 +55,7 @@ class AccountPaymentStatus:
             "source_account_id": self.source_account_id,
             "total_payment_count": self.total_payment_count,
             "status_totals": [bucket.to_api() for bucket in self.status_totals],
-            "outstanding_totals": [
-                total.to_api() for total in self.outstanding_totals
-            ],
+            "outstanding_totals": [total.to_api() for total in self.outstanding_totals],
         }
 
 
@@ -77,9 +75,7 @@ class MonthlyPaymentStatusSummary:
             "month": self.month,
             "total_payment_count": self.total_payment_count,
             "status_totals": [bucket.to_api() for bucket in self.status_totals],
-            "outstanding_totals": [
-                total.to_api() for total in self.outstanding_totals
-            ],
+            "outstanding_totals": [total.to_api() for total in self.outstanding_totals],
             "accounts": [account.to_api() for account in self.accounts],
         }
 
@@ -134,9 +130,7 @@ def _status_buckets(
     statuses = (
         CANONICAL_PAYMENT_STATUSES
         if include_all_statuses
-        else tuple(
-            status for status in CANONICAL_PAYMENT_STATUSES if status in by_status
-        )
+        else tuple(status for status in CANONICAL_PAYMENT_STATUSES if status in by_status)
     )
     return [
         PaymentStatusBucket(
@@ -151,11 +145,7 @@ def _status_buckets(
 def _outstanding_totals(payments: list[AdSensePaymentEntry]) -> list[CurrencyAmount]:
     """Compute totals for outstanding payments (pending and unpaid only)."""
     return _currency_totals(
-        [
-            payment
-            for payment in payments
-            if payment.payment_status in OUTSTANDING_STATUSES
-        ]
+        [payment for payment in payments if payment.payment_status in OUTSTANDING_STATUSES]
     )
 
 
@@ -184,7 +174,4 @@ def _currency_totals(payments: list[AdSensePaymentEntry]) -> list[CurrencyAmount
         sums[payment.payment_currency] = (
             sums.get(payment.payment_currency, Decimal("0")) + payment.payment_amount
         )
-    return [
-        CurrencyAmount(currency=currency, amount=sums[currency])
-        for currency in sorted(sums)
-    ]
+    return [CurrencyAmount(currency=currency, amount=sums[currency]) for currency in sorted(sums)]

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
-from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
+from ums_smart_revenue.finance.revenue_fact_entries import RevenueFactEntry
 
 DEFAULT_VARIANCE_TOLERANCE_PERCENT = Decimal("0.02")
 SOURCE_PRIORITY = {
@@ -60,16 +60,10 @@ class RevenueReconciliationPreview:
             "youtube_channel_id": self.youtube_channel_id,
             "status": self.status,
             "primary_source_kind": self.primary_source_kind,
-            "primary_gross_revenue_usd": _decimal_to_api(
-                self.primary_gross_revenue_usd
-            ),
+            "primary_gross_revenue_usd": _decimal_to_api(self.primary_gross_revenue_usd),
             "compared_source_count": self.compared_source_count,
-            "gross_revenue_variance_usd": _decimal_to_api(
-                self.gross_revenue_variance_usd
-            ),
-            "gross_revenue_variance_percent": _decimal_to_api(
-                self.gross_revenue_variance_percent
-            ),
+            "gross_revenue_variance_usd": _decimal_to_api(self.gross_revenue_variance_usd),
+            "gross_revenue_variance_percent": _decimal_to_api(self.gross_revenue_variance_percent),
             "confidence_score": _decimal_to_api(self.confidence_score),
             "issues": [issue.to_api() for issue in self.issues],
         }
@@ -109,8 +103,7 @@ def build_revenue_reconciliation_preview(
     if not sorted_facts:
         if month is None or youtube_channel_id is None:
             raise ValueError(
-                "month and youtube_channel_id are required when "
-                "no revenue facts are provided"
+                "month and youtube_channel_id are required when no revenue facts are provided"
             )
         return RevenueReconciliationPreview(
             month=month,
@@ -127,8 +120,7 @@ def build_revenue_reconciliation_preview(
                     issue_type="NO_REVENUE_FACTS",
                     severity="HIGH",
                     message=(
-                        f"No revenue facts are available for "
-                        f"{youtube_channel_id} in {month}."
+                        f"No revenue facts are available for {youtube_channel_id} in {month}."
                     ),
                 )
             ],
@@ -160,9 +152,7 @@ def build_revenue_reconciliation_preview(
     elif variance_percent > variance_tolerance_percent:
         status = "VARIANCE_DETECTED"
         severity = "HIGH" if variance_percent >= Decimal("0.05") else "MEDIUM"
-        confidence_score = (
-            _average_confidence(sorted_facts) - variance_percent
-        ).quantize(
+        confidence_score = (_average_confidence(sorted_facts) - variance_percent).quantize(
             Decimal("0.0001"),
             rounding=ROUND_HALF_UP,
         )
@@ -179,9 +169,7 @@ def build_revenue_reconciliation_preview(
         )
     else:
         status = "RECONCILED"
-        confidence_score = (
-            _average_confidence(sorted_facts) - variance_percent
-        ).quantize(
+        confidence_score = (_average_confidence(sorted_facts) - variance_percent).quantize(
             Decimal("0.0001"),
             rounding=ROUND_HALF_UP,
         )
@@ -233,8 +221,7 @@ def _average_confidence(facts: list[RevenueFactEntry]) -> Decimal:
     Returns the average as a Decimal quantized to four decimal places.
     """
     return (
-        sum((fact.confidence_score for fact in facts), Decimal("0"))
-        / Decimal(len(facts))
+        sum((fact.confidence_score for fact in facts), Decimal("0")) / Decimal(len(facts))
     ).quantize(
         Decimal("0.0001"),
         rounding=ROUND_HALF_UP,
@@ -264,6 +251,4 @@ def _percent_message(value: Decimal) -> str:
 
     Multiplies the value by 100 and appends a percent sign.
     """
-    return (
-        f"{(value * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}%"
-    )
+    return f"{(value * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}%"

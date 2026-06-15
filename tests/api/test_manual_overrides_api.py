@@ -51,9 +51,7 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
     with Session(engine) as session:
         session.add_all(
             [
-                OrgUnitORM(
-                    id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True
-                ),
+                OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
                 OrgUnitORM(
                     id=COMPANY_ID,
                     parent_id=SECTOR_ID,
@@ -114,9 +112,7 @@ def test_finance_admin_creates_pending_manual_override_with_audit(tmp_path):
 
     response = client.post(
         "/revenue/manual-overrides",
-        headers=auth_headers(
-            "finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
         json={
             "month": "2026-03",
             "youtube_channel_id": "channel-tv-a",
@@ -147,9 +143,7 @@ def test_finance_approver_approves_pending_manual_override(tmp_path):
 
     create_response = client.post(
         "/revenue/manual-overrides",
-        headers=auth_headers(
-            "finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
         json={
             "month": "2026-03",
             "youtube_channel_id": "channel-tv-a",
@@ -159,18 +153,14 @@ def test_finance_approver_approves_pending_manual_override(tmp_path):
     )
     approve_response = client.post(
         f"/revenue/manual-overrides/{create_response.json()['id']}/approve",
-        headers=auth_headers(
-            "finance_approver", FINANCE_APPROVER_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_approver", FINANCE_APPROVER_ID, scope_id=str(COMPANY_ID)),
         json={"reason": "Approved after source report review"},
     )
 
     engine = create_engine(database_url)
     with Session(engine) as session:
         override = session.scalars(select(RevenueManualOverrideORM)).one()
-        audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.event_type)
-        ).all()
+        audit_logs = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert approve_response.status_code == 200
     assert approve_response.json()["status"] == "APPROVED"
@@ -188,9 +178,7 @@ def test_manual_override_creator_cannot_approve_own_override(tmp_path):
 
     create_response = client.post(
         "/revenue/manual-overrides",
-        headers=auth_headers(
-            "finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
         json={
             "month": "2026-03",
             "youtube_channel_id": "channel-tv-a",
@@ -200,9 +188,7 @@ def test_manual_override_creator_cannot_approve_own_override(tmp_path):
     )
     approve_response = client.post(
         f"/revenue/manual-overrides/{create_response.json()['id']}/approve",
-        headers=auth_headers(
-            "finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
         json={"reason": "Should require a second approver"},
     )
 
@@ -220,9 +206,7 @@ def test_manual_override_rejects_locked_month(tmp_path):
 
     response = client.post(
         "/revenue/manual-overrides",
-        headers=auth_headers(
-            "finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
         json={
             "month": "2026-03",
             "youtube_channel_id": "channel-tv-a",
@@ -242,9 +226,7 @@ def test_company_manager_cannot_create_manual_override(tmp_path):
 
     response = client.post(
         "/revenue/manual-overrides",
-        headers=auth_headers(
-            "company_manager", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("company_manager", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
         json={
             "month": "2026-03",
             "youtube_channel_id": "channel-tv-a",
@@ -254,10 +236,7 @@ def test_company_manager_cannot_create_manual_override(tmp_path):
     )
 
     assert response.status_code == 403
-    assert (
-        response.json()["detail"]
-        == "Missing permission: finance.create_manual_override"
-    )
+    assert response.json()["detail"] == "Missing permission: finance.create_manual_override"
 
 
 def test_user_without_approval_permission_cannot_probe_manual_override_ids(tmp_path):
@@ -267,17 +246,12 @@ def test_user_without_approval_permission_cannot_probe_manual_override_ids(tmp_p
 
     response = client.post(
         "/revenue/manual-overrides/not-a-uuid/approve",
-        headers=auth_headers(
-            "company_manager", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("company_manager", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
         json={"reason": "Should be denied before override lookup"},
     )
 
     assert response.status_code == 403
-    assert (
-        response.json()["detail"]
-        == "Missing permission: finance.approve_manual_override"
-    )
+    assert response.json()["detail"] == "Missing permission: finance.approve_manual_override"
 
 
 def test_scoped_finance_approver_gets_not_found_for_out_of_scope_override(tmp_path):
@@ -319,9 +293,7 @@ def test_finance_viewer_reads_adjusted_revenue_summary_with_approved_overrides_o
 
     approved_create = client.post(
         "/revenue/manual-overrides",
-        headers=auth_headers(
-            "finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
         json={
             "month": "2026-03",
             "youtube_channel_id": "channel-tv-a",
@@ -331,16 +303,12 @@ def test_finance_viewer_reads_adjusted_revenue_summary_with_approved_overrides_o
     )
     client.post(
         f"/revenue/manual-overrides/{approved_create.json()['id']}/approve",
-        headers=auth_headers(
-            "finance_approver", FINANCE_APPROVER_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_approver", FINANCE_APPROVER_ID, scope_id=str(COMPANY_ID)),
         json={"reason": "Approved after source report review"},
     )
     client.post(
         "/revenue/manual-overrides",
-        headers=auth_headers(
-            "finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
         json={
             "month": "2026-03",
             "youtube_channel_id": "channel-tv-a",
@@ -368,9 +336,7 @@ def test_finance_viewer_reads_adjusted_revenue_summary_with_approved_overrides_o
 
     response = client.get(
         "/revenue/channels/channel-tv-a/months/2026-03/summary",
-        headers=auth_headers(
-            "finance_viewer", FINANCE_APPROVER_ID, scope_id=str(COMPANY_ID)
-        ),
+        headers=auth_headers("finance_viewer", FINANCE_APPROVER_ID, scope_id=str(COMPANY_ID)),
     )
 
     with Session(engine) as session:
@@ -382,6 +348,5 @@ def test_finance_viewer_reads_adjusted_revenue_summary_with_approved_overrides_o
     assert response.json()["adjusted_gross_revenue_usd"] == "1125.5"
     assert response.json()["pending_manual_override_count"] == 1
     assert any(
-        log.entity_type == "adjusted_revenue_summary" and log.sensitive
-        for log in audit_logs
+        log.entity_type == "adjusted_revenue_summary" and log.sensitive for log in audit_logs
     )

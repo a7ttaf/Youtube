@@ -1,4 +1,5 @@
 """Service tests for the smart revenue reconciliation workflow (SQLite)."""
+
 from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -80,9 +81,7 @@ def _add_channel(session, channel_id, *, cms_status="INSIDE_CMS"):
     )
 
 
-def _add_cms_fact(
-    session, channel_id, gross, *, source_kind=None, source_report_id=None
-):
+def _add_cms_fact(session, channel_id, gross, *, source_kind=None, source_report_id=None):
     """Insert a gross fact with no net (component-derived path)."""
     session.add(
         MonthlyChannelRevenueFactORM(
@@ -106,10 +105,17 @@ def _add_payment(session, account, amount, *, status="PAID", currency="USD"):
     """Insert one AdSense payment."""
     session.add(
         AdSensePaymentORM(
-            id=uuid4(), month=MONTH, payment_name="mar", source_account_id=account,
-            payment_date=date(2026, 4, 21), payment_amount=Decimal(amount),
-            payment_currency=currency, payment_status=status, raw_payload={},
-            source_report_id=None, imported_by=UUID(ACTOR_ID),
+            id=uuid4(),
+            month=MONTH,
+            payment_name="mar",
+            source_account_id=account,
+            payment_date=date(2026, 4, 21),
+            payment_amount=Decimal(amount),
+            payment_currency=currency,
+            payment_status=status,
+            raw_payload={},
+            source_report_id=None,
+            imported_by=UUID(ACTOR_ID),
         )
     )
 
@@ -118,19 +124,27 @@ def _link_account_channel(session, account, owner, channel):
     """Insert one VERIFIED account->owner->channel mapping for the test month."""
     session.add(
         AdsenseContentOwnerLinkORM(
-            id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-            adsense_account_id=account, content_owner_id=owner,
-            verification_status="VERIFIED", provenance_kind="MANUAL",
-            provenance_payload={}, effective_month_start=MONTH,
+            id=uuid4(),
+            tenant_id=DEFAULT_TENANT_ID,
+            adsense_account_id=account,
+            content_owner_id=owner,
+            verification_status="VERIFIED",
+            provenance_kind="MANUAL",
+            provenance_payload={},
+            effective_month_start=MONTH,
             effective_month_end=None,
         )
     )
     session.add(
         ContentOwnerChannelLinkORM(
-            id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-            content_owner_id=owner, youtube_channel_id=channel,
-            provenance_kind="MANUAL", active=True,
-            effective_month_start=MONTH, effective_month_end=None,
+            id=uuid4(),
+            tenant_id=DEFAULT_TENANT_ID,
+            content_owner_id=owner,
+            youtube_channel_id=channel,
+            provenance_kind="MANUAL",
+            active=True,
+            effective_month_start=MONTH,
+            effective_month_end=None,
         )
     )
 
@@ -139,11 +153,15 @@ def _add_bank(session, amount_usd, fx, *, reference="BANK-1"):
     """Insert one bank reconciliation entry."""
     session.add(
         BankReconciliationEntryORM(
-            id=uuid4(), month=MONTH, bank_reference=reference,
+            id=uuid4(),
+            month=MONTH,
+            bank_reference=reference,
             bank_received_date=date(2026, 4, 25),
-            bank_received_amount=Decimal(amount_usd), bank_received_currency="USD",
+            bank_received_amount=Decimal(amount_usd),
+            bank_received_currency="USD",
             bank_received_amount_usd=Decimal(amount_usd),
-            transfer_fee_usd=Decimal("0.00"), fx_difference_usd=Decimal(fx),
+            transfer_fee_usd=Decimal("0.00"),
+            fx_difference_usd=Decimal(fx),
             recorded_by=UUID(ACTOR_ID),
         )
     )
@@ -153,7 +171,9 @@ def _lock_month(session):
     """Lock the finance month."""
     session.add(
         FinanceMonthCloseORM(
-            tenant_id=DEFAULT_TENANT_ID, month=MONTH, status="LOCKED",
+            tenant_id=DEFAULT_TENANT_ID,
+            month=MONTH,
+            status="LOCKED",
             allocation_rule_payload={},
         )
     )
@@ -181,15 +201,14 @@ def test_run_persists_components_and_explanations():
         _seed_standard(session)
         sink = InMemoryAuditSink()
         svc = ReconciliationWorkflowService(
-            session, audit_sink=sink,
+            session,
+            audit_sink=sink,
             us_view_share_provider=_FixedShareProvider(Decimal("0.5")),
         )
         result = svc.run(month=MONTH, actor=_actor(), reason="monthly")
         session.commit()
 
-        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(
-            month=MONTH
-        )
+        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(month=MONTH)
         recon = [c for c in comps if c.source_table == "reconciliation_workflow"]
         kinds = {c.component_kind for c in recon}
         persisted = session.scalars(
@@ -247,9 +266,7 @@ def test_recompute_is_idempotent():
         session.commit()
         svc.run(month=MONTH, actor=_actor(), reason="r2")
         session.commit()
-        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(
-            month=MONTH
-        )
+        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(month=MONTH)
         recon = [c for c in comps if c.source_table == "reconciliation_workflow"]
     keys = [c.component_key for c in recon]
     assert len(keys) == len(set(keys))
@@ -308,7 +325,8 @@ def test_reconciliation_deductions_feed_net_revenue():
     with Session(engine) as session:
         _seed_standard(session)
         svc = ReconciliationWorkflowService(
-            session, audit_sink=InMemoryAuditSink(),
+            session,
+            audit_sink=InMemoryAuditSink(),
             us_view_share_provider=_FixedShareProvider(Decimal("0.5")),
         )
         svc.run(month=MONTH, actor=_actor(), reason="r")
@@ -316,9 +334,7 @@ def test_reconciliation_deductions_feed_net_revenue():
 
         fact_repo = SqlAlchemyRevenueFactRepository(session)
         facts = fact_repo.list_channel_month_facts(month=MONTH, youtube_channel_id="c1")
-        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(
-            month=MONTH
-        )
+        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(month=MONTH)
         summary = build_channel_net_revenue_summary(
             facts=facts,
             manual_overrides=[],
@@ -331,7 +347,8 @@ def test_reconciliation_deductions_feed_net_revenue():
     assert summary.net_revenue_usd == Decimal("85.000000")
     # The reconciliation TAX component is source-aligned to YOUTUBE_CMS.
     tax = [
-        c for c in comps
+        c
+        for c in comps
         if c.component_kind == "TAX" and c.source_table == "reconciliation_workflow"
     ]
     assert tax and tax[0].source_system == "youtube_reporting"
@@ -357,16 +374,14 @@ def test_run_uses_primary_revenue_fact_instead_of_summing_sources():
         result = svc.run(month=MONTH, actor=_actor(), reason="r")
         session.commit()
 
-        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(
-            month=MONTH
-        )
+        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(month=MONTH)
 
     assert result.gross_total_usd == Decimal("100.000000")
     assert result.yt_adsense_fee_total_usd == Decimal("20.000000")
     tax = [
-        c for c in comps
-        if c.component_kind == "TRANSFER_FEE"
-        and c.source_table == "reconciliation_workflow"
+        c
+        for c in comps
+        if c.component_kind == "TRANSFER_FEE" and c.source_table == "reconciliation_workflow"
     ]
     assert tax and tax[0].source_system == "youtube_reporting"
 
@@ -409,10 +424,7 @@ def test_run_deletes_stale_outside_cms_allocation_when_payment_invalidates():
             month=MONTH, youtube_channel_id="outside-1"
         )
 
-    assert [
-        f for f in facts
-        if f.source_kind == RevenueFactSourceKind.ALLOCATION.value
-    ] == []
+    assert [f for f in facts if f.source_kind == RevenueFactSourceKind.ALLOCATION.value] == []
 
 
 def test_run_deletes_stale_allocation_when_channel_leaves_outside_cms():
@@ -427,9 +439,7 @@ def test_run_deletes_stale_allocation_when_channel_leaves_outside_cms():
         svc = _service(session)
         svc.run(month=MONTH, actor=_actor(), reason="first")
         channel = session.scalars(
-            select(YouTubeChannelORM).where(
-                YouTubeChannelORM.youtube_channel_id == "outside-1"
-            )
+            select(YouTubeChannelORM).where(YouTubeChannelORM.youtube_channel_id == "outside-1")
         ).one()
         channel.cms_status = "INSIDE_CMS"
         session.commit()
@@ -441,10 +451,7 @@ def test_run_deletes_stale_allocation_when_channel_leaves_outside_cms():
             month=MONTH, youtube_channel_id="outside-1"
         )
 
-    assert [
-        f for f in facts
-        if f.source_kind == RevenueFactSourceKind.ALLOCATION.value
-    ] == []
+    assert [f for f in facts if f.source_kind == RevenueFactSourceKind.ALLOCATION.value] == []
 
 
 def test_run_preserves_connector_allocation_fact_when_no_payment_qualifies():
@@ -488,9 +495,7 @@ def test_rerun_scopes_stale_allocation_delete_to_reconciliation_source_report():
         session.commit()
 
         channel = session.scalars(
-            select(YouTubeChannelORM).where(
-                YouTubeChannelORM.youtube_channel_id == "outside-1"
-            )
+            select(YouTubeChannelORM).where(YouTubeChannelORM.youtube_channel_id == "outside-1")
         ).one()
         channel.cms_status = "INSIDE_CMS"
         session.commit()
@@ -509,8 +514,7 @@ def test_rerun_scopes_stale_allocation_delete_to_reconciliation_source_report():
 
     assert delete_calls
     assert (
-        delete_calls[0].get("source_report_id")
-        == "reconciliation_workflow:outside_cms_allocation"
+        delete_calls[0].get("source_report_id") == "reconciliation_workflow:outside_cms_allocation"
     )
 
 
@@ -538,17 +542,13 @@ def test_run_includes_connector_allocation_fact_in_reconciliation_basis():
         result = svc.run(month=MONTH, actor=_actor(), reason="r")
         session.commit()
 
-        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(
-            month=MONTH
-        )
+        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(month=MONTH)
 
     assert [line.youtube_channel_id for line in result.channels] == ["outside-1"]
     assert result.gross_total_usd == Decimal("40.000000")
     assert result.yt_adsense_fee_total_usd == Decimal("10.000000")
     transfer_fee = [
-        c
-        for c in comps
-        if c.scope_id == "outside-1" and c.component_kind == "TRANSFER_FEE"
+        c for c in comps if c.scope_id == "outside-1" and c.component_kind == "TRANSFER_FEE"
     ]
     assert transfer_fee and transfer_fee[0].source_system == "reconciliation"
 
@@ -556,7 +556,7 @@ def test_run_includes_connector_allocation_fact_in_reconciliation_basis():
 class _LockedDeductionRepository:
     """Test double that simulates a repository month-lock race."""
 
-    def upsert_components(
+    def upsert_components(  # skipcq: PYL-R0201
         self, *, month, components, replace_source_tables=None
     ):
         """Raise the same locked-month error as the real repository."""
@@ -605,8 +605,7 @@ def test_outside_cms_one_to_one_writes_allocation_fact():
         )
     alloc = [f for f in facts if f.source_kind == RevenueFactSourceKind.ALLOCATION.value]
     tax_components = [
-        c for c in components
-        if c.scope_id == "outside-1" and c.component_kind == "TAX"
+        c for c in components if c.scope_id == "outside-1" and c.component_kind == "TAX"
     ]
     assert len(alloc) == 1
     assert alloc[0].gross_revenue_usd == Decimal("42")
@@ -678,8 +677,7 @@ def test_outside_cms_allocation_skips_unscoped_bank_basis():
     assert result.fx_total_usd == Decimal("0.000000")
     assert any(w["code"] == "BANK_BASIS_UNSCOPED" for w in result.warnings)
     bank_components = [
-        c for c in components
-        if c.component_key.endswith((":adsense_bank_fee", ":fx_variance"))
+        c for c in components if c.component_key.endswith((":adsense_bank_fee", ":fx_variance"))
     ]
     assert bank_components == []
 
@@ -771,9 +769,7 @@ def test_outside_cms_warnings_persist_to_reconciliation_explanation():
         ).one()
 
     assert any(w["code"] == "MISSING_REVENUE_SOURCE" for w in result.warnings)
-    assert any(
-        w["code"] == "MISSING_REVENUE_SOURCE" for w in persisted.warnings
-    )
+    assert any(w["code"] == "MISSING_REVENUE_SOURCE" for w in persisted.warnings)
 
 
 def test_manual_upload_primary_fact_reconciles_without_source_mapping_error():
@@ -824,9 +820,8 @@ def test_manual_upload_primary_fact_reconciles_without_source_mapping_error():
     assert result.yt_adsense_fee_total_usd == Decimal("5.000000")
     tax_components = [c for c in components if c.component_kind == "TAX"]
     assert {c.source_system for c in tax_components} == {"manual_upload"}
-    gross_component = next(
-        component for component in persisted.components
-        if component["key"] == "estimated_gross_usd"
+    gross_component = next(  # skipcq: PTC-W0063
+        component for component in persisted.components if component["key"] == "estimated_gross_usd"
     )
     assert gross_component["label"] == "Gross (manual upload)"
     assert summary.status == "COMPONENT_DERIVED"
@@ -855,8 +850,7 @@ def test_non_usd_paid_payment_skips_unscoped_bank_basis():
     assert result.fx_total_usd == Decimal("0.000000")
     assert any(w["code"] == "BANK_BASIS_UNSCOPED" for w in result.warnings)
     bank_components = [
-        c for c in components
-        if c.component_key.endswith((":adsense_bank_fee", ":fx_variance"))
+        c for c in components if c.component_key.endswith((":adsense_bank_fee", ":fx_variance"))
     ]
     assert bank_components == []
 
@@ -870,20 +864,28 @@ def test_outside_cms_ambiguous_account_skips_and_warns():
         _add_payment(session, "pub-7", "30")
         session.add(
             AdsenseContentOwnerLinkORM(
-                id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-                adsense_account_id="pub-7", content_owner_id="owner-7",
-                verification_status="VERIFIED", provenance_kind="MANUAL",
-                provenance_payload={}, effective_month_start=MONTH,
+                id=uuid4(),
+                tenant_id=DEFAULT_TENANT_ID,
+                adsense_account_id="pub-7",
+                content_owner_id="owner-7",
+                verification_status="VERIFIED",
+                provenance_kind="MANUAL",
+                provenance_payload={},
+                effective_month_start=MONTH,
                 effective_month_end=None,
             )
         )
         for channel in ("outside-a", "outside-b"):
             session.add(
                 ContentOwnerChannelLinkORM(
-                    id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-                    content_owner_id="owner-7", youtube_channel_id=channel,
-                    provenance_kind="MANUAL", active=True,
-                    effective_month_start=MONTH, effective_month_end=None,
+                    id=uuid4(),
+                    tenant_id=DEFAULT_TENANT_ID,
+                    content_owner_id="owner-7",
+                    youtube_channel_id=channel,
+                    provenance_kind="MANUAL",
+                    active=True,
+                    effective_month_start=MONTH,
+                    effective_month_end=None,
                 )
             )
         session.commit()

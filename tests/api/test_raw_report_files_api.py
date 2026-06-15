@@ -11,7 +11,9 @@ from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, User
 USER_ID = UUID("00000000-0000-0000-0000-000000010001")
 
 
-def auth_headers(role: str, scope_type: str = "global", scope_id: str | None = None) -> dict[str, str]:
+def auth_headers(
+    role: str, scope_type: str = "global", scope_id: str | None = None
+) -> dict[str, str]:
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "raw-report-user@example.com",
@@ -33,7 +35,9 @@ def seed_database(database_url: str) -> None:
     SecurityBase.metadata.create_all(engine)
     ReportBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(UserORM(id=USER_ID, email="raw-report-user@example.com", display_name="Raw Report User"))
+        session.add(
+            UserORM(id=USER_ID, email="raw-report-user@example.com", display_name="Raw Report User")
+        )
         session.commit()
 
 
@@ -179,13 +183,18 @@ def test_connector_admin_lists_raw_report_files_for_authorized_source_only(tmp_p
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
 
-    for source, checksum in (("youtube_reporting", "sha256:83f8b7d92d8a"), ("adsense", "sha256:66b0e83cf04a")):
+    for source, checksum in (
+        ("youtube_reporting", "sha256:83f8b7d92d8a"),
+        ("adsense", "sha256:66b0e83cf04a"),
+    ):
         create_response = client.post(
             "/reports/raw-files",
             headers=auth_headers("system_integration_user", "connector", source),
             json={
                 "source": source,
-                "report_type": "YOUTUBE_CMS_REVENUE" if source == "youtube_reporting" else "ADSENSE_PAYMENT",
+                "report_type": "YOUTUBE_CMS_REVENUE"
+                if source == "youtube_reporting"
+                else "ADSENSE_PAYMENT",
                 "report_month": "2026-03",
                 "storage_uri": f"s3://ums-raw-reports/{source}/2026-03/report.csv",
                 "checksum": checksum,
@@ -206,7 +215,12 @@ def test_connector_admin_lists_raw_report_files_for_authorized_source_only(tmp_p
 
     assert response.status_code == 200
     assert response.json()["items"][0]["source"] == "youtube_reporting"
-    assert response.json()["pagination"] == {"limit": 1, "offset": 0, "returned": 1, "has_more": False}
+    assert response.json()["pagination"] == {
+        "limit": 1,
+        "offset": 0,
+        "returned": 1,
+        "has_more": False,
+    }
     assert denied.status_code == 403
     assert denied.json()["detail"] == "Missing permission: raw_files.view"
 

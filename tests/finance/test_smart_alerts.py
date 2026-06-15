@@ -77,9 +77,7 @@ def manual_override(status: str = "APPROVED") -> RevenueManualOverrideEntry:
         reason="Finance correction",
         status=status,
         created_by="00000000-0000-0000-0000-00000000b001",
-        approved_by=(
-            "00000000-0000-0000-0000-00000000b002" if status == "APPROVED" else None
-        ),
+        approved_by=("00000000-0000-0000-0000-00000000b002" if status == "APPROVED" else None),
         approval_reason="Approved correction" if status == "APPROVED" else None,
     )
 
@@ -154,15 +152,9 @@ def test_smart_alerts_flag_missing_channel_revenue_facts():
     assert codes.index("CHANNELS_MISSING_REVENUE_FACTS") == (
         codes.index("MISSING_REVENUE_SOURCE") + 1
     )
-    assert codes.index("CHANNELS_MISSING_REVENUE_FACTS") < codes.index(
-        "PAYMENT_NOT_MATCHED"
-    )
+    assert codes.index("CHANNELS_MISSING_REVENUE_FACTS") < codes.index("PAYMENT_NOT_MATCHED")
     coverage_alert = next(
-        (
-            alert
-            for alert in summary.alerts
-            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
-        ),
+        (alert for alert in summary.alerts if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"),
         None,
     )
     assert coverage_alert is not None, "expected CHANNELS_MISSING_REVENUE_FACTS alert"
@@ -182,11 +174,7 @@ def test_smart_alerts_cap_missing_channel_sample_at_twenty():
     )
 
     coverage_alert = next(
-        (
-            alert
-            for alert in summary.alerts
-            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
-        ),
+        (alert for alert in summary.alerts if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"),
         None,
     )
     assert coverage_alert is not None, "expected CHANNELS_MISSING_REVENUE_FACTS alert"

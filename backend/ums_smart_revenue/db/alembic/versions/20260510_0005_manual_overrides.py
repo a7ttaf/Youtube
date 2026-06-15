@@ -18,7 +18,12 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "revenue_manual_overrides",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id",
+            postgresql.UUID(as_uuid=True),
+            primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
         sa.Column("month", sa.Text(), nullable=False),
         sa.Column(
             "youtube_channel_id",
@@ -34,11 +39,15 @@ def upgrade() -> None:
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'PENDING'")),
         sa.Column("created_by", postgresql.UUID(as_uuid=True), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("approved_by", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("approved_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("approval_reason", sa.Text(), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         # Dialect-agnostic month format check. The original `~` regex was
         # PostgreSQL-only and broke SQLite-backed migration test harnesses;
         # substr/BETWEEN runs identically on PostgreSQL and SQLite. Each
@@ -57,8 +66,13 @@ def upgrade() -> None:
             "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_revenue_manual_overrides_month_format",
         ),
-        sa.CheckConstraint("adjustment_revenue_usd <> 0", name="ck_revenue_manual_overrides_adjustment_nonzero"),
-        sa.CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_revenue_manual_overrides_status"),
+        sa.CheckConstraint(
+            "adjustment_revenue_usd <> 0", name="ck_revenue_manual_overrides_adjustment_nonzero"
+        ),
+        sa.CheckConstraint(
+            "status IN ('PENDING', 'APPROVED', 'REJECTED')",
+            name="ck_revenue_manual_overrides_status",
+        ),
         sa.CheckConstraint(
             "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL "
             "AND approval_reason IS NOT NULL) "
@@ -80,7 +94,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Fully reverse upgrade(): drop all tables and indexes created in this migration in reverse dependency order."""
-    op.drop_index("ix_revenue_manual_overrides_channel_month", table_name="revenue_manual_overrides")
+    """Fully reverse upgrade(): drop all tables and indexes created in this
+    migration in reverse dependency order."""
+    op.drop_index(
+        "ix_revenue_manual_overrides_channel_month", table_name="revenue_manual_overrides"
+    )
     op.drop_index("ix_revenue_manual_overrides_month_status", table_name="revenue_manual_overrides")
     op.drop_table("revenue_manual_overrides")

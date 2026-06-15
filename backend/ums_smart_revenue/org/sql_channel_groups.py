@@ -15,8 +15,7 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _SQLITE_DUPLICATE_GROUP_MEMBER_ERROR = (
-    "unique constraint failed: channel_group_members.group_id, "
-    "channel_group_members.channel_id"
+    "unique constraint failed: channel_group_members.group_id, channel_group_members.channel_id"
 )
 
 
@@ -40,8 +39,7 @@ class SqlAlchemyChannelGroupRegistry:
         group_ids = [row.id for row in rows]
         channel_ids_by_group = self._channel_ids_by_group(group_ids)
         return [
-            self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ()))
-            for row in rows
+            self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
         ]
 
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
@@ -78,9 +76,7 @@ class SqlAlchemyChannelGroupRegistry:
         self._session.flush()
         return self._to_entry(row)
 
-    def add_members(
-        self, *, group_id: str, channel_ids: list[str]
-    ) -> ChannelGroupEntry:
+    def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
         row = self._require_group_row(group_id)
         channel_rows = self._channel_rows_by_external_ids(channel_ids)
         existing_ids = set(
@@ -148,9 +144,7 @@ class SqlAlchemyChannelGroupRegistry:
         self._session.flush()
         return self._to_entry(row)
 
-    def _replace_member_rows(
-        self, group_id: UUID, channel_rows: list[YouTubeChannelORM]
-    ) -> None:
+    def _replace_member_rows(self, group_id: UUID, channel_rows: list[YouTubeChannelORM]) -> None:
         self._session.execute(
             delete(ChannelGroupMemberORM).where(
                 ChannelGroupMemberORM.tenant_id == self._tenant_id,
@@ -184,9 +178,7 @@ class SqlAlchemyChannelGroupRegistry:
             raise KeyError(f"Group not found: {group_id}")
         return row
 
-    def _channel_rows_by_external_ids(
-        self, channel_ids: list[str]
-    ) -> list[YouTubeChannelORM]:
+    def _channel_rows_by_external_ids(self, channel_ids: list[str]) -> list[YouTubeChannelORM]:
         unique_channel_ids = list(dict.fromkeys(channel_ids))
         if not unique_channel_ids:
             return []
@@ -198,17 +190,13 @@ class SqlAlchemyChannelGroupRegistry:
         ).all()
         rows_by_external_id = {row.youtube_channel_id: row for row in rows}
         missing = [
-            channel_id
-            for channel_id in unique_channel_ids
-            if channel_id not in rows_by_external_id
+            channel_id for channel_id in unique_channel_ids if channel_id not in rows_by_external_id
         ]
         if missing:
             raise KeyError(f"Channel not found: {missing[0]}")
         return [rows_by_external_id[channel_id] for channel_id in unique_channel_ids]
 
-    def _channel_ids_by_group(
-        self, group_ids: list[UUID]
-    ) -> dict[UUID, tuple[str, ...]]:
+    def _channel_ids_by_group(self, group_ids: list[UUID]) -> dict[UUID, tuple[str, ...]]:
         if not group_ids:
             return {}
         rows = self._session.execute(
@@ -222,16 +210,13 @@ class SqlAlchemyChannelGroupRegistry:
                 ChannelGroupMemberORM.tenant_id == self._tenant_id,
                 ChannelGroupMemberORM.group_id.in_(group_ids),
             )
-            .order_by(
-                ChannelGroupMemberORM.group_id, YouTubeChannelORM.youtube_channel_id
-            )
+            .order_by(ChannelGroupMemberORM.group_id, YouTubeChannelORM.youtube_channel_id)
         ).all()
         channel_ids_by_group: dict[UUID, list[str]] = {}
         for group_id, youtube_channel_id in rows:
             channel_ids_by_group.setdefault(group_id, []).append(youtube_channel_id)
         return {
-            group_id: tuple(channel_ids)
-            for group_id, channel_ids in channel_ids_by_group.items()
+            group_id: tuple(channel_ids) for group_id, channel_ids in channel_ids_by_group.items()
         }
 
     def _to_entry(

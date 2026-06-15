@@ -29,9 +29,7 @@ def upgrade() -> None:
         sa.Column("entity_id", sa.Text(), nullable=False),
         sa.Column("metric", sa.Text(), nullable=False),
         sa.Column("value", sa.Numeric(18, 6), nullable=False),
-        sa.Column(
-            "currency", sa.Text(), nullable=False, server_default=sa.text("'USD'")
-        ),
+        sa.Column("currency", sa.Text(), nullable=False, server_default=sa.text("'USD'")),
         sa.Column("formula", sa.Text(), nullable=False),
         sa.Column("confidence", sa.Text(), nullable=False),
         sa.Column(
@@ -78,9 +76,7 @@ def upgrade() -> None:
             "entity_type IN ('channel', 'company', 'sector', 'holding')",
             name="ck_number_explanations_entity_type",
         ),
-        sa.CheckConstraint(
-            "currency = 'USD'", name="ck_number_explanations_currency_usd"
-        ),
+        sa.CheckConstraint("currency = 'USD'", name="ck_number_explanations_currency_usd"),
     )
     op.create_index(
         "ix_number_explanations_entity",

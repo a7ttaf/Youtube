@@ -5,6 +5,7 @@ GoogleConnectorError so the orchestrator's outer handler can catch the whole
 family in one except clause and translate it into a connector_runs FAILED
 row plus an audit event with error_class=<class name>.
 """
+
 from __future__ import annotations
 
 from uuid import UUID
@@ -98,8 +99,7 @@ class SecretFetchError(GoogleConnectorError):
     def __init__(self, *, ref: str, inner: Exception) -> None:
         """Carry the redacted ``ref`` and the original ``inner`` exception."""
         super().__init__(
-            f"secret fetch failed for {_redacted_secret_locator(ref)}: "
-            f"{type(inner).__name__}"
+            f"secret fetch failed for {_redacted_secret_locator(ref)}: {type(inner).__name__}"
         )
         self.ref = ref
         self.inner = inner
@@ -128,9 +128,7 @@ class BlobUploadError(GoogleConnectorError):
 
     def __init__(self, *, storage_uri: str, inner: Exception) -> None:
         """Carry the target ``storage_uri`` and the original ``inner`` exception."""
-        super().__init__(
-            f"blob upload failed for {storage_uri}: {type(inner).__name__}"
-        )
+        super().__init__(f"blob upload failed for {storage_uri}: {type(inner).__name__}")
         self.storage_uri = storage_uri
         self.inner = inner
 
@@ -140,9 +138,7 @@ class BlobDownloadError(GoogleConnectorError):
 
     def __init__(self, *, storage_uri: str, inner: Exception) -> None:
         """Carry the source ``storage_uri`` and the original ``inner`` exception."""
-        super().__init__(
-            f"blob download failed for {storage_uri}: {type(inner).__name__}"
-        )
+        super().__init__(f"blob download failed for {storage_uri}: {type(inner).__name__}")
         self.storage_uri = storage_uri
         self.inner = inner
 
@@ -162,9 +158,7 @@ class BlobChecksumMismatchError(GoogleConnectorError):
 
     def __init__(self, *, storage_uri: str, computed: str, read: str) -> None:
         """Carry the ``storage_uri`` and both ``computed``/``read`` digests."""
-        super().__init__(
-            f"checksum mismatch at {storage_uri}: computed={computed} read={read}"
-        )
+        super().__init__(f"checksum mismatch at {storage_uri}: computed={computed} read={read}")
         self.storage_uri = storage_uri
         self.computed = computed
         self.read = read
@@ -176,8 +170,7 @@ class RawFileLifecycleError(GoogleConnectorError):
     def __init__(self, *, raw_file_id: str, current: str, target: str) -> None:
         """Carry the ``raw_file_id`` and the illegal ``current`` → ``target`` pair."""
         super().__init__(
-            f"illegal raw_file lifecycle transition for {raw_file_id}: "
-            f"{current} -> {target}"
+            f"illegal raw_file lifecycle transition for {raw_file_id}: {current} -> {target}"
         )
         self.raw_file_id = raw_file_id
         self.current = current
@@ -223,10 +216,7 @@ class TenantLifecycleError(GoogleConnectorError):
         if status is None:
             super().__init__(f"tenant {tenant_id} not found")
         else:
-            super().__init__(
-                f"tenant {tenant_id} is {status}; "
-                f"connector runs require ACTIVE"
-            )
+            super().__init__(f"tenant {tenant_id} is {status}; connector runs require ACTIVE")
         self.tenant_id = tenant_id
         self.status = status
 
@@ -327,8 +317,6 @@ class MalformedAnalyticsSelectorError(GoogleConnectorError):
 
     def __init__(self, *, field_name: str, value: str) -> None:
         """Carry the offending ``field_name`` / ``value`` for downstream diagnostics."""
-        super().__init__(
-            f"{field_name} must be a non-empty string, got {value!r}"
-        )
+        super().__init__(f"{field_name} must be a non-empty string, got {value!r}")
         self.field_name = field_name
         self.value = value

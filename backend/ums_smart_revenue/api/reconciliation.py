@@ -7,6 +7,7 @@ reconciliation explanation for one channel-month. All business logic lives in
 the finance service/repository layers; routes only parse input, enforce the
 boundary permission gate, translate typed errors, and serialize the response.
 """
+
 import re
 from typing import Annotated
 
@@ -85,8 +86,7 @@ def _channel_line_to_api(line: ChannelReconciliation) -> dict[str, object]:
         "fx_variance_usd": _decimal_to_api(line.fx_variance_usd),
         "net_received_usd": _decimal_to_api(line.net_received_usd),
         "us_view_share": (
-            None if line.us_view_share is None
-            else _decimal_to_api(line.us_view_share)
+            None if line.us_view_share is None else _decimal_to_api(line.us_view_share)
         ),
     }
 
@@ -99,16 +99,13 @@ def _result_to_api(result: MonthReconciliationResult) -> dict[str, object]:
         "totals": {
             "gross_total_usd": _decimal_to_api(result.gross_total_usd),
             "us_tax_total_usd": _decimal_to_api(result.us_tax_total_usd),
-            "yt_adsense_fee_total_usd": _decimal_to_api(
-                result.yt_adsense_fee_total_usd
-            ),
-            "adsense_bank_fee_total_usd": _decimal_to_api(
-                result.adsense_bank_fee_total_usd
-            ),
+            "yt_adsense_fee_total_usd": _decimal_to_api(result.yt_adsense_fee_total_usd),
+            "adsense_bank_fee_total_usd": _decimal_to_api(result.adsense_bank_fee_total_usd),
             "fx_total_usd": _decimal_to_api(result.fx_total_usd),
             "net_total_usd": _decimal_to_api(result.net_total_usd),
             "yt_adsense_fee_pct": (
-                None if result.yt_adsense_fee_pct is None
+                None
+                if result.yt_adsense_fee_pct is None
                 else _decimal_to_api(result.yt_adsense_fee_pct)
             ),
         },
@@ -143,28 +140,20 @@ def reconcile_month(
     #   - File: Docs/superpowers/plans/2026-06-09-track-f-smart-reconciliation.md
     # ========================================================================
     _require_valid_month(month)
-    _require_permission(
-        user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month)
-    )
+    _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month))
     _require_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope())
-    _require_permission(
-        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
-    )
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
     _require_permission(
         user,
         Permission.VIEW_BANK_RECONCILIATION,
         AccessScope.finance_month(month),
     )
-    _require_permission(
-        user, Permission.VIEW_CONFIDENCE, AccessScope.global_scope()
-    )
+    _require_permission(user, Permission.VIEW_CONFIDENCE, AccessScope.global_scope())
     service = ReconciliationWorkflowService(session, audit_sink=audit_sink)
     try:
         result = service.run(month=month, actor=user, reason=payload.reason)
     except MonthLockedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return _result_to_api(result)
 
 
@@ -200,9 +189,7 @@ def get_channel_month_reconciliation(
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
-    _require_permission(
-        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
-    )
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
     _require_permission(
         user,
         Permission.VIEW_BANK_RECONCILIATION,
@@ -218,9 +205,7 @@ def get_channel_month_reconciliation(
     if explanation is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                f"No reconciliation explanation for {channel_id} in {month}"
-            ),
+            detail=(f"No reconciliation explanation for {channel_id} in {month}"),
         )
     details = {
         "month": month,

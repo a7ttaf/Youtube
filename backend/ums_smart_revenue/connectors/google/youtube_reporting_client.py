@@ -8,6 +8,7 @@ Endpoints used (Bearer auth via GoogleHttpClient):
 Caller filters by SUPPORTED_REPORT_TYPES on list_supported_jobs and
 date-bounds on list_reports_for_month.
 """
+
 from __future__ import annotations
 
 import ipaddress
@@ -71,16 +72,12 @@ def _report_period_key(report: dict[str, object]) -> tuple[str, str, str]:
     return ("report", _text_sort_key(report.get("id")), "")
 
 
-def _newest_reports_by_period(
-    reports: list[dict[str, object]]
-) -> list[dict[str, object]]:
+def _newest_reports_by_period(reports: list[dict[str, object]]) -> list[dict[str, object]]:
     latest: dict[tuple[str, str, str], dict[str, object]] = {}
     for report in reports:
         period_key = _report_period_key(report)
         current = latest.get(period_key)
-        if current is None or _report_freshness_key(report) > _report_freshness_key(
-            current
-        ):
+        if current is None or _report_freshness_key(report) > _report_freshness_key(current):
             latest[period_key] = report
     return sorted(
         latest.values(),
@@ -111,12 +108,8 @@ def _response_object_list(
     if field not in body:
         return []
     value = body[field]
-    if not isinstance(value, list) or not all(
-        isinstance(item, dict) for item in value
-    ):
-        raise GoogleApiResponseError(
-            url=url, reason=f"{field!r} must be a list of objects"
-        )
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise GoogleApiResponseError(url=url, reason=f"{field!r} must be a list of objects")
     return value
 
 
@@ -140,9 +133,7 @@ def _next_page_token(body: dict[str, object], *, url: str) -> str | None:
     # FIX: Distinguish terminal absence/empty-string from malformed non-string
     # tokens so pagination cannot silently stop or reuse an object as pageToken.
     if not isinstance(value, str) or not value.strip():
-        raise GoogleApiResponseError(
-            url=url, reason="'nextPageToken' must be a non-empty string"
-        )
+        raise GoogleApiResponseError(url=url, reason="'nextPageToken' must be a non-empty string")
     return value
 
 
@@ -211,7 +202,11 @@ class YouTubeReportingClient:
     #     §5.4 -> orchestrator integration contract for per-month ingestion.
     # ============================================================================
     def list_reports_for_month(
-        self, *, account_id: str, job_id: str, report_month: str,
+        self,
+        *,
+        account_id: str,
+        job_id: str,
+        report_month: str,
     ) -> list[dict[str, object]]:
         url = f"{_BASE}/jobs/{job_id}/reports"
         start_iso, end_iso = _month_bounds_iso(report_month)
@@ -272,14 +267,10 @@ class YouTubeReportingClient:
 def _validate_google_download_url(download_url: str) -> None:
     parsed = urlparse(download_url)
     if parsed.scheme != "https":
-        raise GoogleApiResponseError(
-            url="<downloadUrl>", reason="downloadUrl must use https"
-        )
+        raise GoogleApiResponseError(url="<downloadUrl>", reason="downloadUrl must use https")
     host = (parsed.hostname or "").lower().strip(".")
     if not host:
-        raise GoogleApiResponseError(
-            url="<downloadUrl>", reason="downloadUrl host is missing"
-        )
+        raise GoogleApiResponseError(url="<downloadUrl>", reason="downloadUrl host is missing")
     try:
         ipaddress.ip_address(host)
     except ValueError:
@@ -293,9 +284,7 @@ def _validate_google_download_url(download_url: str) -> None:
             url="<downloadUrl>", reason="downloadUrl host must be a Google domain"
         )
     allowed_suffixes = ("googleapis.com", "googleusercontent.com")
-    if not any(
-        host == suffix or host.endswith(f".{suffix}") for suffix in allowed_suffixes
-    ):
+    if not any(host == suffix or host.endswith(f".{suffix}") for suffix in allowed_suffixes):
         raise GoogleApiResponseError(
             url="<downloadUrl>", reason="downloadUrl host must be a Google domain"
         )

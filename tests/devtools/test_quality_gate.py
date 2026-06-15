@@ -162,9 +162,7 @@ def test_run_gate_uses_repo_root_and_disables_bytecode(monkeypatch):
     )
 
     assert exit_code == 0
-    assert observed_calls == [
-        (("tool", "arg"), PROJECT_ROOT, "1", str(PROJECT_ROOT / "backend"))
-    ]
+    assert observed_calls == [(("tool", "arg"), PROJECT_ROOT, "1", str(PROJECT_ROOT / "backend"))]
     assert os.environ["PYTHONDONTWRITEBYTECODE"] == "0"
 
 

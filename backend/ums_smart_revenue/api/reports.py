@@ -99,9 +99,7 @@ def register_raw_report_file(
             actor_user_id=user.user_id,
         )
     except RawReportFileConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RawReportFileValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -280,9 +278,7 @@ def purge_raw_report_file(
             reason=payload.reason,
         )
     except (RawReportFilePurgeConflictError, RawReportFileConflictError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RawReportFileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -309,16 +305,12 @@ def purge_raw_report_file(
     )
     response = purged.to_api()
     response["purged_by"] = purged.purged_by
-    response["purged_at"] = (
-        purged.purged_at.isoformat() if purged.purged_at else None
-    )
+    response["purged_at"] = purged.purged_at.isoformat() if purged.purged_at else None
     response["audit_event"] = audit_record_to_api(record)
     return response
 
 
-def _require_permission(
-    user: UserPrincipal, permission: Permission, scope: AccessScope
-) -> None:
+def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
     if not has_permission(user, permission, scope):
         _raise_missing_permission(permission)
 
@@ -337,8 +329,6 @@ def _has_any_permission_scope(user: UserPrincipal, permission: Permission) -> bo
         if grant.active and grant.permission == permission:
             return True
     for assignment in user.role_assignments:
-        if assignment.active and permission in ROLE_PERMISSIONS.get(
-            assignment.role, frozenset()
-        ):
+        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset()):
             return True
     return False

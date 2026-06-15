@@ -85,9 +85,7 @@ from ums_smart_revenue.tenancy.resolver import (
 )
 
 
-def create_app(
-    *, database_url: str | None = None, authz_source: str | None = None
-) -> FastAPI:
+def create_app(*, database_url: str | None = None, authz_source: str | None = None) -> FastAPI:
     """Create the FastAPI application with optional SQL-backed authorization."""
     settings = load_app_settings()
     resolved_database_url = database_url or settings.database_url
@@ -95,9 +93,8 @@ def create_app(
     if resolved_authz_source not in {AUTHZ_SOURCE_HEADERS, AUTHZ_SOURCE_DATABASE}:
         raise ValueError("authz_source must be 'headers' or 'database'")
     if resolved_authz_source == AUTHZ_SOURCE_DATABASE and not resolved_database_url:
-        raise ValueError(
-            "database authz_source requires database_url or UMS_DATABASE_URL"
-        )
+        raise ValueError("database authz_source requires database_url or UMS_DATABASE_URL")
+
     # ========================================================================
     # Purpose: Close the module-owned ConnectorJobExecutor on app shutdown so
     #   worker threads tear down deterministically (the weakref.finalize GC
@@ -112,12 +109,12 @@ def create_app(
     #   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> close().
     # ========================================================================
     @asynccontextmanager
-    async def _lifespan(app: FastAPI):
+    async def _lifespan(fastapi_app: FastAPI):
         """Yield through serving, then close the connector-job executor if present."""
         try:
             yield
         finally:
-            executor = getattr(app.state, "connector_job_executor", None)
+            executor = getattr(fastapi_app.state, "connector_job_executor", None)
             if executor is not None:
                 executor.close()
 
@@ -131,9 +128,7 @@ def create_app(
     if resolved_database_url:
         session_factory = build_session_factory(resolved_database_url)
         sqlite_database = _is_sqlite_database_url(resolved_database_url)
-        platform_session_factory = build_platform_session_factory(
-            resolved_database_url
-        )
+        platform_session_factory = build_platform_session_factory(resolved_database_url)
         if settings.connector_job_executor_enabled:
             # FIX: reuse the request-scoped session_factory the app already
             # created. build_session_factory caches the engine per URL, but
@@ -149,9 +144,7 @@ def create_app(
             )
         overrides = _app.dependency_overrides
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
-            overrides[current_db_session] = authenticated_session_dependency(
-                session_factory
-            )
+            overrides[current_db_session] = authenticated_session_dependency(session_factory)
             overrides[current_platform_db_session] = (
                 _sqlite_platform_session_from_request
                 if sqlite_database
@@ -372,9 +365,7 @@ def _bootstrap_tenant() -> Tenant:
 
 def _tenant_resolution_bypassed(path: str, bypass_paths: Iterable[str]) -> bool:
     """Return True if the request path matches a configured bypass path."""
-    return any(
-        path == bypass or path.startswith(bypass + "/") for bypass in bypass_paths
-    )
+    return any(path == bypass or path.startswith(bypass + "/") for bypass in bypass_paths)
 
 
 app = create_app()

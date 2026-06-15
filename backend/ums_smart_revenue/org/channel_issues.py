@@ -42,10 +42,7 @@ def build_channel_registry_issues(
     org_index: OrgAccessIndex,
 ) -> list[ChannelRegistryIssue]:
     grouped_channel_ids = {
-        channel_id
-        for group in groups
-        if group.active
-        for channel_id in group.channel_ids
+        channel_id for group in groups if group.active for channel_id in group.channel_ids
     }
     issues: list[ChannelRegistryIssue] = []
     for channel in sorted(channels, key=lambda item: item.youtube_channel_id):
@@ -111,25 +108,18 @@ def _issues_for_channel(
                 issue_type=ChannelIssueType.OUTSIDE_CMS_REVENUE_REQUIRED,
                 severity="medium",
                 message="Revenue-required channel is outside CMS.",
-                recommended_action=(
-                    "Link the channel to CMS or maintain official manual import."
-                ),
+                recommended_action=("Link the channel to CMS or maintain official manual import."),
             )
         )
 
-    if (
-        channel.revenue_required
-        and channel.youtube_channel_id not in grouped_channel_ids
-    ):
+    if channel.revenue_required and channel.youtube_channel_id not in grouped_channel_ids:
         issues.append(
             _build_issue(
                 channel=channel,
                 issue_type=ChannelIssueType.REVENUE_REQUIRED_NO_GROUP,
                 severity="medium",
                 message="Revenue-required channel is not in any active group.",
-                recommended_action=(
-                    "Add the channel to an operational or finance group."
-                ),
+                recommended_action=("Add the channel to an operational or finance group."),
             )
         )
 

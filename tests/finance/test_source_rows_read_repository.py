@@ -117,9 +117,7 @@ def seed_many(session: Session) -> dict[str, UUID]:
     """Seed multiple tenant-A rows for pagination tests."""
     _seed_tenants_and_currency(session)
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
-    session.add_all(
-        [_row(A, ingested_at=base + timedelta(minutes=i)) for i in range(5)]
-    )
+    session.add_all([_row(A, ingested_at=base + timedelta(minutes=i)) for i in range(5)])
     session.flush()
     return {}
 
@@ -145,8 +143,11 @@ def test_entry_never_exposes_raw_payload(session, seed_rows):
 def test_source_system_filter(session, seed_rows):
     """Verify the source-system filter limits the projected rows."""
     page = list_source_rows(
-        session, tenant_id=A, month="2026-03",
-        source_system="adsense_management", limit=50,
+        session,
+        tenant_id=A,
+        month="2026-03",
+        source_system="adsense_management",
+        limit=50,
     )
     assert all(e.source_system == "adsense_management" for e in page.items)
 
@@ -155,8 +156,12 @@ def test_half_cursor_raises(session):
     """Verify a half-specified cursor is rejected as invalid input."""
     with pytest.raises(SourceRowValidationError):
         list_source_rows(
-            session, tenant_id=A, month="2026-03",
-            cursor_ingested_at=None, cursor_id="x", limit=50,
+            session,
+            tenant_id=A,
+            month="2026-03",
+            cursor_ingested_at=None,
+            cursor_id="x",
+            limit=50,
         )
 
 
@@ -166,7 +171,9 @@ def test_limit_out_of_range_raises(session):
         list_source_rows(session, tenant_id=A, month="2026-03", limit=0)
     with pytest.raises(SourceRowValidationError):
         list_source_rows(
-            session, tenant_id=A, month="2026-03",
+            session,
+            tenant_id=A,
+            month="2026-03",
             limit=MAX_SOURCE_ROW_PAGE_SIZE + 1,
         )
 
@@ -189,7 +196,10 @@ def test_pagination_has_more_and_cursor(session, seed_many):
     assert len(page.items) == 2
     assert page.next_cursor is not None
     nxt = list_source_rows(
-        session, tenant_id=A, month="2026-03", limit=2,
+        session,
+        tenant_id=A,
+        month="2026-03",
+        limit=2,
         cursor_ingested_at=page.next_cursor["ingested_at"],
         cursor_id=page.next_cursor["id"],
     )

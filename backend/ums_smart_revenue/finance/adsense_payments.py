@@ -113,9 +113,7 @@ class SqlAlchemyAdSensePaymentRepository:
     ) -> list[AdSensePaymentEntry]:
         """Upsert account-scoped payment rows after validation and lock checks."""
         if not payments:
-            raise AdSensePaymentValidationError(
-                "payments must contain at least one payment"
-            )
+            raise AdSensePaymentValidationError("payments must contain at least one payment")
         actor_uuid = _parse_uuid_or_none(actor_user_id)
         normalized_source_report_id = _normalize_optional_string(source_report_id)
 
@@ -203,9 +201,7 @@ class SqlAlchemyAdSensePaymentRepository:
                 f"limit must be between 1 and {MAX_ADSENSE_PAYMENT_PAGE_SIZE}"
             )
         if offset < 0:
-            raise AdSensePaymentValidationError(
-                "offset must be greater than or equal to 0"
-            )
+            raise AdSensePaymentValidationError("offset must be greater than or equal to 0")
         if month is not None:
             _validate_month(month)
 
@@ -256,9 +252,7 @@ class SqlAlchemyAdSensePaymentRepository:
             for_update=True,
         )
         if close.status == "LOCKED":
-            raise AdSensePaymentLockedMonthError(
-                "Finance month is locked for AdSense payment sync"
-            )
+            raise AdSensePaymentLockedMonthError("Finance month is locked for AdSense payment sync")
 
     @staticmethod
     def _to_entry(row: AdSensePaymentORM) -> AdSensePaymentEntry:
@@ -281,9 +275,7 @@ class SqlAlchemyAdSensePaymentRepository:
 def _normalize_payment(payment: AdSensePaymentInput) -> AdSensePaymentInput:
     """Normalize and validate one payment input without mutating the caller."""
     _validate_month(payment.month)
-    source_account_id = _normalize_required_string(
-        payment.source_account_id, "source_account_id"
-    )
+    source_account_id = _normalize_required_string(payment.source_account_id, "source_account_id")
     payment_name = _normalize_required_string(payment.payment_name, "payment_name")
     payment_currency = _normalize_currency(payment.payment_currency)
     payment_status = _normalize_payment_status(payment.payment_status)
@@ -347,9 +339,7 @@ def _normalize_payment_status(value: str) -> str:
 def _validate_payment_amount(value: Decimal) -> None:
     """Validate that a payment amount is finite and non-negative."""
     if not value.is_finite() or value < 0:
-        raise AdSensePaymentValidationError(
-            "payment_amount must be a finite decimal >= 0"
-        )
+        raise AdSensePaymentValidationError("payment_amount must be a finite decimal >= 0")
 
 
 def _dialect_insert(dialect_name: str):

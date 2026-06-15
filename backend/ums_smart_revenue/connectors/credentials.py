@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from typing import Self
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -18,9 +19,7 @@ SECRET_REF_PREFIXES = (
     "vault://",
     "kms://",
 )
-CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = (
-    "uq_api_connector_credentials_connector_account"
-)
+CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = "uq_api_connector_credentials_connector_account"
 MAX_CREDENTIAL_PAGE_SIZE = 100
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
@@ -50,13 +49,65 @@ class ConnectorCredentialEntry:
                 else None
             ),
             "token_expiry_at": (
-                self.token_expiry_at.isoformat()
-                if self.token_expiry_at is not None
-                else None
+                self.token_expiry_at.isoformat() if self.token_expiry_at is not None else None
             ),
             "last_refresh_status": self.last_refresh_status,
             "last_refresh_error_class": self.last_refresh_error_class,
         }
+
+
+# ============================================================================
+# Purpose: Derive a coarse, read-only health label for a connector credential
+#   from its already-persisted refresh telemetry. Pure and side-effect free so
+#   the route can pass an explicit as_of and the rules stay unit-testable.
+# Database/ORM: None (operates on a ConnectorCredentialEntry value object).
+# Standards: Returns a fixed literal set; never raises on naive/aware datetime
+#   mismatch (token_expiry_at is normalized to UTC before comparison so the
+#   SQLite read-back tz-naive value compares safely against an aware as_of).
+# Blast Radius: Connector credential read surface only. No finance, auth-
+#   mutation, audit, or graph projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> the health route
+#     appends this label to each credential's to_api() shape.
+# ============================================================================
+CREDENTIAL_EXPIRY_WINDOW = timedelta(hours=24)
+
+
+def derive_credential_health_state(entry: ConnectorCredentialEntry, *, as_of: datetime) -> str:
+    """Return one of healthy/expiring/auth_failed/missing/unknown for a credential.
+
+    Rules (evaluated in order):
+      - unknown: the credential status is not 'active' (disabled, rotating,
+        failed_auth, or any future non-active status).
+      - auth_failed: last_refresh_status is a failure or last_refresh_error_class
+        is set.
+      - missing: no stored secret reference.
+      - expiring: token_expiry_at is at or before as_of + 24h.
+      - healthy: last refresh succeeded and the token is not expiring.
+      - unknown: none of the above can be determined.
+    """
+    as_of = _as_aware_utc(as_of)
+    # FIX: reject any non-active credential — the orchestrator
+    # (orchestrator.py:684) only accepts status == "active", so the health
+    # surface must not label rotating/failed_auth/disabled as usable.
+    if entry.status != "active":
+        return "unknown"
+    if entry.last_refresh_status == "failed" or entry.last_refresh_error_class:
+        return "auth_failed"
+    if not entry.has_secret_ref:
+        return "missing"
+    if entry.token_expiry_at is not None:
+        expiry = _as_aware_utc(entry.token_expiry_at)
+        if expiry <= as_of + CREDENTIAL_EXPIRY_WINDOW:
+            return "expiring"
+    if entry.last_refresh_status == "succeeded":
+        return "healthy"
+    return "unknown"
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    """Normalize a tz-naive datetime (SQLite read-back) to UTC for comparison."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -85,6 +136,24 @@ class SqlAlchemyConnectorCredentialRepository:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
+    # ============================================================================
+    # Purpose: Rebind the request-scoped credential repository to the resolved
+    #   tenant without changing the SQLAlchemy session or transaction lifecycle.
+    # Database/ORM: ApiConnectorCredentialORM through the repository session.
+    # Standards: Keeps tenant scope explicit at the route boundary and
+    #   repository-owned for credential reads and writes.
+    # Blast Radius: Connector credential reads/writes only; no finance, audit,
+    #   authorization mutation, or Neo4j projection impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/connectors.py -> Health route
+    #     binds reads to the authenticated principal tenant before listing.
+    #   - File: tests/api/test_connectors_api.py -> Covers non-bootstrap
+    #     tenant binding for credential health reads.
+    # ============================================================================
+    def for_tenant(self, tenant_id: UUID | str) -> Self:
+        """Return a same-session repository bound to an explicit tenant."""
+        return type(self)(self._session, tenant_id=tenant_id)
+
     def list_credentials(
         self,
         *,
@@ -112,9 +181,7 @@ class SqlAlchemyConnectorCredentialRepository:
             statement = statement.where(
                 ApiConnectorCredentialORM.connector_key.in_(sorted(connector_keys))
             )
-        rows = self._session.scalars(
-            statement.limit(limit + 1).offset(offset)
-        ).all()
+        rows = self._session.scalars(statement.limit(limit + 1).offset(offset)).all()
         visible_rows = rows[:limit]
         return ConnectorCredentialPage(
             items=[self._to_entry(row) for row in visible_rows],
@@ -242,9 +309,7 @@ def _parse_uuid(value: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ConnectorCredentialValidationError(
-            "actor_user_id must be a valid UUID"
-        ) from exc
+        raise ConnectorCredentialValidationError("actor_user_id must be a valid UUID") from exc
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
@@ -264,9 +329,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
     try:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
-        raise ConnectorCredentialValidationError(
-            "tenant_id must be a valid UUID"
-        ) from exc
+        raise ConnectorCredentialValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
@@ -294,12 +357,14 @@ def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
     )
 
 
-_ACTOR_FK_CONSTRAINTS = frozenset({
-    "fk_api_connector_credentials_created_by",
-    "fk_api_connector_credentials_updated_by",
-    "fk_api_connector_credentials_tenant_created_by",
-    "fk_api_connector_credentials_tenant_updated_by",
-})
+_ACTOR_FK_CONSTRAINTS = frozenset(
+    {
+        "fk_api_connector_credentials_created_by",
+        "fk_api_connector_credentials_updated_by",
+        "fk_api_connector_credentials_tenant_created_by",
+        "fk_api_connector_credentials_tenant_updated_by",
+    }
+)
 
 
 def _is_foreign_key_integrity_error(exc: IntegrityError) -> bool:

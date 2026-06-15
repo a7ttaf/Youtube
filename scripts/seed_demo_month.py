@@ -41,6 +41,7 @@ The script orchestrates the existing service/repository layer; it never opens
 its own engine/transaction semantics beyond the app's own
 ``build_session_factory`` and never reimplements finance math.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -64,7 +65,10 @@ _COMMIT_IDEMPOTENCY_PREFIX = "demo-seed-commit"
 _COMMIT_REASON = "demo month seed close"
 
 _DEMO_COMMITTER_EMAIL = "demo-seed@ums.local"
-_DEMO_GATEWAY_TOKEN = "demo-trusted-gateway-token"
+# FIX: No hardcoded trusted-gateway token literal in source (DeepSource SCT-A000).
+# The seed runbook (frontend/README.md) sets UMS_TRUSTED_GATEWAY_TOKEN before
+# running this script; when it is unset the printed headers carry an empty token
+# and the summary warns the operator, rather than shipping a credential literal.
 
 # FIX: Keep project imports lazy so direct script execution can adjust sys.path
 # before importing the backend package (mirrors scripts/run_deduction_ingestion.py).
@@ -92,12 +96,18 @@ class _ChannelSpec:
 # on the missing-net path (the surface the net-revenue dashboard column shows).
 _CHANNELS: tuple[_ChannelSpec, ...] = (
     _ChannelSpec(
-        "demo-channel-alpha", "Demo Alpha",
-        Decimal("6000.00"), Decimal("5100.00"), 1_500_000,
+        "demo-channel-alpha",
+        "Demo Alpha",
+        Decimal("6000.00"),
+        Decimal("5100.00"),
+        1_500_000,
     ),
     _ChannelSpec(
-        "demo-channel-bravo", "Demo Bravo",
-        Decimal("3000.00"), Decimal("2550.00"), 720_000,
+        "demo-channel-bravo",
+        "Demo Bravo",
+        Decimal("3000.00"),
+        Decimal("2550.00"),
+        720_000,
     ),
     _ChannelSpec("demo-channel-charlie", "Demo Charlie", Decimal("1000.00"), None, 240_000),
 )
@@ -254,9 +264,7 @@ def _redact_database_url(database_url: str) -> str:
     netloc = f"{userinfo}@{host}" if host else f"{userinfo}@"
     if parts.port is not None:
         netloc = f"{netloc}:{parts.port}"
-    return urlunsplit(
-        (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
-    )
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def _create_schema(engine: Any, deps: dict[str, Any]) -> None:
@@ -301,8 +309,13 @@ def _create_schema(engine: Any, deps: dict[str, Any]) -> None:
 #   - File: tests/api/test_committed_allocation_api.py -> proven _seed pattern.
 # ============================================================================
 def _seed_substrate(
-    session: Any, *, month: str, tenant_id: UUID, tenant_slug: str,
-    allocation_method: str, deps: dict[str, Any],
+    session: Any,
+    *,
+    month: str,
+    tenant_id: UUID,
+    tenant_slug: str,
+    allocation_method: str,
+    deps: dict[str, Any],
 ) -> dict[str, Any]:
     """Insert (idempotently) the tenant, org, channels, facts, deduction, map, user, close row.
 
@@ -332,8 +345,13 @@ def _seed_substrate(
         session, deps, mark, tenant_id=tenant_id, company_id=company_id
     )
     _seed_revenue_facts(
-        session, deps, mark, tenant_id=tenant_id, month=month,
-        user_id=user_id, post_tax=post_tax,
+        session,
+        deps,
+        mark,
+        tenant_id=tenant_id,
+        month=month,
+        user_id=user_id,
+        post_tax=post_tax,
     )
     _seed_account_deduction(session, deps, mark, tenant_id=tenant_id, month=month)
     _seed_account_links(session, deps, mark, tenant_id=tenant_id, month=month)
@@ -355,8 +373,12 @@ def _summary_marker(summary: dict[str, Any]) -> Callable[[str, bool], None]:
 
 
 def _seed_tenant(
-    session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
-    *, tenant_id: UUID, tenant_slug: str,
+    session: Any,
+    deps: dict[str, Any],
+    mark: Callable[[str, bool], None],
+    *,
+    tenant_id: UUID,
+    tenant_slug: str,
 ) -> None:
     """Insert the tenant FK parent (idempotent) and flush.
 
@@ -376,8 +398,11 @@ def _seed_tenant(
     if session.get(tenant_orm, tenant_id) is None:
         session.add(
             tenant_orm(
-                id=tenant_id, slug=tenant_slug, display_name="UMS",
-                primary_currency="USD", status="ACTIVE",
+                id=tenant_id,
+                slug=tenant_slug,
+                display_name="UMS",
+                primary_currency="USD",
+                status="ACTIVE",
             )
         )
         mark("tenant", True)
@@ -387,8 +412,11 @@ def _seed_tenant(
 
 
 def _seed_org_hierarchy(
-    session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
-    *, tenant_id: UUID,
+    session: Any,
+    deps: dict[str, Any],
+    mark: Callable[[str, bool], None],
+    *,
+    tenant_id: UUID,
 ) -> UUID:
     """Insert the SECTOR -> COMPANY org units (idempotent); return the company id."""
     org_orm = deps["OrgUnitORM"]
@@ -397,8 +425,12 @@ def _seed_org_hierarchy(
     if session.get(org_orm, sector_id) is None:
         session.add(
             org_orm(
-                id=sector_id, tenant_id=tenant_id, parent_id=None, type="SECTOR",
-                name="Demo Sector", active=True,
+                id=sector_id,
+                tenant_id=tenant_id,
+                parent_id=None,
+                type="SECTOR",
+                name="Demo Sector",
+                active=True,
             )
         )
         mark("sector", True)
@@ -408,8 +440,12 @@ def _seed_org_hierarchy(
     if session.get(org_orm, company_id) is None:
         session.add(
             org_orm(
-                id=company_id, tenant_id=tenant_id, parent_id=sector_id, type="COMPANY",
-                name="Demo Company", active=True,
+                id=company_id,
+                tenant_id=tenant_id,
+                parent_id=sector_id,
+                type="COMPANY",
+                name="Demo Company",
+                active=True,
             )
         )
         mark("company", True)
@@ -420,8 +456,11 @@ def _seed_org_hierarchy(
 
 
 def _seed_committer_user(
-    session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
-    *, tenant_id: UUID,
+    session: Any,
+    deps: dict[str, Any],
+    mark: Callable[[str, bool], None],
+    *,
+    tenant_id: UUID,
 ) -> UUID:
     """Insert the committer user (committed_by / imported_by); return its id.
 
@@ -435,8 +474,10 @@ def _seed_committer_user(
     if session.get(user_orm, user_id) is None:
         session.add(
             user_orm(
-                id=user_id, tenant_id=tenant_id,
-                email=_DEMO_COMMITTER_EMAIL, display_name="Demo Seed Committer",
+                id=user_id,
+                tenant_id=tenant_id,
+                email=_DEMO_COMMITTER_EMAIL,
+                display_name="Demo Seed Committer",
             )
         )
         mark("user", True)
@@ -447,8 +488,12 @@ def _seed_committer_user(
 
 
 def _seed_channels(
-    session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
-    *, tenant_id: UUID, company_id: UUID,
+    session: Any,
+    deps: dict[str, Any],
+    mark: Callable[[str, bool], None],
+    *,
+    tenant_id: UUID,
+    company_id: UUID,
 ) -> list[str]:
     """Insert each demo channel (idempotent); return the seeded public ids.
 
@@ -461,10 +506,14 @@ def _seed_channels(
         if session.get(channel_orm, row_id) is None:
             session.add(
                 channel_orm(
-                    id=row_id, tenant_id=tenant_id,
+                    id=row_id,
+                    tenant_id=tenant_id,
                     youtube_channel_id=spec.youtube_channel_id,
-                    channel_name=spec.channel_name, primary_org_unit_id=company_id,
-                    cms_status="INSIDE_CMS", revenue_required=True, active=True,
+                    channel_name=spec.channel_name,
+                    primary_org_unit_id=company_id,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
                 )
             )
             mark(f"channel:{spec.youtube_channel_id}", True)
@@ -476,8 +525,14 @@ def _seed_channels(
 
 
 def _seed_revenue_facts(
-    session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
-    *, tenant_id: UUID, month: str, user_id: UUID, post_tax: bool,
+    session: Any,
+    deps: dict[str, Any],
+    mark: Callable[[str, bool], None],
+    *,
+    tenant_id: UUID,
+    month: str,
+    user_id: UUID,
+    post_tax: bool,
 ) -> None:
     """Insert one ADSENSE revenue fact per channel (idempotent).
 
@@ -490,25 +545,31 @@ def _seed_revenue_facts(
         net_revenue_usd = spec.net_revenue_usd
         if net_revenue_usd is None and post_tax:
             # 85% margin mirrors the populated channels (5100/6000, 2550/3000).
-            net_revenue_usd = (
-                spec.gross_revenue_usd * Decimal("0.85")
-            ).quantize(Decimal("0.01"))
+            net_revenue_usd = (spec.gross_revenue_usd * Decimal("0.85")).quantize(Decimal("0.01"))
         if _fact_exists(
-            session, fact_orm, tenant_id=tenant_id, month=month,
-            youtube_channel_id=spec.youtube_channel_id, source_kind="ADSENSE",
+            session,
+            fact_orm,
+            tenant_id=tenant_id,
+            month=month,
+            youtube_channel_id=spec.youtube_channel_id,
+            source_kind="ADSENSE",
         ):
             mark(f"fact:{spec.youtube_channel_id}", False)
             continue
         session.add(
             fact_orm(
                 id=_demo_tenant_uuid(tenant_id, "fact", month, spec.youtube_channel_id, "ADSENSE"),
-                tenant_id=tenant_id, month=month,
-                youtube_channel_id=spec.youtube_channel_id, source_kind="ADSENSE",
+                tenant_id=tenant_id,
+                month=month,
+                youtube_channel_id=spec.youtube_channel_id,
+                source_kind="ADSENSE",
                 source_report_id=f"demo-adsense-{month}",
                 gross_revenue_usd=spec.gross_revenue_usd,
                 net_revenue_usd=net_revenue_usd,
-                views=spec.views, watch_time_minutes=Decimal("0"),
-                confidence_score=Decimal("0.9500"), imported_by=user_id,
+                views=spec.views,
+                watch_time_minutes=Decimal("0"),
+                confidence_score=Decimal("0.9500"),
+                imported_by=user_id,
             )
         )
         mark(f"fact:{spec.youtube_channel_id}", True)
@@ -516,8 +577,12 @@ def _seed_revenue_facts(
 
 
 def _seed_account_deduction(
-    session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
-    *, tenant_id: UUID, month: str,
+    session: Any,
+    deps: dict[str, Any],
+    mark: Callable[[str, bool], None],
+    *,
+    tenant_id: UUID,
+    month: str,
 ) -> None:
     """Insert the ACCOUNT-scoped deduction the allocation distributes (idempotent)."""
     deduction_orm = deps["DeductionComponentORM"]
@@ -528,12 +593,21 @@ def _seed_account_deduction(
         session.add(
             deduction_orm(
                 id=_demo_tenant_uuid(tenant_id, "deduction", month, _ACCOUNT_ID),
-                tenant_id=tenant_id, month=month, component_kind="DEDUCTION",
-                scope_kind="ACCOUNT", scope_id=_ACCOUNT_ID,
-                amount_usd=_ACCOUNT_DEDUCTION_USD, amount_native=None, currency_code="USD",
-                source_system="adsense_management", source_table="google_revenue_source_rows",
-                source_id=None, source_key=f"demo-{_ACCOUNT_ID}", source_report_id=None,
-                raw_payload={"demo": True}, component_key=component_key,
+                tenant_id=tenant_id,
+                month=month,
+                component_kind="DEDUCTION",
+                scope_kind="ACCOUNT",
+                scope_id=_ACCOUNT_ID,
+                amount_usd=_ACCOUNT_DEDUCTION_USD,
+                amount_native=None,
+                currency_code="USD",
+                source_system="adsense_management",
+                source_table="google_revenue_source_rows",
+                source_id=None,
+                source_key=f"demo-{_ACCOUNT_ID}",
+                source_report_id=None,
+                raw_payload={"demo": True},
+                component_key=component_key,
             )
         )
         mark("account_deduction", True)
@@ -543,8 +617,12 @@ def _seed_account_deduction(
 
 
 def _seed_account_links(
-    session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
-    *, tenant_id: UUID, month: str,
+    session: Any,
+    deps: dict[str, Any],
+    mark: Callable[[str, bool], None],
+    *,
+    tenant_id: UUID,
+    month: str,
 ) -> None:
     """Insert the verified account->owner link and active owner->channel links.
 
@@ -559,8 +637,12 @@ def _seed_account_links(
     # Verified account->owner link (the money-gating trust decision).
     adsense_link_orm = deps["AdsenseContentOwnerLinkORM"]
     if not _adsense_link_exists(
-        session, adsense_link_orm, tenant_id=tenant_id,
-        adsense_account_id=_ACCOUNT_ID, content_owner_id=_CONTENT_OWNER_ID, month=month,
+        session,
+        adsense_link_orm,
+        tenant_id=tenant_id,
+        adsense_account_id=_ACCOUNT_ID,
+        content_owner_id=_CONTENT_OWNER_ID,
+        month=month,
     ):
         session.add(
             adsense_link_orm(
@@ -572,9 +654,12 @@ def _seed_account_links(
                 id=_demo_tenant_uuid(
                     tenant_id, "adsense-link", month, _ACCOUNT_ID, _CONTENT_OWNER_ID
                 ),
-                tenant_id=tenant_id, adsense_account_id=_ACCOUNT_ID,
-                content_owner_id=_CONTENT_OWNER_ID, verification_status="VERIFIED",
-                provenance_kind="OPERATOR_ASSERTED", provenance_payload={"demo": True},
+                tenant_id=tenant_id,
+                adsense_account_id=_ACCOUNT_ID,
+                content_owner_id=_CONTENT_OWNER_ID,
+                verification_status="VERIFIED",
+                provenance_kind="OPERATOR_ASSERTED",
+                provenance_payload={"demo": True},
                 effective_month_start=month,
             )
         )
@@ -586,9 +671,12 @@ def _seed_account_links(
     owner_link_orm = deps["ContentOwnerChannelLinkORM"]
     for spec in _CHANNELS:
         if _owner_channel_link_exists(
-            session, owner_link_orm, tenant_id=tenant_id,
+            session,
+            owner_link_orm,
+            tenant_id=tenant_id,
             content_owner_id=_CONTENT_OWNER_ID,
-            youtube_channel_id=spec.youtube_channel_id, month=month,
+            youtube_channel_id=spec.youtube_channel_id,
+            month=month,
         ):
             mark(f"owner_channel_link:{spec.youtube_channel_id}", False)
             continue
@@ -600,9 +688,12 @@ def _seed_account_links(
                 id=_demo_tenant_uuid(
                     tenant_id, "owner-link", month, _CONTENT_OWNER_ID, spec.youtube_channel_id
                 ),
-                tenant_id=tenant_id, content_owner_id=_CONTENT_OWNER_ID,
-                youtube_channel_id=spec.youtube_channel_id, provenance_kind="SOURCE_ROW",
-                active=True, effective_month_start=month,
+                tenant_id=tenant_id,
+                content_owner_id=_CONTENT_OWNER_ID,
+                youtube_channel_id=spec.youtube_channel_id,
+                provenance_kind="SOURCE_ROW",
+                active=True,
+                effective_month_start=month,
             )
         )
         mark(f"owner_channel_link:{spec.youtube_channel_id}", True)
@@ -610,8 +701,12 @@ def _seed_account_links(
 
 
 def _seed_finance_close_row(
-    session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
-    *, tenant_id: UUID, month: str,
+    session: Any,
+    deps: dict[str, Any],
+    mark: Callable[[str, bool], None],
+    *,
+    tenant_id: UUID,
+    month: str,
 ) -> None:
     """Insert the finance-month close control row (OPEN; lock step flips it)."""
     close_orm = deps["FinanceMonthCloseORM"]
@@ -626,38 +721,59 @@ def _seed_finance_close_row(
 
 
 def _fact_exists(
-    session: Any, fact_orm: Any, *, tenant_id: UUID, month: str,
-    youtube_channel_id: str, source_kind: str,
+    session: Any,
+    fact_orm: Any,
+    *,
+    tenant_id: UUID,
+    month: str,
+    youtube_channel_id: str,
+    source_kind: str,
 ) -> bool:
     """Return whether a revenue fact already exists for the unique business key."""
     from sqlalchemy import select
 
-    return session.scalar(
-        select(fact_orm.id).where(
-            fact_orm.tenant_id == tenant_id, fact_orm.month == month,
-            fact_orm.youtube_channel_id == youtube_channel_id,
-            fact_orm.source_kind == source_kind,
+    return (
+        session.scalar(
+            select(fact_orm.id).where(
+                fact_orm.tenant_id == tenant_id,
+                fact_orm.month == month,
+                fact_orm.youtube_channel_id == youtube_channel_id,
+                fact_orm.source_kind == source_kind,
+            )
         )
-    ) is not None
+        is not None
+    )
 
 
 def _deduction_exists(
-    session: Any, deduction_orm: Any, *, tenant_id: UUID, component_key: str,
+    session: Any,
+    deduction_orm: Any,
+    *,
+    tenant_id: UUID,
+    component_key: str,
 ) -> bool:
     """Return whether a deduction component already exists for (tenant, component_key)."""
     from sqlalchemy import select
 
-    return session.scalar(
-        select(deduction_orm.id).where(
-            deduction_orm.tenant_id == tenant_id,
-            deduction_orm.component_key == component_key,
+    return (
+        session.scalar(
+            select(deduction_orm.id).where(
+                deduction_orm.tenant_id == tenant_id,
+                deduction_orm.component_key == component_key,
+            )
         )
-    ) is not None
+        is not None
+    )
 
 
 def _adsense_link_exists(
-    session: Any, link_orm: Any, *, tenant_id: UUID,
-    adsense_account_id: str, content_owner_id: str, month: str,
+    session: Any,
+    link_orm: Any,
+    *,
+    tenant_id: UUID,
+    adsense_account_id: str,
+    content_owner_id: str,
+    month: str,
 ) -> bool:
     """Return whether the VERIFIED account->owner link already exists for the unique key.
 
@@ -666,19 +782,27 @@ def _adsense_link_exists(
     """
     from sqlalchemy import select
 
-    return session.scalar(
-        select(link_orm.id).where(
-            link_orm.tenant_id == tenant_id,
-            link_orm.adsense_account_id == adsense_account_id,
-            link_orm.content_owner_id == content_owner_id,
-            link_orm.effective_month_start == month,
+    return (
+        session.scalar(
+            select(link_orm.id).where(
+                link_orm.tenant_id == tenant_id,
+                link_orm.adsense_account_id == adsense_account_id,
+                link_orm.content_owner_id == content_owner_id,
+                link_orm.effective_month_start == month,
+            )
         )
-    ) is not None
+        is not None
+    )
 
 
 def _owner_channel_link_exists(
-    session: Any, link_orm: Any, *, tenant_id: UUID,
-    content_owner_id: str, youtube_channel_id: str, month: str,
+    session: Any,
+    link_orm: Any,
+    *,
+    tenant_id: UUID,
+    content_owner_id: str,
+    youtube_channel_id: str,
+    month: str,
 ) -> bool:
     """Return whether the owner->channel link already exists for the unique key.
 
@@ -687,19 +811,27 @@ def _owner_channel_link_exists(
     """
     from sqlalchemy import select
 
-    return session.scalar(
-        select(link_orm.id).where(
-            link_orm.tenant_id == tenant_id,
-            link_orm.content_owner_id == content_owner_id,
-            link_orm.youtube_channel_id == youtube_channel_id,
-            link_orm.effective_month_start == month,
+    return (
+        session.scalar(
+            select(link_orm.id).where(
+                link_orm.tenant_id == tenant_id,
+                link_orm.content_owner_id == content_owner_id,
+                link_orm.youtube_channel_id == youtube_channel_id,
+                link_orm.effective_month_start == month,
+            )
         )
-    ) is not None
+        is not None
+    )
 
 
 def _commit_allocation(
-    session: Any, *, month: str, tenant_id: UUID, committer_user_id: str,
-    allocation_method: str, deps: dict[str, Any],
+    session: Any,
+    *,
+    month: str,
+    tenant_id: UUID,
+    committer_user_id: str,
+    allocation_method: str,
+    deps: dict[str, Any],
 ) -> dict[str, Any]:
     """Commit (or idempotently replay) the account-allocation snapshot for the month."""
     committed_repo = deps["SqlAlchemyCommittedAllocationRepository"](session, tenant_id=tenant_id)
@@ -713,10 +845,14 @@ def _commit_allocation(
     fingerprint = _demo_uuid("commit-fp", month, allocation_method, _COMMIT_REASON).hex
 
     outcome = committed_repo.commit_allocation(
-        month=month, allocation_method=allocation_method,
-        idempotency_key=idempotency_key, request_fingerprint=fingerprint,
-        reason=_COMMIT_REASON, committed_by=committer_user_id,
-        deduction_repository=deduction_repo, revenue_repository=revenue_repo,
+        month=month,
+        allocation_method=allocation_method,
+        idempotency_key=idempotency_key,
+        request_fingerprint=fingerprint,
+        reason=_COMMIT_REASON,
+        committed_by=committer_user_id,
+        deduction_repository=deduction_repo,
+        revenue_repository=revenue_repo,
         link_repository=link_repo,
     )
     session.flush()
@@ -735,8 +871,15 @@ def _commit_allocation(
     }
 
 
-def _lock_month(session: Any, *, month: str, tenant_id: UUID, committer_user_id: str,
-                demo_lock_bypass: bool, deps: dict[str, Any]) -> dict[str, Any]:
+def _lock_month(
+    session: Any,
+    *,
+    month: str,
+    tenant_id: UUID,
+    committer_user_id: str,
+    demo_lock_bypass: bool,
+    deps: dict[str, Any],
+) -> dict[str, Any]:
     """Lock the month via the production close service; honor the readiness gate.
 
     The faithful path is SqlAlchemyFinanceMonthCloseRepository.lock_month, which
@@ -797,7 +940,10 @@ def _lock_month(session: Any, *, month: str, tenant_id: UUID, committer_user_id:
 
 
 def _demo_principal_headers(
-    *, committer_user_id: str, gateway_token: str | None, tenant_slug: str,
+    *,
+    committer_user_id: str,
+    gateway_token: str | None,
+    tenant_slug: str,
 ) -> dict[str, str]:
     """Return the trusted-gateway headers an operator/Vite proxy would send."""
     # FIX: include X-UMS-Tenant so the printed headers work for non-default
@@ -810,14 +956,21 @@ def _demo_principal_headers(
         "X-Role": "finance_admin",
         "X-Scope-Type": "global",
         "X-UMS-Tenant": tenant_slug,
-        "X-UMS-Trusted-Gateway-Token": gateway_token or _DEMO_GATEWAY_TOKEN,
+        "X-UMS-Trusted-Gateway-Token": gateway_token or "",
     }
 
 
 def _print_summary(
-    *, database_url: str, month: str, tenant_id: UUID, tenant_slug: str,
-    seed_summary: dict[str, Any], commit_summary: dict[str, Any],
-    lock_summary: dict[str, Any], headers: dict[str, str], gateway_token_set: bool,
+    *,
+    database_url: str,
+    month: str,
+    tenant_id: UUID,
+    tenant_slug: str,
+    seed_summary: dict[str, Any],
+    commit_summary: dict[str, Any],
+    lock_summary: dict[str, Any],
+    headers: dict[str, str],
+    gateway_token_set: bool,
 ) -> None:
     """Print a clear, operator-facing summary of the seeded demo month.
 
@@ -864,7 +1017,7 @@ def _print_summary(
             source = (
                 "set via UMS_TRUSTED_GATEWAY_TOKEN"
                 if gateway_token_set
-                else "built-in demo default"
+                else "not set (set UMS_TRUSTED_GATEWAY_TOKEN)"
             )
             print(f"  {key}: <redacted> ({source})")
             continue
@@ -882,28 +1035,35 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         description="Seed one fully-populated, LOCKED demo finance month (idempotent).",
     )
     parser.add_argument(
-        "--database-url", default=None,
+        "--database-url",
+        default=None,
         help="SQLAlchemy URL. Defaults to UMS_DATABASE_URL from settings.",
     )
     parser.add_argument(
-        "--month", default=_DEFAULT_MONTH,
+        "--month",
+        default=_DEFAULT_MONTH,
         help=f"Finance month YYYY-MM (default {_DEFAULT_MONTH}).",
     )
     parser.add_argument(
-        "--tenant", default=None, type=UUID,
+        "--tenant",
+        default=None,
+        type=UUID,
         help="Tenant UUID (default: the bootstrap UMS tenant).",
     )
     parser.add_argument(
-        "--allocation-method", default="gross_revenue_proportional",
+        "--allocation-method",
+        default="gross_revenue_proportional",
         choices=["gross_revenue_proportional", "post_tax_revenue_proportional"],
         help="Committed-allocation method (default gross_revenue_proportional).",
     )
     parser.add_argument(
-        "--create-schema", action="store_true",
+        "--create-schema",
+        action="store_true",
         help="Create metadata tables first (needed for a fresh SQLite file).",
     )
     parser.add_argument(
-        "--demo-lock-bypass", action="store_true",
+        "--demo-lock-bypass",
+        action="store_true",
         help=(
             "When the production lock service refuses on readiness, force a direct"
             " LOCKED status flip. Bypasses the readiness gate, writes NO audit"
@@ -921,8 +1081,11 @@ def _validate_month(month: str) -> None:
             outside the calendar range 01-12.
     """
     valid = (
-        len(month) == 7 and month[4] == "-" and month[:4].isdigit()
-        and month[5:].isdigit() and 1 <= int(month[5:7]) <= 12
+        len(month) == 7
+        and month[4] == "-"
+        and month[:4].isdigit()
+        and month[5:].isdigit()
+        and 1 <= int(month[5:7]) <= 12
     )
     if not valid:
         raise ValueError("--month must use YYYY-MM with a calendar month from 01 to 12")
@@ -980,18 +1143,28 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with session_factory() as session:
             seed_summary = _seed_substrate(
-                session, month=args.month, tenant_id=tenant_id, tenant_slug=tenant_slug,
-                allocation_method=args.allocation_method, deps=deps,
+                session,
+                month=args.month,
+                tenant_id=tenant_id,
+                tenant_slug=tenant_slug,
+                allocation_method=args.allocation_method,
+                deps=deps,
             )
             commit_summary = _commit_allocation(
-                session, month=args.month, tenant_id=tenant_id,
+                session,
+                month=args.month,
+                tenant_id=tenant_id,
                 committer_user_id=seed_summary["committer_user_id"],
-                allocation_method=args.allocation_method, deps=deps,
+                allocation_method=args.allocation_method,
+                deps=deps,
             )
             lock_summary = _lock_month(
-                session, month=args.month, tenant_id=tenant_id,
+                session,
+                month=args.month,
+                tenant_id=tenant_id,
                 committer_user_id=seed_summary["committer_user_id"],
-                demo_lock_bypass=args.demo_lock_bypass, deps=deps,
+                demo_lock_bypass=args.demo_lock_bypass,
+                deps=deps,
             )
             session.commit()
     except deps["CommittedAllocationValidationError"] as exc:
@@ -1044,9 +1217,15 @@ def main(argv: list[str] | None = None) -> int:
         tenant_slug=tenant_slug,
     )
     _print_summary(
-        database_url=database_url, month=args.month, tenant_id=tenant_id, tenant_slug=tenant_slug,
-        seed_summary=seed_summary, commit_summary=commit_summary, lock_summary=lock_summary,
-        headers=headers, gateway_token_set=bool(settings.trusted_gateway_token),
+        database_url=database_url,
+        month=args.month,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        seed_summary=seed_summary,
+        commit_summary=commit_summary,
+        lock_summary=lock_summary,
+        headers=headers,
+        gateway_token_set=bool(settings.trusted_gateway_token),
     )
     return 0
 

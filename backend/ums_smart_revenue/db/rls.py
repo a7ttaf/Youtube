@@ -6,6 +6,7 @@ allowlist is the single source of truth for "which tables are tenant-scoped";
 the migration cross-checks it against the live schema so a new tenant table that
 ships without RLS becomes a loud migration failure, not a silent leak.
 """
+
 from __future__ import annotations
 
 # Every table carrying a tenant_id column (platform-wide tables excluded).

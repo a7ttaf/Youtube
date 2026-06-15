@@ -1,4 +1,5 @@
 """PostgreSQL round-trip for 20260531_0001 (channel-account map tables)."""
+
 from pathlib import Path
 
 import pytest
@@ -72,9 +73,7 @@ def test_upgrade_creates_both_tables_with_constraints(alembic_config, fresh_engi
     inspector = inspect(fresh_engine)
     assert "adsense_content_owner_links" in inspector.get_table_names()
     assert "content_owner_channel_links" in inspector.get_table_names()
-    checks = {
-        c["name"] for c in inspector.get_check_constraints("adsense_content_owner_links")
-    }
+    checks = {c["name"] for c in inspector.get_check_constraints("adsense_content_owner_links")}
     assert "ck_adsense_content_owner_links_status" in checks
     assert "ck_adsense_content_owner_links_range" in checks
     assert "ck_adsense_content_owner_links_provenance_payload_object" in checks
@@ -83,7 +82,10 @@ def test_upgrade_creates_both_tables_with_constraints(alembic_config, fresh_engi
         for c in inspector.get_unique_constraints("adsense_content_owner_links")
     }
     assert uniques["uq_adsense_content_owner_links_key"] == (
-        "tenant_id", "adsense_account_id", "content_owner_id", "effective_month_start",
+        "tenant_id",
+        "adsense_account_id",
+        "content_owner_id",
+        "effective_month_start",
     )
     fks = {c["name"] for c in inspector.get_foreign_keys("content_owner_channel_links")}
     assert "fk_content_owner_channel_links_tenant" in fks
@@ -92,7 +94,10 @@ def test_upgrade_creates_both_tables_with_constraints(alembic_config, fresh_engi
         for c in inspector.get_unique_constraints("content_owner_channel_links")
     }
     assert uniques2["uq_content_owner_channel_links_key"] == (
-        "tenant_id", "content_owner_id", "youtube_channel_id", "effective_month_start",
+        "tenant_id",
+        "content_owner_id",
+        "youtube_channel_id",
+        "effective_month_start",
     )
     indexes = {c["name"] for c in inspector.get_indexes("adsense_content_owner_links")} | {
         c["name"] for c in inspector.get_indexes("content_owner_channel_links")
@@ -171,9 +176,12 @@ def test_repo_verify_blocks_on_held_per_account_advisory_lock(alembic_config, fr
         link_id = (
             SqlAlchemyChannelAccountLinkRepository(setup, tenant_id=tenant)
             .propose_account_owner_link(
-                adsense_account_id="pub-lock", content_owner_id="owner-1",
-                effective_month_start="2026-01", effective_month_end=None,
-                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+                adsense_account_id="pub-lock",
+                content_owner_id="owner-1",
+                effective_month_start="2026-01",
+                effective_month_end=None,
+                provenance_kind="OPERATOR_ASSERTED",
+                provenance_payload={},
             )
             .id
         )
@@ -214,18 +222,19 @@ def test_repo_verify_succeeds_uncontended_on_postgres(alembic_config, fresh_engi
     with Session(fresh_engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=tenant)
         link = repo.propose_account_owner_link(
-            adsense_account_id="pub-pg", content_owner_id="owner-pg",
-            effective_month_start="2026-01", effective_month_end=None,
-            provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            adsense_account_id="pub-pg",
+            content_owner_id="owner-pg",
+            effective_month_start="2026-01",
+            effective_month_end=None,
+            provenance_kind="OPERATOR_ASSERTED",
+            provenance_payload={},
         )
         out = repo.verify_account_owner_link(link.id, verified_by=uuid4(), reason="ok")
         session.commit()
     assert out.verification_status == "VERIFIED"
 
 
-def test_repo_verify_blocks_on_held_covered_month_close_row_lock(
-    alembic_config, fresh_engine
-):
+def test_repo_verify_blocks_on_held_covered_month_close_row_lock(alembic_config, fresh_engine):
     """Proof verify FOR UPDATE-locks existing close rows across the covered range.
 
     Connection A holds FOR UPDATE on the finance_month_close row for a covered
@@ -256,9 +265,12 @@ def test_repo_verify_blocks_on_held_covered_month_close_row_lock(
         link_id = (
             SqlAlchemyChannelAccountLinkRepository(setup, tenant_id=tenant)
             .propose_account_owner_link(
-                adsense_account_id="pub-rng", content_owner_id="owner-rng",
-                effective_month_start="2026-01", effective_month_end="2026-06",
-                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+                adsense_account_id="pub-rng",
+                content_owner_id="owner-rng",
+                effective_month_start="2026-01",
+                effective_month_end="2026-06",
+                provenance_kind="OPERATOR_ASSERTED",
+                provenance_payload={},
             )
             .id
         )
@@ -291,9 +303,7 @@ def test_repo_verify_blocks_on_held_covered_month_close_row_lock(
         holder.close()
 
 
-def test_repo_derivation_blocks_on_held_observed_month_close_row_lock(
-    alembic_config, fresh_engine
-):
+def test_repo_derivation_blocks_on_held_observed_month_close_row_lock(alembic_config, fresh_engine):
     """Proof derivation FOR UPDATE-locks existing close rows for observed months.
 
     Connection A holds FOR UPDATE on the finance_month_close row for an observed
@@ -326,15 +336,21 @@ def test_repo_derivation_blocks_on_held_observed_month_close_row_lock(
     with Session(fresh_engine) as setup:
         setup.add(
             GoogleRevenueSourceRowORM(
-                tenant_id=tenant, source_system="youtube_reporting",
+                tenant_id=tenant,
+                source_system="youtube_reporting",
                 source_row_key="deriv-lock-key".ljust(64, "0"),
-                source_account_id="pub-deriv", content_owner_id="owner-deriv",
-                youtube_channel_id="chan-deriv", report_month="2026-03",
+                source_account_id="pub-deriv",
+                content_owner_id="owner-deriv",
+                youtube_channel_id="chan-deriv",
+                report_month="2026-03",
                 report_type="channel_basic_a2",
                 period_start=datetime(2026, 3, 1, tzinfo=UTC).date(),
                 period_end=datetime(2026, 3, 31, tzinfo=UTC).date(),
-                metric_key="estimated_partner_revenue", value_kind="estimated",
-                amount_native=0, currency_code="USD", raw_payload={},
+                metric_key="estimated_partner_revenue",
+                value_kind="estimated",
+                amount_native=0,
+                currency_code="USD",
+                raw_payload={},
             )
         )
         get_or_create_month_close_row(setup, "2026-03", tenant_id=tenant)
@@ -402,15 +418,21 @@ def test_repo_derivation_blocks_on_held_absent_observed_month_advisory_lock(
     with Session(fresh_engine) as setup:
         setup.add(
             GoogleRevenueSourceRowORM(
-                tenant_id=tenant, source_system="youtube_reporting",
+                tenant_id=tenant,
+                source_system="youtube_reporting",
                 source_row_key="deriv-absent-key".ljust(64, "0"),
-                source_account_id="pub-deriv", content_owner_id="owner-absent",
-                youtube_channel_id="chan-absent", report_month="2026-07",
+                source_account_id="pub-deriv",
+                content_owner_id="owner-absent",
+                youtube_channel_id="chan-absent",
+                report_month="2026-07",
                 report_type="channel_basic_a2",
                 period_start=datetime(2026, 7, 1, tzinfo=UTC).date(),
                 period_end=datetime(2026, 7, 31, tzinfo=UTC).date(),
-                metric_key="estimated_partner_revenue", value_kind="estimated",
-                amount_native=0, currency_code="USD", raw_payload={},
+                metric_key="estimated_partner_revenue",
+                value_kind="estimated",
+                amount_native=0,
+                currency_code="USD",
+                raw_payload={},
             )
         )
         setup.commit()

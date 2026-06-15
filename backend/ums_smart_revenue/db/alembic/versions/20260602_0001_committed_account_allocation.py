@@ -45,7 +45,9 @@ def upgrade() -> None:
         "committed_allocation_runs",
         sa.Column("id", sa.Uuid(), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column(
-            "tenant_id", sa.Uuid(), nullable=False,
+            "tenant_id",
+            sa.Uuid(),
+            nullable=False,
             server_default=sa.text(f"'{UMS_TENANT_ID}'"),
         ),
         sa.Column("month", sa.Text(), nullable=False),
@@ -62,28 +64,40 @@ def upgrade() -> None:
         sa.Column("reconciliation_total_usd", sa.Numeric(20, 6), nullable=False),
         sa.Column("committed_by", sa.Uuid(), nullable=False),
         sa.Column(
-            "committed_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "committed_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.ForeignKeyConstraint(
-            ["tenant_id"], ["tenants.id"],
-            name="fk_committed_allocation_runs_tenant", ondelete="RESTRICT",
+            ["tenant_id"],
+            ["tenants.id"],
+            name="fk_committed_allocation_runs_tenant",
+            ondelete="RESTRICT",
         ),
         sa.UniqueConstraint(
-            "tenant_id", "month", "commit_version",
+            "tenant_id",
+            "month",
+            "commit_version",
             name="uq_committed_allocation_runs_version",
         ),
         sa.UniqueConstraint(
-            "tenant_id", "month", "idempotency_key",
+            "tenant_id",
+            "month",
+            "idempotency_key",
             name="uq_committed_allocation_runs_idempotency",
         ),
         sa.CheckConstraint(
@@ -129,12 +143,16 @@ def upgrade() -> None:
         sa.Column("allocated_amount_usd", sa.Numeric(20, 6), nullable=False),
         sa.Column("net_applicable", sa.Boolean(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.ForeignKeyConstraint(
-            ["run_id"], ["committed_allocation_runs.id"],
-            name="fk_committed_allocation_lines_run", ondelete="CASCADE",
+            ["run_id"],
+            ["committed_allocation_runs.id"],
+            name="fk_committed_allocation_lines_run",
+            ondelete="CASCADE",
         ),
         sa.CheckConstraint(
             "length(adsense_account_id) >= 1",
@@ -160,12 +178,16 @@ def upgrade() -> None:
         sa.Column("issue_code", sa.Text(), nullable=False),
         sa.Column("detail", sa.Text(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.ForeignKeyConstraint(
-            ["run_id"], ["committed_allocation_runs.id"],
-            name="fk_committed_allocation_unallocated_run", ondelete="CASCADE",
+            ["run_id"],
+            ["committed_allocation_runs.id"],
+            name="fk_committed_allocation_unallocated_run",
+            ondelete="CASCADE",
         ),
         sa.CheckConstraint(
             "length(scope_id) >= 1",
@@ -184,12 +206,16 @@ def upgrade() -> None:
         sa.Column("youtube_channel_id", sa.Text(), nullable=False),
         sa.Column("detail", sa.Text(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.func.now(),
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
         ),
         sa.ForeignKeyConstraint(
-            ["run_id"], ["committed_allocation_runs.id"],
-            name="fk_committed_allocation_notes_run", ondelete="CASCADE",
+            ["run_id"],
+            ["committed_allocation_runs.id"],
+            name="fk_committed_allocation_notes_run",
+            ondelete="CASCADE",
         ),
         sa.CheckConstraint(
             "length(youtube_channel_id) >= 1",
@@ -200,12 +226,15 @@ def upgrade() -> None:
     # ORM's .ddl_if(dialect="postgresql") CHECKs in finance_models.py.
     if op.get_bind().dialect.name == "postgresql":
         for col in (
-            "allocated_total_usd", "unallocated_total_usd",
-            "net_applicable_total_usd", "reconciliation_total_usd",
+            "allocated_total_usd",
+            "unallocated_total_usd",
+            "net_applicable_total_usd",
+            "reconciliation_total_usd",
         ):
             op.create_check_constraint(
                 f"ck_committed_allocation_runs_{col}_finite",
-                "committed_allocation_runs", _finite(col),
+                "committed_allocation_runs",
+                _finite(col),
             )
         op.create_check_constraint(
             "ck_committed_allocation_lines_amounts_finite",
@@ -215,26 +244,26 @@ def upgrade() -> None:
         )
         op.create_check_constraint(
             "ck_committed_allocation_unallocated_amount_usd_finite",
-            "committed_allocation_unallocated", _finite("amount_usd"),
+            "committed_allocation_unallocated",
+            _finite("amount_usd"),
         )
     op.create_index(
         "ix_committed_allocation_runs_tenant_month",
-        "committed_allocation_runs", ["tenant_id", "month"],
+        "committed_allocation_runs",
+        ["tenant_id", "month"],
     )
-    op.create_index(
-        "ix_committed_allocation_lines_run", "committed_allocation_lines", ["run_id"]
-    )
+    op.create_index("ix_committed_allocation_lines_run", "committed_allocation_lines", ["run_id"])
     op.create_index(
         "ix_committed_allocation_lines_run_channel",
-        "committed_allocation_lines", ["run_id", "youtube_channel_id"],
+        "committed_allocation_lines",
+        ["run_id", "youtube_channel_id"],
     )
     op.create_index(
         "ix_committed_allocation_unallocated_run",
-        "committed_allocation_unallocated", ["run_id"],
+        "committed_allocation_unallocated",
+        ["run_id"],
     )
-    op.create_index(
-        "ix_committed_allocation_notes_run", "committed_allocation_notes", ["run_id"]
-    )
+    op.create_index("ix_committed_allocation_notes_run", "committed_allocation_notes", ["run_id"])
 
 
 def downgrade() -> None:

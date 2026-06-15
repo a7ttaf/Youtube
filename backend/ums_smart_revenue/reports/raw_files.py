@@ -14,9 +14,7 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 PURGED_PARSE_STATUS = "PURGED"
-ALLOWED_PARSE_STATUSES = frozenset(
-    {"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"}
-)
+ALLOWED_PARSE_STATUSES = frozenset({"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"})
 ALLOWED_STORAGE_PREFIXES = ("s3://", "gs://", "azure://", "blob://", "file-store://")
 MAX_RAW_REPORT_FILE_PAGE_SIZE = 100
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
@@ -120,9 +118,7 @@ class SqlAlchemyRawReportFileRepository:
             self._session.flush()
         except IntegrityError as exc:
             if _is_duplicate_raw_report_file_integrity_error(exc):
-                raise RawReportFileConflictError(
-                    "Raw report file metadata already exists"
-                ) from exc
+                raise RawReportFileConflictError("Raw report file metadata already exists") from exc
             raise
         return self._to_entry(row)
 
@@ -144,9 +140,7 @@ class SqlAlchemyRawReportFileRepository:
                 f"limit must be between 1 and {MAX_RAW_REPORT_FILE_PAGE_SIZE}"
             )
         if offset < 0:
-            raise RawReportFileValidationError(
-                "offset must be greater than or equal to 0"
-            )
+            raise RawReportFileValidationError("offset must be greater than or equal to 0")
         if report_month is not None:
             _validate_month(report_month)
 
@@ -241,9 +235,7 @@ class SqlAlchemyRawReportFileRepository:
             if row is None:
                 raise RawReportFileNotFoundError("Raw report file not found")
             if row.parse_status == PURGED_PARSE_STATUS:
-                raise RawReportFilePurgeConflictError(
-                    "Raw report file is already purged"
-                )
+                raise RawReportFilePurgeConflictError("Raw report file is already purged")
             raise RawReportFileConflictError("Raw report file purge was not applied")
         row = self._session.scalars(
             select(RawReportFileORM)
@@ -298,8 +290,7 @@ def _normalize_storage_uri(value: str) -> str:
     normalized = _normalize_required_string(value, "storage_uri")
     if not normalized.startswith(ALLOWED_STORAGE_PREFIXES):
         raise RawReportFileValidationError(
-            "storage_uri must point to approved object storage, "
-            "not raw inline report content"
+            "storage_uri must point to approved object storage, not raw inline report content"
         )
     return normalized
 
@@ -332,9 +323,7 @@ def _parse_uuid(value: str, *, field_name: str = "raw_report_file_id") -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise RawReportFileValidationError(
-            f"{field_name} must be a valid UUID"
-        ) from exc
+        raise RawReportFileValidationError(f"{field_name} must be a valid UUID") from exc
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
@@ -354,9 +343,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
     try:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
-        raise RawReportFileValidationError(
-            "tenant_id must be a valid UUID"
-        ) from exc
+        raise RawReportFileValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _is_duplicate_raw_report_file_integrity_error(error: IntegrityError) -> bool:
@@ -366,7 +353,4 @@ def _is_duplicate_raw_report_file_integrity_error(error: IntegrityError) -> bool
     if constraint_name == "uq_raw_report_files_source_type_month_checksum":
         return True
     message = str(orig)
-    return (
-        "raw_report_files.source" in message
-        and "raw_report_files.report_type" in message
-    )
+    return "raw_report_files.source" in message and "raw_report_files.report_type" in message

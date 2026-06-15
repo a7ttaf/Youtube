@@ -1,4 +1,5 @@
 """Tests for the run_deduction_ingestion CLI script."""
+
 import importlib.util
 from pathlib import Path
 
@@ -9,9 +10,7 @@ from ums_smart_revenue.finance.deduction_ingestion import (
     DeductionComponentValidationError,
 )
 
-_CLI_PATH = (
-    Path(__file__).resolve().parents[2] / "scripts" / "run_deduction_ingestion.py"
-)
+_CLI_PATH = Path(__file__).resolve().parents[2] / "scripts" / "run_deduction_ingestion.py"
 TENANT = "00000000-0000-0000-0000-00000000d001"
 BASE_ARGV = ["--tenant", TENANT, "--month", "2026-04", "--reason", "r"]
 
@@ -51,7 +50,8 @@ class _SpySession:
 def _fake_result():
     """Return a dummy result object with expected ingestion attributes."""
     return type(
-        "R", (),
+        "R",
+        (),
         {
             "month": "2026-04",
             "total_upserted": 4,
@@ -76,6 +76,7 @@ class _FakeServiceOK:
 
 def _patch_common(monkeypatch, module, *, session, service, settings=None):
     """Patch common CLI dependencies: settings, session factory, connector, and service."""
+
     def _session_factory():
         """Return the fake session for CLI tests."""
         return session
@@ -99,11 +100,14 @@ def _patch_common(monkeypatch, module, *, session, service, settings=None):
         return object()
 
     monkeypatch.setattr(
-        module, "load_app_settings",
+        module,
+        "load_app_settings",
         _load_app_settings,
     )
     monkeypatch.setattr(module, "build_session_factory", _build_session_factory)
-    monkeypatch.setattr(module, "build_connector_service_principal", _build_connector_service_principal)
+    monkeypatch.setattr(
+        module, "build_connector_service_principal", _build_connector_service_principal
+    )
     monkeypatch.setattr(module, "SqlAlchemyAuditSink", _audit_sink)
     monkeypatch.setattr(module, "DeductionIngestionService", service)
 
@@ -135,7 +139,10 @@ def test_cli_missing_db_config_returns_2(monkeypatch, capsys):
     module = _load_cli()
     session = _SpySession()
     _patch_common(
-        monkeypatch, module, session=session, service=_FakeServiceOK,
+        monkeypatch,
+        module,
+        session=session,
+        service=_FakeServiceOK,
         settings=_FakeSettings(database_url=""),
     )
     rc = module.main(BASE_ARGV)
@@ -144,10 +151,13 @@ def test_cli_missing_db_config_returns_2(monkeypatch, capsys):
     assert session.commits == 0
 
 
-@pytest.mark.parametrize("error", [
-    DeductionComponentValidationError("bad"),
-    DeductionComponentLockedMonthError("locked"),
-])
+@pytest.mark.parametrize(
+    "error",
+    [
+        DeductionComponentValidationError("bad"),
+        DeductionComponentLockedMonthError("locked"),
+    ],
+)
 def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
     """Test that typed service failures return code 2 and include the error name."""
     module = _load_cli()

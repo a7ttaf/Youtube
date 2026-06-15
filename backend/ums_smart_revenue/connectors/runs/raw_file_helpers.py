@@ -17,6 +17,7 @@ RawFileLifecycleError, not a silent no-op.
 
 Mutations are in-place on the loaded ORM row; the caller owns flush/commit.
 """
+
 from __future__ import annotations
 
 from uuid import UUID
@@ -34,10 +35,14 @@ from ums_smart_revenue.db.report_models import RawReportFileORM
 def _load_or_raise(
     session: Session, *, raw_file_id: UUID, tenant_id: UUID, target: str
 ) -> RawReportFileORM:
-    stmt = select(RawReportFileORM).where(
-        RawReportFileORM.id == raw_file_id,
-        RawReportFileORM.tenant_id == tenant_id,
-    ).with_for_update()
+    stmt = (
+        select(RawReportFileORM)
+        .where(
+            RawReportFileORM.id == raw_file_id,
+            RawReportFileORM.tenant_id == tenant_id,
+        )
+        .with_for_update()
+    )
     row = session.execute(stmt).scalar_one_or_none()
     if row is None:
         raise RawFileLifecycleError(
@@ -54,15 +59,12 @@ def _load_or_raise(
 # Blast Radius: Raw evidence lifecycle only. Finance facts and exports read the
 #               resulting source rows, not this helper directly.
 # Connections:
-#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> Calls after parser and source-row upsert.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py
+#     -> Calls after parser and source-row upsert.
 #   - File: backend/ums_smart_revenue/db/report_models.py -> RawReportFileORM parse_status contract.
 # ============================================================================
-def mark_parsed(
-    session: Session, *, raw_file_id: UUID, tenant_id: UUID
-) -> None:
-    row = _load_or_raise(
-        session, raw_file_id=raw_file_id, tenant_id=tenant_id, target="PARSED"
-    )
+def mark_parsed(session: Session, *, raw_file_id: UUID, tenant_id: UUID) -> None:
+    row = _load_or_raise(session, raw_file_id=raw_file_id, tenant_id=tenant_id, target="PARSED")
     if row.parse_status == "PARSED":
         raise RawFileAlreadyParsedError(raw_file_id=str(raw_file_id))
     if row.parse_status in ("DOWNLOADED", "FAILED"):
@@ -86,9 +88,7 @@ def mark_parsed(
 #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> Bucket B failure cleanup.
 #   - File: backend/ums_smart_revenue/db/report_models.py -> RawReportFileORM parse_status contract.
 # ============================================================================
-def mark_failed(
-    session: Session, *, raw_file_id: UUID, tenant_id: UUID
-) -> None:
+def mark_failed(session: Session, *, raw_file_id: UUID, tenant_id: UUID) -> None:
     """Transition DOWNLOADED|FAILED -> FAILED.
 
     raw_report_files does not store error_class/error_summary (per the
@@ -96,9 +96,7 @@ def mark_failed(
     Error details flow to connector_runs.error_summary at finish_run time
     and to the REPORT_IMPORTED audit event payload (error_class only).
     """
-    row = _load_or_raise(
-        session, raw_file_id=raw_file_id, tenant_id=tenant_id, target="FAILED"
-    )
+    row = _load_or_raise(session, raw_file_id=raw_file_id, tenant_id=tenant_id, target="FAILED")
     if row.parse_status in ("DOWNLOADED", "FAILED"):
         row.parse_status = "FAILED"
         return

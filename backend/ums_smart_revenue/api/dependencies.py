@@ -154,9 +154,7 @@ def authenticated_session_dependency(
     """Build a database session dependency gated by gateway authentication."""
 
     def dependency(
-        _identity: Annotated[
-            TrustedGatewayIdentity, Depends(current_trusted_gateway_identity)
-        ],
+        _identity: Annotated[TrustedGatewayIdentity, Depends(current_trusted_gateway_identity)],
     ) -> Iterator[Session]:
         """Open a database session only after gateway authentication succeeds."""
         with session_factory() as session:
@@ -171,9 +169,7 @@ def authenticated_session_dependency(
 
 
 def current_principal_from_database(
-    identity: Annotated[
-        TrustedGatewayIdentity, Depends(current_trusted_gateway_identity)
-    ],
+    identity: Annotated[TrustedGatewayIdentity, Depends(current_trusted_gateway_identity)],
     session: Annotated[Session, Depends(current_db_session)],
 ) -> UserPrincipal:
     """Load a request principal from SQL after trusted gateway validation."""
@@ -219,9 +215,7 @@ def current_principal_from_database(
             detail="Principal authorization unavailable",
         ) from exc
     except PrincipalValidationError as exc:
-        logger.warning(
-            "Database principal lookup rejected invalid principal input: %s", exc
-        )
+        logger.warning("Database principal lookup rejected invalid principal input: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid request",

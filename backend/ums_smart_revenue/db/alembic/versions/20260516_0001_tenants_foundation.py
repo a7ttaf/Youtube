@@ -72,8 +72,7 @@ def upgrade() -> None:
             name="ck_tenants_status",
         ),
         sa.CheckConstraint(
-            "length(primary_currency) = 3 "
-            "AND primary_currency = upper(primary_currency)",
+            "length(primary_currency) = 3 AND primary_currency = upper(primary_currency)",
             name="ck_tenants_primary_currency_iso4217",
         ),
     )
@@ -124,13 +123,27 @@ def upgrade() -> None:
         unique=True,
     )
 
-    # Seed UMS as tenant #1. Idempotent across re-runs and test fixtures.
+    # ============================================================================
+    # Purpose: Seed the deterministic default UMS tenant during tenant bootstrap.
+    # Database/ORM: tenants table.
+    # Standards: Parameterized SQL, migration-owned database write, SQLite-safe tests.
+    # Blast Radius: Tenant registry seed only; no finance, audit, Neo4j, or exports.
+    # Connections:
+    #   - File: tests/db/test_tenants_migration.py -> Verifies SQLite migration tests.
+    #   - File: backend/ums_smart_revenue/db/rls.py -> RLS depends on tenant rows.
+    # ============================================================================
+    bind = op.get_bind()
+    tenant_seed_sql = (
+        "INSERT INTO tenants (id, slug, display_name, primary_currency, status) "
+        "VALUES (CAST(:tenant_id AS uuid), 'ums', 'UMS', 'USD', 'ACTIVE') "
+        "ON CONFLICT (slug) DO NOTHING"
+        if bind.dialect.name == "postgresql"
+        else "INSERT INTO tenants (id, slug, display_name, primary_currency, status) "
+        "VALUES (:tenant_id, 'ums', 'UMS', 'USD', 'ACTIVE') "
+        "ON CONFLICT (slug) DO NOTHING"
+    )
     op.execute(
-        sa.text(
-            "INSERT INTO tenants (id, slug, display_name, primary_currency, status) "
-            f"VALUES ('{UMS_TENANT_ID}', 'ums', 'UMS', 'USD', 'ACTIVE') "
-            "ON CONFLICT (slug) DO NOTHING"
-        )
+        sa.text(tenant_seed_sql).bindparams(tenant_id=UMS_TENANT_ID)
     )
 
 

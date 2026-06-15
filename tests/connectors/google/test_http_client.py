@@ -4,6 +4,7 @@ The client invokes credentials.before_request(...) on every request so
 google-auth handles refresh; it parses JSON responses and returns the
 decoded dict.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,9 +38,7 @@ def test_request_invokes_before_request_and_parses_json(mock_credentials) -> Non
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
         captured["auth"] = request.headers.get("Authorization")
-        return httpx.Response(
-            200, content=json.dumps({"jobs": [{"id": "job-1"}]}).encode()
-        )
+        return httpx.Response(200, content=json.dumps({"jobs": [{"id": "job-1"}]}).encode())
 
     client = GoogleHttpClient(
         credentials=mock_credentials,
@@ -128,10 +127,12 @@ def test_request_passes_query_params(mock_credentials) -> None:
         return httpx.Response(200, content=b"{}")
 
     client = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     client.request(
-        method="GET", url="https://example.com/v1/x",
+        method="GET",
+        url="https://example.com/v1/x",
         params={"pageToken": "abc", "limit": "10"},
     )
     assert captured["query"] == {"pageToken": "abc", "limit": "10"}
@@ -146,7 +147,8 @@ def test_4xx_client_errors_no_retry(mock_credentials, status) -> None:
         return httpx.Response(status, content=b"{}")
 
     client = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     with pytest.raises(GoogleApiClientError) as ctx:
         client.request(method="GET", url="https://example.com/x")
@@ -163,7 +165,8 @@ def test_auth_errors_no_retry(mock_credentials, status) -> None:
         return httpx.Response(status, content=b"{}")
 
     client = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     with pytest.raises(GoogleApiAuthError):
         client.request(method="GET", url="https://example.com/x")
@@ -182,7 +185,8 @@ def test_429_retries_then_raises(mock_credentials, monkeypatch) -> None:
         return httpx.Response(429, content=b"{}")
 
     client = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     with pytest.raises(GoogleApiRateLimitError) as ctx:
         client.request(method="GET", url="https://example.com/x")
@@ -196,10 +200,13 @@ def test_429_honors_retry_after(mock_credentials, monkeypatch) -> None:
         "ums_smart_revenue.connectors.google.http_client.time.sleep",
         sleeps.append,
     )
-    seq = iter([
-        httpx.Response(429, headers={"Retry-After": "3"}, content=b"{}"),
-        httpx.Response(200, content=b"{}"),
-    ])
+    seq = iter(
+        [
+            httpx.Response(429, headers={"Retry-After": "3"}, content=b"{}"),
+            httpx.Response(200, content=b"{}"),
+        ]
+    )
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return _next_response(seq)
 
@@ -224,7 +231,8 @@ def test_429_without_retry_after_uses_backoff_schedule(mock_credentials, monkeyp
         return httpx.Response(429, content=b"{}")
 
     client = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     with pytest.raises(GoogleApiRateLimitError):
         client.request(method="GET", url="https://example.com/x")
@@ -238,11 +246,14 @@ def test_5xx_retries_then_raises(mock_credentials, monkeypatch) -> None:
         lambda _: None,
     )
     calls = []
+
     def handler(_request):
         calls.append(1)
         return httpx.Response(503, content=b"{}")
+
     client = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     with pytest.raises(GoogleApiServerError) as ctx:
         client.request(method="GET", url="https://example.com/x")
@@ -254,8 +265,10 @@ def test_5xx_retries_then_raises(mock_credentials, monkeypatch) -> None:
 def test_non_json_response_raises_response_error(mock_credentials) -> None:
     def handler(_request):
         return httpx.Response(200, content=b"<html>not json</html>")
+
     client = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     with pytest.raises(GoogleApiResponseError) as ctx:
         client.request(method="GET", url="https://example.com/x")
@@ -265,8 +278,10 @@ def test_non_json_response_raises_response_error(mock_credentials) -> None:
 def test_non_object_json_raises_response_error(mock_credentials) -> None:
     def handler(_request):
         return httpx.Response(200, content=b"[1, 2, 3]")
+
     client = GoogleHttpClient(
-        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
     )
     with pytest.raises(GoogleApiResponseError):
         client.request(method="GET", url="https://example.com/x")
@@ -277,10 +292,13 @@ def test_fetch_bytes_retries_5xx_via_shared_helper(mock_credentials, monkeypatch
         "ums_smart_revenue.connectors.google.http_client.time.sleep",
         lambda _: None,
     )
-    seq = iter([
-        httpx.Response(503, content=b""),
-        httpx.Response(200, content=b"csv-bytes"),
-    ])
+    seq = iter(
+        [
+            httpx.Response(503, content=b""),
+            httpx.Response(200, content=b"csv-bytes"),
+        ]
+    )
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return _next_response(seq)
 
@@ -292,9 +310,7 @@ def test_fetch_bytes_retries_5xx_via_shared_helper(mock_credentials, monkeypatch
     assert out == b"csv-bytes"
 
 
-def test_remote_protocol_error_uses_connect_retry_budget(
-    mock_credentials, monkeypatch
-) -> None:
+def test_remote_protocol_error_uses_connect_retry_budget(mock_credentials, monkeypatch) -> None:
     sleeps: list[float] = []
     monkeypatch.setattr(
         "ums_smart_revenue.connectors.google.http_client.time.sleep",
@@ -319,9 +335,7 @@ def test_remote_protocol_error_uses_connect_retry_budget(
     assert sleeps == [1.0, 2.0]
 
 
-def test_proxy_error_uses_connect_retry_budget(
-    mock_credentials, monkeypatch
-) -> None:
+def test_proxy_error_uses_connect_retry_budget(mock_credentials, monkeypatch) -> None:
     sleeps: list[float] = []
     monkeypatch.setattr(
         "ums_smart_revenue.connectors.google.http_client.time.sleep",

@@ -83,9 +83,7 @@ def test_app_tenant_cannot_read_other_tenant_rows():
         with engine.connect() as conn:
             _set_trusted_tenant(conn, A)
             # Bare select, NO WHERE tenant_id — RLS must filter to A only.
-            rows = conn.execute(
-                sa.text("SELECT tenant_id FROM org_units")
-            ).scalars().all()
+            rows = conn.execute(sa.text("SELECT tenant_id FROM org_units")).scalars().all()
             assert rows, "expected at least the seeded A-owned row to be visible"
             assert all(str(t) == A for t in rows)
     finally:

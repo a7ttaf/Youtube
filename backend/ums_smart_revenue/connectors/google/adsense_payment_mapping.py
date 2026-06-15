@@ -6,6 +6,7 @@ agreement, and parses the formatted amount string into ``(Decimal, ISO)`` with a
 fail-closed currency allowlist. ``parse_amount`` is called by the sync service
 for OPEN-month settlements only, never inside ``classify_payments``.
 """
+
 from __future__ import annotations
 
 import re
@@ -17,18 +18,14 @@ from decimal import Decimal, InvalidOperation
 from ums_smart_revenue.db.iso_4217_2026_05 import ISO_4217_CURRENCIES_2026_05
 
 # accounts/{account}/payments/{suffix}; the suffix carries the type/status.
-_RESOURCE_NAME_RE = re.compile(
-    r"^accounts/(?P<account>[^/]+)/payments/(?P<suffix>.+)$"
-)
+_RESOURCE_NAME_RE = re.compile(r"^accounts/(?P<account>[^/]+)/payments/(?P<suffix>.+)$")
 # Paid settlement suffix: [youtube-]YYYY-MM-DD.
 _DATE_SUFFIX_RE = re.compile(r"^(?:youtube-)?(?P<date>\d{4}-\d{2}-\d{2})$")
 # Running balance suffix: [youtube-]unpaid (no date).
 _BALANCE_SUFFIX_RE = re.compile(r"^(?:youtube-)?unpaid$")
 # An explicit ISO 4217 code anywhere in the string wins over symbols.
 _ISO_CODE_RE = re.compile(r"\b([A-Z]{3})\b")
-_ISO_4217_CODES = frozenset(
-    str(entry["code"]) for entry in ISO_4217_CURRENCIES_2026_05
-)
+_ISO_4217_CODES = frozenset(str(entry["code"]) for entry in ISO_4217_CURRENCIES_2026_05)
 # Only unambiguous symbols are accepted; $, ¥, kr, etc. are intentionally absent.
 _SYMBOL_CURRENCIES: dict[str, str] = {"£": "GBP", "€": "EUR"}
 # Plain decimal: optional 3-digit thousands groups, optional fractional part.
@@ -53,10 +50,10 @@ class PaidSettlement:
     """Paid AdSense settlement classified for strict amount parsing and sync."""
 
     source_account_id: str
-    month: str          # YYYY-MM derived from Payment.date
-    payment_name: str   # raw resource-name suffix, e.g. "2026-04-21"
+    month: str  # YYYY-MM derived from Payment.date
+    payment_name: str  # raw resource-name suffix, e.g. "2026-04-21"
     payment_date: date
-    raw_amount: str     # raw formatted string, preserved into raw_payload
+    raw_amount: str  # raw formatted string, preserved into raw_payload
     resource_name: str  # full "accounts/{account}/payments/{suffix}"
 
 
@@ -81,9 +78,7 @@ class ClassifiedPayments:
 #   - File: backend/ums_smart_revenue/connectors/google/adsense_payment_sync.py
 #     -> consumes ClassifiedPayments and calls parse_amount for open months.
 # ============================================================================
-def classify_payments(
-    response: dict[str, object], *, account_id: str
-) -> ClassifiedPayments:
+def classify_payments(response: dict[str, object], *, account_id: str) -> ClassifiedPayments:
     """Split payments into paid settlements vs retained balances.
 
     Raises:
@@ -106,9 +101,7 @@ def classify_payments(
             raise AdSensePaymentMappingError("payment.name must be a non-empty string")
         raw_amount = entry.get("amount")
         if not isinstance(raw_amount, str):
-            raise AdSensePaymentMappingError(
-                f"payment.amount must be a string for {name!r}"
-            )
+            raise AdSensePaymentMappingError(f"payment.amount must be a string for {name!r}")
         suffix = _resource_suffix(name, account_id)
 
         if _BALANCE_SUFFIX_RE.fullmatch(suffix):
@@ -124,9 +117,7 @@ def classify_payments(
 
         date_match = _DATE_SUFFIX_RE.fullmatch(suffix)
         if date_match is None:
-            raise AdSensePaymentMappingError(
-                f"unrecognized payment name form: {name!r}"
-            )
+            raise AdSensePaymentMappingError(f"unrecognized payment name form: {name!r}")
         payment_date = _parse_google_date(entry.get("date"), name)
         suffix_date = _parse_iso_date(date_match.group("date"), name)
         if suffix_date != payment_date:
@@ -174,9 +165,7 @@ def parse_amount(raw_amount: str) -> tuple[Decimal, str]:
         raise AdSensePaymentMappingError("amount string is empty")
     if "-" in text:
         # Negative settlements are not valid paid rows; reject before parsing.
-        raise AdSensePaymentMappingError(
-            f"amount must be non-negative: {raw_amount!r}"
-        )
+        raise AdSensePaymentMappingError(f"amount must be non-negative: {raw_amount!r}")
 
     iso = _ISO_CODE_RE.search(text)
     if iso is not None:
@@ -184,10 +173,8 @@ def parse_amount(raw_amount: str) -> tuple[Decimal, str]:
         # FIX: Only the immutable ISO 4217 snapshot may make a three-letter
         # token authoritative; unknown tokens like "ABC" must fail closed.
         if currency not in _ISO_4217_CODES:
-            raise AdSensePaymentMappingError(
-                f"unsupported ISO currency in amount: {raw_amount!r}"
-            )
-        remainder = (text[: iso.start()] + text[iso.end():]).strip()
+            raise AdSensePaymentMappingError(f"unsupported ISO currency in amount: {raw_amount!r}")
+        remainder = (text[: iso.start()] + text[iso.end() :]).strip()
         # FIX: The explicit ISO code is authoritative, but only a real leading
         # currency symbol may be ignored (for example, "¥1,235 JPY"). Unknown
         # prefixes such as "x100 GBP" must remain and fail _NUMBER_RE below.
@@ -200,7 +187,7 @@ def parse_amount(raw_amount: str) -> tuple[Decimal, str]:
         for symbol, code in _SYMBOL_CURRENCIES.items():
             if text.startswith(symbol):
                 currency = code
-                number = text[len(symbol):].strip()
+                number = text[len(symbol) :].strip()
                 break
         if not currency:
             # No ISO code and no allowlisted symbol -> ambiguous ($, ¥, kr, ...).
@@ -209,19 +196,13 @@ def parse_amount(raw_amount: str) -> tuple[Decimal, str]:
             )
 
     if not _NUMBER_RE.fullmatch(number):
-        raise AdSensePaymentMappingError(
-            f"unparseable amount number: {raw_amount!r}"
-        )
+        raise AdSensePaymentMappingError(f"unparseable amount number: {raw_amount!r}")
     try:
         amount = Decimal(number.replace(",", ""))
     except InvalidOperation as exc:
-        raise AdSensePaymentMappingError(
-            f"unparseable amount: {raw_amount!r}"
-        ) from exc
+        raise AdSensePaymentMappingError(f"unparseable amount: {raw_amount!r}") from exc
     if not amount.is_finite() or amount < 0:
-        raise AdSensePaymentMappingError(
-            f"amount must be a finite value >= 0: {raw_amount!r}"
-        )
+        raise AdSensePaymentMappingError(f"amount must be a finite value >= 0: {raw_amount!r}")
     return amount, currency
 
 
@@ -229,15 +210,12 @@ def _resource_suffix(name: str, account_id: str) -> str:
     """Return the resource-name suffix after a fail-closed account match."""
     match = _RESOURCE_NAME_RE.fullmatch(name)
     if match is None:
-        raise AdSensePaymentMappingError(
-            f"payment.name is not a valid resource name: {name!r}"
-        )
+        raise AdSensePaymentMappingError(f"payment.name is not a valid resource name: {name!r}")
     if match.group("account") != account_id:
         # The resource name's account must equal the account we pulled for,
         # else the row's identity cannot be trusted.
         raise AdSensePaymentMappingError(
-            f"payment.name account {match.group('account')!r} "
-            f"!= requested account {account_id!r}"
+            f"payment.name account {match.group('account')!r} != requested account {account_id!r}"
         )
     return match.group("suffix")
 
@@ -245,15 +223,11 @@ def _resource_suffix(name: str, account_id: str) -> str:
 def _parse_google_date(value: object, name: str) -> date:
     """Parse the ``google.type.Date`` object ({year,month,day}) for a settlement."""
     if not isinstance(value, dict):
-        raise AdSensePaymentMappingError(
-            f"paid settlement {name!r} is missing Payment.date"
-        )
+        raise AdSensePaymentMappingError(f"paid settlement {name!r} is missing Payment.date")
     try:
         return date(int(value["year"]), int(value["month"]), int(value["day"]))
     except (KeyError, TypeError, ValueError) as exc:
-        raise AdSensePaymentMappingError(
-            f"invalid Payment.date for {name!r}"
-        ) from exc
+        raise AdSensePaymentMappingError(f"invalid Payment.date for {name!r}") from exc
 
 
 def _parse_iso_date(text: str, name: str) -> date:
@@ -261,6 +235,4 @@ def _parse_iso_date(text: str, name: str) -> date:
     try:
         return date.fromisoformat(text)
     except ValueError as exc:
-        raise AdSensePaymentMappingError(
-            f"invalid date suffix for {name!r}"
-        ) from exc
+        raise AdSensePaymentMappingError(f"invalid date suffix for {name!r}") from exc

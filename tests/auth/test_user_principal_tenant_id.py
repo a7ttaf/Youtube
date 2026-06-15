@@ -102,9 +102,7 @@ def test_principal_loader_rejects_malformed_tenant_id() -> None:
     _seed_active_user(engine, user_id=user_id)
 
     with Session(engine) as session, pytest.raises(PrincipalValidationError):
-        SqlAlchemyPrincipalLoader(session).load(
-            user_id=str(user_id), tenant_id="not-a-uuid"
-        )
+        SqlAlchemyPrincipalLoader(session).load(user_id=str(user_id), tenant_id="not-a-uuid")
 
 
 def _build_engine_with_users() -> Engine:

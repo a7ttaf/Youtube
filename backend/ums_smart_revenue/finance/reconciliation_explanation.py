@@ -1,5 +1,6 @@
 """Build the revenue_reconciliation explanation (components + prose) for a
 channel-month from a ChannelReconciliation. Deterministic; no LLM."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -75,10 +76,7 @@ def _confidence_for_warnings(
     LOW when any warning indicates the reconciliation basis was suppressed
     or clamped; MEDIUM otherwise.
     """
-    if any(
-        w["code"].startswith(_LOW_CONFIDENCE_WARNING_PREFIXES)
-        for w in warnings
-    ):
+    if any(w["code"].startswith(_LOW_CONFIDENCE_WARNING_PREFIXES) for w in warnings):
         return {"label": "LOW", "score": "0"}
     return {"label": "MEDIUM", "score": "0.80"}
 
@@ -121,11 +119,13 @@ def build_reconciliation_explanation(
         ),
         _component("us_tax_usd", "US tax", line.us_tax_usd),
         _component(
-            "yt_adsense_fee_usd", "YouTube->AdSense transfer fee",
+            "yt_adsense_fee_usd",
+            "YouTube->AdSense transfer fee",
             line.yt_adsense_fee_usd,
         ),
         _component(
-            "adsense_bank_fee_usd", "AdSense->bank transfer fee",
+            "adsense_bank_fee_usd",
+            "AdSense->bank transfer fee",
             line.adsense_bank_fee_usd,
         ),
         _component("fx_variance_usd", "FX variance", line.fx_variance_usd),
@@ -140,9 +140,7 @@ def build_reconciliation_explanation(
         metric=REVENUE_RECONCILIATION_METRIC,
         value=line.net_received_usd,
         currency="USD",
-        formula=(
-            "estimated_gross - us_tax - yt_adsense_fee - adsense_bank_fee - fx_variance"
-        ),
+        formula=("estimated_gross - us_tax - yt_adsense_fee - adsense_bank_fee - fx_variance"),
         confidence=confidence,
         components=components,
         warnings=list(warnings),

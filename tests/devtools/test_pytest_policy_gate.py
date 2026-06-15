@@ -206,9 +206,7 @@ def test_payment_contract_is_checked():
     )
 
     violations = find_policy_violations(tmp_path)
-    symbols_by_line = {
-        (violation.line, violation.symbol) for violation in violations
-    }
+    symbols_by_line = {(violation.line, violation.symbol) for violation in violations}
 
     assert (9, "pytest.skip") in symbols_by_line
     assert (12, "pytest.mark.xfail") in symbols_by_line

@@ -7,6 +7,7 @@ Two backends implement BlobStorageBackend (Protocol):
 The orchestrator selects the backend by URI scheme; mixed-scheme runs are
 not supported in a single orchestrator invocation.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -143,10 +144,7 @@ def deterministic_blob_path(
     Note: account_id is intentionally NOT in the path - run context lives on
     connector_runs.
     """
-    return (
-        f"{scheme}://{bucket}/{tenant_id}/{connector_key}/{report_type}/"
-        f"{month}/{checksum}.{ext}"
-    )
+    return f"{scheme}://{bucket}/{tenant_id}/{connector_key}/{report_type}/{month}/{checksum}.{ext}"
 
 
 def compute_checksum(content: bytes) -> str:

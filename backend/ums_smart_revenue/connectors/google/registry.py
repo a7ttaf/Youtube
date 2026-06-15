@@ -4,6 +4,7 @@ B2.4 registers the YouTube Reporting keys. B2.5/B2.6 can add analytics and
 AdSense keys without changing the CLI entrypoint. Unknown keys raise ValueError
 at argparse time.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
