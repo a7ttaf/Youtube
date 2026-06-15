@@ -19,7 +19,7 @@ const appendOptionalCredentialHealthParam = (
   key: string,
   value: number | undefined,
 ): void => {
-  if (value != null) params.set(key, String(value));
+  if (value !== undefined) params.set(key, String(value));
 };
 
 export const buildConnectorCredentialHealthUrl = ({
