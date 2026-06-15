@@ -11,9 +11,9 @@ branch_labels = None
 depends_on = None
 
 
-def upgrade() -> None:  # skipcq: PTC-W0049
-    pass
+def upgrade() -> None:
+    """Merge-only revision; no schema operations are required."""
 
 
-def downgrade() -> None:  # skipcq: PTC-W0049
-    pass
+def downgrade() -> None:
+    """Merge-only revision; no schema operations are required."""

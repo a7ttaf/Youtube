@@ -1,7 +1,7 @@
 """Integration tests for connector credential and test-connection API endpoints."""
-
 import os
 from datetime import UTC, datetime
+from typing import Self
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -11,10 +11,18 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.connectors import list_connector_credential_health
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
+from ums_smart_revenue.auth.roles import RoleKey
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
+    ConnectorCredentialEntry,
+    ConnectorCredentialPage,
+    SqlAlchemyConnectorCredentialRepository,
     _is_duplicate_credential_integrity_error,
+    derive_credential_health_state,
     is_external_secret_ref,
 )
 from ums_smart_revenue.connectors.google.errors import (
@@ -99,8 +107,10 @@ def seed_database(database_url: str) -> None:
 
 
 class _FakeExecutor:
-    """Records submit_if_absent / activate / cancel_reservation
-    calls and answers has_active_job() from a flag set."""
+    """Records submit_if_absent / activate / cancel_reservation calls.
+
+    Answers has_active_job() from a flag set at construction time.
+    """
 
     def __init__(self, *, active=False):
         self.active = active
@@ -119,9 +129,8 @@ class _FakeExecutor:
             return None
         return _FakeReservation(kwargs)
 
-    def activate(self, reservation):  # skipcq: PYL-R1711
+    def activate(self, reservation):
         self.activate_calls.append({"reservation": reservation})
-        return None
 
     def cancel_reservation(self, reservation):
         self.cancel_calls.append({"reservation": reservation})
@@ -231,7 +240,9 @@ def test_connector_credentials_reject_raw_secret_payload(tmp_path):
 
 def test_external_secret_ref_requires_prefix_and_locator():
     """is_external_secret_ref requires a recognised scheme prefix and a non-blank locator path."""
-    assert is_external_secret_ref("secret-manager://ums/youtube-reporting/content-owner-1")
+    assert is_external_secret_ref(
+        "secret-manager://ums/youtube-reporting/content-owner-1"
+    )
     assert not is_external_secret_ref("")
     assert not is_external_secret_ref("secret-manager://")
     assert not is_external_secret_ref("secret-manager://   ")
@@ -301,7 +312,9 @@ def test_connector_credentials_list_is_paginated(tmp_path):
         assert create_response.status_code == 201
 
     response = client.get("/connectors/credentials?limit=1&offset=0", headers=headers)
-    next_response = client.get("/connectors/credentials?limit=1&offset=1", headers=headers)
+    next_response = client.get(
+        "/connectors/credentials?limit=1&offset=1", headers=headers
+    )
 
     assert response.status_code == 200
     assert response.json()["items"][0]["account_id"] == "content-owner-1"
@@ -352,7 +365,9 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -414,10 +429,7 @@ def test_request_connector_job_missing_permission_403(tmp_path):
 
 def test_request_connector_job_503_when_executor_disabled(tmp_path):
     """Executor disabled -> 503 + a job_rejected/executor_disabled audit."""
-    import os  # skipcq: PYL-W0404
-
     os.environ.pop("UMS_CONNECTOR_JOB_EXECUTOR_ENABLED", None)
-    from ums_smart_revenue.config.settings import load_app_settings  # skipcq: PYL-W0404
 
     load_app_settings.cache_clear()
     database_url = build_database_url(tmp_path)
@@ -427,7 +439,9 @@ def test_request_connector_job_503_when_executor_disabled(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -480,7 +494,9 @@ def test_request_connector_job_422_bad_month(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -506,7 +522,9 @@ def test_request_connector_job_422_missing_credential(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -533,7 +551,9 @@ def test_request_connector_job_422_inactive_credential(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -551,8 +571,10 @@ def test_request_connector_job_422_inactive_credential(tmp_path):
 
 
 def test_request_connector_job_409_duplicate_in_flight(tmp_path):
-    """submit_if_absent returns None for an in-flight slot
-    -> 409 + job_rejected/duplicate_in_flight."""
+    """submit_if_absent returns None for an in-flight slot.
+
+    Expects 409 + job_rejected/duplicate_in_flight.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url)
@@ -561,7 +583,9 @@ def test_request_connector_job_409_duplicate_in_flight(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -605,7 +629,9 @@ def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -648,8 +674,8 @@ def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
 
 
 def test_request_connector_job_503_service_principal_unavailable(tmp_path):
-    """Missing UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID
-    -> 503 + job_rejected/service_principal_unavailable.
+    """Missing UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID -> 503 + job_rejected/
+    service_principal_unavailable.
 
     The pre-flight check rejects the request without reserving an executor
     slot, so the worker is never enqueued even though the executor is enabled.
@@ -670,7 +696,9 @@ def test_request_connector_job_503_service_principal_unavailable(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -719,7 +747,9 @@ def test_request_connector_job_dry_run_skips_service_principal_preflight(
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -762,7 +792,9 @@ def test_request_connector_job_accepts_hyphen_alias_for_underscore_credential(
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube-reporting",
             "account_id": "content-owner-1",
@@ -775,7 +807,9 @@ def test_request_connector_job_accepts_hyphen_alias_for_underscore_credential(
     assert len(fake.activate_calls) == 1
 
 
-def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monkeypatch) -> None:
+def test_request_connector_job_after_rollback_cancels_reservation(
+    tmp_path, monkeypatch
+) -> None:
     """The after_rollback hook drops the reservation if the session rolls back.
 
     Pins the fix for: a DB error in find_active_runs_for_scope() / finish_run()
@@ -812,7 +846,9 @@ def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monk
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -836,8 +872,8 @@ def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monk
 def test_request_connector_job_activate_failure_writes_bucket_a_audit(
     tmp_path, monkeypatch
 ) -> None:
-    """If executor.activate() raises after the audit commits,
-    a job_failed_before_start audit row is written.
+    """If executor.activate() raises after the audit commits, a job_failed_before_start
+    audit row is written.
 
     Pins the fix for: an accepted 202 with no worker enqueue (e.g. the
     ThreadPoolExecutor rejecting new work during app shutdown) must not
@@ -878,7 +914,9 @@ def test_request_connector_job_activate_failure_writes_bucket_a_audit(
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -919,7 +957,9 @@ def test_request_connector_job_activate_runs_only_after_commit(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
@@ -1008,7 +1048,9 @@ def test_test_connection_returns_inactive_status_for_inactive_credential(tmp_pat
 
     with patch(
         "ums_smart_revenue.api.connectors.resolve_connector_credentials",
-        side_effect=InactiveCredentialError(credential_id="cred-uuid", status="disabled"),
+        side_effect=InactiveCredentialError(
+            credential_id="cred-uuid", status="disabled"
+        ),
     ):
         response = client.post(
             "/connectors/credentials/youtube_reporting/content-owner-1/test",
@@ -1090,7 +1132,6 @@ def test_test_connection_requires_manage_connectors_permission(tmp_path):
 
 def test_credential_integrity_classifier_uses_duplicate_constraint_only():
     """Integrity classifier returns True only for the unique-constraint violation, not FK errors."""
-
     # pylint: disable=too-few-public-methods
     class DuplicateDiag:
         """Minimal constraint diagnostic stub for testing the integrity classifier."""
@@ -1102,8 +1143,12 @@ def test_credential_integrity_classifier_uses_duplicate_constraint_only():
 
         diag = DuplicateDiag()
 
-    duplicate_error = IntegrityError("insert", {}, DuplicateOrigError("duplicate credential"))
-    foreign_key_error = IntegrityError("insert", {}, Exception("FOREIGN KEY constraint failed"))
+    duplicate_error = IntegrityError(
+        "insert", {}, DuplicateOrigError("duplicate credential")
+    )
+    foreign_key_error = IntegrityError(
+        "insert", {}, Exception("FOREIGN KEY constraint failed")
+    )
 
     assert _is_duplicate_credential_integrity_error(duplicate_error)
     assert not _is_duplicate_credential_integrity_error(foreign_key_error)
@@ -1229,7 +1274,9 @@ def test_list_runs_allows_connector_scoped_health_access(tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["pagination"]["returned"] == 2
-    assert {item["connector_key"] for item in body["items"]} == {"youtube-reporting"}
+    assert {item["connector_key"] for item in body["items"]} == {
+        "youtube-reporting"
+    }
 
 
 def test_list_runs_redacts_internal_error_summary_details(tmp_path):
@@ -1379,10 +1426,6 @@ def test_list_runs_limit_over_cap_returns_422(tmp_path):
 
 def test_get_credential_found_none_and_wrong_tenant(tmp_path):
     """get_credential returns the entry for the scope, None when absent/cross-tenant."""
-    from ums_smart_revenue.connectors.credentials import (
-        SqlAlchemyConnectorCredentialRepository,
-    )
-
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -1400,7 +1443,9 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
         )
         session.commit()
     with Session(engine) as session:
-        repo = SqlAlchemyConnectorCredentialRepository(session, tenant_id=UMS_TENANT_ID)
+        repo = SqlAlchemyConnectorCredentialRepository(
+            session, tenant_id=UMS_TENANT_ID
+        )
         found = repo.get_credential(
             session,
             tenant_id=UUID(UMS_TENANT_ID),
@@ -1409,33 +1454,23 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
         )
         assert found is not None
         assert found.status == "active"
-        assert (
-            repo.get_credential(
-                session,
-                tenant_id=UUID(UMS_TENANT_ID),
-                connector_key="youtube_reporting",
-                account_id="missing",
-            )
-            is None
-        )
-        assert (
-            repo.get_credential(
-                session,
-                tenant_id=other_tenant,
-                connector_key="youtube_reporting",
-                account_id="acct-1",
-            )
-            is None
-        )
+        assert repo.get_credential(
+            session,
+            tenant_id=UUID(UMS_TENANT_ID),
+            connector_key="youtube_reporting",
+            account_id="missing",
+        ) is None
+        assert repo.get_credential(
+            session,
+            tenant_id=other_tenant,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+        ) is None
     engine.dispose()
 
 
 def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
     """_to_entry reads the four telemetry columns into the entry + to_api."""
-    from ums_smart_revenue.connectors.credentials import (
-        SqlAlchemyConnectorCredentialRepository,
-    )
-
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     stamped = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
@@ -1457,7 +1492,9 @@ def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
         )
         session.commit()
     with Session(engine) as session:
-        repo = SqlAlchemyConnectorCredentialRepository(session, tenant_id=UMS_TENANT_ID)
+        repo = SqlAlchemyConnectorCredentialRepository(
+            session, tenant_id=UMS_TENANT_ID
+        )
         entry = repo.get_credential(
             session,
             tenant_id=UUID(UMS_TENANT_ID),
@@ -1472,15 +1509,17 @@ def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
     # to_api serializes whatever the DB returns; the SQLite test tier strips
     # the tzinfo on DateTime(timezone=True) read-back (Postgres keeps +00:00),
     # so compare the parsed instant rather than the raw offset string.
-    assert datetime.fromisoformat(api["last_refresh_attempt_at"]).replace(tzinfo=UTC) == stamped
-    assert datetime.fromisoformat(api["token_expiry_at"]).replace(tzinfo=UTC) == stamped
+    assert datetime.fromisoformat(api["last_refresh_attempt_at"]).replace(
+        tzinfo=UTC
+    ) == stamped
+    assert datetime.fromisoformat(api["token_expiry_at"]).replace(
+        tzinfo=UTC
+    ) == stamped
     assert api["last_refresh_error_class"] is None
 
 
 def test_to_api_serializes_none_telemetry(tmp_path):
     """to_api emits None for unstamped telemetry without raising."""
-    from ums_smart_revenue.connectors.credentials import ConnectorCredentialEntry
-
     entry = ConnectorCredentialEntry(
         id="x",
         connector_key="youtube_reporting",
@@ -1517,10 +1556,386 @@ def test_list_credentials_api_includes_telemetry_fields(tmp_path):
         session.commit()
     engine.dispose()
     client = TestClient(create_app(database_url=database_url))
-    response = client.get("/connectors/credentials", headers=auth_headers("connector_admin"))
+    response = client.get(
+        "/connectors/credentials", headers=auth_headers("connector_admin")
+    )
     assert response.status_code == 200
     item = response.json()["items"][0]
     assert "last_refresh_status" in item
     assert "last_refresh_attempt_at" in item
     assert "token_expiry_at" in item
     assert "last_refresh_error_class" in item
+
+
+def seed_credential(
+    database_url: str,
+    *,
+    connector_key: str,
+    account_id: str,
+    status: str = "active",
+    encrypted_secret_ref: str = "secret-manager://ums/yt/acct",
+    last_refresh_attempt_at: datetime | None = None,
+    token_expiry_at: datetime | None = None,
+    last_refresh_status: str | None = None,
+    last_refresh_error_class: str | None = None,
+) -> None:
+    """Seed one connector credential row with explicit telemetry values."""
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            session.add(
+                ApiConnectorCredentialORM(
+                    id=uuid4(),
+                    tenant_id=UUID(UMS_TENANT_ID),
+                    connector_key=connector_key,
+                    account_id=account_id,
+                    encrypted_secret_ref=encrypted_secret_ref,
+                    status=status,
+                    last_refresh_attempt_at=last_refresh_attempt_at,
+                    token_expiry_at=token_expiry_at,
+                    last_refresh_status=last_refresh_status,
+                    last_refresh_error_class=last_refresh_error_class,
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+
+def test_credential_health_returns_telemetry_and_state_for_viewer(tmp_path):
+    """VIEW_CONNECTOR_HEALTH viewer gets telemetry + health_state per credential."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_credential(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        last_refresh_attempt_at=datetime(2026, 3, 1, 12, 0, tzinfo=UTC),
+        token_expiry_at=datetime(2030, 1, 1, 0, 0, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/credentials/health",
+        headers=auth_headers("system_integration_user"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["credentials"]) == 1
+    entry = body["credentials"][0]
+    assert entry["connector_key"] == "youtube_reporting"
+    assert entry["last_refresh_status"] == "succeeded"
+    assert "last_refresh_attempt_at" in entry
+    assert "token_expiry_at" in entry
+    assert "last_refresh_error_class" in entry
+    assert entry["health_state"] == "healthy"
+    assert body["pagination"]["limit"] == 50
+    assert body["pagination"]["offset"] == 0
+    assert body["pagination"]["returned"] == 1
+    assert body["pagination"]["has_more"] is False
+
+
+class _TenantRecordingHealthRepository:
+    def __init__(self) -> None:
+        self.bound_tenant_id: UUID | str | None = None
+        self.connector_keys: frozenset[str] | None = None
+
+    def for_tenant(self, tenant_id: UUID | str) -> Self:
+        self.bound_tenant_id = tenant_id
+        return self
+
+    def list_credentials(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        connector_keys: frozenset[str] | None = None,
+    ) -> ConnectorCredentialPage:
+        self.connector_keys = connector_keys
+        return ConnectorCredentialPage(
+            items=[
+                ConnectorCredentialEntry(
+                    id="cred-other-tenant",
+                    connector_key="youtube_reporting",
+                    account_id="acct-other",
+                    status="active",
+                    has_secret_ref=True,
+                )
+            ],
+            limit=limit,
+            offset=offset,
+            has_more=False,
+        )
+
+
+def test_credential_health_binds_repository_to_principal_tenant():
+    """Credential-health reads use the authenticated tenant, not the bootstrap default."""
+    tenant_id = UUID("00000000-0000-0000-0000-00000000b105")
+    repository = _TenantRecordingHealthRepository()
+    user = UserPrincipal(
+        user_id=str(USER_ID),
+        email="connector-user@example.com",
+        role_assignments=(
+            RoleAssignment(
+                role=RoleKey.SYSTEM_INTEGRATION_USER,
+                scope=AccessScope.global_scope(),
+            ),
+        ),
+        is_service_account=True,
+        tenant_id=str(tenant_id),
+    )
+
+    body = list_connector_credential_health(
+        user=user,
+        repository=repository,
+        limit=50,
+        offset=0,
+    )
+
+    assert repository.bound_tenant_id == tenant_id
+    assert repository.connector_keys is None
+    assert body["credentials"][0]["account_id"] == "acct-other"
+
+
+def test_credential_health_connector_scope_excludes_foreign_connector(tmp_path):
+    """Connector-scoped viewer sees only allowed connector ids; no foreign leak."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_credential(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        last_refresh_status="succeeded",
+    )
+    seed_credential(
+        database_url,
+        connector_key="adsense",
+        account_id="acct-2",
+        last_refresh_status="succeeded",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/credentials/health",
+        headers=auth_headers(
+            "system_integration_user", "connector", "youtube_reporting"
+        ),
+    )
+
+    assert response.status_code == 200
+    keys = {entry["connector_key"] for entry in response.json()["credentials"]}
+    assert keys == {"youtube_reporting"}
+    assert "adsense" not in keys
+
+
+def test_credential_health_forbidden_without_view_connector_health(tmp_path):
+    """audit_viewer lacks VIEW_CONNECTOR_HEALTH (and MANAGE) -> fail-closed 403."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_credential(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/credentials/health",
+        headers=auth_headers("audit_viewer"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.view_health"
+
+
+def test_credential_health_serializes_null_telemetry_as_unknown(tmp_path):
+    """A credential with no refresh telemetry yields health_state 'unknown'."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_credential(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        last_refresh_attempt_at=None,
+        token_expiry_at=None,
+        last_refresh_status=None,
+        last_refresh_error_class=None,
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/credentials/health",
+        headers=auth_headers("system_integration_user"),
+    )
+
+    assert response.status_code == 200
+    entry = response.json()["credentials"][0]
+    assert entry["last_refresh_status"] is None
+    assert entry["token_expiry_at"] is None
+    assert entry["health_state"] == "unknown"
+
+
+def test_derive_credential_health_state_auth_failed_on_failure_status():
+    """A failed last_refresh_status derives 'auth_failed' when the credential is active."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="failed",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "auth_failed"
+
+
+def test_derive_credential_health_state_auth_failed_on_error_class():
+    """A set last_refresh_error_class derives 'auth_failed' even with no status."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        last_refresh_error_class="OAuthRefreshError",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "auth_failed"
+
+
+def test_derive_credential_health_state_missing_without_secret_ref():
+    """No stored secret reference derives 'missing'."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=False,
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "missing"
+
+
+def test_derive_credential_health_state_auth_failed_precedence_over_missing():
+    """auth_failed is evaluated before missing: a failed refresh with no secret
+    still derives 'auth_failed' (locks the documented rule precedence)."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=False,
+        last_refresh_status="failed",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "auth_failed"
+
+
+def test_derive_credential_health_state_expiring_within_window():
+    """token_expiry_at within 24h of as_of derives 'expiring'."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2026, 6, 14, 18, 0, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "expiring"
+
+
+def test_derive_credential_health_state_healthy_on_success_not_expiring():
+    """Last success and a far-future expiry derive 'healthy'."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "healthy"
+
+
+def test_derive_credential_health_state_healthy_on_success_no_expiry():
+    """Last success with no recorded expiry is still 'healthy' (not expiring)."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        token_expiry_at=None,
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "healthy"
+
+
+def test_derive_credential_health_state_unknown_without_telemetry():
+    """A credential with a secret but no telemetry derives 'unknown'."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        token_expiry_at=None,
+        last_refresh_status=None,
+        last_refresh_error_class=None,
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "unknown"
+
+
+def test_derive_credential_health_state_disabled_returns_unknown():
+    """A disabled credential with a prior success returns 'unknown', not 'healthy'."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="disabled",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "unknown"
+
+
+def test_derive_credential_health_state_revoked_returns_unknown():
+    """A non-active credential (rotating) returns 'unknown', not 'healthy'."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="rotating",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "unknown"
+
+
+def test_derive_credential_health_state_failed_auth_returns_unknown():
+    """A failed_auth credential returns 'unknown', not 'healthy'."""
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="failed_auth",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "unknown"

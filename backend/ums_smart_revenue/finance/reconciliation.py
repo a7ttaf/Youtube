@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
-from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
+from ums_smart_revenue.finance.revenue_fact_entries import RevenueFactEntry
 
 DEFAULT_VARIANCE_TOLERANCE_PERCENT = Decimal("0.02")
 SOURCE_PRIORITY = {
@@ -119,7 +119,9 @@ def build_revenue_reconciliation_preview(
                 ReconciliationIssue(
                     issue_type="NO_REVENUE_FACTS",
                     severity="HIGH",
-                    message=(f"no revenue facts are available for {youtube_channel_id} in {month}"),
+                    message=(
+                        f"No revenue facts are available for {youtube_channel_id} in {month}."
+                    ),
                 )
             ],
         )

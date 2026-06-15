@@ -83,6 +83,15 @@ class UserAccessProfileEntry:
         }
 
 
+@dataclass(frozen=True)
+class _UserAccountUpdate:
+    """Normalized optional account fields for one guarded update operation."""
+
+    email: str | None
+    display_name: str | None
+    status: str | None
+
+
 class UserAccountError(ValueError):
     """Base class for user account domain failures exposed to API handlers."""
 
@@ -298,7 +307,16 @@ class SqlAlchemyUserAccountRepository:
 
         return self._run_with_storage_retries(operation)
 
-    def update_user(  # skipcq: PY-R1000
+    # ============================================================================
+    # Purpose: Apply guarded account metadata and lifecycle updates for one tenant.
+    # Database/ORM: UserORM/users.
+    # Standards: Repository-owned write, typed domain errors, rollback on conflicts.
+    # Blast Radius: Authorization and audit-adjacent account lifecycle state.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/user_accounts.py -> Route error mapping.
+    #   - File: backend/ums_smart_revenue/auth/user_auth_service.py -> Principal loading.
+    # ============================================================================
+    def update_user(
         self,
         *,
         user_id: str,
@@ -309,23 +327,11 @@ class SqlAlchemyUserAccountRepository:
     ) -> UserAccountEntry:
         """Update account metadata or lifecycle status after compatibility checks."""
         user_uuid = _parse_uuid(user_id, field_name="user_id")
-
-        normalized_email = None
-        normalized_display_name = None
-        normalized_status = None
-
-        if email is not None:
-            normalized_email = _normalize_email(email)
-
-        if display_name is not None:
-            normalized_display_name = _normalize_bounded_string(
-                display_name,
-                "display_name",
-                max_length=USER_DISPLAY_NAME_MAX_LENGTH,
-            )
-
-        if status is not None:
-            normalized_status = _normalize_status(status)
+        update = _normalize_user_account_update(
+            email=email,
+            display_name=display_name,
+            status=status,
+        )
 
         def operation() -> UserAccountEntry:
             """Attempt one account-update write against the current session."""
@@ -343,27 +349,22 @@ class SqlAlchemyUserAccountRepository:
                     "Service account management requires Super Owner"
                 )
 
-            if normalized_email is not None and (
-                self._email_exists(normalized_email, excluding_user_id=user_uuid)
+            if update.email is not None and (
+                self._email_exists(update.email, excluding_user_id=user_uuid)
             ):
                 raise UserAccountConflictError("User email already exists")
 
-            if normalized_status is not None:
-                _require_compatible_status(row, normalized_status)
+            if update.status is not None:
+                _require_compatible_status(row, update.status)
 
             try:
-                if normalized_email is not None:
-                    row.email = normalized_email
-                if normalized_display_name is not None:
-                    row.display_name = normalized_display_name
-                if normalized_status is not None:
-                    row.status = normalized_status
+                _apply_user_account_update(row, update)
                 self._session.flush()
             except IntegrityError as exc:
                 self._session.rollback()
-                if normalized_email is not None and (
+                if update.email is not None and (
                     _is_email_constraint_violation(exc)
-                    or self._email_exists(normalized_email, excluding_user_id=user_uuid)
+                    or self._email_exists(update.email, excluding_user_id=user_uuid)
                 ):
                     raise UserAccountConflictError("User email already exists") from exc
                 raise UserAccountConflictError(
@@ -427,6 +428,47 @@ def _parse_uuid(value: object, *, field_name: str) -> UUID:
         return UUID(value)
     except (AttributeError, TypeError, ValueError) as exc:
         raise UserAccountValidationError(f"{field_name} must be a valid UUID") from exc
+
+
+# ============================================================================
+# Purpose: Normalize and apply optional user-account update fields consistently.
+# Database/ORM: UserORM/users.
+# Standards: Repository helper, typed validation errors, no direct API concerns.
+# Blast Radius: Authorization and audit-adjacent account lifecycle state.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/users.py -> SqlAlchemyUserAccountRepository.update_user.
+#   - File: backend/ums_smart_revenue/db/security_models.py -> UserORM field contract.
+# ============================================================================
+def _normalize_user_account_update(
+    *,
+    email: str | None,
+    display_name: str | None,
+    status: str | None,
+) -> _UserAccountUpdate:
+    """Normalize optional account update fields before opening the write attempt."""
+    return _UserAccountUpdate(
+        email=_normalize_email(email) if email is not None else None,
+        display_name=(
+            _normalize_bounded_string(
+                display_name,
+                "display_name",
+                max_length=USER_DISPLAY_NAME_MAX_LENGTH,
+            )
+            if display_name is not None
+            else None
+        ),
+        status=_normalize_status(status) if status is not None else None,
+    )
+
+
+def _apply_user_account_update(row: UserORM, update: _UserAccountUpdate) -> None:
+    """Apply only fields explicitly present in the normalized update payload."""
+    if update.email is not None:
+        row.email = update.email
+    if update.display_name is not None:
+        row.display_name = update.display_name
+    if update.status is not None:
+        row.status = update.status
 
 
 def _normalize_email(value: str) -> str:

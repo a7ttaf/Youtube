@@ -14,7 +14,7 @@ import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
 import AuditView from "./views/AuditView";
 import CloseView from "./views/CloseView";
 import CommandView from "./views/CommandView";
-import ConnectorsView from "./views/ConnectorsView";
+import { ConnectorsView } from "./views/ConnectorsView";
 import ExportsView from "./views/ExportsView";
 import RegistryView from "./views/RegistryView";
 import TraceView from "./views/TraceView";

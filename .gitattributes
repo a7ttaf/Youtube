@@ -1,4 +1,8 @@
-# Default: respect core.whitespace and Git's standard line-ending normalization.
+# Default: normalize tracked text files to LF in the repository. `text=auto`
+# lets Git auto-detect binary files and leave them untouched. This prevents
+# CRLF from leaking into committed source on Windows checkouts, since
+# core.autocrlf is intentionally false in this repo.
+* text=auto eol=lf
 
 # Vendored agent content (Claude Code / Codex agents skills + GitHub theme
 # JSON5 files + GitHub font licenses). Sources tracked in skills-lock.json
