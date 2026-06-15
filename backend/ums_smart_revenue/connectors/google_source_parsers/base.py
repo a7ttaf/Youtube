@@ -109,9 +109,7 @@ def parse_decimal_amount(raw_value: object, *, metric_key: str) -> Decimal:
             f"got {type(raw_value).__name__}"
         )
     if not candidate.is_finite():
-        raise ParserError(
-            f"metric {metric_key!r} value must be finite, got {raw_value!r}"
-        )
+        raise ParserError(f"metric {metric_key!r} value must be finite, got {raw_value!r}")
     return candidate
 
 
@@ -131,13 +129,9 @@ def parse_iso_date(raw_value: str, *, field: str) -> date:
     try:
         parsed = date.fromisoformat(raw_value)
     except ValueError as exc:
-        raise ParserError(
-            f"{field} must be an ISO-8601 date string, got {raw_value!r}"
-        ) from exc
+        raise ParserError(f"{field} must be an ISO-8601 date string, got {raw_value!r}") from exc
     if parsed.isoformat() != raw_value:
-        raise ParserError(
-            f"{field} must be a canonical YYYY-MM-DD date string, got {raw_value!r}"
-        )
+        raise ParserError(f"{field} must be a canonical YYYY-MM-DD date string, got {raw_value!r}")
     return parsed
 
 

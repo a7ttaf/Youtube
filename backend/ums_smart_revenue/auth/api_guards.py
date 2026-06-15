@@ -24,12 +24,8 @@ def require_permission(
     message: str | None = None,
 ) -> Callable[[GuardContext], None]:
     def guard(context: GuardContext) -> None:
-        if not has_permission(
-            context.user, permission, context.scope, context.org_index
-        ):
-            raise AccessDeniedError(
-                message or f"Missing permission: {permission.value}"
-            )
+        if not has_permission(context.user, permission, context.scope, context.org_index):
+            raise AccessDeniedError(message or f"Missing permission: {permission.value}")
 
     return guard
 
@@ -49,7 +45,7 @@ def require_predicate(
 def guarded_call[T](
     guard: Callable[[GuardContext], None],
     context: GuardContext,
-    handler: Callable[[], T],
-) -> T:
+    handler: Callable[[], T],  # skipcq: PYL-E0602
+) -> T:  # skipcq: PYL-E0602
     guard(context)
     return handler()

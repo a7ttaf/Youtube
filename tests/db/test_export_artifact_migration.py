@@ -2,16 +2,12 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
-    "backend/ums_smart_revenue/db/alembic/versions/"
-    "20260513_0003_export_artifact_metadata.py"
+    "backend/ums_smart_revenue/db/alembic/versions/20260513_0003_export_artifact_metadata.py"
 )
 
 
 def test_export_artifact_migration_adds_generated_artifact_metadata():
-    migration = (
-        PROJECT_ROOT
-        / MIGRATION_PATH
-    ).read_text(encoding="utf-8")
+    migration = (PROJECT_ROOT / MIGRATION_PATH).read_text(encoding="utf-8")
 
     assert 'revision = "20260513_0003"' in migration
     assert 'down_revision = "20260513_0002"' in migration

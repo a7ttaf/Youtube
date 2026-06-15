@@ -9,6 +9,7 @@ generalizes the sanctioned single-session elevation precedent in
 ``finance/committed_allocation.py`` so the run path can issue those writes under
 ``app_platform`` inside the same atomic transaction.
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterator

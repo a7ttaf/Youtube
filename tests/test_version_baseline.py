@@ -1,3 +1,8 @@
+# skipcq: PYL-R0401 -- DeepSource attributes pre-existing backend import cycles
+# (api.allocation/channels/revenue; finance.month_close/month_close_readiness/
+# reconciliation/revenue_facts) to this top-level module via whole-package import
+# analysis. The cycles are not introduced here and resolve at runtime; they are
+# tracked for a dedicated backend decoupling refactor (see PR #104 report).
 import tomllib
 from pathlib import Path
 
@@ -7,9 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
-    pyproject = tomllib.loads(
-        (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    )
+    pyproject = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = set(pyproject["project"]["dependencies"])
     test_dependencies = set(pyproject["project"]["optional-dependencies"]["test"])
     expected_dependencies = {
@@ -26,12 +29,12 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "reportlab==4.5.1",
         "python-pptx==1.0.2",
         "google-cloud-secret-manager==2.29.0",
-        "google-cloud-storage==3.11.0",
+        "google-cloud-storage==3.12.0",
     }
     expected_test_dependencies = {
         "pytest==9.0.3",
         "httpx==0.28.1",
-        "pypdf==6.13.1",
+        "pypdf==6.13.2",
     }
 
     assert pyproject["project"]["requires-python"] == ">=3.14,<3.15"
@@ -51,8 +54,8 @@ def test_stack_version_baseline_records_runtime_and_frontend_targets():
     assert STACK_VERSION_BASELINE["backend"]["reportlab"] == "4.5.1"
     assert STACK_VERSION_BASELINE["backend"]["python_pptx"] == "1.0.2"
     assert STACK_VERSION_BASELINE["backend"]["google_cloud_secret_manager"] == "2.29.0"
-    assert STACK_VERSION_BASELINE["backend"]["google_cloud_storage"] == "3.11.0"
-    assert STACK_VERSION_BASELINE["backend"]["pypdf"] == "6.13.1"
+    assert STACK_VERSION_BASELINE["backend"]["google_cloud_storage"] == "3.12.0"
+    assert STACK_VERSION_BASELINE["backend"]["pypdf"] == "6.13.2"
     assert STACK_VERSION_BASELINE["datastores"]["postgresql"] == "18.3"
     assert STACK_VERSION_BASELINE["frontend"]["next"] == "16.2.6"
     assert STACK_VERSION_BASELINE["frontend"]["react"] == "19.2.6"

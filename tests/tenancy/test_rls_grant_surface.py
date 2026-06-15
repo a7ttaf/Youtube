@@ -60,9 +60,7 @@ def test_app_tenant_can_reach_non_tenant_tables():
             for table in _NON_TENANT_READ_TABLES:
                 # count(*) on possibly-empty tables: success == no
                 # permission-denied; a privilege gap would raise here.
-                count = conn.execute(
-                    sa.text(f"SELECT count(*) FROM {table}")
-                ).scalar()
+                count = conn.execute(sa.text(f"SELECT count(*) FROM {table}")).scalar()
                 assert count is not None, f"{table} unreachable as app_tenant"
     finally:
         engine.dispose()
@@ -79,13 +77,11 @@ def test_app_tenant_has_write_grant_on_non_tenant_write_table():
         with engine.connect() as conn:
             granted = conn.execute(
                 sa.text(
-                    "SELECT has_table_privilege("
-                    "'app_tenant', 'currency_exchange_rates', 'INSERT')"
+                    "SELECT has_table_privilege('app_tenant', 'currency_exchange_rates', 'INSERT')"
                 )
             ).scalar()
             assert granted is True, (
-                "app_tenant lost INSERT on currency_exchange_rates "
-                "(NON_TENANT_WRITE_TABLES member)"
+                "app_tenant lost INSERT on currency_exchange_rates (NON_TENANT_WRITE_TABLES member)"
             )
     finally:
         engine.dispose()
@@ -100,16 +96,13 @@ def test_app_tenant_is_denied_dml_on_committed_allocation_children():
         with engine.connect() as conn:
             for table in _PLATFORM_ONLY_WRITE_TABLES:
                 granted = conn.execute(
-                    sa.text(
-                        "SELECT has_table_privilege("
-                        "'app_tenant', :table, 'INSERT')"
-                    ),
+                    sa.text("SELECT has_table_privilege('app_tenant', :table, 'INSERT')"),
                     {"table": table},
                 ).scalar()
                 assert granted is False, (
                     f"app_tenant unexpectedly holds INSERT on {table}; "
                     "committed-allocation child writes must stay platform-only"
-            )
+                )
     finally:
         engine.dispose()
 
@@ -123,10 +116,7 @@ def test_app_tenant_is_denied_dml_on_tenant_platform_only_write_tables():
         with engine.connect() as conn:
             for table in _PLATFORM_ONLY_WRITE_TABLES[:3]:
                 granted = conn.execute(
-                    sa.text(
-                        "SELECT has_table_privilege("
-                        "'app_tenant', :table, 'INSERT')"
-                    ),
+                    sa.text("SELECT has_table_privilege('app_tenant', :table, 'INSERT')"),
                     {"table": table},
                 ).scalar()
                 assert granted is False, (
@@ -146,10 +136,7 @@ def test_app_platform_has_write_grant_on_committed_allocation_children():
         with engine.connect() as conn:
             for table in _PLATFORM_ONLY_WRITE_TABLES:
                 granted = conn.execute(
-                    sa.text(
-                        "SELECT has_table_privilege("
-                        "'app_platform', :table, 'INSERT')"
-                    ),
+                    sa.text("SELECT has_table_privilege('app_platform', :table, 'INSERT')"),
                     {"table": table},
                 ).scalar()
                 assert granted is True, (
@@ -171,10 +158,7 @@ def test_app_tenant_is_denied_dml_on_platform_catalog():
     try:
         with engine.connect() as conn:
             insert_granted = conn.execute(
-                sa.text(
-                    "SELECT has_table_privilege("
-                    "'app_tenant', 'permissions', 'INSERT')"
-                )
+                sa.text("SELECT has_table_privilege('app_tenant', 'permissions', 'INSERT')")
             ).scalar()
             assert insert_granted is False, (
                 "app_tenant unexpectedly holds INSERT on the permissions "
@@ -182,14 +166,9 @@ def test_app_tenant_is_denied_dml_on_platform_catalog():
             )
             # Sanity: SELECT on the same catalog IS granted (broad reads).
             select_granted = conn.execute(
-                sa.text(
-                    "SELECT has_table_privilege("
-                    "'app_tenant', 'permissions', 'SELECT')"
-                )
+                sa.text("SELECT has_table_privilege('app_tenant', 'permissions', 'SELECT')")
             ).scalar()
-            assert select_granted is True, (
-                "app_tenant lost broad SELECT on the permissions catalog"
-            )
+            assert select_granted is True, "app_tenant lost broad SELECT on the permissions catalog"
     finally:
         engine.dispose()
 
@@ -203,10 +182,7 @@ def test_app_platform_has_write_grant_on_system_owned_write_tables():
         with engine.connect() as conn:
             for table in _PLATFORM_ONLY_WRITE_TABLES[:3]:
                 granted = conn.execute(
-                    sa.text(
-                        "SELECT has_table_privilege("
-                        "'app_platform', :table, 'INSERT')"
-                    ),
+                    sa.text("SELECT has_table_privilege('app_platform', :table, 'INSERT')"),
                     {"table": table},
                 ).scalar()
                 assert granted is True, (

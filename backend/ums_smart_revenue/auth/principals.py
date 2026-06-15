@@ -125,9 +125,7 @@ class SqlAlchemyPrincipalLoader:
             email=user.email,
             role_assignments=self._load_role_assignments(user.id, user.tenant_id),
             direct_permissions=self._load_permission_grants(user.id, user.tenant_id),
-            is_service_account=(
-                user.is_service_account or user_status == UserStatus.SERVICE
-            ),
+            is_service_account=(user.is_service_account or user_status == UserStatus.SERVICE),
             disabled=False,
             tenant_id=principal_tenant_id,
         )
@@ -135,17 +133,13 @@ class SqlAlchemyPrincipalLoader:
     def _prepare_read_connection(self) -> None:
         """Apply principal read isolation and timeout settings to the transaction."""
         bind = self._session.get_bind()
-        connection = self._session.connection(
-            execution_options={"isolation_level": "SERIALIZABLE"}
-        )
+        connection = self._session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
         if bind.dialect.name == "postgresql":
             connection.exec_driver_sql(
                 f"SET LOCAL statement_timeout = {PRINCIPAL_QUERY_TIMEOUT_MS}"
             )
 
-    def _load_role_assignments(
-        self, user_id: UUID, tenant_id: UUID
-    ) -> tuple[RoleAssignment, ...]:
+    def _load_role_assignments(self, user_id: UUID, tenant_id: UUID) -> tuple[RoleAssignment, ...]:
         """Load active role assignments while enforcing a bounded row count."""
         rows = self._session.execute(
             select(UserRoleAssignmentORM, AccessScopeORM)
@@ -161,8 +155,7 @@ class SqlAlchemyPrincipalLoader:
         ).all()
         if len(rows) > MAX_ACTIVE_ROLE_ASSIGNMENTS:
             raise PrincipalLimitExceededError(
-                "Principal has more than "
-                f"{MAX_ACTIVE_ROLE_ASSIGNMENTS} active role assignments"
+                f"Principal has more than {MAX_ACTIVE_ROLE_ASSIGNMENTS} active role assignments"
             )
         assignments: list[RoleAssignment] = []
         for assignment, scope in rows:
@@ -193,8 +186,7 @@ class SqlAlchemyPrincipalLoader:
         ).all()
         if len(rows) > MAX_ACTIVE_PERMISSION_GRANTS:
             raise PrincipalLimitExceededError(
-                "Principal has more than "
-                f"{MAX_ACTIVE_PERMISSION_GRANTS} active permission grants"
+                f"Principal has more than {MAX_ACTIVE_PERMISSION_GRANTS} active permission grants"
             )
         grants: list[PermissionGrant] = []
         for grant, scope in rows:
@@ -237,9 +229,7 @@ def _parse_user_status(value: str) -> UserStatus:
     try:
         return UserStatus(value)
     except ValueError as exc:
-        raise PrincipalDataValidationError(
-            f"Unknown user status in database: {value}"
-        ) from exc
+        raise PrincipalDataValidationError(f"Unknown user status in database: {value}") from exc
 
 
 def _parse_role(value: str) -> RoleKey:
@@ -247,9 +237,7 @@ def _parse_role(value: str) -> RoleKey:
     try:
         return RoleKey(value)
     except ValueError as exc:
-        raise PrincipalDataValidationError(
-            f"Unknown role assignment in database: {value}"
-        ) from exc
+        raise PrincipalDataValidationError(f"Unknown role assignment in database: {value}") from exc
 
 
 def _parse_permission(value: str) -> Permission:

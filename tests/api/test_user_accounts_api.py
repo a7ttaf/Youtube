@@ -40,9 +40,7 @@ def seed_database(database_url: str) -> None:
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(
-            UserORM(id=ADMIN_ID, email="admin@example.com", display_name="Admin User")
-        )
+        session.add(UserORM(id=ADMIN_ID, email="admin@example.com", display_name="Admin User"))
         session.commit()
 
 
@@ -63,9 +61,7 @@ def test_corporate_admin_creates_human_user_with_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        user = session.scalars(
-            select(UserORM).where(UserORM.email == "analyst@example.com")
-        ).one()
+        user = session.scalars(select(UserORM).where(UserORM.email == "analyst@example.com")).one()
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 201
@@ -137,9 +133,7 @@ def test_historical_duplicate_user_emails_return_conflict(tmp_path):
         session.execute(text("DROP INDEX IF EXISTS uq_users_email_lower"))
         session.add_all(
             [
-                UserORM(
-                    id=uuid4(), email="legacy@example.com", display_name="Legacy User"
-                ),
+                UserORM(id=uuid4(), email="legacy@example.com", display_name="Legacy User"),
                 UserORM(
                     id=uuid4(),
                     email="Legacy@Example.com",
@@ -200,9 +194,7 @@ def test_user_repository_rejects_non_string_email(tmp_path):
     engine = create_engine(database_url)
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
 
         with pytest.raises(
             UserAccountValidationError,
@@ -221,9 +213,7 @@ def test_user_repository_rejects_non_string_user_id(tmp_path):
     engine = create_engine(database_url)
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
 
         with pytest.raises(
             UserAccountValidationError,
@@ -238,9 +228,7 @@ def test_user_repository_rejects_non_boolean_service_account_flag(tmp_path):
     engine = create_engine(database_url)
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
 
         with pytest.raises(
             UserAccountValidationError,
@@ -282,9 +270,7 @@ def test_user_repository_maps_email_unique_constraint_to_conflict(
     engine = create_engine(database_url)
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
         monkeypatch.setattr(repository, "_email_exists", lambda *args, **kwargs: False)
 
         with pytest.raises(
@@ -307,9 +293,7 @@ def test_user_repository_maps_unknown_integrity_error_to_conflict(
     engine = create_engine(database_url)
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
         monkeypatch.setattr(repository, "_email_exists", lambda *args, **kwargs: False)
 
         def fail_flush(*args, **kwargs):
@@ -341,9 +325,7 @@ def test_user_repository_retries_transient_create_storage_error(
     engine = create_engine(database_url)
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
         original_flush = session.flush
         flush_attempts = 0
 
@@ -376,9 +358,7 @@ def test_user_repository_returns_conflict_for_concurrent_duplicate_create(
     engine = create_engine(database_url)
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
         original_flush = session.flush
         injected_duplicate = False
 
@@ -427,9 +407,7 @@ def test_corporate_admin_cannot_create_service_account(tmp_path):
     )
 
     assert response.status_code == 403
-    assert (
-        response.json()["detail"] == "Service account management requires Super Owner"
-    )
+    assert response.json()["detail"] == "Service account management requires Super Owner"
 
 
 def test_super_owner_creates_service_account(tmp_path):
@@ -772,9 +750,7 @@ def test_corporate_admin_cannot_patch_existing_service_account(tmp_path):
     )
 
     assert response.status_code == 403
-    assert (
-        response.json()["detail"] == "Service account management requires Super Owner"
-    )
+    assert response.json()["detail"] == "Service account management requires Super Owner"
 
 
 def test_repository_rechecks_service_account_policy_during_update(tmp_path):
@@ -784,9 +760,7 @@ def test_repository_rechecks_service_account_policy_during_update(tmp_path):
     engine = create_engine(database_url)
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
         service_account = repository.create_user(
             email="svc-policy@example.com",
             display_name="Service Policy User",
@@ -795,9 +769,7 @@ def test_repository_rechecks_service_account_policy_during_update(tmp_path):
         session.commit()
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
 
         with pytest.raises(
             UserAccountServiceAccountPolicyError,
@@ -820,9 +792,7 @@ def test_user_repository_returns_conflict_for_concurrent_duplicate_update(
     engine = create_engine(database_url)
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
         account = repository.create_user(
             email="loser@example.com",
             display_name="Race Loser",
@@ -831,9 +801,7 @@ def test_user_repository_returns_conflict_for_concurrent_duplicate_update(
         session.commit()
 
     with Session(engine) as session:
-        repository = SqlAlchemyUserAccountRepository(
-            session, tenant_id=DEFAULT_TENANT_ID
-        )
+        repository = SqlAlchemyUserAccountRepository(session, tenant_id=DEFAULT_TENANT_ID)
         original_flush = session.flush
         injected_duplicate = False
 
@@ -884,9 +852,7 @@ def test_update_to_historical_duplicate_email_returns_conflict(tmp_path):
         session.execute(text("DROP INDEX IF EXISTS uq_users_email_lower"))
         session.add_all(
             [
-                UserORM(
-                    id=uuid4(), email="legacy@example.com", display_name="Legacy User"
-                ),
+                UserORM(id=uuid4(), email="legacy@example.com", display_name="Legacy User"),
                 UserORM(
                     id=uuid4(),
                     email="Legacy@Example.com",

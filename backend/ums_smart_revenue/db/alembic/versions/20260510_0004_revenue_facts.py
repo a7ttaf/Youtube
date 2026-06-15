@@ -39,9 +39,7 @@ def upgrade() -> None:
         sa.Column("source_report_id", sa.Text(), nullable=True),
         sa.Column("gross_revenue_usd", sa.Numeric(18, 6), nullable=False),
         sa.Column("net_revenue_usd", sa.Numeric(18, 6), nullable=True),
-        sa.Column(
-            "views", sa.BigInteger(), nullable=False, server_default=sa.text("0")
-        ),
+        sa.Column("views", sa.BigInteger(), nullable=False, server_default=sa.text("0")),
         sa.Column(
             "watch_time_minutes",
             sa.Numeric(18, 2),
@@ -95,9 +93,7 @@ def upgrade() -> None:
             "net_revenue_usd IS NULL OR net_revenue_usd >= 0",
             name="ck_monthly_channel_revenue_facts_net_nonnegative",
         ),
-        sa.CheckConstraint(
-            "views >= 0", name="ck_monthly_channel_revenue_facts_views_nonnegative"
-        ),
+        sa.CheckConstraint("views >= 0", name="ck_monthly_channel_revenue_facts_views_nonnegative"),
         sa.CheckConstraint(
             "watch_time_minutes >= 0",
             name="ck_monthly_channel_revenue_facts_watch_time_nonnegative",

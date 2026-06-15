@@ -4,7 +4,8 @@
 # Standards: Local Playwright runner, deterministic output paths, no app logic.
 # Blast Radius: Mockup QA artifacts only; no auth, finance, audit, Neo4j, exports.
 # Connections:
-#   - File: mockups/ums-smart-revenue-command-center-soft-dark.html -> Source HTML captured into PNG QA views.
+#   - File: mockups/ums-smart-revenue-command-center-soft-dark.html
+#     -> Source HTML captured into PNG QA views.
 #   - File: Docs/09_SMART_DASHBOARD_UI.md -> Documents the soft-dark visual reference.
 # ============================================================================
 from pathlib import Path
@@ -15,12 +16,14 @@ html_path = Path(__file__).parent.parent / "ums-smart-revenue-command-center-sof
 qa_dir = Path(__file__).parent
 base_url = f"file:///{html_path.resolve().as_posix()}"
 
+
 # Contract: Wait for the local page and loaded webfonts to settle before capture.
 # Parameters: page is a Playwright Page already navigating to the mockup view.
 # Returns: None; blocks only until network and font readiness conditions finish.
 def wait_for_stable(page):
     page.wait_for_load_state("networkidle")
     page.evaluate("document.fonts.ready")
+
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)

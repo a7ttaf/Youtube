@@ -17,6 +17,7 @@ fetch_bytes() (raw download bodies):
     DNS / TCP   -> exp backoff 1/2/4s max 3 attempts -> GoogleApiServerError
                    (status=0 sentinel: no HTTP response was produced)
 """
+
 from __future__ import annotations
 
 import time
@@ -70,7 +71,7 @@ def _backoff_schedule(max_attempts: int) -> list[float]:
     # 1, 2, 4, 8, ... capped at 64s; one entry per attempt, indexed by
     # (attempt - 1). Used identically by 429, 5xx, timeouts, and connect
     # errors; each retry budget consumes its own slot in the schedule.
-    return [min(2.0 ** i, _BACKOFF_CAP_SECONDS) for i in range(max_attempts)]
+    return [min(2.0**i, _BACKOFF_CAP_SECONDS) for i in range(max_attempts)]
 
 
 # ============================================================================
@@ -103,7 +104,9 @@ def _sleep_for_retryable_status(
     if status == 429:
         if attempt == _MAX_STATUS_ATTEMPTS:
             raise GoogleApiRateLimitError(
-                method=method, url=url, status=429,
+                method=method,
+                url=url,
+                status=429,
                 attempts=_MAX_STATUS_ATTEMPTS,
             )
         ra = response.headers.get("Retry-After")
@@ -117,7 +120,9 @@ def _sleep_for_retryable_status(
     if status in _RETRY_SERVER_STATUSES:
         if attempt == _MAX_STATUS_ATTEMPTS:
             raise GoogleApiServerError(
-                method=method, url=url, status=status,
+                method=method,
+                url=url,
+                status=status,
                 attempts=_MAX_STATUS_ATTEMPTS,
             )
         time.sleep(status_backoff[attempt - 1])
@@ -148,9 +153,7 @@ def _auth_headers(
     return headers
 
 
-def _retry_after_timeout(
-    state: _RetryState, *, method: str, url: str
-) -> None:
+def _retry_after_timeout(state: _RetryState, *, method: str, url: str) -> None:
     """
     Increment timeout retry counter, adjust status attempts, and sleep based
     on the timeout backoff schedule, raising an error if retry limit is exceeded.
@@ -167,9 +170,7 @@ def _retry_after_timeout(
     time.sleep(state.timeout_backoff[state.timeout_attempts - 1])
 
 
-def _retry_after_connect_error(
-    state: _RetryState, *, method: str, url: str
-) -> None:
+def _retry_after_connect_error(state: _RetryState, *, method: str, url: str) -> None:
     """
     Increment transport connection retry counter, adjust status attempts, and
     sleep based on the connect backoff schedule, raising an error if retry limit is exceeded.
@@ -405,14 +406,15 @@ class GoogleHttpClient:
         #     _GoogleApiHttpError) for the 200-with-bad-body branch.
         # ====================================================================
         response = self._send_with_retry(
-            method=method, url=url, params=params, json_body=json_body,
+            method=method,
+            url=url,
+            params=params,
+            json_body=json_body,
         )
         try:
             body = response.json()
         except ValueError as exc:
-            raise GoogleApiResponseError(
-                url=url, reason=f"not valid json: {exc}"
-            ) from exc
+            raise GoogleApiResponseError(url=url, reason=f"not valid json: {exc}") from exc
         if not isinstance(body, dict):
             raise GoogleApiResponseError(
                 url=url, reason=f"expected object, got {type(body).__name__}"

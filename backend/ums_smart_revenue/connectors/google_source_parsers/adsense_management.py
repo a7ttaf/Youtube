@@ -54,7 +54,7 @@ _TOLERATED_METRIC_HEADER_TYPES: Final[frozenset[str]] = frozenset(
 class AdSenseManagementParser:
     source_system = "adsense_management"
 
-    def parse(
+    def parse(  # skipcq: PY-R1000
         self,
         payload: dict[str, object],
         *,
@@ -91,8 +91,12 @@ class AdSenseManagementParser:
             raise ParserError(
                 "request.accountId must include a non-empty account id after 'accounts/'"
             )
-        period_start = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "startDate"))
-        period_end = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "endDate"))
+        period_start = self._parse_iso_date(
+            require_dict(require_dict(request, "dateRange"), "startDate")
+        )
+        period_end = self._parse_iso_date(
+            require_dict(require_dict(request, "dateRange"), "endDate")
+        )
         currency = require_str(request, "currencyCode")
         # FIX: reject a blank/whitespace currency: it is not a valid ISO code and
         # would persist as a blank currency_code and key axis (mirrors the YouTube
@@ -216,7 +220,8 @@ class AdSenseManagementParser:
                     source_row_key=source_row_key,
                     source_account_id=account_id,
                     content_owner_id=None,
-                    youtube_channel_id=None,  # AdSense reports are account-scoped, not channel-scoped.
+                    # AdSense reports are account-scoped, not channel-scoped.
+                    youtube_channel_id=None,
                     report_type=report_type,
                     report_month=f"{period_start.year:04d}-{period_start.month:02d}",
                     period_start=period_start,
@@ -232,7 +237,11 @@ class AdSenseManagementParser:
                     # mutation of one row's raw_payload["dimensions"] silently
                     # corrupt sibling metric rows' audit payloads (CLAUDE.md rule
                     # 4). Cells are scalars, so a shallow dict() copy isolates it.
-                    raw_payload={"dimensions": dict(dim_values), "metric": metric_name, "value": raw_value},
+                    raw_payload={
+                        "dimensions": dict(dim_values),
+                        "metric": metric_name,
+                        "value": raw_value,
+                    },
                 )
 
     @staticmethod

@@ -59,9 +59,7 @@ class ConnectorRunEntry:
             "report_month": self.report_month,
             "triggered_by_user_id": self.triggered_by_user_id,
             "started_at": self.started_at.isoformat(),
-            "finished_at": (
-                self.finished_at.isoformat() if self.finished_at is not None else None
-            ),
+            "finished_at": (self.finished_at.isoformat() if self.finished_at is not None else None),
             "status": self.status,
             "counts": dict(self.counts),
             # FIX: Keep the raw DB value internal and redact locators before
@@ -253,9 +251,7 @@ def record_projection_failure(
         for_update=True,
     )
     if row.status == "RUNNING":
-        raise ConnectorRunValidationError(
-            "connector run is still RUNNING; use finish_run instead"
-        )
+        raise ConnectorRunValidationError("connector run is still RUNNING; use finish_run instead")
     row.status = "FAILED"
     row.error_summary = error_summary.strip()[:ERROR_SUMMARY_MAX_CHARS]
     session.flush()
@@ -457,9 +453,7 @@ def _validate_ordering_index(ordering_index: int) -> None:
         or not isinstance(ordering_index, int)
         or ordering_index < 0
     ):
-        raise ConnectorRunValidationError(
-            "ordering_index must be a non-negative integer"
-        )
+        raise ConnectorRunValidationError("ordering_index must be a non-negative integer")
 
 
 def _get_raw_file(
@@ -563,11 +557,7 @@ def _normalize_counts_for_read(counts_json: object) -> dict[str, int]:
     normalized: dict[str, int] = {}
     for key in CONNECTOR_RUN_COUNT_KEYS:
         value = raw.get(key)
-        if (
-            isinstance(value, int)
-            and not isinstance(value, bool)
-            and value >= 0
-        ):
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             normalized[key] = value
         else:
             normalized[key] = 0
@@ -582,9 +572,7 @@ def _to_entry(row: ConnectorRunORM) -> ConnectorRunEntry:
         connector_key=row.connector_key,
         account_id=row.account_id,
         report_month=row.report_month,
-        triggered_by_user_id=(
-            str(row.triggered_by_user_id) if row.triggered_by_user_id else None
-        ),
+        triggered_by_user_id=(str(row.triggered_by_user_id) if row.triggered_by_user_id else None),
         started_at=row.started_at,
         finished_at=row.finished_at,
         status=row.status,

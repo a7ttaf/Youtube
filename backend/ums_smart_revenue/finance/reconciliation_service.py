@@ -6,6 +6,7 @@ deductions as typed deduction_components and a reconciliation explanation, write
 ALLOCATION revenue facts for 1:1 outside-CMS channels, and records one audit
 event. PostgreSQL/warehouse stays the source of truth; no Neo4j writes.
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -137,13 +138,9 @@ class ReconciliationWorkflowService:
         self._explanations = SqlAlchemyNumberExplanationRepository(
             session, tenant_id=self._tenant_id
         )
-        self._links = SqlAlchemyChannelAccountLinkRepository(
-            session, tenant_id=self._tenant_id
-        )
+        self._links = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=self._tenant_id)
 
-    def run(
-        self, *, month: str, actor: UserPrincipal, reason: str
-    ) -> MonthReconciliationResult:
+    def run(self, *, month: str, actor: UserPrincipal, reason: str) -> MonthReconciliationResult:
         """Reconcile a finance month and persist the derived deductions + facts.
 
         Raises:
@@ -171,9 +168,7 @@ class ReconciliationWorkflowService:
         #   - File: backend/ums_smart_revenue/finance/net_revenue.py -> resolver.
         #   - File: Docs/superpowers/plans/2026-06-09-track-f-smart-reconciliation.md
         # ====================================================================
-        if get_month_close_status(
-            self._session, month, tenant_id=self._tenant_id
-        ) == "LOCKED":
+        if get_month_close_status(self._session, month, tenant_id=self._tenant_id) == "LOCKED":
             raise MonthLockedError(f"Finance month {month!r} is locked")
 
         try:
@@ -181,9 +176,7 @@ class ReconciliationWorkflowService:
                 outside_warnings,
                 adsense_total,
                 bank_basis_scoped,
-            ) = self._attribute_outside_cms(
-                month=month, actor=actor
-            )
+            ) = self._attribute_outside_cms(month=month, actor=actor)
 
             channel_gross, primary_source = self._gather_channel_gross(month)
             bank_total, fx_total = self._gather_bank_totals(month)
@@ -202,8 +195,7 @@ class ReconciliationWorkflowService:
                 bank_total = None
                 fx_total = Decimal("0")
             us_view_shares = {
-                channel: self._us_view.us_view_share(month, channel)
-                for channel in channel_gross
+                channel: self._us_view.us_view_share(month, channel) for channel in channel_gross
             }
 
             result = compute_month_reconciliation(
@@ -260,9 +252,7 @@ class ReconciliationWorkflowService:
         )
         return _with_warnings(result, merged_warnings)
 
-    def _gather_channel_gross(
-        self, month: str
-    ) -> tuple[dict[str, Decimal], dict[str, str]]:
+    def _gather_channel_gross(self, month: str) -> tuple[dict[str, Decimal], dict[str, str]]:
         """Select source-backed primary gross facts using source priority."""
         facts_by_channel: dict[str, list] = defaultdict(list)
         primary: dict[str, str] = {}
@@ -286,25 +276,18 @@ class ReconciliationWorkflowService:
 
     def _list_paid_payments(self, month: str) -> list[AdSensePaymentEntry]:
         """Return PAID AdSense payments for a month."""
-        repo = SqlAlchemyAdSensePaymentRepository(
-            self._session, tenant_id=self._tenant_id
-        )
+        repo = SqlAlchemyAdSensePaymentRepository(self._session, tenant_id=self._tenant_id)
         return [
-            pay for pay in repo.list_month_payments(month=month)
-            if pay.payment_status == "PAID"
+            pay for pay in repo.list_month_payments(month=month) if pay.payment_status == "PAID"
         ]
 
     def _gather_bank_totals(self, month: str) -> tuple[Decimal | None, Decimal]:
         """Sum bank receipts (None when absent) and FX differences for the month."""
-        repo = SqlAlchemyBankReconciliationRepository(
-            self._session, tenant_id=self._tenant_id
-        )
+        repo = SqlAlchemyBankReconciliationRepository(self._session, tenant_id=self._tenant_id)
         entries = repo.list_month_entries(month=month)
         if not entries:
             return None, Decimal("0")
-        bank_total = sum(
-            (entry.bank_received_amount_usd for entry in entries), Decimal("0")
-        )
+        bank_total = sum((entry.bank_received_amount_usd for entry in entries), Decimal("0"))
         fx_total = sum((entry.fx_difference_usd for entry in entries), Decimal("0"))
         return bank_total, fx_total
 
@@ -323,12 +306,10 @@ class ReconciliationWorkflowService:
             for kind, amount, suffix in _channel_hops(line):
                 if amount == 0:
                     continue
-                components.append(
-                    self._component(month, line, kind, amount, suffix, source_system)
-                )
+                components.append(self._component(month, line, kind, amount, suffix, source_system))
         return components
 
-    def _component(
+    def _component(  # skipcq: PYL-R0201
         self,
         month: str,
         line: ChannelReconciliation,

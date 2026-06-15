@@ -69,19 +69,10 @@ class OrgAccessIndex:
         # targets. Fail closed on either side.
         if granted_scope.id is None or target_scope.id is None:
             return False
-        if (
-            granted_scope.type == ScopeType.SECTOR
-            and target_scope.type == ScopeType.COMPANY
-        ):
+        if granted_scope.type == ScopeType.SECTOR and target_scope.type == ScopeType.COMPANY:
             return self.company_sector.get(target_scope.id) == granted_scope.id
-        if (
-            granted_scope.type == ScopeType.SECTOR
-            and target_scope.type == ScopeType.CHANNEL
-        ):
+        if granted_scope.type == ScopeType.SECTOR and target_scope.type == ScopeType.CHANNEL:
             return self.channel_sector.get(target_scope.id) == granted_scope.id
-        if (
-            granted_scope.type == ScopeType.COMPANY
-            and target_scope.type == ScopeType.CHANNEL
-        ):
+        if granted_scope.type == ScopeType.COMPANY and target_scope.type == ScopeType.CHANNEL:
             return self.channel_company.get(target_scope.id) == granted_scope.id
         return False

@@ -13,14 +13,10 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-FINANCE_EXPORT_TYPES = frozenset(
-    {"FINANCE_EXCEL", "EXECUTIVE_PDF", "BRANDED_SLIDE_PACK"}
-)
+FINANCE_EXPORT_TYPES = frozenset({"FINANCE_EXCEL", "EXECUTIVE_PDF", "BRANDED_SLIDE_PACK"})
 ANALYTICS_EXPORT_TYPES = frozenset({"ANALYTICS_SUMMARY_CSV"})
 ALLOWED_EXPORT_TYPES = FINANCE_EXPORT_TYPES | ANALYTICS_EXPORT_TYPES
-ALLOWED_EXPORT_SCOPE_TYPES = frozenset(
-    {"global", "sector", "company", "channel", "group"}
-)
+ALLOWED_EXPORT_SCOPE_TYPES = frozenset({"global", "sector", "company", "channel", "group"})
 ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES = (
     "file-store://",
     "s3://",
@@ -31,6 +27,8 @@ ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES = (
 MAX_EXPORT_JOB_PAGE_SIZE = 100
 _TERMINAL_EXPORT_JOB_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
+
+
 @dataclass(frozen=True)
 class ExportJobEntry:
     id: str
@@ -63,9 +61,7 @@ class ExportJobEntry:
             "scope_type": self.scope_type,
             "scope_id": self.scope_id,
             "scope_channel_ids": (
-                list(self.scope_channel_ids)
-                if self.scope_channel_ids is not None
-                else None
+                list(self.scope_channel_ids) if self.scope_channel_ids is not None else None
             ),
             "month": self.month,
             "currency": self.currency,
@@ -81,9 +77,7 @@ class ExportJobEntry:
             "include_confidence_notes": self.include_confidence_notes,
             "include_manual_override_notes": self.include_manual_override_notes,
             "created_at": self.created_at.isoformat(),
-            "completed_at": self.completed_at.isoformat()
-            if self.completed_at
-            else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
         }
 
 
@@ -148,9 +142,7 @@ class SqlAlchemyExportJobRepository:
         scope_channel_ids: tuple[str, ...] | frozenset[str] | None = None,
     ) -> ExportJobEntry:
         normalized_export_type = _normalize_export_type(export_type)
-        normalized_scope_type, normalized_scope_id = _normalize_scope(
-            scope_type, scope_id
-        )
+        normalized_scope_type, normalized_scope_id = _normalize_scope(scope_type, scope_id)
         _validate_month(month)
         normalized_currency = _normalize_currency(currency)
         actor_uuid = _actor_identity_uuid(actor_user_id)
@@ -257,9 +249,7 @@ class SqlAlchemyExportJobRepository:
             raise ExportJobTerminalStateError(
                 f"Export job {export_id} is already in terminal status {row.status}"
             )
-        normalized_failure_reason = _normalize_required_string(
-            failure_reason, "failure_reason"
-        )
+        normalized_failure_reason = _normalize_required_string(failure_reason, "failure_reason")
         now = datetime.now(UTC)
         row.status = "FAILED"
         row.file_url = None
@@ -380,10 +370,7 @@ class SqlAlchemyExportJobRepository:
 
 
 def _visibility_filter_condition(visibility_filter: ExportJobVisibilityFilter):
-    if (
-        visibility_filter.scope_type is None
-        and visibility_filter.scope_id is not None
-    ):
+    if visibility_filter.scope_type is None and visibility_filter.scope_id is not None:
         raise ExportJobValidationError(
             "visibility filter must include scope_type when scope_id is set"
         )
@@ -417,9 +404,7 @@ def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | 
         raise ExportJobValidationError(f"Unknown export scope_type: {scope_type}")
     if normalized_scope_type == "global":
         if normalized_scope_id:
-            raise ExportJobValidationError(
-                "scope_id must be omitted for global exports"
-            )
+            raise ExportJobValidationError("scope_id must be omitted for global exports")
         return normalized_scope_type, None
     if not normalized_scope_id:
         raise ExportJobValidationError(
@@ -430,9 +415,7 @@ def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | 
 
 def _validate_month(month: str) -> None:
     if not MONTH_PATTERN.fullmatch(month):
-        raise ExportJobValidationError(
-            "month must use YYYY-MM with a calendar month from 01 to 12"
-        )
+        raise ExportJobValidationError("month must use YYYY-MM with a calendar month from 01 to 12")
 
 
 def _normalize_currency(value: str) -> str:
@@ -454,28 +437,20 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 def _normalize_artifact_uri(value: str) -> str:
     normalized = _normalize_required_string(value, "file_url")
     if not normalized.startswith(ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES):
-        raise ExportJobValidationError(
-            "file_url must point to approved artifact storage"
-        )
+        raise ExportJobValidationError("file_url must point to approved artifact storage")
     return normalized
 
 
 def _normalize_artifact_byte_size(value: int) -> int:
     if value < 0:
-        raise ExportJobValidationError(
-            "artifact_byte_size must be greater than or equal to 0"
-        )
+        raise ExportJobValidationError("artifact_byte_size must be greater than or equal to 0")
     return value
 
 
 def _normalize_sha256(value: str) -> str:
     normalized = _normalize_required_string(value, "artifact_checksum_sha256").lower()
-    if len(normalized) != 64 or not all(
-        char in "0123456789abcdef" for char in normalized
-    ):
-        raise ExportJobValidationError(
-            "artifact_checksum_sha256 must be a 64-character hex digest"
-        )
+    if len(normalized) != 64 or not all(char in "0123456789abcdef" for char in normalized):
+        raise ExportJobValidationError("artifact_checksum_sha256 must be a 64-character hex digest")
     return normalized
 
 
@@ -519,29 +494,19 @@ def _normalize_scope_channel_ids(
 ) -> tuple[str, ...] | None:
     if scope_type == "global":
         if scope_channel_ids is not None:
-            raise ExportJobValidationError(
-                "scope_channel_ids must be omitted for global exports"
-            )
+            raise ExportJobValidationError("scope_channel_ids must be omitted for global exports")
         return None
     if scope_channel_ids is None:
-        raise ExportJobValidationError(
-            "scope_channel_ids must be provided for non-global exports"
-        )
+        raise ExportJobValidationError("scope_channel_ids must be provided for non-global exports")
     cleaned: list[str] = []
     for channel_id in scope_channel_ids:
         if not isinstance(channel_id, str):
-            raise ExportJobValidationError(
-                "scope_channel_ids must contain only strings"
-            )
+            raise ExportJobValidationError("scope_channel_ids must contain only strings")
         stripped = channel_id.strip()
         if not stripped:
-            raise ExportJobValidationError(
-                "scope_channel_ids must not contain blank entries"
-            )
+            raise ExportJobValidationError("scope_channel_ids must not contain blank entries")
         cleaned.append(stripped)
     result = tuple(sorted(set(cleaned)))
     if not result:
-        raise ExportJobValidationError(
-            "scope_channel_ids must contain at least one channel"
-        )
+        raise ExportJobValidationError("scope_channel_ids must contain at least one channel")
     return result

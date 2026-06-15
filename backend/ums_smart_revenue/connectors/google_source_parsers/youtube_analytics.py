@@ -22,8 +22,13 @@ from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
 from ums_smart_revenue.connectors.google_source_rows import ParsedSourceRow
 
 _MONETARY_METRICS: Final[frozenset[str]] = frozenset(
-    {"estimatedRevenue", "grossRevenue", "estimatedAdRevenue",
-     "estimatedRedPartnerRevenue", "adRevenue"}
+    {
+        "estimatedRevenue",
+        "grossRevenue",
+        "estimatedAdRevenue",
+        "estimatedRedPartnerRevenue",
+        "adRevenue",
+    }
 )
 
 
@@ -55,9 +60,7 @@ def _canonical_filters(filters: str | None) -> str | None:
             continue
         if "==" in clause:
             key, _, values = clause.partition("==")
-            sorted_values = ",".join(
-                sorted(v.strip() for v in values.split(",") if v.strip())
-            )
+            sorted_values = ",".join(sorted(v.strip() for v in values.split(",") if v.strip()))
             clause = f"{key.strip()}=={sorted_values}"
         canonical_clauses.append(clause)
     return ";".join(sorted(canonical_clauses)) or None
@@ -76,7 +79,7 @@ def _canonical_filters(filters: str | None) -> str | None:
 class YouTubeAnalyticsParser:
     source_system = "youtube_analytics"
 
-    def parse(
+    def parse(  # skipcq: PY-R1000
         self,
         payload: dict[str, object],
         *,
@@ -111,9 +114,7 @@ class YouTubeAnalyticsParser:
             # malformed (not a valid ISO code) and must fail closed rather than
             # be stored/keyed as a blank currency. Store the trimmed value.
             if not isinstance(currency, str) or not currency.strip():
-                raise ParserError(
-                    "query_request.currency must be a non-empty string when present"
-                )
+                raise ParserError("query_request.currency must be a non-empty string when present")
             currency = currency.strip()
         else:
             currency = "USD"
@@ -152,8 +153,7 @@ class YouTubeAnalyticsParser:
         selector_id = selector_id.strip()
         if sep != "==" or selector_kind not in {"channel", "contentOwner"} or not selector_id:
             raise ParserError(
-                "query_request.ids must be 'channel==<id>' or 'contentOwner==<id>', "
-                f"got {ids!r}"
+                f"query_request.ids must be 'channel==<id>' or 'contentOwner==<id>', got {ids!r}"
             )
         # content_owner_id holds the BARE id (the part after "==") so it is
         # usable for joins/filters; source_account_id stores the NORMALISED
@@ -303,5 +303,9 @@ class YouTubeAnalyticsParser:
                     # mutation of one row's raw_payload["dimensions"] silently
                     # corrupt sibling metric rows' audit payloads (CLAUDE.md rule
                     # 4). Cells are scalars, so a shallow dict() copy isolates it.
-                    raw_payload={"dimensions": dict(dim_values), "metric": metric_name, "value": raw_value},
+                    raw_payload={
+                        "dimensions": dict(dim_values),
+                        "metric": metric_name,
+                        "value": raw_value,
+                    },
                 )

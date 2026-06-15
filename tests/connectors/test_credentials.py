@@ -219,9 +219,7 @@ def test_create_credential_stamps_tenant_and_persists_all_fields():
 
 def test_create_credential_uses_ambient_tenant_context():
     with build_session() as session:
-        seed_actor_user(
-            session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID
-        )
+        seed_actor_user(session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID)
         token = TENANT_CTX.set(tenant())
         try:
             repo = SqlAlchemyConnectorCredentialRepository(session)
@@ -237,9 +235,7 @@ def test_create_credential_uses_ambient_tenant_context():
 def test_create_credential_returns_entry_without_exposing_secret_ref_value():
     with build_session() as session:
         repo = SqlAlchemyConnectorCredentialRepository(session)
-        entry = create_default(
-            repo, encrypted_secret_ref="vault://secret/data/yt/content-owner-1"
-        )
+        entry = create_default(repo, encrypted_secret_ref="vault://secret/data/yt/content-owner-1")
         session.commit()
 
         api = entry.to_api()
@@ -295,19 +291,13 @@ def test_create_credential_same_key_under_different_tenants_does_not_conflict():
         create_default(primary_repo)
         session.commit()
 
-        other_repo = SqlAlchemyConnectorCredentialRepository(
-            session, tenant_id=OTHER_TENANT_UUID
-        )
-        seed_actor_user(
-            session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID
-        )
+        other_repo = SqlAlchemyConnectorCredentialRepository(session, tenant_id=OTHER_TENANT_UUID)
+        seed_actor_user(session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID)
         create_default(other_repo, actor_user_id=OTHER_ACTOR_USER_ID)
         session.commit()
 
         rows = session.scalars(
-            select(ApiConnectorCredentialORM).order_by(
-                ApiConnectorCredentialORM.tenant_id
-            )
+            select(ApiConnectorCredentialORM).order_by(ApiConnectorCredentialORM.tenant_id)
         ).all()
         assert {row.tenant_id for row in rows} == {
             DEFAULT_TENANT_UUID,
@@ -340,9 +330,7 @@ def test_create_credential_rejects_empty_actor_user_id():
 
 def test_create_credential_rejects_actor_user_from_another_tenant():
     with build_session() as session:
-        seed_actor_user(
-            session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID
-        )
+        seed_actor_user(session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID)
         repo = SqlAlchemyConnectorCredentialRepository(session)
 
         with pytest.raises(
@@ -383,9 +371,7 @@ def test_list_credentials_paginates_with_has_more_flag():
     with build_session() as session:
         repo = SqlAlchemyConnectorCredentialRepository(session)
         for index in range(5):
-            create_default(
-                repo, connector_key="youtube_reporting", account_id=f"acct-{index}"
-            )
+            create_default(repo, connector_key="youtube_reporting", account_id=f"acct-{index}")
         session.commit()
 
         first = repo.list_credentials(limit=2, offset=0)
@@ -405,17 +391,11 @@ def test_list_credentials_paginates_with_has_more_flag():
 def test_list_credentials_rejects_bad_limit_and_offset():
     with build_session() as session:
         repo = SqlAlchemyConnectorCredentialRepository(session)
-        with pytest.raises(
-            ConnectorCredentialValidationError, match="limit must be between"
-        ):
+        with pytest.raises(ConnectorCredentialValidationError, match="limit must be between"):
             repo.list_credentials(limit=0)
-        with pytest.raises(
-            ConnectorCredentialValidationError, match="limit must be between"
-        ):
+        with pytest.raises(ConnectorCredentialValidationError, match="limit must be between"):
             repo.list_credentials(limit=MAX_CREDENTIAL_PAGE_SIZE + 1)
-        with pytest.raises(
-            ConnectorCredentialValidationError, match="offset must be greater"
-        ):
+        with pytest.raises(ConnectorCredentialValidationError, match="offset must be greater"):
             repo.list_credentials(offset=-1)
 
 
@@ -426,12 +406,8 @@ def test_list_credentials_does_not_surface_cross_tenant_rows():
         create_default(primary_repo, connector_key="adsense", account_id="primary-2")
         session.commit()
 
-        other_repo = SqlAlchemyConnectorCredentialRepository(
-            session, tenant_id=OTHER_TENANT_UUID
-        )
-        seed_actor_user(
-            session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID
-        )
+        other_repo = SqlAlchemyConnectorCredentialRepository(session, tenant_id=OTHER_TENANT_UUID)
+        seed_actor_user(session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID)
         create_default(
             other_repo,
             connector_key="adsense",
@@ -479,9 +455,7 @@ def test_list_credentials_returns_empty_page_when_no_rows_match():
 def test_list_credentials_never_exposes_encrypted_secret_ref_in_serialized_output():
     with build_session() as session:
         repo = SqlAlchemyConnectorCredentialRepository(session)
-        create_default(
-            repo, encrypted_secret_ref="vault://secret/data/yt/content-owner-1"
-        )
+        create_default(repo, encrypted_secret_ref="vault://secret/data/yt/content-owner-1")
         session.commit()
 
         page = repo.list_credentials()
@@ -541,9 +515,7 @@ def test_repository_default_tenant_id_matches_constant():
 def test_repository_rejects_malformed_tenant_id():
     with (
         build_session() as session,
-        pytest.raises(
-            ConnectorCredentialValidationError, match="tenant_id must be a valid UUID"
-        ),
+        pytest.raises(ConnectorCredentialValidationError, match="tenant_id must be a valid UUID"),
     ):
         SqlAlchemyConnectorCredentialRepository(session, tenant_id="not-a-uuid")
 
@@ -566,9 +538,7 @@ def test_foreign_key_integrity_detection_includes_tenant_scoped_actor_constraint
         def __init__(self, name: str) -> None:
             self.diag = _Diag(name)
 
-    assert _is_foreign_key_integrity_error(
-        IntegrityError("stmt", {}, _Orig(constraint_name))
-    )
+    assert _is_foreign_key_integrity_error(IntegrityError("stmt", {}, _Orig(constraint_name)))
 
 
 def test_max_credential_page_size_is_positive_integer():

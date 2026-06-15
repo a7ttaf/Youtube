@@ -157,7 +157,8 @@ def seed_database(database_url: str, *, payment_amount: str = "930.00") -> None:
 def test_finance_viewer_reads_payment_match_with_revenue_and_payment_audits(
     tmp_path,
 ):
-    """Test that a finance viewer can read the payment match along with revenue and payment audit logs."""
+    """Test that a finance viewer can read the payment match
+    along with revenue and payment audit logs."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -169,9 +170,7 @@ def test_finance_viewer_reads_payment_match_with_revenue_and_payment_audits(
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.event_type)
-        ).all()
+        audit_logs = session.scalars(select(AuditLogORM).order_by(AuditLogORM.event_type)).all()
 
     assert response.status_code == 200
     assert response.json()["status"] == "PAYMENT_MATCHED"
@@ -202,9 +201,7 @@ def test_payment_match_maps_adsense_payment_validation_to_422():
         user_id=str(USER_ID),
         email="payment-match@example.com",
         role_assignments=(
-            RoleAssignment(
-                role=RoleKey.FINANCE_VIEWER, scope=AccessScope.global_scope()
-            ),
+            RoleAssignment(role=RoleKey.FINANCE_VIEWER, scope=AccessScope.global_scope()),
         ),
     )
 
@@ -242,7 +239,8 @@ def test_month_payment_match_reports_payment_variance(tmp_path):
 def test_month_payment_match_rejects_non_usd_currency_until_exchange_rates_exist(
     tmp_path,
 ):
-    """Test that non-USD currency requests are rejected until exchange-rate support is implemented."""
+    """Test that non-USD currency requests are rejected
+    until exchange-rate support is implemented."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -274,7 +272,8 @@ def test_assistant_cannot_read_month_payment_match(tmp_path):
 
 
 def test_company_scoped_finance_viewer_cannot_read_holding_payment_match(tmp_path):
-    """Test that company-scoped finance viewers cannot read holding payment matches outside their scope."""
+    """Test that company-scoped finance viewers cannot read
+    holding payment matches outside their scope."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

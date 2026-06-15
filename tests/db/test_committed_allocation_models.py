@@ -1,4 +1,5 @@
 """SQLite model + constraint coverage for the committed-allocation tables."""
+
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -37,10 +38,15 @@ def _engine(tmp_path):
     TenantBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(TenantORM(
-            id=TENANT, slug="ums", display_name="UMS",
-            primary_currency="USD", status="ACTIVE",
-        ))
+        session.add(
+            TenantORM(
+                id=TENANT,
+                slug="ums",
+                display_name="UMS",
+                primary_currency="USD",
+                status="ACTIVE",
+            )
+        )
         session.commit()
     return engine
 
@@ -48,14 +54,21 @@ def _engine(tmp_path):
 def _run(**overrides):
     """Build a valid CommittedAllocationRunORM with overridable fields."""
     base = dict(
-        tenant_id=TENANT, month="2026-04", commit_version=1,
+        tenant_id=TENANT,
+        month="2026-04",
+        commit_version=1,
         allocation_method="gross_revenue_proportional",
-        idempotency_key="key-1", request_fingerprint="fp-1",
-        component_count=1, allocated_component_count=1, unallocated_component_count=0,
-        allocated_total_usd=Decimal("100.000000"), unallocated_total_usd=Decimal("0"),
+        idempotency_key="key-1",
+        request_fingerprint="fp-1",
+        component_count=1,
+        allocated_component_count=1,
+        unallocated_component_count=0,
+        allocated_total_usd=Decimal("100.000000"),
+        unallocated_total_usd=Decimal("0"),
         net_applicable_total_usd=Decimal("100.000000"),
         reconciliation_total_usd=Decimal("0"),
-        committed_by=TENANT, reason="month close",
+        committed_by=TENANT,
+        reason="month close",
     )
     base.update(overrides)
     return CommittedAllocationRunORM(**base)
@@ -68,24 +81,42 @@ def test_run_and_children_persist(tmp_path):
         run = _run()
         session.add(run)
         session.flush()
-        session.add(CommittedAllocationLineORM(
-            run_id=run.id, adsense_account_id="pub-1", youtube_channel_id="chA",
-            component_kind="DEDUCTION", source_system="adsense_management",
-            component_key="k1", basis_source_kind="ADSENSE",
-            basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
-            allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
-        ))
-        session.add(CommittedAllocationNoteORM(
-            run_id=run.id, note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
-            youtube_channel_id="chA", detail="x",
-        ))
+        session.add(
+            CommittedAllocationLineORM(
+                run_id=run.id,
+                adsense_account_id="pub-1",
+                youtube_channel_id="chA",
+                component_kind="DEDUCTION",
+                source_system="adsense_management",
+                component_key="k1",
+                basis_source_kind="ADSENSE",
+                basis_amount_usd=Decimal("1000.000000"),
+                basis_share=Decimal("1.000000"),
+                allocated_amount_usd=Decimal("100.000000"),
+                net_applicable=True,
+            )
+        )
+        session.add(
+            CommittedAllocationNoteORM(
+                run_id=run.id,
+                note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
+                youtube_channel_id="chA",
+                detail="x",
+            )
+        )
         # The unallocated table is empty in v1 but ships for snapshot-schema
         # fidelity; assert a row persists/reads back so all four tables are covered.
-        session.add(CommittedAllocationUnallocatedORM(
-            run_id=run.id, scope_id="chA", component_kind="DEDUCTION",
-            component_key="k1", amount_usd=Decimal("0"),
-            issue_code="UNALLOCATED", detail="x",
-        ))
+        session.add(
+            CommittedAllocationUnallocatedORM(
+                run_id=run.id,
+                scope_id="chA",
+                component_kind="DEDUCTION",
+                component_key="k1",
+                amount_usd=Decimal("0"),
+                issue_code="UNALLOCATED",
+                detail="x",
+            )
+        )
         session.commit()
         assert session.query(CommittedAllocationLineORM).count() == 1
         assert session.query(CommittedAllocationNoteORM).count() == 1
@@ -104,9 +135,9 @@ def test_method_check_accepts_post_tax(tmp_path):
     """allocation_method CHECK accepts post_tax_revenue_proportional."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
-        session.add(_run(
-            allocation_method="post_tax_revenue_proportional", idempotency_key="key-pt"
-        ))
+        session.add(
+            _run(allocation_method="post_tax_revenue_proportional", idempotency_key="key-pt")
+        )
         session.commit()
         assert session.query(CommittedAllocationRunORM).count() == 1
 
@@ -120,10 +151,13 @@ def test_method_check_accepts_widened_methods(tmp_path):
     engine = _engine(tmp_path)
     with Session(engine) as session:
         for index, method in enumerate(("company_level", "manual", "no_allocation")):
-            session.add(_run(
-                allocation_method=method, idempotency_key=f"key-{method}",
-                commit_version=index + 2,
-            ))
+            session.add(
+                _run(
+                    allocation_method=method,
+                    idempotency_key=f"key-{method}",
+                    commit_version=index + 2,
+                )
+            )
         session.commit()
         assert session.query(CommittedAllocationRunORM).count() == 3
 
@@ -195,13 +229,21 @@ def test_line_run_fk_cascade_delete(tmp_path):
         session.add(run)
         session.flush()
         run_id = run.id
-        session.add(CommittedAllocationLineORM(
-            run_id=run_id, adsense_account_id="pub-1", youtube_channel_id="chA",
-            component_kind="DEDUCTION", source_system="adsense_management",
-            component_key="k1", basis_source_kind="ADSENSE",
-            basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
-            allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
-        ))
+        session.add(
+            CommittedAllocationLineORM(
+                run_id=run_id,
+                adsense_account_id="pub-1",
+                youtube_channel_id="chA",
+                component_kind="DEDUCTION",
+                source_system="adsense_management",
+                component_key="k1",
+                basis_source_kind="ADSENSE",
+                basis_amount_usd=Decimal("1000.000000"),
+                basis_share=Decimal("1.000000"),
+                allocated_amount_usd=Decimal("100.000000"),
+                net_applicable=True,
+            )
+        )
         session.commit()
         # FIX: Delete via the ORM query (not raw SQL bound with str(run_id)).
         # SQLAlchemy stores Uuid PKs on SQLite as 32-char hex WITHOUT dashes, so a
@@ -230,22 +272,40 @@ def test_all_children_cascade_on_run_delete(tmp_path):
         session.add(run)
         session.flush()
         run_id = run.id
-        session.add(CommittedAllocationLineORM(
-            run_id=run_id, adsense_account_id="pub-1", youtube_channel_id="chA",
-            component_kind="DEDUCTION", source_system="adsense_management",
-            component_key="k1", basis_source_kind="ADSENSE",
-            basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
-            allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
-        ))
-        session.add(CommittedAllocationNoteORM(
-            run_id=run_id, note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
-            youtube_channel_id="chA", detail="x",
-        ))
-        session.add(CommittedAllocationUnallocatedORM(
-            run_id=run_id, scope_id="chA", component_kind="DEDUCTION",
-            component_key="k1", amount_usd=Decimal("0"),
-            issue_code="UNALLOCATED", detail="x",
-        ))
+        session.add(
+            CommittedAllocationLineORM(
+                run_id=run_id,
+                adsense_account_id="pub-1",
+                youtube_channel_id="chA",
+                component_kind="DEDUCTION",
+                source_system="adsense_management",
+                component_key="k1",
+                basis_source_kind="ADSENSE",
+                basis_amount_usd=Decimal("1000.000000"),
+                basis_share=Decimal("1.000000"),
+                allocated_amount_usd=Decimal("100.000000"),
+                net_applicable=True,
+            )
+        )
+        session.add(
+            CommittedAllocationNoteORM(
+                run_id=run_id,
+                note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
+                youtube_channel_id="chA",
+                detail="x",
+            )
+        )
+        session.add(
+            CommittedAllocationUnallocatedORM(
+                run_id=run_id,
+                scope_id="chA",
+                component_kind="DEDUCTION",
+                component_key="k1",
+                amount_usd=Decimal("0"),
+                issue_code="UNALLOCATED",
+                detail="x",
+            )
+        )
         session.commit()
         session.query(CommittedAllocationRunORM).filter_by(id=run_id).delete(
             synchronize_session=False
@@ -256,20 +316,23 @@ def test_all_children_cascade_on_run_delete(tmp_path):
         assert session.query(CommittedAllocationUnallocatedORM).count() == 0
 
 
-@pytest.mark.parametrize(
-    "field", ["adsense_account_id", "youtube_channel_id", "component_key"]
-)
+@pytest.mark.parametrize("field", ["adsense_account_id", "youtube_channel_id", "component_key"])
 def test_line_identity_nonempty_check_rejects_empty(tmp_path, field):
     """Each committed line identity key (account/channel/component) rejects "" at
     the DB level, mirroring deduction_components' non-empty identifier CHECKs.
     """
     engine = _engine(tmp_path)
     line_kwargs = dict(
-        adsense_account_id="pub-1", youtube_channel_id="chA",
-        component_kind="DEDUCTION", source_system="adsense_management",
-        component_key="k1", basis_source_kind="ADSENSE",
-        basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
-        allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
+        adsense_account_id="pub-1",
+        youtube_channel_id="chA",
+        component_kind="DEDUCTION",
+        source_system="adsense_management",
+        component_key="k1",
+        basis_source_kind="ADSENSE",
+        basis_amount_usd=Decimal("1000.000000"),
+        basis_share=Decimal("1.000000"),
+        allocated_amount_usd=Decimal("100.000000"),
+        net_applicable=True,
     )
     line_kwargs[field] = ""
     with Session(engine) as session, pytest.raises(IntegrityError):
@@ -287,17 +350,19 @@ def test_unallocated_identity_nonempty_check_rejects_empty(tmp_path, field):
     """
     engine = _engine(tmp_path)
     unallocated_kwargs = dict(
-        scope_id="chA", component_kind="DEDUCTION", component_key="k1",
-        amount_usd=Decimal("0"), issue_code="UNALLOCATED", detail="x",
+        scope_id="chA",
+        component_kind="DEDUCTION",
+        component_key="k1",
+        amount_usd=Decimal("0"),
+        issue_code="UNALLOCATED",
+        detail="x",
     )
     unallocated_kwargs[field] = ""
     with Session(engine) as session, pytest.raises(IntegrityError):
         run = _run()
         session.add(run)
         session.flush()
-        session.add(
-            CommittedAllocationUnallocatedORM(run_id=run.id, **unallocated_kwargs)
-        )
+        session.add(CommittedAllocationUnallocatedORM(run_id=run.id, **unallocated_kwargs))
         session.commit()
 
 
@@ -310,8 +375,12 @@ def test_note_channel_nonempty_check_rejects_empty(tmp_path):
         run = _run()
         session.add(run)
         session.flush()
-        session.add(CommittedAllocationNoteORM(
-            run_id=run.id, note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
-            youtube_channel_id="", detail="x",
-        ))
+        session.add(
+            CommittedAllocationNoteORM(
+                run_id=run.id,
+                note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
+                youtube_channel_id="",
+                detail="x",
+            )
+        )
         session.commit()

@@ -72,9 +72,7 @@ def revenue_fact(
         source_kind=source_kind,
         source_report_id=source_report_id or f"report-{source_kind}",
         gross_revenue_usd=Decimal(gross_revenue_usd),
-        net_revenue_usd=(
-            Decimal(net_revenue_usd) if net_revenue_usd is not None else None
-        ),
+        net_revenue_usd=(Decimal(net_revenue_usd) if net_revenue_usd is not None else None),
         views=0,
         watch_time_minutes=Decimal("0"),
         confidence_score=Decimal(confidence_score),
@@ -154,9 +152,7 @@ def manual_override(
         reason="Revenue correction",
         status=status,
         created_by="00000000-0000-0000-0000-000000009401",
-        approved_by=(
-            "00000000-0000-0000-0000-000000009402" if status == "APPROVED" else None
-        ),
+        approved_by=("00000000-0000-0000-0000-000000009402" if status == "APPROVED" else None),
         approval_reason="Approved source correction" if status == "APPROVED" else None,
     )
 
@@ -447,9 +443,7 @@ def test_record_explanation_isolates_writes_between_tenants():
         )
 
         other_tenant = UUID("00000000-0000-0000-0000-000000061999")
-        other_repo = SqlAlchemyNumberExplanationRepository(
-            session, tenant_id=other_tenant
-        )
+        other_repo = SqlAlchemyNumberExplanationRepository(session, tenant_id=other_tenant)
         other_repo.record_explanation(
             NumberExplanationEntry(
                 month="2026-03",
@@ -479,9 +473,7 @@ def test_record_explanation_does_not_update_other_tenants_row():
     """record_explanation never overwrites another tenant's row."""
     with build_session() as session:
         other_tenant = UUID("00000000-0000-0000-0000-000000061998")
-        other_repo = SqlAlchemyNumberExplanationRepository(
-            session, tenant_id=other_tenant
-        )
+        other_repo = SqlAlchemyNumberExplanationRepository(session, tenant_id=other_tenant)
         other_repo.record_explanation(
             NumberExplanationEntry(
                 month="2026-03",
@@ -551,9 +543,7 @@ def test_build_explanation_happy_path_with_approved_and_pending_overrides():
     assert entry.metric == ADJUSTED_GROSS_REVENUE_METRIC
     assert entry.value == Decimal("1125.50")
     assert entry.currency == "USD"
-    assert entry.formula == (
-        "baseline_gross_revenue_usd + approved_manual_override_total_usd"
-    )
+    assert entry.formula == ("baseline_gross_revenue_usd + approved_manual_override_total_usd")
     assert entry.components == [
         {
             "key": "baseline_gross_revenue_usd",
@@ -573,8 +563,7 @@ def test_build_explanation_happy_path_with_approved_and_pending_overrides():
         {
             "code": "PENDING_MANUAL_OVERRIDES",
             "message": (
-                "1 pending manual override is "
-                f"not included in {ADJUSTED_GROSS_REVENUE_METRIC}."
+                f"1 pending manual override is not included in {ADJUSTED_GROSS_REVENUE_METRIC}."
             ),
         }
     ]
@@ -639,15 +628,12 @@ def test_build_explanation_pluralizes_pending_override_warning():
         metric=ADJUSTED_GROSS_REVENUE_METRIC,
     )
 
-    pending_warnings = [
-        w for w in entry.warnings if w["code"] == "PENDING_MANUAL_OVERRIDES"
-    ]
+    pending_warnings = [w for w in entry.warnings if w["code"] == "PENDING_MANUAL_OVERRIDES"]
     assert pending_warnings == [
         {
             "code": "PENDING_MANUAL_OVERRIDES",
             "message": (
-                "2 pending manual overrides are "
-                f"not included in {ADJUSTED_GROSS_REVENUE_METRIC}."
+                f"2 pending manual overrides are not included in {ADJUSTED_GROSS_REVENUE_METRIC}."
             ),
         }
     ]
@@ -663,9 +649,7 @@ def test_build_explanation_clamps_high_confidence_when_warnings_present():
                 confidence_score="0.9800",
             )
         ],
-        manual_overrides=[
-            manual_override(status="PENDING", adjustment_revenue_usd="50.00")
-        ],
+        manual_overrides=[manual_override(status="PENDING", adjustment_revenue_usd="50.00")],
         month="2026-03",
         youtube_channel_id="channel-tv-a",
         metric=ADJUSTED_GROSS_REVENUE_METRIC,
@@ -684,9 +668,7 @@ def test_build_explanation_does_not_clamp_when_score_already_below_ceiling():
                 confidence_score="0.8500",
             )
         ],
-        manual_overrides=[
-            manual_override(status="PENDING", adjustment_revenue_usd="50.00")
-        ],
+        manual_overrides=[manual_override(status="PENDING", adjustment_revenue_usd="50.00")],
         month="2026-03",
         youtube_channel_id="channel-tv-a",
         metric=ADJUSTED_GROSS_REVENUE_METRIC,
@@ -742,11 +724,7 @@ def test_build_explanation_counts_only_approved_overrides_in_component():
     )
 
     approved_component = next(
-        (
-            c
-            for c in entry.components
-            if c["key"] == "approved_manual_override_total_usd"
-        ),
+        (c for c in entry.components if c["key"] == "approved_manual_override_total_usd"),
         None,
     )
     assert approved_component is not None
@@ -758,9 +736,7 @@ def test_build_explanation_round_trip_through_to_api_serializes_full_shape():
     """Building then serializing via to_api produces the full adjusted-gross shape."""
     entry = build_channel_month_revenue_explanation(
         facts=[revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00")],
-        manual_overrides=[
-            manual_override(status="APPROVED", adjustment_revenue_usd="125.50")
-        ],
+        manual_overrides=[manual_override(status="APPROVED", adjustment_revenue_usd="125.50")],
         month="2026-03",
         youtube_channel_id="channel-tv-a",
         metric=ADJUSTED_GROSS_REVENUE_METRIC,
@@ -772,9 +748,7 @@ def test_build_explanation_round_trip_through_to_api_serializes_full_shape():
     assert api["currency"] == "USD"
     assert api["confidence"] == {"label": "HIGH", "score": "0.98"}
     assert api["warnings"] == []
-    assert api["formula"] == (
-        "baseline_gross_revenue_usd + approved_manual_override_total_usd"
-    )
+    assert api["formula"] == ("baseline_gross_revenue_usd + approved_manual_override_total_usd")
 
 
 # -----------------------------------------------------------------------------
@@ -786,12 +760,8 @@ def test_build_then_record_persists_full_explanation_into_database():
     """Building then recording persists the full explanation into the database."""
     with build_session() as session:
         entry = build_channel_month_revenue_explanation(
-            facts=[
-                revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00")
-            ],
-            manual_overrides=[
-                manual_override(status="APPROVED", adjustment_revenue_usd="125.50")
-            ],
+            facts=[revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00")],
+            manual_overrides=[manual_override(status="APPROVED", adjustment_revenue_usd="125.50")],
             month="2026-03",
             youtube_channel_id="channel-tv-a",
             metric=ADJUSTED_GROSS_REVENUE_METRIC,
@@ -821,9 +791,7 @@ def test_repository_rejects_malformed_tenant_id():
     """A malformed tenant id is rejected with NumberExplanationValidationError."""
     with (
         build_session() as session,
-        pytest.raises(
-            NumberExplanationValidationError, match="tenant_id must be a valid UUID"
-        ),
+        pytest.raises(NumberExplanationValidationError, match="tenant_id must be a valid UUID"),
     ):
         SqlAlchemyNumberExplanationRepository(session, tenant_id="not-a-uuid")
 
@@ -990,9 +958,7 @@ def test_net_explanation_source_net_path_reconciles_with_approved_override():
                 net_revenue_usd="900.00",
             )
         ],
-        manual_overrides=[
-            manual_override(status="APPROVED", adjustment_revenue_usd="125.50")
-        ],
+        manual_overrides=[manual_override(status="APPROVED", adjustment_revenue_usd="125.50")],
         month="2026-03",
         youtube_channel_id="channel-tv-a",
         metric=NET_REVENUE_METRIC,
@@ -1018,9 +984,7 @@ def test_net_explanation_source_net_path_reconciles_with_approved_override():
     assert src["source_kind"] == "YOUTUBE_CMS"
     # No-drift: the stated formula reconstructs the persisted value exactly.
     assert (
-        Decimal(baseline["value"])
-        + Decimal(approved["value"])
-        - Decimal(src["value"])
+        Decimal(baseline["value"]) + Decimal(approved["value"]) - Decimal(src["value"])
         == entry.value
     )
 
@@ -1028,9 +992,7 @@ def test_net_explanation_source_net_path_reconciles_with_approved_override():
 def test_net_explanation_component_derived_path_with_full_provenance_and_sum_identity():
     """Component-derived path emits full provenance whose amounts sum to the totals."""
     components = [
-        deduction_component(
-            component_key="cd-1", component_kind="TAX", amount_usd="30.00"
-        )
+        deduction_component(component_key="cd-1", component_kind="TAX", amount_usd="30.00")
     ]
     allocations = [
         allocation_line(
@@ -1083,9 +1045,7 @@ def test_net_explanation_component_derived_path_with_full_provenance_and_sum_ide
         }
     ]
     # No-drift: provenance amounts sum to the component values.
-    assert Decimal(cd["value"]) == sum(
-        Decimal(x["amount_usd"]) for x in cd["components"]
-    )
+    assert Decimal(cd["value"]) == sum(Decimal(x["amount_usd"]) for x in cd["components"])
     assert Decimal(aa["value"]) == sum(
         Decimal(x["allocated_amount_usd"]) for x in aa["allocations"]
     )

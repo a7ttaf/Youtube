@@ -147,13 +147,9 @@ def build_branded_slide_pack_report(
         smart_alerts=smart_alerts,
     )
     if export_job.currency != "USD":
-        raise BrandedSlidePackValidationError(
-            "branded slide pack requires USD currency"
-        )
+        raise BrandedSlidePackValidationError("branded slide pack requires USD currency")
     if payment_match.currency != "USD" or bank_reconciliation.currency != "USD":
-        raise BrandedSlidePackValidationError(
-            "branded slide pack requires USD source summaries"
-        )
+        raise BrandedSlidePackValidationError("branded slide pack requires USD source summaries")
 
     return BrandedSlidePackReport(
         export_job=export_job,
@@ -192,8 +188,7 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
         presentation,
         "Monthly highlights",
         [
-            "Total Net Revenue USD: "
-            f"{_decimal_to_api(net_revenue.total_net_revenue_usd)}",
+            f"Total Net Revenue USD: {_decimal_to_api(net_revenue.total_net_revenue_usd)}",
             "Adjusted Gross Revenue USD: "
             f"{_decimal_to_api(net_revenue.total_adjusted_gross_revenue_usd)}",
             f"Payment status: {payment_match.status}",
@@ -223,8 +218,7 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
         presentation,
         "Channel ranking",
         [
-            f"{channel.youtube_channel_id}: "
-            f"{_decimal_to_api(channel.net_revenue_usd)} USD"
+            f"{channel.youtube_channel_id}: {_decimal_to_api(channel.net_revenue_usd)} USD"
             for channel in sorted(
                 report.net_revenue.channels,
                 key=lambda item: (
@@ -271,9 +265,7 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
             "components and the account-allocated portion from account-level "
             "deduction allocations.",
             "Pending overrides are shown as risk and do not change net revenue.",
-            account_allocation_disclosure_token(
-                report.account_allocation_provenance
-            ),
+            account_allocation_disclosure_token(report.account_allocation_provenance),
         ],
     )
     _add_content_slide(
@@ -282,8 +274,7 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
         [
             "YouTube revenue total USD: "
             f"{_decimal_to_api(payment_match.youtube_revenue_total_usd)}",
-            "AdSense paid amount: "
-            f"{_decimal_to_api(payment_match.adsense_paid_amount)}",
+            f"AdSense paid amount: {_decimal_to_api(payment_match.adsense_paid_amount)}",
             f"Payment gap USD: {_decimal_to_api(payment_match.payment_gap_usd)}",
             f"Bank gap USD: {_decimal_to_api(bank_reconciliation.bank_gap_usd)}",
         ],
@@ -304,9 +295,7 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
     return stream.getvalue()
 
 
-def _add_cover_slide(
-    presentation: Presentation, report: BrandedSlidePackReport
-) -> None:
+def _add_cover_slide(presentation: Presentation, report: BrandedSlidePackReport) -> None:
     """Add a cover slide with the branded bar, title, and footer to the presentation."""
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     _add_brand_bar(slide)
@@ -328,11 +317,7 @@ def _add_cover_slide(
         height=Inches(0.5),
         text=(
             f"{report.export_job.month} | {report.export_job.scope_type}"
-            + (
-                f" | {report.export_job.scope_id}"
-                if report.export_job.scope_id is not None
-                else ""
-            )
+            + (f" | {report.export_job.scope_id}" if report.export_job.scope_id is not None else "")
         ),
         font_size=Pt(14),
         color=_BRAND_MUTED,
@@ -340,9 +325,7 @@ def _add_cover_slide(
     _add_footer(slide)
 
 
-def _add_content_slide(
-    presentation: Presentation, title: str, bullets: list[str]
-) -> None:
+def _add_content_slide(presentation: Presentation, title: str, bullets: list[str]) -> None:
     """Add a content slide with a title and bullet points to the presentation."""
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     _add_brand_bar(slide)
@@ -356,9 +339,7 @@ def _add_content_slide(
         font_size=Pt(20),
         color=_BRAND_TEXT,
     )
-    body = slide.shapes.add_textbox(
-        Inches(0.75), Inches(1.3), Inches(8.8), Inches(4.9)
-    ).text_frame
+    body = slide.shapes.add_textbox(Inches(0.75), Inches(1.3), Inches(8.8), Inches(4.9)).text_frame
     body.clear()
     for index, bullet in enumerate(bullets):
         paragraph = body.paragraphs[0] if index == 0 else body.add_paragraph()
@@ -434,8 +415,7 @@ def _scope_bullets(report: BrandedSlidePackReport, scope_name: str) -> list[str]
     """Generate bullet points summarizing the report scope and net revenue details."""
     return [
         f"{scope_name.title()} scope: {report.export_job.scope_id or 'global'}",
-        "Total net revenue USD: "
-        f"{_decimal_to_api(report.net_revenue.total_net_revenue_usd)}",
+        f"Total net revenue USD: {_decimal_to_api(report.net_revenue.total_net_revenue_usd)}",
         f"Channels included: {report.net_revenue.channel_count}",
     ]
 
@@ -505,9 +485,7 @@ def _executive_summary(
             net_revenue.total_adjusted_gross_revenue_usd
         ),
         "total_net_revenue_usd": _decimal_to_api(net_revenue.total_net_revenue_usd),
-        "total_deduction_amount_usd": _decimal_to_api(
-            net_revenue.total_deduction_amount_usd
-        ),
+        "total_deduction_amount_usd": _decimal_to_api(net_revenue.total_deduction_amount_usd),
         # Deduction-split totals SUPPLEMENT (never replace) total_deduction_amount_usd
         # and are read-only projections of MonthNetRevenueSummary; see the
         # deduction-slide contract block in build_branded_slide_pack_pptx.

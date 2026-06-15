@@ -12,6 +12,7 @@ a deterministic SHA-256 of (account_id, locked-report-key) as `report_id`. The
 stamp is per-account stable, so re-pulls map to the same source_report_id
 provenance downstream.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -67,9 +68,7 @@ class GoogleAdSensePaymentClient:
         # GoogleHttpClient.request already guarantees a dict on the real path,
         # but a fake/transport that bypasses it must still fail closed here.
         if not isinstance(response, dict):
-            raise GoogleApiResponseError(
-                url=url, reason="payments response is not an object"
-            )
+            raise GoogleApiResponseError(url=url, reason="payments response is not an object")
         # Google may omit repeated fields when empty; normalize that omission
         # to [] while still rejecting a present field with the wrong type.
         payments = response.get("payments", [])
@@ -78,9 +77,7 @@ class GoogleAdSensePaymentClient:
                 url=url,
                 reason=f"expected 'payments' list, got {type(payments).__name__}",
             )
-        report_id = hashlib.sha256(
-            f"{account}|{_REPORT_KEY}".encode()
-        ).hexdigest()
+        report_id = hashlib.sha256(f"{account}|{_REPORT_KEY}".encode()).hexdigest()
         return {
             **response,
             "payments": payments,

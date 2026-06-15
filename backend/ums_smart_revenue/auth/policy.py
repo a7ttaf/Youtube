@@ -13,17 +13,19 @@ from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 
 EMPTY_ORG_INDEX = OrgAccessIndex()
-_CONNECTOR_KEY_ALIASES = MappingProxyType({
-    "youtube-reporting": ("youtube_reporting",),
-    "youtube_reporting": ("youtube-reporting",),
-    "youtube-analytics": ("youtube_analytics",),
-    "youtube_analytics": ("youtube-analytics",),
-    # FIX: Treat the legacy AdSense connector scope as an umbrella for the
-    # AdSense management run-history keys so scoped health reads stay complete.
-    "adsense": ("adsense-management", "adsense_management"),
-    "adsense-management": ("adsense_management",),
-    "adsense_management": ("adsense-management",),
-})
+_CONNECTOR_KEY_ALIASES = MappingProxyType(
+    {
+        "youtube-reporting": ("youtube_reporting",),
+        "youtube_reporting": ("youtube-reporting",),
+        "youtube-analytics": ("youtube_analytics",),
+        "youtube_analytics": ("youtube-analytics",),
+        # FIX: Treat the legacy AdSense connector scope as an umbrella for the
+        # AdSense management run-history keys so scoped health reads stay complete.
+        "adsense": ("adsense-management", "adsense_management"),
+        "adsense-management": ("adsense_management",),
+        "adsense_management": ("adsense-management",),
+    }
+)
 
 
 def has_permission(
@@ -39,11 +41,7 @@ def has_permission(
     index = org_index or EMPTY_ORG_INDEX
 
     for grant in user.direct_permissions:
-        if (
-            grant.active
-            and grant.permission == permission
-            and index.contains(grant.scope, scope)
-        ):
+        if grant.active and grant.permission == permission and index.contains(grant.scope, scope):
             return True
 
     for assignment in user.role_assignments:
@@ -174,9 +172,7 @@ def can_view_channel_revenue(
     org_index: OrgAccessIndex,
 ) -> bool:
     """Authorize revenue reads for a specific channel."""
-    return has_permission(
-        user, Permission.VIEW_REVENUE, AccessScope.channel(channel_id), org_index
-    )
+    return has_permission(user, Permission.VIEW_REVENUE, AccessScope.channel(channel_id), org_index)
 
 
 def can_view_company_revenue(
@@ -185,9 +181,7 @@ def can_view_company_revenue(
     org_index: OrgAccessIndex,
 ) -> bool:
     """Authorize revenue reads for a company scope."""
-    return has_permission(
-        user, Permission.VIEW_REVENUE, AccessScope.company(company_id), org_index
-    )
+    return has_permission(user, Permission.VIEW_REVENUE, AccessScope.company(company_id), org_index)
 
 
 def can_export_finance_report(
@@ -208,37 +202,27 @@ def can_export_finance_report(
 
 def can_lock_month(user: UserPrincipal, month: str) -> bool:
     """Authorize locking a finance month."""
-    return has_permission(
-        user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month)
-    )
+    return has_permission(user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month))
 
 
 def can_unlock_month(user: UserPrincipal, month: str) -> bool:
     """Authorize unlocking a finance month."""
-    return has_permission(
-        user, Permission.UNLOCK_FINANCE_MONTH, AccessScope.finance_month(month)
-    )
+    return has_permission(user, Permission.UNLOCK_FINANCE_MONTH, AccessScope.finance_month(month))
 
 
 def can_change_allocation_rule(user: UserPrincipal, month: str) -> bool:
     """Authorize changes to allocation rules for a finance month."""
-    return has_permission(
-        user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month)
-    )
+    return has_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month))
 
 
 def can_manage_connectors(user: UserPrincipal) -> bool:
     """Authorize connector administration."""
-    return has_permission(
-        user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope()
-    )
+    return has_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope())
 
 
 def can_run_connector_job(user: UserPrincipal, connector_id: str) -> bool:
     """Authorize running a connector job."""
-    return has_permission(
-        user, Permission.RUN_CONNECTOR_JOBS, AccessScope.connector(connector_id)
-    )
+    return has_permission(user, Permission.RUN_CONNECTOR_JOBS, AccessScope.connector(connector_id))
 
 
 def can_assign_roles(user: UserPrincipal) -> bool:

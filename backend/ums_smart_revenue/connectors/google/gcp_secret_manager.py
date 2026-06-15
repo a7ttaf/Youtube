@@ -6,6 +6,7 @@ URI shape:
 where {version} is either an integer or 'latest'. The path after :// is the
 exact name expected by SecretManagerServiceClient.access_secret_version.
 """
+
 from __future__ import annotations
 
 import re
@@ -20,9 +21,7 @@ from ums_smart_revenue.connectors.google.errors import (
     SecretNotFoundError,
 )
 
-_NAME_PATTERN = re.compile(
-    r"^projects/[^/]+/secrets/[^/]+/versions/[^/]+$"
-)
+_NAME_PATTERN = re.compile(r"^projects/[^/]+/secrets/[^/]+/versions/[^/]+$")
 _SUPPORTED_PREFIXES = ("gcp-secret-manager://", "secret-manager://")
 
 
@@ -45,9 +44,7 @@ class GcpSecretManagerResolver:
         if not _NAME_PATTERN.match(name):
             raise MalformedSecretUriError(ref=ref)
         try:
-            response = self._get_client(ref=ref).access_secret_version(
-                request={"name": name}
-            )
+            response = self._get_client(ref=ref).access_secret_version(request={"name": name})
         except gcp_exceptions.NotFound as exc:
             raise SecretNotFoundError(ref=ref) from exc
         except gcp_exceptions.GoogleAPICallError as exc:

@@ -42,9 +42,7 @@ def _resolve_npm() -> str:
     """Resolve an npm executable. On Windows, npm is npm.cmd."""
     npm = shutil.which("npm") or shutil.which("npm.cmd")
     if npm is None:
-        raise RuntimeError(
-            "npm not found on PATH; install Node.js to run frontend tests."
-        )
+        raise RuntimeError("npm not found on PATH; install Node.js to run frontend tests.")
     return npm
 
 
@@ -92,9 +90,7 @@ def build_gate_commands(*, python: str = sys.executable) -> tuple[GateCommand, .
     )
 
 
-def build_test_gate_commands(
-    *, python: str = sys.executable
-) -> tuple[GateCommand, ...]:
+def build_test_gate_commands(*, python: str = sys.executable) -> tuple[GateCommand, ...]:
     """Return the test-only validation commands for local quality gates."""
     return (
         GateCommand(

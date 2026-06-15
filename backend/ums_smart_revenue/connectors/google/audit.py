@@ -25,6 +25,7 @@ rather than failing.
 Dry-run skips ``emit_run_started`` entirely; the dry-run path also never
 calls ``start_run`` or ``finish_run`` so there is no FINISHED edge either.
 """
+
 from __future__ import annotations
 
 from typing import Any

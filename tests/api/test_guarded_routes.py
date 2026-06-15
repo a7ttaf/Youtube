@@ -14,9 +14,7 @@ def create_bootstrap_app():
     return app
 
 
-def auth_headers(
-    role: str, scope_type: str, scope_id: str | None = None
-) -> dict[str, str]:
+def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
     headers = {
         "x-user-id": "user-1",
         "x-user-email": "user@example.com",
@@ -83,9 +81,7 @@ def test_guarded_route_rejects_untrusted_identity_headers():
 
     headers = auth_headers("super_owner", "global")
     headers.pop("x-ums-trusted-gateway-token")
-    response = client.get(
-        "/revenue/channels/channel-tv-a/authorization-check", headers=headers
-    )
+    response = client.get("/revenue/channels/channel-tv-a/authorization-check", headers=headers)
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid trusted gateway token"

@@ -38,7 +38,9 @@ def upgrade() -> None:
     op.create_table(
         "deduction_components",
         sa.Column(
-            "id", sa.Uuid(), primary_key=True,
+            "id",
+            sa.Uuid(),
+            primary_key=True,
             server_default=sa.text("gen_random_uuid()"),
         ),
         sa.Column(
@@ -67,16 +69,18 @@ def upgrade() -> None:
         ),
         sa.Column("component_key", sa.Text(), nullable=False),
         sa.Column(
-            "created_at", sa.DateTime(timezone=True), nullable=False,
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
             server_default=sa.func.now(),
         ),
         sa.Column(
-            "updated_at", sa.DateTime(timezone=True), nullable=False,
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
             server_default=sa.func.now(),
         ),
-        sa.UniqueConstraint(
-            "tenant_id", "component_key", name="uq_deduction_components_key"
-        ),
+        sa.UniqueConstraint("tenant_id", "component_key", name="uq_deduction_components_key"),
         sa.ForeignKeyConstraint(
             ["tenant_id"],
             ["tenants.id"],
@@ -136,15 +140,18 @@ def upgrade() -> None:
         )
     op.create_index(
         "ix_deduction_components_tenant_month",
-        "deduction_components", ["tenant_id", "month"],
+        "deduction_components",
+        ["tenant_id", "month"],
     )
     op.create_index(
         "ix_deduction_components_tenant_scope",
-        "deduction_components", ["tenant_id", "scope_kind", "scope_id"],
+        "deduction_components",
+        ["tenant_id", "scope_kind", "scope_id"],
     )
     op.create_index(
         "ix_deduction_components_tenant_month_kind",
-        "deduction_components", ["tenant_id", "month", "component_kind"],
+        "deduction_components",
+        ["tenant_id", "month", "component_kind"],
     )
 
 
@@ -154,10 +161,6 @@ def downgrade() -> None:
         "ix_deduction_components_tenant_month_kind",
         table_name="deduction_components",
     )
-    op.drop_index(
-        "ix_deduction_components_tenant_scope", table_name="deduction_components"
-    )
-    op.drop_index(
-        "ix_deduction_components_tenant_month", table_name="deduction_components"
-    )
+    op.drop_index("ix_deduction_components_tenant_scope", table_name="deduction_components")
+    op.drop_index("ix_deduction_components_tenant_month", table_name="deduction_components")
     op.drop_table("deduction_components")

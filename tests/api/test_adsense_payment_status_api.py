@@ -1,4 +1,5 @@
 """Tests for the AdSense payment paid/unpaid status endpoint."""
+
 from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -136,16 +137,12 @@ def test_finance_viewer_reads_payment_status_breakdown_with_audit(tmp_path):
         "CANCELLED",
     ]
     statuses = {b["status"]: b for b in body["status_totals"]}
-    assert statuses["PAID"]["currency_totals"] == [
-        {"currency": "USD", "amount": "8400"}
-    ]
+    assert statuses["PAID"]["currency_totals"] == [{"currency": "USD", "amount": "8400"}]
     assert statuses["PENDING"]["currency_totals"] == [
         {"currency": "EUR", "amount": "300"},
         {"currency": "USD", "amount": "1200"},
     ]
-    assert statuses["CANCELLED"]["currency_totals"] == [
-        {"currency": "USD", "amount": "99"}
-    ]
+    assert statuses["CANCELLED"]["currency_totals"] == [{"currency": "USD", "amount": "99"}]
     assert body["outstanding_totals"] == [
         {"currency": "EUR", "amount": "300"},
         {"currency": "GBP", "amount": "500"},
@@ -185,9 +182,7 @@ def test_cancelled_amount_present_but_excluded_from_outstanding_via_api(tmp_path
         pytest.fail("missing CANCELLED status bucket")
     assert cancelled["currency_totals"] == [{"currency": "USD", "amount": "99"}]
     try:
-        usd_outstanding = next(
-            c for c in body["outstanding_totals"] if c["currency"] == "USD"
-        )
+        usd_outstanding = next(c for c in body["outstanding_totals"] if c["currency"] == "USD")
     except StopIteration:
         pytest.fail("missing USD outstanding total")
     assert usd_outstanding["amount"] == "1200"  # PENDING only, never the 99 CANCELLED
@@ -225,9 +220,7 @@ def test_repository_validation_error_maps_to_422():
         user_id=str(USER_ID),
         email="payment-status@example.com",
         role_assignments=(
-            RoleAssignment(
-                role=RoleKey.FINANCE_VIEWER, scope=AccessScope.global_scope()
-            ),
+            RoleAssignment(role=RoleKey.FINANCE_VIEWER, scope=AccessScope.global_scope()),
         ),
     )
     with pytest.raises(HTTPException) as exc_info:
@@ -251,9 +244,7 @@ def test_assistant_cannot_read_payment_status(tmp_path):
         headers=auth_headers("assistant_analyst", "global"),
     )
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_finalized_payments"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_finalized_payments")
 
 
 def test_finance_month_scoped_viewer_reads_matching_month(tmp_path):
@@ -278,9 +269,7 @@ def test_finance_month_scoped_viewer_cannot_read_other_month(tmp_path):
         headers=auth_headers("finance_viewer", "finance-month", "2026-03"),
     )
     assert response.status_code == 403
-    assert response.json()["detail"] == (
-        "Missing permission: finance.view_finalized_payments"
-    )
+    assert response.json()["detail"] == ("Missing permission: finance.view_finalized_payments")
 
 
 class _FailingPaymentRepository:

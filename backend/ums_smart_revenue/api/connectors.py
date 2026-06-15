@@ -1,4 +1,5 @@
 """FastAPI route handlers for connector credential management and test-connection probing."""
+
 # pylint: disable=too-many-arguments, too-many-positional-arguments
 import logging
 from datetime import UTC, datetime, timedelta
@@ -211,9 +212,7 @@ def list_connector_runs(
             list_runs_kwargs["connector_key"] = connector_key
         elif connector_key is not None:
             if connector_key not in allowed_connector_ids:
-                _raise_missing_connector_permission(
-                    Permission.VIEW_CONNECTOR_HEALTH
-                )
+                _raise_missing_connector_permission(Permission.VIEW_CONNECTOR_HEALTH)
             list_runs_kwargs["connector_key"] = connector_key
         else:
             list_runs_kwargs["connector_keys"] = allowed_connector_ids
@@ -317,7 +316,7 @@ def create_connector_credential(
 #   - File: Docs/12_BACKEND_API_SPEC.md -> POST /connectors/jobs contract.
 # ============================================================================
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
-def request_connector_job(
+def request_connector_job(  # skipcq: PY-R1000
     payload: ConnectorJobRequest,
     request: Request,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -337,8 +336,7 @@ def request_connector_job(
         candidate_keys = (payload.connector_key,)
     alias_scopes = [AccessScope.connector(key) for key in candidate_keys]
     if not any(
-        has_permission(user, Permission.RUN_CONNECTOR_JOBS, scope)
-        for scope in alias_scopes
+        has_permission(user, Permission.RUN_CONNECTOR_JOBS, scope) for scope in alias_scopes
     ):
         _raise_missing_connector_permission(Permission.RUN_CONNECTOR_JOBS)
 
@@ -595,23 +593,16 @@ def test_connector_connection(
     except InactiveCredentialError:
         # FIX: str(exc) embeds the raw DB credential UUID; safe canned message only.
         conn_status = "inactive_credential"
-        detail = (
-            "Credential is inactive or revoked;"
-            " contact an administrator to re-register it."
-        )
+        detail = "Credential is inactive or revoked; contact an administrator to re-register it."
     except OAuthRefreshError:
         # FIX: str(exc) exposes the inner exception class name; safe canned message only.
         conn_status = "auth_failed"
-        detail = (
-            "OAuth token refresh failed;"
-            " check that the credential secret is current."
-        )
+        detail = "OAuth token refresh failed; check that the credential secret is current."
     except GoogleConnectorError:
         # FIX: str(exc) on GoogleConnectorError subclasses embeds full Google API URLs.
         conn_status = "error"
         detail = (
-            "Connector probe returned an error;"
-            " check connector configuration and account access."
+            "Connector probe returned an error; check connector configuration and account access."
         )
 
     record = _audit_connector_change(
@@ -828,9 +819,7 @@ def _supersede_or_block_running_runs(
                 event_type=AuditEventType.CONNECTOR_JOB_RUN,
                 connector_key=payload.connector_key,
                 account_id=payload.account_id,
-                reason=(
-                    f"orphaned RUNNING run {entry.id} superseded by new job"
-                ),
+                reason=(f"orphaned RUNNING run {entry.id} superseded by new job"),
                 details={
                     "action": "run_superseded",
                     "run_id": entry.id,
@@ -853,9 +842,7 @@ def _resolve_triggered_by_user_id(
     except (ValueError, TypeError):
         return None
     exists = session.scalar(
-        select(UserORM.id).where(
-            UserORM.id == candidate, UserORM.tenant_id == tenant_id
-        )
+        select(UserORM.id).where(UserORM.id == candidate, UserORM.tenant_id == tenant_id)
     )
     return candidate if exists is not None else None
 
@@ -924,15 +911,18 @@ def _reject_connector_job(
 #   - File: backend/ums_smart_revenue/api/connectors.py ->
 #     request_connector_job attaches the hooks.
 # ============================================================================
-_AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"
-_AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"
+# These are SQLAlchemy `session.info` flag keys (idempotency markers for the
+# event hooks below), not credentials. DeepSource's secret scanner (SCT-A000)
+# false-positives on the `_KEY` suffix; the string values are static identifiers.
+_AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"  # skipcq: SCT-A000
+_AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"  # skipcq: SCT-A000
 
 
 def _attach_after_rollback_hook(
     *,
     session: Session,
-    executor: ConnectorJobExecutor,
-    reservation: _SlotReservation,
+    executor: ConnectorJobExecutor,  # skipcq: PYL-E0601
+    reservation: _SlotReservation,  # skipcq: PYL-E0601
 ) -> None:
     """Attach the after_rollback hook immediately after submit_if_absent.
 
@@ -967,9 +957,7 @@ def _enqueue_after_commit(
         session.info[_AFTER_COMMIT_FLAG_KEY] = True
 
 
-def _make_after_commit_handler(
-    executor: ConnectorJobExecutor, reservation: _SlotReservation
-):
+def _make_after_commit_handler(executor: ConnectorJobExecutor, reservation: _SlotReservation):
     """Return a hook that activates the reservation after the session commits.
 
     If activation fails (e.g. the ThreadPoolExecutor rejects new work
@@ -980,14 +968,13 @@ def _make_after_commit_handler(
     lifecycle. The reservation is also dropped so a future request for
     the same scope is not blocked by a stale slot.
     """
+
     def _after_commit(_session: Session) -> None:
         try:
             executor.activate(reservation)
         except Exception as exc:  # noqa: BLE001 — best-effort, never raise
             executor.cancel_reservation(reservation)
-            logger.exception(
-                "Failed to activate connector job reservation after commit"
-            )
+            logger.exception("Failed to activate connector job reservation after commit")
             # Persist a job_failed_before_start audit row so the accepted
             # 202 has a matching failure row. The original request session
             # is already committed/closed, so this opens a fresh session
@@ -995,7 +982,7 @@ def _make_after_commit_handler(
             # best-effort: any error here is logged and never raised
             # into the request lifecycle.
             try:
-                executor._audit_failed_before_start(
+                executor._audit_failed_before_start(  # skipcq: PYL-W0212
                     tenant_id=reservation.tenant_id,
                     connector_key=reservation.connector_key,
                     account_id=reservation.account_id,
@@ -1004,16 +991,15 @@ def _make_after_commit_handler(
                     actor_identity=reservation.actor_identity,
                 )
             except Exception:  # noqa: BLE001 — best-effort audit
-                logger.exception(
-                    "Failed to persist activation-failure audit for reservation"
-                )
+                logger.exception("Failed to persist activation-failure audit for reservation")
+
     return _after_commit
 
 
-def _make_after_rollback_handler(
-    executor: ConnectorJobExecutor, reservation: _SlotReservation
-):
+def _make_after_rollback_handler(executor: ConnectorJobExecutor, reservation: _SlotReservation):
     """Return a hook that drops the reservation when the session rolls back."""
+
     def _after_rollback(_session: Session) -> None:
         executor.cancel_reservation(reservation)
+
     return _after_rollback

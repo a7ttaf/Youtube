@@ -34,9 +34,7 @@ FINANCE_WORKBOOK_SHEET_NAMES = (
 )
 
 _SHEET_SOURCES = {
-    "Executive Summary": (
-        "computed_finance_summary_deduction_components_and_account_allocations"
-    ),
+    "Executive Summary": ("computed_finance_summary_deduction_components_and_account_allocations"),
     "Monthly Close": "finance_month_close",
     "Company Breakdown": "monthly_revenue_facts_deduction_components_and_account_allocations",
     "Sector Breakdown": (
@@ -105,9 +103,7 @@ class FinanceWorkbookPreview:
             "scope_id": self.export_job.scope_id,
             "month_lock_status": self.export_job.month_lock_status,
             "include_confidence_notes": self.export_job.include_confidence_notes,
-            "include_manual_override_notes": (
-                self.export_job.include_manual_override_notes
-            ),
+            "include_manual_override_notes": (self.export_job.include_manual_override_notes),
             "sheets": [sheet.to_api() for sheet in self.sheets],
             "executive_summary": _executive_summary(
                 export_job=self.export_job,
@@ -220,9 +216,7 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
             "month_lock_status": preview.export_job.month_lock_status,
             "export_job_status": preview.export_job.status,
             "include_confidence_notes": preview.export_job.include_confidence_notes,
-            "include_manual_override_notes": (
-                preview.export_job.include_manual_override_notes
-            ),
+            "include_manual_override_notes": (preview.export_job.include_manual_override_notes),
         },
     )
     _write_key_value_sheet(
@@ -324,21 +318,15 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
             "youtube_revenue_total_usd": _decimal_to_api(
                 preview.payment_match.youtube_revenue_total_usd
             ),
-            "adsense_paid_amount": _decimal_to_api(
-                preview.payment_match.adsense_paid_amount
-            ),
+            "adsense_paid_amount": _decimal_to_api(preview.payment_match.adsense_paid_amount),
             "payment_gap_usd": _decimal_to_api(preview.payment_match.payment_gap_usd),
             "bank_reconciliation_status": preview.bank_reconciliation.status,
             "bank_received_amount_usd": _decimal_to_api(
                 preview.bank_reconciliation.bank_received_amount_usd
             ),
             "bank_gap_usd": _decimal_to_api(preview.bank_reconciliation.bank_gap_usd),
-            "transfer_fee_usd": _decimal_to_api(
-                preview.bank_reconciliation.transfer_fee_usd
-            ),
-            "fx_difference_usd": _decimal_to_api(
-                preview.bank_reconciliation.fx_difference_usd
-            ),
+            "transfer_fee_usd": _decimal_to_api(preview.bank_reconciliation.transfer_fee_usd),
+            "fx_difference_usd": _decimal_to_api(preview.bank_reconciliation.fx_difference_usd),
         },
     )
     _write_table_sheet(
@@ -437,9 +425,7 @@ def _executive_summary(
             net_revenue.total_adjusted_gross_revenue_usd
         ),
         "total_net_revenue_usd": _decimal_to_api(net_revenue.total_net_revenue_usd),
-        "total_deduction_amount_usd": _decimal_to_api(
-            net_revenue.total_deduction_amount_usd
-        ),
+        "total_deduction_amount_usd": _decimal_to_api(net_revenue.total_deduction_amount_usd),
         "total_channel_direct_deduction_amount_usd": _decimal_to_api(
             net_revenue.total_channel_direct_deduction_amount_usd
         ),
@@ -453,9 +439,7 @@ def _executive_summary(
     }
 
 
-def _scope_breakdown(
-    preview: FinanceWorkbookPreview, *, breakdown_type: str
-) -> dict[str, object]:
+def _scope_breakdown(preview: FinanceWorkbookPreview, *, breakdown_type: str) -> dict[str, object]:
     """
     Generate a scope breakdown dictionary for the given preview and breakdown type,
     including revenue metrics and channel counts.
@@ -471,9 +455,7 @@ def _scope_breakdown(
         "total_adjusted_gross_revenue_usd": _decimal_to_api(
             preview.net_revenue.total_adjusted_gross_revenue_usd
         ),
-        "total_net_revenue_usd": _decimal_to_api(
-            preview.net_revenue.total_net_revenue_usd
-        ),
+        "total_net_revenue_usd": _decimal_to_api(preview.net_revenue.total_net_revenue_usd),
         "total_deduction_amount_usd": _decimal_to_api(
             preview.net_revenue.total_deduction_amount_usd
         ),
@@ -501,9 +483,7 @@ def _write_key_value_sheet(sheet: Worksheet, values: dict[str, object]) -> None:
     )
 
 
-def _write_table_sheet(
-    sheet: Worksheet, headers: list[str], rows: list[list[object]]
-) -> None:
+def _write_table_sheet(sheet: Worksheet, headers: list[str], rows: list[list[object]]) -> None:
     """
     Populate the worksheet with the given headers and rows,
     then freeze the header row, apply header styling, and autosize columns.

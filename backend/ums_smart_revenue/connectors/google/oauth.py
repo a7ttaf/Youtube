@@ -7,6 +7,7 @@ to OAuthRefreshError.
 Required payload fields: refresh_token, client_id, client_secret, token_uri.
 Optional (passed through if present): scopes.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,8 +31,10 @@ _REQUIRED_FIELDS = ("refresh_token", "client_id", "client_secret", "token_uri")
 # Blast Radius: Credential bootstrap only. Authorization, finance, audit,
 #               Neo4j, and exports are unaffected until credentials are used.
 # Connections:
-#   - File: backend/ums_smart_revenue/connectors/google/secret_resolver.py -> Supplies the raw JSON payload.
-#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> Calls before live/dry-run dispatch.
+#   - File: backend/ums_smart_revenue/connectors/google/secret_resolver.py
+#     -> Supplies the raw JSON payload.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py
+#     -> Calls before live/dry-run dispatch.
 # ============================================================================
 def build_credentials_from_payload(payload: str) -> Credentials:
     try:
@@ -55,9 +58,7 @@ def build_credentials_from_payload(payload: str) -> Credentials:
 def _validated_required_field(data: dict[str, object], field: str) -> str:
     value = data.get(field)
     if not isinstance(value, str) or not value.strip():
-        raise MalformedSecretPayloadError(
-            detail=f"{field} must be a non-empty string"
-        )
+        raise MalformedSecretPayloadError(detail=f"{field} must be a non-empty string")
     return value.strip()
 
 
@@ -65,15 +66,11 @@ def _validated_scopes(value: object) -> list[str] | None:
     if value is None:
         return None
     if not isinstance(value, list):
-        raise MalformedSecretPayloadError(
-            detail="scopes must be a list of non-empty strings"
-        )
+        raise MalformedSecretPayloadError(detail="scopes must be a list of non-empty strings")
     scopes: list[str] = []
     for scope in value:
         if not isinstance(scope, str) or not scope.strip():
-            raise MalformedSecretPayloadError(
-                detail="scopes must be a list of non-empty strings"
-            )
+            raise MalformedSecretPayloadError(detail="scopes must be a list of non-empty strings")
         scopes.append(scope.strip())
     return scopes
 
@@ -86,7 +83,8 @@ def _validated_scopes(value: object) -> list[str] | None:
 #               written when refresh fails.
 # Connections:
 #   - File: backend/ums_smart_revenue/connectors/google/errors.py -> OAuthRefreshError.
-#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> Bucket A pre-start behavior.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py
+#     -> Bucket A pre-start behavior.
 # ============================================================================
 def refresh_credentials(credentials: Credentials) -> None:
     try:

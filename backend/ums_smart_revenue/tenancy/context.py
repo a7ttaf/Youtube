@@ -50,7 +50,6 @@ def require_current_tenant() -> Tenant:
     tenant = TENANT_CTX.get()
     if tenant is None:
         raise TenantContextMissing(
-            "No tenant in context — middleware likely missing or "
-            "request bypassed the resolver"
+            "No tenant in context — middleware likely missing or request bypassed the resolver"
         )
     return tenant

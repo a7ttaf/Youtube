@@ -22,9 +22,7 @@ from __future__ import annotations
 
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-GATEWAY_ACTOR_NAMESPACE = uuid5(
-    NAMESPACE_URL, "ums-smart-revenue:trusted-gateway-actor"
-)
+GATEWAY_ACTOR_NAMESPACE = uuid5(NAMESPACE_URL, "ums-smart-revenue:trusted-gateway-actor")
 
 
 def actor_identity_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:

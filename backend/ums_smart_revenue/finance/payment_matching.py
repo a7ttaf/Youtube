@@ -45,21 +45,15 @@ class MonthlyPaymentMatchSummary:
             "month": self.month,
             "currency": self.currency,
             "status": self.status,
-            "youtube_revenue_total_usd": _decimal_to_api(
-                self.youtube_revenue_total_usd
-            ),
+            "youtube_revenue_total_usd": _decimal_to_api(self.youtube_revenue_total_usd),
             "adsense_paid_amount": _decimal_to_api(self.adsense_paid_amount),
             "payment_gap_usd": _decimal_to_api(self.payment_gap_usd),
             "youtube_source_channel_count": self.youtube_source_channel_count,
-            "missing_youtube_source_channel_count": (
-                self.missing_youtube_source_channel_count
-            ),
+            "missing_youtube_source_channel_count": (self.missing_youtube_source_channel_count),
             "payment_count": self.payment_count,
             "paid_payment_count": self.paid_payment_count,
             "non_paid_payment_count": self.non_paid_payment_count,
-            "unsupported_payment_currency_count": (
-                self.unsupported_payment_currency_count
-            ),
+            "unsupported_payment_currency_count": (self.unsupported_payment_currency_count),
             "tolerance_usd": _decimal_to_api(self.tolerance_usd),
             "issues": [issue.to_api() for issue in self.issues],
         }
@@ -95,12 +89,8 @@ def build_monthly_payment_match_summary(
     normalized_currency = normalize_payment_match_currency(currency)
     month_facts = _filter_by_month(facts, month)
     month_payments = _filter_by_month(payments, month)
-    eligible_currency_payments = _filter_payments_by_currency(
-        month_payments, normalized_currency
-    )
-    unsupported_payment_currency_count = len(month_payments) - len(
-        eligible_currency_payments
-    )
+    eligible_currency_payments = _filter_payments_by_currency(month_payments, normalized_currency)
+    unsupported_payment_currency_count = len(month_payments) - len(eligible_currency_payments)
     youtube_facts_by_channel = _select_youtube_facts_by_channel(month_facts)
     missing_youtube_channels = _channel_ids_without_youtube_sources(month_facts)
 
@@ -111,9 +101,7 @@ def build_monthly_payment_match_summary(
         )
     )
     paid_payments = [
-        payment
-        for payment in eligible_currency_payments
-        if payment.payment_status == "PAID"
+        payment for payment in eligible_currency_payments if payment.payment_status == "PAID"
     ]
     adsense_paid_amount = _quantize_money(
         sum((payment.payment_amount for payment in paid_payments), Decimal("0"))

@@ -8,6 +8,7 @@ method validation, compute, reject-on-unallocated, version assignment, and the
 row inserts. It NEVER opens or commits its own session/transaction — the FastAPI
 session dependency commits after the route returns.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -75,9 +76,7 @@ def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
     try:
         return UUID(str(tenant_id).strip())
     except ValueError as exc:
-        raise CommittedAllocationValidationError(
-            f"invalid tenant_id: {tenant_id!r}"
-        ) from exc
+        raise CommittedAllocationValidationError(f"invalid tenant_id: {tenant_id!r}") from exc
 
 
 def _actor_identity_uuid(value: str) -> UUID:
@@ -126,7 +125,7 @@ class SqlAlchemyCommittedAllocationRepository:
     #   422/409; method-before-compute; reject-on-unallocated.
     # Blast Radius: Finance write; first allocation persistence. No reader change.
     # ========================================================================
-    def commit_allocation(
+    def commit_allocation(  # skipcq: PY-R1000
         self,
         *,
         month: str,
@@ -182,10 +181,7 @@ class SqlAlchemyCommittedAllocationRepository:
         # Service-layer mirror of the engine's company_level precondition so the
         # route gets a typed 422 (the engine's AllocationValidationError would
         # surface as a 500 from this path).
-        if (
-            allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD
-            and channel_company is None
-        ):
+        if allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD and channel_company is None:
             raise CommittedAllocationValidationError(
                 "channel_company mapping is required for company_level"
             )
@@ -208,18 +204,23 @@ class SqlAlchemyCommittedAllocationRepository:
 
         next_version = (
             self._session.scalars(
-                select(CommittedAllocationRunORM.commit_version).where(
+                select(CommittedAllocationRunORM.commit_version)
+                .where(
                     CommittedAllocationRunORM.tenant_id == self._tenant_id,
                     CommittedAllocationRunORM.month == month,
-                ).order_by(CommittedAllocationRunORM.commit_version.desc())
+                )
+                .order_by(CommittedAllocationRunORM.commit_version.desc())
             ).first()
             or 0
         ) + 1
 
         run = CommittedAllocationRunORM(
-            tenant_id=self._tenant_id, month=month, commit_version=next_version,
+            tenant_id=self._tenant_id,
+            month=month,
+            commit_version=next_version,
             allocation_method=result.allocation_method,
-            idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
             component_count=result.summary.component_count,
             allocated_component_count=result.summary.allocated_component_count,
             unallocated_component_count=result.summary.unallocated_component_count,
@@ -227,7 +228,8 @@ class SqlAlchemyCommittedAllocationRepository:
             unallocated_total_usd=result.summary.unallocated_total_usd,
             net_applicable_total_usd=result.summary.net_applicable_total_usd,
             reconciliation_total_usd=result.summary.reconciliation_total_usd,
-            committed_by=committed_by_uuid, reason=reason,
+            committed_by=committed_by_uuid,
+            reason=reason,
         )
         self._session.add(run)
         self._session.flush()  # assign run.id
@@ -249,12 +251,15 @@ class SqlAlchemyCommittedAllocationRepository:
         try:
             lines = tuple(
                 CommittedAllocationLineORM(
-                    run_id=run.id, adsense_account_id=ln.adsense_account_id,
+                    run_id=run.id,
+                    adsense_account_id=ln.adsense_account_id,
                     youtube_channel_id=ln.youtube_channel_id,
-                    component_kind=ln.component_kind, source_system=ln.source_system,
+                    component_kind=ln.component_kind,
+                    source_system=ln.source_system,
                     component_key=ln.component_key,
                     basis_source_kind=ln.basis_source_kind,
-                    basis_amount_usd=ln.basis_amount_usd, basis_share=ln.basis_share,
+                    basis_amount_usd=ln.basis_amount_usd,
+                    basis_share=ln.basis_share,
                     allocated_amount_usd=ln.allocated_amount_usd,
                     net_applicable=ln.net_applicable,
                 )
@@ -262,8 +267,10 @@ class SqlAlchemyCommittedAllocationRepository:
             )
             notes = tuple(
                 CommittedAllocationNoteORM(
-                    run_id=run.id, note_code=note.note_code,
-                    youtube_channel_id=note.youtube_channel_id, detail=note.detail,
+                    run_id=run.id,
+                    note_code=note.note_code,
+                    youtube_channel_id=note.youtube_channel_id,
+                    detail=note.detail,
                 )
                 for note in result.notes
             )
@@ -272,10 +279,13 @@ class SqlAlchemyCommittedAllocationRepository:
             # snapshots its full INTENTIONAL_NO_ALLOCATION set as evidence.
             unallocated = tuple(
                 CommittedAllocationUnallocatedORM(
-                    run_id=run.id, scope_id=iss.scope_id,
+                    run_id=run.id,
+                    scope_id=iss.scope_id,
                     component_kind=iss.component_kind,
-                    component_key=iss.component_key, amount_usd=iss.amount_usd,
-                    issue_code=iss.issue_code, detail=iss.detail,
+                    component_key=iss.component_key,
+                    amount_usd=iss.amount_usd,
+                    issue_code=iss.issue_code,
+                    detail=iss.detail,
                 )
                 for iss in result.unallocated
             )
@@ -370,28 +380,34 @@ class SqlAlchemyCommittedAllocationRepository:
     # ========================================================================
     def _replay(self, run: CommittedAllocationRunORM) -> CommitAllocationOutcome:
         """Load an existing run's children (deterministically ordered) for replay."""
-        lines = tuple(self._session.scalars(
-            select(CommittedAllocationLineORM).where(
-                CommittedAllocationLineORM.run_id == run.id
-            ).order_by(
-                CommittedAllocationLineORM.adsense_account_id,
-                CommittedAllocationLineORM.youtube_channel_id,
-                CommittedAllocationLineORM.component_key,
-            )
-        ).all())
-        unallocated = tuple(self._session.scalars(
-            select(CommittedAllocationUnallocatedORM).where(
-                CommittedAllocationUnallocatedORM.run_id == run.id
-            ).order_by(
-                CommittedAllocationUnallocatedORM.scope_id,
-                CommittedAllocationUnallocatedORM.component_key,
-            )
-        ).all())
-        notes = tuple(self._session.scalars(
-            select(CommittedAllocationNoteORM).where(
-                CommittedAllocationNoteORM.run_id == run.id
-            ).order_by(CommittedAllocationNoteORM.youtube_channel_id)
-        ).all())
+        lines = tuple(
+            self._session.scalars(
+                select(CommittedAllocationLineORM)
+                .where(CommittedAllocationLineORM.run_id == run.id)
+                .order_by(
+                    CommittedAllocationLineORM.adsense_account_id,
+                    CommittedAllocationLineORM.youtube_channel_id,
+                    CommittedAllocationLineORM.component_key,
+                )
+            ).all()
+        )
+        unallocated = tuple(
+            self._session.scalars(
+                select(CommittedAllocationUnallocatedORM)
+                .where(CommittedAllocationUnallocatedORM.run_id == run.id)
+                .order_by(
+                    CommittedAllocationUnallocatedORM.scope_id,
+                    CommittedAllocationUnallocatedORM.component_key,
+                )
+            ).all()
+        )
+        notes = tuple(
+            self._session.scalars(
+                select(CommittedAllocationNoteORM)
+                .where(CommittedAllocationNoteORM.run_id == run.id)
+                .order_by(CommittedAllocationNoteORM.youtube_channel_id)
+            ).all()
+        )
         return CommitAllocationOutcome(
             run=run, lines=lines, unallocated=unallocated, notes=notes, created=False
         )
@@ -399,10 +415,12 @@ class SqlAlchemyCommittedAllocationRepository:
     def get_latest_run(self, month: str) -> CommittedAllocationRunORM | None:
         """Return the highest-version run for a month (NOT wired into readers)."""
         return self._session.scalars(
-            select(CommittedAllocationRunORM).where(
+            select(CommittedAllocationRunORM)
+            .where(
                 CommittedAllocationRunORM.tenant_id == self._tenant_id,
                 CommittedAllocationRunORM.month == month,
-            ).order_by(CommittedAllocationRunORM.commit_version.desc())
+            )
+            .order_by(CommittedAllocationRunORM.commit_version.desc())
         ).first()
 
     def get_run_by_idempotency_key(

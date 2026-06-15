@@ -1,4 +1,5 @@
 """Endpoint tests for the channel-account map (auth, audit, payload safety)."""
+
 from uuid import UUID, uuid4
 
 import pytest
@@ -55,9 +56,12 @@ def seed(database_url):
         session.add(UserORM(id=USER_ID, email="map-admin@example.com", display_name="Map Admin"))
         session.add(
             AdsenseContentOwnerLinkORM(
-                id=uuid4(), tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
-                adsense_account_id="pub-1", content_owner_id="owner-1",
-                verification_status="UNVERIFIED", provenance_kind="OPERATOR_ASSERTED",
+                id=uuid4(),
+                tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
+                adsense_account_id="pub-1",
+                content_owner_id="owner-1",
+                verification_status="UNVERIFIED",
+                provenance_kind="OPERATOR_ASSERTED",
                 provenance_payload={"secret_provenance": "LEAK-1"},
                 effective_month_start="2026-01",
             )
@@ -121,8 +125,10 @@ def test_propose_creates_link_with_org_mapping_permission(tmp_path):
         "/revenue/channel-account-links",
         headers=auth_headers("corporate_admin", "global"),
         json={
-            "adsense_account_id": "pub-2", "content_owner_id": "owner-2",
-            "effective_month_start": "2026-02", "effective_month_end": None,
+            "adsense_account_id": "pub-2",
+            "content_owner_id": "owner-2",
+            "effective_month_start": "2026-02",
+            "effective_month_end": None,
             "provenance_kind": "OPERATOR_ASSERTED",
             "provenance_payload": {"note": "from contract"},
             "reason": "operator asserts pub-2 maps to owner-2",
@@ -142,11 +148,16 @@ def test_propose_requires_manage_org_mapping(tmp_path):
     client = TestClient(create_app(database_url=database_url))
     response = client.post(
         "/revenue/channel-account-links",
-        headers=auth_headers("finance_viewer", "global"),  # has finance view, NOT MANAGE_ORG_MAPPING
+        headers=auth_headers(
+            "finance_viewer", "global"
+        ),  # has finance view, NOT MANAGE_ORG_MAPPING
         json={
-            "adsense_account_id": "pub-2", "content_owner_id": "owner-2",
-            "effective_month_start": "2026-02", "effective_month_end": None,
-            "provenance_kind": "OPERATOR_ASSERTED", "provenance_payload": {},
+            "adsense_account_id": "pub-2",
+            "content_owner_id": "owner-2",
+            "effective_month_start": "2026-02",
+            "effective_month_end": None,
+            "provenance_kind": "OPERATOR_ASSERTED",
+            "provenance_payload": {},
             "reason": "x",
         },
     )
@@ -159,9 +170,13 @@ def _propose_via_api(client, *, account="pub-9", owner="owner-9", start="2026-01
         "/revenue/channel-account-links",
         headers=auth_headers("super_owner", "global"),
         json={
-            "adsense_account_id": account, "content_owner_id": owner,
-            "effective_month_start": start, "effective_month_end": end,
-            "provenance_kind": "OPERATOR_ASSERTED", "provenance_payload": {}, "reason": "seed",
+            "adsense_account_id": account,
+            "content_owner_id": owner,
+            "effective_month_start": start,
+            "effective_month_end": end,
+            "provenance_kind": "OPERATOR_ASSERTED",
+            "provenance_payload": {},
+            "reason": "seed",
         },
     ).json()["link"]["id"]
 
@@ -206,9 +221,7 @@ def test_verify_records_full_effective_range_in_audit_details(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         verified = session.scalars(
-            select(AuditLogORM).where(
-                AuditLogORM.event_type == "CHANNEL_ACCOUNT_LINK_VERIFIED"
-            )
+            select(AuditLogORM).where(AuditLogORM.event_type == "CHANNEL_ACCOUNT_LINK_VERIFIED")
         ).all()
     assert len(verified) == 1
     details = verified[0].details
@@ -243,7 +256,9 @@ def test_verify_overlap_returns_409(tmp_path):
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
-    first = _propose_via_api(client, account="pub-9", owner="owner-1", start="2026-01", end="2026-06")
+    first = _propose_via_api(
+        client, account="pub-9", owner="owner-1", start="2026-01", end="2026-06"
+    )
     client.post(
         f"/revenue/channel-account-links/{first}/verify",
         headers=auth_headers("super_owner", "global"),
@@ -359,7 +374,10 @@ def test_iter_months_inclusive_with_year_rollover():
     """_iter_months yields each YYYY-MM start..end inclusive, rolling over years."""
     assert _iter_months("2026-03", "2026-03") == ["2026-03"]
     assert _iter_months("2026-11", "2027-02") == [
-        "2026-11", "2026-12", "2027-01", "2027-02",
+        "2026-11",
+        "2026-12",
+        "2027-01",
+        "2027-02",
     ]
 
 
@@ -394,9 +412,7 @@ def test_allocation_permission_gated_for_whole_range():
         user_id=str(USER_ID),
         email="map-admin@example.com",
         direct_permissions=(
-            PermissionGrant(
-                Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
-            ),
+            PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()),
         ),
     )
     # Global allocation grant authorizes both a bounded and an open-ended range.
@@ -407,21 +423,16 @@ def test_allocation_permission_gated_for_whole_range():
 def test_global_grant_short_circuits_bounded_range_without_iteration(monkeypatch):
     """A global CHANGE_ALLOCATION_RULE grant authorizes a far-future bounded range
     via one check -- the per-month loop must NOT run (no ~95k iterations)."""
-    def _boom(start, end):
-        raise AssertionError(
-            "_iter_months must not run for a global-grant holder (short-circuit)"
-        )
 
-    monkeypatch.setattr(
-        "ums_smart_revenue.api.channel_account_links._iter_months", _boom
-    )
+    def _boom(start, end):
+        raise AssertionError("_iter_months must not run for a global-grant holder (short-circuit)")
+
+    monkeypatch.setattr("ums_smart_revenue.api.channel_account_links._iter_months", _boom)
     global_scoped = UserPrincipal(
         user_id=str(USER_ID),
         email="map-admin@example.com",
         direct_permissions=(
-            PermissionGrant(
-                Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
-            ),
+            PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()),
         ),
     )
     # Under the old per-month loop this far-future bound would iterate ~95k
@@ -439,9 +450,7 @@ def test_month_scoped_caller_still_iterates_bounded_range(monkeypatch):
         calls.append((start, end))
         return real_iter(start, end)
 
-    monkeypatch.setattr(
-        "ums_smart_revenue.api.channel_account_links._iter_months", _counting
-    )
+    monkeypatch.setattr("ums_smart_revenue.api.channel_account_links._iter_months", _counting)
     month_scoped = UserPrincipal(
         user_id=str(USER_ID),
         email="map-admin@example.com",
@@ -476,9 +485,7 @@ def test_missing_and_disabled_global_grant_fail_closed():
         email="map-admin@example.com",
         disabled=True,
         direct_permissions=(
-            PermissionGrant(
-                Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
-            ),
+            PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()),
         ),
     )
     with pytest.raises(HTTPException) as disabled:

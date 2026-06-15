@@ -26,9 +26,12 @@ endif
 # Detect uv presence at make-time but invoke by bare name so the runtime
 # shell's PATH (not make's $(shell ...) env) resolves the binary; this
 # avoids HOME-expansion bugs when make's subshell has a sparse env.
+# --extra dev installs the test/lint tools (pytest, ruff, mypy) into the venv so
+# the python lane's pytest/ruff steps resolve; a bare `uv run` syncs only the
+# runtime deps and the gate fails infra with "pytest binary is missing".
 HAS_UV := $(shell command -v uv >/dev/null 2>&1 && echo yes || echo no)
 ifeq ($(HAS_UV),yes)
-PREFLIGHT := bash ci/scripts/with-home.sh uv run bash ci/preflight.sh
+PREFLIGHT := bash ci/scripts/with-home.sh uv run --extra dev bash ci/preflight.sh
 else
 PREFLIGHT := bash ci/scripts/with-home.sh bash ci/preflight.sh
 endif

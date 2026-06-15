@@ -4,6 +4,7 @@ Revision ID: 20260612_0001
 Revises: 20260609_0002
 Create Date: 2026-06-12
 """
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -32,10 +33,7 @@ down_revision = "20260609_0002"
 branch_labels = None
 depends_on = None
 
-_STATUS_CHECK = (
-    "last_refresh_status IS NULL "
-    "OR last_refresh_status IN ('succeeded', 'failed')"
-)
+_STATUS_CHECK = "last_refresh_status IS NULL OR last_refresh_status IN ('succeeded', 'failed')"
 
 
 def upgrade() -> None:
@@ -48,28 +46,16 @@ def upgrade() -> None:
                 nullable=True,
             )
         )
-        batch.add_column(
-            sa.Column(
-                "token_expiry_at", sa.DateTime(timezone=True), nullable=True
-            )
-        )
-        batch.add_column(
-            sa.Column("last_refresh_status", sa.Text(), nullable=True)
-        )
-        batch.add_column(
-            sa.Column("last_refresh_error_class", sa.Text(), nullable=True)
-        )
-        batch.create_check_constraint(
-            "ck_connector_last_refresh_status", _STATUS_CHECK
-        )
+        batch.add_column(sa.Column("token_expiry_at", sa.DateTime(timezone=True), nullable=True))
+        batch.add_column(sa.Column("last_refresh_status", sa.Text(), nullable=True))
+        batch.add_column(sa.Column("last_refresh_error_class", sa.Text(), nullable=True))
+        batch.create_check_constraint("ck_connector_last_refresh_status", _STATUS_CHECK)
 
 
 def downgrade() -> None:
     """Drop the status CHECK then the four telemetry columns."""
     with op.batch_alter_table("api_connector_credentials") as batch:
-        batch.drop_constraint(
-            "ck_connector_last_refresh_status", type_="check"
-        )
+        batch.drop_constraint("ck_connector_last_refresh_status", type_="check")
         batch.drop_column("last_refresh_error_class")
         batch.drop_column("last_refresh_status")
         batch.drop_column("token_expiry_at")

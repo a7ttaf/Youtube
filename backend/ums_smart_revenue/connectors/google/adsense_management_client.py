@@ -24,6 +24,7 @@ same source_report_id provenance.
 AdSense data is ingestion/audit evidence only in B2. C1 skips AdSense rows
 as SkipReason.MISSING_CHANNEL_ID until a future allocation/mapping spec.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -57,7 +58,10 @@ _REPORTING_TIME_ZONE = "GOOGLE_TIME_ZONE"
 # report_id stamp. Locked at ship: widening this set requires both a parser
 # contract update and a new adapter branch.
 SUPPORTED_ADSENSE_REPORTS: frozenset[str] = frozenset({"monthly_account_earnings"})
-_REPORT_KEY = "monthly_account_earnings"
+# Report-kind identifier folded into the deterministic report_id stamp, not a
+# secret. DeepSource's secret scanner (SCT-A000) false-positives on the `_KEY`
+# suffix; the value mirrors SUPPORTED_ADSENSE_REPORTS above.
+_REPORT_KEY = "monthly_account_earnings"  # skipcq: SCT-A000
 _MAX_REPORT_RESULT_ROWS = 100_000
 _ACCOUNT_RESOURCE_PREFIX = "accounts/"
 _ACCOUNT_ID_RESERVED_CHARS = frozenset("/?#%")
@@ -93,7 +97,9 @@ def _validated_account_id(account_id: str) -> str:
 
 
 def _synthesized_request(
-    *, account_id: str, report_month: str,
+    *,
+    account_id: str,
+    report_month: str,
 ) -> dict[str, object]:
     """Build parser-visible request metadata from trusted client inputs."""
     year_i, month_i, last_day = _report_month_date_range(report_month)
@@ -123,21 +129,19 @@ def _result_rows(*, response_json: dict[str, object], url: str) -> list[object] 
 
 
 def _total_matched_rows(
-    *, response_json: dict[str, object], url: str,
+    *,
+    response_json: dict[str, object],
+    url: str,
 ) -> int | None:
     """Return totalMatchedRows as an int when Google includes the count."""
     total = response_json.get("totalMatchedRows")
     if total is None:
         return None
     if isinstance(total, bool):
-        raise GoogleApiResponseError(
-            url=url, reason="expected totalMatchedRows integer, got bool"
-        )
+        raise GoogleApiResponseError(url=url, reason="expected totalMatchedRows integer, got bool")
     if isinstance(total, int):
         if total < 0:
-            raise GoogleApiResponseError(
-                url=url, reason="totalMatchedRows must not be negative"
-            )
+            raise GoogleApiResponseError(url=url, reason="totalMatchedRows must not be negative")
         return total
     if isinstance(total, str) and total.isdecimal():
         return int(total)
@@ -164,7 +168,9 @@ def _total_matched_rows(
 #     adsense_management.py -> must only receive complete ReportResult rows.
 # ============================================================================
 def _reject_truncated_report_result(
-    *, response_json: dict[str, object], url: str,
+    *,
+    response_json: dict[str, object],
+    url: str,
 ) -> None:
     """Raise when the AdSense ReportResult row counts prove truncation."""
     rows = _result_rows(response_json=response_json, url=url)
@@ -182,26 +188,19 @@ def _reject_truncated_report_result(
     if total is not None and total < returned_count:
         raise GoogleApiResponseError(
             url=url,
-            reason=(
-                "totalMatchedRows is smaller than returned rows "
-                f"({total}<{returned_count})"
-            ),
+            reason=(f"totalMatchedRows is smaller than returned rows ({total}<{returned_count})"),
         )
     if total is not None and total > returned_count:
         raise GoogleApiResponseError(
             url=url,
             reason=(
-                "truncated ReportResult "
-                f"(totalMatchedRows={total}, returnedRows={returned_count})"
+                f"truncated ReportResult (totalMatchedRows={total}, returnedRows={returned_count})"
             ),
         )
     if total is None and returned_count >= _MAX_REPORT_RESULT_ROWS:
         raise GoogleApiResponseError(
             url=url,
-            reason=(
-                "possible truncated ReportResult at AdSense row cap without "
-                "totalMatchedRows"
-            ),
+            reason=("possible truncated ReportResult at AdSense row cap without totalMatchedRows"),
         )
 
 
@@ -238,12 +237,11 @@ def adsense_response_to_parser_payload(
         MalformedReportMonthError: If ``report_month`` is not ``YYYY-MM``.
     """
     account_id = _validated_account_id(account_id)
-    report_id = hashlib.sha256(
-        f"{account_id}|{report_month}|{_REPORT_KEY}".encode()
-    ).hexdigest()
+    report_id = hashlib.sha256(f"{account_id}|{report_month}|{_REPORT_KEY}".encode()).hexdigest()
     payload = dict(response_json)
     payload["request"] = _synthesized_request(
-        account_id=account_id, report_month=report_month,
+        account_id=account_id,
+        report_month=report_month,
     )
     payload["headers"] = response_json.get("headers", [])
     # Parser tolerates a missing/None `rows` as a clean zero-result; passing
@@ -283,7 +281,10 @@ class AdSenseManagementClient:
         self._http = http
 
     def fetch_monthly_report(
-        self, *, account_id: str, report_month: str,
+        self,
+        *,
+        account_id: str,
+        report_month: str,
     ) -> dict[str, object]:
         """Fetch one AdSense account's monthly reports.generate JSON, wrapped
         with the deterministic report_id stamp the parser requires.

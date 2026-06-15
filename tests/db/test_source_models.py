@@ -58,17 +58,13 @@ def test_currency_orm_columns() -> None:
 
 
 def test_currency_orm_unique_numeric_code() -> None:
-    uniques = [
-        c for c in CurrencyORM.__table__.constraints if isinstance(c, UniqueConstraint)
-    ]
+    uniques = [c for c in CurrencyORM.__table__.constraints if isinstance(c, UniqueConstraint)]
     named = {c.name for c in uniques}
     assert "uq_currencies_numeric_code" in named
 
 
 def test_currency_orm_checks() -> None:
-    checks = [
-        c for c in CurrencyORM.__table__.constraints if isinstance(c, CheckConstraint)
-    ]
+    checks = [c for c in CurrencyORM.__table__.constraints if isinstance(c, CheckConstraint)]
     names = {c.name for c in checks}
     assert "ck_currencies_code_format" in names
     assert "ck_currencies_numeric_code_format" in names
@@ -159,7 +155,8 @@ def test_google_revenue_source_row_columns() -> None:
 
 def test_google_revenue_source_row_unique_source_row_key() -> None:
     uniques = [
-        c for c in GoogleRevenueSourceRowORM.__table__.constraints
+        c
+        for c in GoogleRevenueSourceRowORM.__table__.constraints
         if isinstance(c, UniqueConstraint)
     ]
     named = {c.name for c in uniques}
@@ -168,7 +165,8 @@ def test_google_revenue_source_row_unique_source_row_key() -> None:
 
 def test_google_revenue_source_row_tenant_fk_present() -> None:
     fks = [
-        c for c in GoogleRevenueSourceRowORM.__table__.constraints
+        c
+        for c in GoogleRevenueSourceRowORM.__table__.constraints
         if isinstance(c, ForeignKeyConstraint)
     ]
     target_tables = {fk.referred_table.name for fk in fks}

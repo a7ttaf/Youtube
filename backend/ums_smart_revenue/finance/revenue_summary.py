@@ -29,15 +29,11 @@ class AdjustedRevenueSummary:
             "youtube_channel_id": self.youtube_channel_id,
             "status": self.status,
             "primary_source_kind": self.primary_source_kind,
-            "baseline_gross_revenue_usd": _decimal_to_api(
-                self.baseline_gross_revenue_usd
-            ),
+            "baseline_gross_revenue_usd": _decimal_to_api(self.baseline_gross_revenue_usd),
             "approved_manual_override_total_usd": _decimal_to_api(
                 self.approved_manual_override_total_usd
             ),
-            "adjusted_gross_revenue_usd": _decimal_to_api(
-                self.adjusted_gross_revenue_usd
-            ),
+            "adjusted_gross_revenue_usd": _decimal_to_api(self.adjusted_gross_revenue_usd),
             "approved_manual_override_count": self.approved_manual_override_count,
             "pending_manual_override_count": self.pending_manual_override_count,
         }
@@ -62,8 +58,7 @@ def build_adjusted_revenue_summary(
     else:
         if month is None or youtube_channel_id is None:
             raise ValueError(
-                "month and youtube_channel_id are required when "
-                "no revenue facts are provided"
+                "month and youtube_channel_id are required when no revenue facts are provided"
             )
         resolved_month = month
         resolved_channel_id = youtube_channel_id
@@ -85,9 +80,7 @@ def build_adjusted_revenue_summary(
 
     approved = [override for override in override_list if override.status == "APPROVED"]
     pending = [override for override in override_list if override.status == "PENDING"]
-    approved_total = sum(
-        (override.adjustment_revenue_usd for override in approved), Decimal("0")
-    )
+    approved_total = sum((override.adjustment_revenue_usd for override in approved), Decimal("0"))
     adjusted = baseline + approved_total
     if approved:
         summary_status = "ADJUSTED"
@@ -119,6 +112,4 @@ def _validate_same_period_and_channel(
     """Ensure revenue summary inputs share the requested month and channel."""
     for entry in entries:
         if entry.month != month or entry.youtube_channel_id != youtube_channel_id:
-            raise ValueError(
-                "Cannot aggregate revenue summary with inconsistent month/channel"
-            )
+            raise ValueError("Cannot aggregate revenue summary with inconsistent month/channel")

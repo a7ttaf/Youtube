@@ -1,4 +1,5 @@
 """Read-switch resolver: lock-aware snapshot-vs-live selection + reconstruction."""
+
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -56,80 +57,159 @@ def _session(tmp_path) -> Session:
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     session = Session(engine)
-    session.add(TenantORM(
-        id=TENANT, slug="ums", display_name="UMS", primary_currency="USD", status="ACTIVE",
-    ))
+    session.add(
+        TenantORM(
+            id=TENANT,
+            slug="ums",
+            display_name="UMS",
+            primary_currency="USD",
+            status="ACTIVE",
+        )
+    )
     session.commit()
     return session
 
 
 def _add_account(session, *, account, channel, gross, deduction, mapped):
     """Seed one ACCOUNT deduction over one channel (ADSENSE gross), optionally mapped."""
-    session.add(YouTubeChannelORM(
-        id=uuid4(), tenant_id=TENANT, youtube_channel_id=channel, channel_name=channel, active=True,
-    ))
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            youtube_channel_id=channel,
+            channel_name=channel,
+            active=True,
+        )
+    )
     session.flush()  # cross-registry composite FK: channel before the dependent fact
-    session.add(MonthlyChannelRevenueFactORM(
-        id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id=channel,
-        source_kind="ADSENSE", gross_revenue_usd=Decimal(gross), net_revenue_usd=None,
-    ))
-    session.add(DeductionComponentORM(
-        id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
-        scope_kind="ACCOUNT", scope_id=account, amount_usd=Decimal(deduction),
-        currency_code="USD", source_system="adsense_management",
-        source_table="google_revenue_source_rows", component_key=f"ad-{account}",
-        raw_payload={},
-    ))
+    session.add(
+        MonthlyChannelRevenueFactORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            youtube_channel_id=channel,
+            source_kind="ADSENSE",
+            gross_revenue_usd=Decimal(gross),
+            net_revenue_usd=None,
+        )
+    )
+    session.add(
+        DeductionComponentORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            component_kind="DEDUCTION",
+            scope_kind="ACCOUNT",
+            scope_id=account,
+            amount_usd=Decimal(deduction),
+            currency_code="USD",
+            source_system="adsense_management",
+            source_table="google_revenue_source_rows",
+            component_key=f"ad-{account}",
+            raw_payload={},
+        )
+    )
     if mapped:
         owner = f"owner-{account}"
-        session.add(AdsenseContentOwnerLinkORM(
-            id=uuid4(), tenant_id=TENANT, adsense_account_id=account, content_owner_id=owner,
-            verification_status="VERIFIED", provenance_kind="OPERATOR_ASSERTED",
-            provenance_payload={}, effective_month_start="2026-01",
-        ))
-        session.add(ContentOwnerChannelLinkORM(
-            id=uuid4(), tenant_id=TENANT, content_owner_id=owner, youtube_channel_id=channel,
-            provenance_kind="SOURCE_ROW", active=True, effective_month_start="2026-01",
-        ))
+        session.add(
+            AdsenseContentOwnerLinkORM(
+                id=uuid4(),
+                tenant_id=TENANT,
+                adsense_account_id=account,
+                content_owner_id=owner,
+                verification_status="VERIFIED",
+                provenance_kind="OPERATOR_ASSERTED",
+                provenance_payload={},
+                effective_month_start="2026-01",
+            )
+        )
+        session.add(
+            ContentOwnerChannelLinkORM(
+                id=uuid4(),
+                tenant_id=TENANT,
+                content_owner_id=owner,
+                youtube_channel_id=channel,
+                provenance_kind="SOURCE_ROW",
+                active=True,
+                effective_month_start="2026-01",
+            )
+        )
 
 
 def _add_channel(session, *, channel, gross, source_kind="ADSENSE"):
     """Seed one channel + its source-aligned monthly gross fact."""
-    session.add(YouTubeChannelORM(
-        id=uuid4(), tenant_id=TENANT, youtube_channel_id=channel, channel_name=channel, active=True,
-    ))
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            youtube_channel_id=channel,
+            channel_name=channel,
+            active=True,
+        )
+    )
     session.flush()  # cross-registry composite FK: channel before the dependent fact
-    session.add(MonthlyChannelRevenueFactORM(
-        id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id=channel,
-        source_kind=source_kind, gross_revenue_usd=Decimal(gross), net_revenue_usd=None,
-    ))
+    session.add(
+        MonthlyChannelRevenueFactORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            youtube_channel_id=channel,
+            source_kind=source_kind,
+            gross_revenue_usd=Decimal(gross),
+            net_revenue_usd=None,
+        )
+    )
 
 
 def _map_account_to_channels(session, *, account, channels, owner=None):
     """Verify-map one ACCOUNT to a set of already-seeded channels (one owner)."""
     owner = owner or f"owner-{account}"
-    session.add(AdsenseContentOwnerLinkORM(
-        id=uuid4(), tenant_id=TENANT, adsense_account_id=account, content_owner_id=owner,
-        verification_status="VERIFIED", provenance_kind="OPERATOR_ASSERTED",
-        provenance_payload={}, effective_month_start="2026-01",
-    ))
+    session.add(
+        AdsenseContentOwnerLinkORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            adsense_account_id=account,
+            content_owner_id=owner,
+            verification_status="VERIFIED",
+            provenance_kind="OPERATOR_ASSERTED",
+            provenance_payload={},
+            effective_month_start="2026-01",
+        )
+    )
     for channel in channels:
-        session.add(ContentOwnerChannelLinkORM(
-            id=uuid4(), tenant_id=TENANT, content_owner_id=owner, youtube_channel_id=channel,
-            provenance_kind="SOURCE_ROW", active=True, effective_month_start="2026-01",
-        ))
+        session.add(
+            ContentOwnerChannelLinkORM(
+                id=uuid4(),
+                tenant_id=TENANT,
+                content_owner_id=owner,
+                youtube_channel_id=channel,
+                provenance_kind="SOURCE_ROW",
+                active=True,
+                effective_month_start="2026-01",
+            )
+        )
 
 
-def _add_account_deduction(session, *, account, deduction, component_key=None,
-                           source_system="adsense_management"):
+def _add_account_deduction(
+    session, *, account, deduction, component_key=None, source_system="adsense_management"
+):
     """Seed one ACCOUNT-scoped deduction component (no channel/map seeding)."""
-    session.add(DeductionComponentORM(
-        id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
-        scope_kind="ACCOUNT", scope_id=account, amount_usd=Decimal(deduction),
-        currency_code="USD", source_system=source_system,
-        source_table="google_revenue_source_rows",
-        component_key=component_key or f"ad-{account}", raw_payload={},
-    ))
+    session.add(
+        DeductionComponentORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            month=MONTH,
+            component_kind="DEDUCTION",
+            scope_kind="ACCOUNT",
+            scope_id=account,
+            amount_usd=Decimal(deduction),
+            currency_code="USD",
+            source_system=source_system,
+            source_table="google_revenue_source_rows",
+            component_key=component_key or f"ad-{account}",
+            raw_payload={},
+        )
+    )
 
 
 def _close(session, status):
@@ -138,13 +218,23 @@ def _close(session, status):
     # get_or_create_month_close_row, so after a snapshot commit the (tenant, month)
     # row already exists. Update it in place rather than blindly inserting (the
     # UNIQUE(tenant_id, month) constraint would otherwise reject a second row).
-    existing = session.query(FinanceMonthCloseORM).filter_by(
-        tenant_id=TENANT, month=MONTH,
-    ).one_or_none()
+    existing = (
+        session.query(FinanceMonthCloseORM)
+        .filter_by(
+            tenant_id=TENANT,
+            month=MONTH,
+        )
+        .one_or_none()
+    )
     if existing is None:
-        session.add(FinanceMonthCloseORM(
-            tenant_id=TENANT, month=MONTH, status=status, allocation_rule_payload={},
-        ))
+        session.add(
+            FinanceMonthCloseORM(
+                tenant_id=TENANT,
+                month=MONTH,
+                status=status,
+                allocation_rule_payload={},
+            )
+        )
     else:
         existing.status = status
     session.commit()
@@ -162,13 +252,20 @@ def _repos(session):
 
 def _commit(session, *, status_after="OPEN"):
     """Seed one mapped account, commit a snapshot, then set the close status."""
-    _add_account(session, account="pub-1", channel="chA", gross="1000.00", deduction="100.00", mapped=True)
+    _add_account(
+        session, account="pub-1", channel="chA", gross="1000.00", deduction="100.00", mapped=True
+    )
     session.commit()
     committed, ded, rev, link = _repos(session)
     committed.commit_allocation(
-        month=MONTH, allocation_method="gross_revenue_proportional",
-        idempotency_key="k1", request_fingerprint="fp1", reason="close",
-        committed_by=ACTOR, deduction_repository=ded, revenue_repository=rev,
+        month=MONTH,
+        allocation_method="gross_revenue_proportional",
+        idempotency_key="k1",
+        request_fingerprint="fp1",
+        reason="close",
+        committed_by=ACTOR,
+        deduction_repository=ded,
+        revenue_repository=rev,
         link_repository=link,
     )
     _close(session, status_after)
@@ -178,8 +275,12 @@ def _resolve(session, *, adsense_account_id=None):
     """Call resolve_month_account_allocation for MONTH using all repos from session."""
     committed, ded, rev, link = _repos(session)
     return resolve_month_account_allocation(
-        month=MONTH, session=session, deduction_repository=ded, revenue_repository=rev,
-        link_repository=link, committed_repository=committed,
+        month=MONTH,
+        session=session,
+        deduction_repository=ded,
+        revenue_repository=rev,
+        link_repository=link,
+        committed_repository=committed,
         adsense_account_id=adsense_account_id,
     )
 
@@ -209,7 +310,9 @@ def test_open_month_uses_live_compute(tmp_path):
 def test_no_close_row_uses_live_compute(tmp_path):
     """No close row -> treated as open -> live_compute."""
     session = _session(tmp_path)
-    _add_account(session, account="pub-1", channel="chA", gross="1000.00", deduction="100.00", mapped=True)
+    _add_account(
+        session, account="pub-1", channel="chA", gross="1000.00", deduction="100.00", mapped=True
+    )
     session.commit()
     _result, prov = _resolve(session)
     assert prov.source == "live_compute"
@@ -218,7 +321,9 @@ def test_no_close_row_uses_live_compute(tmp_path):
 def test_locked_without_snapshot_falls_back_to_live(tmp_path):
     """LOCKED month with no committed run -> live_fallback (never errors)."""
     session = _session(tmp_path)
-    _add_account(session, account="pub-1", channel="chA", gross="1000.00", deduction="100.00", mapped=True)
+    _add_account(
+        session, account="pub-1", channel="chA", gross="1000.00", deduction="100.00", mapped=True
+    )
     session.commit()
     _close(session, "LOCKED")
     result, prov = _resolve(session)
@@ -233,7 +338,10 @@ def test_reconstruction_equals_live_for_locked(tmp_path):
     snap, _prov = _resolve(session)
     _committed, ded, rev, link = _repos(session)
     live = compute_month_account_allocation(
-        month=MONTH, deduction_repository=ded, revenue_repository=rev, link_repository=link,
+        month=MONTH,
+        deduction_repository=ded,
+        revenue_repository=rev,
+        link_repository=link,
     )
     assert snap.lines == live.lines
     assert snap.unallocated == live.unallocated
@@ -243,21 +351,34 @@ def test_reconstruction_equals_live_for_locked(tmp_path):
 def test_account_filter_matches_live_per_account(tmp_path):
     """LOCKED snapshot filtered to one account == live compute filtered to that account."""
     session = _session(tmp_path)
-    _add_account(session, account="pub-1", channel="chA", gross="1000.00", deduction="100.00", mapped=True)
-    _add_account(session, account="pub-2", channel="chB", gross="500.00", deduction="40.00", mapped=True)
+    _add_account(
+        session, account="pub-1", channel="chA", gross="1000.00", deduction="100.00", mapped=True
+    )
+    _add_account(
+        session, account="pub-2", channel="chB", gross="500.00", deduction="40.00", mapped=True
+    )
     session.commit()
     committed, ded, rev, link = _repos(session)
     committed.commit_allocation(
-        month=MONTH, allocation_method="gross_revenue_proportional",
-        idempotency_key="k1", request_fingerprint="fp1", reason="close",
-        committed_by=ACTOR, deduction_repository=ded, revenue_repository=rev, link_repository=link,
+        month=MONTH,
+        allocation_method="gross_revenue_proportional",
+        idempotency_key="k1",
+        request_fingerprint="fp1",
+        reason="close",
+        committed_by=ACTOR,
+        deduction_repository=ded,
+        revenue_repository=rev,
+        link_repository=link,
     )
     _close(session, "LOCKED")
     for account in ("pub-1", "pub-2"):
         snap, prov = _resolve(session, adsense_account_id=account)
         live = compute_month_account_allocation(
-            month=MONTH, deduction_repository=ded, revenue_repository=rev,
-            link_repository=link, adsense_account_id=account,
+            month=MONTH,
+            deduction_repository=ded,
+            revenue_repository=rev,
+            link_repository=link,
+            adsense_account_id=account,
         )
         assert prov.source == "committed_snapshot"
         assert snap.lines == live.lines
@@ -287,9 +408,14 @@ def test_per_account_filter_actively_drops_cross_account_note(tmp_path):
     session.commit()
     committed, ded, rev, link = _repos(session)
     committed.commit_allocation(
-        month=MONTH, allocation_method="gross_revenue_proportional",
-        idempotency_key="k1", request_fingerprint="fp1", reason="close",
-        committed_by=ACTOR, deduction_repository=ded, revenue_repository=rev,
+        month=MONTH,
+        allocation_method="gross_revenue_proportional",
+        idempotency_key="k1",
+        request_fingerprint="fp1",
+        reason="close",
+        committed_by=ACTOR,
+        deduction_repository=ded,
+        revenue_repository=rev,
         link_repository=link,
     )
     _close(session, "LOCKED")
@@ -307,8 +433,11 @@ def test_per_account_filter_actively_drops_cross_account_note(tmp_path):
 
     # (c) live single-account compute for that account also has no note (equivalence).
     live = compute_month_account_allocation(
-        month=MONTH, deduction_repository=ded, revenue_repository=rev,
-        link_repository=link, adsense_account_id="pub-1",
+        month=MONTH,
+        deduction_repository=ded,
+        revenue_repository=rev,
+        link_repository=link,
+        adsense_account_id="pub-1",
     )
     assert live.notes == ()
     assert snap.lines == live.lines
@@ -328,9 +457,14 @@ def _commit_multi(session):
     session.commit()
     committed, ded, rev, link = _repos(session)
     committed.commit_allocation(
-        month=MONTH, allocation_method="gross_revenue_proportional",
-        idempotency_key="k1", request_fingerprint="fp1", reason="close",
-        committed_by=ACTOR, deduction_repository=ded, revenue_repository=rev,
+        month=MONTH,
+        allocation_method="gross_revenue_proportional",
+        idempotency_key="k1",
+        request_fingerprint="fp1",
+        reason="close",
+        committed_by=ACTOR,
+        deduction_repository=ded,
+        revenue_repository=rev,
         link_repository=link,
     )
     _close(session, "LOCKED")
@@ -355,7 +489,10 @@ def test_reconstruction_multi_account_matches_live_sorted_and_is_deterministic(t
     snap, prov = _resolve(session)
     assert prov.source == "committed_snapshot"
     live = compute_month_account_allocation(
-        month=MONTH, deduction_repository=ded, revenue_repository=rev, link_repository=link,
+        month=MONTH,
+        deduction_repository=ded,
+        revenue_repository=rev,
+        link_repository=link,
     )
     # equal as sets/sorted sequences (don't assume live's emission order)
     assert sorted(snap.lines, key=_line_sort_key) == sorted(live.lines, key=_line_sort_key)
@@ -385,9 +522,14 @@ def test_zero_amount_component_yields_no_line_and_row_derived_counts(tmp_path):
     session.commit()
     committed, ded, rev, link = _repos(session)
     committed.commit_allocation(
-        month=MONTH, allocation_method="gross_revenue_proportional",
-        idempotency_key="k1", request_fingerprint="fp1", reason="close",
-        committed_by=ACTOR, deduction_repository=ded, revenue_repository=rev,
+        month=MONTH,
+        allocation_method="gross_revenue_proportional",
+        idempotency_key="k1",
+        request_fingerprint="fp1",
+        reason="close",
+        committed_by=ACTOR,
+        deduction_repository=ded,
+        revenue_repository=rev,
         link_repository=link,
     )
     _close(session, "LOCKED")
@@ -407,8 +549,11 @@ def test_zero_amount_component_yields_no_line_and_row_derived_counts(tmp_path):
     # this is the documented divergence between the live count and the row-derived
     # snapshot filter. Monetary totals agree exactly.
     live = compute_month_account_allocation(
-        month=MONTH, deduction_repository=ded, revenue_repository=rev,
-        link_repository=link, adsense_account_id="pub-z",
+        month=MONTH,
+        deduction_repository=ded,
+        revenue_repository=rev,
+        link_repository=link,
+        adsense_account_id="pub-z",
     )
     assert live.lines == ()
     assert live.summary.allocated_total_usd == Decimal("0")
@@ -424,21 +569,39 @@ def test_rebuild_maps_unallocated_fields_from_a_synthetic_run():
     exercised with real data). No session/DB needed — pure mapping.
     """
     run = CommittedAllocationRunORM(
-        id=UUID(int=7), tenant_id=TENANT, month=MONTH, commit_version=1,
+        id=UUID(int=7),
+        tenant_id=TENANT,
+        month=MONTH,
+        commit_version=1,
         allocation_method="gross_revenue_proportional",
-        idempotency_key="k", request_fingerprint="fp",
-        component_count=1, allocated_component_count=0, unallocated_component_count=1,
-        allocated_total_usd=Decimal("0"), unallocated_total_usd=Decimal("9.50"),
-        net_applicable_total_usd=Decimal("0"), reconciliation_total_usd=Decimal("0"),
-        committed_by=UUID(int=1), reason="r",
+        idempotency_key="k",
+        request_fingerprint="fp",
+        component_count=1,
+        allocated_component_count=0,
+        unallocated_component_count=1,
+        allocated_total_usd=Decimal("0"),
+        unallocated_total_usd=Decimal("9.50"),
+        net_applicable_total_usd=Decimal("0"),
+        reconciliation_total_usd=Decimal("0"),
+        committed_by=UUID(int=1),
+        reason="r",
     )
     issue_row = CommittedAllocationUnallocatedORM(
-        id=UUID(int=8), run_id=run.id, scope_id="pub-x", component_kind="DEDUCTION",
-        component_key="acct-ded-x", amount_usd=Decimal("9.50"),
-        issue_code="ACCOUNT_UNMAPPED_OR_UNVERIFIED", detail="no verified channels",
+        id=UUID(int=8),
+        run_id=run.id,
+        scope_id="pub-x",
+        component_kind="DEDUCTION",
+        component_key="acct-ded-x",
+        amount_usd=Decimal("9.50"),
+        issue_code="ACCOUNT_UNMAPPED_OR_UNVERIFIED",
+        detail="no verified channels",
     )
     outcome = CommitAllocationOutcome(
-        run=run, lines=(), unallocated=(issue_row,), notes=(), created=False,
+        run=run,
+        lines=(),
+        unallocated=(issue_row,),
+        notes=(),
+        created=False,
     )
     result = rebuild_result_from_run(outcome)
     assert len(result.unallocated) == 1
@@ -456,8 +619,12 @@ def test_resolve_serves_committed_post_tax_snapshot_for_locked_month(tmp_path):
     """LOCKED month -> committed post_tax snapshot (reconstructed losslessly)."""
     session = _session(tmp_path)
     _add_account(
-        session, account="pub-1", channel="chA",
-        gross="1000.00", deduction="100.00", mapped=True,
+        session,
+        account="pub-1",
+        channel="chA",
+        gross="1000.00",
+        deduction="100.00",
+        mapped=True,
     )
     session.execute(
         MonthlyChannelRevenueFactORM.__table__.update()
@@ -470,9 +637,14 @@ def test_resolve_serves_committed_post_tax_snapshot_for_locked_month(tmp_path):
     rev = SqlAlchemyRevenueFactRepository(session)
     link = SqlAlchemyChannelAccountLinkRepository(session)
     committed.commit_allocation(
-        month=MONTH, allocation_method="post_tax_revenue_proportional",
-        idempotency_key="k-pt", request_fingerprint="fp-pt", reason="close",
-        committed_by=ACTOR, deduction_repository=ded, revenue_repository=rev,
+        month=MONTH,
+        allocation_method="post_tax_revenue_proportional",
+        idempotency_key="k-pt",
+        request_fingerprint="fp-pt",
+        reason="close",
+        committed_by=ACTOR,
+        deduction_repository=ded,
+        revenue_repository=rev,
         link_repository=link,
     )
     # commit_allocation auto-created the OPEN close row; lock it so the
@@ -486,8 +658,12 @@ def test_resolve_serves_committed_post_tax_snapshot_for_locked_month(tmp_path):
     close.status = "LOCKED"
     session.commit()
     result, provenance = resolve_month_account_allocation(
-        month=MONTH, session=session, deduction_repository=ded,
-        revenue_repository=rev, link_repository=link, committed_repository=committed,
+        month=MONTH,
+        session=session,
+        deduction_repository=ded,
+        revenue_repository=rev,
+        link_repository=link,
+        committed_repository=committed,
     )
     assert provenance.source == "committed_snapshot"
     assert result.allocation_method == "post_tax_revenue_proportional"
@@ -497,13 +673,18 @@ def test_resolve_serves_committed_post_tax_snapshot_for_locked_month(tmp_path):
 def test_provenance_api_and_token(tmp_path):
     """allocation_provenance_to_api + disclosure token render committed vs live."""
     committed = AllocationProvenance(
-        source="committed_snapshot", commit_version=3,
-        committed_at=None, run_id=UUID(int=1),
+        source="committed_snapshot",
+        commit_version=3,
+        committed_at=None,
+        run_id=UUID(int=1),
     )
     api = allocation_provenance_to_api(committed)
     assert api["allocation_source"] == "committed_snapshot"
     assert api["committed_run"]["commit_version"] == 3
-    assert allocation_provenance_to_api(AllocationProvenance(source="live_compute"))["committed_run"] is None
+    assert (
+        allocation_provenance_to_api(AllocationProvenance(source="live_compute"))["committed_run"]
+        is None
+    )
     assert account_allocation_disclosure_token(AllocationProvenance(source="live_compute")) == (
         "Account allocation: live compute"
     )

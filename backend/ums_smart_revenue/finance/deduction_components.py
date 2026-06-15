@@ -13,7 +13,11 @@ from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _deci
 
 USD = "USD"
 COMPONENT_KINDS: tuple[str, ...] = (
-    "TAX", "DEDUCTION", "TRANSFER_FEE", "FX_VARIANCE", "UNRESOLVED_PAYMENT_GAP",
+    "TAX",
+    "DEDUCTION",
+    "TRANSFER_FEE",
+    "FX_VARIANCE",
+    "UNRESOLVED_PAYMENT_GAP",
 )
 SCOPE_KINDS: tuple[str, ...] = ("CHANNEL", "ACCOUNT", "PAYMENT")
 _TAX_DEDUCTION_VALUE_KINDS: frozenset[str] = frozenset({"tax", "deduction"})
@@ -73,8 +77,7 @@ class DeductionComponent:
             "scope_id": self.scope_id,
             "amount_usd": _decimal_to_api(self.amount_usd),
             "amount_native": (
-                None if self.amount_native is None
-                else _decimal_to_api(self.amount_native)
+                None if self.amount_native is None else _decimal_to_api(self.amount_native)
             ),
             "currency_code": self.currency_code,
             "source_system": self.source_system,
@@ -152,14 +155,20 @@ def map_bank_entries_to_components(
         if entry.transfer_fee_usd > 0:
             components.append(
                 _bank_component(
-                    entry, month, "TRANSFER_FEE", entry.transfer_fee_usd,
+                    entry,
+                    month,
+                    "TRANSFER_FEE",
+                    entry.transfer_fee_usd,
                     "transfer_fee",
                 )
             )
         if entry.fx_difference_usd != 0:
             components.append(
                 _bank_component(
-                    entry, month, "FX_VARIANCE", entry.fx_difference_usd,
+                    entry,
+                    month,
+                    "FX_VARIANCE",
+                    entry.fx_difference_usd,
                     "fx_variance",
                 )
             )

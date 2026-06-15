@@ -4,6 +4,7 @@ Pipeline: resolve credentials -> fetch payments.list -> classify -> read-only
 locked-month prefilter -> strict parse (open months only) -> sync_payments ->
 audit. Fully separate from the run_one source-row framework.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -142,7 +143,9 @@ class AdSensePaymentSyncService:
         for settlement in classified.paid:
             if settlement.month not in status_by_month:
                 status_by_month[settlement.month] = get_month_close_status(
-                    self._session, settlement.month, tenant_id=tenant_id,
+                    self._session,
+                    settlement.month,
+                    tenant_id=tenant_id,
                 )
             if status_by_month[settlement.month] == "LOCKED":
                 skipped_locked.append(
@@ -195,9 +198,7 @@ class AdSensePaymentSyncService:
         # an empty batch); otherwise upsert. sync_payments' own per-month
         # FOR UPDATE locked-month gate is the authoritative race guard.
         if inputs:
-            repo = SqlAlchemyAdSensePaymentRepository(
-                self._session, tenant_id=tenant_id
-            )
+            repo = SqlAlchemyAdSensePaymentRepository(self._session, tenant_id=tenant_id)
             repo.sync_payments(
                 payments=inputs,
                 actor_user_id=actor.user_id,

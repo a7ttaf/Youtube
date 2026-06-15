@@ -47,9 +47,7 @@ class RawReportFileORM(ReportBase):
     parse_status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'DOWNLOADED'")
     )
-    downloaded_by: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True), nullable=True
-    )
+    downloaded_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     downloaded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -65,9 +63,7 @@ class RawReportFileORM(ReportBase):
         default=_TENANT_ID_DEFAULT_VALUE,
         server_default=_TENANT_ID_DEFAULT,
     )
-    purged_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     purged_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
     __table_args__ = (
@@ -94,8 +90,7 @@ class RawReportFileORM(ReportBase):
             name="ck_raw_report_files_report_month_format",
         ),
         CheckConstraint(
-            "parse_status IN "
-            "('DOWNLOADED', 'PARSED', 'FAILED', 'QUARANTINED', 'PURGED')",
+            "parse_status IN ('DOWNLOADED', 'PARSED', 'FAILED', 'QUARANTINED', 'PURGED')",
             name="ck_raw_report_files_parse_status",
         ),
         Index("ix_raw_report_files_source_month", "source", "report_month"),
@@ -127,13 +122,9 @@ class ExportJobORM(ReportBase):
         nullable=True,
     )
     month: Mapped[str] = mapped_column(Text, nullable=False)
-    currency: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'USD'")
-    )
+    currency: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'USD'"))
     requested_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'QUEUED'")
-    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'QUEUED'"))
     file_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
     artifact_content_type: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -152,9 +143,7 @@ class ExportJobORM(ReportBase):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

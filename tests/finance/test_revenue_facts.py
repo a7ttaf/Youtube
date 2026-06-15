@@ -255,9 +255,7 @@ def test_delete_month_facts_can_scope_by_source_report_id():
 
         assert deleted == 1
         assert (
-            repository.list_channel_month_facts(
-                month="2026-03", youtube_channel_id="channel-rec"
-            )
+            repository.list_channel_month_facts(month="2026-03", youtube_channel_id="channel-rec")
             == []
         )
         connector_facts = repository.list_channel_month_facts(

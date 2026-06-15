@@ -3,6 +3,7 @@
 upgrade 20260529_0001 -> 20260529_0002 (create deduction_components) and the
 reverse downgrade. Verifies the live Postgres schema matches DeductionComponentORM.
 """
+
 from pathlib import Path
 
 import pytest
@@ -81,9 +82,7 @@ def test_upgrade_creates_table_constraints_and_indexes(alembic_config, fresh_eng
     assert cols["amount_usd"]["type"].scale == 6
     assert cols["amount_native"]["nullable"] is True
     assert cols["raw_payload"]["nullable"] is False
-    foreign_keys = {
-        c["name"]: c for c in inspector.get_foreign_keys("deduction_components")
-    }
+    foreign_keys = {c["name"]: c for c in inspector.get_foreign_keys("deduction_components")}
     assert foreign_keys["fk_deduction_components_tenant"]["referred_table"] == "tenants"
     assert foreign_keys["fk_deduction_components_tenant"]["referred_columns"] == ["id"]
     uniques = {
@@ -92,8 +91,7 @@ def test_upgrade_creates_table_constraints_and_indexes(alembic_config, fresh_eng
     }
     assert uniques["uq_deduction_components_key"] == ("tenant_id", "component_key")
     checks = {
-        c["name"]: c["sqltext"]
-        for c in inspector.get_check_constraints("deduction_components")
+        c["name"]: c["sqltext"] for c in inspector.get_check_constraints("deduction_components")
     }
     assert "ck_deduction_components_kind" in checks
     assert "ck_deduction_components_scope_kind" in checks

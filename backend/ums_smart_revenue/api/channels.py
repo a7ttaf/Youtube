@@ -44,9 +44,7 @@ router = APIRouter(prefix="/channels", tags=["channels"])
 
 _CHANNEL_REGISTRY = bootstrap_channel_registry()
 _AUDIT_SINK = InMemoryAuditSink()
-_OFFICIAL_REVENUE_SOURCE_STATUSES = frozenset(
-    {"OFFICIAL_CMS_REVENUE", "OFFICIAL_MANUAL_IMPORT"}
-)
+_OFFICIAL_REVENUE_SOURCE_STATUSES = frozenset({"OFFICIAL_CMS_REVENUE", "OFFICIAL_MANUAL_IMPORT"})
 
 
 class ChannelCreateRequest(BaseModel):
@@ -56,9 +54,7 @@ class ChannelCreateRequest(BaseModel):
     cms_status: str
     revenue_required: bool
 
-    @field_validator(
-        "youtube_channel_id", "channel_name", "primary_company_id", mode="before"
-    )
+    @field_validator("youtube_channel_id", "channel_name", "primary_company_id", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
         return _strip_required_string(value)
@@ -153,9 +149,7 @@ def list_outside_cms_channels(
         "items": items,
         "summary": {
             "outside_cms_channel_count": len(items),
-            "revenue_required_count": sum(
-                1 for item in items if item["revenue_required"]
-            ),
+            "revenue_required_count": sum(1 for item in items if item["revenue_required"]),
             "missing_official_revenue_count": sum(
                 1 for item in items if item["missing_official_revenue"]
             ),
@@ -167,9 +161,7 @@ def list_outside_cms_channels(
 def list_channel_issues(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
-    group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
-    ],
+    group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> dict[str, object]:
     _require_analytics_view_permission(user)
@@ -192,9 +184,7 @@ def _require_analytics_view_permission(user: UserPrincipal) -> None:
     # Explicit 403 instead of returning a silent empty result: analytics
     # consumers without VIEW_ANALYTICS should fail authorization, not see
     # an empty channel feed that could be mistaken for "no channels exist".
-    if user.disabled or not _granted_scopes_for_permission(
-        user, Permission.VIEW_ANALYTICS
-    ):
+    if user.disabled or not _granted_scopes_for_permission(user, Permission.VIEW_ANALYTICS):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {Permission.VIEW_ANALYTICS.value}",
@@ -260,10 +250,7 @@ def _recommended_outside_cms_action(
     if missing_official_revenue:
         return "Link channel to CMS or import official manual revenue."
     if revenue_source_status == "OFFICIAL_MANUAL_IMPORT":
-        return (
-            "Keep manual official revenue import current; "
-            "CMS linking remains recommended."
-        )
+        return "Keep manual official revenue import current; CMS linking remains recommended."
     return "Verify CMS link and continue normal ingestion."
 
 
@@ -294,9 +281,7 @@ def _authorized_channel_ids_for_analytics(
     return channel_ids
 
 
-def _direct_scopes_for_permission(
-    user: UserPrincipal, permission: Permission
-) -> list[AccessScope]:
+def _direct_scopes_for_permission(user: UserPrincipal, permission: Permission) -> list[AccessScope]:
     return [
         grant.scope
         for grant in user.direct_permissions
@@ -304,14 +289,11 @@ def _direct_scopes_for_permission(
     ]
 
 
-def _role_scopes_for_permission(
-    user: UserPrincipal, permission: Permission
-) -> list[AccessScope]:
+def _role_scopes_for_permission(user: UserPrincipal, permission: Permission) -> list[AccessScope]:
     return [
         assignment.scope
         for assignment in user.role_assignments
-        if assignment.active
-        and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
     ]
 
 
@@ -387,9 +369,7 @@ def update_channel_mapping(
     can_manage_current = has_permission(
         user, Permission.MANAGE_ORG_MAPPING, current_scope, org_index
     )
-    can_manage_target = has_permission(
-        user, Permission.MANAGE_ORG_MAPPING, target_scope, org_index
-    )
+    can_manage_target = has_permission(user, Permission.MANAGE_ORG_MAPPING, target_scope, org_index)
     if not (can_manage_current and can_manage_target):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -398,9 +378,7 @@ def update_channel_mapping(
 
     current_channel = registry.get_channel(youtube_channel_id)
     if current_channel is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
 
     # FIX: Detect a no-op PATCH at the route boundary so the audit decision
     # (suppress CHANNEL_UPDATED) lives with actor + reason, not the registry.
@@ -423,9 +401,7 @@ def update_channel_mapping(
     # channel has facts in a LOCKED finance month must NOT be recorded as an
     # applied CHANNEL_UPDATED event.
     except ChannelMappingLockedMonthError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ChannelRegistryValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)

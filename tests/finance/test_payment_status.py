@@ -1,4 +1,5 @@
 """Tests for the monthly AdSense payment paid/unpaid status breakdown."""
+
 from datetime import date
 from decimal import Decimal
 from importlib import import_module
@@ -63,12 +64,8 @@ def test_status_bucket_groups_amounts_per_currency_alphabetically():
     """Group status amounts by currency in alphabetical order."""
     summary = build(
         [
-            adsense_payment(
-                name="p1", amount="1200.00", status="PENDING", currency="USD"
-            ),
-            adsense_payment(
-                name="p2", amount="300.00", status="PENDING", currency="EUR"
-            ),
+            adsense_payment(name="p1", amount="1200.00", status="PENDING", currency="USD"),
+            adsense_payment(name="p2", amount="300.00", status="PENDING", currency="EUR"),
         ]
     )
     pending = _bucket(summary, "PENDING")
@@ -160,12 +157,8 @@ def test_per_account_breakdown_splits_by_source_account_id():
     """Split per-account status rollups by source account ID."""
     summary = build(
         [
-            adsense_payment(
-                name="p1", amount="8400.00", status="PAID", account="pub-111"
-            ),
-            adsense_payment(
-                name="pend", amount="1200.00", status="PENDING", account="pub-222"
-            ),
+            adsense_payment(name="p1", amount="8400.00", status="PAID", account="pub-111"),
+            adsense_payment(name="pend", amount="1200.00", status="PENDING", account="pub-222"),
             adsense_payment(
                 name="unp",
                 amount="500.00",
@@ -192,12 +185,8 @@ def test_per_account_breakdown_splits_by_source_account_id():
 def test_rollup_equals_sum_of_account_breakdowns():
     """Keep the month rollup equal to the sum of account rollups."""
     payments = [
-        adsense_payment(
-            name="p1", amount="8400.00", status="PAID", account="pub-111"
-        ),
-        adsense_payment(
-            name="pend", amount="1200.00", status="PENDING", account="pub-222"
-        ),
+        adsense_payment(name="p1", amount="8400.00", status="PAID", account="pub-111"),
+        adsense_payment(name="pend", amount="1200.00", status="PENDING", account="pub-222"),
         adsense_payment(
             name="unp",
             amount="500.00",
@@ -207,9 +196,7 @@ def test_rollup_equals_sum_of_account_breakdowns():
         ),
     ]
     summary = build(payments)
-    assert summary.total_payment_count == sum(
-        a.total_payment_count for a in summary.accounts
-    )
+    assert summary.total_payment_count == sum(a.total_payment_count for a in summary.accounts)
     assert [(c.currency, c.amount) for c in summary.outstanding_totals] == [
         ("GBP", Decimal("500.00")),
         ("USD", Decimal("1200.00")),
@@ -226,9 +213,7 @@ def test_determinism_independent_of_input_order():
             currency="GBP",
             account="pub-222",
         ),
-        adsense_payment(
-            name="p1", amount="8400.00", status="PAID", account="pub-111"
-        ),
+        adsense_payment(name="p1", amount="8400.00", status="PAID", account="pub-111"),
         adsense_payment(
             name="e1",
             amount="300.00",
@@ -246,21 +231,15 @@ def test_determinism_independent_of_input_order():
 def test_amount_serialization_preserves_precision_without_scientific_notation():
     """Serialize decimal precision without scientific notation."""
     summary = build([adsense_payment(name="p1", amount="1234.5678", status="PENDING")])
-    assert summary.to_api()["outstanding_totals"] == [
-        {"currency": "USD", "amount": "1234.5678"}
-    ]
+    assert summary.to_api()["outstanding_totals"] == [{"currency": "USD", "amount": "1234.5678"}]
 
 
 def test_payments_from_other_months_are_ignored():
     """Ignore payments outside the requested month."""
     summary = build(
         [
-            adsense_payment(
-                name="this", amount="100.00", status="PENDING", month="2026-04"
-            ),
-            adsense_payment(
-                name="other", amount="999.00", status="PENDING", month="2026-03"
-            ),
+            adsense_payment(name="this", amount="100.00", status="PENDING", month="2026-04"),
+            adsense_payment(name="other", amount="999.00", status="PENDING", month="2026-03"),
         ],
         month="2026-04",
     )

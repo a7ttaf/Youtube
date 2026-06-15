@@ -25,9 +25,7 @@ BRANCH_NODES = (
 
 def _top_level_function(tree: ast.Module, name: str) -> ast.FunctionDef:
     matches = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == name
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name
     ]
     assert len(matches) == 1
     return matches[0]

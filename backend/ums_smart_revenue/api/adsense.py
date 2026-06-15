@@ -304,9 +304,7 @@ def get_adsense_payment_status(
             detail=str(exc),
         ) from exc
 
-    summary = build_monthly_payment_status_summary(
-        month=normalized_month, payments=payments
-    )
+    summary = build_monthly_payment_status_summary(month=normalized_month, payments=payments)
     record = record_audit_event(
         sink=audit_sink,
         actor=user,

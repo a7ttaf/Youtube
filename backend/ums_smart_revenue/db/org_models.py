@@ -38,9 +38,7 @@ class OrgUnitORM(OrgBase):
     parent_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     type: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true")
-    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -65,9 +63,7 @@ class OrgUnitORM(OrgBase):
             name="fk_org_units_tenant_parent",
             ondelete="RESTRICT",
         ),
-        CheckConstraint(
-            "type IN ('HOLDING', 'SECTOR', 'COMPANY')", name="ck_org_units_type"
-        ),
+        CheckConstraint("type IN ('HOLDING', 'SECTOR', 'COMPANY')", name="ck_org_units_type"),
         Index("ix_org_units_parent_id", "parent_id"),
         Index("ix_org_units_tenant_id", "tenant_id"),
     )
@@ -81,12 +77,8 @@ class YouTubeChannelORM(OrgBase):
     )
     youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     channel_name: Mapped[str] = mapped_column(Text, nullable=False)
-    primary_org_unit_id: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True), nullable=True
-    )
-    cms_status: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'UNKNOWN'")
-    )
+    primary_org_unit_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    cms_status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'UNKNOWN'"))
     content_owner_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     revenue_required: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
@@ -94,9 +86,7 @@ class YouTubeChannelORM(OrgBase):
     revenue_source_status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'MISSING_REVENUE_SOURCE'")
     )
-    active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true")
-    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -157,9 +147,7 @@ class ChannelGroupORM(OrgBase):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     group_type: Mapped[str] = mapped_column(Text, nullable=False)
-    active: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=text("true")
-    )
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

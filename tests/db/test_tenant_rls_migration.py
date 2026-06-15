@@ -102,7 +102,7 @@ def _assert_app_platform_cross_backend_delete_rejected(url: str) -> None:
     import psycopg
 
     libpq_url = url.replace("postgresql+psycopg://", "postgresql://")
-    with psycopg.connect(libpq_url, autocommit=True) as raw_conn:
+    with psycopg.connect(libpq_url, autocommit=True) as raw_conn:  # skipcq: PTC-W0062
         with raw_conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO app_tenant_context "
@@ -113,18 +113,15 @@ def _assert_app_platform_cross_backend_delete_rejected(url: str) -> None:
                 cur.execute("SET ROLE app_platform")
                 try:
                     cur.execute(
-                        "DELETE FROM app_tenant_context "
-                        "WHERE backend_pid = %s",
+                        "DELETE FROM app_tenant_context WHERE backend_pid = %s",
                         (_FAKE_CROSS_BACKEND_PID,),
                     )
                 except psycopg.errors.RaiseException as exc:
-                    assert (
-                        "app_tenant_context DELETE restricted" in str(exc)
-                    ), f"unexpected error: {exc}"
-                else:
-                    raise AssertionError(
-                        "guard trigger should reject cross-backend DELETE"
+                    assert "app_tenant_context DELETE restricted" in str(exc), (
+                        f"unexpected error: {exc}"
                     )
+                else:
+                    raise AssertionError("guard trigger should reject cross-backend DELETE")
                 finally:
                     cur.execute("RESET ROLE")
             finally:
@@ -146,27 +143,16 @@ def test_rls_migration_creates_roles_policies_and_grants():
     engine = sa.create_engine(url)
     try:
         with engine.connect() as conn:
-            roles = set(
-                conn.execute(
-                    sa.text("SELECT rolname FROM pg_roles")
-                ).scalars()
-            )
+            roles = set(conn.execute(sa.text("SELECT rolname FROM pg_roles")).scalars())
             assert APP_TENANT_ROLE in roles
             assert APP_PLATFORM_ROLE in roles
-            bypass = dict(
-                conn.execute(
-                    sa.text("SELECT rolname, rolbypassrls FROM pg_roles")
-                ).all()
-            )
+            bypass = dict(conn.execute(sa.text("SELECT rolname, rolbypassrls FROM pg_roles")).all())
             assert bypass[APP_PLATFORM_ROLE] is False
             assert bypass[APP_TENANT_ROLE] is False
             # Every allowlisted table has RLS enabled + the isolation policy.
             for table in TENANT_SCOPED_TABLES:
                 enabled = conn.execute(
-                    sa.text(
-                        "SELECT relrowsecurity FROM pg_class "
-                        "WHERE relname = :t"
-                    ),
+                    sa.text("SELECT relrowsecurity FROM pg_class WHERE relname = :t"),
                     {"t": table},
                 ).scalar()
                 assert enabled is True, f"{table} RLS not enabled"
@@ -192,11 +178,7 @@ def test_rls_migration_downgrade_drops_roles_then_upgrade_restores():
     engine = sa.create_engine(url)
     try:
         with engine.connect() as conn:
-            roles = set(
-                conn.execute(
-                    sa.text("SELECT rolname FROM pg_roles")
-                ).scalars()
-            )
+            roles = set(conn.execute(sa.text("SELECT rolname FROM pg_roles")).scalars())
             assert APP_TENANT_ROLE not in roles
             assert APP_PLATFORM_ROLE not in roles
     finally:
@@ -248,8 +230,7 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
     command.upgrade(cfg, "head")
     with _db_conn(url) as conn:
         assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is True, (
-            "head must expose clear_app_current_tenant_id; "
-            "20260609_0002 is its sole owner."
+            "head must expose clear_app_current_tenant_id; 20260609_0002 is its sole owner."
         )
         grant_holder = conn.execute(
             sa.text(
@@ -276,9 +257,7 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
             "Downgrading 20260609_0002 must drop clear_app_current_tenant_id "
             "— that is its sole-owner contract."
         )
-        delete_grants_after_downgrade = _get_delete_grantees(
-            conn, TENANT_CONTEXT_TABLE
-        )
+        delete_grants_after_downgrade = _get_delete_grantees(conn, TENANT_CONTEXT_TABLE)
         assert APP_PLATFORM_ROLE in delete_grants_after_downgrade, (
             "Downgrading 20260609_0002 must NOT revoke the platform "
             "DELETE grant on app_tenant_context, or the session hook's "

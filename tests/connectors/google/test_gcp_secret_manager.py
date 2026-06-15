@@ -5,6 +5,7 @@ into a fully-qualified name, calls SecretManagerServiceClient.access_secret_vers
 and returns the decoded payload. NotFound -> SecretNotFoundError; any other
 google-cloud error -> SecretFetchError.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -35,9 +36,7 @@ def _make_client_returning(payload: bytes) -> MagicMock:
 def test_resolve_returns_decoded_payload() -> None:
     client = _make_client_returning(b'{"refresh_token": "rt"}')
     resolver = GcpSecretManagerResolver(client=client)
-    out = resolver.resolve(
-        "gcp-secret-manager://projects/my-proj/secrets/yt-creds/versions/latest"
-    )
+    out = resolver.resolve("gcp-secret-manager://projects/my-proj/secrets/yt-creds/versions/latest")
     assert out == '{"refresh_token": "rt"}'
     client.access_secret_version.assert_called_once_with(
         request={"name": "projects/my-proj/secrets/yt-creds/versions/latest"}
@@ -48,9 +47,7 @@ def test_resolve_accepts_generic_secret_manager_alias() -> None:
     client = _make_client_returning(b'{"refresh_token": "rt"}')
     resolver = GcpSecretManagerResolver(client=client)
 
-    out = resolver.resolve(
-        "secret-manager://projects/my-proj/secrets/yt-creds/versions/latest"
-    )
+    out = resolver.resolve("secret-manager://projects/my-proj/secrets/yt-creds/versions/latest")
 
     assert out == '{"refresh_token": "rt"}'
     client.access_secret_version.assert_called_once_with(
@@ -63,9 +60,7 @@ def test_resolve_wraps_non_utf8_payload_as_malformed_payload() -> None:
     resolver = GcpSecretManagerResolver(client=client)
 
     with pytest.raises(MalformedSecretPayloadError) as ctx:
-        resolver.resolve(
-            "gcp-secret-manager://projects/my-proj/secrets/yt-creds/versions/latest"
-        )
+        resolver.resolve("gcp-secret-manager://projects/my-proj/secrets/yt-creds/versions/latest")
 
     assert "utf-8" in ctx.value.detail
 
@@ -75,9 +70,7 @@ def test_resolve_raises_not_found_on_gcp_404() -> None:
     client.access_secret_version.side_effect = gcp_exceptions.NotFound("missing")
     resolver = GcpSecretManagerResolver(client=client)
     with pytest.raises(SecretNotFoundError):
-        resolver.resolve(
-            "gcp-secret-manager://projects/x/secrets/y/versions/1"
-        )
+        resolver.resolve("gcp-secret-manager://projects/x/secrets/y/versions/1")
 
 
 def test_resolve_wraps_other_gcp_errors_as_fetch_error() -> None:
@@ -86,9 +79,7 @@ def test_resolve_wraps_other_gcp_errors_as_fetch_error() -> None:
     client.access_secret_version.side_effect = inner
     resolver = GcpSecretManagerResolver(client=client)
     with pytest.raises(SecretFetchError) as ctx:
-        resolver.resolve(
-            "gcp-secret-manager://projects/x/secrets/y/versions/latest"
-        )
+        resolver.resolve("gcp-secret-manager://projects/x/secrets/y/versions/latest")
     assert ctx.value.inner is inner
 
 

@@ -136,9 +136,7 @@ class ExportRequest(BaseModel):
     include_manual_override_notes: bool = True
     reason: str = Field(min_length=1)
 
-    @field_validator(
-        "export_type", "scope_type", "month", "currency", "reason", mode="before"
-    )
+    @field_validator("export_type", "scope_type", "month", "currency", "reason", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
         """Strip whitespace and reject blank strings for required fields."""
@@ -178,12 +176,8 @@ def request_export(
     payload: ExportRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
-    ],
-    repository: Annotated[
-        SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
-    ],
+    group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    repository: Annotated[SqlAlchemyExportJobRepository, Depends(current_export_job_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Accept a new export request, authorize the caller, snapshot scope, and enqueue the job."""
@@ -192,12 +186,8 @@ def request_export(
         # ("Unknown export_type") instead of falling through to the analytics
         # permission gate and producing a 403 for users with finance grants.
         if payload.export_type not in ALLOWED_EXPORT_TYPES:
-            raise ExportJobValidationError(
-                f"Unknown export_type: {payload.export_type}"
-            )
-        required_export_permission = _audit_permission_for_export_type(
-            payload.export_type
-        )
+            raise ExportJobValidationError(f"Unknown export_type: {payload.export_type}")
+        required_export_permission = _audit_permission_for_export_type(payload.export_type)
         if not _has_export_permission_assignment(user, required_export_permission):
             _raise_missing_permission(required_export_permission)
         # Pre-check channel-scope authorization before resolving the channel
@@ -231,9 +221,7 @@ def request_export(
             org_index=org_index,
             group_registry=group_registry,
         )
-        snapshot_tuple = (
-            tuple(sorted(snapshot)) if snapshot is not None else None
-        )
+        snapshot_tuple = tuple(sorted(snapshot)) if snapshot is not None else None
         _require_export_access_permissions(
             user=user,
             export_type=payload.export_type,
@@ -291,12 +279,8 @@ def request_export(
 def list_exports(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
-    ],
-    repository: Annotated[
-        SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
-    ],
+    group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    repository: Annotated[SqlAlchemyExportJobRepository, Depends(current_export_job_repository)],
     limit: Annotated[int, Query(ge=1, le=MAX_EXPORT_JOB_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
@@ -332,12 +316,8 @@ def get_export(
     export_id: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
-    ],
-    repository: Annotated[
-        SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
-    ],
+    group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    repository: Annotated[SqlAlchemyExportJobRepository, Depends(current_export_job_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Retrieve a single export job by ID and emit a scoped access audit event."""
@@ -346,9 +326,7 @@ def get_export(
     try:
         export_job = repository.get_job(export_id, requested_by=user.user_id)
     except ExportJobNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ExportJobValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -404,12 +382,8 @@ def preview_finance_workbook(
     export_id: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
-    ],
-    repository: Annotated[
-        SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
-    ],
+    group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    repository: Annotated[SqlAlchemyExportJobRepository, Depends(current_export_job_repository)],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
@@ -442,9 +416,7 @@ def preview_finance_workbook(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
         ) from exc
     except ExportJobNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ExportArtifactStorageError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -484,12 +456,8 @@ def download_finance_workbook(
     export_id: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
-    ],
-    repository: Annotated[
-        SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
-    ],
+    group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    repository: Annotated[SqlAlchemyExportJobRepository, Depends(current_export_job_repository)],
     artifact_store: Annotated[
         FileSystemExportArtifactStore, Depends(current_export_artifact_store)
     ],
@@ -530,9 +498,7 @@ def download_finance_workbook(
             )
             workbook_bytes = build_finance_workbook_xlsx(preview)
             filename = f"ums-finance-{export_job.month}-{export_job.scope_type}.xlsx"
-            content_type = (
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             export_job, storage_failure_response = _persist_generated_export_artifact(
                 repository=repository,
                 artifact_store=artifact_store,
@@ -554,9 +520,7 @@ def download_finance_workbook(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
         ) from exc
     except ExportJobNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ExportArtifactStorageError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -598,12 +562,8 @@ def download_executive_pdf(
     export_id: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
-    ],
-    repository: Annotated[
-        SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
-    ],
+    group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    repository: Annotated[SqlAlchemyExportJobRepository, Depends(current_export_job_repository)],
     artifact_store: Annotated[
         FileSystemExportArtifactStore, Depends(current_export_artifact_store)
     ],
@@ -648,9 +608,7 @@ def download_executive_pdf(
                 payment_match=source_summaries.payment_match,
                 bank_reconciliation=source_summaries.bank_reconciliation,
                 smart_alerts=source_summaries.smart_alerts,
-                account_allocation_provenance=(
-                    source_summaries.account_allocation_provenance
-                ),
+                account_allocation_provenance=(source_summaries.account_allocation_provenance),
             )
             pdf_bytes = build_executive_pdf_bytes(report)
             filename = f"ums-executive-{export_job.month}-{export_job.scope_type}.pdf"
@@ -676,9 +634,7 @@ def download_executive_pdf(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
         ) from exc
     except ExportJobNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ExportArtifactStorageError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -720,12 +676,8 @@ def download_branded_slide_pack(
     export_id: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
-    ],
-    repository: Annotated[
-        SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
-    ],
+    group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    repository: Annotated[SqlAlchemyExportJobRepository, Depends(current_export_job_repository)],
     artifact_store: Annotated[
         FileSystemExportArtifactStore, Depends(current_export_artifact_store)
     ],
@@ -770,9 +722,7 @@ def download_branded_slide_pack(
                 payment_match=source_summaries.payment_match,
                 bank_reconciliation=source_summaries.bank_reconciliation,
                 smart_alerts=source_summaries.smart_alerts,
-                account_allocation_provenance=(
-                    source_summaries.account_allocation_provenance
-                ),
+                account_allocation_provenance=(source_summaries.account_allocation_provenance),
             )
             pptx_bytes = build_branded_slide_pack_pptx(report)
             filename = f"ums-branded-{export_job.month}-{export_job.scope_type}.pptx"
@@ -800,9 +750,7 @@ def download_branded_slide_pack(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
         ) from exc
     except ExportJobNotFoundError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ExportArtifactStorageError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -938,12 +886,7 @@ def _persist_generated_export_artifact(
         _discard_saved_artifact(artifact_store=artifact_store, file_url=artifact.file_url)
         return None, JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            content={
-                "detail": (
-                    "Export job is already in terminal status "
-                    f"{latest_job.status}"
-                )
-            },
+            content={"detail": (f"Export job is already in terminal status {latest_job.status}")},
         )
     except Exception:
         logger.exception("Export artifact completion failed for export %s", export_job.id)
@@ -958,9 +901,7 @@ def _has_completed_artifact(export_job: ExportJobEntry) -> bool:
 
 
 _DEFAULT_ARTIFACT_CONTENT_TYPES: dict[str, str] = {
-    "FINANCE_EXCEL": (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    ),
+    "FINANCE_EXCEL": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
     "EXECUTIVE_PDF": "application/pdf",
     "BRANDED_SLIDE_PACK": (
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -999,11 +940,8 @@ def _serve_persisted_artifact_bytes(
         return None
     artifact_bytes = artifact_store.read(file_url=export_job.file_url)
     filename = export_job.artifact_filename or export_job.file_url.rsplit("/", 1)[-1]
-    content_type = (
-        export_job.artifact_content_type
-        or _DEFAULT_ARTIFACT_CONTENT_TYPES.get(
-            export_job.export_type, "application/octet-stream"
-        )
+    content_type = export_job.artifact_content_type or _DEFAULT_ARTIFACT_CONTENT_TYPES.get(
+        export_job.export_type, "application/octet-stream"
     )
     return artifact_bytes, filename, content_type
 
@@ -1085,9 +1023,9 @@ def _build_finance_source_summaries_for_export(
         payments = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(
             month=export_job.month
         )
-        bank_entries = SqlAlchemyBankReconciliationRepository(
-            session
-        ).list_month_entries(month=export_job.month)
+        bank_entries = SqlAlchemyBankReconciliationRepository(session).list_month_entries(
+            month=export_job.month
+        )
     close = SqlAlchemyFinanceMonthCloseRepository(session).get(export_job.month)
     close_status = close.status if close is not None else export_job.month_lock_status
 
@@ -1124,9 +1062,7 @@ def _build_finance_source_summaries_for_export(
     # to channel_ids so a company/sector/group export can never include
     # allocation rows or totals for channels outside the exported scope.
     # channel_ids is None only for global exports, which pass through unchanged.
-    scoped_account_lines = filter_account_allocations_to_scope(
-        account_result.lines, channel_ids
-    )
+    scoped_account_lines = filter_account_allocations_to_scope(account_result.lines, channel_ids)
     net_revenue = build_month_net_revenue_summary(
         month=export_job.month,
         facts=facts,
@@ -1307,15 +1243,11 @@ def _audit_revenue_scopes_for_export(
     if scope_type == "global":
         return (_access_scope_from_export_scope(scope_type, scope_id),)
     if scope_channel_ids is not None:
-        return tuple(
-            AccessScope.channel(channel_id) for channel_id in scope_channel_ids
-        )
+        return tuple(AccessScope.channel(channel_id) for channel_id in scope_channel_ids)
     if scope_type != "group":
         return (_access_scope_from_export_scope(scope_type, scope_id),)
     if not scope_id:
-        raise ExportJobValidationError(
-            "scope_id is required for export scope_type: group"
-        )
+        raise ExportJobValidationError("scope_id is required for export scope_type: group")
     # The earlier `scope_channel_ids is not None` branch above already returns
     # for any non-global scope when a snapshot is present, so by the time we
     # reach the group path scope_channel_ids is guaranteed to be None and we
@@ -1341,9 +1273,7 @@ def _require_export_permissions(
     """Assert the caller holds the appropriate export and view permissions for the given scope."""
     finance_export = is_finance_export_type(export_type)
     export_permission = _audit_permission_for_export_type(export_type)
-    view_permission = (
-        Permission.VIEW_REVENUE if finance_export else Permission.VIEW_ANALYTICS
-    )
+    view_permission = Permission.VIEW_REVENUE if finance_export else Permission.VIEW_ANALYTICS
     _require_export_scope_permissions(
         user=user,
         export_permission=export_permission,
@@ -1422,9 +1352,7 @@ def _require_export_scope_permissions(
     # ====================================================================
     if scope_channel_ids is not None and scope_type != "global":
         if not scope_channel_ids:
-            raise ExportJobValidationError(
-                "scoped exports require at least one channel"
-            )
+            raise ExportJobValidationError("scoped exports require at least one channel")
         for channel_id in scope_channel_ids:
             channel_scope = AccessScope.channel(channel_id)
             _require_permission(user, export_permission, channel_scope, org_index)
@@ -1433,16 +1361,12 @@ def _require_export_scope_permissions(
 
     if scope_type == "group":
         if not scope_id:
-            raise ExportJobValidationError(
-                "scope_id is required for export scope_type: group"
-            )
+            raise ExportJobValidationError("scope_id is required for export scope_type: group")
         group = group_registry.get_group(scope_id)
         if group is None:
             raise KeyError(f"Group not found: {scope_id}")
         if not group.channel_ids:
-            raise ExportJobValidationError(
-                "group exports require at least one channel"
-            )
+            raise ExportJobValidationError("group exports require at least one channel")
         for channel_id in group.channel_ids:
             channel_scope = AccessScope.channel(channel_id)
             _require_permission(user, export_permission, channel_scope, org_index)
@@ -1522,17 +1446,13 @@ def _channel_ids_for_export_scope(
         return None
     if scope_type == "group":
         if not scope_id:
-            raise ExportJobValidationError(
-                "scope_id is required for export scope_type: group"
-            )
+            raise ExportJobValidationError("scope_id is required for export scope_type: group")
         group = group_registry.get_group(scope_id)
         if group is None:
             raise KeyError(f"Group not found: {scope_id}")
         return set(group.channel_ids)
     if not scope_id:
-        raise ExportJobValidationError(
-            f"scope_id is required for export scope_type: {scope_type}"
-        )
+        raise ExportJobValidationError(f"scope_id is required for export scope_type: {scope_type}")
     if scope_type == "sector":
         # Raise KeyError only when the sector itself is unknown (404). When the
         # sector exists but currently has no channels, return an empty set so
@@ -1549,9 +1469,7 @@ def _channel_ids_for_export_scope(
             if sector_id == scope_id
         }
     if scope_type == "company":
-        known_company_ids = set(org_index.channel_company.values()) | set(
-            org_index.company_sector
-        )
+        known_company_ids = set(org_index.channel_company.values()) | set(org_index.company_sector)
         if scope_id not in known_company_ids:
             raise KeyError(f"Company not found: {scope_id}")
         return {
@@ -1571,20 +1489,14 @@ def _require_known_channel_scope(scope_id: str, org_index: OrgAccessIndex) -> No
         raise KeyError(f"Channel not found: {scope_id}")
 
 
-def _access_scope_from_export_scope(
-    scope_type: str, scope_id: str | None
-) -> AccessScope:
+def _access_scope_from_export_scope(scope_type: str, scope_id: str | None) -> AccessScope:
     """Convert export scope_type and scope_id to an AccessScope object."""
     if scope_type == "global":
         if scope_id is not None:
-            raise ExportJobValidationError(
-                "scope_id must be omitted for global exports"
-            )
+            raise ExportJobValidationError("scope_id must be omitted for global exports")
         return AccessScope.global_scope()
     if not scope_id:
-        raise ExportJobValidationError(
-            f"scope_id is required for export scope_type: {scope_type}"
-        )
+        raise ExportJobValidationError(f"scope_id is required for export scope_type: {scope_type}")
     if scope_type == "sector":
         return AccessScope.sector(scope_id)
     if scope_type == "company":
@@ -1620,8 +1532,7 @@ def _has_any_export_permission(user: UserPrincipal) -> bool:
         Permission.EXPORT_REVENUE_REPORT,
     }
     return any(
-        _has_export_permission_assignment(user, permission)
-        for permission in export_permissions
+        _has_export_permission_assignment(user, permission) for permission in export_permissions
     )
 
 
@@ -1636,10 +1547,7 @@ def _has_export_permission_assignment(
         if grant.active and grant.permission == permission:
             return True
     for assignment in user.role_assignments:
-        if (
-            assignment.active
-            and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
-        ):
+        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset()):
             return True
     return False
 
@@ -1692,9 +1600,7 @@ def _list_authorized_export_jobs(
         if not page.has_more or len(items) > limit:
             break
         scan_offset += len(page.items)
-    scan_truncated = (
-        last_page_has_more and len(items) <= limit and scan_pages >= max_scan_pages
-    )
+    scan_truncated = last_page_has_more and len(items) <= limit and scan_pages >= max_scan_pages
     if scan_truncated:
         logger.warning(
             "metric=export_job_scan_truncated scanned_pages=%s "

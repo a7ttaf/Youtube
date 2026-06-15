@@ -3,6 +3,7 @@
 URI shape: local-secret://{name} where {name} is a key in the mapping.
 Never registered in production; production registers only gcp-secret-manager://.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping

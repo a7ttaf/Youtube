@@ -60,9 +60,7 @@ def current_audit_log_repository(
 @router.get("/events")
 def list_audit_events(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[
-        SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)
-    ],
+    repository: Annotated[SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
     event_type: str | None = None,
     entity_type: str | None = None,
@@ -92,9 +90,7 @@ def list_audit_events(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
-    details_redacted = not include_sensitive_details and any(
-        item.sensitive for item in page.items
-    )
+    details_redacted = not include_sensitive_details and any(item.sensitive for item in page.items)
     record = record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -112,8 +108,7 @@ def list_audit_events(
     )
     return {
         "items": [
-            item.to_api(include_sensitive_details=include_sensitive_details)
-            for item in page.items
+            item.to_api(include_sensitive_details=include_sensitive_details) for item in page.items
         ],
         "pagination": {
             "limit": page.limit,
@@ -128,9 +123,7 @@ def list_audit_events(
 @router.get("/summary")
 def get_audit_summary(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[
-        SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)
-    ],
+    repository: Annotated[SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
     window_hours: Annotated[int, Query(ge=1, le=MAX_SUMMARY_WINDOW_HOURS)] = 24,
 ) -> AuditSummaryResponse:
@@ -197,9 +190,7 @@ def get_audit_summary(
 @router.get("/events/export")
 def export_audit_events(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[
-        SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)
-    ],
+    repository: Annotated[SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
     event_type: str | None = None,
     entity_type: str | None = None,
@@ -264,15 +255,10 @@ def export_audit_events(
         truncated = True
         items = items[:AUDIT_EXPORT_MAX_ROWS]
 
-    rows = [
-        item.to_api(include_sensitive_details=include_sensitive_details)
-        for item in items
-    ]
+    rows = [item.to_api(include_sensitive_details=include_sensitive_details) for item in items]
     csv_text = _audit_events_to_csv(rows)
 
-    details_redacted = not include_sensitive_details and any(
-        item.sensitive for item in items
-    )
+    details_redacted = not include_sensitive_details and any(item.sensitive for item in items)
     # One download event, emitted AFTER the snapshot is materialized.
     record_audit_event(
         sink=audit_sink,
@@ -300,9 +286,7 @@ def export_audit_events(
     return Response(content=csv_text, media_type="text/csv", headers=headers)
 
 
-def _require_permission(
-    user: UserPrincipal, permission: Permission, scope: AccessScope
-) -> None:
+def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
     """Raise HTTP 403 when the caller lacks the requested permission."""
     if not has_permission(user, permission, scope):
         raise HTTPException(
@@ -363,9 +347,7 @@ def _audit_events_to_csv(rows: list[dict[str, object]]) -> str:
         if details_redacted:
             details_cell = ""
         else:
-            details_cell = json.dumps(
-                row["details"], separators=(",", ":"), sort_keys=True
-            )
+            details_cell = json.dumps(row["details"], separators=(",", ":"), sort_keys=True)
         writer.writerow(
             {
                 # created_at is already an ISO-8601 string from to_api.

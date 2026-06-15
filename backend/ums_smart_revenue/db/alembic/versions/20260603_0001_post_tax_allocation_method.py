@@ -46,12 +46,15 @@ def upgrade() -> None:
     if is_pg:
         op.drop_constraint(
             "ck_committed_allocation_lines_amounts_finite",
-            "committed_allocation_lines", type_="check",
+            "committed_allocation_lines",
+            type_="check",
         )
     with op.batch_alter_table("committed_allocation_lines") as batch:
         batch.alter_column(
-            "basis_gross_usd", new_column_name="basis_amount_usd",
-            existing_type=sa.Numeric(20, 6), existing_nullable=False,
+            "basis_gross_usd",
+            new_column_name="basis_amount_usd",
+            existing_type=sa.Numeric(20, 6),
+            existing_nullable=False,
         )
     if is_pg:
         op.create_check_constraint(
@@ -65,8 +68,7 @@ def upgrade() -> None:
         batch.drop_constraint("ck_committed_allocation_runs_method", type_="check")
         batch.create_check_constraint(
             "ck_committed_allocation_runs_method",
-            "allocation_method IN "
-            "('gross_revenue_proportional', 'post_tax_revenue_proportional')",
+            "allocation_method IN ('gross_revenue_proportional', 'post_tax_revenue_proportional')",
         )
 
 
@@ -88,12 +90,16 @@ def downgrade() -> None:
     if is_pg:
         # Fail fast before any DDL: a cryptic constraint-violation from PostgreSQL
         # is harder to diagnose than this explicit message.
-        count = op.get_bind().execute(
-            sa.text(
-                "SELECT COUNT(*) FROM committed_allocation_runs "
-                "WHERE allocation_method = 'post_tax_revenue_proportional'"
+        count = (
+            op.get_bind()
+            .execute(
+                sa.text(
+                    "SELECT COUNT(*) FROM committed_allocation_runs "
+                    "WHERE allocation_method = 'post_tax_revenue_proportional'"
+                )
             )
-        ).scalar()
+            .scalar()
+        )
         if count:
             raise RuntimeError(
                 f"Cannot downgrade 20260603_0001: {count} committed_allocation_runs "
@@ -109,12 +115,15 @@ def downgrade() -> None:
     if is_pg:
         op.drop_constraint(
             "ck_committed_allocation_lines_amounts_finite",
-            "committed_allocation_lines", type_="check",
+            "committed_allocation_lines",
+            type_="check",
         )
     with op.batch_alter_table("committed_allocation_lines") as batch:
         batch.alter_column(
-            "basis_amount_usd", new_column_name="basis_gross_usd",
-            existing_type=sa.Numeric(20, 6), existing_nullable=False,
+            "basis_amount_usd",
+            new_column_name="basis_gross_usd",
+            existing_type=sa.Numeric(20, 6),
+            existing_nullable=False,
         )
     if is_pg:
         op.create_check_constraint(

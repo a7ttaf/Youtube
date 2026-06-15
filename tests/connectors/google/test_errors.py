@@ -5,6 +5,7 @@ the whole family in one except clause. Subclasses are distinguishable by
 isinstance. As the B2 slices land (B2.1 secrets/oauth, B2.2 blob storage,
 B2.3/B2.4 to follow), new errors are appended to the family roster below.
 """
+
 from __future__ import annotations
 
 from ums_smart_revenue.connectors.google.errors import (

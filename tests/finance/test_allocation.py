@@ -120,8 +120,10 @@ def test_net_applicable_buckets_split_correctly():
         components=[
             _component(component_kind="DEDUCTION", amount="10.00", key="d"),
             _component(
-                component_kind="UNRESOLVED_PAYMENT_GAP", amount="4.00",
-                source_system="adsense_payment_gap", key="g",
+                component_kind="UNRESOLVED_PAYMENT_GAP",
+                amount="4.00",
+                source_system="adsense_payment_gap",
+                key="g",
             ),
         ],
         verified_channels={"pub-1": ["chA"]},
@@ -130,8 +132,7 @@ def test_net_applicable_buckets_split_correctly():
     assert result.summary.net_applicable_total_usd == Decimal("10.000000")
     assert result.summary.reconciliation_total_usd == Decimal("4.000000")
     assert (
-        result.summary.net_applicable_total_usd
-        + result.summary.reconciliation_total_usd
+        result.summary.net_applicable_total_usd + result.summary.reconciliation_total_usd
         == result.summary.allocated_total_usd
     )
 
@@ -238,10 +239,7 @@ def test_aggregate_conservation_across_components():
         },
     )
     total_in = Decimal("110.00")
-    assert (
-        result.summary.allocated_total_usd + result.summary.unallocated_total_usd
-        == total_in
-    )
+    assert result.summary.allocated_total_usd + result.summary.unallocated_total_usd == total_in
 
 
 def test_proportional_allocation_rejects_non_positive_basis():
@@ -283,8 +281,10 @@ def test_allocates_negative_amount_preserving_sign_and_conservation():
         month="2026-04",
         components=[
             _component(
-                component_kind="UNRESOLVED_PAYMENT_GAP", amount="-9.00",
-                source_system="adsense_payment_gap", key="neg",
+                component_kind="UNRESOLVED_PAYMENT_GAP",
+                amount="-9.00",
+                source_system="adsense_payment_gap",
+                key="neg",
             )
         ],
         verified_channels={"pub-1": ["chA", "chB"]},

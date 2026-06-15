@@ -33,17 +33,13 @@ def build_database_url(tmp_path) -> str:
     return f"sqlite+pysqlite:///{(tmp_path / 'user-roles.db').as_posix()}"
 
 
-def seed_database(
-    database_url: str, *, target_is_service_account: bool = False
-) -> None:
+def seed_database(database_url: str, *, target_is_service_account: bool = False) -> None:
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as session:
         session.add_all(
             [
-                UserORM(
-                    id=ADMIN_ID, email="admin@example.com", display_name="Admin User"
-                ),
+                UserORM(id=ADMIN_ID, email="admin@example.com", display_name="Admin User"),
                 UserORM(
                     id=TARGET_ID,
                     email="target@example.com",
@@ -183,10 +179,7 @@ def test_corporate_admin_cannot_assign_finance_role(tmp_path):
     )
 
     assert response.status_code == 403
-    assert (
-        response.json()["detail"]
-        == "Finance roles require Finance Admin or Super Owner"
-    )
+    assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
 
 
 def test_finance_admin_can_assign_finance_viewer_role(tmp_path):
@@ -297,9 +290,7 @@ def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         assignment = session.scalars(select(UserRoleAssignmentORM)).one()
-        audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.created_at)
-        ).all()
+        audit_logs = session.scalars(select(AuditLogORM).order_by(AuditLogORM.created_at)).all()
 
     assert response.status_code == 200
     assert response.json()["active"] is False
@@ -336,10 +327,7 @@ def test_corporate_admin_cannot_revoke_finance_role(tmp_path):
     )
 
     assert response.status_code == 403
-    assert (
-        response.json()["detail"]
-        == "Finance roles require Finance Admin or Super Owner"
-    )
+    assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
 
 
 def test_finance_admin_can_revoke_finance_viewer_role(tmp_path):

@@ -69,9 +69,7 @@ class RevenueFactEntry:
             "net_revenue_usd": _decimal_to_api(self.net_revenue_usd),
             "shorts_revenue_usd": _decimal_to_api(self.shorts_revenue_usd),
             "longform_revenue_usd": _decimal_to_api(self.longform_revenue_usd),
-            "subscription_revenue_usd": _decimal_to_api(
-                self.subscription_revenue_usd
-            ),
+            "subscription_revenue_usd": _decimal_to_api(self.subscription_revenue_usd),
             "views": self.views,
             "watch_time_minutes": _decimal_to_api(self.watch_time_minutes),
             "confidence_score": _decimal_to_api(self.confidence_score),
@@ -336,16 +334,12 @@ class SqlAlchemyRevenueFactRepository:
             for_update=True,
         )
         if close.status == "LOCKED":
-            raise RevenueFactLockedMonthError(
-                "Finance month is locked for revenue fact imports"
-            )
+            raise RevenueFactLockedMonthError("Finance month is locked for revenue fact imports")
 
     def _require_active_channel_for_import(self, youtube_channel_id: str) -> None:
         """Ensure a YouTube channel is active before import."""
         if not self._active_channel_exists(youtube_channel_id):
-            raise RevenueFactValidationError(
-                "youtube_channel_id must reference an active channel"
-            )
+            raise RevenueFactValidationError("youtube_channel_id must reference an active channel")
 
     def _require_active_channel_for_read(self, youtube_channel_id: str) -> None:
         """

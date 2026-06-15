@@ -7,8 +7,7 @@ from sqlalchemy import create_engine, inspect
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
-    PROJECT_ROOT
-    / "backend/ums_smart_revenue/db/alembic/versions/20260510_0008_export_jobs.py"
+    PROJECT_ROOT / "backend/ums_smart_revenue/db/alembic/versions/20260510_0008_export_jobs.py"
 )
 
 
@@ -41,9 +40,7 @@ def test_export_job_migration_creates_export_jobs_table():
 
 
 def _apply_migration(connection) -> None:
-    spec = importlib.util.spec_from_file_location(
-        "export_job_migration", MIGRATION_PATH
-    )
+    spec = importlib.util.spec_from_file_location("export_job_migration", MIGRATION_PATH)
     assert spec is not None
     migration = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

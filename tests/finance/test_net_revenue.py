@@ -21,9 +21,7 @@ def revenue_fact(
         source_kind=source_kind,
         source_report_id=f"report-{source_kind}",
         gross_revenue_usd=Decimal(gross_revenue_usd),
-        net_revenue_usd=(
-            Decimal(net_revenue_usd) if net_revenue_usd is not None else None
-        ),
+        net_revenue_usd=(Decimal(net_revenue_usd) if net_revenue_usd is not None else None),
         views=0,
         watch_time_minutes=Decimal("0"),
         confidence_score=Decimal(confidence_score),
@@ -46,9 +44,7 @@ def manual_override(
         reason="Finance correction",
         status=status,
         created_by="00000000-0000-0000-0000-00000000c001",
-        approved_by=(
-            "00000000-0000-0000-0000-00000000c002" if status == "APPROVED" else None
-        ),
+        approved_by=("00000000-0000-0000-0000-00000000c002" if status == "APPROVED" else None),
         approval_reason="Approved correction" if status == "APPROVED" else None,
     )
 
@@ -102,8 +98,7 @@ def test_channel_net_revenue_reports_missing_net_source_without_inventing_values
             "issue_type": "NET_REVENUE_SOURCE_MISSING",
             "severity": "HIGH",
             "message": (
-                "Primary revenue source YOUTUBE_CMS has no net revenue for "
-                "channel-tv-a in 2026-03."
+                "Primary revenue source YOUTUBE_CMS has no net revenue for channel-tv-a in 2026-03."
             ),
         }
     ]

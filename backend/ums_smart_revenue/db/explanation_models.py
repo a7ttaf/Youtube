@@ -2,7 +2,18 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, Index, Numeric, Text, UniqueConstraint, Uuid, func, text
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    Index,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -31,9 +42,7 @@ class NumberExplanationORM(ExplanationBase):
     entity_id: Mapped[str] = mapped_column(Text, nullable=False)
     metric: Mapped[str] = mapped_column(Text, nullable=False)
     value: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
-    currency: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default=text("'USD'")
-    )
+    currency: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'USD'"))
     formula: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[str] = mapped_column(Text, nullable=False)
     components: Mapped[list[dict[str, object]]] = mapped_column(

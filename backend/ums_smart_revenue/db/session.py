@@ -1,4 +1,5 @@
 """SQLAlchemy engine and session-factory helpers with per-URL engine caching."""
+
 from collections.abc import Callable, Iterator
 from threading import Lock
 
@@ -79,9 +80,7 @@ def build_engine(database_url: str) -> Engine:
 #   - File: backend/ums_smart_revenue/db/rls.py -> app_tenant role name.
 #   - File: backend/ums_smart_revenue/app.py -> request session factory.
 # ============================================================================
-def build_session_factory(
-    database_url: str, engine: Engine | None = None
-) -> SessionFactory:
+def build_session_factory(database_url: str, engine: Engine | None = None) -> SessionFactory:
     """Return a tenant-lane sessionmaker bound to a cached or given engine."""
     if engine is None:
         with _engine_cache_lock:
@@ -93,7 +92,7 @@ def build_session_factory(
         "expire_on_commit": False,
         "info": {_SESSION_ROLE_KEY: APP_TENANT_ROLE},
     }
-    if database_url.startswith("sqlite"):
+    if database_url.startswith("sqlite"):  # skipcq: PTC-W0047
         # NOTE: We deliberately do NOT set `join_transaction_mode` on the
         # engine-bound sessionmaker. Codex P2 review on PR #88 confirmed
         # that `join_transaction_mode="create_savepoint"` does not actually
@@ -198,7 +197,11 @@ def _apply_tenant_isolation(session, _transaction, connection):
             # FIX: During a rolling migration gap, clear the trusted context row
             # directly instead of leaving a pooled backend pinned to a prior tenant.
             connection.exec_driver_sql(
-                f"DELETE FROM {TENANT_CONTEXT_TABLE} WHERE backend_pid = pg_backend_pid()"
+                # BAN-B608: TENANT_CONTEXT_TABLE is a fixed module constant
+                # identifier (not user input); identifiers cannot be bound
+                # parameters, so this statement is not SQL-injectable.
+                f"DELETE FROM {TENANT_CONTEXT_TABLE} "  # skipcq: BAN-B608
+                "WHERE backend_pid = pg_backend_pid()"
             )
     if role == APP_TENANT_ROLE:
         # FIX: Keep tenant-lane sessions restricted even when TENANT_CTX is

@@ -83,9 +83,7 @@ def fresh_engine(postgres_url: str) -> object:
         engine.dispose()
 
 
-def test_source_account_migration_rekeys_uniqueness(
-    alembic_config, fresh_engine
-) -> None:
+def test_source_account_migration_rekeys_uniqueness(alembic_config, fresh_engine) -> None:
     """Upgrading creates the account-scoped key and tenant-month read index."""
     command.upgrade(alembic_config, "head")
     inspector = inspect(fresh_engine)
@@ -96,15 +94,19 @@ def test_source_account_migration_rekeys_uniqueness(
         for c in inspector.get_unique_constraints("adsense_payments")
     }
     assert uniques["uq_adsense_payments_account_month_name"] == (
-        "tenant_id", "source_account_id", "month", "payment_name",
+        "tenant_id",
+        "source_account_id",
+        "month",
+        "payment_name",
     )
     assert "uq_adsense_payments_month_name" not in uniques
     indexes = {
-        c["name"]: tuple(c["column_names"])
-        for c in inspector.get_indexes("adsense_payments")
+        c["name"]: tuple(c["column_names"]) for c in inspector.get_indexes("adsense_payments")
     }
     assert indexes["ix_adsense_payments_tenant_month_payment_date"] == (
-        "tenant_id", "month", "payment_date",
+        "tenant_id",
+        "month",
+        "payment_date",
     )
     checks = {c["name"] for c in inspector.get_check_constraints("adsense_payments")}
     assert "ck_adsense_payments_source_account_id_nonempty" in checks
@@ -126,9 +128,7 @@ def test_source_account_migration_rekeys_uniqueness(
 #            updated_at have server defaults and are omitted.
 # Blast Radius: Test-only. Finance source-of-truth backfill correctness.
 # ============================================================================
-def test_source_account_migration_backfills_legacy_null_rows(
-    alembic_config, fresh_engine
-) -> None:
+def test_source_account_migration_backfills_legacy_null_rows(alembic_config, fresh_engine) -> None:
     """Backfills existing pre-live-pull rows with the legacy account sentinel."""
     # 1. Step to the PRIOR head: adsense_payments exists WITHOUT
     #    source_account_id and with the old (tenant_id, month, payment_name) key.
@@ -168,8 +168,7 @@ def test_source_account_migration_backfills_legacy_null_rows(
     with fresh_engine.begin() as conn:
         rows = conn.execute(
             text(
-                "SELECT source_account_id FROM adsense_payments "
-                "WHERE payment_name = :payment_name"
+                "SELECT source_account_id FROM adsense_payments WHERE payment_name = :payment_name"
             ),
             {"payment_name": "Legacy Manual Upload"},
         ).fetchall()
@@ -182,9 +181,7 @@ def test_source_account_migration_backfills_legacy_null_rows(
     assert cols["source_account_id"]["nullable"] is False
 
 
-def test_source_account_migration_downgrade_reverses(
-    alembic_config, fresh_engine
-) -> None:
+def test_source_account_migration_downgrade_reverses(alembic_config, fresh_engine) -> None:
     """Downgrading to the prior revision removes source-account schema changes."""
     command.upgrade(alembic_config, "head")
     command.downgrade(alembic_config, "20260527_0001")

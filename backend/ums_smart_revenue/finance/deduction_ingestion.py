@@ -170,7 +170,8 @@ class SqlAlchemyDeductionComponentRepository:
             )
 
     def upsert_components(
-        self, *,
+        self,
+        *,
         month: str,
         components: list[DeductionComponentInput],
         replace_source_tables: Collection[str] | None = None,
@@ -199,46 +200,51 @@ class SqlAlchemyDeductionComponentRepository:
         entries: list[DeductionComponent] = []
         now = datetime.now(UTC)
         for component in components:
-            statement = insert_builder(DeductionComponentORM).values(
-                id=uuid4(),
-                tenant_id=self._tenant_id,
-                month=month,
-                component_kind=component.component_kind,
-                scope_kind=component.scope_kind,
-                scope_id=component.scope_id,
-                amount_usd=component.amount_usd,
-                amount_native=component.amount_native,
-                currency_code=component.currency_code,
-                source_system=component.source_system,
-                source_table=component.source_table,
-                source_id=component.source_id,
-                source_key=component.source_key,
-                source_report_id=component.source_report_id,
-                raw_payload=dict(component.raw_payload),
-                component_key=component.component_key,
-                updated_at=now,
-            ).on_conflict_do_update(
-                index_elements=[
-                    DeductionComponentORM.tenant_id,
-                    DeductionComponentORM.component_key,
-                ],
-                set_={
-                    "month": month,
-                    "component_kind": component.component_kind,
-                    "scope_kind": component.scope_kind,
-                    "scope_id": component.scope_id,
-                    "amount_usd": component.amount_usd,
-                    "amount_native": component.amount_native,
-                    "currency_code": component.currency_code,
-                    "source_system": component.source_system,
-                    "source_table": component.source_table,
-                    "source_id": component.source_id,
-                    "source_key": component.source_key,
-                    "source_report_id": component.source_report_id,
-                    "raw_payload": dict(component.raw_payload),
-                    "updated_at": now,
-                },
-            ).returning(DeductionComponentORM.id)
+            statement = (
+                insert_builder(DeductionComponentORM)
+                .values(
+                    id=uuid4(),
+                    tenant_id=self._tenant_id,
+                    month=month,
+                    component_kind=component.component_kind,
+                    scope_kind=component.scope_kind,
+                    scope_id=component.scope_id,
+                    amount_usd=component.amount_usd,
+                    amount_native=component.amount_native,
+                    currency_code=component.currency_code,
+                    source_system=component.source_system,
+                    source_table=component.source_table,
+                    source_id=component.source_id,
+                    source_key=component.source_key,
+                    source_report_id=component.source_report_id,
+                    raw_payload=dict(component.raw_payload),
+                    component_key=component.component_key,
+                    updated_at=now,
+                )
+                .on_conflict_do_update(
+                    index_elements=[
+                        DeductionComponentORM.tenant_id,
+                        DeductionComponentORM.component_key,
+                    ],
+                    set_={
+                        "month": month,
+                        "component_kind": component.component_kind,
+                        "scope_kind": component.scope_kind,
+                        "scope_id": component.scope_id,
+                        "amount_usd": component.amount_usd,
+                        "amount_native": component.amount_native,
+                        "currency_code": component.currency_code,
+                        "source_system": component.source_system,
+                        "source_table": component.source_table,
+                        "source_id": component.source_id,
+                        "source_key": component.source_key,
+                        "source_report_id": component.source_report_id,
+                        "raw_payload": dict(component.raw_payload),
+                        "updated_at": now,
+                    },
+                )
+                .returning(DeductionComponentORM.id)
+            )
             row_id = self._session.execute(statement).scalar_one()
             row = self._session.get(DeductionComponentORM, row_id)
             if row is None:
@@ -253,7 +259,8 @@ class SqlAlchemyDeductionComponentRepository:
         return entries
 
     def _delete_stale_month_components(
-        self, *,
+        self,
+        *,
         month: str,
         live_component_keys: set[str],
         replace_source_tables: Collection[str] | None = None,
@@ -343,7 +350,8 @@ class SqlAlchemyDeductionComponentRepository:
     #   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_deduction_components.
     # ============================================================================
     def list_month_components_page(
-        self, *,
+        self,
+        *,
         month: str,
         component_kind: str | None = None,
         scope_kind: str | None = None,
@@ -486,7 +494,10 @@ class DeductionIngestionService:
     # Blast Radius: Finance source-of-truth writes + one audit event.
     # ========================================================================
     def __init__(
-        self, session: Session, *, audit_sink: AuditSink,
+        self,
+        session: Session,
+        *,
+        audit_sink: AuditSink,
         tenant_id: UUID | str | None = None,
     ):
         self._session = session
@@ -497,8 +508,13 @@ class DeductionIngestionService:
         )
 
     def ingest(
-        self, *, month: str, actor: UserPrincipal, reason: str,
-        source: str | None = None, dry_run: bool = False,
+        self,
+        *,
+        month: str,
+        actor: UserPrincipal,
+        reason: str,
+        source: str | None = None,
+        dry_run: bool = False,
     ) -> DeductionIngestionResult:
         """Ingest deduction evidence for one finance month.
 
@@ -522,10 +538,7 @@ class DeductionIngestionService:
         # ingestion without creating an OPEN close row as a dry-run side effect.
         if (
             dry_run
-            and get_month_close_status(
-                self._session, month, tenant_id=self._tenant_id
-            )
-            == "LOCKED"
+            and get_month_close_status(self._session, month, tenant_id=self._tenant_id) == "LOCKED"
         ):
             raise DeductionComponentLockedMonthError(
                 "Finance month is locked for deduction-component ingestion"
@@ -570,9 +583,7 @@ class DeductionIngestionService:
         if not dry_run:
             # FIX: Scoped ingestion replaces only the selected source family; a
             # bank-only rerun must not delete source-row or gap evidence.
-            replace_source_tables = (
-                None if source is None else _SOURCE_REPLACE_TABLES[source]
-            )
+            replace_source_tables = None if source is None else _SOURCE_REPLACE_TABLES[source]
             self._repository.upsert_components(
                 month=month,
                 components=components,
@@ -594,6 +605,9 @@ class DeductionIngestionService:
                 },
             )
         return DeductionIngestionResult(
-            month=month, total_upserted=total, by_kind=by_kind,
-            skipped_non_usd=skipped_non_usd, dry_run=dry_run,
+            month=month,
+            total_upserted=total,
+            by_kind=by_kind,
+            skipped_non_usd=skipped_non_usd,
+            dry_run=dry_run,
         )
