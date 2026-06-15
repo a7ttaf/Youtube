@@ -1,6 +1,6 @@
 # Delivery Backlog
 
-## Status (2026-06-13)
+## Status (2026-06-15)
 
 Reconciled through PR #97 (executor Bucket-A audit RLS fix). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
