@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
@@ -51,6 +52,22 @@ SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-2222008a0000"
 REPORT_MONTH = "2026-04"
 CONNECTOR_KEY = "youtube-reporting"
 ACCOUNT_ID = "cms-1"
+
+
+@dataclass
+class _StubResult:
+    """Minimal stand-in for ``NormalizationResult`` used across wiring tests.
+
+    The wiring seam only reads ``created``/``updated``/``unchanged``/``skipped``
+    off the normalizer's return value, so a lightweight dataclass mirrors the
+    real ``NormalizationResult`` shape without importing the finance normalizer
+    into every test that only needs a controllable return value.
+    """
+
+    created: list
+    updated: list
+    unchanged: list
+    skipped: list
 
 
 @pytest.fixture(autouse=True)
@@ -407,15 +424,6 @@ def test_actor_is_triggering_user_when_supplied() -> None:
     that's expected for the normalize stage because triggering users
     are typically operators who run the ingest out-of-band.
     """
-    from dataclasses import dataclass
-
-    @dataclass
-    class _StubResult:
-        created: list
-        updated: list
-        unchanged: list
-        skipped: list
-
     created_fact = MagicMock(name="created_fact")
     created_fact.audit_entity_id = "channel-1:2026-04:YOUTUBE_CMS"
     created_fact.source_kind = "YOUTUBE_CMS"
@@ -490,14 +498,6 @@ def test_audit_events_emitted_for_created_and_updated_facts() -> None:
     updated_fact.month = "2026-04"
 
     normalizer = MagicMock(name="normalizer_instance")
-    from dataclasses import dataclass
-
-    @dataclass
-    class _StubResult:
-        created: list
-        updated: list
-        unchanged: list
-        skipped: list
 
     normalizer.normalize_month.return_value = _StubResult(
         created=[created_fact],
@@ -532,6 +532,97 @@ def test_audit_events_emitted_for_created_and_updated_facts() -> None:
         assert "triggered_by_account_id" in record.details
         lifecycles.append(record.details["lifecycle"])
     assert sorted(lifecycles) == ["CREATED", "UPDATED"]
+
+
+def test_skipped_rows_emit_observability_audit_edge(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Normalize-time skipped source rows emit one summary audit edge + a WARNING.
+
+    ``GoogleSourceNormalizer`` drops unregistered/inactive-channel (and other)
+    revenue rows from the fact projection into ``result.skipped``. Before this
+    contract the adapter consumed only ``created``/``updated`` and discarded
+    ``skipped`` entirely, so dropped revenue was invisible -- no audit, no log,
+    run still SUCCEEDED. The adapter now emits ONE ``CONNECTOR_JOB_RUN`` summary
+    edge (not one per row, to avoid audit flooding) carrying the skip counts by
+    reason, scoped to the finance month so finance auditors can discover it,
+    plus a WARNING log line for immediate operator visibility.
+    """
+    from ums_smart_revenue.auth.audit import AuditEventType
+    from ums_smart_revenue.auth.scopes import ScopeType
+    from ums_smart_revenue.finance.google_source_normalizer import (
+        SkippedSourceRow,
+        SkipReason,
+    )
+
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.return_value = _StubResult(
+        created=[],
+        updated=[],
+        unchanged=[],
+        skipped=[
+            SkippedSourceRow(source_row_id="r1", reason=SkipReason.UNKNOWN_CHANNEL),
+            SkippedSourceRow(source_row_id="r2", reason=SkipReason.UNKNOWN_CHANNEL),
+            SkippedSourceRow(source_row_id="r3", reason=SkipReason.MISSING_CHANNEL_ID),
+        ],
+    )
+    caplog.set_level(logging.WARNING, logger=normalization.logger.name)
+    _, _, _, _, audit_sink = _invoke_run_one(
+        outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
+        normalizer=normalizer,
+    )
+    append_calls = audit_sink.append.call_args_list
+    # created/updated are empty, so the only audit edge is the skip summary.
+    assert len(append_calls) == 1
+    record = append_calls[0].args[0]
+    assert record.event_type == AuditEventType.CONNECTOR_JOB_RUN.value
+    assert record.entity_type == "connector_run"
+    assert record.details.get("lifecycle") == "ROWS_SKIPPED"
+    assert record.details.get("skipped_count") == 3
+    assert record.details.get("skipped_by_reason") == {
+        "unknown_channel": 2,
+        "missing_channel_id": 1,
+    }
+    assert record.scope_type == ScopeType.FINANCE_MONTH.value
+    assert record.scope_id == REPORT_MONTH
+    assert record.details.get("triggered_by_run_id")
+    # Immediate operator visibility for the dropped revenue.
+    assert "skipped" in caplog.text.lower()
+
+
+def test_no_skipped_rows_emits_no_skip_edge() -> None:
+    """A normalize with an empty ``skipped`` list emits no skip-summary edge.
+
+    Guards against the skip edge firing on the happy path: only created/updated
+    fact edges are appended when nothing was dropped.
+    """
+    from ums_smart_revenue.auth.audit import AuditEventType
+
+    created_fact = MagicMock(name="created_fact")
+    created_fact.audit_entity_id = "channel-1:2026-04:YOUTUBE_CMS"
+    created_fact.source_kind = "YOUTUBE_CMS"
+    created_fact.source_report_id = "report-A"
+    created_fact.youtube_channel_id = "channel-1"
+    created_fact.month = "2026-04"
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.return_value = _StubResult(
+        created=[created_fact],
+        updated=[],
+        unchanged=[],
+        skipped=[],
+    )
+    _, _, _, _, audit_sink = _invoke_run_one(
+        outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
+        normalizer=normalizer,
+    )
+    lifecycles = [
+        call.args[0].details.get("lifecycle") for call in audit_sink.append.call_args_list
+    ]
+    assert "ROWS_SKIPPED" not in lifecycles
+    assert all(
+        call.args[0].event_type == AuditEventType.REPORT_IMPORTED.value
+        for call in audit_sink.append.call_args_list
+    )
 
 
 def test_projection_failure_records_on_run_when_normalize_raises() -> None:

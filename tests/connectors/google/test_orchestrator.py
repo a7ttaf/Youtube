@@ -4083,8 +4083,14 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
 
 
 def _connector_audit_events(session: Session) -> list[AuditLogORM]:
-    """Return audit rows tied to the connector audit lifecycle in insertion order."""
-    return list(
+    """Return audit rows tied to the connector audit lifecycle in insertion order.
+
+    Excludes the post-run normalize ``ROWS_SKIPPED`` summary edge -- it is also a
+    ``CONNECTOR_JOB_RUN`` event but is a projection-skip summary, not part of the
+    run/raw-file STARTED->...->FINISHED lifecycle these tests assert. That edge is
+    covered by ``test_normalize_wiring`` and ``test_ingestion_gate`` (Assertion 4c).
+    """
+    rows = list(
         session.scalars(
             select(AuditLogORM)
             .where(AuditLogORM.tenant_id == TENANT_ID)
@@ -4092,6 +4098,7 @@ def _connector_audit_events(session: Session) -> list[AuditLogORM]:
             .order_by(AuditLogORM.created_at, AuditLogORM.id)
         )
     )
+    return [row for row in rows if row.details.get("lifecycle") != "ROWS_SKIPPED"]
 
 
 def _audit_lifecycles(events: list[AuditLogORM]) -> list[str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -18,7 +19,10 @@ from ums_smart_revenue.connectors.runs.repository import (
     record_projection_failure,
 )
 from ums_smart_revenue.db.lane import platform_lane
-from ums_smart_revenue.finance.google_source_normalizer import GoogleSourceNormalizer
+from ums_smart_revenue.finance.google_source_normalizer import (
+    GoogleSourceNormalizer,
+    SkippedSourceRow,
+)
 from ums_smart_revenue.finance.month_close import get_month_close_status
 from ums_smart_revenue.finance.revenue_facts import RevenueFactLockedMonthError
 
@@ -106,6 +110,14 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
                         run=run,
                         fact=fact,
                         lifecycle="UPDATED",
+                    )
+                if result.skipped:
+                    _emit_skipped_rows_audit(
+                        audit_sink=audit_sink,
+                        audit_actor=audit_actor,
+                        run=run,
+                        report_month=report_month,
+                        skipped=result.skipped,
                     )
                 self._session.commit()
         except RevenueFactLockedMonthError:
@@ -195,6 +207,74 @@ def _record_projection_failure_on_run(
             },
         )
         session.commit()
+
+
+# ============================================================================
+# Purpose: Surface source rows the normalizer dropped from the fact projection
+#          as one durable audit edge + a WARNING log, so unregistered/inactive
+#          channel revenue is not silently lost without any signal.
+# Database/ORM: Writes one audit_logs row (via record_audit_event) inside the
+#               caller's platform_lane transaction. Reads nothing.
+# Standards: One summary edge per run (counts by reason) -- never one row per
+#            skip -- to avoid audit flooding; WARNING level because dropped
+#            revenue warrants operator attention. No secrets/PII logged.
+# Blast Radius: Audit trail only. Does NOT change what gets ingested or
+#               projected. No finance number changes. No graph projection
+#               impact detected.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     Produces NormalizationResult.skipped (SkippedSourceRow + SkipReason).
+# ============================================================================
+def _emit_skipped_rows_audit(
+    *,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
+    run: ConnectorRunEntry,
+    report_month: str,
+    skipped: list[SkippedSourceRow],
+) -> None:
+    """Emit one CONNECTOR_JOB_RUN summary edge for projection-skipped source rows."""
+    from ums_smart_revenue.auth.audit import AuditEventType
+    from ums_smart_revenue.auth.audit_service import record_audit_event
+    from ums_smart_revenue.auth.scopes import AccessScope
+
+    # FIX: avoid eager evaluation of ``str(row.reason)`` for every skipped row.
+    # ``getattr(..., default)`` evaluates the default argument before the call,
+    # so the previous ``str(row.reason)`` default ran even when ``.value``
+    # existed. ``SkipReason`` is an Enum whose ``.value`` always exists, so the
+    # ternary short-circuits in practice and never falls back to ``str()`` here;
+    # the fallback is retained only to keep the helper safe for non-enum inputs.
+    reason_counts = dict(
+        Counter(
+            row.reason.value if hasattr(row.reason, "value") else str(row.reason) for row in skipped
+        )
+    )
+    logger.warning(
+        "ingestion normalize dropped %d source row(s) from fact projection "
+        "tenant_id=%s month=%s skipped_by_reason=%s",
+        len(skipped),
+        run.tenant_id,
+        report_month,
+        reason_counts,
+    )
+    record_audit_event(
+        sink=audit_sink,
+        actor=audit_actor,
+        event_type=AuditEventType.CONNECTOR_JOB_RUN,
+        entity_type="connector_run",
+        entity_id=run.id,
+        scope=AccessScope.finance_month(report_month),
+        reason="connector normalize: source rows skipped during projection",
+        details={
+            "lifecycle": "ROWS_SKIPPED",
+            "skipped_count": len(skipped),
+            "skipped_by_reason": reason_counts,
+            "month": report_month,
+            "triggered_by_run_id": run.id,
+            "triggered_by_connector_key": run.connector_key,
+            "triggered_by_account_id": run.account_id,
+        },
+    )
 
 
 def _emit_normalized_fact_audit(
