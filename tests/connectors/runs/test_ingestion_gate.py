@@ -667,11 +667,17 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
     # every row.
     # ============================================================================
     events = _connector_audit_events(session)
-    assert len(events) == 12, (
-        f"expected 12 audit events (4 per run x 3 runs); got {len(events)}: "
-        f"{[(e.event_type, e.details.get('lifecycle')) for e in events]}"
+    # The post-run normalize stage also emits ROWS_SKIPPED summary edges (same
+    # CONNECTOR_JOB_RUN event_type) for rows dropped from the fact projection.
+    # Assertion 4 only checks the run lifecycle sequence, so exclude them here
+    # and assert them explicitly in Assertion 4c.
+    lifecycle_events = [e for e in events if e.details.get("lifecycle") != "ROWS_SKIPPED"]
+    assert len(lifecycle_events) == 12, (
+        f"expected 12 lifecycle audit events (4 per run x 3 runs); "
+        f"got {len(lifecycle_events)}: "
+        f"{[(e.event_type, e.details.get('lifecycle')) for e in lifecycle_events]}"
     )
-    grouped = _group_events_by_run(events)
+    grouped = _group_events_by_run(lifecycle_events)
     assert len(grouped) == 3, f"expected 3 distinct run_ids; got {len(grouped)}"
     for run_id, run_events in grouped.items():
         lifecycles = [event.details["lifecycle"] for event in run_events]
@@ -679,6 +685,34 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
             f"run_id={run_id} lifecycle mismatch: expected STARTED -> "
             f"DOWNLOADED -> PARSED -> FINISHED, got {lifecycles!r}"
         )
+
+    # ============================================================================
+    # Assertion 4c: the AdSense rows skipped as MISSING_CHANNEL_ID are surfaced
+    # as a ROWS_SKIPPED summary edge -- not silently dropped from the source of
+    # truth. This is the observability contract for projection-skipped revenue:
+    # one CONNECTOR_JOB_RUN edge per run that dropped rows, carrying the
+    # counts-by-reason, scoped to the finance month.
+    # ============================================================================
+    skip_edges = [e for e in events if e.details.get("lifecycle") == "ROWS_SKIPPED"]
+    assert skip_edges, (
+        "post-run normalize must surface dropped source rows as ROWS_SKIPPED "
+        "summary edges instead of silently discarding them"
+    )
+    missing_channel_skipped = sum(
+        e.details["skipped_by_reason"].get("missing_channel_id", 0) for e in skip_edges
+    )
+    assert missing_channel_skipped == len(adsense_source_rows), (
+        "the AdSense rows skipped as MISSING_CHANNEL_ID must be reflected in a "
+        f"ROWS_SKIPPED edge; got {missing_channel_skipped}, "
+        f"expected {len(adsense_source_rows)}"
+    )
+    for edge in skip_edges:
+        assert edge.scope_id == REPORT_MONTH, (
+            f"ROWS_SKIPPED edge must be finance-month scoped; got {edge.scope_id!r}"
+        )
+        assert edge.details["skipped_count"] == sum(
+            edge.details["skipped_by_reason"].values()
+        ), "skipped_count must equal the sum of the per-reason counts"
 
     # ============================================================================
     # Assertion 4b: post-run normalize emits one REPORT_IMPORTED CREATED audit
