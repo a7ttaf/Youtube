@@ -402,176 +402,37 @@ def _group_events_by_run(
     return grouped
 
 
-# ============================================================================
-# Purpose: Mock end-to-end ingestion gate -- three connectors run via run_one,
-#          source rows persist, C1 normalizes YT rows to facts and skips
-#          AdSense as MISSING_CHANNEL_ID, audit log carries 12 lifecycle
-#          events under one service principal.
-# Database/ORM: ApiConnectorCredentialORM, YouTubeChannelORM, ConnectorRunORM,
-#               ConnectorRunRawFileORM, RawReportFileORM,
-#               GoogleRevenueSourceRowORM, MonthlyChannelRevenueFactORM,
-#               AuditLogORM.
-# Standards: Each mock client patched at orchestrator module scope; no live
-#            HTTP, OAuth, or disk traffic. Service principal env honored via
-#            autouse fixture so Bucket A fail-closed does not trigger.
-# Blast Radius: Audit lifecycle, source-row repository, C1 fact creation, and
-#               the connector dispatcher all participate -- any regression
-#               in B2.4-B2.6 surfaces here.
-# Connections:
-#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> run_one.
-#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py -> C1.
-#   - File: tests/connectors/google/test_orchestrator.py -> mirrors T37/T38
-#     patch surface so this test stays consistent with the per-connector tests.
-# ============================================================================
-def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_resolver) -> None:
-    """Mock end-to-end ingestion gate -- B2.6 §9.3 closing assertion."""
-    # ----- seed credentials for all three connectors -----
-    _make_credential_row(session, connector_key=YT_REPORTING_KEY, account_id=YT_REPORTING_ACCOUNT)
-    _make_credential_row(session, connector_key=YT_ANALYTICS_KEY, account_id=YT_ANALYTICS_ACCOUNT)
-    _make_credential_row(session, connector_key=ADSENSE_KEY, account_id=ADSENSE_ACCOUNT)
+def _wire_mock_file_store(local_cls_mock) -> dict[str, bytes]:
+    """Wire an in-memory dict behind a mocked ``LocalFileStoreBackend``.
 
-    # ----- seed one CMS-owned channel matching the YT runs -----
-    # YT Reporting writes source rows keyed on the CSV's ``channel`` column;
-    # YT Analytics's list_target_channels picks this channel as the only
-    # target. The same channel powers C1's per-channel fact creation.
-    channel_id = "UC_e2e_1"
-    _make_youtube_channel(
-        session,
-        youtube_channel_id=channel_id,
-        content_owner_id=YT_ANALYTICS_ACCOUNT,
+    Returns the dict so callers can inspect uploads if needed. Each connector
+    run block repeats this store wiring, so isolating it keeps the per-run
+    blocks short and avoids three copies of the same ``side_effect`` lambdas.
+    """
+    store: dict[str, bytes] = {}
+    backend = local_cls_mock.return_value
+    backend.upload.side_effect = lambda *, storage_uri, content: store.__setitem__(
+        storage_uri, content
     )
+    backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+    return store
 
-    # ----- build the per-runner mock payloads -----
-    yt_reporting_csv = _yt_reporting_csv_bytes(
-        channel_id=channel_id, account_id=YT_REPORTING_ACCOUNT
-    )
-    yt_analytics_payload = _yt_analytics_payload(
-        channel_id=channel_id, account_id=YT_ANALYTICS_ACCOUNT
-    )
-    adsense_payload = _adsense_payload(account_id=ADSENSE_ACCOUNT)
 
-    # ----- run YT Reporting -----
-    # Patched at orchestrator module scope so the runner instantiates the
-    # mock instead of the live client; ``LocalFileStoreBackend`` is replaced
-    # with an in-memory dict so no disk I/O fires.
-    with (
-        patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-        ) as yt_rep_cls,
-        patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-        ) as local_cls_rep,
-        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh_rep,
-        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls_rep,
-    ):
-        http_cls_rep.return_value.close.return_value = None
-        refresh_rep.return_value = None
-
-        rep_client = yt_rep_cls.return_value
-        rep_client.list_supported_jobs.return_value = [
-            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
-        ]
-        rep_client.list_reports_for_month.return_value = [
-            {"id": "r1", "downloadUrl": "https://yt/r1"}
-        ]
-        rep_client.fetch_report.return_value = yt_reporting_csv
-
-        store_rep: dict[str, bytes] = {}
-        backend_rep = local_cls_rep.return_value
-        backend_rep.upload.side_effect = lambda *, storage_uri, content: store_rep.__setitem__(
-            storage_uri, content
-        )
-        backend_rep.get_bytes.side_effect = lambda *, storage_uri: store_rep[storage_uri]
-
-        outcome_reporting = run_one(
-            session,
-            tenant_id=TENANT_ID,
-            connector_key=YT_REPORTING_KEY,
-            account_id=YT_REPORTING_ACCOUNT,
-            report_month=REPORT_MONTH,
-        )
-
-    assert outcome_reporting.run is not None
-    assert outcome_reporting.run.status == "SUCCEEDED"
-
-    # ----- run YT Analytics -----
-    with (
-        patch("ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient") as yt_an_cls,
-        patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-        ) as local_cls_an,
-        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh_an,
-        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls_an,
-    ):
-        http_cls_an.return_value.close.return_value = None
-        refresh_an.return_value = None
-
-        an_client = yt_an_cls.return_value
-        an_client.fetch_channel_report.return_value = yt_analytics_payload
-
-        store_an: dict[str, bytes] = {}
-        backend_an = local_cls_an.return_value
-        backend_an.upload.side_effect = lambda *, storage_uri, content: store_an.__setitem__(
-            storage_uri, content
-        )
-        backend_an.get_bytes.side_effect = lambda *, storage_uri: store_an[storage_uri]
-
-        outcome_analytics = run_one(
-            session,
-            tenant_id=TENANT_ID,
-            connector_key=YT_ANALYTICS_KEY,
-            account_id=YT_ANALYTICS_ACCOUNT,
-            report_month=REPORT_MONTH,
-        )
-
-    assert outcome_analytics.run is not None
-    assert outcome_analytics.run.status == "SUCCEEDED"
-
-    # ----- run AdSense -----
-    with (
-        patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
-        ) as adsense_cls,
-        patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-        ) as local_cls_ads,
-        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh_ads,
-        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls_ads,
-    ):
-        http_cls_ads.return_value.close.return_value = None
-        refresh_ads.return_value = None
-
-        ads_client = adsense_cls.return_value
-        ads_client.fetch_monthly_report.return_value = adsense_payload
-
-        store_ads: dict[str, bytes] = {}
-        backend_ads = local_cls_ads.return_value
-        backend_ads.upload.side_effect = lambda *, storage_uri, content: store_ads.__setitem__(
-            storage_uri, content
-        )
-        backend_ads.get_bytes.side_effect = lambda *, storage_uri: store_ads[storage_uri]
-
-        outcome_adsense = run_one(
-            session,
-            tenant_id=TENANT_ID,
-            connector_key=ADSENSE_KEY,
-            account_id=ADSENSE_ACCOUNT,
-            report_month=REPORT_MONTH,
-        )
-
-    assert outcome_adsense.run is not None
-    assert outcome_adsense.run.status == "SUCCEEDED"
-
-    # ============================================================================
-    # Assertion 1: all three source-systems are present in google_revenue_source_rows.
-    # ============================================================================
-    source_rows = list(
+def _load_source_rows(session: Session) -> list[GoogleRevenueSourceRowORM]:
+    """Load all tenant source rows for the end-to-end gate's source-row assertion."""
+    return list(
         session.scalars(
             select(GoogleRevenueSourceRowORM).where(
                 GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
             )
         )
     )
+
+
+def _assert_source_rows_shape(
+    source_rows: list[GoogleRevenueSourceRowORM],
+) -> list[GoogleRevenueSourceRowORM]:
+    """Assertion 1: all three source systems present, exact row count, channel-less AdSense."""
     source_systems = {row.source_system for row in source_rows}
     assert source_systems == {
         "youtube_reporting",
@@ -590,20 +451,20 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
         f"expected exactly 6 source rows across the three connectors "
         f"(YT Reporting=1, YT Analytics=3, AdSense=2); got {len(source_rows)}"
     )
-
-    # AdSense rows must carry NULL youtube_channel_id (account-scoped).
     adsense_source_rows = [r for r in source_rows if r.source_system == "adsense_management"]
     assert adsense_source_rows, "AdSense run should have produced source rows"
     assert all(r.youtube_channel_id is None for r in adsense_source_rows), (
         "AdSense source rows must be channel-less; channel allocation is a future spec"
     )
+    return adsense_source_rows
 
-    # ============================================================================
-    # Assertion 2 + 3: the orchestrator now normalizes source rows into facts as
-    # the final stage of a successful run (no manual normalize_month call). The
-    # YT Reporting + YT Analytics rows must already be MonthlyChannelRevenueFactORM
-    # entries after run_one returns; AdSense is skipped (MISSING_CHANNEL_ID).
-    # ============================================================================
+
+def _assert_facts_and_skip_semantics(
+    session: Session,
+    channel_id: str,
+    adsense_source_rows: list[GoogleRevenueSourceRowORM],
+) -> None:
+    """Assertions 2 + 3: YT facts projected, AdSense skipped as MISSING_CHANNEL_ID."""
     facts = list(
         session.scalars(
             select(MonthlyChannelRevenueFactORM).where(
@@ -612,10 +473,6 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
         )
     )
     fact_source_kinds = {fact.source_kind for fact in facts}
-    # YT Reporting + YT Analytics each emit one (channel, source_kind) bucket
-    # so two facts are expected: one ``YOUTUBE_CMS`` and one ``YOUTUBE_ANALYTICS``.
-    # source_kind values are persisted in the uppercase RevenueFactSourceKind
-    # member form (see backend/ums_smart_revenue/finance/revenue_facts.py).
     assert fact_source_kinds == {"YOUTUBE_CMS", "YOUTUBE_ANALYTICS"}, (
         f"expected YT-only fact source_kinds; got {fact_source_kinds!r}"
     )
@@ -632,8 +489,8 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
     # Direct normalizer-semantics coverage: the AdSense rows must classify as
     # MISSING_CHANNEL_ID (the wiring's NormalizationResult is internal to the
     # orchestrator, so re-run normalize_month explicitly to inspect skips). This
-    # re-run is idempotent against the facts the wiring already wrote — the two
-    # YT facts come back UNCHANGED — so it does not perturb the count above.
+    # re-run is idempotent against the facts the wiring already wrote -- the two
+    # YT facts come back UNCHANGED -- so it does not perturb the count above.
     result = GoogleSourceNormalizer(session, tenant_id=TENANT_ID).normalize_month(
         month=REPORT_MONTH,
         actor_user_id=ACTOR_USER_ID,
@@ -645,8 +502,6 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
     assert {fact.youtube_channel_id for fact in result.unchanged} == {channel_id}, (
         "the wiring-written YT facts must re-classify as UNCHANGED on re-run"
     )
-    # The C1 normalizer flags the AdSense rows as MISSING_CHANNEL_ID because
-    # the AdSense parser leaves ``youtube_channel_id=None``.
     missing_channel_skips = [s for s in result.skipped if s.reason == SkipReason.MISSING_CHANNEL_ID]
     assert missing_channel_skips, (
         "AdSense source rows should have been skipped as MISSING_CHANNEL_ID; "
@@ -661,16 +516,13 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
         "every AdSense source row must appear in result.skipped with MISSING_CHANNEL_ID"
     )
 
-    # ============================================================================
-    # Assertion 4: audit log carries the full STARTED -> DOWNLOADED -> PARSED ->
-    # FINISHED sequence for each run, with the connector service principal on
-    # every row.
-    # ============================================================================
-    events = _connector_audit_events(session)
+
+def _assert_run_lifecycle_sequence(events: list[AuditLogORM]) -> None:
+    """Assertion 4: full STARTED -> DOWNLOADED -> PARSED -> FINISHED sequence per run."""
     # The post-run normalize stage also emits ROWS_SKIPPED summary edges (same
     # CONNECTOR_JOB_RUN event_type) for rows dropped from the fact projection.
     # Assertion 4 only checks the run lifecycle sequence, so exclude them here
-    # and assert them explicitly in Assertion 4c.
+    # and assert them explicitly in _assert_skip_summary_edges.
     lifecycle_events = [e for e in events if e.details.get("lifecycle") != "ROWS_SKIPPED"]
     assert len(lifecycle_events) == 12, (
         f"expected 12 lifecycle audit events (4 per run x 3 runs); "
@@ -686,13 +538,12 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
             f"DOWNLOADED -> PARSED -> FINISHED, got {lifecycles!r}"
         )
 
-    # ============================================================================
-    # Assertion 4c: the AdSense rows skipped as MISSING_CHANNEL_ID are surfaced
-    # as a ROWS_SKIPPED summary edge -- not silently dropped from the source of
-    # truth. This is the observability contract for projection-skipped revenue:
-    # one CONNECTOR_JOB_RUN edge per run that dropped rows, carrying the
-    # counts-by-reason, scoped to the finance month.
-    # ============================================================================
+
+def _assert_skip_summary_edges(
+    events: list[AuditLogORM],
+    adsense_source_rows: list[GoogleRevenueSourceRowORM],
+) -> None:
+    """Assertion 4c: skipped rows surface as a finance-month-scoped ROWS_SKIPPED edge."""
     skip_edges = [e for e in events if e.details.get("lifecycle") == "ROWS_SKIPPED"]
     assert skip_edges, (
         "post-run normalize must surface dropped source rows as ROWS_SKIPPED "
@@ -710,19 +561,16 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
         assert edge.scope_id == REPORT_MONTH, (
             f"ROWS_SKIPPED edge must be finance-month scoped; got {edge.scope_id!r}"
         )
-        assert edge.details["skipped_count"] == sum(
-            edge.details["skipped_by_reason"].values()
-        ), "skipped_count must equal the sum of the per-reason counts"
+        assert edge.details["skipped_count"] == sum(edge.details["skipped_by_reason"].values()), (
+            "skipped_count must equal the sum of the per-reason counts"
+        )
 
-    # ============================================================================
-    # Assertion 4b: post-run normalize emits one REPORT_IMPORTED CREATED audit
-    # edge per fact written. YT Reporting + YT Analytics each write one
-    # channel-eligible USD fact; AdSense rows are skipped as
-    # MISSING_CHANNEL_ID (no fact, no audit edge). entity_type
-    # ``monthly_channel_revenue_fact`` distinguishes these from the
-    # connector-lifecycle REPORT_IMPORTED events above (entity_type
-    # ``raw_report_file``).
-    # ============================================================================
+
+def _assert_fact_audit_and_principal(
+    session: Session,
+    events: list[AuditLogORM],
+) -> None:
+    """Assertions 4b + principal: fact CREATED edges + one service principal on all rows."""
     fact_audit_events = list(
         session.scalars(
             select(AuditLogORM)
@@ -746,18 +594,174 @@ def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_res
         f"expected the connector service principal on every fact-audit row; "
         f"got {fact_audit_actors!r}"
     )
-
     # Every audit row must carry the same connector service principal. The
     # SqlAlchemyAuditSink stores the raw actor UUID in
     # ``details['actor_user_id']`` when the UUID is not a real users.id, and
     # sets ``user_id=None`` on the row. Both the column and the details key
     # must agree across all 12 events: a single principal for all three runs.
-    principal_user_ids = {event.user_id for event in events}
-    assert principal_user_ids == {None}, (
-        f"expected user_id=None on all rows (service principal is not a "
-        f"users.id); got {principal_user_ids!r}"
+    assert {event.user_id for event in events} == {None}, (
+        "expected user_id=None on all rows (service principal is not a users.id)"
     )
-    actor_user_ids = {event.details.get("actor_user_id") for event in events}
-    assert actor_user_ids == {SERVICE_ACTOR_ID}, (
-        f"expected the connector service principal on all rows; got {actor_user_ids!r}"
+    assert {event.details.get("actor_user_id") for event in events} == {SERVICE_ACTOR_ID}, (
+        "expected the connector service principal on all rows"
     )
+
+
+# ============================================================================
+# Purpose: Mock end-to-end ingestion gate -- three connectors run via run_one,
+#          source rows persist, C1 normalizes YT rows to facts and skips
+#          AdSense as MISSING_CHANNEL_ID, audit log carries 12 lifecycle
+#          events under one service principal.
+# Database/ORM: ApiConnectorCredentialORM, YouTubeChannelORM, ConnectorRunORM,
+#               ConnectorRunRawFileORM, RawReportFileORM,
+#               GoogleRevenueSourceRowORM, MonthlyChannelRevenueFactORM,
+#               AuditLogORM.
+# Standards: Each mock client patched at orchestrator module scope; no live
+#            HTTP, OAuth, or disk traffic. Service principal env honored via
+#            autouse fixture so Bucket A fail-closed does not trigger.
+# Blast Radius: Audit lifecycle, source-row repository, C1 fact creation, and
+#               the connector dispatcher all participate -- any regression
+#               in B2.4-B2.6 surfaces here.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> run_one.
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py -> C1.
+#   - File: tests/connectors/google/test_orchestrator.py -> mirrors T37/T38
+#     patch surface so this test stays consistent with the per-connector tests.
+# ============================================================================
+def _run_yt_reporting(session: Session, channel_id: str):
+    """Run the YT Reporting connector against an in-memory mock backend."""
+    yt_reporting_csv = _yt_reporting_csv_bytes(
+        channel_id=channel_id, account_id=YT_REPORTING_ACCOUNT
+    )
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_rep_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+        ) as local_cls_rep,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh_rep,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls_rep,
+    ):
+        http_cls_rep.return_value.close.return_value = None
+        refresh_rep.return_value = None
+
+        rep_client = yt_rep_cls.return_value
+        rep_client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        rep_client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        rep_client.fetch_report.return_value = yt_reporting_csv
+        _wire_mock_file_store(local_cls_rep)
+
+        return run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=YT_REPORTING_KEY,
+            account_id=YT_REPORTING_ACCOUNT,
+            report_month=REPORT_MONTH,
+        )
+
+
+def _run_yt_analytics(session: Session, channel_id: str):
+    """Run the YT Analytics connector against an in-memory mock backend."""
+    yt_analytics_payload = _yt_analytics_payload(
+        channel_id=channel_id, account_id=YT_ANALYTICS_ACCOUNT
+    )
+    with (
+        patch("ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient") as yt_an_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+        ) as local_cls_an,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh_an,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls_an,
+    ):
+        http_cls_an.return_value.close.return_value = None
+        refresh_an.return_value = None
+
+        an_client = yt_an_cls.return_value
+        an_client.fetch_channel_report.return_value = yt_analytics_payload
+        _wire_mock_file_store(local_cls_an)
+
+        return run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=YT_ANALYTICS_KEY,
+            account_id=YT_ANALYTICS_ACCOUNT,
+            report_month=REPORT_MONTH,
+        )
+
+
+def _run_adsense(session: Session):
+    """Run the AdSense connector against an in-memory mock backend."""
+    adsense_payload = _adsense_payload(account_id=ADSENSE_ACCOUNT)
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
+        ) as adsense_cls,
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+        ) as local_cls_ads,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh_ads,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls_ads,
+    ):
+        http_cls_ads.return_value.close.return_value = None
+        refresh_ads.return_value = None
+
+        ads_client = adsense_cls.return_value
+        ads_client.fetch_monthly_report.return_value = adsense_payload
+        _wire_mock_file_store(local_cls_ads)
+
+        return run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=ADSENSE_KEY,
+            account_id=ADSENSE_ACCOUNT,
+            report_month=REPORT_MONTH,
+        )
+
+
+def test_three_connectors_end_to_end_on_mocks(session: Session, _stub_secret_resolver) -> None:
+    """Mock end-to-end ingestion gate -- B2.6 §9.3 closing assertion."""
+    # ----- seed credentials for all three connectors -----
+    _make_credential_row(session, connector_key=YT_REPORTING_KEY, account_id=YT_REPORTING_ACCOUNT)
+    _make_credential_row(session, connector_key=YT_ANALYTICS_KEY, account_id=YT_ANALYTICS_ACCOUNT)
+    _make_credential_row(session, connector_key=ADSENSE_KEY, account_id=ADSENSE_ACCOUNT)
+
+    # ----- seed one CMS-owned channel matching the YT runs -----
+    # YT Reporting writes source rows keyed on the CSV's ``channel`` column;
+    # YT Analytics's list_target_channels picks this channel as the only
+    # target. The same channel powers C1's per-channel fact creation.
+    channel_id = "UC_e2e_1"
+    _make_youtube_channel(
+        session,
+        youtube_channel_id=channel_id,
+        content_owner_id=YT_ANALYTICS_ACCOUNT,
+    )
+
+    # ----- run YT Reporting -----
+    outcome_reporting = _run_yt_reporting(session, channel_id)
+    assert outcome_reporting.run is not None
+    assert outcome_reporting.run.status == "SUCCEEDED"
+
+    # ----- run YT Analytics -----
+    outcome_analytics = _run_yt_analytics(session, channel_id)
+    assert outcome_analytics.run is not None
+    assert outcome_analytics.run.status == "SUCCEEDED"
+
+    # ----- run AdSense -----
+    outcome_adsense = _run_adsense(session)
+    assert outcome_adsense.run is not None
+    assert outcome_adsense.run.status == "SUCCEEDED"
+
+    # ----- Assertions (delegated to focused helpers) -----
+    source_rows = _load_source_rows(session)
+    adsense_source_rows = _assert_source_rows_shape(source_rows)
+    _assert_facts_and_skip_semantics(session, channel_id, adsense_source_rows)
+
+    events = _connector_audit_events(session)
+    _assert_run_lifecycle_sequence(events)
+    _assert_skip_summary_edges(events, adsense_source_rows)
+    _assert_fact_audit_and_principal(session, events)

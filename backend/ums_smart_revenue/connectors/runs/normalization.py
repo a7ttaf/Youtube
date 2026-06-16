@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -18,7 +19,10 @@ from ums_smart_revenue.connectors.runs.repository import (
     record_projection_failure,
 )
 from ums_smart_revenue.db.lane import platform_lane
-from ums_smart_revenue.finance.google_source_normalizer import GoogleSourceNormalizer
+from ums_smart_revenue.finance.google_source_normalizer import (
+    GoogleSourceNormalizer,
+    SkippedSourceRow,
+)
 from ums_smart_revenue.finance.month_close import get_month_close_status
 from ums_smart_revenue.finance.revenue_facts import RevenueFactLockedMonthError
 
@@ -107,7 +111,7 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
                         fact=fact,
                         lifecycle="UPDATED",
                     )
-                if getattr(result, "skipped", None):
+                if result.skipped:
                     _emit_skipped_rows_audit(
                         audit_sink=audit_sink,
                         audit_actor=audit_actor,
@@ -227,16 +231,24 @@ def _emit_skipped_rows_audit(
     audit_actor: UserPrincipal,
     run: ConnectorRunEntry,
     report_month: str,
-    skipped: list[object],
+    skipped: list[SkippedSourceRow],
 ) -> None:
     """Emit one CONNECTOR_JOB_RUN summary edge for projection-skipped source rows."""
-    from collections import Counter
-
     from ums_smart_revenue.auth.audit import AuditEventType
     from ums_smart_revenue.auth.audit_service import record_audit_event
     from ums_smart_revenue.auth.scopes import AccessScope
 
-    reason_counts = dict(Counter(getattr(row.reason, "value", str(row.reason)) for row in skipped))
+    # FIX: avoid eager evaluation of ``str(row.reason)`` for every skipped row.
+    # ``getattr(..., default)`` evaluates the default argument before the call,
+    # so the previous ``str(row.reason)`` default ran even when ``.value``
+    # existed. ``SkipReason`` is an Enum whose ``.value`` always exists, so the
+    # ternary short-circuits in practice and never falls back to ``str()`` here;
+    # the fallback is retained only to keep the helper safe for non-enum inputs.
+    reason_counts = dict(
+        Counter(
+            row.reason.value if hasattr(row.reason, "value") else str(row.reason) for row in skipped
+        )
+    )
     logger.warning(
         "ingestion normalize dropped %d source row(s) from fact projection "
         "tenant_id=%s month=%s skipped_by_reason=%s",

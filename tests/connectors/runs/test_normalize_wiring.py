@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
@@ -51,6 +52,22 @@ SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-2222008a0000"
 REPORT_MONTH = "2026-04"
 CONNECTOR_KEY = "youtube-reporting"
 ACCOUNT_ID = "cms-1"
+
+
+@dataclass
+class _StubResult:
+    """Minimal stand-in for ``NormalizationResult`` used across wiring tests.
+
+    The wiring seam only reads ``created``/``updated``/``unchanged``/``skipped``
+    off the normalizer's return value, so a lightweight dataclass mirrors the
+    real ``NormalizationResult`` shape without importing the finance normalizer
+    into every test that only needs a controllable return value.
+    """
+
+    created: list
+    updated: list
+    unchanged: list
+    skipped: list
 
 
 @pytest.fixture(autouse=True)
@@ -407,15 +424,6 @@ def test_actor_is_triggering_user_when_supplied() -> None:
     that's expected for the normalize stage because triggering users
     are typically operators who run the ingest out-of-band.
     """
-    from dataclasses import dataclass
-
-    @dataclass
-    class _StubResult:
-        created: list
-        updated: list
-        unchanged: list
-        skipped: list
-
     created_fact = MagicMock(name="created_fact")
     created_fact.audit_entity_id = "channel-1:2026-04:YOUTUBE_CMS"
     created_fact.source_kind = "YOUTUBE_CMS"
@@ -490,14 +498,6 @@ def test_audit_events_emitted_for_created_and_updated_facts() -> None:
     updated_fact.month = "2026-04"
 
     normalizer = MagicMock(name="normalizer_instance")
-    from dataclasses import dataclass
-
-    @dataclass
-    class _StubResult:
-        created: list
-        updated: list
-        unchanged: list
-        skipped: list
 
     normalizer.normalize_month.return_value = _StubResult(
         created=[created_fact],
@@ -548,21 +548,12 @@ def test_skipped_rows_emit_observability_audit_edge(
     reason, scoped to the finance month so finance auditors can discover it,
     plus a WARNING log line for immediate operator visibility.
     """
-    from dataclasses import dataclass
-
     from ums_smart_revenue.auth.audit import AuditEventType
     from ums_smart_revenue.auth.scopes import ScopeType
     from ums_smart_revenue.finance.google_source_normalizer import (
         SkippedSourceRow,
         SkipReason,
     )
-
-    @dataclass
-    class _StubResult:
-        created: list
-        updated: list
-        unchanged: list
-        skipped: list
 
     normalizer = MagicMock(name="normalizer_instance")
     normalizer.normalize_month.return_value = _StubResult(
@@ -605,16 +596,7 @@ def test_no_skipped_rows_emits_no_skip_edge() -> None:
     Guards against the skip edge firing on the happy path: only created/updated
     fact edges are appended when nothing was dropped.
     """
-    from dataclasses import dataclass
-
     from ums_smart_revenue.auth.audit import AuditEventType
-
-    @dataclass
-    class _StubResult:
-        created: list
-        updated: list
-        unchanged: list
-        skipped: list
 
     created_fact = MagicMock(name="created_fact")
     created_fact.audit_entity_id = "channel-1:2026-04:YOUTUBE_CMS"
