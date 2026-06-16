@@ -222,7 +222,7 @@ The same policy template applies to all tenant-scoped tables. Migration files ge
 | Role | Use |
 |---|---|
 | `app_tenant` | The app runs as this role. All queries are subject to RLS. Cannot bypass tenant isolation. |
-| `app_platform` | Reserved for platform-admin operations and platform-only writes (audit logs, finance facts, month-close). Does **not** bypass RLS (`NOBYPASSRLS`); RLS still applies via the same trusted-context policies. Gains its wider write surface through explicit per-table DML grants, not a role-level RLS bypass. Used by a small set of explicitly platform-level endpoints only. |
+| `app_platform` | The privileged write lane for selected platform-only tables (audit logs, finance facts, month-close). Does **not** bypass RLS (`NOBYPASSRLS`); RLS still applies via the same trusted-context policies. Gains its wider write surface through explicit per-table DML grants, not a role-level RLS bypass. Also used by non-platform finance endpoints that route through the platform session factory (e.g. revenue fact import, recalculation). |
 
 Connection-pool config: the app uses `app_tenant`. Platform endpoints route through a separate, narrowly-scoped session factory using `app_platform`.
 
@@ -325,7 +325,7 @@ revision.
 
 1. Create `tenants` table. Seed UMS as `('00000000-0000-0000-0000-000000000001', 'ums', 'UMS', 'USD')`.
 2. Create `platform_admins` table.
-3. _(No separate platform audit table — all audit events write to the existing tenant-scoped `audit_logs` table via the `app_platform` role for platform-admin actions.)_
+3. _(No separate platform audit table — the migration plan intended all audit events to write to the existing tenant-scoped `audit_logs` table via the `app_platform` role for platform-admin actions. However, this path is currently a known gap: platform actions without tenant context cannot insert into `audit_logs` due to non-null `tenant_id` and RLS constraints. See the audit context gap note above.)_
 4. For each tenant-scoped table:
    1. Add `tenant_id UUID NULL`.
    2. Add the FK to `tenants(id)` ON DELETE RESTRICT with `NOT VALID`.

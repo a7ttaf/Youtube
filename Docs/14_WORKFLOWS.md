@@ -55,9 +55,11 @@ Current foundation support:
    for the key) a blocking-issues pre-flight runs, then the system commits a
    versioned allocation snapshot and emits ALLOCATION_COMMITTED (HTTP 201 fresh /
    HTTP 200 replay). On replay the pre-flight is bypassed and only
-   RECALCULATION_REQUESTED is recorded (no second ALLOCATION_COMMITTED). Note:
-   allocation_method=manual is rejected with HTTP 422 on this endpoint; manual
-   allocations require explicit lines via the dedicated commit endpoint.
+   RECALCULATION_REQUESTED is recorded (no second ALLOCATION_COMMITTED).
+   Pre-flight-blocked writes (409) are not audited with RECALCULATION_REQUESTED.
+   Note: allocation_method=manual is accepted for dry-run previews but rejected
+   with HTTP 422 on committed writes; manual allocations require explicit lines
+   via the dedicated commit endpoint.
 7. Planned / not yet implemented: system updates confidence levels and
    explanations after recalculation persistence is consumed downstream.
 8. Planned / not yet implemented: user accepts or reverts persisted results

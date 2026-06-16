@@ -355,7 +355,7 @@ audit_logs (
   details jsonb not null default '{}',
   sensitive boolean not null default false,
   created_at timestamptz not null default now(),
-  tenant_id uuid not null
+  tenant_id uuid not null references tenants(id)
 );
 ```
 

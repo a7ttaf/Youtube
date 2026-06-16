@@ -272,10 +272,10 @@ both a dry-run preview and a committed write path. The request includes `month`,
 `allocation_method`, `scope_type`, optional `scope_id`, `currency`, `dry_run`,
 `idempotency_key`, and `reason`. It always requires `finance.view_revenue` for the
 selected data scope and `finance.change_allocation_rule` for the requested
-`finance_month`, and audits `RECALCULATION_REQUESTED`. `allocation_method=manual`
-is rejected with HTTP 422 on this endpoint; manual allocations require explicit
-lines and must use the dedicated commit endpoint
-(`POST /revenue/months/{month}/account-allocations/commit`). With `dry_run=true`
+`finance_month`. `allocation_method=manual` is accepted for dry-run previews
+(`dry_run=true`) but rejected with HTTP 422 on committed writes (`dry_run=false`);
+manual allocations require explicit lines and must use the dedicated commit
+endpoint (`POST /revenue/months/{month}/account-allocations/commit`). With `dry_run=true`
 the response validates the allocation method, reports scoped source coverage
 counts, reports blockers (e.g. missing net revenue for post-tax methods), and
 returns `NO_WRITES_PERFORMED`; it does not persist rows, apply allocation deltas,
@@ -288,7 +288,9 @@ pre-flight gate runs (409 `BLOCKED_BY_ISSUES` if any remain), then on success an
 `ALLOCATION_COMMITTED` audit event is emitted and HTTP 201 is returned. On
 idempotent replay (same key and fingerprint) the pre-flight gate is bypassed, no
 second `ALLOCATION_COMMITTED` audit event is written (though `RECALCULATION_REQUESTED`
-is still recorded for the replay), and HTTP 200 is returned.
+is still recorded for the replay), and HTTP 200 is returned. Pre-flight-blocked
+writes (409 `BLOCKED_BY_ISSUES`) are not audited with `RECALCULATION_REQUESTED`
+because the HTTP 409 is raised before the audit call.
 
 `GET /revenue/source-rows` is an implemented read-only, tenant-scoped list of
 Google source evidence rows (Track E, 2026-06-08). It requires global

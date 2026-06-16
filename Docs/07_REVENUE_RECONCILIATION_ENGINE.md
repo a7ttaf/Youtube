@@ -128,9 +128,10 @@ null and must not be backfilled from gross revenue.
 The backend exposes `POST /revenue/recalculate` as both a dry-run preview and a
 committed write endpoint. It accepts the finance month, allocation method, scoped
 data selection, currency, and reason; requires revenue visibility and
-allocation-rule permission for all callers; and audits `RECALCULATION_REQUESTED`.
-`allocation_method=manual` is rejected with HTTP 422 on this endpoint; manual
-allocations require explicit lines and must use the dedicated commit endpoint
+allocation-rule permission for all callers. `allocation_method=manual` is
+accepted for dry-run previews (`dry_run=true`) but rejected with HTTP 422 on
+committed writes (`dry_run=false`); manual allocations require explicit lines and
+must use the dedicated commit endpoint
 (`POST /revenue/months/{month}/account-allocations/commit`). With `dry_run=true`
 the endpoint returns source coverage and blockers only, tagged
 `NO_WRITES_PERFORMED`, and never creates financial rows. With `dry_run=false` the
@@ -142,7 +143,9 @@ blocking-issues pre-flight gate runs and on success emits an `ALLOCATION_COMMITT
 audit event, returning HTTP 201. On idempotent replay (same key and fingerprint)
 the pre-flight is bypassed, no second `ALLOCATION_COMMITTED` audit event is
 written (though `RECALCULATION_REQUESTED` is still recorded), and HTTP 200 is
-returned. It must not invent transfer, FX, tax, or payment-gap values.
+returned. Pre-flight-blocked writes (409) are not audited with
+`RECALCULATION_REQUESTED` because the HTTP 409 is raised before the audit call.
+It must not invent transfer, FX, tax, or payment-gap values.
 
 ## Acceptance checks
 
@@ -160,8 +163,8 @@ returned. It must not invent transfer, FX, tax, or payment-gap values.
   audit event, returning HTTP 201. On idempotent replay the pre-flight is bypassed,
   no second `ALLOCATION_COMMITTED` audit event is written (though
   `RECALCULATION_REQUESTED` is still recorded), and HTTP 200 is returned.
-  `allocation_method=manual` is rejected with HTTP 422; manual allocations require
-  explicit lines via the dedicated commit endpoint.
+  `allocation_method=manual` is rejected with HTTP 422 on committed writes; manual
+  allocations require explicit lines via the dedicated commit endpoint.
 - Recalculation dry-run access requires revenue visibility and the
   allocation-rule management permission for the requested scope. The write path
   additionally requires the `finance.view_finalized_payments` permission at the
