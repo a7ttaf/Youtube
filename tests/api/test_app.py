@@ -32,20 +32,47 @@ def test_livez_exposes_runtime_health_contract():
     assert response.json() == client.get("/health").json()
 
 
-def test_security_metadata_endpoints_are_available_for_frontend():
+def test_security_metadata_endpoints_visible_to_audit_permissioned_principals():
+    """The role/permission catalog is readable by audit-permissioned principals.
+
+    Both a super_owner (all permissions) and an audit_viewer (whose only
+    permission is audit.view) receive the catalog -- proving the gate is exactly
+    the audit-view permission, not super-owner-only.
+    """
     client = TestClient(create_app())
 
-    headers = {
+    base = {
         "x-user-id": "user-1",
         "x-user-email": "user@example.com",
-        "x-role": "super_owner",
         "x-scope-type": "global",
         "x-ums-trusted-gateway-token": os.environ["UMS_TRUSTED_GATEWAY_TOKEN"],
     }
-    roles = client.get("/security/roles", headers=headers)
-    permissions = client.get("/security/permissions", headers=headers)
+    for role in ("super_owner", "audit_viewer"):
+        headers = {**base, "x-role": role}
+        roles = client.get("/security/roles", headers=headers)
+        permissions = client.get("/security/permissions", headers=headers)
 
-    assert roles.status_code == 200
-    assert permissions.status_code == 200
-    assert any(role["key"] == "finance_admin" for role in roles.json())
-    assert any(permission["key"] == "finance.view_revenue" for permission in permissions.json())
+        assert roles.status_code == 200, role
+        assert permissions.status_code == 200, role
+        assert any(r["key"] == "finance_admin" for r in roles.json())
+        assert any(p["key"] == "finance.view_revenue" for p in permissions.json())
+
+
+def test_security_metadata_endpoints_forbidden_without_audit_permission():
+    """The role/permission catalog (incl. sensitive / auditOnUse flags) is
+    auditor-gated, not readable by every authenticated principal.
+
+    A legitimate but non-audit principal (finance_viewer, which lacks
+    audit.view) must be refused both endpoints so the authorization model and
+    which actions are audited are not disclosed to low-privilege callers.
+    """
+    client = TestClient(create_app())
+    headers = {
+        "x-user-id": "viewer-1",
+        "x-user-email": "viewer@example.com",
+        "x-role": "finance_viewer",
+        "x-scope-type": "global",
+        "x-ums-trusted-gateway-token": os.environ["UMS_TRUSTED_GATEWAY_TOKEN"],
+    }
+    assert client.get("/security/roles", headers=headers).status_code == 403
+    assert client.get("/security/permissions", headers=headers).status_code == 403
