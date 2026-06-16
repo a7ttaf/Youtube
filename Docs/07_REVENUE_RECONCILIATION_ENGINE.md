@@ -166,7 +166,7 @@ It must not invent transfer, FX, tax, or payment-gap values.
   `allocation_method=manual` is rejected with HTTP 422 on committed writes; manual
   allocations require explicit lines via the dedicated commit endpoint.
 - Recalculation dry-run access requires revenue visibility and the
-  allocation-rule management permission for the requested scope. The write path
+  allocation-rule management permission at the `finance_month` scope. The write path
   additionally requires the `finance.view_finalized_payments` permission at the
   `finance_month` scope.
 - System can lock a month.

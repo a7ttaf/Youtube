@@ -37,9 +37,10 @@ Legacy short labels map as `A -> A_OFFICIAL`, `B -> B_RECONCILED`, `C -> C_ALLOC
 
 The explain endpoint serializes `confidence` as an object `{"label": ..., "score": ...}`,
 where `label` is `HIGH`, `MEDIUM`, or `LOW`. The `A_OFFICIAL`…`E_MISSING` values in the
-Confidence levels table are the internal domain tiers; the month-level smart-alert summary
-emits the bare tier code string, whereas the explain endpoint reports the `{label, score}`
-object shown above.
+Confidence levels table are the domain-level tier tokens; the net-revenue API
+(`GET /revenue/months/{month}/net-revenue`) and the month-level smart-alert summary
+emit the bare tier code string (e.g. `B_RECONCILED`, `D_ESTIMATED`, `E_MISSING`),
+whereas the explain endpoint reports the `{label, score}` object shown above.
 
 ## UI rules
 
