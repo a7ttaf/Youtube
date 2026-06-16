@@ -20,6 +20,19 @@ hanging indefinitely. Run these against a **fresh** Postgres cluster — reusing
 shared/contended cluster (orphaned roles/locks from a prior run) causes spurious
 failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-timeout.md`).
 
+**Docs-correctness note (2026-06-16, branch `docs/finance-security-contract-correctness`):**
+a finance/security contract-doc correctness sweep corrected stale statements in
+`Docs/02/07/08/11/12/13/14/17` against current `main`: `POST /revenue/recalculate`
+`dry_run=false` is a committed, audited finance write (not dry-run-only); `app_platform`
+is `NOBYPASSRLS` (not `BYPASSRLS`); the real audit table is `audit_logs` and the real
+tenant migration chain is `20260516_0001`→`20260517_0001`→`20260518_0001` with RLS
+enforced in `20260608_0001`/`20260612_0002` (no `platform_audit_logs`, no `20260520_*`);
+`adsense_payments` uses the 4-column key `(tenant_id, source_account_id, month,
+payment_name)`; the `audit_logs` DDL has 13 columns; the explain confidence wire shape is
+`{label, score}`; and the audit-event (38) and role (16) catalogs are complete. No backlog
+item status changed — the broader endpoint/table coverage and per-item tracker
+reconciliation remain a separate follow-up pass.
+
 ## P0 — Must build first
 
 - ⏳ Dynamic org hierarchy — remaining: ORG models (PR #25); hierarchy

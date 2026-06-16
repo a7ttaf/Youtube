@@ -105,8 +105,8 @@ session would run as the **bare login** — which, under `INHERIT FALSE`, holds 
 grants and gets `permission denied`. The resolver is therefore wired with
 `build_platform_session_factory(...)` (`app.py`): the platform lane switches on
 via `session.info` regardless of context and holds the grants needed to read
-`tenants`. `tenants` is not an RLS table, so `app_platform`'s `BYPASSRLS` is
-immaterial here — only its grant surface matters.
+`tenants`. `tenants` is not an RLS table, so RLS is not a factor here — only
+`app_platform`'s grant surface matters.
 
 > **Follow-up (future spec):** the three `committed_allocation_*` child tables
 > carry no `tenant_id` and are isolated only **transitively** via the `run_id`
@@ -192,7 +192,7 @@ Every existing **operational** table receives a `tenant_id UUID NOT NULL` FK. Ta
 | `youtube_channels`, `channel_groups`, `channel_group_members` | `tenants`, `currencies` |
 | `org_units` | `permissions`, `role_permission_assignments` (definition catalog) |
 | `monthly_channel_revenue_facts`, `revenue_manual_overrides`, `adsense_payments`, `bank_reconciliation_entries`, `finance_month_close` | `roles` (definition catalog) |
-| `raw_report_files`, `number_explanations`, `export_jobs`, `api_connector_credentials` | `platform_audit_logs` |
+| `raw_report_files`, `number_explanations`, `export_jobs`, `api_connector_credentials` | _(none — `audit_logs` is tenant-scoped; no platform-wide audit table exists)_ |
 | `users`, `user_role_assignments`, `user_permission_grants`, `access_scopes` | |
 | `audit_logs` (tenant-scoped audit) | |
 
@@ -222,7 +222,7 @@ The same policy template applies to all tenant-scoped tables. Migration files ge
 | Role | Use |
 |---|---|
 | `app_tenant` | The app runs as this role. All queries are subject to RLS. Cannot bypass tenant isolation. |
-| `app_platform` | Reserved for platform-admin operations (tenant CRUD, cross-tenant reporting). Bypasses RLS by virtue of `BYPASSRLS`. Used by a small set of explicitly platform-level endpoints only. |
+| `app_platform` | The privileged write lane for selected platform-only tables (audit logs, finance facts, month-close). Does **not** bypass RLS (`NOBYPASSRLS`); RLS still applies via the same trusted-context policies. Gains its wider write surface through explicit per-table DML grants, not a role-level RLS bypass. Also used by non-platform finance endpoints that route through the platform session factory (e.g. revenue fact import, recalculation). |
 
 Connection-pool config: the app uses `app_tenant`. Platform endpoints route through a separate, narrowly-scoped session factory using `app_platform`.
 
@@ -297,8 +297,9 @@ A SQLAlchemy transaction-begin hook populates the backend-owned tenant context o
 
 ### Audit logs
 
-- Two tables: `audit_logs` (tenant-scoped, used by tenant operations) and `platform_audit_logs` (cross-tenant, platform-admin actions).
-- All sensitive-payload masking, reason-required rules, and append-only triggers apply equally to both.
+- One table: `audit_logs` (tenant-scoped; covers both tenant operations and platform-admin actions via the `app_platform` role).
+- Sensitive-payload masking, reason-required rules, and append-only triggers apply to this table.
+- **Platform-admin audit context gap:** `audit_logs` has a non-null `tenant_id` with RLS enforced, and `app_platform` is `NOBYPASSRLS`. Platform-admin actions that operate outside any tenant context (e.g. tenant provisioning, suspension) do not carry a valid tenant `UserPrincipal` or RLS context, so the current audit infrastructure cannot insert a row for them without either attributing the action to a specific tenant or relaxing RLS. This is a known gap that must be resolved before platform-admin audit coverage is complete (e.g. via a reserved system tenant, a dedicated `platform_audit_logs` table, or an RLS exemption for `app_platform` on the audit table).
 
 ---
 
@@ -306,13 +307,25 @@ A SQLAlchemy transaction-begin hook populates the backend-owned tenant context o
 
 Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data-shape changes stay inside normal Alembic transactions; long backfills and concurrent indexes are split into explicit autocommit/data revisions because PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside `context.begin_transaction()` and per-batch commits are not real inside one Alembic transaction.
 
-Execution order is `20260520_0001_multi_tenant_foundation` → `20260520_0001b_multi_tenant_backfill` → `20260520_0001a_multi_tenant_indexes`. The suffixes are descriptive, not lexical; Alembic `down_revision` / `depends_on` values must encode this order explicitly.
+Execution order is `20260516_0001_tenants_foundation` → `20260517_0001_tenant_id_on_operational_tables` → `20260518_0001_tenant_scoped_youtube_channel_identity`. Each revision's `down_revision` encodes the chain explicitly.
 
-### `20260520_0001_multi_tenant_foundation`
+The revision IDs are the as-built chain, but the numbered steps under each
+heading below reflect the original Phase-S2 plan groupings, not the literal
+contents of each revision. As built: `20260516_0001` created the `tenants` and
+`platform_admins` tables; `20260517_0001` added `tenant_id` columns and
+tenant-scoped constraints/FKs to the operational tables; and `20260518_0001`
+scoped YouTube channel identity. The `app_tenant` / `app_platform` Postgres roles
+and the Row-Level Security isolation policies were **not** part of this chain —
+they landed later in `20260608_0001_tenant_rls_enforcement` and were hardened with
+`FORCE ROW LEVEL SECURITY` in `20260612_0002_force_tenant_rls`. Treat the
+per-heading steps below as the historical plan rather than a description of each
+revision.
+
+### `20260516_0001_tenants_foundation`
 
 1. Create `tenants` table. Seed UMS as `('00000000-0000-0000-0000-000000000001', 'ums', 'UMS', 'USD')`.
 2. Create `platform_admins` table.
-3. Create `platform_audit_logs` for tenant lifecycle, platform-admin, and cross-tenant operational audit events.
+3. _(No separate platform audit table — the migration plan intended all audit events to write to the existing tenant-scoped `audit_logs` table via the `app_platform` role for platform-admin actions. However, this path is currently a known gap: platform actions without tenant context cannot insert into `audit_logs` due to non-null `tenant_id` and RLS constraints. See the audit context gap note above.)_
 4. For each tenant-scoped table:
    1. Add `tenant_id UUID NULL`.
    2. Add the FK to `tenants(id)` ON DELETE RESTRICT with `NOT VALID`.
@@ -320,7 +333,7 @@ Execution order is `20260520_0001_multi_tenant_foundation` → `20260520_0001b_m
 5. Create `app_tenant` and `app_platform` Postgres roles.
 6. Grant the right read/write surface to each role. Do not enable tenant-isolation RLS yet; existing rows are still `tenant_id = NULL` until the backfill revision completes.
 
-### `20260520_0001b_multi_tenant_backfill`
+### `20260517_0001_tenant_id_on_operational_tables`
 
 1. Runs as an explicit data migration outside the normal transaction wrapper.
 2. Backfills all existing rows to UMS's tenant_id in 5,000-10,000 row batches, committing each batch.
@@ -336,7 +349,7 @@ Execution order is `20260520_0001_multi_tenant_foundation` → `20260520_0001b_m
 12. Re-key every remaining tenant-owned unique constraint to include `tenant_id`; examples include `adsense_payments(month, payment_name)` -> `(tenant_id, month, payment_name)` and `bank_reconciliation_entries(month, bank_reference)` -> `(tenant_id, month, bank_reference)`.
 13. Enable RLS on each tenant-scoped table and install the final isolation policy only after backfill, `NOT NULL`, and tenant-scoped keys are in place.
 
-### `20260520_0001a_multi_tenant_indexes`
+### `20260518_0001_tenant_scoped_youtube_channel_identity`
 
 1. Runs outside a transaction/autocommit block.
 2. Adds read-path indexes `(tenant_id, ...)` with `CREATE INDEX CONCURRENTLY`.

@@ -128,6 +128,7 @@ adsense_payments (
   id uuid primary key,
   month text not null,
   payment_name text not null,
+  source_account_id text not null,
   payment_date date not null,
   payment_amount numeric(18, 6) not null,
   payment_currency text not null,
@@ -137,7 +138,8 @@ adsense_payments (
   imported_by uuid null,
   imported_at timestamp not null default now(),
   updated_at timestamp not null default now(),
-  unique (month, payment_name)
+  tenant_id uuid not null references tenants(id),
+  unique (tenant_id, source_account_id, month, payment_name)
 );
 
 bank_reconciliation_entries (
@@ -226,7 +228,7 @@ finance_month_close (
 -- allocation_rule_payload, unlocked_by, unlocked_at, and updated_at control
 -- columns. Revenue fact tables remain separate and are not calculated by the
 -- close-control API.
--- AdSense payment sync is idempotent by `(month, payment_name)` and is blocked
+-- AdSense payment sync is idempotent by `(tenant_id, source_account_id, month, payment_name)` and is blocked
 -- when the matching finance month is locked. Payment rows are official payment
 -- metadata only; financial source-of-truth calculations remain in SQL revenue
 -- fact/reconciliation tables, not Neo4j.
@@ -342,12 +344,18 @@ revenue_manual_overrides (
 
 audit_logs (
   id uuid primary key,
-  user_id uuid,
-  event_type text,
-  entity_type text,
-  entity_id text,
-  details jsonb,
-  created_at timestamp
+  user_id uuid null,
+  event_type text not null,
+  entity_type text null,
+  entity_id text null,
+  scope_type text null,
+  scope_id text null,
+  request_id text null,
+  reason text null,
+  details jsonb not null default '{}',
+  sensitive boolean not null default false,
+  created_at timestamptz not null default now(),
+  tenant_id uuid not null references tenants(id)
 );
 ```
 

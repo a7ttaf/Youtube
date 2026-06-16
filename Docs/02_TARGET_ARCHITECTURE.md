@@ -55,6 +55,7 @@ Operational DB / Warehouse
 ### Operational DB / Warehouse
 - Source of truth.
 - Stores raw reports, normalized facts, month-close records, overrides, and locked values.
+- Enforces tenant isolation via Postgres Row-Level Security: two non-superuser roles (`app_tenant` and `app_platform`) with per-table isolation policies on all 25 tenant-scoped tables, applied with `FORCE ROW LEVEL SECURITY` so the table owner is also policy-subject. See `Docs/17_MULTI_TENANT_ARCHITECTURE.md` for the full grant model and deployment preconditions.
 
 ### SQL-backed read models
 - Serve hierarchy, ownership, issue, explanation, and reconciliation views from source-of-truth tables or warehouse projections.
