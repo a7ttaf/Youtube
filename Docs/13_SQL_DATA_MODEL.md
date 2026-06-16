@@ -138,7 +138,7 @@ adsense_payments (
   imported_by uuid null,
   imported_at timestamp not null default now(),
   updated_at timestamp not null default now(),
-  tenant_id uuid not null,
+  tenant_id uuid not null references tenants(id),
   unique (tenant_id, source_account_id, month, payment_name)
 );
 

@@ -299,6 +299,7 @@ A SQLAlchemy transaction-begin hook populates the backend-owned tenant context o
 
 - One table: `audit_logs` (tenant-scoped; covers both tenant operations and platform-admin actions via the `app_platform` role).
 - Sensitive-payload masking, reason-required rules, and append-only triggers apply to this table.
+- **Platform-admin audit context gap:** `audit_logs` has a non-null `tenant_id` with RLS enforced, and `app_platform` is `NOBYPASSRLS`. Platform-admin actions that operate outside any tenant context (e.g. tenant provisioning, suspension) do not carry a valid tenant `UserPrincipal` or RLS context, so the current audit infrastructure cannot insert a row for them without either attributing the action to a specific tenant or relaxing RLS. This is a known gap that must be resolved before platform-admin audit coverage is complete (e.g. via a reserved system tenant, a dedicated `platform_audit_logs` table, or an RLS exemption for `app_platform` on the audit table).
 
 ---
 

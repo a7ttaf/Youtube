@@ -51,9 +51,13 @@ Current foundation support:
 5. User reviews blockers and source coverage.
 6. User confirms the allocation commit (dry_run=false): system additionally
    requires finance.view_finalized_payments at the finance_month scope,
-   scope_type=global, and an idempotency_key; runs a blocking-issues pre-flight;
-   then commits a versioned allocation snapshot and emits ALLOCATION_COMMITTED
-   (HTTP 201 fresh / HTTP 200 replay).
+   scope_type=global, and an idempotency_key; on a fresh commit (no existing run
+   for the key) a blocking-issues pre-flight runs, then the system commits a
+   versioned allocation snapshot and emits ALLOCATION_COMMITTED (HTTP 201 fresh /
+   HTTP 200 replay). On replay the pre-flight is bypassed and only
+   RECALCULATION_REQUESTED is recorded (no second ALLOCATION_COMMITTED). Note:
+   allocation_method=manual is rejected with HTTP 422 on this endpoint; manual
+   allocations require explicit lines via the dedicated commit endpoint.
 7. Planned / not yet implemented: system updates confidence levels and
    explanations after recalculation persistence is consumed downstream.
 8. Planned / not yet implemented: user accepts or reverts persisted results

@@ -272,18 +272,23 @@ both a dry-run preview and a committed write path. The request includes `month`,
 `allocation_method`, `scope_type`, optional `scope_id`, `currency`, `dry_run`,
 `idempotency_key`, and `reason`. It always requires `finance.view_revenue` for the
 selected data scope and `finance.change_allocation_rule` for the requested
-`finance_month`, and audits `RECALCULATION_REQUESTED`. With `dry_run=true` the
-response validates the allocation method, reports scoped source coverage counts,
-reports blockers (e.g. missing net revenue for post-tax methods), and returns
-`NO_WRITES_PERFORMED`; it does not persist rows, apply allocation deltas, invent
-tax data, or mutate month-close metadata. With `dry_run=false` the endpoint
+`finance_month`, and audits `RECALCULATION_REQUESTED`. `allocation_method=manual`
+is rejected with HTTP 422 on this endpoint; manual allocations require explicit
+lines and must use the dedicated commit endpoint
+(`POST /revenue/months/{month}/account-allocations/commit`). With `dry_run=true`
+the response validates the allocation method, reports scoped source coverage
+counts, reports blockers (e.g. missing net revenue for post-tax methods), and
+returns `NO_WRITES_PERFORMED`; it does not persist rows, apply allocation deltas,
+invent tax data, or mutate month-close metadata. With `dry_run=false` the endpoint
 additionally requires `finance.view_finalized_payments` at the `finance_month`
-scope, enforces `scope_type=global` and a non-empty `idempotency_key`, passes a
-blocking-issues pre-flight (409 `BLOCKED_BY_ISSUES` if any remain), then commits a
-versioned allocation snapshot via the committed-allocation repository. On a fresh
-commit it emits an `ALLOCATION_COMMITTED` audit event and returns HTTP 201. On
-idempotent replay (same key and fingerprint) no second audit event is written and
-HTTP 200 is returned.
+scope, enforces `scope_type=global` and a non-empty `idempotency_key`, then
+commits a versioned allocation snapshot via the committed-allocation repository.
+On a fresh commit (no existing run for the idempotency key) the blocking-issues
+pre-flight gate runs (409 `BLOCKED_BY_ISSUES` if any remain), then on success an
+`ALLOCATION_COMMITTED` audit event is emitted and HTTP 201 is returned. On
+idempotent replay (same key and fingerprint) the pre-flight gate is bypassed, no
+second `ALLOCATION_COMMITTED` audit event is written (though `RECALCULATION_REQUESTED`
+is still recorded for the replay), and HTTP 200 is returned.
 
 `GET /revenue/source-rows` is an implemented read-only, tenant-scoped list of
 Google source evidence rows (Track E, 2026-06-08). It requires global

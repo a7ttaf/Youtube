@@ -129,15 +129,20 @@ The backend exposes `POST /revenue/recalculate` as both a dry-run preview and a
 committed write endpoint. It accepts the finance month, allocation method, scoped
 data selection, currency, and reason; requires revenue visibility and
 allocation-rule permission for all callers; and audits `RECALCULATION_REQUESTED`.
-With `dry_run=true` the endpoint returns source coverage and blockers only, tagged
+`allocation_method=manual` is rejected with HTTP 422 on this endpoint; manual
+allocations require explicit lines and must use the dedicated commit endpoint
+(`POST /revenue/months/{month}/account-allocations/commit`). With `dry_run=true`
+the endpoint returns source coverage and blockers only, tagged
 `NO_WRITES_PERFORMED`, and never creates financial rows. With `dry_run=false` the
 endpoint additionally requires `finance.view_finalized_payments` at the
 `finance_month` scope, enforces `scope_type=global` and an `idempotency_key`,
-passes a blocking-issues pre-flight gate, then commits a versioned allocation
-snapshot (persisting committed allocation rows); on a fresh commit it also emits
-an `ALLOCATION_COMMITTED` audit event and returns HTTP 201. On idempotent replay
-(same idempotency key, same fingerprint) no second audit event is written and
-HTTP 200 is returned. It must not invent transfer, FX, tax, or payment-gap values.
+then commits a versioned allocation snapshot (persisting committed allocation
+rows). On a fresh commit (no existing run for the idempotency key) the
+blocking-issues pre-flight gate runs and on success emits an `ALLOCATION_COMMITTED`
+audit event, returning HTTP 201. On idempotent replay (same key and fingerprint)
+the pre-flight is bypassed, no second `ALLOCATION_COMMITTED` audit event is
+written (though `RECALCULATION_REQUESTED` is still recorded), and HTTP 200 is
+returned. It must not invent transfer, FX, tax, or payment-gap values.
 
 ## Acceptance checks
 
@@ -149,10 +154,14 @@ HTTP 200 is returned. It must not invent transfer, FX, tax, or payment-gap value
   transfer/FX, payment-gap, or tax rows.
 - `POST /revenue/recalculate` with `dry_run=false` is a committed finance write:
   it additionally requires `finance.view_finalized_payments` at the `finance_month`
-  scope, enforces `scope_type=global` and an `idempotency_key`, blocks on
-  pre-flight issues, then persists a versioned committed allocation snapshot; on a
-  fresh commit it emits an `ALLOCATION_COMMITTED` audit event and returns HTTP 201.
-  On idempotent replay no second audit event is written and HTTP 200 is returned.
+  scope, enforces `scope_type=global` and an `idempotency_key`; on a fresh commit
+  (no existing run for the key) it runs a blocking-issues pre-flight, then persists
+  a versioned committed allocation snapshot and emits an `ALLOCATION_COMMITTED`
+  audit event, returning HTTP 201. On idempotent replay the pre-flight is bypassed,
+  no second `ALLOCATION_COMMITTED` audit event is written (though
+  `RECALCULATION_REQUESTED` is still recorded), and HTTP 200 is returned.
+  `allocation_method=manual` is rejected with HTTP 422; manual allocations require
+  explicit lines via the dedicated commit endpoint.
 - Recalculation dry-run access requires revenue visibility and the
   allocation-rule management permission for the requested scope. The write path
   additionally requires the `finance.view_finalized_payments` permission at the

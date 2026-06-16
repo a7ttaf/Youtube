@@ -28,7 +28,7 @@ Legacy short labels map as `A -> A_OFFICIAL`, `B -> B_RECONCILED`, `C -> C_ALLOC
   "confidence": {"label": "HIGH", "score": "0.95"},
   "formula": "baseline_gross_revenue_usd + approved_manual_override_total_usd",
   "components": [
-    {"key": "baseline_gross_revenue_usd", "label": "Baseline gross revenue", "value": "184000.00", "source_kind": "youtube_report", "source_report_id": "rpt-001"},
+    {"key": "baseline_gross_revenue_usd", "label": "Baseline gross revenue", "value": "184000.00", "source_kind": "YOUTUBE_CMS", "source_report_id": "rpt-001"},
     {"key": "approved_manual_override_total_usd", "label": "Approved manual overrides", "value": "250.00", "count": 1}
   ],
   "warnings": []
