@@ -25,15 +25,21 @@ Legacy short labels map as `A -> A_OFFICIAL`, `B -> B_RECONCILED`, `C -> C_ALLOC
   "month": "2026-03",
   "value": "184250.00",
   "currency": "USD",
-  "confidence": "B_RECONCILED",
+  "confidence": {"label": "HIGH", "score": "0.95"},
   "formula": "baseline_gross_revenue_usd + approved_manual_override_total_usd",
   "components": [
-    {"name": "baseline_gross_revenue_usd", "value": "184000.00", "source": "youtube_report", "confidence": "A_OFFICIAL"},
-    {"name": "approved_manual_override_total_usd", "value": "250.00", "source": "manual_override", "confidence": "B_RECONCILED"}
+    {"key": "baseline_gross_revenue_usd", "label": "Baseline gross revenue", "value": "184000.00", "source_kind": "youtube_report", "source_report_id": "rpt-001"},
+    {"key": "approved_manual_override_total_usd", "label": "Approved manual overrides", "value": "250.00", "count": 1}
   ],
   "warnings": []
 }
 ```
+
+The explain endpoint serializes `confidence` as an object `{"label": ..., "score": ...}`,
+where `label` is `HIGH`, `MEDIUM`, or `LOW`. The `A_OFFICIAL`…`E_MISSING` values in the
+Confidence levels table are the internal domain tiers; the month-level smart-alert summary
+emits the bare tier code string, whereas the explain endpoint reports the `{label, score}`
+object shown above.
 
 ## UI rules
 
@@ -47,11 +53,12 @@ Legacy short labels map as `A -> A_OFFICIAL`, `B -> B_RECONCILED`, `C -> C_ALLOC
 
 ```text
 MISSING_REVENUE_SOURCE
+CHANNELS_MISSING_REVENUE_FACTS
 PAYMENT_NOT_MATCHED
 BANK_AMOUNT_MISSING
-TAX_REPORT_MISSING
-OUTSIDE_CMS_REVENUE_REQUIRED
+BANK_RECONCILIATION_NOT_CONFIRMED
 UNEXPLAINED_GAP_HIGH
+REVENUE_TREND_ANOMALY
 MONTH_NOT_LOCKED
 MANUAL_OVERRIDE_USED
 ```

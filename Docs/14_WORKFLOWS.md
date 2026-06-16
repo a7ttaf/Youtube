@@ -46,11 +46,18 @@ Current foundation support:
 1. User selects month.
 2. User selects allocation method.
 3. System validates finance permissions and source coverage.
-4. System returns a dry-run recalculation preview with no financial writes.
+4. System returns a dry-run recalculation preview with no financial writes
+   (dry_run=true: requires finance.view_revenue + finance.change_allocation_rule).
 5. User reviews blockers and source coverage.
-6. Planned / not yet implemented: system recalculates deductions and net revenue after an explicit confirm action is added.
-7. Planned / not yet implemented: system updates confidence levels and explanations after recalculation persistence is available.
-8. Planned / not yet implemented: user accepts or reverts persisted results after the confirmation endpoint exists.
+6. User confirms the allocation commit (dry_run=false): system additionally
+   requires finance.view_finalized_payments at the finance_month scope,
+   scope_type=global, and an idempotency_key; runs a blocking-issues pre-flight;
+   then commits a versioned allocation snapshot and emits ALLOCATION_COMMITTED
+   (HTTP 201 fresh / HTTP 200 replay).
+7. Planned / not yet implemented: system updates confidence levels and
+   explanations after recalculation persistence is consumed downstream.
+8. Planned / not yet implemented: user accepts or reverts persisted results
+   after a revert/accept endpoint exists.
 ```
 
 ## 4. Export workflow

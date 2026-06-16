@@ -39,7 +39,7 @@
 | Corporate Admin | `global` | Analytics, confidence, users, role assignment below Super Owner, platform settings, registry, groups, export templates, audit metadata. No finance by default. |
 | Revenue Operations Admin | `global` | Analytics, confidence, connector health, run connector jobs, registry/groups, raw parser errors when granted. No payment/bank finance by default. |
 | Finance Admin | `global` or assigned finance scope | Revenue, payments, bank reconciliation, manual overrides, allocation rules, month lock/unlock, finance exports, audit finance events. |
-| Finance Approver | `global` or `finance-month` | Approve overrides, approve allocation changes, unlock month, view finance needed for approval. |
+| Finance Approver | `global` or `finance-month` | Approve overrides, approve allocation changes, unlock month, record bank reconciliation receipts, view finance needed for approval. |
 | Finance Viewer | `global`, `sector`, `company`, or `channel` | Read-only revenue for the assigned organization scope. Finalized-payment and bank-reconciliation reads require a global role or separate finance-month grants. Cannot lock/unlock or edit. |
 | TV Sector Manager | `sector:TV` | TV analytics, confidence, analytics exports. Finance only by explicit direct grant or paired finance role. |
 | News Sector Manager | `sector:NEWS` | News analytics, confidence, analytics exports. Finance only by explicit direct grant or paired finance role. |

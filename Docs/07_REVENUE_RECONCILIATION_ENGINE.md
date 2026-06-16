@@ -125,24 +125,38 @@ stored and exposed for analysis, issue review, and export context, but they do
 not change gross/net calculations in this phase. Missing component fields remain
 null and must not be backfilled from gross revenue.
 
-The backend now also exposes `POST /revenue/recalculate` as a dry-run allocation
-review foundation. It accepts the finance month, allocation method, scoped data
-selection, currency, and reason; requires both revenue visibility and
-allocation-rule permission; and audits `RECALCULATION_REQUESTED`. The endpoint
-returns source coverage and blockers only, with `NO_WRITES_PERFORMED`, until the
-full allocation engine is implemented. It must not create financial rows or
-invent transfer, FX, tax, or payment-gap values.
+The backend exposes `POST /revenue/recalculate` as both a dry-run preview and a
+committed write endpoint. It accepts the finance month, allocation method, scoped
+data selection, currency, and reason; requires revenue visibility and
+allocation-rule permission for all callers; and audits `RECALCULATION_REQUESTED`.
+With `dry_run=true` the endpoint returns source coverage and blockers only, tagged
+`NO_WRITES_PERFORMED`, and never creates financial rows. With `dry_run=false` the
+endpoint additionally requires `finance.view_finalized_payments` at the
+`finance_month` scope, enforces `scope_type=global` and an `idempotency_key`,
+passes a blocking-issues pre-flight gate, then commits a versioned allocation
+snapshot (persisting committed allocation rows); on a fresh commit it also emits
+an `ALLOCATION_COMMITTED` audit event and returns HTTP 201. On idempotent replay
+(same idempotency key, same fingerprint) no second audit event is written and
+HTTP 200 is returned. It must not invent transfer, FX, tax, or payment-gap values.
 
 ## Acceptance checks
 
 - System can calculate net revenue for one month from existing official SQL
   revenue facts only.
-- `POST /revenue/recalculate` is a read-only dry-run: it returns source
-  coverage and blockers tagged `NO_WRITES_PERFORMED`, audits
-  `RECALCULATION_REQUESTED`, and never creates `channel_net_revenue`,
-  allocation, transfer/FX, payment-gap, or tax rows.
-- Recalculation access requires both revenue visibility and the
-  allocation-rule management permission for the requested scope.
+- `POST /revenue/recalculate` with `dry_run=true` is a read-only preview: it
+  returns source coverage and blockers tagged `NO_WRITES_PERFORMED`, audits
+  `RECALCULATION_REQUESTED`, and never creates `channel_net_revenue`, allocation,
+  transfer/FX, payment-gap, or tax rows.
+- `POST /revenue/recalculate` with `dry_run=false` is a committed finance write:
+  it additionally requires `finance.view_finalized_payments` at the `finance_month`
+  scope, enforces `scope_type=global` and an `idempotency_key`, blocks on
+  pre-flight issues, then persists a versioned committed allocation snapshot; on a
+  fresh commit it emits an `ALLOCATION_COMMITTED` audit event and returns HTTP 201.
+  On idempotent replay no second audit event is written and HTTP 200 is returned.
+- Recalculation dry-run access requires revenue visibility and the
+  allocation-rule management permission for the requested scope. The write path
+  additionally requires the `finance.view_finalized_payments` permission at the
+  `finance_month` scope.
 - System can lock a month.
 - Locked month does not change unless explicitly unlocked.
 - Allocation of unknown transfer/FX gap, tax-table ingestion, and bank/payment
