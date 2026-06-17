@@ -63,19 +63,20 @@ enabled = true
 exclude_patterns = ["ci/preflight.sh", "Docs/superpowers/**", "tests/**", "scripts/smoke_mvp.py"]
 
 # ============================================================================
-# Purpose: Scope the Shell analyzer so it does not flag correct, intentional
-#   bash as a portability defect.
+# Purpose: Tell the Shell analyzer the correct dialect so it stops flagging
+#   correct, intentional bash as a portability defect.
 # Database/ORM: None (analyzer configuration).
 # Standards: Every tracked *.sh in this repo has shebang `#!/usr/bin/env bash`
 #   and is documented Bash 3.2+ only (the ci/ gate, hooks, and scripts target
-#   bash explicitly). DeepSource's Shell analyzer runs a POSIX-portability
-#   ruleset that flags bashisms (`[[ =~ ]]`, `BASH_REMATCH`, `${var//x/y}`) as
-#   defects on these files - these are correct bash, not bugs. Real shell
-#   defects are already caught by the BLOCKING shellcheck lane in
-#   .circleci/config.yml (shellcheck 0.10.0 on all 43 scripts) and by the
-#   local `make verify` gate, so disabling DeepSource's redundant Shell
-#   analyzer hides no real finding. This is analyzer configuration, not issue
-#   suppression: no genuine shellcheck finding is hidden behind skipcq.
+#   bash explicitly). With the default (auto-detected, often `sh`) dialect the
+#   Shell analyzer runs a POSIX-portability ruleset that flags bashisms
+#   (`[[ =~ ]]`, `BASH_REMATCH`, `${var//x/y}`) as defects on these files -
+#   these are correct bash, not bugs. Setting dialect = "bash" (per DeepSource
+#   docs) makes the analyzer evaluate them as bash and stop raising those
+#   portability false positives. Real shell defects are still caught by the
+#   BLOCKING shellcheck lane in .circleci/config.yml (shellcheck 0.10.0 on all
+#   43 scripts) and by the local `make verify` gate, so no real finding is
+#   hidden. This is analyzer configuration, not issue suppression.
 # Blast Radius: None detected - read-only static analysis config.
 # Connections:
 # - File: .circleci/config.yml -> shell-quality lane (shellcheck BLOCKING).
@@ -83,4 +84,7 @@ exclude_patterns = ["ci/preflight.sh", "Docs/superpowers/**", "tests/**", "scrip
 # ============================================================================
 [[analyzers]]
 name = "shell"
-enabled = false
+enabled = true
+
+  [analyzers.meta]
+  dialect = "bash"
