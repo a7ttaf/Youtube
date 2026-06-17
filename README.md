@@ -38,7 +38,7 @@ uv sync --extra dev --extra test --extra lint
 $env:PYTHONPATH = (Resolve-Path "backend").Path
 $env:UMS_DATABASE_URL = "postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
 $env:UMS_AUTHZ_SOURCE = "headers"
-$env:UMS_TRUSTED_GATEWAY_TOKEN = "dev-only-token-set-locally"
+$env:UMS_TRUSTED_GATEWAY_TOKEN = "<set-a-local-development-token>"
 
 # 4) Run migrations
 uv run alembic upgrade head

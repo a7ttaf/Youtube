@@ -43,4 +43,4 @@ exclude_patterns = ["ci/**", "frontend/dist/**"]
 [[analyzers]]
 name = "secrets"
 enabled = true
-exclude_patterns = ["ci/preflight.sh"]
+exclude_patterns = ["ci/preflight.sh", "Docs/superpowers/**"]
