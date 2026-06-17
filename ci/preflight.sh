@@ -424,7 +424,7 @@ run_phase() {
     # Try cache lookup before submitting
     local cache_key="" cache_hit=0
     if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && type ci::cache::key >/dev/null 2>&1; then
-      cache_key="$(_compute_cache_key "$label")"  # deepsource-ignore:SCT-A000
+      cache_key="$(_compute_cache_key "$label")"
       local cache_dest="${CI_REPORT_DIR}/.cache/${label}"
       if ci::cache::get "$cache_key" "$cache_dest"; then
         echo "  [cache hit] $label"
@@ -490,7 +490,7 @@ run_phase() {
       printf '%d' "$rc" > "$cache_dest/result.txt"
       printf '%s' "$output" > "$cache_dest/output.txt"
       local put_key
-      put_key="$(_compute_cache_key "$lbl")"  # deepsource-ignore:SCT-A000
+      put_key="$(_compute_cache_key "$lbl")"
       ci::cache::put "$put_key" "$cache_dest"
     fi
   done
