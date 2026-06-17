@@ -311,7 +311,6 @@ _checks_for_lane_label() {
 }
 
 _all_related_checks_disabled() {
-_all_related_checks_disabled() {
   local label="$1"
   local related check_id any=0
   related="$(_checks_for_lane_label "$label")"
