@@ -1086,4 +1086,4 @@ if [ "$AGG_RESULT" -eq "$CI_RESULT_FAIL_NEW_ISSUE" ] || [ "$AGG_RESULT" -eq "$CI
   exit 1
 fi
 
-exit 0
+exit 0; }
