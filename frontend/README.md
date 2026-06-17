@@ -34,8 +34,7 @@ and to match the token the dev proxy injects. Copy `.env.example` to `.env` in
 the repo root and set a local value:
 
 ```dotenv
-# repo-root .env
-UMS_TRUSTED_GATEWAY_TOKEN=<set-a-local-development-token>
+# repo-root .env — copy from .env.example and fill in your values
 UMS_AUTHZ_SOURCE=headers
 ```
 
@@ -85,14 +84,14 @@ Point the backend at the same database you seeded and set the same token:
 ```bash
 # From the repo root (PowerShell)
 $env:UMS_DATABASE_URL = "sqlite+pysqlite:///./demo.db"
-$env:UMS_TRUSTED_GATEWAY_TOKEN = "<set-a-local-development-token>"
+$env:UMS_TRUSTED_GATEWAY_TOKEN = "" # set via .env or environment
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
 ```bash
 # From the repo root (bash)
 UMS_DATABASE_URL="sqlite+pysqlite:///./demo.db" \
-UMS_TRUSTED_GATEWAY_TOKEN="<set-a-local-development-token>" \
+UMS_TRUSTED_GATEWAY_TOKEN="" \
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
