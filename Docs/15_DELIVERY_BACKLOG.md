@@ -253,9 +253,10 @@ closed; Docs/01 status header and 12 "this PR" placeholders updated.
 - ✅ Net revenue calculation — shipped: GET /revenue/months/{month}/net-revenue
   (build_month_net_revenue_summary; per-channel gross/net/deduction roll-up,
   scope-filtered, USD-only). Tax/deduction components are computed and persisted
-  by Track F reconciliation (PR #87); the full allocation engine (Phase 4,
+  by Track F reconciliation (PR #87); the allocation engine (Phase 4,
   PRs #58–#76) applies gross_revenue_proportional, post_tax, company_level,
-  manual, and no_allocation methods against committed allocation snapshots.
+  manual, and no_allocation methods against committed ACCOUNT-scoped allocation
+  snapshots (PAYMENT-scoped allocation remains a separate follow-up).
 - ⏳ Confidence labels — labels ARE computed in services
   (net-revenue B_RECONCILED/D_ESTIMATED/E_MISSING; explain confidence label)
   and returned by the net-revenue/explain APIs; Trace/Explain shows label +

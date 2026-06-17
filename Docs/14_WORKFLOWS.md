@@ -87,7 +87,7 @@ Current foundation support:
 2. System checks `finance.create_manual_override` or `finance.approve_manual_override` for the target channel.
 3. User changes value.
 4. System requires reason.
-5. The service records the override row (old/new value, actor identity, reason) in the `manual_overrides` table.
+5. The service records the override row (old/new value, actor identity, reason) in the `revenue_manual_overrides` table.
 6. System creates `MANUAL_OVERRIDE_CREATED` or `MANUAL_OVERRIDE_APPROVED` audit event.
 7. System recalculates affected numbers.
 8. System flags report as override-used.

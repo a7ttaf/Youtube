@@ -49,8 +49,9 @@ Reconciled through PR #113. Decisions that are now made are listed under
 - ✅ **Default allocation method: gross_revenue_proportional** — shipped as the
   first committable method (PR #58/62); post_tax also available (PR #67);
   company_level, manual, and no_allocation shipped (PR #74/76).
-- ✅ **Who can approve manual overrides** — Finance Admin or Super Owner
-  (established by the auth policy; `APPROVE_MANUAL_OVERRIDE` permission).
+- ✅ **Who can approve manual overrides** — Finance Admin, Finance Approver,
+  or Super Owner (established by the auth policy and
+  `Docs/security/ROLE_PERMISSION_MODEL.md`; `APPROVE_MANUAL_OVERRIDE` permission).
 - Should unresolved payment gap appear as holding-level only or allocated to channels?
 - What happens if bank amount is not available?
 - Which Google/YouTube/AdSense report currency is authoritative when a source

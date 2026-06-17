@@ -28,7 +28,7 @@ Operational DB / Warehouse
 | App database | PostgreSQL 18 (sole source of truth) |
 | Analytics warehouse | PostgreSQL (no separate warehouse) |
 | Jobs | In-process `ThreadPoolExecutor` (bounded; off by default) |
-| Object storage | Local file store / GCS (export artifact abstraction) |
+| Object storage | Local file store (export artifacts; configurable via `UMS_EXPORT_ARTIFACT_DIR`) |
 | Exports | Excel templates, PDF generator, PPTX generator |
 
 ## System responsibilities
