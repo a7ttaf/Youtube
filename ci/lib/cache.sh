@@ -148,7 +148,14 @@ ci::cache::put() {
     [ -n "$old_dir" ] && rm -rf "$old_dir"
     return 0
   fi
-  [ -n "$old_dir" ] && mv "$old_dir" "$entry_dir" 2>/dev/null || true
+  # Restore the previous entry on best-effort basis. This is already the
+  # failure path (we return 1 below), so the restore must never mask that
+  # failure with its own error. Written as an explicit if/then (not
+  # `A && B || C`, which shellcheck flags as SC2015 and which can run `|| true`
+  # when the condition is true but the move fails).
+  if [ -n "$old_dir" ]; then
+    mv "$old_dir" "$entry_dir" 2>/dev/null || true
+  fi
   rm -rf "$tmp_dir"
   return 1
 }

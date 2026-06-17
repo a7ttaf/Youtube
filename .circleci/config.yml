@@ -1,31 +1,263 @@
-# Use the latest 2.1 version of CircleCI pipeline process engine.
-# See: https://circleci.com/docs/reference/configuration-reference
 version: 2.1
 
-# Define a job to be invoked later in a workflow.
-# See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#jobs-overview & https://circleci.com/docs/reference/configuration-reference/#jobs
-jobs:
-  say-hello:
-    # Specify the execution environment. You can specify an image from Docker Hub or use one of our convenience images from CircleCI's Developer Hub.
-    # See: https://circleci.com/docs/guides/execution-managed/executor-intro/ & https://circleci.com/docs/reference/configuration-reference/#executor-job
-    docker:
-      # Specify the version you desire here
-      # See: https://circleci.com/developer/images/image/cimg/base
-      - image: cimg/base:current
+# ===========================================================================
+# UMS Smart Revenue — CircleCI pipeline
+#
+# A cloud mirror of the local-first Elite-CI gate (`make verify`), restructured
+# into deterministic, parallel jobs — and adding the one lane developers cannot
+# run locally without Docker: the FULL pytest suite against real PostgreSQL.
+#
+#   python-quality   ruff lint + ruff format --check (BLOCKING)
+#                     mypy type check                (advisory)
+#   python-tests     full pytest suite vs postgres:18-alpine (BLOCKING)
+#   frontend         tsc type check + vitest + vite build    (BLOCKING)
+#   shell-quality    shellcheck (BLOCKING) · shfmt (advisory)
+#   security-scan    gitleaks secret scan                    (BLOCKING)
+#
+# Toolchain is pinned to pyproject.toml / uv.lock so CI matches the dev box:
+#   Python 3.14 (uv-managed) · Node 22.12 · ruff 0.15.17 · mypy 2.1.0
+#
+# Base image is pinned to the dated monthly snapshot `cimg/base:2026.06` (not the
+# mutable `current` tag) so a lane's build environment cannot drift between runs.
+# Bump the YYYY.MM tag deliberately when you want OS/package updates.
+#
+# Why a real Postgres service: tests/db/_postgres_helpers.py::require_postgres_url
+# RAISES (never skips) when UMS_TEST_DATABASE_URL is unset, so PG-tier tests
+# error rather than skip. The DB name must start with `test_` (fail-closed guard
+# in tests/finance/test_google_source_normalizer_postgres.py). A fresh container
+# per run also avoids the orphaned-role flakiness seen on shared clusters.
+# ===========================================================================
 
-    # Add steps to the job
-    # See: https://circleci.com/docs/guides/orchestrate/jobs-steps/#steps-overview & https://circleci.com/docs/reference/configuration-reference/#steps
+commands:
+  install-uv:
+    description: "Install uv, provision the locked Python 3.14 venv (cached)"
     steps:
-      # Checkout the code as the first step.
+      - run:
+          name: Install uv
+          command: |
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' >> "$BASH_ENV"
+      - restore_cache:
+          keys:
+            - uv-v1-{{ checksum "uv.lock" }}
+            - uv-v1-
+      - run:
+          name: Sync locked dependencies (incl. dev extras)
+          command: |
+            uv python install 3.14
+            uv sync --frozen --extra dev
+      - save_cache:
+          key: uv-v1-{{ checksum "uv.lock" }}
+          paths:
+            - ~/.cache/uv
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Lint, format, and type-check. Fast, no database needed.
+  # -------------------------------------------------------------------------
+  python-quality:
+    docker:
+      - image: cimg/base:2026.06
+    resource_class: medium
+    steps:
+      - checkout
+      - install-uv
+      - run:
+          name: ruff lint (blocking)
+          command: uv run --no-sync ruff check backend tests
+      - run:
+          name: ruff format check (blocking)
+          # Mirrors the local gate's format lane. ruff line-length is 100
+          # (pyproject [tool.ruff]); DeepSource enforces the same ceiling.
+          command: uv run --no-sync ruff format --check backend tests
+      - run:
+          name: mypy type check (advisory)
+          # Advisory to match the vendored gate, where typecheck-python is
+          # severity:warning (ci/config/checks.yml). Findings print to the log
+          # but do not block. Drop the `|| true` to make this gate blocking.
+          command: uv run --no-sync mypy backend/ums_smart_revenue || true
+
+  # -------------------------------------------------------------------------
+  # Full backend test suite against a real, disposable PostgreSQL 18.
+  # This is the lane the local gate cannot run without Docker.
+  # -------------------------------------------------------------------------
+  python-tests:
+    docker:
+      - image: cimg/base:2026.06
+      # Secondary image = service container reachable on localhost.
+      # Matches the project standard (postgres:18-alpine) exactly so RLS /
+      # migration behavior is identical to local runs. If Docker Hub pull
+      # limits ever bite, add Docker Hub auth or switch to cimg/postgres.
+      - image: postgres:18-alpine
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ums
+          POSTGRES_DB: test_ums
+    # Bump to `large` if the suite gets slow; medium is fine for ~2.2k tests.
+    resource_class: medium
+    environment:
+      # DB name MUST start with `test_` (fail-closed guard). The `postgres`
+      # superuser is required: RLS tests CREATE ROLE app_tenant / app_platform
+      # and FORCE ROW LEVEL SECURITY, which need superuser/owner privileges.
+      UMS_TEST_DATABASE_URL: postgresql+psycopg://postgres:ums@localhost:5432/test_ums
+    steps:
+      - checkout
+      - install-uv
+      - run:
+          name: Wait for PostgreSQL
+          command: |
+            for i in $(seq 1 60); do
+              if (echo > /dev/tcp/localhost/5432) >/dev/null 2>&1; then
+                echo "PostgreSQL is accepting connections"; sleep 2; exit 0
+              fi
+              echo "waiting for PostgreSQL ($i/60)"; sleep 1
+            done
+            echo "PostgreSQL did not become ready in time" >&2; exit 1
+      - run:
+          name: pytest (full suite, real Postgres)
+          command: |
+            mkdir -p test-results/pytest
+            uv run --no-sync pytest -q --junitxml=test-results/pytest/results.xml
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: test-results
+          destination: test-results
+
+  # -------------------------------------------------------------------------
+  # Frontend: type check, unit tests, production build.
+  # -------------------------------------------------------------------------
+  frontend:
+    docker:
+      - image: cimg/node:22.12.0
+    resource_class: medium
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - npm-v1-{{ checksum "frontend/package-lock.json" }}
+            - npm-v1-
+      - run:
+          name: Install dependencies (npm ci)
+          command: npm ci
+          working_directory: ~/project/frontend
+      - save_cache:
+          key: npm-v1-{{ checksum "frontend/package-lock.json" }}
+          paths:
+            - ~/.npm
+      - run:
+          name: TypeScript type check (blocking)
+          command: npx tsc --noEmit -p tsconfig.json
+          working_directory: ~/project/frontend
+      - run:
+          name: Vitest unit tests (blocking)
+          command: npm test
+          working_directory: ~/project/frontend
+      - run:
+          name: Production build (blocking)
+          command: npm run build
+          working_directory: ~/project/frontend
+
+  # -------------------------------------------------------------------------
+  # Shell scripts: the entire ci/ gate and the git hooks are bash (43 tracked
+  # *.sh files). The local gate marks lint-shell/format-shell as BLOCKING but
+  # skips them when the tools are absent — and shellcheck/shfmt are not on the
+  # Windows dev box, so this is the first place they actually execute.
+  #   shellcheck  BLOCKING  bug-catcher; scripts carry `# shellcheck source=`
+  #                         directives, i.e. they were authored against it.
+  #                         (-x follows those sourced libs so SC1091 stays quiet.)
+  #   shfmt       advisory  run with -i 2 to match the repo's 2-space style;
+  #                         shfmt defaults to tabs, so a default check would
+  #                         wrongly flag every script. Drop `|| true` (keep -i 2)
+  #                         once it is clean to make formatting blocking.
+  # -------------------------------------------------------------------------
+  shell-quality:
+    docker:
+      - image: cimg/base:2026.06
+    resource_class: small
+    steps:
       - checkout
       - run:
-          name: "Say hello"
-          command: "echo Hello, World!"
+          name: Install shellcheck + shfmt
+          command: |
+            SHELLCHECK_VERSION=0.10.0
+            curl -sSfL "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+              | tar -xJ -C /tmp
+            sudo mv "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+            SHFMT_VERSION=3.10.0
+            curl -sSfL "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64" -o /tmp/shfmt
+            chmod +x /tmp/shfmt && sudo mv /tmp/shfmt /usr/local/bin/shfmt
+            shellcheck --version | sed -n '1,3p'
+            shfmt --version
+      - run:
+          name: shellcheck (blocking)
+          command: |
+            mapfile -t files < <(git ls-files '*.sh')
+            printf 'Running shellcheck on %d shell scripts\n' "${#files[@]}"
+            shellcheck -x "${files[@]}"
+      - run:
+          name: shfmt format check (advisory, 2-space)
+          command: |
+            git ls-files -z '*.sh' | xargs -0 shfmt -i 2 -d || true
 
-# Orchestrate jobs using workflows
-# See: https://circleci.com/docs/guides/orchestrate/workflows/ & https://circleci.com/docs/reference/configuration-reference/#workflows
+  # -------------------------------------------------------------------------
+  # SQL (PL/pgSQL) + YAML. The repo ships 2 hand-written Postgres SQL files
+  # (RLS schema + seed) with a committed .sqlfluff (dialect=postgres), and 17
+  # YAML files. Neither tool is a project dependency, so they run via `uvx`
+  # (ephemeral). Both advisory until their baselines are confirmed clean —
+  # drop the `|| true` to enforce.
+  # -------------------------------------------------------------------------
+  lint-sql-yaml:
+    docker:
+      - image: cimg/base:2026.06
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: Install uv
+          command: |
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' >> "$BASH_ENV"
+      - run:
+          name: sqlfluff lint (advisory, postgres dialect)
+          # Reads .sqlfluff from the repo root (dialect=postgres, templater=raw).
+          command: uvx sqlfluff lint backend/ums_smart_revenue/db || true
+      - run:
+          name: yamllint (advisory, relaxed)
+          # No .yamllint in-repo, so use the built-in relaxed preset (line
+          # length etc. off) to avoid false-failing on existing files.
+          command: uvx yamllint -d relaxed . || true
+
+  # -------------------------------------------------------------------------
+  # Secret scan. BLOCKING: gitleaks exits non-zero on any leak. Matches the
+  # vendored gate's secret-lane policy (ci/checks/manifest.yml: severity
+  # blocker). The tree currently scans clean; if a real false positive shows
+  # up, baseline it in .gitleaksignore instead of weakening the exit code.
+  # -------------------------------------------------------------------------
+  security-scan:
+    docker:
+      - image: cimg/base:2026.06
+    resource_class: small
+    steps:
+      - checkout
+      - run:
+          name: gitleaks secret scan (blocking)
+          command: |
+            GITLEAKS_VERSION=8.21.2
+            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+              | tar -xz -C /tmp gitleaks
+            # Blocking: no --exit-code override, so gitleaks exits non-zero on any
+            # leak and fails this lane. The current tree scans clean (verified
+            # locally with the same 8.21.2 release). If a false positive lands,
+            # commit a .gitleaksignore baseline rather than re-adding --exit-code 0.
+            /tmp/gitleaks detect --no-git --source . --redact
+
 workflows:
-  say-hello-workflow: # This is the name of the workflow, feel free to change it to better match your workflow.
-    # Inside the workflow, you define the jobs you want to run.
+  ci:
     jobs:
-      - say-hello
+      - python-quality
+      - python-tests
+      - frontend
+      - shell-quality
+      - lint-sql-yaml
+      - security-scan
