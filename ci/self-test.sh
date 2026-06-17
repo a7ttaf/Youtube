@@ -285,6 +285,9 @@ echo ""
 echo "[18] No args[@] unbound-variable crash"
 # The safe Bash 3.2 idiom is ${args[@]+"${args[@]}"}; the inner "${args[@]}" is
 # always surrounded by the guard so it can never be a bare (unsafe) expansion.
+# SC2016 is a false positive on the next line: both grep patterns are literal
+# search text (one regex, one -F fixed string) and MUST NOT be shell-expanded.
+# shellcheck disable=SC2016
 unsafe_args_lines="$(grep -En '^[^#]*\$\{args\[@\]\}' ci/lib/runner.sh 2>/dev/null | grep -Fv '${args[@]+"${args[@]}"}' || true)"
 if [ -n "$unsafe_args_lines" ]; then
   fail "runner.sh empty-array safety" "still has bare \${args[@]} expansion — will crash on Bash 3.2"

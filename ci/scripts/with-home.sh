@@ -20,7 +20,10 @@ if [ "${HOME:-/}" = "/" ] || [ -z "${HOME:-}" ]; then
     # USERPROFILE looks like "C:\Users\Mrmah". Convert to "/c/Users/Mrmah":
     #   1. drive letter lower-cased
     #   2. backslashes flipped to forward slashes
-    drive_letter="$(printf '%s' "${USERPROFILE%%:*}" | tr 'A-Z' 'a-z')"
+    # `[:upper:]`/`[:lower:]` instead of literal A-Z/a-z so the lower-casing is
+    # locale-correct (and silences shellcheck SC2018/SC2019); drive letters are
+    # always ASCII, but the character classes are the portable form.
+    drive_letter="$(printf '%s' "${USERPROFILE%%:*}" | tr '[:upper:]' '[:lower:]')"
     rest="${USERPROFILE#*:}"
     rest="${rest//\\//}"
     HOME="/${drive_letter}${rest}"

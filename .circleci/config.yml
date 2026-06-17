@@ -11,10 +11,15 @@ version: 2.1
 #                     mypy type check                (advisory)
 #   python-tests     full pytest suite vs postgres:18-alpine (BLOCKING)
 #   frontend         tsc type check + vitest + vite build    (BLOCKING)
-#   security-scan    gitleaks secret scan                    (advisory)
+#   shell-quality    shellcheck (BLOCKING) · shfmt (advisory)
+#   security-scan    gitleaks secret scan                    (BLOCKING)
 #
 # Toolchain is pinned to pyproject.toml / uv.lock so CI matches the dev box:
 #   Python 3.14 (uv-managed) · Node 22.12 · ruff 0.15.17 · mypy 2.1.0
+#
+# Base image is pinned to the dated monthly snapshot `cimg/base:2026.06` (not the
+# mutable `current` tag) so a lane's build environment cannot drift between runs.
+# Bump the YYYY.MM tag deliberately when you want OS/package updates.
 #
 # Why a real Postgres service: tests/db/_postgres_helpers.py::require_postgres_url
 # RAISES (never skips) when UMS_TEST_DATABASE_URL is unset, so PG-tier tests
@@ -52,7 +57,7 @@ jobs:
   # -------------------------------------------------------------------------
   python-quality:
     docker:
-      - image: cimg/base:current
+      - image: cimg/base:2026.06
     resource_class: medium
     steps:
       - checkout
@@ -78,7 +83,7 @@ jobs:
   # -------------------------------------------------------------------------
   python-tests:
     docker:
-      - image: cimg/base:current
+      - image: cimg/base:2026.06
       # Secondary image = service container reachable on localhost.
       # Matches the project standard (postgres:18-alpine) exactly so RLS /
       # migration behavior is identical to local runs. If Docker Hub pull
@@ -168,7 +173,7 @@ jobs:
   # -------------------------------------------------------------------------
   shell-quality:
     docker:
-      - image: cimg/base:current
+      - image: cimg/base:2026.06
     resource_class: small
     steps:
       - checkout
@@ -204,7 +209,7 @@ jobs:
   # -------------------------------------------------------------------------
   lint-sql-yaml:
     docker:
-      - image: cimg/base:current
+      - image: cimg/base:2026.06
     resource_class: small
     steps:
       - checkout
@@ -224,25 +229,28 @@ jobs:
           command: uvx yamllint -d relaxed . || true
 
   # -------------------------------------------------------------------------
-  # Secret scan. Advisory by design: the vendored gate's secret lane has a
-  # documented false-positive history, so findings are logged, not blocking.
+  # Secret scan. BLOCKING: gitleaks exits non-zero on any leak. Matches the
+  # vendored gate's secret-lane policy (ci/checks/manifest.yml: severity
+  # blocker). The tree currently scans clean; if a real false positive shows
+  # up, baseline it in .gitleaksignore instead of weakening the exit code.
   # -------------------------------------------------------------------------
   security-scan:
     docker:
-      - image: cimg/base:current
+      - image: cimg/base:2026.06
     resource_class: small
     steps:
       - checkout
       - run:
-          name: gitleaks secret scan (advisory)
+          name: gitleaks secret scan (blocking)
           command: |
             GITLEAKS_VERSION=8.21.2
             curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
               | tar -xz -C /tmp gitleaks
-            # --exit-code 0 keeps this lane advisory. Findings still print to
-            # the build log. Flip to `--exit-code 1` once the baseline is clean
-            # to make secret leaks a hard failure.
-            /tmp/gitleaks detect --no-git --source . --redact --exit-code 0
+            # Blocking: no --exit-code override, so gitleaks exits non-zero on any
+            # leak and fails this lane. The current tree scans clean (verified
+            # locally with the same 8.21.2 release). If a false positive lands,
+            # commit a .gitleaksignore baseline rather than re-adding --exit-code 0.
+            /tmp/gitleaks detect --no-git --source . --redact
 
 workflows:
   ci:

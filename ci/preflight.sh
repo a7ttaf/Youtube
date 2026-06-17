@@ -512,8 +512,11 @@ run_full_or_ship_checks() {
 run_mode() {
   # If lanes.conf exists and CI_GATE_USE_LANES=1, read it. Otherwise use hardcoded defaults.
   if [ "${CI_GATE_USE_LANES:-0}" = "1" ] && [ -f "ci/config/lanes.conf" ]; then
-    local lane_id="" lane_name="" lane_cmd="" lane_blocking="" lane_desc=""
-    while IFS='|' read -r lane_id lane_name lane_cmd lane_blocking lane_desc; do
+    # lanes.conf has 5 columns (id|name|command|blocking|description); only id and
+    # command are consumed here. Unused columns are read into `_` so shellcheck does
+    # not flag them (SC2034) while still consuming every delimited field.
+    local lane_id="" lane_cmd=""
+    while IFS='|' read -r lane_id _ lane_cmd _ _; do
       lane_id="$(echo "$lane_id" | tr -d ' ')"
       lane_cmd="$(echo "$lane_cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
       [ -z "$lane_id" ] && continue
