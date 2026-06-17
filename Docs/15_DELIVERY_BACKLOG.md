@@ -254,7 +254,7 @@ closed; Docs/01 status header and 12 "this PR" placeholders updated.
   (build_month_net_revenue_summary; per-channel gross/net/deduction roll-up,
   scope-filtered, USD-only). Tax/deduction components are computed and persisted
   by Track F reconciliation (PR #87); the allocation engine (Phase 4,
-  PRs #58–#76) applies gross_revenue_proportional, post_tax, company_level,
+  PRs #58–#76) applies gross_revenue_proportional, post_tax_revenue_proportional, company_level,
   manual, and no_allocation methods against committed ACCOUNT-scoped allocation
   snapshots (PAYMENT-scoped allocation remains a separate follow-up).
 - ⏳ Confidence labels — labels ARE computed in services

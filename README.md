@@ -13,7 +13,7 @@ This service ingests YouTube + AdSense data, reconciles it against bank movement
 | Backend | Python 3.14 · FastAPI · SQLAlchemy 2 · Alembic |
 | Frontend | Vite 8 · React 19 · TypeScript 6 (shipped) |
 | Storage | PostgreSQL 18 (single source of truth) · local file store (export artifacts) |
-| Background jobs | In-process `ThreadPoolExecutor` (bounded queue; off by default via `connector_job_executor_enabled` setting) |
+| Background jobs | In-process `ThreadPoolExecutor` (bounded queue; off by default via `UMS_CONNECTOR_JOB_EXECUTOR_ENABLED` env var) |
 | Multi-tenant | Postgres Row-Level Security with `FORCE ROW LEVEL SECURITY` on 25 tenant-scoped tables (shipped PR #106) |
 | Multi-currency | AED · USD · EUR · GBP · SAR · EGP — extensible. All math in `Decimal`. |
 | Auth modes | `headers` (dev / bootstrap) · `database` (production; SQL-backed principal) |
@@ -38,7 +38,7 @@ uv sync --extra dev --extra test --extra lint
 $env:PYTHONPATH = (Resolve-Path "backend").Path
 $env:UMS_DATABASE_URL = "postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
 $env:UMS_AUTHZ_SOURCE = "headers"
-$env:UMS_TRUSTED_GATEWAY_TOKEN = "" # set via .env or environment
+$env:UMS_TRUSTED_GATEWAY_TOKEN = "dev-only-token" # required for protected routes; set a real value
 
 # 4) Run migrations
 uv run alembic upgrade head
