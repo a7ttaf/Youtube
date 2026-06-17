@@ -236,7 +236,7 @@ run_check() {
     echo "Skipping [$label] (filtered)"
     return 0
   fi
-  
+
   COMMANDS_RUN+=("$label")
   ci::report::append_log ""
   ci::report::append_log ">>> ${label} (${script})"
@@ -261,48 +261,33 @@ _check_disabled_in_config() {
         ''|'#'*) continue ;;
       esac
 
-      if printf '%s
-' "$line" | grep -q -E '^checks:[[:space:]]*$'; then
+      if [[ "$line" =~ ^checks:[[:space:]]*$ ]]; then
         in_checks=1
         continue
       fi
 
-      if [ "$in_checks" = "1" ] && printf '%s
-' "$line" | grep -q -E '^[^[:space:]]'; then
+      if [ "$in_checks" = "1" ] && [[ "$line" =~ ^[^[:space:]] ]]; then
         in_checks=0
         check_id=""
       fi
 
-      if [ "$in_checks" = "1" ]; then
-        match=$(printf '%s
-' "$line" | grep -E '^[[:space:]]{2}[A-Za-z0-9_-]+:[[:space:]]*(#.*)?$')
-        if [ -n "$match" ]; then
-          check_id=$(printf '%s
-' "$line" | sed -E 's/^[[:space:]]{2}([A-Za-z0-9_-]+):[[:space:]]*(#.*)?$/\1/')
-          enabled="true"
-          in_list_check=0
-          continue
-        fi
+      if [ "$in_checks" = "1" ] && [[ "$line" =~ ^[[:space:]]{2}([A-Za-z0-9_-]+):[[:space:]]*(#.*)?$ ]]; then
+        check_id="${BASH_REMATCH[1]}"
+        enabled="true"
+        in_list_check=0
+        continue
       fi
 
-      list_check_id=$(printf '%s
-' "$line" | sed -nE 's/^[[:space:]]*-[[:space:]]*id:[[:space:]]*(.*)$/\1/p')
-      if [ -n "$list_check_id" ]; then
+      if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*id:[[:space:]]*(.*)$ ]]; then
         in_list_check=1
-        check_id="$list_check_id"
-        check_id="$(printf '%s
-' "$check_id" | tr -d ' ' | tr -d '"')"
+        check_id="${BASH_REMATCH[1]}"
+        check_id="$(echo "$check_id" | tr -d ' ' | tr -d '"')"
         enabled="true"
       fi
-
-      enabled_val=$(printf '%s
-' "$line" | sed -nE 's/^[[:space:]]*enabled:[[:space:]]*(.*)$/\1/p')
-      if { [ "$in_checks" = "1" ] || [ "$in_list_check" = "1" ]; } && [ -n "$enabled_val" ]; then
-        enabled="$enabled_val"
-        enabled="$(printf '%s
-' "$enabled" | sed 's/[[:space:]]//g; s/#.*$//')"
+      if { [ "$in_checks" = "1" ] || [ "$in_list_check" = "1" ]; } && [[ "$line" =~ ^[[:space:]]*enabled:[[:space:]]*(.*)$ ]]; then
+        enabled="${BASH_REMATCH[1]}"
+        enabled="$(echo "$enabled" | sed 's/[[:space:]]//g; s/#.*$//')"
       fi
-
       if [ "$check_id" = "$wanted" ] && [ "$enabled" = "false" ]; then
         return 0  # skip
       fi
@@ -324,7 +309,6 @@ _checks_for_lane_label() {
   esac
 }
 
-_all_related_checks_disabled() {
 _all_related_checks_disabled() {
   local label="$1"
   local related check_id any=0
