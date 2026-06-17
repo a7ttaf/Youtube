@@ -26,27 +26,20 @@ amounts from market FX rates.
 ### Output tables
 
 ```text
-raw_youtube_reports
-google_revenue_source_rows
-fact_channel_daily
-fact_channel_monthly
-fact_revenue_monthly
-fact_tax_monthly
-fact_shorts_revenue
+google_revenue_source_rows   (raw ingestion provenance — amount, currency, source row key)
+monthly_channel_revenue_facts  (normalized per-channel per-month finance facts)
 ```
 
-Foundation note: official Shorts, longform, and subscription revenue components
-are currently stored as optional USD component columns on
-`monthly_channel_revenue_facts` when the source report provides them. Null means
-the report did not provide that component; the backend must not infer a missing
-component from gross revenue.
+Downloaded Google reports are stored as raw files before parsing, then parsed
+into tenant-scoped `google_revenue_source_rows` with the Google-reported amount,
+currency, account/report identifiers, period, source row key, and raw payload
+reference. After that provenance exists, selected values are normalized into
+`monthly_channel_revenue_facts` by the post-run normalizer.
 
-Next source-ingestion foundation: downloaded Google reports are stored as raw
-files before parsing, then parsed into tenant-scoped
-`google_revenue_source_rows` with the Google-reported amount, currency,
-account/report identifiers, period, source row key, and raw payload reference.
-Only after that provenance exists may selected values be normalized into
-finance fact tables.
+Official Shorts, longform, and subscription revenue components are stored as
+optional USD component columns on `monthly_channel_revenue_facts` when the
+source report provides them. Null means the report did not provide that
+component; the backend must not infer a missing component from gross revenue.
 
 ## YouTube Analytics API connector
 
@@ -70,11 +63,9 @@ parameters; it must not convert the amount into another official currency.
 
 ### Output tables
 
-```text
-youtube_channels
-youtube_videos
-channel_metadata_snapshots
-```
+The YouTube Data API connector provides metadata queries only. No dedicated
+warehouse tables are provisioned in this phase; channel identity and
+content-owner details are stored on the core `channels` ORM model.
 
 ## AdSense Management API connector
 
@@ -95,14 +86,23 @@ google_revenue_source_rows
 
 ## Connector health states
 
+**Connector run status** (`connector_runs.status`):
+
 ```text
-OK
-FAILED_AUTH
-FAILED_QUOTA
-FAILED_REPORT_UNAVAILABLE
-FAILED_DOWNLOAD
-FAILED_PARSE
-MISSING_EXPECTED_REPORT
+RUNNING
+SUCCEEDED
+PARTIAL
+FAILED
+```
+
+**Credential health state** (derived at read time in `GET /connectors/credentials/health`):
+
+```text
+healthy          — last refresh succeeded, token not expiring
+expiring         — token at or within 24h of expiry
+auth_failed      — last refresh failed or an error class is recorded
+missing          — no stored secret reference
+unknown          — credential is not in active status (disabled, rotating, etc.)
 ```
 
 ## Required logs

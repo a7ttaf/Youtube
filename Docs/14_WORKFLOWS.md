@@ -14,7 +14,7 @@
 9. Allocate unresolved deductions.
 10. Generate channel/company/sector net revenue.
 11. Review alerts.
-12. Check `finance.lock_month`, call `MonthLock/lockMonth`, and create a `MONTH_LOCKED` audit event with the close reason.
+12. Call `POST /finance-close/{month}/lock` (requires `finance.lock_month` at `finance_month(month)`); the service emits a `MONTH_LOCKED` audit event with the close reason.
 13. Export reports.
 ```
 
@@ -74,7 +74,7 @@ Current foundation support:
 3. User selects month and currency.
 4. System checks unresolved alerts.
 5. System checks export and revenue visibility permissions for the requested scope.
-6. Export job is created through `ExportService.enqueueExport`.
+6. Export job is created via `POST /exports`; the route creates an `export_jobs` row and audits `EXPORT_CREATED`.
 7. System creates an `EXPORT_CREATED` audit event.
 8. File is generated.
 9. User downloads report.
@@ -87,7 +87,7 @@ Current foundation support:
 2. System checks `finance.create_manual_override` or `finance.approve_manual_override` for the target channel.
 3. User changes value.
 4. System requires reason.
-5. `ManualOverride/applyOverride` records old/new value and actor identity.
+5. The service records the override row (old/new value, actor identity, reason) in the `manual_overrides` table.
 6. System creates `MANUAL_OVERRIDE_CREATED` or `MANUAL_OVERRIDE_APPROVED` audit event.
 7. System recalculates affected numbers.
 8. System flags report as override-used.

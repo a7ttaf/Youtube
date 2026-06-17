@@ -1,9 +1,12 @@
 # Implementation Plan
 
-## Status (2026-06-13)
+## Status (2026-06-17)
 
-Mainline merge status is reconciled through PR #97 (executor Bucket-A audit RLS
-fix). Mainline integration was reconciled through PR #36 (S2 multi-tenant
+Mainline merge status is reconciled through PR #113 (finance/security
+doc-correctness sweep). Phase 5 analytics & monitoring (PR #98), Command Center
+scope rollup (PR #102), FORCE RLS (PR #106), skipped-row observability (PR #111),
+and security catalog gating (PR #112) are all merged and inline-marked below.
+Mainline integration was reconciled through PR #36 (S2 multi-tenant
 integration merged onto `main` at commit `96dbe73`), and the roadmap notes
 now include the stacked PR #47 Google live connector foundation state. The
 original Phase 0–7 product cut below is the durable roadmap; status markers
@@ -388,7 +391,7 @@ on real ingestion (Phase 2) and the inventory load workflow.
 - ⏳ Revenue-required flag — remaining: column exists in the registry and is
   surfaced in the Registry table source label (PR #73/#78); finance-fact
   coverage of revenue-required channels is now flagged by the
-  `CHANNELS_MISSING_REVENUE_FACTS` smart alert (this PR).
+  `CHANNELS_MISSING_REVENUE_FACTS` smart alert (PR #98).
 - ✅ Group builder (tenant-scoped channel group registry, PR #25 + direct
   tests in PR #30).
 - ✅ Role model (PRs #3, #4, #24 — tenant-scoped roles & permission grants).
@@ -399,12 +402,12 @@ on real ingestion (Phase 2) and the inventory load workflow.
   not yet driven.
 - ⏳ Company/sector/group mapping — remaining: registries exist and the
   Registry page now drives live re-parenting via `PATCH /channels/{id}/mapping`
-  (Registry Phase 2, PR #78), now month-lock-guarded (this PR rejects a mapping
+  (Registry Phase 2, PR #78), now month-lock-guarded (PR #98 rejects a mapping
   change that would rewrite a LOCKED month's attribution); bulk inventory
   assignment workflow still not built.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to
-  `GET /channels/outside-cms` + `GET /channels/issues` (this PR,
+  `GET /channels/outside-cms` + `GET /channels/issues` (PR #98,
   VIEW_ANALYTICS-gated, no-fetch-when-restricted); proactive alerting beyond the
   panel + the `CHANNELS_MISSING_REVENUE_FACTS` smart alert is not built.
 
@@ -441,7 +444,7 @@ unmapped-channel report are the remaining gaps.
   `connectors/runs/normalization.py` by PR #93), so a run projects source rows
   to `MonthlyChannelRevenueFactORM`; blocked only on real OAuth credentials.
 - ⏳ Missing report alerts — remaining: per-channel coverage is now flagged by
-  the `CHANNELS_MISSING_REVENUE_FACTS` smart alert (this PR); a stored
+  the `CHANNELS_MISSING_REVENUE_FACTS` smart alert (PR #98); a stored
   expected-connectors/accounts baseline (missing-REPORT detection) is deferred
   (`connector_runs` carries no channel dimension).
 
@@ -694,7 +697,7 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
 - ✅ Smart problem panel — shipped (PR #69): smart-alerts problem panel
   wired into the Command Center from GET
   /revenue/months/{month}/smart-alerts.
-- ✅ Company/sector/channel ranking — shipped (this PR): finance-gated,
+- ✅ Company/sector/channel ranking — shipped (PR #98): finance-gated,
   scope-safe `GET /revenue/months/{month}/rankings` (pure `build_month_rankings`
   rolls the per-channel net-revenue summary up to company/sector, ranks each
   dimension by gross|net|deduction with None-sink + stable id tie-break, top-N)
@@ -711,7 +714,7 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
   `{scopeType, scopeId}` pair, global-only fallback on load/403) and threads the
   chosen scope into the already-wired net-revenue + rankings reads. Channel
   GROUP scope is a named follow-up (see acceptance gate below).
-- ✅ Outside-CMS issue monitor — shipped (this PR): CommandView monitor panel
+- ✅ Outside-CMS issue monitor — shipped (PR #98): CommandView monitor panel
   wired to `GET /channels/outside-cms` + `GET /channels/issues`
   (VIEW_ANALYTICS-gated, no-fetch-when-restricted; 403 -> denied copy, never
   "no issues").
@@ -766,7 +769,7 @@ now wired to `GET /audit/events` (see below).
   closed to `AccessDenied`; connector controls require `canRunConnectorJobs`;
   the smoke asserts the contract. Live ingestion needs real connector
   credentials.
-- ✅ `canViewAnalytics` session capability — shipped (this PR): `/session/me`
+- ✅ `canViewAnalytics` session capability — shipped (PR #98): `/session/me`
   `SessionCapabilities` gains `can_view_analytics`, derived **scope-aware** (true
   if the principal holds ANY active `VIEW_ANALYTICS` grant — direct or via role
   — at any scope, mirroring `connector_health`; NOT the global-only `_can()`
@@ -905,11 +908,11 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
 - ✅ Audit logs (tenant-scoped per PR #22; foundation in PR #1).
 - ⏳ Failure alerts — remaining: month-level smart alerts ship
   (`GET /revenue/months/{month}/smart-alerts`) and now include a per-channel
-  `CHANNELS_MISSING_REVENUE_FACTS` HIGH coverage alert (this PR); proactive
+  `CHANNELS_MISSING_REVENUE_FACTS` HIGH coverage alert (PR #98); proactive
   push/notification delivery is not built.
 - ⏳ Data quality checks — remaining: revenue-fact required-field gate
   (PR #8) plus the `CHANNELS_MISSING_REVENUE_FACTS` per-channel coverage check
-  (this PR, active+revenue_required channels with no monthly fact); broader
+  (PR #98, active+revenue_required channels with no monthly fact); broader
   quality checks not built.
 - ⏳ Backup/export retention — remaining: not started.
 - ⏳ OAuth token monitoring — remaining: credentials repo (PRs #33, #34) +
@@ -920,7 +923,7 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   background expiry monitoring + auto-flip on refresh failure not built.
 - ✅ Month locking — shipped: explicit POST /finance-close/{month}/lock +
   /unlock workflow (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED).
-  Strengthened this PR: `PATCH /channels/{id}/mapping` now rejects (409) a
+  Strengthened PR #98: `PATCH /channels/{id}/mapping` now rejects (409) a
   re-parenting that would rewrite a LOCKED month's company/sector attribution.
 - ✅ Migration target-DB safety (PR #96) — alembic env.py no longer lets an
   ambient `UMS_DATABASE_URL` silently override an in-code-injected
@@ -935,7 +938,7 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
 
 - ⏳ Detect missing channels, missing reports, unmatched payments,
   manually overridden values — partially met: missing channel-fact coverage
-  (`CHANNELS_MISSING_REVENUE_FACTS`, this PR) and unmatched payments
+  (`CHANNELS_MISSING_REVENUE_FACTS`, PR #98) and unmatched payments
   (PAYMENT_VARIANCE smart alert + payment-match) are detected; missing-REPORT
   detection is deferred (no expected-connectors baseline).
 
@@ -943,6 +946,6 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
 
 Audit-log infrastructure shipped end-to-end and tenant-scoped, and the
 smart-alerts surface now flags per-channel missing-revenue-fact coverage
-(`CHANNELS_MISSING_REVENUE_FACTS`, this PR). Remaining hardening (report-coverage
+(`CHANNELS_MISSING_REVENUE_FACTS`, PR #98). Remaining hardening (report-coverage
 baseline, backup/retention, live OAuth token monitoring) awaits the ingestion +
 expectation-model work that produces the underlying signals.

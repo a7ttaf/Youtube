@@ -1,10 +1,9 @@
 # Open Decisions
 
-## Status (2026-05-23)
+## Status (2026-06-17)
 
-Reconciled through PR #42 (B1 source-reported revenue pivot). Decisions that
-are now made are listed under "Closed (with PR ref)". Items in the topic
-sections below remain genuinely open.
+Reconciled through PR #113. Decisions that are now made are listed under
+"Closed (with PR ref)". Items in the topic sections below remain genuinely open.
 
 ## Closed (with PR ref)
 
@@ -17,9 +16,9 @@ sections below remain genuinely open.
 - ✅ **Graph database: none** — Neo4j retired entirely in PR #12.
 - ✅ **Multi-tenant model: row-level `tenant_id` on operational tables,
   header-based resolver with contextvar** — implemented via the S2 stack
-  (PRs #18 – #21, #36). Storage-layer hardening (RLS + GUC + composite
-  FKs + tenant-scoped unique keys per `Docs/17`) is a separate S3 spec,
-  not yet written.
+  (PRs #18 – #21, #36). S3 storage-layer hardening shipped: Postgres RLS
+  with `app_tenant`/`app_platform` roles and `FORCE ROW LEVEL SECURITY` on
+  all 25 tenant-scoped tables (PRs #85, #106; see `Docs/17_MULTI_TENANT_ARCHITECTURE.md`).
 - ✅ **Export engine: Python libraries** — `openpyxl` / `reportlab`-class
   approach via the export artifacts in PR #9 + tenant-scoped export jobs
   in PR #36.
@@ -30,11 +29,14 @@ sections below remain genuinely open.
   a future display-only spec and must never drive official totals. Established in
   the B1 pivot (PR #42); see `Docs/18_MULTI_CURRENCY_ENGINE.md`.
 
-## Stack decisions
+## Stack decisions (closed)
 
-- Job runner: Airflow, Temporal, Celery/RQ, or cloud scheduler?
+- ✅ **Job runner: in-process ThreadPoolExecutor** — Celery/RQ, Temporal,
+  Airflow, and cloud scheduler were all deferred. A bounded in-process
+  `ThreadPoolExecutor` (off by default via `connector_job_executor_enabled`)
+  ships with PR #95. Durable out-of-process queue remains a future upgrade.
 
-## Data decisions
+## Data decisions (open — blocked on real OAuth credentials)
 
 - Exact list of YouTube report types available in UMS account.
 - Which reports cover outside-CMS channels.
@@ -44,9 +46,12 @@ sections below remain genuinely open.
 
 ## Finance decisions
 
-- Default allocation method: gross revenue or post-tax revenue?
+- ✅ **Default allocation method: gross_revenue_proportional** — shipped as the
+  first committable method (PR #58/62); post_tax also available (PR #67);
+  company_level, manual, and no_allocation shipped (PR #74/76).
+- ✅ **Who can approve manual overrides** — Finance Admin or Super Owner
+  (established by the auth policy; `APPROVE_MANUAL_OVERRIDE` permission).
 - Should unresolved payment gap appear as holding-level only or allocated to channels?
-- Who can approve manual overrides?
 - What happens if bank amount is not available?
 - Which Google/YouTube/AdSense report currency is authoritative when a source
   offers account currency, payment currency, and/or metric-level `currencyCode`?
@@ -71,7 +76,7 @@ Backend: FastAPI                              [decided — PR #1]
 Database: PostgreSQL + optional BigQuery       [PostgreSQL chosen; BigQuery deferred]
 Graph database: none in active roadmap         [decided — PR #12]
 Export engine: Python libraries                [decided — PR #9 + PR #36]
-Allocation method: post-tax revenue proportional allocation   [target; not yet implemented]
+Allocation method: gross_revenue_proportional default; post_tax also available [shipped — PRs #58–#76]
 Outside-CMS labels: show confidence clearly                   [open]
 Bank input: manual first, automation later                    [foundation shipped — PR #29; automation open]
 ```
