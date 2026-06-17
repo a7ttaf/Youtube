@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.connectors.google.youtube_analytics_client import list_target_channels
 from ums_smart_revenue.db.finance_models import (
     FinanceBase,
     FinanceMonthCloseORM,
@@ -213,6 +214,85 @@ def test_sql_channel_registry_preserves_outside_cms_revenue_metadata():
     assert channel.revenue_source_status == "OFFICIAL_MANUAL_IMPORT"
     assert channel.to_api()["content_owner_id"] == "content-owner-7"
     assert channel.to_api()["revenue_source_status"] == "OFFICIAL_MANUAL_IMPORT"
+
+
+def test_sql_channel_registry_create_persists_content_owner_id():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    created = registry.create_channel(
+        youtube_channel_id="channel-cms",
+        channel_name="CMS Channel",
+        primary_company_id=str(COMPANY_TV_ID),
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+        content_owner_id="owner-cms",
+    )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-cms",
+        )
+    ).one()
+    assert created.content_owner_id == "owner-cms"
+    assert persisted.content_owner_id == "owner-cms"
+
+
+def test_sql_channel_registry_update_content_owner_sets_and_clears():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    updated = registry.update_content_owner(
+        youtube_channel_id="channel-tv-a", content_owner_id="owner-x"
+    )
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
+        )
+    ).one()
+    assert updated.content_owner_id == "owner-x"
+    assert persisted.content_owner_id == "owner-x"
+
+    cleared = registry.update_content_owner(
+        youtube_channel_id="channel-tv-a", content_owner_id=None
+    )
+    assert cleared.content_owner_id is None
+
+
+def test_sql_channel_registry_update_content_owner_missing_channel_raises():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(KeyError):
+        registry.update_content_owner(
+            youtube_channel_id="missing-channel", content_owner_id="owner-x"
+        )
+
+
+def test_setting_content_owner_makes_channel_targetable_for_ingestion():
+    """Closed-loop regression for the silent-zero gap: a channel becomes an
+    Analytics ingestion target only once its content_owner_id matches the CMS
+    account id. Before the write path every channel kept content_owner_id=None,
+    so list_target_channels returned nothing and a run reported SUCCEEDED while
+    ingesting zero rows."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    # channel-tv-a is INSIDE_CMS, active, revenue_required, but content_owner_id
+    # is unset -> not selected for the account.
+    assert list_target_channels(session, tenant_id=DEFAULT_TENANT_ID, account_id="owner-cms") == []
+
+    registry.update_content_owner(youtube_channel_id="channel-tv-a", content_owner_id="owner-cms")
+
+    assert list_target_channels(session, tenant_id=DEFAULT_TENANT_ID, account_id="owner-cms") == [
+        "channel-tv-a"
+    ]
 
 
 def test_sql_channel_registry_rejects_malformed_primary_company_id():

@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Channel `content_owner_id` write path: `content_owner_id` is now an optional
+  field on `POST /channels`, and a new `PATCH /channels/{youtube_channel_id}/content-owner`
+  (gated on `MANAGE_CHANNELS`, audited as `CHANNEL_UPDATED` with old/new values,
+  no-op suppressed, nullable to clear) lets operators set the CMS content owner
+  that `list_target_channels` matches against the connector account id. Closes
+  the latent silent-zero gap where every channel kept `content_owner_id=None`
+  and no channel was ever selected for ingestion. No migration — the
+  `youtube_channels.content_owner_id` column already existed.
 - Root governance: `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `.gitignore`.
 
 ### Changed

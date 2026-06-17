@@ -710,3 +710,176 @@ def test_no_op_mapping_change_returns_200_without_audit(tmp_path):
     assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_TV_ID
     assert response.json()["audit_event"] is None
     assert audit_sink.records == []
+
+
+def test_create_channel_persists_content_owner_id():
+    """A channel can be created with its CMS content_owner_id set."""
+    client = TestClient(create_bootstrap_app())
+
+    response = client.post(
+        "/channels",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={
+            "youtube_channel_id": "channel-cms-new",
+            "channel_name": "CMS New",
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,
+            "cms_status": "INSIDE_CMS",
+            "revenue_required": True,
+            "content_owner_id": "owner-cms-1",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["content_owner_id"] == "owner-cms-1"
+    assert response.json()["audit_event"]["event_type"] == "CHANNEL_CREATED"
+
+
+def test_create_channel_defaults_content_owner_id_to_none():
+    """content_owner_id is optional on create; omitting it leaves it unset."""
+    client = TestClient(create_bootstrap_app())
+
+    response = client.post(
+        "/channels",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={
+            "youtube_channel_id": "channel-no-owner",
+            "channel_name": "No Owner",
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,
+            "cms_status": "UNKNOWN",
+            "revenue_required": True,
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["content_owner_id"] is None
+
+
+def test_create_channel_rejects_blank_content_owner_id():
+    """A present-but-blank content_owner_id is rejected, not coerced to null."""
+    client = TestClient(create_bootstrap_app())
+
+    response = client.post(
+        "/channels",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={
+            "youtube_channel_id": "channel-blank-owner",
+            "channel_name": "Blank Owner",
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,
+            "cms_status": "INSIDE_CMS",
+            "revenue_required": True,
+            "content_owner_id": "   ",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_set_content_owner_is_audited():
+    """PATCH content-owner sets the field and records CHANNEL_UPDATED with old/new."""
+    app = create_bootstrap_app()
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    client = TestClient(app)
+
+    response = client.patch(
+        "/channels/channel-tv-a/content-owner",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"content_owner_id": "owner-1", "reason": "Link to CMS account"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["content_owner_id"] == "owner-1"
+    assert response.json()["audit_event"]["event_type"] == "CHANNEL_UPDATED"
+    assert response.json()["audit_event"]["reason"] == "Link to CMS account"
+    assert len(audit_sink.records) == 1
+    assert audit_sink.records[0].details == {
+        "old_content_owner_id": None,
+        "new_content_owner_id": "owner-1",
+    }
+
+
+def test_no_op_content_owner_change_returns_200_without_audit():
+    """Re-submitting the current content_owner_id is a no-op and is not audited."""
+    app = create_bootstrap_app()
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    client = TestClient(app)
+
+    response = client.patch(
+        "/channels/channel-tv-a/content-owner",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"content_owner_id": None, "reason": "resubmit current value"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["content_owner_id"] is None
+    assert response.json()["audit_event"] is None
+    assert audit_sink.records == []
+
+
+def test_content_owner_update_requires_manage_channels_permission():
+    """Setting content_owner_id requires MANAGE_CHANNELS, not analytics view."""
+    client = TestClient(create_bootstrap_app())
+
+    response = client.patch(
+        "/channels/channel-tv-a/content-owner",
+        headers=auth_headers("assistant_analyst", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"content_owner_id": "owner-1", "reason": "unauthorized"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: registry.manage_channels"
+
+
+def test_content_owner_update_authorizes_before_not_found():
+    """Authorization is checked before existence: an unauthorized caller gets 403."""
+    client = TestClient(create_bootstrap_app())
+
+    response = client.patch(
+        "/channels/missing-channel/content-owner",
+        headers=auth_headers("assistant_analyst", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"content_owner_id": "owner-1", "reason": "unauthorized lookup"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: registry.manage_channels"
+
+
+def test_content_owner_update_404_for_missing_channel_when_authorized():
+    """An authorized caller targeting a missing channel gets 404."""
+    client = TestClient(create_bootstrap_app())
+
+    response = client.patch(
+        "/channels/missing-channel/content-owner",
+        headers=auth_headers("super_owner", "global"),
+        json={"content_owner_id": "owner-1", "reason": "set owner on missing"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Channel not found"
+
+
+def test_content_owner_update_requires_reason():
+    """A content-owner change must carry a reason (audit provenance)."""
+    client = TestClient(create_bootstrap_app())
+
+    response = client.patch(
+        "/channels/channel-tv-a/content-owner",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"content_owner_id": "owner-1"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_content_owner_update_rejects_blank_content_owner_id():
+    """A present-but-blank content_owner_id is rejected on update too."""
+    client = TestClient(create_bootstrap_app())
+
+    response = client.patch(
+        "/channels/channel-tv-a/content-owner",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"content_owner_id": "   ", "reason": "blank owner"},
+    )
+
+    assert response.status_code == 422

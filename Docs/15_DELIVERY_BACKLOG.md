@@ -300,6 +300,15 @@ closed; Docs/01 status header and 12 "this PR" placeholders updated.
   idempotency / version chain; preview as a pre-flight BLOCKED_BY_ISSUES 409
   gate; write-only VIEW_FINALIZED_PAYMENTS gate; manual redirected to the commit
   endpoint). See the manual-method + recalculate write-path entry below.
+- ✅ Channel `content_owner_id` write path — shipped: the operator key that
+  `list_target_channels` matches against the CMS account id is now settable.
+  `content_owner_id` is an optional field on channel create and has a dedicated
+  `PATCH /channels/{id}/content-owner` route (MANAGE_CHANNELS, audited
+  `CHANNEL_UPDATED` with old/new, no-op-suppressed, no locked-month coupling
+  because it only retargets future ingestion). Closes the latent silent-zero
+  ingestion gap where every channel kept `content_owner_id=None` and matched no
+  account. No migration (the `youtube_channels.content_owner_id` column already
+  existed).
 - ✅ Channel↔account map — shipped (PR #57): two-layer canonical map
   (`adsense_content_owner_links` operator-verified + `content_owner_channel_links`
   derived from source rows), audited propose/verify/reject API behind dual

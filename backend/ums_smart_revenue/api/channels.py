@@ -53,11 +53,17 @@ class ChannelCreateRequest(BaseModel):
     primary_company_id: str = Field(min_length=1)
     cms_status: str
     revenue_required: bool
+    content_owner_id: str | None = None
 
     @field_validator("youtube_channel_id", "channel_name", "primary_company_id", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
         return _strip_required_string(value)
+
+    @field_validator("content_owner_id", mode="before")
+    @classmethod
+    def strip_optional_content_owner(cls, value):
+        return _strip_optional_string(value)
 
 
 class ChannelMappingRequest(BaseModel):
@@ -70,7 +76,37 @@ class ChannelMappingRequest(BaseModel):
         return _strip_required_string(value)
 
 
+class ContentOwnerUpdateRequest(BaseModel):
+    # content_owner_id is required-to-be-present but nullable: sending null
+    # clears the CMS content owner; a present-but-blank string is rejected.
+    content_owner_id: str | None
+    reason: str = Field(min_length=1)
+
+    @field_validator("content_owner_id", mode="before")
+    @classmethod
+    def strip_optional_content_owner(cls, value):
+        return _strip_optional_string(value)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        return _strip_required_string(value)
+
+
 def _strip_required_string(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+    return value
+
+
+def _strip_optional_string(value):
+    # None stays None (field unset); a present string is stripped and a
+    # blank-after-strip value is rejected rather than silently coerced to null.
+    if value is None:
+        return None
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:
@@ -327,6 +363,7 @@ def create_channel(
             primary_company_id=payload.primary_company_id,
             cms_status=payload.cms_status,
             revenue_required=payload.revenue_required,
+            content_owner_id=payload.content_owner_id,
         )
     except ChannelRegistryValidationError as exc:
         raise HTTPException(
@@ -348,6 +385,7 @@ def create_channel(
             "primary_company_id": channel.primary_company_id,
             "cms_status": channel.cms_status,
             "revenue_required": channel.revenue_required,
+            "content_owner_id": channel.content_owner_id,
         },
     )
     response = channel.to_api()
@@ -427,5 +465,62 @@ def update_channel_mapping(
             "new_primary_company_id": payload.primary_company_id,
         },
     )
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
+@router.patch("/{youtube_channel_id}/content-owner")
+def update_channel_content_owner(
+    youtube_channel_id: str,
+    payload: ContentOwnerUpdateRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> dict[str, object]:
+    # Setting the CMS content owner is channel ingestion configuration, gated on
+    # MANAGE_CHANNELS (not the org-re-parenting MANAGE_ORG_MAPPING). Authorize
+    # before the existence check so a missing channel never leaks via a 404.
+    target_scope = AccessScope.channel(youtube_channel_id)
+    if not has_permission(user, Permission.MANAGE_CHANNELS, target_scope, org_index):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.MANAGE_CHANNELS.value}",
+        )
+
+    current_channel = registry.get_channel(youtube_channel_id)
+    if current_channel is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
+
+    # No-op: re-submitting the current value writes nothing and is not audited,
+    # so idempotent retries do not produce a misleading CHANNEL_UPDATED event.
+    if current_channel.content_owner_id == payload.content_owner_id:
+        response = current_channel.to_api()
+        response["audit_event"] = None
+        return response
+
+    try:
+        updated = registry.update_content_owner(
+            youtube_channel_id=youtube_channel_id,
+            content_owner_id=payload.content_owner_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
+        ) from exc
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.CHANNEL_UPDATED,
+        entity_type="youtube_channel",
+        entity_id=youtube_channel_id,
+        scope=target_scope,
+        reason=payload.reason,
+        details={
+            "old_content_owner_id": current_channel.content_owner_id,
+            "new_content_owner_id": updated.content_owner_id,
+        },
+    )
+    response = updated.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
