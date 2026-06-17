@@ -39,3 +39,8 @@ exclude_patterns = ["ci/**", "frontend/dist/**"]
   module_system = "es-modules"
   dependency_file_paths = ["frontend"]
   cyclomatic_complexity_threshold = "high"
+
+[[analyzers]]
+name = "secrets"
+enabled = true
+exclude_patterns = ["ci/preflight.sh", "Docs/superpowers/**"]

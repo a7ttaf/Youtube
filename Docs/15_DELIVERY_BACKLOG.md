@@ -1,8 +1,8 @@
 # Delivery Backlog
 
-## Status (2026-06-15)
+## Status (2026-06-17)
 
-Reconciled through PR #97 (executor Bucket-A audit RLS fix). Marker conventions
+Reconciled through PR #113 (finance/security doc-correctness sweep). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
 
 - `✅ PR #N` — shipped end-to-end at the layer being marked.
@@ -29,9 +29,16 @@ tenant migration chain is `20260516_0001`→`20260517_0001`→`20260518_0001` wi
 enforced in `20260608_0001`/`20260612_0002` (no `platform_audit_logs`, no `20260520_*`);
 `adsense_payments` uses the 4-column key `(tenant_id, source_account_id, month,
 payment_name)`; the `audit_logs` DDL has 13 columns; the explain confidence wire shape is
-`{label, score}`; and the audit-event (38) and role (16) catalogs are complete. No backlog
-item status changed — the broader endpoint/table coverage and per-item tracker
-reconciliation remain a separate follow-up pass.
+`{label, score}`; and the audit-event (38) and role (16) catalogs are complete.
+
+**Coverage + tracker note (2026-06-17, branch `docs/coverage-tracker-reconciliation`):**
+broader coverage and tracker reconciliation sweep: AGENTS.md Neo4j references removed;
+README/Docs/02 stack fiction (Next.js, Celery, asyncpg, RLS-planned) corrected to shipped
+reality; Docs/00 file table updated; Docs/05 fictional output tables and health-state enum
+corrected; Docs/14 fictional symbols replaced; Docs/15 net-revenue "Phase 4 unbuilt" note
+corrected + PR #111/112 entries added + FX scaffold and deduction-ingestion CLI noted +
+12 "this PR" placeholders resolved to PR #98; Docs/16 stack/allocation/RLS decisions
+closed; Docs/01 status header and 12 "this PR" placeholders updated.
 
 ## P0 — Must build first
 
@@ -40,7 +47,7 @@ reconciliation remain a separate follow-up pass.
 - ✅ Channel registry (tenant-scoped, PR #25).
 - ⏳ CMS/outside-CMS status — remaining: schema column (PR #25); outside-CMS
   revenue sourcing partially resolved (Track F 1:1 attribution, PR #87) and the
-  outside-CMS monitor panel surfaces the rest (this PR); many/zero-link channels
+  outside-CMS monitor panel surfaces the rest (PR #98); many/zero-link channels
   stay open (Hard Problem #1).
 - ✅ Group builder (tenant-scoped channel group registry, PR #25 + tests
   in PR #30).
@@ -245,8 +252,11 @@ reconciliation remain a separate follow-up pass.
   audited reason); close-gate backend (PR #8).
 - ✅ Net revenue calculation — shipped: GET /revenue/months/{month}/net-revenue
   (build_month_net_revenue_summary; per-channel gross/net/deduction roll-up,
-  scope-filtered, USD-only). Tax/deduction ingestion + allocation-rule
-  application remain unbuilt (Phase 4).
+  scope-filtered, USD-only). Tax/deduction components are computed and persisted
+  by Track F reconciliation (PR #87); the allocation engine (Phase 4,
+  PRs #58–#76) applies gross_revenue_proportional, post_tax_revenue_proportional, company_level,
+  manual, and no_allocation methods against committed ACCOUNT-scoped allocation
+  snapshots (PAYMENT-scoped allocation remains a separate follow-up).
 - ⏳ Confidence labels — labels ARE computed in services
   (net-revenue B_RECONCILED/D_ESTIMATED/E_MISSING; explain confidence label)
   and returned by the net-revenue/explain APIs; Trace/Explain shows label +
@@ -260,7 +270,7 @@ reconciliation remain a separate follow-up pass.
   drawer UI remains unbuilt (Phase 5).
 - ✅ Smart issue panel — shipped (PR #69): smart-alerts problem panel wired
   into the Command Center from GET /revenue/months/{month}/smart-alerts
-  (build_monthly_smart_alert_summary). Extended this PR with a per-channel
+  (build_monthly_smart_alert_summary). Extended in PR #98 with a per-channel
   `CHANNELS_MISSING_REVENUE_FACTS` HIGH coverage alert (active+revenue_required
   channels with no monthly fact).
 - ✅ Excel export — shipped: GET /exports/{export_id}/finance-workbook.xlsx
@@ -276,7 +286,7 @@ reconciliation remain a separate follow-up pass.
   /exports/{export_id}/branded-slide-pack.pptx (build_branded_slide_pack_pptx;
   cover + content slides with brand bar/footer, persisted + audited). Final
   theming may iterate.
-- ✅ Outside-CMS monitor — shipped (this PR): CommandView monitor panel wired to
+- ✅ Outside-CMS monitor — shipped (PR #98): CommandView monitor panel wired to
   `GET /channels/outside-cms` + `GET /channels/issues` (both VIEW_ANALYTICS-gated,
   scope-filtered, `{items, summary}`, no money/audit), gated on `canViewAnalytics`
   with no-fetch-when-restricted; summary tiles (outside-CMS / missing-official-
@@ -380,7 +390,7 @@ reconciliation remain a separate follow-up pass.
     insert the round-3 -iW fix removed. Eliminating this needs a shared
     serialization point on the month-close path itself (e.g. PostgreSQL
     `SERIALIZABLE`/predicate-range lock, or a per-tenant close-epoch advisory lock
-    both paths take) — a close-path change outside this PR's scope that also needs
+    both paths take) — a close-path change outside the scope of PR #57 that also needs
     owner approval as a finance-close refactor. Risk bounded: no production
     consumer of `list_verified_adsense_account_channels` until Spec 2b; both
     verify/reject and close are dual-gated admin actions. File:
@@ -689,7 +699,7 @@ single P-tier above.
   flow); Review → Trace navigation preselected on the channel. Backend +5 TDD
   org-units tests; frontend 189 Vitest green (10 new RegistryView + 5 hook).
   Mapping-route month-lock enforcement (the pre-existing gap named here) is now
-  CLOSED by this PR — `PATCH /channels/{id}/mapping` rejects (409) a re-parenting
+  CLOSED by PR #98 — `PATCH /channels/{id}/mapping` rejects (409) a re-parenting
   that would rewrite a LOCKED month's attribution. Remaining (definition-blocked):
   bulk inventory import format; "Scoped changes" tile.
 - ⏳ Google source-reported revenue ingestion foundation: `currencies`
@@ -863,6 +873,31 @@ single P-tier above.
     `_require_export_scope_permissions`, which loops the resolved channels
     asserting `AccessScope.channel(cid)`, plus `_access_scope_from_export_scope`
     for the non-group scope->AccessScope mapping).
+- ✅ Surface projection-skipped source rows (PR #111) — `normalize_after_run`
+  previously discarded `result.skipped` silently, so revenue rows for
+  unknown/inactive channels vanished from the fact projection with no
+  audit, alert, or log while the run reported SUCCEEDED. Now emits one
+  `CONNECTOR_JOB_RUN` `ROWS_SKIPPED` summary audit edge (counts by reason,
+  finance-month scoped) + WARNING log. Ingest/finance numbers unchanged;
+  only the silent drop is now observable.
+- ✅ Gate `/security/*` catalog endpoints behind VIEW_AUDIT_LOG (PR #112) —
+  `GET /security/roles` and `GET /security/permissions` previously returned
+  the full role→permission catalog (including `sensitive`/`auditOnUse` flags)
+  to any authenticated user. Both now require `VIEW_AUDIT_LOG` at global
+  scope (fail-closed 403), per `ROLE_PERMISSION_MODEL.md`. SPA does not
+  consume either endpoint so no UI impact.
+- ⏳ FX exchange-rate scaffold — `backend/ums_smart_revenue/finance/exchange_rates.py`,
+  `api/exchange_rates.py`, and migration `20260513_0004_currency_exchange_rates`
+  exist as legacy scaffolding (`POST /exchange-rates/sync`,
+  `GET /exchange-rates/latest`). The B1 pivot (PR #42) retired FX-rate-led
+  official finance design; public/provider FX rates are not an official
+  source for monthly revenue, tax, or deduction. The scaffold remains for a
+  future display-only conversion path. Remaining: display conversion wiring
+  (see `Docs/18_MULTI_CURRENCY_ENGINE.md`).
+- ✅ Deduction-ingestion CLI — `scripts/run_deduction_ingestion.py` is an
+  operational CLI for importing deduction components from `source_rows`,
+  `bank`, and `gap` data sources via `DeductionIngestionService`. Ships
+  alongside the Track F reconciliation service (PR #87).
 
 ## Hard problems to solve early
 
@@ -870,7 +905,7 @@ single P-tier above.
    (PR #87) attributes outside-CMS revenue via the single verified
    account->channel link (1:1 ALLOCATION writes the gross fact; many-link ->
    skip + warn). Channels with zero or multiple verified links remain open, and
-   the CommandView outside-CMS monitor panel (this PR) now surfaces the
+   the CommandView outside-CMS monitor panel (PR #98) now surfaces the
    outstanding "outside CMS + missing source" set.
 2. ⏳ System-managed report availability and retention — remaining: raw
    report file ORM + repo (PR #32); ingestion + retention policy not

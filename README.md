@@ -11,10 +11,10 @@ This service ingests YouTube + AdSense data, reconciles it against bank movement
 | Aspect | Value |
 |---|---|
 | Backend | Python 3.14 · FastAPI · SQLAlchemy 2 · Alembic |
-| Frontend | Next.js 16 · React 19 · TypeScript 6 *(in progress — Phase 5)* |
-| Storage | PostgreSQL 18 (single source of truth) · Redis 8.6 (cache + pub/sub) · MinIO (S3-compatible object store, future) |
-| Background jobs | Celery 5.6 *(workers wired in Phase 2)* |
-| Multi-tenant | Planned Phase S2: Postgres Row-Level Security with `tenant_id` on tenant-scoped tables |
+| Frontend | Vite 8 · React 19 · TypeScript 6 (shipped) |
+| Storage | PostgreSQL 18 (single source of truth) · local file store (export artifacts) |
+| Background jobs | In-process `ThreadPoolExecutor` (bounded queue; off by default via `UMS_CONNECTOR_JOB_EXECUTOR_ENABLED` env var) |
+| Multi-tenant | Postgres Row-Level Security with `FORCE ROW LEVEL SECURITY` on 25 tenant-scoped tables (shipped PR #106) |
 | Multi-currency | AED · USD · EUR · GBP · SAR · EGP — extensible. All math in `Decimal`. |
 | Auth modes | `headers` (dev / bootstrap) · `database` (production; SQL-backed principal) |
 | License | See [LICENSE](LICENSE) |
@@ -25,20 +25,20 @@ For the long-form vision, read [PRODUCT.md](PRODUCT.md) and [DESIGN.md](DESIGN.m
 
 ## Quickstart
 
-> Requires Python 3.14, PostgreSQL 18, Redis 8, and [uv](https://docs.astral.sh/uv/) installed locally. Start PostgreSQL and Redis with your local service manager before launching the API.
+> Requires Python 3.14, PostgreSQL 18, and [uv](https://docs.astral.sh/uv/) installed locally. Start PostgreSQL with your local service manager before launching the API.
 
 ```powershell
 # 1) Install Python deps with uv
 uv sync --extra dev --extra test --extra lint
 
-# 2) Start Postgres + Redis outside this repo.
+# 2) Start PostgreSQL outside this repo.
 #    Verify the database accepts connections before running migrations.
 
 # 3) Configure environment (see below for the full env-var matrix)
 $env:PYTHONPATH = (Resolve-Path "backend").Path
-$env:UMS_DATABASE_URL = "postgresql+asyncpg://ums:ums@localhost:5432/ums_smart_revenue"
+$env:UMS_DATABASE_URL = "postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
 $env:UMS_AUTHZ_SOURCE = "headers"
-$env:UMS_TRUSTED_GATEWAY_TOKEN = "dev-only-token-set-locally"
+$env:UMS_TRUSTED_GATEWAY_TOKEN = "dev-only-token" # required for protected routes; set a real value
 
 # 4) Run migrations
 uv run alembic upgrade head
@@ -66,7 +66,7 @@ uv run pytest -q tests/api
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `UMS_DATABASE_URL` | yes (prod) | none | SQLAlchemy URL for PostgreSQL. Use `postgresql+asyncpg://…` for the async driver. |
+| `UMS_DATABASE_URL` | yes (prod) | none | SQLAlchemy URL for PostgreSQL. Use `postgresql+psycopg://…` (psycopg3 binary driver). Update `.env.example` to match. |
 | `UMS_AUTHZ_SOURCE` | no | `headers` | `headers` for dev/bootstrap, `database` for production (loads principal + roles from SQL). |
 | `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. Also read by `frontend/vite.config.ts` in Node to inject the dev proxy `X-UMS-Trusted-Gateway-Token` header. **Never use a `VITE_*` alias** — any `VITE_*` env is embedded in the client bundle. |
 | `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` | required for Google connector runs | none | UUID used as the connector service principal for audit events. Optional at process boot so non-connector workloads can start; connector execution fails closed at runtime when unset, and malformed values fail settings load. |
@@ -107,7 +107,7 @@ deploy/helm/              Helm chart for Kubernetes (in progress)
 
 ## How the auth model works (one-paragraph version)
 
-A `Principal` has a user id, email, role assignments, and direct permission grants. Role assignments and direct grants carry an access scope (global, company, sector, channel, finance month, or connector); tenant-id modeling is planned for Phase S2 and is not yet an implemented isolation guarantee. Each protected route declares the permission it needs (`require_permission(Permission.LOCK_FINANCE_MONTH)`) plus, often, a scope predicate (`can_view_channel_revenue(principal, channel_id)`). The `auth/policy.py` module is the single source of truth for that decision. Every sensitive read or write writes an `AuditLogEntry` with the actor, scope, sensitive flag, and (for writes) a non-blank reason. Production runs `UMS_AUTHZ_SOURCE=database` so headers cannot be spoofed.
+A `Principal` has a user id, email, role assignments, and direct permission grants. Role assignments and direct grants carry an access scope (global, company, sector, channel, finance month, or connector). Tenant isolation is enforced at the database layer via Postgres Row-Level Security with `FORCE ROW LEVEL SECURITY` on 25 tenant-scoped tables (shipped PR #106). Each protected route declares the permission it needs (`require_permission(Permission.LOCK_FINANCE_MONTH)`) plus, often, a scope predicate (`can_view_channel_revenue(principal, channel_id)`). The `auth/policy.py` module is the single source of truth for that decision. Every sensitive read or write writes an `AuditLogEntry` with the actor, scope, sensitive flag, and (for writes) a non-blank reason. Production runs `UMS_AUTHZ_SOURCE=database` so headers cannot be spoofed.
 
 For the full role/permission matrix, see [Docs/security/PERMISSION_MATRIX.md](Docs/security/PERMISSION_MATRIX.md).
 

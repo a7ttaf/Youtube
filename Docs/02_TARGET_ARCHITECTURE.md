@@ -21,14 +21,14 @@ Operational DB / Warehouse
 
 ## Recommended stack
 
-| Layer | Recommended option |
+| Layer | Shipped stack |
 |---|---|
-| Frontend | Next.js / React |
-| Backend | Python FastAPI or Node.js/NestJS |
-| App database | PostgreSQL |
-| Analytics warehouse | BigQuery or PostgreSQL partitioned tables |
-| Jobs | Celery/RQ, Temporal, Airflow, or Cloud Scheduler + workers |
-| Object storage | Google Cloud Storage / S3-compatible storage |
+| Frontend | Vite 8 + React 19 + TypeScript 6 |
+| Backend | Python 3.14 FastAPI + SQLAlchemy 2 + Alembic |
+| App database | PostgreSQL 18 (sole source of truth) |
+| Analytics warehouse | PostgreSQL (no separate warehouse) |
+| Jobs | In-process `ThreadPoolExecutor` (bounded; off by default) |
+| Object storage | Local file store (export artifacts; configurable via `UMS_EXPORT_ARTIFACT_DIR`) |
 | Exports | Excel templates, PDF generator, PPTX generator |
 
 ## System responsibilities

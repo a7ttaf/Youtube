@@ -4,8 +4,8 @@ Codex operates in this repository as the director software architect,
 backend reviewer, and validation owner for the UMS Smart Revenue project.
 
 The goal is not only to make code work. The goal is to keep revenue numbers,
-authorization, audit trails, database state, graph projections, and delivery
-docs correct before any files are uploaded or pushed.
+authorization, audit trails, database state, and delivery docs correct before
+any files are uploaded or pushed.
 
 ## System Context
 
@@ -18,9 +18,10 @@ Repository shape:
 
 ```txt
 backend/       Python FastAPI application, SQLAlchemy, Alembic, services
+frontend/      Vite + React SPA (TypeScript)
 Docs/          Architecture, data model, workflows, security, API contracts
 mockups/       Product and UI planning assets
-tests/         API, auth, finance, graph, and repository tests
+tests/         API, auth, finance, and repository tests
 pyproject.toml Runtime and tooling contract
 alembic.ini    Migration entrypoint
 ```
@@ -28,17 +29,15 @@ alembic.ini    Migration entrypoint
 Architecture:
 
 ```txt
-Dashboard / API client
+Frontend SPA (Vite + React)
   -> FastAPI routes
   -> service and repository layers
-  -> PostgreSQL operational database / warehouse
-  -> read-only Neo4j graph projection
+  -> PostgreSQL operational database (source of truth)
 ```
 
-PostgreSQL or the operational warehouse is the financial source of truth.
-Neo4j is a read-only graph projection for exploration and visualization. Neo4j
-must never grant authorization or become the source of truth for revenue,
-payment, lock, override, or allocation decisions.
+PostgreSQL is the sole source of truth for finance, audit, tenancy, and
+authorization state. SQL-backed read models serve hierarchy, reconciliation,
+explanation, and analytics views.
 
 ## Non-Negotiable Engineering Rules
 
@@ -51,18 +50,16 @@ payment, lock, override, or allocation decisions.
 4. Preserve every financial number's source, formula, confidence, and export
    value.
 5. Never calculate official finance results directly in the UI.
-6. Never use Neo4j as the source of truth for financial calculations,
-   authorization, month locks, manual overrides, or audit events.
-7. Never weaken authorization, trusted-gateway validation, database-backed
+6. Never weaken authorization, trusted-gateway validation, database-backed
    principal loading, scope checks, or fail-closed behavior to pass a test.
-8. Never skip, xfail, delete, or loosen tests to make CI pass.
-9. Never push, upload, open a PR, or claim review readiness before personally
+7. Never skip, xfail, delete, or loosen tests to make CI pass.
+8. Never push, upload, open a PR, or claim review readiness before personally
    running the required local validation for the changed scope.
-10. Never treat remote CI, CodeRabbit, another assistant, or a previous run as a
-    substitute for current local verification.
-11. Never hide a discovered bug in the touched scope. Fix it directly or record
+9. Never treat remote CI, CodeRabbit, another assistant, or a previous run as a
+   substitute for current local verification.
+10. Never hide a discovered bug in the touched scope. Fix it directly or record
     the exact file, risk, and next PR recommendation.
-12. Never remove planning docs or mockups unless the operator explicitly asks
+11. Never remove planning docs or mockups unless the operator explicitly asks
     for that deletion.
 
 ## Required Workflow
@@ -74,7 +71,7 @@ Before modifying code, inspect the relevant files and identify:
 - The purpose and architectural layer of each file.
 - Related routes, services, repositories, models, migrations, docs, and tests.
 - Whether the change touches finance numbers, authz, audit, SQLAlchemy,
-  Alembic, PostgreSQL, Neo4j projection data, connectors, exports, or docs.
+  Alembic, PostgreSQL, connectors, exports, or docs.
 - Whether database rows, enum/status values, JSON shapes, API responses, or
   authorization behavior change.
 - Which tests and docs must change with the implementation.
@@ -88,7 +85,7 @@ Before implementation, determine:
 - What files should change.
 - What files must not change.
 - Whether logic belongs in API routes, services, repositories, auth, finance,
-  graph, reports, config, or tests.
+  reports, config, or tests.
 - Whether the change affects the OPUS repo, this UMS repo, or both.
 - Which exact validation commands will be run before upload or push.
 - Whether a migration, data reset, seed, backfill, rollback note, or docs update
@@ -130,8 +127,6 @@ Changed-scope additions:
   fail-closed storage errors where practical.
 - Finance changes require tests for source, formula, confidence, locks,
   overrides, duplicate records, missing data, rounding, and export/API shape.
-- Neo4j or graph projection changes require read-only query validation and
-  proof that graph output cannot mutate source-of-truth data.
 - Documentation-only changes require doc diff hygiene, accurate commands,
   accurate dates/statuses, and `git diff --check`.
 
@@ -165,15 +160,13 @@ A blast-radius review is mandatory when changing:
   values, status values, timestamps, or JSON payloads.
 - Query filters, inserts, updates, deletes, locks, reconciliation behavior,
   audit writes, principal loading, direct permission grants, or scope logic.
-- Any field that contributes to finance totals, confidence, exports, or graph
-  projections.
+- Any field that contributes to finance totals, confidence, or exports.
 
 For database-related changes, explicitly answer:
 
 - Which tables and ORM models are affected?
 - Is PostgreSQL still the source of truth?
 - Could existing migrations, tests, seed data, or docs break?
-- Could Neo4j projection code misread or over-trust the changed shape?
 - Could authorization or audit behavior become more permissive?
 - Could finance results, month locks, manual overrides, or payment matching
   change?
@@ -183,9 +176,9 @@ For database-related changes, explicitly answer:
 
 State one of:
 
-- `No graph projection impact detected.`
-- `Potential graph projection impact: review <file/table/field>.`
-- `Confirmed graph projection update required: <file/function/query>.`
+- `No migration/backfill required.`
+- `Potential migration impact: review <file/table/field>.`
+- `Confirmed migration required: <file/function/query>.`
 - `Unsafe without migration/backfill.`
 - `Disposable pre-alpha data reset accepted: reset/reseed required.`
 
@@ -212,8 +205,7 @@ Rules:
 Do not add decorative comments above trivial code. Add a concise contract block
 directly above meaningful new or modified blocks: API endpoints, service entry
 points, repository methods, database writes, transactions, authorization logic,
-graph projection logic, finance calculations, reconciliation, exports, and
-non-obvious fixes.
+finance calculations, reconciliation, exports, and non-obvious fixes.
 
 Use this Python format exactly:
 
@@ -222,7 +214,7 @@ Use this Python format exactly:
 # Purpose: Clear, concise explanation of what this block does.
 # Database/ORM: Related SQLAlchemy models/tables, or "None".
 # Standards: Logging, error handling, typed boundaries, and layer ownership.
-# Blast Radius: Authorization, finance, audit, Neo4j, exports, or "None detected".
+# Blast Radius: Authorization, finance, audit, exports, or "None detected".
 # Connections:
 #   - File: backend/ums_smart_revenue/config/settings.py -> Explain dependency.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> Explain API contract link.
@@ -268,7 +260,6 @@ rollback/reset notes, and next recommendations.
   `PRODUCT.md`.
 - Runtime and tool versions are declared in `pyproject.toml`.
 - Alembic migrations live under `backend/ums_smart_revenue/db/alembic/`.
-- PostgreSQL/warehouse data is source of truth.
-- Neo4j is a read-only projection.
+- PostgreSQL is the sole source of truth.
 - Mockups and Markdown planning files are active project assets, not disposable
   clutter.
