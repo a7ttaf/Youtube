@@ -2477,15 +2477,16 @@ def missing_revenue_fact_channel_count_and_sample(
 
 
 # ============================================================================
-# Purpose: Read connector normalization ROWS_SKIPPED audit edges for a finance
-#   month and aggregate them into the smart-alert builder's source-row skip
-#   signal. Filtering the JSON lifecycle in Python keeps the read portable
-#   across SQLite tests and PostgreSQL production while the SQL predicates stay
-#   tenant/month/event scoped.
+# Purpose: Read connector normalization audit edges for a finance month and
+#   derive the current smart-alert source-row skip signal from the newest
+#   relevant connector-run edge only. Filtering the JSON lifecycle in Python
+#   keeps the read portable across SQLite tests and PostgreSQL production while
+#   the SQL predicates stay tenant/month/event scoped.
 # Database/ORM: Read-only SELECT on AuditLogORM / audit_logs; no locks or
 #   writes. PostgreSQL remains the source of truth for audit observability.
-# Standards: Tenant-scoped via _resolve_smart_alert_tenant_id; ignores malformed
-#   or zero-count audit details instead of making the dashboard fail on legacy
+# Standards: Tenant-scoped via _resolve_smart_alert_tenant_id; a newer clean
+#   connector edge clears older ROWS_SKIPPED history; ignores malformed or
+#   zero-count audit details instead of making the dashboard fail on legacy
 #   audit rows; preserves valid reason counts exactly.
 # Blast Radius: Finance dashboard read surface; no finance calculation,
 #   authorization, export, ingestion, or audit-write behavior changes.
@@ -2505,11 +2506,12 @@ def skipped_source_row_count_and_reasons(
 
     Reads connector `ROWS_SKIPPED` audit edges scoped by tenant,
     `CONNECTOR_JOB_RUN` event type, `FINANCE_MONTH` scope, and the requested
-    month. The function returns the **latest** ROWS_SKIPPED edge only — not
+    month. The function returns the newest connector-run signal only — not
     the sum across re-runs — because fact projection is idempotent and each
     connector run emits its own edge for the same month; aggregating across
     runs would over-count stale or duplicate signals (review threads #1 and
-    #10). Malformed or zero-count rows are tolerated: `skipped_count` and
+    #10). A newer clean connector edge clears older `ROWS_SKIPPED` history.
+    Malformed or zero-count rows are tolerated: `skipped_count` and
     `skipped_by_reason` are reconciled via `max()` so the returned pair is
     internally consistent (review thread #8).
 
@@ -2527,13 +2529,9 @@ def skipped_source_row_count_and_reasons(
         returned in deterministic key-sorted order.
     """
     tenant_id = _resolve_smart_alert_tenant_id()
-    # FIX: Read only the most recent ROWS_SKIPPED edge for the month so a
-    # connector re-run (which is idempotent for fact projection) does not
-    # inflate the dashboard alert by summing historical audit rows. The
-    # ORDER BY created_at DESC, id DESC picks the latest projection signal;
-    # lifecycle filtering stays in Python so the read remains portable across
-    # SQLite tests and PostgreSQL production (lifecycle lives inside the JSON
-    # `details` column which is text in SQLite and jsonb in PG).
+    # FIX: Read only the newest relevant connector edge for the month. If that
+    # newest edge is not ROWS_SKIPPED, a clean re-run has superseded the older
+    # skipped-row audit history and the dashboard must not show a stale alert.
     details_rows = session.scalars(
         select(AuditLogORM.details)
         .where(
@@ -2546,9 +2544,12 @@ def skipped_source_row_count_and_reasons(
     ).all()
     latest_details: dict[str, object] | None = None
     for details in details_rows:
-        if isinstance(details, dict) and details.get("lifecycle") == "ROWS_SKIPPED":
-            latest_details = details
-            break
+        if not isinstance(details, dict):
+            continue
+        if details.get("lifecycle") != "ROWS_SKIPPED":
+            return 0, {}
+        latest_details = details
+        break
     if latest_details is None:
         return 0, {}
     reason_counts = _skipped_reason_counts_from_details(latest_details)

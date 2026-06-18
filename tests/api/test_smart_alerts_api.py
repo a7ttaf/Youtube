@@ -320,11 +320,10 @@ def test_month_smart_alerts_flag_channel_missing_revenue_facts(tmp_path):
 def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
     """The latest per-month ROWS_SKIPPED edge surfaces the SOURCE_ROWS_SKIPPED alert.
 
-    The alert is gated by VIEW_AUDIT_LOG. The latest edge wins (no
+    The alert is gated by VIEW_AUDIT_LOG. The latest skipped edge wins (no
     double-counting across re-runs), so only ``run-skipped-b`` contributes
     even though ``run-skipped-a`` reported a different breakdown. The
-    other-month and FINISHED lifecycle rows are filtered by scope/lifecycle
-    and do not contribute.
+    other-month row is filtered by scope and does not contribute.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -387,20 +386,6 @@ def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
                     sensitive=True,
                     created_at=datetime(2026, 4, 3, tzinfo=UTC),
                 ),
-                AuditLogORM(
-                    id=uuid4(),
-                    tenant_id=tenant_id,
-                    user_id=USER_ID,
-                    event_type="CONNECTOR_JOB_RUN",
-                    entity_type="connector_run",
-                    entity_id="run-finished",
-                    scope_type="finance-month",
-                    scope_id="2026-03",
-                    reason="connector finished",
-                    details={"lifecycle": "FINISHED", "status": "SUCCEEDED"},
-                    sensitive=True,
-                    created_at=datetime(2026, 4, 4, tzinfo=UTC),
-                ),
             ]
         )
         session.commit()
@@ -428,6 +413,62 @@ def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
         "skipped_count": 1,
         "skipped_by_reason": {},
     }
+
+
+def test_month_smart_alerts_clear_stale_skipped_source_after_clean_rerun(tmp_path):
+    """A later clean connector-run edge clears older append-only ROWS_SKIPPED history."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    tenant_id = UUID(UMS_TENANT_ID)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-skipped",
+                    scope_type="finance-month",
+                    scope_id="2026-03",
+                    reason="connector normalize: source rows skipped during projection",
+                    details={
+                        "lifecycle": "ROWS_SKIPPED",
+                        "skipped_count": 3,
+                        "skipped_by_reason": {"unknown_channel": 3},
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 1, tzinfo=UTC),
+                ),
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-clean",
+                    scope_type="finance-month",
+                    scope_id="2026-03",
+                    reason="connector finished",
+                    details={"lifecycle": "FINISHED", "status": "SUCCEEDED"},
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 2, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_approver", "global"),
+    )
+
+    assert response.status_code == 200
+    codes = [alert["code"] for alert in response.json()["alerts"]]
+    assert "SOURCE_ROWS_SKIPPED" not in codes
 
 
 def test_month_smart_alerts_omit_skipped_source_alert_without_audit_permission(
