@@ -46,23 +46,24 @@ def _normalize_legacy_allocation_method_casing() -> int:
     the allowlist is functionally a valid canonical method and must be
     migrated forward to its lowercase form before the CHECK is added.
     """
-    bind = op.get_bind()
-    with bind.begin() as conn:
-        result = conn.execute(
-            sa.text(
-                "UPDATE finance_month_close "
-                "SET allocation_method = lower(allocation_method) "
-                "WHERE allocation_method IS NOT NULL "
-                "AND lower(allocation_method) IN :allowed_methods "
-                "AND allocation_method <> lower(allocation_method)"
-            ).bindparams(
-                bindparam(
-                    "allowed_methods",
-                    value=tuple(_ALLOCATION_METHOD_VALUES),
-                    expanding=True,
-                )
-            ),
-        )
+    # Alembic already manages the transaction around upgrade(); we must not
+    # open a nested transaction on the same connection. Execute directly on
+    # op.get_bind() and read the rowcount from the result.
+    result = op.get_bind().execute(
+        sa.text(
+            "UPDATE finance_month_close "
+            "SET allocation_method = lower(allocation_method) "
+            "WHERE allocation_method IS NOT NULL "
+            "AND lower(allocation_method) IN :allowed_methods "
+            "AND allocation_method <> lower(allocation_method)"
+        ).bindparams(
+            bindparam(
+                "allowed_methods",
+                value=tuple(_ALLOCATION_METHOD_VALUES),
+                expanding=True,
+            )
+        ),
+    )
     return int(result.rowcount or 0)
 
 
@@ -72,23 +73,23 @@ def _invalid_allocation_method_count() -> int:
     Assumes :func:`_normalize_legacy_allocation_method_casing` has already
     folded any case-variant canonical methods into their lowercase form.
     """
-    bind = op.get_bind()
-    with bind.begin() as conn:
-        return int(
-            conn.execute(
-                sa.text(
-                    "SELECT COUNT(*) FROM finance_month_close "
-                    "WHERE allocation_method IS NOT NULL "
-                    "AND allocation_method NOT IN :allowed_methods"
-                ).bindparams(
-                    bindparam(
-                        "allowed_methods",
-                        value=tuple(_ALLOCATION_METHOD_VALUES),
-                        expanding=True,
-                    )
-                ),
-            ).scalar_one()
+    return int(
+        op.get_bind()
+        .execute(
+            sa.text(
+                "SELECT COUNT(*) FROM finance_month_close "
+                "WHERE allocation_method IS NOT NULL "
+                "AND allocation_method NOT IN :allowed_methods"
+            ).bindparams(
+                bindparam(
+                    "allowed_methods",
+                    value=tuple(_ALLOCATION_METHOD_VALUES),
+                    expanding=True,
+                )
+            ),
         )
+        .scalar_one()
+    )
 
 
 # ============================================================================
