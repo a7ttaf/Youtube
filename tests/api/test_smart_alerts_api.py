@@ -318,7 +318,14 @@ def test_month_smart_alerts_flag_channel_missing_revenue_facts(tmp_path):
 
 
 def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
-    """ROWS_SKIPPED connector audit edges become a finance dashboard smart alert."""
+    """The latest per-month ROWS_SKIPPED edge surfaces the SOURCE_ROWS_SKIPPED alert.
+
+    The alert is gated by VIEW_AUDIT_LOG. The latest edge wins (no
+    double-counting across re-runs), so only ``run-skipped-b`` contributes
+    even though ``run-skipped-a`` reported a different breakdown. The
+    other-month and FINISHED lifecycle rows are filtered by scope/lifecycle
+    and do not contribute.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -399,9 +406,12 @@ def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
         session.commit()
     client = TestClient(create_app(database_url=database_url))
 
+    # finance_approver has VIEW_AUDIT_LOG (no VIEW_SENSITIVE_AUDIT_PAYLOADS),
+    # so the alert surfaces with the count visible and the reason breakdown
+    # redacted to an empty dict.
     response = client.get(
         "/revenue/months/2026-03/smart-alerts",
-        headers=auth_headers("finance_viewer", "global"),
+        headers=auth_headers("finance_approver", "global"),
     )
 
     assert response.status_code == 200
@@ -415,12 +425,101 @@ def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
     assert skipped["severity"] == "HIGH"
     assert skipped["source"] == "connector_job_run"
     assert skipped["details"] == {
-        "skipped_count": 3,
-        "skipped_by_reason": {
-            "missing_channel_id": 1,
-            "unknown_channel": 2,
-        },
+        "skipped_count": 1,
+        "skipped_by_reason": {},
     }
+
+
+def test_month_smart_alerts_omit_skipped_source_alert_without_audit_permission(
+    tmp_path,
+):
+    """finance_viewer (no VIEW_AUDIT_LOG) must not see the audit-derived alert."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    tenant_id = UUID(UMS_TENANT_ID)
+    with Session(engine) as session:
+        session.add(
+            AuditLogORM(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                user_id=USER_ID,
+                event_type="CONNECTOR_JOB_RUN",
+                entity_type="connector_run",
+                entity_id="run-skipped-only",
+                scope_type="finance-month",
+                scope_id="2026-03",
+                reason="connector normalize: source rows skipped during projection",
+                details={
+                    "lifecycle": "ROWS_SKIPPED",
+                    "skipped_count": 5,
+                    "skipped_by_reason": {"unknown_channel": 5},
+                },
+                sensitive=True,
+                created_at=datetime(2026, 4, 2, tzinfo=UTC),
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 200
+    codes = [alert["code"] for alert in response.json()["alerts"]]
+    assert "SOURCE_ROWS_SKIPPED" not in codes
+
+
+def test_month_smart_alerts_audit_viewer_redacts_reason_breakdown(tmp_path):
+    """finance_approver has VIEW_AUDIT_LOG but not VIEW_SENSITIVE_AUDIT_PAYLOADS.
+
+    Per-reason counts are redacted; the total count is still surfaced so
+    the dashboard reports the magnitude of the skip without leaking the
+    sensitive per-reason breakdown.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    tenant_id = UUID(UMS_TENANT_ID)
+    with Session(engine) as session:
+        session.add(
+            AuditLogORM(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                user_id=USER_ID,
+                event_type="CONNECTOR_JOB_RUN",
+                entity_type="connector_run",
+                entity_id="run-skipped-sensitive",
+                scope_type="finance-month",
+                scope_id="2026-03",
+                reason="connector normalize: source rows skipped during projection",
+                details={
+                    "lifecycle": "ROWS_SKIPPED",
+                    "skipped_count": 5,
+                    "skipped_by_reason": {"unknown_channel": 5},
+                },
+                sensitive=True,
+                created_at=datetime(2026, 4, 2, tzinfo=UTC),
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_approver", "global"),
+    )
+
+    assert response.status_code == 200
+    skipped = next(
+        (alert for alert in response.json()["alerts"] if alert["code"] == "SOURCE_ROWS_SKIPPED"),
+        None,
+    )
+    assert skipped is not None
+    assert skipped["details"]["skipped_count"] == 5
+    assert skipped["details"]["skipped_by_reason"] == {}
 
 
 def test_coverage_alert_excludes_inactive_and_non_required_channels(tmp_path):

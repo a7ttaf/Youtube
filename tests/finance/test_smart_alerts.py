@@ -255,6 +255,54 @@ def test_smart_alerts_reject_negative_missing_channel_count():
         build_alerts(missing_revenue_fact_channel_count=-1)
 
 
+def test_smart_alerts_reconcile_skipped_count_with_reason_breakdown():
+    """Mismatch between count and sum(reason_counts) is reconciled via max().
+
+    Either side may legitimately disagree with the other on legacy or
+    malformed audit rows (for example a connector that wrote `skipped_count`
+    but lost the per-reason breakdown during a payload migration). The alert
+    must report a total that is internally consistent with the breakdown.
+    """
+    # count > sum_reasons: prefer count.
+    summary = build_alerts(
+        skipped_source_row_count=7,
+        skipped_source_rows_by_reason={"unknown_channel": 2},
+    )
+    skipped = next(alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED")
+    assert skipped.details == {
+        "skipped_count": 7,
+        "skipped_by_reason": {"unknown_channel": 2},
+    }
+
+    # sum_reasons > count: prefer reasons total (do not under-report).
+    summary = build_alerts(
+        skipped_source_row_count=2,
+        skipped_source_rows_by_reason={
+            "unknown_channel": 2,
+            "missing_channel_id": 4,
+        },
+    )
+    skipped = next(alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED")
+    assert skipped.details == {
+        "skipped_count": 6,
+        "skipped_by_reason": {
+            "missing_channel_id": 4,
+            "unknown_channel": 2,
+        },
+    }
+
+    # Equal values: report the same number on both sides.
+    summary = build_alerts(
+        skipped_source_row_count=3,
+        skipped_source_rows_by_reason={"unknown_channel": 3},
+    )
+    skipped = next(alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED")
+    assert skipped.details == {
+        "skipped_count": 3,
+        "skipped_by_reason": {"unknown_channel": 3},
+    }
+
+
 def test_smart_alerts_return_clear_when_payment_bank_and_close_are_clean():
     summary = build_alerts(
         payment_match=payment_summary(

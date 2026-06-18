@@ -251,10 +251,17 @@ finance-month scope. The response includes alert codes such as
 `CHANNELS_MISSING_REVENUE_FACTS` flags active, revenue-required channels that
 have no revenue fact for the month (per-channel coverage, distinct from the
 month-level `MISSING_REVENUE_SOURCE`); its details report `channel_count` and a
-sorted `sample_channel_ids` list capped at 20. `SOURCE_ROWS_SKIPPED` aggregates
-connector `CONNECTOR_JOB_RUN` audit edges with `lifecycle=ROWS_SKIPPED` for the
-requested finance month; its details report `skipped_count` and
-`skipped_by_reason`. `REVENUE_TREND_ANOMALY` compares
+sorted `sample_channel_ids` list capped at 20. `SOURCE_ROWS_SKIPPED` is gated
+on global `audit.view` so the audit-derived signal cannot leak to viewers
+without explicit audit authorization; without that permission the alert is
+omitted entirely. When `audit.view` is granted but `audit.view_sensitive_payloads`
+is not, the alert surfaces only the total `skipped_count` and the per-reason
+breakdown (`skipped_by_reason`) is redacted to an empty map, mirroring the
+redaction rule applied to `/audit/events`. The latest
+`CONNECTOR_JOB_RUN` audit edge with `lifecycle=ROWS_SKIPPED` for the requested
+finance month is the only signal consumed; historical or re-run edges do not
+compound, and `skipped_count` is reconciled against `sum(skipped_by_reason)`
+via `max()` so the details are internally consistent. `REVENUE_TREND_ANOMALY` compares
 each channel's selected primary current-month SQL revenue fact with the
 selected primary previous-month
 SQL revenue fact and reports only channel ids plus current/prior gross revenue

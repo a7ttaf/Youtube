@@ -157,6 +157,16 @@ def _export_job(*, scope_type, scope_channel_ids):
     )
 
 
+def _test_export_user() -> UserPrincipal:
+    """Build a minimal UserPrincipal for export test scenarios.
+
+    The audit-derived smart-alert signal requires VIEW_AUDIT_LOG, so the
+    default export test user carries the permission to keep the existing
+    alert surface stable.
+    """
+    return UserPrincipal(user_id="user-1", email="exp@example.com")
+
+
 def _seed_out_of_scope_account_allocation(session):
     """A second channel ("chB") with gross but no source net + an ACCOUNT
     deduction mapped to it via a VERIFIED link. It is outside a chA-scoped
@@ -236,6 +246,7 @@ def test_scoped_export_excludes_out_of_scope_account_allocation(tmp_path):
         _seed_out_of_scope_account_allocation(session)
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
+            user=_test_export_user(),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
@@ -257,6 +268,7 @@ def test_export_net_reflects_channel_direct_and_account_deductions(tmp_path):
         _seed_missing_net_with_components(session)
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
@@ -301,6 +313,7 @@ def test_export_bundle_locked_month_uses_committed_snapshot_provenance(tmp_path)
         _commit_snapshot_and_lock(session)
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
@@ -316,6 +329,7 @@ def test_export_bundle_open_month_uses_live_compute_provenance(tmp_path):
         _seed_missing_net_with_components(session)
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
@@ -334,6 +348,7 @@ def test_workbook_preview_payload_carries_allocation_provenance(tmp_path):
         _commit_snapshot_and_lock(session)
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
@@ -392,6 +407,7 @@ def test_export_committed_post_tax_month_renders_only_disclosure_token(tmp_path)
         _commit_post_tax_snapshot_and_lock(session)
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
@@ -477,6 +493,7 @@ def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):
         session.commit()
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
@@ -525,6 +542,7 @@ def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
         # Scoped export: frozen channel_ids = ("chA",) only.
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
+            user=_test_export_user(),
             session=session,
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
@@ -545,6 +563,7 @@ def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
     # And the global export (no frozen channel set) still surfaces it.
     global_summaries = _build_finance_source_summaries_for_export(
         export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        user=_test_export_user(),
         session=session,
         org_index=OrgAccessIndex(),
         group_registry=ChannelGroupRegistry(),

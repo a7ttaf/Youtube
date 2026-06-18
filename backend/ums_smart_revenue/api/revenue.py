@@ -1,3 +1,30 @@
+# ============================================================================
+# Purpose: Serve the finance revenue read API (facts, allocation, smart-alerts,
+#   monthly summaries, reconciliation, explanation). Routes are thin: they
+#   parse input, enforce typed permissions + tenant/scope boundaries, call
+#   finance + repository services, and translate typed domain errors into
+#   HTTP responses. No finance math or audit writes happen here.
+# Database/ORM: Reads/writes via SQLAlchemy repositories
+#   (RevenueFactRepository, AdSensePaymentRepository, BankReconciliationRepository,
+#   ManualOverrideRepository, FinanceMonthCloseRepository, AllocationRepository)
+#   plus tenant-scoped AuditLogORM reads for smart-alert inputs.
+# Standards: smart-alerts four-permission gate (VIEW_REVENUE/VIEW_CONFIDENCE
+#   global + VIEW_FINALIZED_PAYMENTS/VIEW_BANK_RECONCILIATION month-scoped);
+#   audit-derived inputs gated by VIEW_AUDIT_LOG with VIEW_SENSITIVE_AUDIT_PAYLOADS
+#   controlling reason redaction; tenant_id resolved once per request; month
+#   validated to YYYY-MM; typed errors translated to 4xx via HTTPException.
+# Blast Radius: Finance read surface, audit observability surface, and the
+#   smart-alerts authorization boundary. No finance writes, no Neo4j, no
+#   matching/close behavior change.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/* -> pure builders (smart_alerts,
+#     payment_matching, bank_reconciliation, net_revenue, manual_overrides).
+#   - File: backend/ums_smart_revenue/api/exports.py -> mirrors the smart-alerts
+#     read path so exported workbooks surface the same alerts.
+#   - File: backend/ums_smart_revenue/auth/audit.py -> audit-log gate pattern
+#     that this module follows for the audit-derived skipped-row signal.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> endpoint contracts and alert codes.
+# ============================================================================
 import re
 from datetime import date
 from decimal import Decimal
@@ -1066,6 +1093,33 @@ def get_month_payment_match(
     return summary_api
 
 
+# ============================================================================
+# Purpose: Serve the monthly smart-alerts dashboard endpoint. Aggregates
+#   cross-domain finance health signals (payment match, bank reconciliation,
+#   coverage gap, audit-derived skipped source rows, overrides, MoM revenue
+#   anomaly, close status) into a prioritized alert summary + self-audit
+#   trail. Read-only; never mutates finance numbers.
+# Database/ORM: Reads via RevenueFact/AdSensePayment/BankReconciliation/
+#   ManualOverride/FinanceMonthClose repositories plus a tenant-scoped
+#   AuditLogORM scan for ROWS_SKIPPED connector edges.
+# Standards: smart-alerts four-permission gate (VIEW_REVENUE/VIEW_CONFIDENCE
+#   global + VIEW_FINALIZED_PAYMENTS/VIEW_BANK_RECONCILIATION month-scoped).
+#   Audit-derived inputs require VIEW_AUDIT_LOG; without it the alert is
+#   omitted (return 0,{}) so finance viewers do not bypass the audit gate.
+#   Per-reason breakdown requires VIEW_SENSITIVE_AUDIT_PAYLOADS; without it
+#   the count is returned but the breakdown is redacted, mirroring audit.py.
+# Blast Radius: Finance dashboard + audit-observability boundary. The audit
+#   gate is the security-relevant change; do not weaken it without an owner
+#   review. No money/ingestion/match/close behavior change.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> pure builder
+#     that consumes the (count, reasons) aggregate.
+#   - File: backend/ums_smart_revenue/auth/audit.py -> same VIEW_AUDIT_LOG
+#     pattern with redaction via VIEW_SENSITIVE_AUDIT_PAYLOADS.
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py ->
+#     emits the ROWS_SKIPPED audit edges this endpoint aggregates.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> alert code wire contract.
+# ============================================================================
 @router.get("/months/{month}/smart-alerts")
 def get_month_smart_alerts(
     month: str,
@@ -1100,6 +1154,20 @@ def get_month_smart_alerts(
     _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    # FIX: Audit-derived inputs require VIEW_AUDIT_LOG; without it the
+    # SOURCE_ROWS_SKIPPED alert is omitted entirely so finance viewers do
+    # not silently gain access to audit payloads. Per-reason breakdown
+    # additionally requires VIEW_SENSITIVE_AUDIT_PAYLOADS; without it the
+    # count is returned but the breakdown is redacted, mirroring audit.py.
+    audit_scope = AccessScope.global_scope()
+    if has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
+        include_sensitive_details = has_permission(
+            user, Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS, audit_scope
+        )
+    else:
+        skipped_source_row_count = 0
+        skipped_source_rows_by_reason: dict[str, int] = {}
+        include_sensitive_details = False
     try:
         facts = revenue_repository.list_month_facts(month=month)
         previous_facts = revenue_repository.list_month_facts(month=_previous_month(month))
@@ -1116,10 +1184,15 @@ def get_month_smart_alerts(
             missing_fact_channel_count,
             missing_fact_channel_sample,
         ) = missing_revenue_fact_channel_count_and_sample(session, month=month)
-        (
-            skipped_source_row_count,
-            skipped_source_rows_by_reason,
-        ) = skipped_source_row_count_and_reasons(session, month=month)
+        if has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
+            (
+                skipped_source_row_count,
+                skipped_source_rows_by_reason,
+            ) = skipped_source_row_count_and_reasons(
+                session,
+                month=month,
+                include_sensitive_details=include_sensitive_details,
+            )
         payment_match = build_monthly_payment_match_summary(
             month=month,
             facts=facts,
@@ -2426,9 +2499,41 @@ def skipped_source_row_count_and_reasons(
     session: Session,
     *,
     month: str,
+    include_sensitive_details: bool = True,
 ) -> tuple[int, dict[str, int]]:
-    """Return total skipped source rows and counts by skip reason for one month."""
+    """Return skipped source rows + skip reasons for one finance month.
+
+    Reads connector `ROWS_SKIPPED` audit edges scoped by tenant,
+    `CONNECTOR_JOB_RUN` event type, `FINANCE_MONTH` scope, and the requested
+    month. The function returns the **latest** ROWS_SKIPPED edge only — not
+    the sum across re-runs — because fact projection is idempotent and each
+    connector run emits its own edge for the same month; aggregating across
+    runs would over-count stale or duplicate signals (review threads #1 and
+    #10). Malformed or zero-count rows are tolerated: `skipped_count` and
+    `skipped_by_reason` are reconciled via `max()` so the returned pair is
+    internally consistent (review thread #8).
+
+    Args:
+        session: Active SQLAlchemy session.
+        month: Finance month in `YYYY-MM` format (already validated by caller).
+        include_sensitive_details: When False, the returned reason breakdown is
+            redacted to an empty dict so callers without
+            `VIEW_SENSITIVE_AUDIT_PAYLOADS` cannot learn per-reason counts.
+            The total `skipped_count` is still returned because the count is
+            operational, not sensitive.
+
+    Returns:
+        A (count, reasons_by_label) tuple. `reasons_by_label` is always
+        returned in deterministic key-sorted order.
+    """
     tenant_id = _resolve_smart_alert_tenant_id()
+    # FIX: Read only the most recent ROWS_SKIPPED edge for the month so a
+    # connector re-run (which is idempotent for fact projection) does not
+    # inflate the dashboard alert by summing historical audit rows. The
+    # ORDER BY created_at DESC, id DESC picks the latest projection signal;
+    # lifecycle filtering stays in Python so the read remains portable across
+    # SQLite tests and PostgreSQL production (lifecycle lives inside the JSON
+    # `details` column which is text in SQLite and jsonb in PG).
     details_rows = session.scalars(
         select(AuditLogORM.details)
         .where(
@@ -2437,19 +2542,30 @@ def skipped_source_row_count_and_reasons(
             AuditLogORM.scope_type == ScopeType.FINANCE_MONTH.value,
             AuditLogORM.scope_id == month,
         )
-        .order_by(AuditLogORM.created_at, AuditLogORM.id)
+        .order_by(AuditLogORM.created_at.desc(), AuditLogORM.id.desc())
     ).all()
-    skipped_count = 0
-    reason_counts: dict[str, int] = {}
+    latest_details: dict[str, object] | None = None
     for details in details_rows:
-        if not isinstance(details, dict) or details.get("lifecycle") != "ROWS_SKIPPED":
-            continue
-        row_reason_counts = _skipped_reason_counts_from_details(details)
-        row_count = _positive_int(details.get("skipped_count"))
-        skipped_count += row_count if row_count > 0 else sum(row_reason_counts.values())
-        for reason, count in row_reason_counts.items():
-            reason_counts[reason] = reason_counts.get(reason, 0) + count
-    return skipped_count, dict(sorted(reason_counts.items()))
+        if isinstance(details, dict) and details.get("lifecycle") == "ROWS_SKIPPED":
+            latest_details = details
+            break
+    if latest_details is None:
+        return 0, {}
+    reason_counts = _skipped_reason_counts_from_details(latest_details)
+    skipped_count = _positive_int(latest_details.get("skipped_count"))
+    reasons_total = sum(reason_counts.values())
+    if skipped_count > 0 and reasons_total > 0:
+        effective_count = max(skipped_count, reasons_total)
+    elif skipped_count > 0:
+        effective_count = skipped_count
+    elif reasons_total > 0:
+        effective_count = reasons_total
+    else:
+        effective_count = 0
+    if not include_sensitive_details:
+        # Redact per-reason breakdown; keep total count visible.
+        return effective_count, {}
+    return effective_count, dict(sorted(reason_counts.items()))
 
 
 def _skipped_reason_counts_from_details(details: dict[str, object]) -> dict[str, int]:
