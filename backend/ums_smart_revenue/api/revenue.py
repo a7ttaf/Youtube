@@ -2368,7 +2368,9 @@ def get_channel_month_revenue_summary(
 #   requiring the requested permission on every member channel.
 # Database/ORM: None; group membership was resolved before this helper.
 # Standards: Fail-closed authorization helper; no data reads, no side effects,
-#   no widened role/grant storage.
+#   no widened role/grant storage. For groups, the check is a single subset
+#   test over a precomputed covered-channel set instead of one
+#   has_permission call per member channel.
 # Blast Radius: Authorization boundary for revenue/confidence reads.
 # Connections:
 #   - File: backend/ums_smart_revenue/auth/scopes.py -> OrgAccessIndex.contains
@@ -2376,6 +2378,59 @@ def get_channel_month_revenue_summary(
 #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> group channel
 #       membership source resolved by _revenue_read_scope_to_channel_ids.
 # ============================================================================
+def _principal_covered_channels(
+    user: UserPrincipal,
+    permission: Permission,
+    org_index: OrgAccessIndex,
+) -> set[str] | None:
+    """Return the channels the principal can read for a revenue permission.
+
+    None means the principal has a global grant and therefore covers every
+    channel; any concrete set is the union of channels reachable via direct
+    grants and active role assignments. Role-based permissions are looked up
+    once per role.
+    """
+    # FIX (Qodo review #122 #performance): Precompute the covered channel set
+    # once per request so the per-group subset check is O(group_size) instead
+    # of O(group_size * (direct_grants + role_assignments)).
+    from ums_smart_revenue.auth.policy import ROLE_PERMISSIONS
+
+    covered: set[str] = set()
+    has_global = False
+
+    def _expand_scope(scope: AccessScope) -> None:
+        nonlocal has_global
+        if scope.type == ScopeType.GLOBAL:
+            has_global = True
+            return
+        if scope.id is None:
+            return
+        if scope.type == ScopeType.CHANNEL:
+            covered.add(scope.id)
+        elif scope.type == ScopeType.COMPANY:
+            for channel_id, company_id in org_index.channel_company.items():
+                if company_id == scope.id:
+                    covered.add(channel_id)
+        elif scope.type == ScopeType.SECTOR:
+            for channel_id, sector_id in org_index.channel_sector.items():
+                if sector_id == scope.id:
+                    covered.add(channel_id)
+
+    for grant in user.direct_permissions:
+        if grant.active and grant.permission == permission:
+            _expand_scope(grant.scope)
+    for assignment in user.role_assignments:
+        if not assignment.active:
+            continue
+        role_permissions = ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        if permission in role_permissions:
+            _expand_scope(assignment.scope)
+
+    if has_global:
+        return None
+    return covered
+
+
 def _require_revenue_read_permission(
     user: UserPrincipal,
     permission: Permission,
@@ -2392,8 +2447,12 @@ def _require_revenue_read_permission(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="group revenue reads require at least one channel",
         )
-    for channel_id in sorted(channel_ids):
-        _require_permission(user, permission, AccessScope.channel(channel_id), org_index)
+    covered = _principal_covered_channels(user, permission, org_index)
+    if covered is not None and not set(channel_ids).issubset(covered):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {permission.value}",
+        )
 
 
 def _require_permission(

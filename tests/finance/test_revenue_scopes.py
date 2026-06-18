@@ -284,6 +284,29 @@ def test_no_grants_returns_empty_list():
     assert _build(()) == []
 
 
+def test_covered_channel_ids_uses_set_containment():
+    """Regression for the Qodo #122 performance fix.
+
+    The precomputed covered-channel set is computed once and reused for every
+    group; semantically equivalent to the prior per-channel/per-grant scan.
+    """
+    # FIX: a sector grant must cover every channel mapped to that sector via
+    # the org_index, and a group whose members are a strict subset must be
+    # listed exactly once (no per-channel duplication).
+    options = _build(
+        (AccessScope.sector(SECTOR_TV),),
+        groups=(
+            _group("group-tv", "TV Group", (CHANNEL_TV_A, CHANNEL_TV_B)),
+            _group("group-tv-a-only", "TV A Only", (CHANNEL_TV_A,)),
+            _group("group-foreign", "Foreign", (CHANNEL_MUSIC,)),
+        ),
+    )
+    keys = [(option.scope_type, option.scope_id) for option in options]
+    assert keys.count(("group", "group-tv")) == 1
+    assert ("group", "group-tv-a-only") in keys
+    assert ("group", "group-foreign") not in keys
+
+
 def test_unsupported_scope_type_is_dropped():
     """Only global/sector/company become options; an unexpected granted type
     (channel/connector/finance-month, the HOLDING-equivalent here) is dropped so

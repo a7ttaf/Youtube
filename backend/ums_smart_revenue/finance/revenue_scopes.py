@@ -138,6 +138,38 @@ def _grant_contains_channel(
     return org_index.contains(scope, AccessScope.channel(channel_id))
 
 
+def _covered_channel_ids(
+    granted: tuple[AccessScope, ...],
+    org_index: OrgAccessIndex,
+) -> set[str] | None:
+    """Return the set of channels covered by the granted scopes, or None for global.
+
+    None signals that the caller has a global grant and therefore every channel
+    is covered; callers must treat None as a superset of any concrete channel set.
+    Computing this once lets the group authorization checks run as a single set
+    containment test per group instead of nested per-channel/per-grant scans.
+    """
+    covered: set[str] = set()
+    has_global = False
+    for scope in granted:
+        if scope.type == ScopeType.GLOBAL:
+            has_global = True
+            continue
+        if scope.type == ScopeType.CHANNEL and scope.id is not None:
+            covered.add(scope.id)
+        elif scope.type == ScopeType.COMPANY and scope.id is not None:
+            for channel_id, company_id in org_index.channel_company.items():
+                if company_id == scope.id:
+                    covered.add(channel_id)
+        elif scope.type == ScopeType.SECTOR and scope.id is not None:
+            for channel_id, sector_id in org_index.channel_sector.items():
+                if sector_id == scope.id:
+                    covered.add(channel_id)
+    if has_global:
+        return None
+    return covered
+
+
 def _group_authorized(
     group: ChannelGroupEntry,
     granted: tuple[AccessScope, ...],
@@ -146,10 +178,10 @@ def _group_authorized(
     """Return whether every active group member channel is covered."""
     if not group.active or not group.channel_ids:
         return False
-    return all(
-        any(_grant_contains_channel(scope, org_index, channel_id) for scope in granted)
-        for channel_id in group.channel_ids
-    )
+    covered = _covered_channel_ids(granted, org_index)
+    if covered is None:
+        return True
+    return set(group.channel_ids).issubset(covered)
 
 
 def _build_group_options(
@@ -159,11 +191,16 @@ def _build_group_options(
     org_index: OrgAccessIndex,
 ) -> list[RevenueScopeOption]:
     """Assemble authorized group scope options from complete member coverage."""
-    options = [
-        RevenueScopeOption(scope_type="group", scope_id=group.id, label=group.name)
-        for group in groups
-        if _group_authorized(group, granted, org_index)
-    ]
+    covered = _covered_channel_ids(granted, org_index)
+    options: list[RevenueScopeOption] = []
+    for group in groups:
+        if not group.active or not group.channel_ids:
+            continue
+        if covered is not None and not set(group.channel_ids).issubset(covered):
+            continue
+        options.append(
+            RevenueScopeOption(scope_type="group", scope_id=group.id, label=group.name)
+        )
     options.sort(key=_scope_sort_key)
     return options
 
