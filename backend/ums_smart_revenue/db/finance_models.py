@@ -25,6 +25,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.tenant_models import TenantORM
+from ums_smart_revenue.finance.allocation_methods import allocation_method_check_expression
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 
@@ -100,6 +101,10 @@ class FinanceMonthCloseORM(FinanceBase):
             name="ck_finance_month_close_month_format",
         ),
         CheckConstraint("status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"),
+        CheckConstraint(
+            allocation_method_check_expression("allocation_method", nullable=True),
+            name="ck_finance_month_close_allocation_method",
+        ),
         Index("ix_finance_month_close_tenant_id", "tenant_id"),
     )
 
@@ -974,9 +979,7 @@ class CommittedAllocationRunORM(FinanceBase):
             name="ck_committed_allocation_runs_month_format",
         ),
         CheckConstraint(
-            "allocation_method IN ("
-            "'gross_revenue_proportional', 'post_tax_revenue_proportional', "
-            "'company_level', 'manual', 'no_allocation')",
+            allocation_method_check_expression("allocation_method"),
             name="ck_committed_allocation_runs_method",
         ),
         CheckConstraint(

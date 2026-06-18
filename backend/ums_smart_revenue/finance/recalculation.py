@@ -1,18 +1,10 @@
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from ums_smart_revenue.finance.allocation_methods import ALLOCATION_METHODS
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
-ALLOCATION_METHODS = frozenset(
-    {
-        "gross_revenue_proportional",
-        "post_tax_revenue_proportional",
-        "company_level",
-        "manual",
-        "no_allocation",
-    }
-)
 NET_REVENUE_REQUIRED_METHODS = frozenset({"post_tax_revenue_proportional"})
 COMPANY_MAPPING_REQUIRED_METHODS = frozenset({"company_level"})
 # no_allocation withholds every component without reading facts, so a factless

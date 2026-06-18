@@ -27,6 +27,10 @@ from ums_smart_revenue.finance.month_close import (
 from ums_smart_revenue.finance.month_close_readiness import (
     SqlAlchemyFinanceCloseReadinessService,
 )
+from ums_smart_revenue.finance.recalculation import (
+    RevenueRecalculationValidationError,
+    normalize_allocation_method,
+)
 
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -204,6 +208,20 @@ def unlock_finance_month(
     return _with_audit_event(close, record)
 
 
+# ============================================================================
+# Purpose: Record finance-month allocation-rule metadata after validating the
+#   method against the same allowlist used by revenue recalculation.
+# Database/ORM: FinanceMonthCloseORM via SqlAlchemyFinanceMonthCloseRepository.
+# Standards: Route owns permission checks, request normalization, typed error
+#   translation, and audit shape; repository owns the locked-row write.
+# Blast Radius: Finance close metadata and audit details only; no allocation
+#   math, official finance totals, exports, or authorization broadening.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/recalculation.py -> Shared
+#     allocation_method normalizer/allowlist.
+#   - File: backend/ums_smart_revenue/finance/month_close.py -> Persists the
+#     normalized rule metadata while the month is OPEN.
+# ============================================================================
 @router.post("/{month}/allocate")
 def record_allocation_rule(
     month: str,
@@ -218,9 +236,16 @@ def record_allocation_rule(
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, scope)
     try:
+        allocation_method = normalize_allocation_method(payload.allocation_method)
+    except RevenueRecalculationValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    try:
         close = repository.record_allocation_rule(
             month=month,
-            allocation_method=payload.allocation_method,
+            allocation_method=allocation_method,
             rule_payload=payload.rule_payload,
         )
     except ValueError as exc:
@@ -235,7 +260,7 @@ def record_allocation_rule(
         month=month,
         reason=payload.reason,
         details={
-            "allocation_method": payload.allocation_method,
+            "allocation_method": allocation_method,
             "rule_payload": payload.rule_payload,
         },
     )

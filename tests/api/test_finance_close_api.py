@@ -663,6 +663,60 @@ def test_finance_close_rejects_blank_allocation_method_before_state_change(tmp_p
     assert audit_logs == []
 
 
+def test_finance_close_rejects_unknown_allocation_method_before_state_change(tmp_path):
+    """Unknown allocation methods are rejected before close-state mutation or audit."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/finance-close/2026-03/allocate",
+        headers=auth_headers("finance_admin"),
+        json={
+            "allocation_method": "definitely_not_a_method",
+            "rule_payload": {"gap_type": "transfer_fee"},
+            "reason": "Reject unsupported allocation method",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("Unknown allocation_method")
+    assert close is None
+    assert audit_logs == []
+
+
+def test_finance_close_normalizes_allocation_method_before_persisting_and_auditing(tmp_path):
+    """Valid allocation methods are persisted and audited in normalized form."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/finance-close/2026-03/allocate",
+        headers=auth_headers("finance_admin"),
+        json={
+            "allocation_method": " POST_TAX_REVENUE_PROPORTIONAL ",
+            "rule_payload": {"gap_type": "transfer_fee", "basis": "net_revenue_usd"},
+            "reason": "Allocate confirmed transfer fee by net revenue",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 200
+    assert response.json()["allocation_method"] == "post_tax_revenue_proportional"
+    assert close.allocation_method == "post_tax_revenue_proportional"
+    assert audit_log.details["allocation_method"] == "post_tax_revenue_proportional"
+
+
 def test_finance_admin_can_record_allocation_rule_metadata_with_audit(tmp_path):
     """Finance Admin can record allocation metadata with an audit event."""
     database_url = build_database_url(tmp_path)

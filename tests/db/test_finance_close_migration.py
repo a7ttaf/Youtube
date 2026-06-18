@@ -14,3 +14,24 @@ def test_finance_close_migration_creates_month_close_table():
     assert '"finance_month_close"' in migration
     assert '"allocation_rule_payload"' in migration
     assert "substr(month, 6, 2) BETWEEN '01' AND '12'" in migration
+
+
+def test_finance_month_close_allocation_method_check_migration_exists():
+    migration = (
+        PROJECT_ROOT
+        / "backend/ums_smart_revenue/db/alembic/versions/"
+        / "20260618_0001_finance_month_close_allocation_method_check.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "20260618_0001"' in migration
+    assert 'down_revision = "20260612_0002"' in migration
+    assert "ck_finance_month_close_allocation_method" in migration
+    assert "allocation_method IS NULL OR allocation_method IN" in migration
+    assert "definitely_not_a_method" not in migration
+    # The pre-PR endpoint stripped whitespace but did not lowercase, so the
+    # migration must fold legacy upper/mixed-case canonical values into their
+    # lowercase form before the preflight count.
+    assert "_normalize_legacy_allocation_method_casing" in migration
+    assert "lower(allocation_method)" in migration
+    assert "SET allocation_method = lower(allocation_method)" in migration
+    assert "UPDATE finance_month_close" in migration
