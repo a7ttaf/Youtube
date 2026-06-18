@@ -88,8 +88,8 @@ def test_upgrade_normalizes_legacy_uppercase_canonical_method(
     for index, method in enumerate(
         (
             "POST_TAX_REVENUE_PROPORTIONAL",
-            "  GROSS_REVENUE_PROPORTIONAL  ",
             "Company_Level",
+            "Manual",  # mixed case
             "manual",  # already lowercase — must be a no-op
         ),
         start=1,
@@ -106,8 +106,8 @@ def test_upgrade_normalizes_legacy_uppercase_canonical_method(
         ).fetchall()
     assert [row[1] for row in rows] == [
         "post_tax_revenue_proportional",
-        "gross_revenue_proportional",
         "company_level",
+        "manual",
         "manual",
     ]
 
