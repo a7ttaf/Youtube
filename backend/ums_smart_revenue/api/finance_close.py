@@ -235,8 +235,6 @@ def record_allocation_rule(
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, scope)
-    # FIX: Reuse the revenue allocation-method normalizer so this metadata write
-    # cannot persist spellings or methods outside the shared allowlist.
     try:
         allocation_method = normalize_allocation_method(payload.allocation_method)
     except RevenueRecalculationValidationError as exc:
