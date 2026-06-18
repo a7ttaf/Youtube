@@ -192,6 +192,63 @@ def test_smart_alerts_omit_missing_channel_alert_when_empty():
     assert "CHANNELS_MISSING_REVENUE_FACTS" not in codes
 
 
+def test_smart_alerts_flag_skipped_source_rows():
+    summary = build_alerts(
+        missing_revenue_fact_channel_count=1,
+        missing_revenue_fact_channel_sample=["channel-tv-b"],
+        skipped_source_row_count=3,
+        skipped_source_rows_by_reason={
+            "unknown_channel": 2,
+            "missing_channel_id": 1,
+        },
+    )
+
+    codes = [alert.code for alert in summary.alerts]
+    assert codes.index("SOURCE_ROWS_SKIPPED") == (
+        codes.index("CHANNELS_MISSING_REVENUE_FACTS") + 1
+    )
+    assert codes.index("SOURCE_ROWS_SKIPPED") < codes.index("PAYMENT_NOT_MATCHED")
+    skipped_alert = next(
+        (alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED"),
+        None,
+    )
+    assert skipped_alert is not None, "expected SOURCE_ROWS_SKIPPED alert"
+    assert skipped_alert.severity == "HIGH"
+    assert skipped_alert.confidence == "E_MISSING"
+    assert skipped_alert.source == "connector_job_run"
+    assert skipped_alert.details == {
+        "skipped_count": 3,
+        "skipped_by_reason": {
+            "missing_channel_id": 1,
+            "unknown_channel": 2,
+        },
+    }
+
+
+def test_smart_alerts_omit_skipped_source_rows_when_empty():
+    summary = build_alerts(
+        skipped_source_row_count=0,
+        skipped_source_rows_by_reason={},
+    )
+
+    codes = [alert.code for alert in summary.alerts]
+    assert "SOURCE_ROWS_SKIPPED" not in codes
+
+
+def test_smart_alerts_reject_negative_skipped_source_row_inputs():
+    with pytest.raises(
+        ValueError,
+        match="skipped_source_row_count must be non-negative",
+    ):
+        build_alerts(skipped_source_row_count=-1)
+
+    with pytest.raises(
+        ValueError,
+        match="skipped_source_rows_by_reason counts must be non-negative",
+    ):
+        build_alerts(skipped_source_rows_by_reason={"unknown_channel": -1})
+
+
 def test_smart_alerts_reject_negative_missing_channel_count():
     with pytest.raises(
         ValueError,

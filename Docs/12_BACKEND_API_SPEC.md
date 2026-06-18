@@ -238,18 +238,23 @@ payment rows are excluded from the paid USD comparison and reported as issues.
 engine for the internal finance command center. It derives alerts only from SQL
 source-of-truth data already stored by the backend: monthly revenue facts,
 approved/pending manual overrides, official AdSense payment metadata,
-finance-entered bank reconciliation receipt rows, and finance month-close
-state. It requires global `finance.view_revenue`, global
+finance-entered bank reconciliation receipt rows, finance month-close state,
+and finance-month-scoped connector audit edges for projection-skipped source
+rows. It requires global `finance.view_revenue`, global
 `analytics.view_confidence`, `finance.view_finalized_payments` for the requested
 finance-month scope, and `finance.view_bank_reconciliation` for the requested
 finance-month scope. The response includes alert codes such as
 `MISSING_REVENUE_SOURCE`, `CHANNELS_MISSING_REVENUE_FACTS`,
-`PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`, `UNEXPLAINED_GAP_HIGH`,
-`REVENUE_TREND_ANOMALY`, `MONTH_NOT_LOCKED`, and `MANUAL_OVERRIDE_USED`.
+`SOURCE_ROWS_SKIPPED`, `PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`,
+`UNEXPLAINED_GAP_HIGH`, `REVENUE_TREND_ANOMALY`, `MONTH_NOT_LOCKED`, and
+`MANUAL_OVERRIDE_USED`.
 `CHANNELS_MISSING_REVENUE_FACTS` flags active, revenue-required channels that
 have no revenue fact for the month (per-channel coverage, distinct from the
 month-level `MISSING_REVENUE_SOURCE`); its details report `channel_count` and a
-sorted `sample_channel_ids` list capped at 20. `REVENUE_TREND_ANOMALY` compares
+sorted `sample_channel_ids` list capped at 20. `SOURCE_ROWS_SKIPPED` aggregates
+connector `CONNECTOR_JOB_RUN` audit edges with `lifecycle=ROWS_SKIPPED` for the
+requested finance month; its details report `skipped_count` and
+`skipped_by_reason`. `REVENUE_TREND_ANOMALY` compares
 each channel's selected primary current-month SQL revenue fact with the
 selected primary previous-month
 SQL revenue fact and reports only channel ids plus current/prior gross revenue

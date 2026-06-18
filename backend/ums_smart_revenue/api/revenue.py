@@ -43,6 +43,7 @@ from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
 from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
+from ums_smart_revenue.db.security_models import AuditLogORM
 from ums_smart_revenue.finance.account_allocation_read import (
     allocation_provenance_to_api,
     resolve_month_account_allocation,
@@ -1115,6 +1116,10 @@ def get_month_smart_alerts(
             missing_fact_channel_count,
             missing_fact_channel_sample,
         ) = missing_revenue_fact_channel_count_and_sample(session, month=month)
+        (
+            skipped_source_row_count,
+            skipped_source_rows_by_reason,
+        ) = skipped_source_row_count_and_reasons(session, month=month)
         payment_match = build_monthly_payment_match_summary(
             month=month,
             facts=facts,
@@ -1145,6 +1150,8 @@ def get_month_smart_alerts(
         manual_overrides=manual_overrides,
         missing_revenue_fact_channel_count=missing_fact_channel_count,
         missing_revenue_fact_channel_sample=missing_fact_channel_sample,
+        skipped_source_row_count=skipped_source_row_count,
+        skipped_source_rows_by_reason=skipped_source_rows_by_reason,
         current_revenue_facts=facts,
         previous_revenue_facts=previous_facts,
     )
@@ -2394,6 +2401,80 @@ def missing_revenue_fact_channel_count_and_sample(
     count_value = int(session.execute(count_statement).scalar_one())
     sample_ids = list(session.scalars(sample_statement).all())
     return count_value, sample_ids
+
+
+# ============================================================================
+# Purpose: Read connector normalization ROWS_SKIPPED audit edges for a finance
+#   month and aggregate them into the smart-alert builder's source-row skip
+#   signal. Filtering the JSON lifecycle in Python keeps the read portable
+#   across SQLite tests and PostgreSQL production while the SQL predicates stay
+#   tenant/month/event scoped.
+# Database/ORM: Read-only SELECT on AuditLogORM / audit_logs; no locks or
+#   writes. PostgreSQL remains the source of truth for audit observability.
+# Standards: Tenant-scoped via _resolve_smart_alert_tenant_id; ignores malformed
+#   or zero-count audit details instead of making the dashboard fail on legacy
+#   audit rows; preserves valid reason counts exactly.
+# Blast Radius: Finance dashboard read surface; no finance calculation,
+#   authorization, export, ingestion, or audit-write behavior changes.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py ->
+#     emits lifecycle=ROWS_SKIPPED with skipped_count/skipped_by_reason.
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes the
+#     aggregate as SOURCE_ROWS_SKIPPED.
+# ============================================================================
+def skipped_source_row_count_and_reasons(
+    session: Session,
+    *,
+    month: str,
+) -> tuple[int, dict[str, int]]:
+    """Return total skipped source rows and counts by skip reason for one month."""
+    tenant_id = _resolve_smart_alert_tenant_id()
+    details_rows = session.scalars(
+        select(AuditLogORM.details)
+        .where(
+            AuditLogORM.tenant_id == tenant_id,
+            AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+            AuditLogORM.scope_type == ScopeType.FINANCE_MONTH.value,
+            AuditLogORM.scope_id == month,
+        )
+        .order_by(AuditLogORM.created_at, AuditLogORM.id)
+    ).all()
+    skipped_count = 0
+    reason_counts: dict[str, int] = {}
+    for details in details_rows:
+        if not isinstance(details, dict) or details.get("lifecycle") != "ROWS_SKIPPED":
+            continue
+        row_reason_counts = _skipped_reason_counts_from_details(details)
+        row_count = _positive_int(details.get("skipped_count"))
+        skipped_count += row_count if row_count > 0 else sum(row_reason_counts.values())
+        for reason, count in row_reason_counts.items():
+            reason_counts[reason] = reason_counts.get(reason, 0) + count
+    return skipped_count, dict(sorted(reason_counts.items()))
+
+
+def _skipped_reason_counts_from_details(details: dict[str, object]) -> dict[str, int]:
+    """Extract positive reason counts from one ROWS_SKIPPED audit detail payload."""
+    raw_reason_counts = details.get("skipped_by_reason")
+    if not isinstance(raw_reason_counts, dict):
+        return {}
+    reason_counts: dict[str, int] = {}
+    for raw_reason, raw_count in raw_reason_counts.items():
+        reason = str(raw_reason).strip()
+        count = _positive_int(raw_count)
+        if reason and count > 0:
+            reason_counts[reason] = reason_counts.get(reason, 0) + count
+    return reason_counts
+
+
+def _positive_int(value: object) -> int:
+    """Return positive JSON integer-like values; malformed values collapse to zero."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if value > 0 else 0
+    if isinstance(value, str) and value.strip().isdecimal():
+        return int(value)
+    return 0
 
 
 def _resolve_smart_alert_tenant_id() -> UUID:

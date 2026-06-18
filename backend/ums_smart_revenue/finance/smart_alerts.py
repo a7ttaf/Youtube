@@ -1,4 +1,4 @@
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -69,6 +69,8 @@ def build_monthly_smart_alert_summary(
     manual_overrides: Iterable[RevenueManualOverrideEntry],
     missing_revenue_fact_channel_count: int = 0,
     missing_revenue_fact_channel_sample: Sequence[str] = (),
+    skipped_source_row_count: int = 0,
+    skipped_source_rows_by_reason: Mapping[str, int] | None = None,
     current_revenue_facts: Iterable[RevenueFactEntry] = (),
     previous_revenue_facts: Iterable[RevenueFactEntry] = (),
     high_gap_threshold_usd: Decimal = DEFAULT_HIGH_GAP_THRESHOLD_USD,
@@ -88,6 +90,12 @@ def build_monthly_smart_alert_summary(
         raise ValueError("revenue_trend_anomaly_threshold_percent must be non-negative")
     if missing_revenue_fact_channel_count < 0:
         raise ValueError("missing_revenue_fact_channel_count must be non-negative")
+    if skipped_source_row_count < 0:
+        raise ValueError("skipped_source_row_count must be non-negative")
+    if skipped_source_rows_by_reason is not None and any(
+        count < 0 for count in skipped_source_rows_by_reason.values()
+    ):
+        raise ValueError("skipped_source_rows_by_reason counts must be non-negative")
     normalized_close_status = close_status or "OPEN"
     overrides = list(manual_overrides)
 
@@ -102,6 +110,11 @@ def build_monthly_smart_alert_summary(
             month,
             missing_revenue_fact_channel_count,
             missing_revenue_fact_channel_sample,
+        ),
+        lambda: _source_rows_skipped_alert(
+            month,
+            skipped_source_row_count,
+            skipped_source_rows_by_reason,
         ),
         lambda: _payment_not_matched_alert(month, payment_match),
         lambda: _bank_reconciliation_alert(month, bank_reconciliation),
@@ -178,6 +191,50 @@ def _channels_missing_revenue_facts_alert(
         details={
             "channel_count": count,
             "sample_channel_ids": capped_sample,
+        },
+    )
+
+
+def _source_rows_skipped_alert(
+    month: str,
+    count: int,
+    skipped_by_reason: Mapping[str, int] | None,
+) -> MonthlySmartAlert | None:
+    # ========================================================================
+    # Purpose: Surface source revenue rows that connector normalization dropped
+    #   from monthly fact projection. The adapter already records this as a
+    #   finance-month-scoped ROWS_SKIPPED audit edge; this turns that same
+    #   source-backed signal into a dashboard smart alert.
+    # Database/ORM: None (pure; count + reason totals are pre-read by the API).
+    # Standards: Preserve reason counts, omit zero-count reasons, and do not
+    #   change ingestion, matching, close, or exported finance numbers.
+    # Blast Radius: Finance dashboard read surface only; audit-derived signal.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/normalization.py ->
+    #     emits ROWS_SKIPPED audit edges with skipped_count/skipped_by_reason.
+    #   - File: backend/ums_smart_revenue/api/revenue.py -> aggregates the
+    #     current month audit edges into this pure builder input.
+    # ========================================================================
+    reason_counts = {
+        reason: reason_count
+        for reason, reason_count in sorted((skipped_by_reason or {}).items())
+        if reason_count > 0
+    }
+    effective_count = count if count > 0 else sum(reason_counts.values())
+    if effective_count <= 0:
+        return None
+    return MonthlySmartAlert(
+        code="SOURCE_ROWS_SKIPPED",
+        severity="HIGH",
+        message=(
+            f"{effective_count} source revenue row(s) were skipped during "
+            f"fact projection for {month}."
+        ),
+        source="connector_job_run",
+        confidence="E_MISSING",
+        details={
+            "skipped_count": effective_count,
+            "skipped_by_reason": reason_counts,
         },
     )
 

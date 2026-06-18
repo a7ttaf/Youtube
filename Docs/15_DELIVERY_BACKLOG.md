@@ -887,8 +887,9 @@ single P-tier above.
   unknown/inactive channels vanished from the fact projection with no
   audit, alert, or log while the run reported SUCCEEDED. Now emits one
   `CONNECTOR_JOB_RUN` `ROWS_SKIPPED` summary audit edge (counts by reason,
-  finance-month scoped) + WARNING log. Ingest/finance numbers unchanged;
-  only the silent drop is now observable.
+  finance-month scoped) + WARNING log, and the same finance-month audit edges
+  feed the `SOURCE_ROWS_SKIPPED` dashboard smart alert. Ingest/finance numbers
+  unchanged; only the silent drop is now observable.
 - ✅ Gate `/security/*` catalog endpoints behind VIEW_AUDIT_LOG (PR #112) —
   `GET /security/roles` and `GET /security/permissions` previously returned
   the full role→permission catalog (including `sensitive`/`auditOnUse` flags)
