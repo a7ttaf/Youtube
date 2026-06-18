@@ -100,6 +100,12 @@ class FinanceMonthCloseORM(FinanceBase):
             name="ck_finance_month_close_month_format",
         ),
         CheckConstraint("status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"),
+        CheckConstraint(
+            "allocation_method IS NULL OR allocation_method IN ("
+            "'gross_revenue_proportional', 'post_tax_revenue_proportional', "
+            "'company_level', 'manual', 'no_allocation')",
+            name="ck_finance_month_close_allocation_method",
+        ),
         Index("ix_finance_month_close_tenant_id", "tenant_id"),
     )
 
