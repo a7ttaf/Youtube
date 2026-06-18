@@ -102,7 +102,7 @@ def _strip_required_string(value):
     return value
 
 
-def _strip_optional_string(value):
+def _strip_optional_string(value: str | None) -> str | None:
     # None stays None (field unset); a present string is stripped and a
     # blank-after-strip value is rejected rather than silently coerced to null.
     if value is None:
@@ -469,6 +469,27 @@ def update_channel_mapping(
     return response
 
 
+# ============================================================================
+# Purpose: Set or clear a channel's CMS content_owner_id. This is channel
+#   ingestion configuration (which CMS account future revenue pulls target),
+#   distinct from the org re-parenting handled by PATCH .../mapping.
+# Database/ORM: YouTubeChannelORM via the registry's update_content_owner.
+# Standards: Thin route — authorize -> existence check -> no-op detection ->
+#   registry write -> typed-error translation -> CHANNEL_UPDATED audit. Authorize
+#   before the existence check so an unauthorized caller never learns whether a
+#   channel exists (no 404 information leak).
+# Blast Radius: Future ingestion targeting only. No finance attribution rewrite,
+#   no month locks, no Neo4j, no exports. CHANNEL_UPDATED is audited with an
+#   explicit permission_override=MANAGE_CHANNELS so the audit record reflects
+#   the permission that actually authorized this write (not the
+#   registry.manage_org_mapping default on the CHANNEL_UPDATED definition).
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py
+#     -> update_content_owner performs the tenant-scoped write.
+#   - File: backend/ums_smart_revenue/connectors/google/
+#     youtube_analytics_client.py -> list_target_channels reads content_owner_id
+#     to choose which channels a revenue pull targets.
+# ============================================================================
 @router.patch("/{youtube_channel_id}/content-owner")
 def update_channel_content_owner(
     youtube_channel_id: str,
@@ -508,6 +529,13 @@ def update_channel_content_owner(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
         ) from exc
+    # Translate a registry validation failure (e.g. an IntegrityError converted
+    # during flush) to 422, mirroring create_channel/update_channel_mapping so a
+    # bad payload surfaces as a client error instead of an unhandled 500.
+    except ChannelRegistryValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
     record = record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -516,6 +544,13 @@ def update_channel_content_owner(
         entity_id=youtube_channel_id,
         scope=target_scope,
         reason=payload.reason,
+        # FIX: This route authorizes on MANAGE_CHANNELS, but the CHANNEL_UPDATED
+        # audit definition defaults to registry.manage_org_mapping (the mapping
+        # re-parenting permission). Without an override the audit record
+        # misattributes the authorizing permission, so an auditor filtering by
+        # MANAGE_CHANNELS would miss every content-owner change. Both permissions
+        # are SENSITIVE, so _resolve_audit_permission accepts this override.
+        permission_override=Permission.MANAGE_CHANNELS,
         details={
             "old_content_owner_id": current_channel.content_owner_id,
             "new_content_owner_id": updated.content_owner_id,

@@ -34,6 +34,7 @@ from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroup
 from ums_smart_revenue.org.channel_registry import (
     ChannelRegistry,
     ChannelRegistryEntry,
+    ChannelRegistryValidationError,
     bootstrap_channel_registry,
 )
 
@@ -798,6 +799,28 @@ def test_set_content_owner_is_audited():
     }
 
 
+def test_content_owner_audit_tags_manage_channels_permission():
+    """The CHANNEL_UPDATED audit for a content-owner change must be tagged with
+    registry.manage_channels (the permission that authorized the write), not the
+    registry.manage_org_mapping default on the CHANNEL_UPDATED definition —
+    otherwise permission-based audit filtering misattributes the write."""
+    app = create_bootstrap_app()
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    client = TestClient(app)
+
+    response = client.patch(
+        "/channels/channel-tv-a/content-owner",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"content_owner_id": "owner-perm", "reason": "Tag audit permission"},
+    )
+
+    assert response.status_code == 200
+    assert len(audit_sink.records) == 1
+    # MANAGE_CHANNELS = "registry.manage_channels", NOT "registry.manage_org_mapping".
+    assert audit_sink.records[0].permission == "registry.manage_channels"
+
+
 def test_no_op_content_owner_change_returns_200_without_audit():
     """Re-submitting the current content_owner_id is a no-op and is not audited."""
     app = create_bootstrap_app()
@@ -883,3 +906,52 @@ def test_content_owner_update_rejects_blank_content_owner_id():
     )
 
     assert response.status_code == 422
+
+
+class ValidationFailingContentOwnerRegistry:
+    """Registry stub whose update_content_owner raises ChannelRegistryValidationError.
+
+    Mirrors how a flush() IntegrityError is converted inside the SQL registry, so
+    the route's 422 translation can be exercised without a live database.
+    """
+
+    def __init__(self) -> None:
+        self._owner: str | None = None
+
+    @staticmethod
+    def list_channels() -> list[ChannelRegistryEntry]:
+        return []
+
+    def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
+        return ChannelRegistryEntry(
+            youtube_channel_id=youtube_channel_id,
+            channel_name="TV A",
+            primary_company_id=BOOTSTRAP_COMPANY_TV_ID,
+            cms_status="UNKNOWN",
+            revenue_required=True,
+            content_owner_id=self._owner,
+        )
+
+    def update_content_owner(
+        self, *, youtube_channel_id: str, content_owner_id: str | None  # noqa: ARG002
+    ) -> ChannelRegistryEntry:
+        raise ChannelRegistryValidationError("simulated flush integrity failure")
+
+
+def test_content_owner_update_translates_registry_validation_error_to_422():
+    """A ChannelRegistryValidationError from update_content_owner must surface as
+    HTTP 422 (matching create_channel/update_mapping), not an unhandled 500."""
+    app = create_bootstrap_app()
+    app.dependency_overrides[current_channel_registry] = (
+        lambda: ValidationFailingContentOwnerRegistry()
+    )
+    client = TestClient(app)
+
+    response = client.patch(
+        "/channels/channel-tv-a/content-owner",
+        headers=auth_headers("super_owner", "global"),
+        json={"content_owner_id": "owner-1", "reason": "trigger validation error"},
+    )
+
+    assert response.status_code == 422
+    assert "simulated flush integrity failure" in response.json()["detail"]
