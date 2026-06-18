@@ -413,6 +413,15 @@ def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
         "skipped_count": 1,
         "skipped_by_reason": {},
     }
+    with Session(engine) as session:
+        audit_reads = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+        ).all()
+    assert len(audit_reads) == 1
+    assert audit_reads[0].entity_type == "audit_log_page"
+    assert audit_reads[0].scope_type == "global"
+    assert audit_reads[0].details["returned"] == 1
+    assert audit_reads[0].details["details_redacted"] is True
 
 
 def test_month_smart_alerts_clear_stale_skipped_source_after_clean_rerun(tmp_path):
@@ -469,6 +478,13 @@ def test_month_smart_alerts_clear_stale_skipped_source_after_clean_rerun(tmp_pat
     assert response.status_code == 200
     codes = [alert["code"] for alert in response.json()["alerts"]]
     assert "SOURCE_ROWS_SKIPPED" not in codes
+    with Session(engine) as session:
+        audit_reads = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+        ).all()
+    assert len(audit_reads) == 1
+    assert audit_reads[0].details["returned"] == 0
+    assert audit_reads[0].details["details_redacted"] is False
 
 
 def test_month_smart_alerts_omit_skipped_source_alert_without_audit_permission(
@@ -511,6 +527,11 @@ def test_month_smart_alerts_omit_skipped_source_alert_without_audit_permission(
     assert response.status_code == 200
     codes = [alert["code"] for alert in response.json()["alerts"]]
     assert "SOURCE_ROWS_SKIPPED" not in codes
+    with Session(engine) as session:
+        audit_reads = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+        ).all()
+    assert audit_reads == []
 
 
 def test_month_smart_alerts_audit_viewer_redacts_reason_breakdown(tmp_path):

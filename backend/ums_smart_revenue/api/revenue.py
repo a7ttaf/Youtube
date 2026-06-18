@@ -1266,9 +1266,13 @@ def get_month_smart_alerts(
     # the /audit/events redaction-on-use pattern. The audit trail is emitted
     # when the caller has VIEW_AUDIT_LOG regardless of whether the helper
     # returned data; the `returned` field carries 0 or 1 so a clean month
-    # still leaves a record of the read.
+    # still leaves a record of the read. `details_redacted` reflects whether
+    # sensitive per-reason breakdown was redacted in the alert response,
+    # mirroring /audit/events: True only when the alert actually surfaced
+    # data AND the caller lacks VIEW_SENSITIVE_AUDIT_PAYLOADS.
     audit_records = [revenue_record, payment_record, bank_record]
     if has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
+        details_redacted = skipped_source_row_count > 0 and not include_sensitive_details
         audit_records.append(
             record_audit_event(
                 sink=audit_sink,
@@ -1282,7 +1286,7 @@ def get_month_smart_alerts(
                     "entity_type": "monthly_smart_alerts",
                     "entity_id": month,
                     "returned": 1 if skipped_source_row_count > 0 else 0,
-                    "details_redacted": not include_sensitive_details,
+                    "details_redacted": details_redacted,
                 },
             )
         )

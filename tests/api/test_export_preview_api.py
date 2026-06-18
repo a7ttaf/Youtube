@@ -305,11 +305,11 @@ def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_p
     assert payload["executive_summary"]["bank_reconciliation_status"] == ("MISSING_ADSENSE_PAYMENT")
     # Scoped finance-artifact exports now emit PAYMENT_VIEWED alongside
     # REVENUE_VIEWED (export net consumes account allocations); month-wide cash
-    # exposure (BANK_RECONCILIATION_VIEWED) stays global-only.
-    # AUDIT_LOG_VIEWED fires when finance_admin reads audit_logs to derive
-    # the SOURCE_ROWS_SKIPPED smart alert in the export bundle.
+    # exposure (BANK_RECONCILIATION_VIEWED) stays global-only. Scoped exports
+    # do NOT emit AUDIT_LOG_VIEWED because the audit-derived skipped-row signal
+    # is suppressed for non-global scopes until source rows can be tied to the
+    # export's frozen channel set.
     assert [event.event_type for event in audit_events] == [
-        "AUDIT_LOG_VIEWED",
         "PAYMENT_VIEWED",
         "REVENUE_VIEWED",
     ]
@@ -528,7 +528,6 @@ def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path)
     assert workbook["Executive Summary"]["B2"].value == "2026-03"
     assert workbook["Channel Breakdown"]["A2"].value == "channel-tv-a"
     assert {event.event_type for event in audit_events} == {
-        "AUDIT_LOG_VIEWED",
         "BANK_RECONCILIATION_VIEWED",
         "EXPORT_DOWNLOADED",
         "PAYMENT_VIEWED",
@@ -967,7 +966,6 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(
     assert "PAYMENT_MATCHED" in text
     assert "BANK_CONFIRMED" in text
     assert {event.event_type for event in audit_events} == {
-        "AUDIT_LOG_VIEWED",
         "BANK_RECONCILIATION_VIEWED",
         "EXPORT_DOWNLOADED",
         "PAYMENT_VIEWED",
@@ -1038,7 +1036,6 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
     assert "PAYMENT_MATCHED" in slide_text
     assert "BANK_CONFIRMED" in slide_text
     assert {event.event_type for event in audit_events} == {
-        "AUDIT_LOG_VIEWED",
         "BANK_RECONCILIATION_VIEWED",
         "EXPORT_DOWNLOADED",
         "PAYMENT_VIEWED",
