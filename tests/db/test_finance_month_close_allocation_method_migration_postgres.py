@@ -80,6 +80,38 @@ def test_upgrade_refuses_existing_unknown_allocation_method(
         command.upgrade(alembic_config, ALLOCATION_METHOD_HEAD)
 
 
+def test_upgrade_normalizes_legacy_uppercase_canonical_method(
+    alembic_config: Config, fresh_engine: object
+) -> None:
+    """Legacy upper/mixed-case canonical values are folded to lowercase."""
+    command.upgrade(alembic_config, PRIOR_HEAD)
+    for index, method in enumerate(
+        (
+            "POST_TAX_REVENUE_PROPORTIONAL",
+            "  GROSS_REVENUE_PROPORTIONAL  ",
+            "Company_Level",
+            "manual",  # already lowercase — must be a no-op
+        ),
+        start=1,
+    ):
+        sql, params = _insert_close_sql(month=f"2025-{index:02d}", method=method)
+        with fresh_engine.begin() as conn:
+            conn.execute(sql, params)
+
+    command.upgrade(alembic_config, ALLOCATION_METHOD_HEAD)
+
+    with fresh_engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT month, allocation_method FROM finance_month_close ORDER BY month")
+        ).fetchall()
+    assert [row[1] for row in rows] == [
+        "post_tax_revenue_proportional",
+        "gross_revenue_proportional",
+        "company_level",
+        "manual",
+    ]
+
+
 def test_head_check_accepts_allowlist_and_null_rejects_unknown(
     alembic_config: Config, fresh_engine: object
 ) -> None:

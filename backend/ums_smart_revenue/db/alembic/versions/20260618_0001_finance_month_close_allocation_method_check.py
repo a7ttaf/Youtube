@@ -20,6 +20,13 @@ branch_labels = None
 depends_on = None
 
 _CONSTRAINT_NAME = "ck_finance_month_close_allocation_method"
+_ALLOCATION_METHOD_VALUES = (
+    "gross_revenue_proportional",
+    "post_tax_revenue_proportional",
+    "company_level",
+    "manual",
+    "no_allocation",
+)
 _ALLOCATION_METHOD_CHECK = (
     "allocation_method IS NULL OR allocation_method IN ("
     "'gross_revenue_proportional', 'post_tax_revenue_proportional', "
@@ -27,8 +34,40 @@ _ALLOCATION_METHOD_CHECK = (
 )
 
 
+def _normalize_legacy_allocation_method_casing() -> int:
+    """Lowercase existing rows whose lower-cased value is in the allowlist.
+
+    The pre-PR endpoint stripped whitespace but did not lowercase the value,
+    so a row persisted as ``POST_TAX_REVENUE_PROPORTIONAL`` (or any other
+    upper/mixed-case variant of a canonical method) would be counted as
+    invalid by the preflight and abort this migration. The new route accepts
+    and normalizes such input, so a legacy row whose lower-cased form is in
+    the allowlist is functionally a valid canonical method and must be
+    migrated forward to its lowercase form before the CHECK is added.
+    """
+    bind = op.get_bind()
+    with bind.begin() as conn:
+        result = conn.execute(
+            sa.text(
+                "UPDATE finance_month_close "
+                "SET allocation_method = lower(allocation_method) "
+                "WHERE allocation_method IS NOT NULL "
+                "AND lower(allocation_method) IN ("
+                + ", ".join(f":v{i}" for i in range(len(_ALLOCATION_METHOD_VALUES)))
+                + ")"
+                "AND allocation_method <> lower(allocation_method)"
+            ),
+            {f"v{i}": value for i, value in enumerate(_ALLOCATION_METHOD_VALUES)},
+        )
+    return int(result.rowcount or 0)
+
+
 def _invalid_allocation_method_count() -> int:
-    """Return existing close rows that would violate the new CHECK."""
+    """Return existing close rows that would violate the new CHECK.
+
+    Assumes :func:`_normalize_legacy_allocation_method_casing` has already
+    folded any case-variant canonical methods into their lowercase form.
+    """
     return int(
         op.get_bind()
         .execute(
@@ -62,6 +101,7 @@ def _invalid_allocation_method_count() -> int:
 # ============================================================================
 def upgrade() -> None:
     """Add the allocation_method allowlist CHECK."""
+    _normalize_legacy_allocation_method_casing()
     invalid_count = _invalid_allocation_method_count()
     if invalid_count:
         raise RuntimeError(
