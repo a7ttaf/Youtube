@@ -13,6 +13,7 @@ all persisted non-null methods.
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy import bindparam
 
 revision = "20260618_0001"
 down_revision = "20260612_0002"
@@ -52,12 +53,15 @@ def _normalize_legacy_allocation_method_casing() -> int:
                 "UPDATE finance_month_close "
                 "SET allocation_method = lower(allocation_method) "
                 "WHERE allocation_method IS NOT NULL "
-                "AND lower(allocation_method) IN ("
-                + ", ".join(f":v{i}" for i in range(len(_ALLOCATION_METHOD_VALUES)))
-                + ")"
+                "AND lower(allocation_method) IN :allowed_methods "
                 "AND allocation_method <> lower(allocation_method)"
+            ).bindparams(
+                bindparam(
+                    "allowed_methods",
+                    value=tuple(_ALLOCATION_METHOD_VALUES),
+                    expanding=True,
+                )
             ),
-            {f"v{i}": value for i, value in enumerate(_ALLOCATION_METHOD_VALUES)},
         )
     return int(result.rowcount or 0)
 
@@ -68,19 +72,23 @@ def _invalid_allocation_method_count() -> int:
     Assumes :func:`_normalize_legacy_allocation_method_casing` has already
     folded any case-variant canonical methods into their lowercase form.
     """
-    return int(
-        op.get_bind()
-        .execute(
-            sa.text(
-                "SELECT COUNT(*) FROM finance_month_close "
-                "WHERE allocation_method IS NOT NULL "
-                "AND allocation_method NOT IN ("
-                "'gross_revenue_proportional', 'post_tax_revenue_proportional', "
-                "'company_level', 'manual', 'no_allocation')"
-            )
+    bind = op.get_bind()
+    with bind.begin() as conn:
+        return int(
+            conn.execute(
+                sa.text(
+                    "SELECT COUNT(*) FROM finance_month_close "
+                    "WHERE allocation_method IS NOT NULL "
+                    "AND allocation_method NOT IN :allowed_methods"
+                ).bindparams(
+                    bindparam(
+                        "allowed_methods",
+                        value=tuple(_ALLOCATION_METHOD_VALUES),
+                        expanding=True,
+                    )
+                ),
+            ).scalar_one()
         )
-        .scalar_one()
-    )
 
 
 # ============================================================================
