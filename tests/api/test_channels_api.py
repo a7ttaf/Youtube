@@ -932,8 +932,11 @@ class ValidationFailingContentOwnerRegistry:
             content_owner_id=self._owner,
         )
 
+    @staticmethod
     def update_content_owner(
-        self, *, youtube_channel_id: str, content_owner_id: str | None  # noqa: ARG002
+        *,
+        youtube_channel_id: str,
+        content_owner_id: str | None,  # noqa: ARG001
     ) -> ChannelRegistryEntry:
         raise ChannelRegistryValidationError("simulated flush integrity failure")
 
@@ -942,9 +945,9 @@ def test_content_owner_update_translates_registry_validation_error_to_422():
     """A ChannelRegistryValidationError from update_content_owner must surface as
     HTTP 422 (matching create_channel/update_mapping), not an unhandled 500."""
     app = create_bootstrap_app()
-    app.dependency_overrides[current_channel_registry] = (
-        lambda: ValidationFailingContentOwnerRegistry()
-    )
+    # Pass the class directly (FastAPI instantiates it), matching the file's
+    # existing ScopedListRegistry override style and avoiding a needless lambda.
+    app.dependency_overrides[current_channel_registry] = ValidationFailingContentOwnerRegistry
     client = TestClient(app)
 
     response = client.patch(
