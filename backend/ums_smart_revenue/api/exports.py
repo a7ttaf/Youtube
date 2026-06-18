@@ -447,7 +447,7 @@ def preview_finance_workbook(
         group_registry=group_registry,
         artifact_type="finance_workbook_preview",
         include_download_event=False,
-        audit_summary=preview.smart_alerts,
+        audit_summary=preview.smart_alerts if export_job.scope_type == "global" else None,
     )
     response = preview.to_api()
     response["audit_events"] = [audit_record_to_api(record) for record in audit_records]
@@ -499,6 +499,7 @@ def download_finance_workbook(
                 session=session,
                 org_index=org_index,
                 group_registry=group_registry,
+                include_audit_derived_alerts=False,
             )
             workbook_bytes = build_finance_workbook_xlsx(preview)
             filename = f"ums-finance-{export_job.month}-{export_job.scope_type}.xlsx"
@@ -553,7 +554,6 @@ def download_finance_workbook(
         group_registry=group_registry,
         artifact_type="finance_workbook_xlsx",
         include_download_event=True,
-        audit_summary=preview.smart_alerts,
     )
     return Response(
         content=workbook_bytes,
@@ -607,6 +607,7 @@ def download_executive_pdf(
                 session=session,
                 org_index=org_index,
                 group_registry=group_registry,
+                include_audit_derived_alerts=False,
             )
             report = build_executive_pdf_report(
                 export_job=export_job,
@@ -669,7 +670,6 @@ def download_executive_pdf(
         group_registry=group_registry,
         artifact_type="executive_pdf",
         include_download_event=True,
-        audit_summary=source_summaries.smart_alerts,
     )
     return Response(
         content=pdf_bytes,
@@ -723,6 +723,7 @@ def download_branded_slide_pack(
                 session=session,
                 org_index=org_index,
                 group_registry=group_registry,
+                include_audit_derived_alerts=False,
             )
             report = build_branded_slide_pack_report(
                 export_job=export_job,
@@ -787,7 +788,6 @@ def download_branded_slide_pack(
         group_registry=group_registry,
         artifact_type="branded_slide_pack_pptx",
         include_download_event=True,
-        audit_summary=source_summaries.smart_alerts,
     )
     return Response(
         content=pptx_bytes,
@@ -803,6 +803,7 @@ def _build_finance_workbook_preview_for_export(
     session: Session,
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
+    include_audit_derived_alerts: bool = True,
 ) -> FinanceWorkbookPreview:
     """Build the finance workbook preview model for the given export job."""
     source_summaries = _build_finance_source_summaries_for_export(
@@ -811,6 +812,7 @@ def _build_finance_workbook_preview_for_export(
         session=session,
         org_index=org_index,
         group_registry=group_registry,
+        include_audit_derived_alerts=include_audit_derived_alerts,
     )
     return build_finance_workbook_preview(
         export_job=export_job,
@@ -998,6 +1000,7 @@ def _build_finance_source_summaries_for_export(
     session: Session,
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
+    include_audit_derived_alerts: bool = True,
 ) -> _FinanceExportSourceSummaries:
     """Resolve all finance source summaries (net revenue, payments, bank, alerts) for an export."""
     # ====================================================================
@@ -1111,12 +1114,16 @@ def _build_finance_source_summaries_for_export(
         month=export_job.month,
         youtube_channel_ids=channel_ids,
     )
-    # FIX: mirror the smart-alerts API audit gate so the SOURCE_ROWS_SKIPPED
-    # alert surfaces in workbook / executive-PDF / branded-slide-pack exports
-    # only when the caller holds VIEW_AUDIT_LOG. Per-reason breakdown still
-    # requires VIEW_SENSITIVE_AUDIT_PAYLOADS, matching the API redaction rule.
+    # FIX: preview may surface the audit-derived skipped-row signal, but
+    # persisted downloadable bytes must stay permission-invariant. Scoped
+    # exports suppress this tenant-wide audit signal until source rows can be
+    # tied to the export's frozen channel set.
     audit_scope = AccessScope.global_scope()
-    if has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
+    if (
+        include_audit_derived_alerts
+        and channel_ids is None
+        and has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
+    ):
         include_sensitive_details = has_permission(
             user, Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS, audit_scope
         )
@@ -1160,7 +1167,7 @@ def _record_finance_export_artifact_audit(
     group_registry: ChannelGroupRegistryStore,
     artifact_type: str,
     include_download_event: bool,
-    audit_summary: object | None = None,
+    audit_summary: MonthlySmartAlertSummary | None = None,
 ):
     """Emit revenue, payment, bank-reconciliation, and optional download audit events."""
     revenue_scopes = _audit_revenue_scopes_for_export(
@@ -1220,33 +1227,31 @@ def _record_finance_export_artifact_audit(
     # /audit/events redaction-on-use pattern and the get_month_smart_alerts
     # self-audit so an export generated with VIEW_AUDIT_LOG leaves an audit
     # trail of its audit-derived read.
-    if audit_summary is not None and has_permission(
-        user, Permission.VIEW_AUDIT_LOG, AccessScope.global_scope()
-    ):
-        skipped_alert_codes = "SOURCE_ROWS_SKIPPED" if audit_summary is not None else ""
+    audit_scope = AccessScope.global_scope()
+    if audit_summary is not None and has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
+        returned = any(alert.code == "SOURCE_ROWS_SKIPPED" for alert in audit_summary.alerts)
         audit_records.append(
             record_audit_event(
                 sink=audit_sink,
                 actor=user,
                 event_type=AuditEventType.AUDIT_LOG_VIEWED,
-                entity_type="export_job",
+                entity_type="audit_log_page",
                 entity_id=f"{export_job.id}:skipped_source_rows",
-                scope=AccessScope.global_scope(),
+                scope=audit_scope,
                 details={
                     "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
-                    "entity_type": "monthly_smart_alerts",
-                    "entity_id": export_job.month,
-                    "returned": 1
-                    if skipped_alert_codes
-                    and any(
-                        getattr(alert, "code", "") == "SOURCE_ROWS_SKIPPED"
-                        for alert in getattr(audit_summary, "alerts", [])
-                    )
-                    else 0,
-                    "details_redacted": not has_permission(
+                    "entity_type": "finance_export",
+                    "entity_id": export_job.id,
+                    "month": export_job.month,
+                    "scope_type": export_job.scope_type,
+                    "scope_id": export_job.scope_id,
+                    "artifact_type": artifact_type,
+                    "returned": 1 if returned else 0,
+                    "details_redacted": returned
+                    and not has_permission(
                         user,
                         Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
-                        AccessScope.global_scope(),
+                        audit_scope,
                     ),
                 },
             )

@@ -11,8 +11,9 @@ from ums_smart_revenue.api.exports import (
     _record_finance_export_artifact_audit,
 )
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
-from ums_smart_revenue.auth.models import UserPrincipal
-from ums_smart_revenue.auth.scopes import OrgAccessIndex
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.db.finance_models import (
     AdsenseContentOwnerLinkORM,
     ContentOwnerChannelLinkORM,
@@ -22,6 +23,7 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
 )
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
+from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase
 from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
 )
@@ -44,6 +46,7 @@ TENANT = UUID(UMS_TENANT_ID)
 def _engine(tmp_path):
     """Create an in-memory SQLite engine with org and finance schemas."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
+    SecurityBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     return engine
@@ -157,14 +160,57 @@ def _export_job(*, scope_type, scope_channel_ids):
     )
 
 
-def _test_export_user() -> UserPrincipal:
+def _test_export_user(
+    *,
+    include_audit: bool = False,
+    include_sensitive: bool = False,
+) -> UserPrincipal:
     """Build a minimal UserPrincipal for export test scenarios.
 
-    The audit-derived smart-alert signal requires VIEW_AUDIT_LOG, so the
-    default export test user carries the permission to keep the existing
-    alert surface stable.
+    The audit-derived smart-alert signal requires VIEW_AUDIT_LOG, so tests
+    opt in explicitly instead of making unrelated export helper coverage depend
+    on audit access.
     """
-    return UserPrincipal(user_id="user-1", email="exp@example.com")
+    grants: list[PermissionGrant] = []
+    if include_audit:
+        grants.append(PermissionGrant(Permission.VIEW_AUDIT_LOG, AccessScope.global_scope()))
+    if include_sensitive:
+        grants.append(
+            PermissionGrant(
+                Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
+                AccessScope.global_scope(),
+            )
+        )
+    return UserPrincipal(
+        user_id="user-1",
+        email="exp@example.com",
+        direct_permissions=tuple(grants),
+    )
+
+
+def _seed_skipped_source_row_audit_edge(session) -> None:
+    """Seed a current ROWS_SKIPPED audit edge for the export month."""
+    session.add(
+        AuditLogORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            user_id=None,
+            event_type="CONNECTOR_JOB_RUN",
+            entity_type="connector_run",
+            entity_id="run-skipped",
+            scope_type="finance-month",
+            scope_id=MONTH,
+            reason="connector normalize: source rows skipped during projection",
+            details={
+                "lifecycle": "ROWS_SKIPPED",
+                "skipped_count": 4,
+                "skipped_by_reason": {"missing_channel_id": 4},
+            },
+            sensitive=True,
+            created_at=datetime(2026, 4, 2, tzinfo=UTC),
+        )
+    )
+    session.commit()
 
 
 def _seed_out_of_scope_account_allocation(session):
@@ -278,6 +324,66 @@ def test_export_net_reflects_channel_direct_and_account_deductions(tmp_path):
     assert channel.net_revenue_usd == Decimal("870.000000")  # 1000 - 30 - 100
     assert channel.channel_direct_deduction_amount_usd == Decimal("30.00")
     assert channel.account_allocated_deduction_amount_usd == Decimal("100.000000")
+
+
+def test_global_export_preview_includes_skipped_source_alert_for_audit_user(tmp_path):
+    """Global preview can surface audit-derived skipped source rows to audit users."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        _seed_skipped_source_row_audit_edge(session)
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(include_audit=True),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+
+    skipped = next(
+        (alert for alert in summaries.smart_alerts.alerts if alert.code == "SOURCE_ROWS_SKIPPED"),
+        None,
+    )
+    assert skipped is not None
+    assert skipped.details == {
+        "skipped_count": 4,
+        "skipped_by_reason": {},
+    }
+
+
+def test_scoped_export_suppresses_tenant_wide_skipped_source_alert(tmp_path):
+    """Scoped exports must not leak tenant-wide skipped-row audit signals."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        _seed_skipped_source_row_audit_edge(session)
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
+            user=_test_export_user(include_audit=True),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+
+    assert "SOURCE_ROWS_SKIPPED" not in {alert.code for alert in summaries.smart_alerts.alerts}
+
+
+def test_persisted_artifact_source_summary_is_permission_invariant(tmp_path):
+    """Persisted download builders suppress caller-specific audit-derived alerts."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        _seed_skipped_source_row_audit_edge(session)
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(include_audit=True, include_sensitive=True),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+            include_audit_derived_alerts=False,
+        )
+
+    assert "SOURCE_ROWS_SKIPPED" not in {alert.code for alert in summaries.smart_alerts.alerts}
 
 
 def _commit_snapshot_and_lock(session):
