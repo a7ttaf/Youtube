@@ -1261,11 +1261,33 @@ def get_month_smart_alerts(
         scope=month_scope,
         details=audit_details,
     )
-    summary_api["audit_events"] = [
-        audit_record_to_api(revenue_record),
-        audit_record_to_api(payment_record),
-        audit_record_to_api(bank_record),
-    ]
+    # FIX: Record an AUDIT_LOG_VIEWED self-audit when the route actually reads
+    # audit_logs to derive the SOURCE_ROWS_SKIPPED alert, matching the
+    # /audit/events redaction-on-use pattern. Without this self-audit a caller
+    # with VIEW_AUDIT_LOG leaves no audit trail of their audit-derived reads,
+    # which is the same gap the chatgpt-codex-connector P2 review flagged.
+    audit_records = [revenue_record, payment_record, bank_record]
+    if skipped_source_row_count > 0 and has_permission(
+        user, Permission.VIEW_AUDIT_LOG, audit_scope
+    ):
+        audit_records.append(
+            record_audit_event(
+                sink=audit_sink,
+                actor=user,
+                event_type=AuditEventType.AUDIT_LOG_VIEWED,
+                entity_type="audit_log_page",
+                entity_id=f"{month}:skipped_source_rows",
+                scope=audit_scope,
+                details={
+                    "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
+                    "entity_type": "monthly_smart_alerts",
+                    "entity_id": month,
+                    "returned": 1,
+                    "details_redacted": not include_sensitive_details,
+                },
+            )
+        )
+    summary_api["audit_events"] = [audit_record_to_api(r) for r in audit_records]
     return summary_api
 
 
