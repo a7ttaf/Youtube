@@ -43,9 +43,33 @@ Database authorization rejects unknown users and disabled users before route cod
 GET /channels
 POST /channels
 PATCH /channels/{youtube_channel_id}/mapping
+PATCH /channels/{youtube_channel_id}/content-owner
 GET /channels/issues
 GET /channels/outside-cms
 ```
+
+`PATCH /channels/{youtube_channel_id}/content-owner` sets or clears a channel's
+CMS `content_owner_id` — the value `list_target_channels` matches against the
+connector account id to choose which channels a revenue pull targets. It requires
+`registry.manage_channels` (not `registry.manage_org_mapping`) at the target
+channel scope, checked before the existence check so an unauthorized caller never
+learns whether a channel exists (403 before any 404). The request body is
+`{"content_owner_id": str | null, "reason": str}` where `content_owner_id` is
+required-to-be-present but nullable: sending `null` clears the CMS content owner,
+while a present-but-blank string is rejected as 422 (not silently coerced to
+null). Authorization is verified before existence, so an unauthorized caller
+always gets 403 regardless of whether the channel exists; an authorized caller
+targeting a missing channel gets 404. A registry validation failure surfaces as
+422, mirroring `POST /channels` and `PATCH .../mapping`. Re-submitting the
+current value is a no-op: it writes nothing and returns 200 with
+`audit_event: null` so idempotent retries do not produce a misleading audit
+event. An applied change records a `CHANNEL_UPDATED` audit event tagged with
+`permission=registry.manage_channels` (via an explicit permission override, so
+permission-based audit filtering attributes the write to the permission that
+authorized it), carrying `old_content_owner_id`/`new_content_owner_id` in the
+details and the required `reason`. It applies to future ingestion targeting only;
+it performs no locked-month guard and never rewrites a closed month's finance
+attribution.
 
 `GET /channels/outside-cms` is an implemented monitor endpoint for active
 channels with `cms_status=OUTSIDE_CMS`. It requires `analytics.view` for the

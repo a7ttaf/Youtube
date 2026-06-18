@@ -14,6 +14,7 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelRegistryConflictError,
     ChannelRegistryEntry,
     ChannelRegistryValidationError,
+    normalize_optional_content_owner,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -73,6 +74,7 @@ class SqlAlchemyChannelRegistry:
         primary_company_id: str | None,
         cms_status: str,
         revenue_required: bool,
+        content_owner_id: str | None = None,
     ) -> ChannelRegistryEntry:
         """Create a channel row, raising on tenant-scoped duplicate or FK violation."""
         if self._get_row(youtube_channel_id) is not None:
@@ -85,7 +87,7 @@ class SqlAlchemyChannelRegistry:
             channel_name=channel_name,
             primary_org_unit_id=_parse_optional_uuid(primary_company_id, "primary_company_id"),
             cms_status=cms_status,
-            content_owner_id=None,
+            content_owner_id=normalize_optional_content_owner(content_owner_id),
             revenue_required=revenue_required,
             revenue_source_status=(
                 "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
@@ -155,6 +157,49 @@ class SqlAlchemyChannelRegistry:
             )
 
         row.primary_org_unit_id = parsed_primary_company_id
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            self._session.rollback()
+            raise _channel_registry_validation_error_from_integrity_error(exc) from exc
+        return self._to_entry(row)
+
+    # ========================================================================
+    # Purpose: Set or clear a channel's CMS content_owner_id — the key
+    #   list_target_channels matches against the connector account id to
+    #   choose which channels a revenue pull targets.
+    # Database/ORM: YouTubeChannelORM (write), tenant-scoped.
+    # Standards: No locked-month guard (unlike update_mapping). Changing the
+    #   content owner never rewrites a closed month's company/sector
+    #   attribution — it only retargets FUTURE ingestion — so the lock check
+    #   that protects finance attribution does not apply here. A missing row
+    #   raises KeyError, which the route maps to HTTP 404. A flush IntegrityError
+    #   is converted to ChannelRegistryValidationError, which the route maps to
+    #   HTTP 422 (mirroring create_channel / update_mapping).
+    # Blast Radius: Future ingestion targeting only. No finance attribution
+    #   rewrite, no month locks, no Neo4j, no exports. KNOWN CAVEAT: this write
+    #   does not touch google_revenue_source_rows already ingested for an OPEN
+    #   month under a previous content owner; normalize_month buckets source rows
+    #   by (youtube_channel_id, source_system) and is content_owner-agnostic, so
+    #   stale prior-owner rows for the current month can still feed that month's
+    #   revenue fact until the next ingestion/normalization cycle replaces them.
+    #   Invalidating source rows is a finance-data mutation that belongs in the
+    #   ingestion/cleanup layer (locked-month-aware), not this registry write.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/channels.py -> 404 + 422 boundary
+    #     and no-op audit suppression + MANAGE_CHANNELS permission_override.
+    #   - File: backend/ums_smart_revenue/connectors/google/
+    #     youtube_analytics_client.py -> list_target_channels reads it.
+    #   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py
+    #     -> normalize_month is content_owner-agnostic (see caveat above).
+    # ========================================================================
+    def update_content_owner(
+        self, *, youtube_channel_id: str, content_owner_id: str | None
+    ) -> ChannelRegistryEntry:
+        row = self._get_row(youtube_channel_id)
+        if row is None:
+            raise KeyError(f"Channel not found: {youtube_channel_id}")
+        row.content_owner_id = normalize_optional_content_owner(content_owner_id)
         try:
             self._session.flush()
         except IntegrityError as exc:

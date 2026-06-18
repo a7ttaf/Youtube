@@ -77,11 +77,17 @@ class ChannelRegistryStore(Protocol):
         primary_company_id: str | None,
         cms_status: str,
         revenue_required: bool,
+        content_owner_id: str | None = None,
     ) -> ChannelRegistryEntry:
         pass
 
     def update_mapping(
         self, *, youtube_channel_id: str, primary_company_id: str | None
+    ) -> ChannelRegistryEntry:
+        pass
+
+    def update_content_owner(
+        self, *, youtube_channel_id: str, content_owner_id: str | None
     ) -> ChannelRegistryEntry:
         pass
 
@@ -123,6 +129,7 @@ class ChannelRegistry:
         primary_company_id: str | None,
         cms_status: str,
         revenue_required: bool,
+        content_owner_id: str | None = None,
     ) -> ChannelRegistryEntry:
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
         if youtube_channel_id in self._channels:
@@ -136,6 +143,7 @@ class ChannelRegistry:
             primary_company_id=normalized_company_id,
             cms_status=cms_status,
             revenue_required=revenue_required,
+            content_owner_id=normalize_optional_content_owner(content_owner_id),
             revenue_source_status=initial_revenue_source_status,
         )
         self._channels[youtube_channel_id] = channel
@@ -155,6 +163,25 @@ class ChannelRegistry:
             cms_status=existing.cms_status,
             revenue_required=existing.revenue_required,
             content_owner_id=existing.content_owner_id,
+            revenue_source_status=existing.revenue_source_status,
+            active=existing.active,
+        )
+        self._channels[youtube_channel_id] = updated
+        return updated
+
+    def update_content_owner(
+        self, *, youtube_channel_id: str, content_owner_id: str | None
+    ) -> ChannelRegistryEntry:
+        existing = self._channels.get(youtube_channel_id)
+        if existing is None:
+            raise KeyError(youtube_channel_id)
+        updated = ChannelRegistryEntry(
+            youtube_channel_id=existing.youtube_channel_id,
+            channel_name=existing.channel_name,
+            primary_company_id=existing.primary_company_id,
+            cms_status=existing.cms_status,
+            revenue_required=existing.revenue_required,
+            content_owner_id=normalize_optional_content_owner(content_owner_id),
             revenue_source_status=existing.revenue_source_status,
             active=existing.active,
         )
@@ -188,3 +215,16 @@ def _parse_optional_uuid(value: str | None, field_name: str) -> str | None:
         return str(UUID(value))
     except ValueError as exc:
         raise ChannelRegistryValidationError(f"{field_name} must be a valid UUID") from exc
+
+
+def normalize_optional_content_owner(value: str | None) -> str | None:
+    """Normalize a content owner id, treating blank/None as unset (None).
+
+    The content owner id is a free-form Google CMS string matched against the
+    connector account id, not a UUID. The API layer rejects a present-but-blank
+    value; this defensive normalization keeps direct registry callers from
+    persisting a whitespace-only owner that could never match an account.
+    """
+    if value is None:
+        return None
+    return value.strip() or None

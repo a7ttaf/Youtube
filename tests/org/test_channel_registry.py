@@ -137,3 +137,93 @@ def test_in_memory_channel_registry_list_channels_excludes_inactive_entries():
     assert [channel.youtube_channel_id for channel in registry.list_channels()] == [
         "channel-active"
     ]
+
+
+def test_in_memory_channel_registry_create_sets_content_owner_id():
+    registry = ChannelRegistry()
+
+    channel = registry.create_channel(
+        youtube_channel_id="channel-cms",
+        channel_name="CMS Channel",
+        primary_company_id=COMPANY_TV_ID,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+        content_owner_id="owner-123",
+    )
+
+    assert channel.content_owner_id == "owner-123"
+    assert registry.get_channel("channel-cms").content_owner_id == "owner-123"
+
+
+def test_in_memory_channel_registry_create_defaults_content_owner_id_to_none():
+    registry = ChannelRegistry()
+
+    channel = registry.create_channel(
+        youtube_channel_id="channel-no-owner",
+        channel_name="No Owner",
+        primary_company_id=COMPANY_TV_ID,
+        cms_status="UNKNOWN",
+        revenue_required=True,
+    )
+
+    assert channel.content_owner_id is None
+
+
+def test_in_memory_channel_registry_update_content_owner_sets_changes_and_clears():
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id="channel-tv-a",
+                channel_name="TV A",
+                primary_company_id=COMPANY_TV_ID,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+            )
+        ]
+    )
+
+    set_owner = registry.update_content_owner(
+        youtube_channel_id="channel-tv-a", content_owner_id="owner-1"
+    )
+    assert set_owner.content_owner_id == "owner-1"
+    # Unrelated fields are preserved by a content-owner-only update.
+    assert set_owner.cms_status == "INSIDE_CMS"
+    assert set_owner.primary_company_id == COMPANY_TV_ID
+
+    changed = registry.update_content_owner(
+        youtube_channel_id="channel-tv-a", content_owner_id="owner-2"
+    )
+    assert changed.content_owner_id == "owner-2"
+
+    cleared = registry.update_content_owner(
+        youtube_channel_id="channel-tv-a", content_owner_id=None
+    )
+    assert cleared.content_owner_id is None
+
+
+def test_in_memory_channel_registry_update_content_owner_normalizes_blank_to_none():
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id="channel-tv-a",
+                channel_name="TV A",
+                primary_company_id=COMPANY_TV_ID,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id="owner-1",
+            )
+        ]
+    )
+
+    cleared = registry.update_content_owner(
+        youtube_channel_id="channel-tv-a", content_owner_id="   "
+    )
+
+    assert cleared.content_owner_id is None
+
+
+def test_in_memory_channel_registry_update_content_owner_missing_channel_raises():
+    registry = ChannelRegistry()
+
+    with pytest.raises(KeyError):
+        registry.update_content_owner(youtube_channel_id="missing", content_owner_id="owner-1")
