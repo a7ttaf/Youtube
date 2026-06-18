@@ -263,12 +263,20 @@ def test_smart_alerts_reconcile_skipped_count_with_reason_breakdown():
     but lost the per-reason breakdown during a payload migration). The alert
     must report a total that is internally consistent with the breakdown.
     """
+
+    def _find_skipped(alerts):
+        """Return the SOURCE_ROWS_SKIPPED alert or raise AssertionError."""
+        for alert in alerts:
+            if alert.code == "SOURCE_ROWS_SKIPPED":
+                return alert
+        raise AssertionError("expected SOURCE_ROWS_SKIPPED alert")
+
     # count > sum_reasons: prefer count.
     summary = build_alerts(
         skipped_source_row_count=7,
         skipped_source_rows_by_reason={"unknown_channel": 2},
     )
-    skipped = next(alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED")
+    skipped = _find_skipped(summary.alerts)
     assert skipped.details == {
         "skipped_count": 7,
         "skipped_by_reason": {"unknown_channel": 2},
@@ -282,7 +290,7 @@ def test_smart_alerts_reconcile_skipped_count_with_reason_breakdown():
             "missing_channel_id": 4,
         },
     )
-    skipped = next(alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED")
+    skipped = _find_skipped(summary.alerts)
     assert skipped.details == {
         "skipped_count": 6,
         "skipped_by_reason": {
@@ -296,7 +304,7 @@ def test_smart_alerts_reconcile_skipped_count_with_reason_breakdown():
         skipped_source_row_count=3,
         skipped_source_rows_by_reason={"unknown_channel": 3},
     )
-    skipped = next(alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED")
+    skipped = _find_skipped(summary.alerts)
     assert skipped.details == {
         "skipped_count": 3,
         "skipped_by_reason": {"unknown_channel": 3},
