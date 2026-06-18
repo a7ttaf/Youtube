@@ -204,9 +204,7 @@ def test_smart_alerts_flag_skipped_source_rows():
     )
 
     codes = [alert.code for alert in summary.alerts]
-    assert codes.index("SOURCE_ROWS_SKIPPED") == (
-        codes.index("CHANNELS_MISSING_REVENUE_FACTS") + 1
-    )
+    assert codes.index("SOURCE_ROWS_SKIPPED") == (codes.index("CHANNELS_MISSING_REVENUE_FACTS") + 1)
     assert codes.index("SOURCE_ROWS_SKIPPED") < codes.index("PAYMENT_NOT_MATCHED")
     skipped_alert = next(
         (alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED"),
