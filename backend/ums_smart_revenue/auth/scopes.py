@@ -9,6 +9,7 @@ class ScopeType(StrEnum):
     SECTOR = "sector"
     COMPANY = "company"
     CHANNEL = "channel"
+    GROUP = "group"
     FINANCE_MONTH = "finance-month"
     EXPORT = "export"
     CONNECTOR = "connector"
@@ -34,6 +35,10 @@ class AccessScope:
     @classmethod
     def channel(cls, channel_id: str) -> AccessScope:
         return cls(ScopeType.CHANNEL, channel_id)
+
+    @classmethod
+    def group(cls, group_id: str) -> AccessScope:
+        return cls(ScopeType.GROUP, group_id)
 
     @classmethod
     def finance_month(cls, month: str) -> AccessScope:

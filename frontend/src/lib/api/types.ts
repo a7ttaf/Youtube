@@ -1028,11 +1028,12 @@ export type RankedEntry = {
 // Purpose: TypeScript mirror of the backend GET /revenue/scopes JSON contract
 //   consumed by the Command Center scope selector. The endpoint returns ONLY the
 //   rollup scopes the viewer is VIEW_REVENUE-authorized for (global / their
-//   sectors / their companies), so the selector cannot offer an out-of-scope org
-//   unit (org-structure leak) or a dead option that 403s on the rollup read.
-//   `scope_id` is null for the global option and the org-unit id otherwise; the
-//   id/label pair threads straight into the net-revenue + rankings reads. Fields
-//   are matched 1:1 against RevenueScopeOption.to_api() (not guessed).
+//   sectors / their companies / channel groups), so the selector cannot offer an
+//   out-of-scope org unit or group (org-structure leak) or a dead option that
+//   403s on the rollup read. `scope_id` is null for the global option and the
+//   org-unit or group id otherwise; the id/label pair threads straight into the
+//   net-revenue + rankings reads. Fields are matched 1:1 against
+//   RevenueScopeOption.to_api() (not guessed).
 // Standards: Read-only typed boundary at the API surface; no logic here. No
 //   client-side authorization is invented — the backend VIEW_REVENUE gate is
 //   authoritative and the option set is the fail-closed source of truth.
@@ -1044,8 +1045,8 @@ export type RankedEntry = {
 // ============================================================================
 
 // One authorized rollup scope option. scope_type is "global" | "sector" |
-// "company"; scope_id is null only for the global option (the org-unit id
-// otherwise). label resolves to the org-unit name with a raw-id fallback.
+// "company" | "group"; scope_id is null only for the global option (the
+// org-unit or group id otherwise). label resolves to the backend display name.
 // Source: RevenueScopeOption.to_api() (finance/revenue_scopes.py).
 export type RevenueScopeOption = {
   scope_type: string;

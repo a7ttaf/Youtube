@@ -12,6 +12,7 @@ from ums_smart_revenue.finance.revenue_scopes import (
     RevenueScopeOption,
     build_authorized_revenue_scopes,
 )
+from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
 
 # Two sectors, three companies. company_sector maps company_id -> sector_id.
 SECTOR_TV = "sector-tv"
@@ -19,10 +20,21 @@ SECTOR_MUSIC = "sector-music"
 COMPANY_TV_A = "company-tv-a"
 COMPANY_TV_B = "company-tv-b"
 COMPANY_MUSIC = "company-music"
+CHANNEL_TV_A = "channel-tv-a"
+CHANNEL_TV_B = "channel-tv-b"
+CHANNEL_MUSIC = "channel-music"
 
 ORG_INDEX = OrgAccessIndex(
-    channel_company={},
-    channel_sector={},
+    channel_company={
+        CHANNEL_TV_A: COMPANY_TV_A,
+        CHANNEL_TV_B: COMPANY_TV_B,
+        CHANNEL_MUSIC: COMPANY_MUSIC,
+    },
+    channel_sector={
+        CHANNEL_TV_A: SECTOR_TV,
+        CHANNEL_TV_B: SECTOR_TV,
+        CHANNEL_MUSIC: SECTOR_MUSIC,
+    },
     company_sector={
         COMPANY_TV_A: SECTOR_TV,
         COMPANY_TV_B: SECTOR_TV,
@@ -37,13 +49,31 @@ COMPANY_NAMES = {
 }
 
 
-def _build(granted):
+def _build(granted, *, groups=()):
     """Invoke the service with the shared org fixtures and given grants."""
     return build_authorized_revenue_scopes(
         granted=granted,
         org_index=ORG_INDEX,
         sector_names=SECTOR_NAMES,
         company_names=COMPANY_NAMES,
+        groups=groups,
+    )
+
+
+def _group(
+    group_id: str,
+    name: str,
+    channel_ids: tuple[str, ...],
+    *,
+    active: bool = True,
+) -> ChannelGroupEntry:
+    """Build an in-memory channel-group entry for pure scope tests."""
+    return ChannelGroupEntry(
+        id=group_id,
+        name=name,
+        group_type="CUSTOM_GROUP",
+        active=active,
+        channel_ids=channel_ids,
     )
 
 
@@ -140,6 +170,72 @@ def test_global_grant_with_other_scoped_grants_still_lists_full_universe():
 
     assert any(o.scope_type == "global" for o in options)
     assert len(options) == 6
+
+
+def test_global_grant_emits_active_non_empty_groups():
+    """A global grant lists active channel groups after org rollup options."""
+    options = _build(
+        (AccessScope.global_scope(),),
+        groups=(
+            _group("group-tv", "TV Group", (CHANNEL_TV_A, CHANNEL_TV_B)),
+            _group("group-empty", "Empty Group", ()),
+            _group("group-inactive", "Inactive Group", (CHANNEL_TV_A,), active=False),
+        ),
+    )
+
+    keys = [(option.scope_type, option.scope_id) for option in options]
+    assert ("group", "group-tv") in keys
+    assert ("group", "group-empty") not in keys
+    assert ("group", "group-inactive") not in keys
+    assert keys[-1] == ("group", "group-tv")
+
+
+def test_channel_grants_for_every_member_emit_group_option():
+    """A group can be listed from channel grants only when every member is covered."""
+    options = _build(
+        (
+            AccessScope.channel(CHANNEL_TV_A),
+            AccessScope.channel(CHANNEL_MUSIC),
+        ),
+        groups=(
+            _group("group-mixed", "Mixed Group", (CHANNEL_TV_A, CHANNEL_MUSIC)),
+            _group("group-tv", "TV Group", (CHANNEL_TV_A, CHANNEL_TV_B)),
+        ),
+    )
+
+    assert [(option.scope_type, option.scope_id) for option in options] == [
+        ("group", "group-mixed")
+    ]
+
+
+def test_company_grant_excludes_group_with_foreign_member_channel():
+    """A company grant does not authorize a group that includes another company."""
+    options = _build(
+        (AccessScope.company(COMPANY_TV_A),),
+        groups=(
+            _group("group-tv-a", "TV A Group", (CHANNEL_TV_A,)),
+            _group("group-mixed", "Mixed Group", (CHANNEL_TV_A, CHANNEL_MUSIC)),
+        ),
+    )
+
+    keys = {(option.scope_type, option.scope_id) for option in options}
+    assert ("group", "group-tv-a") in keys
+    assert ("group", "group-mixed") not in keys
+
+
+def test_sector_grant_emits_group_when_all_members_are_in_sector():
+    """A sector grant can authorize groups whose members are all in that sector."""
+    options = _build(
+        (AccessScope.sector(SECTOR_TV),),
+        groups=(
+            _group("group-tv", "TV Group", (CHANNEL_TV_A, CHANNEL_TV_B)),
+            _group("group-mixed", "Mixed Group", (CHANNEL_TV_A, CHANNEL_MUSIC)),
+        ),
+    )
+
+    keys = {(option.scope_type, option.scope_id) for option in options}
+    assert ("group", "group-tv") in keys
+    assert ("group", "group-mixed") not in keys
 
 
 def test_raw_id_fallback_when_name_missing():

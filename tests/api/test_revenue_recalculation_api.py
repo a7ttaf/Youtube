@@ -10,7 +10,13 @@ from ums_smart_revenue.db.finance_models import (
     FinanceBase,
     MonthlyChannelRevenueFactORM,
 )
-from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.db.org_models import (
+    ChannelGroupMemberORM,
+    ChannelGroupORM,
+    OrgBase,
+    OrgUnitORM,
+    YouTubeChannelORM,
+)
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000d101")
@@ -19,6 +25,7 @@ OTHER_COMPANY_ID = UUID("00000000-0000-0000-0000-00000000d202")
 CHANNEL_A_ROW_ID = UUID("00000000-0000-0000-0000-00000000d301")
 CHANNEL_B_ROW_ID = UUID("00000000-0000-0000-0000-00000000d302")
 OTHER_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d303")
+GROUP_ID = UUID("00000000-0000-0000-0000-00000000d501")
 USER_ID = UUID("00000000-0000-0000-0000-00000000d401")
 
 
@@ -151,6 +158,27 @@ def seed_database(database_url: str) -> None:
         session.commit()
 
 
+def seed_group(database_url: str, *, channel_row_ids: tuple[UUID, ...]) -> None:
+    """Seed one active channel group for recalculation scope tests."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ChannelGroupORM(
+                id=GROUP_ID,
+                name="TV A Group",
+                group_type="CUSTOM_GROUP",
+                active=True,
+            )
+        )
+        session.add_all(
+            [
+                ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=channel_row_id)
+                for channel_row_id in channel_row_ids
+            ]
+        )
+        session.commit()
+
+
 def recalculation_payload(**overrides) -> dict[str, object]:
     """Return a default recalculation request payload with optional overrides."""
     payload: dict[str, object] = {
@@ -207,6 +235,27 @@ def test_finance_admin_requests_recalculation_preview_with_audit(tmp_path):
     assert audit_log.scope_type == "finance-month"
     assert audit_log.scope_id == "2026-03"
     assert audit_log.sensitive is True
+
+
+def test_recalculation_preview_supports_group_scope(tmp_path):
+    """A group-scoped dry run filters source rows to the group's member channels."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_group(database_url, channel_row_ids=(CHANNEL_A_ROW_ID,))
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="group", scope_id=str(GROUP_ID)),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == {"scope_type": "group", "scope_id": str(GROUP_ID)}
+    assert body["source_summary"]["revenue_fact_count"] == 1
+    assert body["source_summary"]["source_channel_count"] == 1
+    assert body["source_summary"]["net_revenue_source_count"] == 1
 
 
 def test_finance_viewer_cannot_request_recalculation(tmp_path):

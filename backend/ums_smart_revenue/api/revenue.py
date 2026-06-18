@@ -55,6 +55,7 @@ from ums_smart_revenue.api.dependencies_finance import (
     current_revenue_fact_repository,
 )
 from ums_smart_revenue.api.org_units import current_org_unit_reader
+from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import (
     AuditRecord,
@@ -156,6 +157,7 @@ from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_sum
 from ums_smart_revenue.finance.smart_alerts import (
     build_monthly_smart_alert_summary,
 )
+from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
 from ums_smart_revenue.org.org_units_read import SqlAlchemyOrgUnitReader
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -644,6 +646,10 @@ def request_revenue_recalculation(
         Depends(current_channel_account_link_repository),
     ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    group_registry: Annotated[
+        ChannelGroupRegistryStore,
+        Depends(sql_group_registry_from_session),
+    ],
     response: Response,
 ) -> dict[str, object]:
     """Preview (dry_run) or commit (dry_run=false) a revenue recalculation."""
@@ -651,12 +657,19 @@ def request_revenue_recalculation(
         scope_type=payload.scope_type,
         scope_id=payload.scope_id,
         org_index=org_index,
+        group_registry=group_registry,
     )
     month_scope = AccessScope.finance_month(payload.month)
     # Gates first (authorization before request-shape validation). The write path
     # must never be weaker than the commit endpoint: dry_run=false adds the
     # write-only VIEW_FINALIZED_PAYMENTS gate right after the two dry-run gates.
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    _require_revenue_read_permission(
+        user,
+        Permission.VIEW_REVENUE,
+        target_scope,
+        channel_ids,
+        org_index,
+    )
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, month_scope)
     if not payload.dry_run:
         _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
@@ -1416,11 +1429,12 @@ def get_month_deduction_components(
 
 # ============================================================================
 # Purpose: Return ONLY the rollup scopes the caller is VIEW_REVENUE-authorized
-#   to aggregate (global / their sectors / their companies), so the Command
-#   Center scope selector cannot offer an out-of-scope unit (org-structure leak)
-#   or a dead option that would 403 on the rollup read.
+#   to aggregate (global / their sectors / their companies / channel groups),
+#   so the Command Center scope selector cannot offer an out-of-scope unit
+#   (org-structure leak) or a dead option that would 403 on the rollup read.
 # Database/ORM: OrgUnitORM names via SqlAlchemyOrgUnitReader; the org-access
-#   index (company_sector) via current_org_access_index. Read-only, no writes.
+#   index (company_sector) via current_org_access_index; channel-group rows via
+#   ChannelGroupRegistryStore. Read-only, no writes.
 # Standards: Thin route — fail-closed VIEW_REVENUE gate at the boundary, then a
 #   pure service build, then typed serialization. No audit event (metadata
 #   helper like GET /org-units; it discloses only ids/names the caller is
@@ -1440,6 +1454,10 @@ def list_authorized_revenue_scopes(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     reader: Annotated[SqlAlchemyOrgUnitReader, Depends(current_org_unit_reader)],
+    group_registry: Annotated[
+        ChannelGroupRegistryStore,
+        Depends(sql_group_registry_from_session),
+    ],
 ) -> dict[str, object]:
     """Return the caller's authorized rollup scope options; 403 without VIEW_REVENUE."""
     granted = _granted_scopes_for_permission(user, Permission.VIEW_REVENUE)
@@ -1459,6 +1477,7 @@ def list_authorized_revenue_scopes(
         org_index=org_index,
         sector_names=sector_names,
         company_names=company_names,
+        groups=tuple(group_registry.list_groups()),
     )
     if not options:
         # FIX (review #102): Fail-closed when a viewer's VIEW_REVENUE grants
@@ -1509,6 +1528,10 @@ def get_month_net_revenue(
     ],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    group_registry: Annotated[
+        ChannelGroupRegistryStore,
+        Depends(sql_group_registry_from_session),
+    ],
     scope_type: Annotated[str, Query(min_length=1)] = "global",
     scope_id: str | None = None,
     currency: Annotated[str, Query(min_length=1)] = "USD",
@@ -1518,9 +1541,22 @@ def get_month_net_revenue(
         scope_type=scope_type,
         scope_id=scope_id,
         org_index=org_index,
+        group_registry=group_registry,
     )
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
-    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    _require_revenue_read_permission(
+        user,
+        Permission.VIEW_REVENUE,
+        target_scope,
+        channel_ids,
+        org_index,
+    )
+    _require_revenue_read_permission(
+        user,
+        Permission.VIEW_CONFIDENCE,
+        target_scope,
+        channel_ids,
+        org_index,
+    )
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
     # FIX: Derive the global-surface gate and audit entity ids from the resolved
     # AccessScope, not the raw scope_type/scope_id query strings. The permission
@@ -1619,8 +1655,8 @@ def get_month_net_revenue(
 
 
 # ============================================================================
-# Purpose: Return finance-gated, scope-safe company/sector/channel rankings for
-#   a month, rolled up from the per-channel net-revenue summary.
+# Purpose: Return finance-gated, scope-safe company/sector/channel/group
+#   rankings for a month, rolled up from the per-channel net-revenue summary.
 # Database/ORM: Reads revenue facts, manual overrides, deduction components,
 #   channel-account links (committed snapshot for LOCKED months), and org-unit
 #   names; no writes.
@@ -1666,6 +1702,10 @@ def get_month_rankings(
     ],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    group_registry: Annotated[
+        ChannelGroupRegistryStore,
+        Depends(sql_group_registry_from_session),
+    ],
     scope_type: Annotated[str, Query(min_length=1)] = "global",
     scope_id: str | None = None,
     metric: Annotated[str, Query(min_length=1)] = "gross",
@@ -1676,9 +1716,22 @@ def get_month_rankings(
         scope_type=scope_type,
         scope_id=scope_id,
         org_index=org_index,
+        group_registry=group_registry,
     )
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
-    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    _require_revenue_read_permission(
+        user,
+        Permission.VIEW_REVENUE,
+        target_scope,
+        channel_ids,
+        org_index,
+    )
+    _require_revenue_read_permission(
+        user,
+        Permission.VIEW_CONFIDENCE,
+        target_scope,
+        channel_ids,
+        org_index,
+    )
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month))
     normalized_scope_type = target_scope.type.value
     normalized_scope_id = target_scope.id or "global"
@@ -2309,6 +2362,40 @@ def get_channel_month_revenue_summary(
     return summary.to_api()
 
 
+# ============================================================================
+# Purpose: Enforce revenue-read permissions for direct org scopes and channel
+#   groups. Groups are not stored as grant scopes; they are authorized by
+#   requiring the requested permission on every member channel.
+# Database/ORM: None; group membership was resolved before this helper.
+# Standards: Fail-closed authorization helper; no data reads, no side effects,
+#   no widened role/grant storage.
+# Blast Radius: Authorization boundary for revenue/confidence reads.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> OrgAccessIndex.contains
+#       for channel containment under global/sector/company/channel grants.
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> group channel
+#       membership source resolved by _revenue_read_scope_to_channel_ids.
+# ============================================================================
+def _require_revenue_read_permission(
+    user: UserPrincipal,
+    permission: Permission,
+    target_scope: AccessScope,
+    channel_ids: set[str] | None,
+    org_index: OrgAccessIndex,
+) -> None:
+    """Raise HTTP 403 unless the principal can read the resolved revenue scope."""
+    if target_scope.type != ScopeType.GROUP:
+        _require_permission(user, permission, target_scope, org_index)
+        return
+    if not channel_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="group revenue reads require at least one channel",
+        )
+    for channel_id in sorted(channel_ids):
+        _require_permission(user, permission, AccessScope.channel(channel_id), org_index)
+
+
 def _require_permission(
     user: UserPrincipal,
     permission: Permission,
@@ -2627,11 +2714,28 @@ def _resolve_smart_alert_tenant_id() -> UUID:
     return UUID(UMS_TENANT_ID)
 
 
+# ============================================================================
+# Purpose: Normalize supported revenue read scopes into an AccessScope plus the
+#   optional channel filter used by net revenue, rankings, and recalculation
+#   preview reads.
+# Database/ORM: Channel groups are loaded through ChannelGroupRegistryStore;
+#   org hierarchy containment is supplied by OrgAccessIndex. No writes.
+# Standards: Route-boundary shape validation with typed HTTP errors; keeps SQL
+#   filtering outside the route and rejects unknown, missing, inactive, or empty
+#   group scopes before any finance read runs.
+# Blast Radius: Finance read scope resolution and audit entity identity.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> PostgreSQL
+#       source for channel-group metadata and member channel IDs.
+#   - File: backend/ums_smart_revenue/finance/revenue_summary.py -> downstream
+#       channel filter consumer for net revenue/ranking summaries.
+# ============================================================================
 def _revenue_read_scope_to_channel_ids(
     *,
     scope_type: str,
     scope_id: str | None,
     org_index: OrgAccessIndex,
+    group_registry: ChannelGroupRegistryStore,
 ) -> tuple[AccessScope, set[str] | None]:
     """Translate a revenue read scope into an AccessScope and channel filter."""
     normalized_scope_type = scope_type.strip()
@@ -2668,6 +2772,19 @@ def _revenue_read_scope_to_channel_ids(
         )
     if normalized_scope_type == "channel":
         return AccessScope.channel(normalized_scope_id), {normalized_scope_id}
+    if normalized_scope_type == "group":
+        group = group_registry.get_group(normalized_scope_id)
+        if group is None or not group.active:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Group not found: {normalized_scope_id}",
+            )
+        if not group.channel_ids:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="group revenue reads require at least one channel",
+            )
+        return AccessScope.group(normalized_scope_id), set(group.channel_ids)
     raise HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=f"Unknown revenue scope_type: {scope_type}",
