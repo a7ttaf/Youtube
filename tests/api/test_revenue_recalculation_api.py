@@ -258,6 +258,78 @@ def test_recalculation_preview_supports_group_scope(tmp_path):
     assert body["source_summary"]["net_revenue_source_count"] == 1
 
 
+def test_recalculation_preview_normalizes_invalid_group_to_403(tmp_path):
+    """Invalid group_id returns 403 (not 404) to prevent scope discovery surface.
+
+    A group_id that does not exist, is inactive, or has no channels must
+    return the same 403 as an unauthorized access, so a caller cannot probe
+    for group existence by observing the HTTP status code.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    missing_group_id = UUID("00000000-0000-0000-0000-00000000d999")
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="group", scope_id=str(missing_group_id)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_recalculation_preview_normalizes_empty_group_to_403(tmp_path):
+    """An active but empty channel group returns 403, not 422, for the same
+    fail-closed reason as a missing group lookup.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_group(database_url, channel_row_ids=())
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="group", scope_id=str(GROUP_ID)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_recalculation_preview_normalizes_inactive_group_to_403(tmp_path):
+    """An inactive channel group returns 403, not 404, for the same
+    fail-closed reason as a missing group lookup.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    # Re-seed with active=False to cover the inactive branch.
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ChannelGroupORM(
+                id=GROUP_ID,
+                name="Inactive Group",
+                group_type="CUSTOM_GROUP",
+                active=False,
+            )
+        )
+        session.add(ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=CHANNEL_A_ROW_ID))
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="group", scope_id=str(GROUP_ID)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
 def test_finance_viewer_cannot_request_recalculation(tmp_path):
     """finance_viewer is rejected with 403."""
     database_url = build_database_url(tmp_path)

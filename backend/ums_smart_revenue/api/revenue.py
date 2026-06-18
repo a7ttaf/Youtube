@@ -2773,16 +2773,16 @@ def _revenue_read_scope_to_channel_ids(
     if normalized_scope_type == "channel":
         return AccessScope.channel(normalized_scope_id), {normalized_scope_id}
     if normalized_scope_type == "group":
+        # FIX (Qodo review #122): Normalize invalid group lookups to HTTP 403
+        # instead of 404/422 so a caller cannot probe for group existence,
+        # active state, or emptiness. The same 403 is returned when the
+        # caller lacks VIEW_REVENUE on every member channel, so unauthorized
+        # probes and unauthorized reads are indistinguishable.
         group = group_registry.get_group(normalized_scope_id)
-        if group is None or not group.active:
+        if group is None or not group.active or not group.channel_ids:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Group not found: {normalized_scope_id}",
-            )
-        if not group.channel_ids:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="group revenue reads require at least one channel",
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing permission: {Permission.VIEW_REVENUE.value}",
             )
         return AccessScope.group(normalized_scope_id), set(group.channel_ids)
     raise HTTPException(

@@ -295,6 +295,40 @@ def test_group_scope_requires_revenue_access_to_every_member_channel(tmp_path):
     assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
+def test_group_scope_normalizes_missing_group_to_403(tmp_path):
+    """A missing group_id returns 403 (not 404) to prevent scope discovery."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _channel_a_finance_principal
+    client = TestClient(app)
+    missing_group_id = UUID("00000000-0000-0000-0000-00000000c999")
+
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=group&scope_id={missing_group_id}",
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_group_scope_normalizes_empty_group_to_403(tmp_path):
+    """An active but empty channel group returns 403 (not 422)."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_group(database_url, channel_row_ids=())
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _channel_a_finance_principal
+    client = TestClient(app)
+
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=group&scope_id={GROUP_ID}",
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
 def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
     """assistant_analyst lacks VIEW_REVENUE and is rejected
     with HTTP 403 on the net-revenue endpoint."""
