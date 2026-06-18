@@ -274,6 +274,7 @@ def test_finance_admin_previews_finance_workbook_with_sensitive_audit(tmp_path):
         "Raw Appendix",
     ]
     assert {event.event_type for event in audit_events} == {
+        "AUDIT_LOG_VIEWED",
         "BANK_RECONCILIATION_VIEWED",
         "PAYMENT_VIEWED",
         "REVENUE_VIEWED",
@@ -304,7 +305,10 @@ def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_p
     assert payload["executive_summary"]["bank_reconciliation_status"] == ("MISSING_ADSENSE_PAYMENT")
     # Scoped finance-artifact exports now emit PAYMENT_VIEWED alongside
     # REVENUE_VIEWED (export net consumes account allocations); month-wide cash
-    # exposure (BANK_RECONCILIATION_VIEWED) stays global-only.
+    # exposure (BANK_RECONCILIATION_VIEWED) stays global-only. Scoped exports
+    # do NOT emit AUDIT_LOG_VIEWED because the audit-derived skipped-row signal
+    # is suppressed for non-global scopes until source rows can be tied to the
+    # export's frozen channel set.
     assert [event.event_type for event in audit_events] == [
         "PAYMENT_VIEWED",
         "REVENUE_VIEWED",
@@ -568,6 +572,20 @@ def test_finance_workbook_download_persists_artifact_and_completes_job(
     assert export_job.artifact_checksum_sha256 == hashlib.sha256(response.content).hexdigest()
     assert export_job.failure_reason is None
     assert persisted_file.read_bytes() == response.content
+
+    cached_response = client.get(
+        f"/exports/{EXPORT_ID}/finance-workbook.xlsx",
+        headers=auth_headers("finance_admin"),
+    )
+
+    with Session(engine) as session:
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert cached_response.status_code == 200
+    assert cached_response.content == response.content
+    event_types = [event.event_type for event in audit_events]
+    assert event_types.count("EXPORT_DOWNLOADED") == 2
+    assert "AUDIT_LOG_VIEWED" not in event_types
 
 
 def test_finance_workbook_storage_failure_leaves_export_retryable_without_download_audit(

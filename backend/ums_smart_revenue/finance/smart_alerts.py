@@ -1,4 +1,24 @@
-from collections.abc import Callable, Iterable, Sequence
+# ============================================================================
+# Purpose: Build the dashboard-facing monthly smart-alert summary for the
+#   finance command center. Pure functions over pre-aggregated inputs; never
+#   reads from the database, never triggers ingestion, never mutates finance
+#   numbers or audit state. Each per-alert helper is independently testable.
+# Database/ORM: None (pure module — all DB access lives in api/revenue.py and
+#   api/exports.py, which pre-aggregate and pass typed inputs here).
+# Standards: smart-alerts builder consumes pre-aggregated inputs; rejects
+#   negative thresholds/counts at the boundary; preserves reason totals
+#   deterministically; keeps highest_severity == None when no alerts fire.
+# Blast Radius: Finance dashboard read surface (no auth, no money, no Neo4j).
+#   Adds the SOURCE_ROWS_SKIPPED alert code for connector normalization drops.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> pre-reads coverage and
+#     audit-derived inputs and calls build_monthly_smart_alert_summary.
+#   - File: backend/ums_smart_revenue/api/exports.py -> mirrors the API path
+#     so workbook/PDF/PPTX exports surface the same alerts.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> alert code contract (severity,
+#     source, confidence, details shape).
+# ============================================================================
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -60,6 +80,23 @@ class MonthlySmartAlertSummary:
         }
 
 
+# ============================================================================
+# Purpose: Compose the dashboard smart-alert list for one finance month from
+#   pre-aggregated cross-domain inputs (payment match, bank reconciliation,
+#   coverage gap, audit-derived skipped rows, overrides, MoM revenue anomaly,
+#   close status). Each per-alert helper is a pure function returning the alert
+#   or None, so this builder only orders and ranks them.
+# Database/ORM: None (pure).
+# Standards: Boundary validation rejects negative thresholds and counts;
+#   deterministically orders alerts; assigns the highest severity from the
+#   produced set; preserves reason totals for SOURCE_ROWS_SKIPPED.
+# Blast Radius: Finance dashboard read surface. No auth, no money, no Neo4j.
+#   Adding/changing an alert code is an API contract change — keep wire-stable.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> primary caller.
+#   - File: backend/ums_smart_revenue/api/exports.py -> export mirror caller.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> alert code wire contract.
+# ============================================================================
 def build_monthly_smart_alert_summary(
     *,
     month: str,
@@ -69,6 +106,8 @@ def build_monthly_smart_alert_summary(
     manual_overrides: Iterable[RevenueManualOverrideEntry],
     missing_revenue_fact_channel_count: int = 0,
     missing_revenue_fact_channel_sample: Sequence[str] = (),
+    skipped_source_row_count: int = 0,
+    skipped_source_rows_by_reason: Mapping[str, int] | None = None,
     current_revenue_facts: Iterable[RevenueFactEntry] = (),
     previous_revenue_facts: Iterable[RevenueFactEntry] = (),
     high_gap_threshold_usd: Decimal = DEFAULT_HIGH_GAP_THRESHOLD_USD,
@@ -88,6 +127,12 @@ def build_monthly_smart_alert_summary(
         raise ValueError("revenue_trend_anomaly_threshold_percent must be non-negative")
     if missing_revenue_fact_channel_count < 0:
         raise ValueError("missing_revenue_fact_channel_count must be non-negative")
+    if skipped_source_row_count < 0:
+        raise ValueError("skipped_source_row_count must be non-negative")
+    if skipped_source_rows_by_reason is not None and any(
+        count < 0 for count in skipped_source_rows_by_reason.values()
+    ):
+        raise ValueError("skipped_source_rows_by_reason counts must be non-negative")
     normalized_close_status = close_status or "OPEN"
     overrides = list(manual_overrides)
 
@@ -102,6 +147,11 @@ def build_monthly_smart_alert_summary(
             month,
             missing_revenue_fact_channel_count,
             missing_revenue_fact_channel_sample,
+        ),
+        lambda: _source_rows_skipped_alert(
+            month,
+            skipped_source_row_count,
+            skipped_source_rows_by_reason,
         ),
         lambda: _payment_not_matched_alert(month, payment_match),
         lambda: _bank_reconciliation_alert(month, bank_reconciliation),
@@ -178,6 +228,63 @@ def _channels_missing_revenue_facts_alert(
         details={
             "channel_count": count,
             "sample_channel_ids": capped_sample,
+        },
+    )
+
+
+# ============================================================================
+# Purpose: Surface source revenue rows that connector normalization dropped
+#   from monthly fact projection. The adapter already records this as a
+#   finance-month-scoped ROWS_SKIPPED audit edge; this turns that same
+#   source-backed signal into a dashboard smart alert.
+# Database/ORM: None (pure; count + reason totals are pre-read by the API).
+# Standards: Preserve reason counts, omit zero-count reasons, and do not
+#   change ingestion, matching, close, or exported finance numbers.
+#   Reconcile count vs sum(reason_counts) via max() so the alert is internally
+#   consistent even when an upstream audit row is malformed or legacy.
+# Blast Radius: Finance dashboard read surface only; audit-derived signal.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py ->
+#     emits ROWS_SKIPPED audit edges with skipped_count/skipped_by_reason.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> aggregates the
+#     current month audit edges into this pure builder input.
+# ============================================================================
+def _source_rows_skipped_alert(
+    month: str,
+    count: int,
+    skipped_by_reason: Mapping[str, int] | None,
+) -> MonthlySmartAlert | None:
+    reason_counts = {
+        reason: reason_count
+        for reason, reason_count in sorted((skipped_by_reason or {}).items())
+        if reason_count > 0
+    }
+    # FIX: reconcile count vs sum(reason_counts) so the reported total always
+    # matches the breakdown. A legacy/malformed audit row may carry one without
+    # the other; we never report a count that disagrees with the reasons map.
+    reasons_total = sum(reason_counts.values())
+    if count > 0 and reasons_total > 0:
+        effective_count = max(count, reasons_total)
+    elif count > 0:
+        effective_count = count
+    elif reasons_total > 0:
+        effective_count = reasons_total
+    else:
+        effective_count = 0
+    if effective_count <= 0:
+        return None
+    return MonthlySmartAlert(
+        code="SOURCE_ROWS_SKIPPED",
+        severity="HIGH",
+        message=(
+            f"{effective_count} source revenue row(s) were skipped during "
+            f"fact projection for {month}."
+        ),
+        source="connector_job_run",
+        confidence="E_MISSING",
+        details={
+            "skipped_count": effective_count,
+            "skipped_by_reason": reason_counts,
         },
     )
 

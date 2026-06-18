@@ -76,7 +76,8 @@ assigned to an active group. Finance reconciliation issues remain sourced from
 month-specific revenue endpoints. Month smart alerts also surface source-backed
 revenue movement anomalies from SQL monthly revenue facts so finance users can
 see channels whose current gross revenue moved materially from the prior month
-before exporting.
+before exporting, plus connector projection-skipped source rows from
+finance-month-scoped `ROWS_SKIPPED` audit edges.
 
 ### 4. Outside-CMS Monitor
 
