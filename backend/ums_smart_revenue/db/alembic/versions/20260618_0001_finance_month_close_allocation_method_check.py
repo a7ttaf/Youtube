@@ -35,7 +35,7 @@ _ALLOCATION_METHOD_CHECK = (
 )
 
 
-def _normalize_legacy_allocation_method_casing() -> int:
+def _normalize_legacy_allocation_method_casing() -> None:
     """Lowercase existing rows whose lower-cased value is in the allowlist.
 
     The pre-PR endpoint stripped whitespace but did not lowercase the value,
@@ -48,8 +48,8 @@ def _normalize_legacy_allocation_method_casing() -> int:
     """
     # Alembic already manages the transaction around upgrade(); we must not
     # open a nested transaction on the same connection. Execute directly on
-    # op.get_bind() and read the rowcount from the result.
-    result = op.get_bind().execute(
+    # op.get_bind() — the rowcount is not consumed by the caller.
+    op.get_bind().execute(
         sa.text(
             "UPDATE finance_month_close "
             "SET allocation_method = lower(allocation_method) "
@@ -64,7 +64,6 @@ def _normalize_legacy_allocation_method_casing() -> int:
             )
         ),
     )
-    return int(result.rowcount or 0)
 
 
 def _invalid_allocation_method_count() -> int:
