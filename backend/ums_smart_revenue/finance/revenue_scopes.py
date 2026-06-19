@@ -184,9 +184,7 @@ def _build_group_options(
             continue
         if covered is not None and not set(group.channel_ids).issubset(covered):
             continue
-        options.append(
-            RevenueScopeOption(scope_type="group", scope_id=group.id, label=group.name)
-        )
+        options.append(RevenueScopeOption(scope_type="group", scope_id=group.id, label=group.name))
     options.sort(key=_scope_sort_key)
     return options
 

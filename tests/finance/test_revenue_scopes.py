@@ -364,18 +364,13 @@ def test_resolve_revenue_read_scope_rejects_invalid_group():
         resolve_revenue_read_scope,
     )
 
-    cases = [
-        (None, "missing"),
-        (
-            _group("g1", "Inactive", (CHANNEL_TV_A,), active=False),
-            "inactive",
-        ),
-        (_group("g2", "Empty", ()), "empty"),
-    ]
-    for group_entry, label in cases:
-        registry = _StaticGroupRegistry(
-            {group_entry.id: group_entry} if group_entry else {}
-        )
+    cases = (
+        None,
+        _group("g1", "Inactive", (CHANNEL_TV_A,), active=False),
+        _group("g2", "Empty", ()),
+    )
+    for group_entry in cases:
+        registry = _StaticGroupRegistry({group_entry.id: group_entry} if group_entry else {})
         with pytest.raises(RevenueReadScopeResolutionError):
             resolve_revenue_read_scope(
                 scope_type="group",
