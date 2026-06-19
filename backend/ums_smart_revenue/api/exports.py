@@ -1375,7 +1375,8 @@ def _record_analytics_export_artifact_audit(
         "scope_id": export_job.scope_id,
     }
     if export_job.file_url:
-        details.update(_artifact_metadata_audit_details(export_job))
+        for field_name, field_value in _artifact_metadata_audit_details(export_job).items():
+            details[field_name] = field_value
     return record_audit_event(
         sink=audit_sink,
         actor=user,
