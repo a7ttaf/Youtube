@@ -170,20 +170,6 @@ def _covered_channel_ids(
     return covered
 
 
-def _group_authorized(
-    group: ChannelGroupEntry,
-    granted: tuple[AccessScope, ...],
-    org_index: OrgAccessIndex,
-) -> bool:
-    """Return whether every active group member channel is covered."""
-    if not group.active or not group.channel_ids:
-        return False
-    covered = _covered_channel_ids(granted, org_index)
-    if covered is None:
-        return True
-    return set(group.channel_ids).issubset(covered)
-
-
 def _build_group_options(
     *,
     groups: tuple[ChannelGroupEntry, ...],
