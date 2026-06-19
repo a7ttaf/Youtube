@@ -146,10 +146,10 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
  * Returns the binary download route (resolved against the configured API origin)
  * and artifact format for a job, or null if the type has no GET route.
  */
-function downloadFor(
+const downloadFor = (
   job: ExportJob,
   canViewRevenue: boolean,
-): { href: string; format: string } | null {
+): { href: string; format: string } | null => {
   const route = DOWNLOAD_ROUTES[job.export_type];
   if (!route || (route.requiresRevenueVisibility && !canViewRevenue)) {
     // FIX: Analytics CSV artifacts include revenue amounts, so the UI must not
@@ -158,7 +158,7 @@ function downloadFor(
   }
   const id = encodeURIComponent(job.id);
   return { href: resolveUrl(route.path(id)), format: route.format };
-}
+};
 
 // ============================================================================
 // Purpose: The action verb for a downloadable job's link. A QUEUED job triggers

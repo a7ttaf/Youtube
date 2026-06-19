@@ -350,27 +350,25 @@ const EMPTY_EXPORTS = {
 
 type FetchRoute = readonly [path: string, respond: () => Response];
 
-function routeFetchWithSessionRoutes(sessionResponder: () => Response): FetchRoute[] {
-  return [
-    ["/session/me", sessionResponder],
-    ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
-    ["/connectors/credentials", () => jsonResponse(EMPTY_CONNECTOR_CREDENTIALS)],
-    ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
-    ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
-  ];
-}
+const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRoute[] => [
+  ["/session/me", sessionResponder],
+  ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
+  ["/connectors/credentials", () => jsonResponse(EMPTY_CONNECTOR_CREDENTIALS)],
+  ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
+  ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
+];
 
 // Route fetch with a caller-supplied /session/me responder; connector, AdSense,
 // and export list calls get empty real-shaped bodies, tenant gets a fixed UMS
 // body, and the net-revenue call gets the neutral body.
-function routeFetchWithSession(sessionResponder: () => Response) {
+const routeFetchWithSession = (sessionResponder: () => Response) => {
   const routes = routeFetchWithSessionRoutes(sessionResponder);
   return (input: unknown) => {
     const url = urlOf(input);
     const route = routes.find(([path]) => url.includes(path));
     return Promise.resolve(route ? route[1]() : jsonResponse(NET_REVENUE_BODY));
   };
-}
+};
 
 function renderShell() { // skipcq: JS-0067
   return render(
