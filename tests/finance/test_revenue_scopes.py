@@ -336,6 +336,12 @@ class _StaticGroupRegistry:
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         return self._groups.get(group_id)
 
+    def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
+        group = self._groups.get(group_id)
+        if group is None:
+            return None
+        return group.channel_ids
+
     def list_groups(self) -> list[ChannelGroupEntry]:
         return list(self._groups.values())
 

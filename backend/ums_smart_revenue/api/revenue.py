@@ -2752,8 +2752,8 @@ def _revenue_read_scope_to_channel_ids(
 ) -> tuple[AccessScope, set[str] | None]:
     """Thin shim around resolve_revenue_read_scope that maps service errors to HTTP."""
     from ums_smart_revenue.finance.revenue_scopes import (
+        RevenueReadScopeRequestShapeError,
         RevenueReadScopeResolutionError,
-        UnknownRevenueScopeTypeError,
         resolve_revenue_read_scope,
     )
 
@@ -2764,10 +2764,14 @@ def _revenue_read_scope_to_channel_ids(
             org_index=org_index,
             group_registry=group_registry,
         )
-    except UnknownRevenueScopeTypeError as exc:
+    except RevenueReadScopeRequestShapeError as exc:
+        # FIX (chatgpt-codex-connector review #122): Translate request-shape
+        # errors (missing/extra scope_id, unknown scope_type) to 422 so the
+        # caller can distinguish a malformed request from an unauthorized
+        # read. Only group-validity errors stay normalized to 403.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Unknown revenue scope_type: {exc.scope_type}",
+            detail=str(exc),
         ) from exc
     except RevenueReadScopeResolutionError as exc:
         # FIX (Qodo review #122): Normalize invalid group lookups to HTTP 403

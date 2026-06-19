@@ -291,7 +291,15 @@ class RevenueReadScopeResolutionError(ValueError):
     """Base error for revenue-read scope resolution failures."""
 
 
-class UnknownRevenueScopeTypeError(RevenueReadScopeResolutionError):
+class RevenueReadScopeRequestShapeError(RevenueReadScopeResolutionError):
+    """The request shape is invalid (missing/extra scope_id, unknown type).
+
+    Translated to HTTP 422 by the route shim so the caller can distinguish
+    malformed requests from unauthorized reads.
+    """
+
+
+class UnknownRevenueScopeTypeError(RevenueReadScopeRequestShapeError):
     """The requested scope_type is not one of the supported revenue scopes."""
 
     def __init__(self, scope_type: str) -> None:
@@ -317,12 +325,12 @@ def resolve_revenue_read_scope(
     normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
     if normalized_scope_type == "global":
         if normalized_scope_id:
-            raise RevenueReadScopeResolutionError(
+            raise RevenueReadScopeRequestShapeError(
                 "scope_id must be omitted for global revenue reads"
             )
         return AccessScope.global_scope(), None
     if not normalized_scope_id:
-        raise RevenueReadScopeResolutionError(
+        raise RevenueReadScopeRequestShapeError(
             f"scope_id is required for revenue scope_type: {normalized_scope_type}"
         )
     if normalized_scope_type == "sector":
@@ -346,10 +354,20 @@ def resolve_revenue_read_scope(
     if normalized_scope_type == "channel":
         return AccessScope.channel(normalized_scope_id), {normalized_scope_id}
     if normalized_scope_type == "group":
+        # FIX (Gitar + chatgpt-codex-connector reviews #122): Use the
+        # active-only member set for revenue reads while get_group still
+        # returns the full member list for management authz. The full
+        # group is fetched first so a missing or inactive group yields
+        # the same 403 as a group whose active member set is empty.
         group = group_registry.get_group(normalized_scope_id)
-        if group is None or not group.active or not group.channel_ids:
+        if group is None or not group.active:
             raise RevenueReadScopeResolutionError(
                 "group revenue reads require an active, non-empty group"
             )
-        return AccessScope.group(normalized_scope_id), set(group.channel_ids)
+        active_channel_ids = group_registry.get_active_member_channels(normalized_scope_id) or ()
+        if not active_channel_ids:
+            raise RevenueReadScopeResolutionError(
+                "group revenue reads require an active, non-empty group"
+            )
+        return AccessScope.group(normalized_scope_id), set(active_channel_ids)
     raise UnknownRevenueScopeTypeError(normalized_scope_type)

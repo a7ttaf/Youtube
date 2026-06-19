@@ -28,6 +28,9 @@ class ChannelGroupRegistryStore(Protocol):
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         pass
 
+    def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
+        pass
+
     def create_group(
         self, *, name: str, group_type: str, channel_ids: list[str]
     ) -> ChannelGroupEntry:
@@ -54,6 +57,12 @@ class ChannelGroupRegistry:
 
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         return self._groups.get(group_id)
+
+    def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
+        group = self._groups.get(group_id)
+        if group is None:
+            return None
+        return group.channel_ids
 
     def create_group(
         self, *, name: str, group_type: str, channel_ids: list[str]

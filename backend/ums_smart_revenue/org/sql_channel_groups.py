@@ -48,6 +48,34 @@ class SqlAlchemyChannelGroupRegistry:
             return None
         return self._to_entry(row)
 
+    def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
+        """Return active member channel ids for a group, or None if the group is missing.
+
+        Distinct from get_group (which returns ALL members for management authz)
+        so the revenue read path operates on the same set the scope selector
+        advertises, while the groups management API can still authorize over
+        the full member set (including channels that have since been
+        deactivated and are outside the caller's org scope).
+        """
+        row = self._get_group_row(group_id)
+        if row is None:
+            return None
+        rows = self._session.execute(
+            select(YouTubeChannelORM.youtube_channel_id)
+            .join(
+                ChannelGroupMemberORM,
+                (ChannelGroupMemberORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (ChannelGroupMemberORM.channel_id == YouTubeChannelORM.id),
+            )
+            .where(
+                ChannelGroupMemberORM.tenant_id == self._tenant_id,
+                ChannelGroupMemberORM.group_id == row.id,
+                YouTubeChannelORM.active.is_(True),
+            )
+            .order_by(YouTubeChannelORM.youtube_channel_id)
+        ).all()
+        return tuple(row.youtube_channel_id for row in rows)
+
     def create_group(
         self, *, name: str, group_type: str, channel_ids: list[str]
     ) -> ChannelGroupEntry:
@@ -209,12 +237,6 @@ class SqlAlchemyChannelGroupRegistry:
             .where(
                 ChannelGroupMemberORM.tenant_id == self._tenant_id,
                 ChannelGroupMemberORM.group_id.in_(group_ids),
-                # FIX (Qodo review #122): Exclude deactivated channels from group
-                # membership so a group whose members are all inactive is
-                # reported as empty (and therefore not offerable as a revenue
-                # scope) instead of as a dead option that 200s on selection
-                # and then 200s with empty rows on the net-revenue read.
-                YouTubeChannelORM.active.is_(True),
             )
             .order_by(ChannelGroupMemberORM.group_id, YouTubeChannelORM.youtube_channel_id)
         ).all()
@@ -242,15 +264,6 @@ class SqlAlchemyChannelGroupRegistry:
                     .where(
                         ChannelGroupMemberORM.tenant_id == self._tenant_id,
                         ChannelGroupMemberORM.group_id == row.id,
-                        # FIX (Gitar review #122 #asymmetry): Exclude inactive
-                        # member channels in the get_group fallback query so
-                        # list_groups and get_group agree on which channels
-                        # the group contains. Without this, the scope
-                        # selector would offer a group based on its active
-                        # members while the read path would authorize and
-                        # filter over the full (active + inactive) member
-                        # set, producing asymmetric net-revenue results.
-                        YouTubeChannelORM.active.is_(True),
                     )
                     .order_by(YouTubeChannelORM.youtube_channel_id)
                 ).all()

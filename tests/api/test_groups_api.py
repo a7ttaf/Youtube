@@ -392,13 +392,14 @@ def test_malformed_group_id_returns_not_found(tmp_path):
     assert response.json()["detail"] == "Group not found"
 
 
-def test_sql_group_registry_excludes_inactive_member_channels(tmp_path):
-    """A group whose only member channel has been deactivated is reported as empty.
+def test_sql_group_registry_exposes_active_and_full_member_views(tmp_path):
+    """get_group returns full members; get_active_member_channels returns active only.
 
-    Regression for Qodo review #122: the revenue scope selector must not offer
-    a group that resolves to zero active member channels, otherwise a
-    net-revenue read against that group 200s with an empty body instead of
-    being omitted like other dead options.
+    Regression for chatgpt-codex-connector review #122: management authz
+    must see ALL members (including channels that have since been
+    deactivated and are outside the caller's org scope), while the revenue
+    read path must operate on the active member set so a group whose only
+    members are inactive cannot 200 with empty rows.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -412,24 +413,29 @@ def test_sql_group_registry_excludes_inactive_member_channels(tmp_path):
 
     with Session(engine) as session:
         registry = SqlAlchemyChannelGroupRegistry(session)
-        groups = {group.id: group for group in registry.list_groups()}
+        full_tv = registry.get_group(str(GROUP_TV_ID))
+        full_mixed = registry.get_group(str(GROUP_MIXED_ID))
+        active_tv = registry.get_active_member_channels(str(GROUP_TV_ID))
+        active_mixed = registry.get_active_member_channels(str(GROUP_MIXED_ID))
 
-    assert str(GROUP_TV_ID) in groups
-    assert groups[str(GROUP_TV_ID)].channel_ids == ()
+    # Management path: full member set, including the inactive channel.
+    assert full_tv is not None
+    assert full_tv.channel_ids == ("group-channel-tv",)
+    assert full_mixed is not None
+    assert full_mixed.channel_ids == ("group-channel-news", "group-channel-tv")
 
-    # The mixed group still resolves to its remaining active member.
-    assert str(GROUP_MIXED_ID) in groups
-    assert groups[str(GROUP_MIXED_ID)].channel_ids == ("group-channel-news",)
+    # Revenue read path: active-only member set.
+    assert active_tv == ()
+    assert active_mixed == ("group-channel-news",)
 
 
-def test_sql_group_registry_get_group_matches_list_groups_active_filter(tmp_path):
-    """get_group and list_groups must agree on which member channels are active.
+def test_sql_group_registry_get_group_matches_list_groups_full_member_view(tmp_path):
+    """get_group and list_groups must agree on the full member set.
 
-    Regression for Gitar review #122: the list_groups path filters
-    YouTubeChannelORM.active in _channel_ids_by_group, but the get_group
-    fallback in _to_entry previously did not, causing the scope selector and
-    the revenue read path to operate on different member sets for the same
-    group.
+    Regression for Gitar review #122: list_groups and get_group should
+    return the same ChannelGroupEntry (with the full member set) for the
+    same group. The active-only filter is applied separately via
+    get_active_member_channels for the revenue read path.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -447,7 +453,7 @@ def test_sql_group_registry_get_group_matches_list_groups_active_filter(tmp_path
 
     assert via_get is not None
     assert via_get.channel_ids == via_list[str(GROUP_TV_ID)].channel_ids
-    assert via_get.channel_ids == ()
+    assert via_get.channel_ids == ("group-channel-tv",)
 
 
 def test_sql_group_add_members_treats_duplicate_race_as_idempotent(tmp_path, monkeypatch):

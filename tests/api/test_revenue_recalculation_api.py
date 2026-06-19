@@ -280,6 +280,46 @@ def test_recalculation_preview_normalizes_invalid_group_to_403(tmp_path):
     assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
+def test_recalculation_preview_returns_422_for_malformed_non_group_scope(tmp_path):
+    """Request-shape errors (missing scope_id, extra scope_id on global) are 422, not 403.
+
+    chatgpt-codex-connector review #122: only group-validity errors stay
+    normalized to 403. A missing scope_id on a non-global scope, or a
+    scope_id on a global scope, is a malformed request and must return
+    422 so the caller can distinguish it from an unauthorized read.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    # Missing scope_id on a company scope.
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="company", scope_id=None),
+    )
+    assert response.status_code == 422
+    assert "scope_id is required" in response.json()["detail"]
+
+    # Extra scope_id on a global scope.
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="global", scope_id=str(COMPANY_ID)),
+    )
+    assert response.status_code == 422
+    assert "scope_id must be omitted" in response.json()["detail"]
+
+    # Unknown scope_type.
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="region", scope_id="emea"),
+    )
+    assert response.status_code == 422
+    assert "Unknown revenue scope_type" in response.json()["detail"]
+
+
 def test_recalculation_preview_normalizes_empty_group_to_403(tmp_path):
     """An active but empty channel group returns 403, not 422, for the same
     fail-closed reason as a missing group lookup.
