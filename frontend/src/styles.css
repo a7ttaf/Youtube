@@ -451,6 +451,9 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, color-mix(in oklch, var(--bg-rail) 92%, var(--panel)), var(--bg-rail));
 }
+.status-strip.reconciliation-strip {
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+}
 .metric {
   --metric-tone: var(--line-strong);
   position: relative;
