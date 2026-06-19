@@ -213,7 +213,8 @@ describe("CommandView wired to net-revenue", () => {
     routeFetch(() => jsonResponse(NET_REVENUE_BODY));
     renderCommandView(true);
 
-    const reconciliation = await screen.findByRole("region", {
+    await screen.findByText("$930.00");
+    const reconciliation = screen.getByRole("region", {
       name: "Payment reconciliation summary",
     });
     expect(within(reconciliation).getByText("AdSense payment")).toBeInTheDocument();

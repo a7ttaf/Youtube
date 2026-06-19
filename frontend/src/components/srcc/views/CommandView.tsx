@@ -690,58 +690,103 @@ type BankReconciliationMetric = {
   tone: string;
 };
 
+const BANK_RECONCILIATION_CARD_LABELS = [
+  "AdSense payment",
+  "Bank received",
+  "Unresolved gap",
+] as const;
+
+const BANK_RECONCILIATION_USD_CURRENCY = "USD";
+
+const adsensePaymentBadge = (
+  data: MonthBankReconciliationSummary,
+): BankReconciliationMetric["badge"] => {
+  if (data.paid_payment_count > 0) return { text: "Paid", tone: "green" };
+  return { text: "Missing", tone: "amber" };
+};
+
+const adsensePaymentSecondaryNote = (data: MonthBankReconciliationSummary): string => {
+  if (data.non_paid_payment_count > 0) {
+    return countLabel(data.non_paid_payment_count, "unpaid row");
+  }
+  return "AdSense source";
+};
+
+const adsensePaymentTone = (data: MonthBankReconciliationSummary): string => {
+  if (data.paid_payment_count > 0) return "is-payment";
+  return "is-review";
+};
+
+const bankReceiptBadge = (
+  data: MonthBankReconciliationSummary,
+): BankReconciliationMetric["badge"] => {
+  if (data.entry_count > 0) {
+    return { text: countLabel(data.entry_count, "receipt"), tone: "green" };
+  }
+  return { text: countLabel(data.entry_count, "receipt"), tone: "amber" };
+};
+
+const bankReceiptSourceNote = (data: MonthBankReconciliationSummary): string => {
+  if (data.entry_count > 0) return "Bank source loaded";
+  return "Waiting for bank";
+};
+
+const bankReceiptTone = (data: MonthBankReconciliationSummary): string => {
+  if (data.entry_count > 0) return "is-revenue";
+  return "is-review";
+};
+
+const bankTransferFeeNote = (
+  data: MonthBankReconciliationSummary,
+  canViewFinance: boolean,
+): string =>
+  financeDisplay(data.transfer_fee_usd, canViewFinance, {
+    currency: BANK_RECONCILIATION_USD_CURRENCY,
+    placeholder: "No fee",
+  });
+
+const bankGapSecondaryNote = (
+  data: MonthBankReconciliationSummary,
+  canViewFinance: boolean,
+): string => {
+  if (data.bank_gap_usd === null) return "Needs both sources";
+  return `Tolerance ${financeDisplay(data.tolerance_usd, canViewFinance, {
+    currency: BANK_RECONCILIATION_USD_CURRENCY,
+  })}`;
+};
+
 const buildBankReconciliationMetrics = (
   data: MonthBankReconciliationSummary,
   canViewFinance: boolean,
-  fallbackCurrency: string,
 ): BankReconciliationMetric[] => {
-  const currency = data.currency || fallbackCurrency;
+  const currency = BANK_RECONCILIATION_USD_CURRENCY;
   const status = bankReconciliationStatusCopy(data.status);
   return [
     {
       id: "adsense-payment",
       label: "AdSense payment",
       value: financeDisplay(data.adsense_paid_amount_usd, canViewFinance, { currency }),
-      badge: {
-        text: data.paid_payment_count > 0 ? "Paid" : "Missing",
-        tone: data.paid_payment_count > 0 ? "green" : "amber",
-      },
+      badge: adsensePaymentBadge(data),
       note: [
         `${data.paid_payment_count}/${data.payment_count} paid`,
-        data.non_paid_payment_count > 0
-          ? countLabel(data.non_paid_payment_count, "unpaid row")
-          : "AdSense source",
+        adsensePaymentSecondaryNote(data),
       ],
-      tone: data.paid_payment_count > 0 ? "is-payment" : "is-review",
+      tone: adsensePaymentTone(data),
     },
     {
       id: "bank-received",
       label: "Bank received",
       value: financeDisplay(data.bank_received_amount_usd, canViewFinance, { currency }),
-      badge: {
-        text: countLabel(data.entry_count, "receipt"),
-        tone: data.entry_count > 0 ? "green" : "amber",
-      },
-      note: [
-        data.entry_count > 0 ? "Bank source loaded" : "Waiting for bank",
-        financeDisplay(data.transfer_fee_usd, canViewFinance, {
-          currency,
-          placeholder: "No fee",
-        }),
-      ],
-      tone: data.entry_count > 0 ? "is-revenue" : "is-review",
+      badge: bankReceiptBadge(data),
+      note: [bankReceiptSourceNote(data), bankTransferFeeNote(data, canViewFinance)],
+      tone: bankReceiptTone(data),
     },
     {
       id: "bank-gap",
       label: "Unresolved gap",
       value: financeDisplay(data.bank_gap_usd, canViewFinance, { currency }),
       badge: { text: status.badge, tone: status.tone },
-      note: [
-        status.label,
-        data.bank_gap_usd === null
-          ? "Needs both sources"
-          : `Tolerance ${financeDisplay(data.tolerance_usd, canViewFinance, { currency })}`,
-      ],
+      note: [status.label, bankGapSecondaryNote(data, canViewFinance)],
       tone: status.metricTone,
     },
   ];
@@ -764,6 +809,125 @@ const bankReconciliationErrorCopy = (
   };
 };
 
+const bankReconciliationErrorTone = (title: string): Severity => {
+  if (title === "No permission") return "blue";
+  return "red";
+};
+
+const isInitialBankReconciliationLoad = (
+  loading: boolean,
+  data: MonthBankReconciliationSummary | null,
+): boolean => loading && !data;
+
+const BankReconciliationShell = ({
+  children,
+  role,
+  busy = false,
+}: {
+  children: ReactNode;
+  role?: "alert";
+  busy?: boolean;
+}) => (
+  <section
+    className="status-strip reconciliation-strip"
+    aria-label="Payment reconciliation summary"
+    aria-busy={busy ? true : undefined}
+    role={role}
+  >
+    {children}
+  </section>
+);
+
+const RestrictedBankReconciliationStrip = () => (
+  <BankReconciliationShell>
+    {BANK_RECONCILIATION_CARD_LABELS.map((label) => (
+      <article key={label} className="metric is-review">
+        <header>
+          <span className="metric-label">{label}</span>
+          <Badge tone="red">Restricted</Badge>
+        </header>
+        <div className="metric-value finance-data">{RESTRICTED_FINANCE_VALUE}</div>
+        <div className="metric-note">
+          <span>Finance access required</span>
+        </div>
+      </article>
+    ))}
+  </BankReconciliationShell>
+);
+
+const BankReconciliationErrorStrip = ({ error }: { error: ApiError | Error }) => {
+  const { title, detail } = bankReconciliationErrorCopy(error);
+  return (
+    <BankReconciliationShell role="alert">
+      <article className="metric is-risk">
+        <header>
+          <span className="metric-label">Payment reconciliation unavailable</span>
+          <Badge tone={bankReconciliationErrorTone(title)}>{title}</Badge>
+        </header>
+        <div className="metric-value">—</div>
+        <div className="metric-note">
+          <span>{detail}</span>
+        </div>
+      </article>
+    </BankReconciliationShell>
+  );
+};
+
+const LoadingBankReconciliationStrip = ({ month }: { month: string }) => (
+  <BankReconciliationShell busy>
+    {BANK_RECONCILIATION_CARD_LABELS.map((label) => (
+      <article key={label} className="metric">
+        <header>
+          <span className="metric-label">{label}</span>
+          <Badge tone="blue">Loading</Badge>
+        </header>
+        <div className="metric-value">…</div>
+        <div className="metric-note">
+          <span>Fetching reconciliation</span>
+          <span>{month}</span>
+        </div>
+      </article>
+    ))}
+  </BankReconciliationShell>
+);
+
+const EmptyBankReconciliationStrip = () => (
+  <BankReconciliationShell>
+    <article className="metric is-review">
+      <header>
+        <span className="metric-label">Payment reconciliation</span>
+        <Badge tone="amber">Empty</Badge>
+      </header>
+      <div className="metric-value">—</div>
+      <div className="metric-note">
+        <span>No reconciliation summary returned</span>
+      </div>
+    </article>
+  </BankReconciliationShell>
+);
+
+const PopulatedBankReconciliationStrip = ({
+  metrics,
+}: {
+  metrics: BankReconciliationMetric[];
+}) => (
+  <BankReconciliationShell>
+    {metrics.map((metric) => (
+      <article key={metric.id} className={`metric ${metric.tone}`}>
+        <header>
+          <span className="metric-label">{metric.label}</span>
+          <Badge tone={metric.badge.tone}>{metric.badge.text}</Badge>
+        </header>
+        <div className="metric-value finance-data">{metric.value}</div>
+        <div className="metric-note">
+          <span>{metric.note[0]}</span>
+          <span>{metric.note[1]}</span>
+        </div>
+      </article>
+    ))}
+  </BankReconciliationShell>
+);
+
 // ============================================================================
 // Purpose: Payment reconciliation cards for the Command Center. Fetches the
 //   month-level bank reconciliation summary independently from net revenue and
@@ -771,7 +935,8 @@ const bankReconciliationErrorCopy = (
 //   received amount, and unresolved bank gap.
 // Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/bank-reconciliation.
 // Standards: Official finance values are backend strings rendered via
-//   financeDisplay; no browser-side finance calculation. The read is disabled
+//   financeDisplay; USD-suffixed fields are always rendered as USD with no
+//   browser-side finance calculation. The read is disabled
 //   when finance values are withheld, and endpoint 403s render inside this strip
 //   without replacing the rest of CommandView.
 // Blast Radius: Finance display only. No mutation, export, lock, or audit write
@@ -784,11 +949,9 @@ const bankReconciliationErrorCopy = (
 const BankReconciliationStatusStrip = ({
   month,
   canViewFinance,
-  currency,
 }: {
   month: string;
   canViewFinance: boolean;
-  currency: string;
 }) => {
   const { data, loading, error } = useBankReconciliation({
     month,
@@ -796,115 +959,24 @@ const BankReconciliationStatusStrip = ({
   });
 
   if (!canViewFinance) {
-    return (
-      <section
-        className="status-strip reconciliation-strip"
-        aria-label="Payment reconciliation summary"
-      >
-        {["AdSense payment", "Bank received", "Unresolved gap"].map((label) => (
-          <article key={label} className="metric is-review">
-            <header>
-              <span className="metric-label">{label}</span>
-              <Badge tone="red">Restricted</Badge>
-            </header>
-            <div className="metric-value finance-data">{RESTRICTED_FINANCE_VALUE}</div>
-            <div className="metric-note">
-              <span>Finance access required</span>
-            </div>
-          </article>
-        ))}
-      </section>
-    );
+    return <RestrictedBankReconciliationStrip />;
   }
 
   if (error) {
-    const { title, detail } = bankReconciliationErrorCopy(error);
-    return (
-      <section
-        className="status-strip reconciliation-strip"
-        aria-label="Payment reconciliation summary"
-        role="alert"
-      >
-        <article className="metric is-risk">
-          <header>
-            <span className="metric-label">Payment reconciliation unavailable</span>
-            <Badge tone={title === "No permission" ? "blue" : "red"}>{title}</Badge>
-          </header>
-          <div className="metric-value">—</div>
-          <div className="metric-note">
-            <span>{detail}</span>
-          </div>
-        </article>
-      </section>
-    );
+    return <BankReconciliationErrorStrip error={error} />;
   }
 
-  if (loading && !data) {
-    return (
-      <section
-        className="status-strip reconciliation-strip"
-        aria-label="Payment reconciliation summary"
-        aria-busy="true"
-      >
-        {["AdSense payment", "Bank received", "Unresolved gap"].map((label) => (
-          <article key={label} className="metric">
-            <header>
-              <span className="metric-label">{label}</span>
-              <Badge tone="blue">Loading</Badge>
-            </header>
-            <div className="metric-value">…</div>
-            <div className="metric-note">
-              <span>Fetching reconciliation</span>
-              <span>{month}</span>
-            </div>
-          </article>
-        ))}
-      </section>
-    );
+  if (isInitialBankReconciliationLoad(loading, data)) {
+    return <LoadingBankReconciliationStrip month={month} />;
   }
 
   if (!data) {
-    return (
-      <section
-        className="status-strip reconciliation-strip"
-        aria-label="Payment reconciliation summary"
-      >
-        <article className="metric is-review">
-          <header>
-            <span className="metric-label">Payment reconciliation</span>
-            <Badge tone="amber">Empty</Badge>
-          </header>
-          <div className="metric-value">—</div>
-          <div className="metric-note">
-            <span>No reconciliation summary returned</span>
-          </div>
-        </article>
-      </section>
-    );
+    return <EmptyBankReconciliationStrip />;
   }
 
-  const metrics = buildBankReconciliationMetrics(data, canViewFinance, currency);
+  const metrics = buildBankReconciliationMetrics(data, canViewFinance);
 
-  return (
-    <section
-      className="status-strip reconciliation-strip"
-      aria-label="Payment reconciliation summary"
-    >
-      {metrics.map((metric) => (
-        <article key={metric.id} className={`metric ${metric.tone}`}>
-          <header>
-            <span className="metric-label">{metric.label}</span>
-            <Badge tone={metric.badge.tone}>{metric.badge.text}</Badge>
-          </header>
-          <div className="metric-value finance-data">{metric.value}</div>
-          <div className="metric-note">
-            <span>{metric.note[0]}</span>
-            <span>{metric.note[1]}</span>
-          </div>
-        </article>
-      ))}
-    </section>
-  );
+  return <PopulatedBankReconciliationStrip metrics={metrics} />;
 };
 
 /** Static header row for the channel revenue table. */
@@ -2028,7 +2100,6 @@ const CommandView = ({
       <BankReconciliationStatusStrip
         month={month}
         canViewFinance={canViewFinance}
-        currency={currency}
       />
 
       {/* smart-alerts / problem panel — REAL data, fails independently */}
