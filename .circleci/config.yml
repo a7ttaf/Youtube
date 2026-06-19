@@ -57,7 +57,7 @@ jobs:
   # -------------------------------------------------------------------------
   python-quality:
     docker:
-      - image: cimg/base:2026.06
+      - image: cimg/base:2026.06@sha256:deb111cac98e50249a996a413313b8e3d381f4ae2e7059b7e27dce02f61d744c
     resource_class: medium
     steps:
       - checkout
@@ -83,12 +83,12 @@ jobs:
   # -------------------------------------------------------------------------
   python-tests:
     docker:
-      - image: cimg/base:2026.06
+      - image: cimg/base:2026.06@sha256:deb111cac98e50249a996a413313b8e3d381f4ae2e7059b7e27dce02f61d744c
       # Secondary image = service container reachable on localhost.
       # Matches the project standard (postgres:18-alpine) exactly so RLS /
       # migration behavior is identical to local runs. If Docker Hub pull
       # limits ever bite, add Docker Hub auth or switch to cimg/postgres.
-      - image: postgres:18-alpine
+      - image: postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa
         environment:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: ums
@@ -136,7 +136,7 @@ jobs:
   # -------------------------------------------------------------------------
   frontend:
     docker:
-      - image: cimg/node:22.12.0
+      - image: cimg/node:22.12.0@sha256:0dae71c56fb15a93a8223b5bfe2e93395b97efbf5509a48fe75b890bf1ad0b4e
     resource_class: medium
     steps:
       - checkout
@@ -206,7 +206,7 @@ jobs:
   # -------------------------------------------------------------------------
   shell-quality:
     docker:
-      - image: cimg/base:2026.06
+      - image: cimg/base:2026.06@sha256:deb111cac98e50249a996a413313b8e3d381f4ae2e7059b7e27dce02f61d744c
     resource_class: small
     steps:
       - checkout
@@ -242,7 +242,7 @@ jobs:
   # -------------------------------------------------------------------------
   lint-sql-yaml:
     docker:
-      - image: cimg/base:2026.06
+      - image: cimg/base:2026.06@sha256:deb111cac98e50249a996a413313b8e3d381f4ae2e7059b7e27dce02f61d744c
     resource_class: small
     steps:
       - checkout
@@ -269,7 +269,7 @@ jobs:
   # -------------------------------------------------------------------------
   security-scan:
     docker:
-      - image: cimg/base:2026.06
+      - image: cimg/base:2026.06@sha256:deb111cac98e50249a996a413313b8e3d381f4ae2e7059b7e27dce02f61d744c
     resource_class: small
     steps:
       - checkout
