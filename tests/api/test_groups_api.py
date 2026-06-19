@@ -497,6 +497,61 @@ def test_sql_group_registry_list_groups_full_includes_inactive_members(tmp_path)
     )
 
 
+def test_list_groups_endpoint_keeps_deactivated_member_in_authz_check(tmp_path):
+    """GET /groups must authorize over the full member set.
+
+    Regression for Gitar review #122 #fail-open: a scoped manager must
+    not be able to enumerate a group whose out-of-scope member channel
+    has since been deactivated, because _can_view_group iterates over
+    the full member set to require VIEW_ANALYTICS on every channel.
+    Switching the endpoint from list_groups to list_groups_full keeps
+    the deactivated channel in the authz iteration and preserves the
+    fail-closed visibility behavior.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    # Deactivate the only member of GROUP_TV_ID. The other companies'
+    # scoped viewers should not be able to see GROUP_TV_ID any more
+    # than they could before the change (they could never cover the
+    # channel, but the authz iteration must still include it so a
+    # scoped manager who happens to have VIEW_ANALYTICS on the
+    # remaining members does not silently gain access).
+    with Session(engine) as session:
+        channel = session.get(YouTubeChannelORM, CHANNEL_TV_ROW_ID)
+        channel.active = False
+        session.commit()
+
+    app = create_app(database_url=database_url)
+    client = TestClient(app)
+
+    # Corporate admin (global VIEW_ANALYTICS) sees every group because
+    # the global grant covers every member including the deactivated one.
+    from ums_smart_revenue.api.dependencies import (
+        current_principal_from_headers,
+    )
+    from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+    from ums_smart_revenue.auth.permissions import Permission
+    from ums_smart_revenue.auth.scopes import AccessScope
+
+    def _global_admin() -> UserPrincipal:
+        return UserPrincipal(
+            user_id=str(USER_ID),
+            email="groups-admin@example.com",
+            direct_permissions=(
+                PermissionGrant(Permission.VIEW_ANALYTICS, AccessScope.global_scope()),
+            ),
+        )
+
+    app.dependency_overrides[current_principal_from_headers] = _global_admin
+    response = client.get("/groups")
+    assert response.status_code == 200
+    visible_ids = {group["id"] for group in response.json()}
+    assert str(GROUP_TV_ID) in visible_ids
+    assert str(GROUP_MIXED_ID) in visible_ids
+
+
 def test_sql_group_add_members_treats_duplicate_race_as_idempotent(tmp_path, monkeypatch):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

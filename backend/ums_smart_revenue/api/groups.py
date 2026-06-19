@@ -96,9 +96,16 @@ def list_groups(
     registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> list[dict[str, object]]:
+    # FIX (Gitar review #122 #fail-open): use list_groups_full so
+    # _can_view_group authorizes over the complete member set. list_groups
+    # now returns the active-only set (used by the revenue scope selector
+    # to advertise the channels the read path will touch); using it here
+    # would drop deactivated members from the authz iteration and let a
+    # scoped manager enumerate groups whose out-of-scope members have
+    # since been deactivated.
     return [
         group.to_api()
-        for group in registry.list_groups()
+        for group in registry.list_groups_full()
         if _can_view_group(user=user, group=group, org_index=org_index)
     ]
 

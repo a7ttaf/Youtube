@@ -316,10 +316,12 @@ def resolve_revenue_read_scope(
 ) -> tuple[AccessScope, set[str] | None]:
     """Translate a revenue read scope into an AccessScope and channel filter.
 
-    Raises UnknownRevenueScopeTypeError for unsupported scope types. Invalid
-    group lookups (missing, inactive, or empty) are normalized to a
-    permission-shaped error by the caller so unauthorized probes and
-    unauthorized reads return the same 403.
+    Raises RevenueReadScopeRequestShapeError for malformed requests (missing
+    or extra scope_id) and UnknownRevenueScopeTypeError for unsupported
+    scope types. Invalid group lookups (missing, inactive, or empty)
+    raise RevenueReadScopeResolutionError, which the caller normalizes
+    to HTTP 403 so unauthorized probes and unauthorized reads return
+    the same response.
     """
     normalized_scope_type = scope_type.strip()
     normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else scope_id

@@ -68,6 +68,11 @@ class ChannelGroupRegistry:
         return self._groups.get(group_id)
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
+        """Return active member channel ids for a group, or None if the group is missing.
+
+        In-memory implementation: every member is treated as active. The
+        SQL counterpart filters by YouTubeChannelORM.active.
+        """
         group = self._groups.get(group_id)
         if group is None:
             return None
