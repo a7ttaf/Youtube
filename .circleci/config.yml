@@ -10,12 +10,12 @@ version: 2.1
 #   python-quality   ruff lint + ruff format --check (BLOCKING)
 #                     mypy type check                (advisory)
 #   python-tests     full pytest suite vs postgres:18-alpine (BLOCKING)
-#   frontend         tsc type check + vitest + vite build    (BLOCKING)
+#   frontend         tsc type check + vitest + vite build    (BLOCKING, Bun)
 #   shell-quality    shellcheck (BLOCKING) · shfmt (advisory)
 #   security-scan    gitleaks secret scan                    (BLOCKING)
 #
 # Toolchain is pinned to pyproject.toml / uv.lock so CI matches the dev box:
-#   Python 3.14 (uv-managed) · Node 22.12 · ruff 0.15.17 · mypy 2.1.0
+#   Python 3.14 (uv-managed) · Node 22.12 · Bun 1.3.14 (frontend) · ruff 0.15.17 · mypy 2.1.0
 #
 # Base image is pinned to the dated monthly snapshot `cimg/base:2026.06` (not the
 # mutable `current` tag) so a lane's build environment cannot drift between runs.
@@ -125,7 +125,14 @@ jobs:
           destination: test-results
 
   # -------------------------------------------------------------------------
-  # Frontend: type check, unit tests, production build.
+  # Frontend: type check, unit tests, production build — all under Bun.
+  #
+  # Bun (pinned 1.3.14) replaces npm as the package manager + script runner
+  # for this lane (install / tsc / vitest / vite build). The base image stays
+  # cimg/node so `checkout` has git/ssh and Node remains available as a
+  # fallback runtime; Bun is installed on top, pinned to match the committed
+  # frontend/bun.lock and the dev box. Validated locally under Bun 1.3.14:
+  # tsc clean, vitest 276/276 green, vite build OK.
   # -------------------------------------------------------------------------
   frontend:
     docker:
@@ -133,29 +140,55 @@ jobs:
     resource_class: medium
     steps:
       - checkout
+      - run:
+          name: Install Bun 1.3.14 from GitHub release (pinned + checksum verified)
+          # Hardened: download the release zip directly from GitHub and verify its
+          # SHA-256 checksum, instead of piping an install script from bun.sh.
+          # The checksum is pinned alongside the version so the frontend toolchain
+          # cannot drift between runs and a compromised install script cannot execute
+          # arbitrary code in CI. Asset: oven-sh/bun releases, bun-v1.3.14.
+          command: |
+            BUN_VERSION="1.3.14"
+            BUN_ASSET="bun-linux-x64.zip"
+            BUN_SHA256="951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
+            BUN_BASE="https://github.com/oven-sh/bun/releases/download"
+            BUN_URL="${BUN_BASE}/bun-v${BUN_VERSION}/${BUN_ASSET}"
+            mkdir -p /tmp/bun-install
+            curl -fsSL "${BUN_URL}" -o "/tmp/bun-install/${BUN_ASSET}"
+            echo "${BUN_SHA256}  /tmp/bun-install/${BUN_ASSET}" | sha256sum -c -
+            unzip -o -q "/tmp/bun-install/${BUN_ASSET}" -d /tmp/bun-install/extract
+            mkdir -p "$HOME/.bun/bin"
+            mv "/tmp/bun-install/extract/bun-linux-x64/bun" "$HOME/.bun/bin/bun"
+            chmod +x "$HOME/.bun/bin/bun"
+            echo 'export BUN_INSTALL="$HOME/.bun"' >> "$BASH_ENV"
+            echo 'export PATH="$HOME/.bun/bin:$PATH"' >> "$BASH_ENV"
+      - run:
+          name: Bun version
+          command: bun --version
       - restore_cache:
           keys:
-            - npm-v1-{{ checksum "frontend/package-lock.json" }}
-            - npm-v1-
+            - bun-v1-{{ checksum "frontend/bun.lock" }}
+            - bun-v1-
       - run:
-          name: Install dependencies (npm ci)
-          command: npm ci
+          name: Install dependencies (bun, frozen lockfile)
+          # --frozen-lockfile mirrors `npm ci`: fail if bun.lock would change.
+          command: bun install --frozen-lockfile
           working_directory: ~/project/frontend
       - save_cache:
-          key: npm-v1-{{ checksum "frontend/package-lock.json" }}
+          key: bun-v1-{{ checksum "frontend/bun.lock" }}
           paths:
-            - ~/.npm
+            - ~/.bun/install/cache
       - run:
           name: TypeScript type check (blocking)
-          command: npx tsc --noEmit -p tsconfig.json
+          command: bun x tsc --noEmit -p tsconfig.json
           working_directory: ~/project/frontend
       - run:
           name: Vitest unit tests (blocking)
-          command: npm test
+          command: bun run test
           working_directory: ~/project/frontend
       - run:
           name: Production build (blocking)
-          command: npm run build
+          command: bun run build
           working_directory: ~/project/frontend
 
   # -------------------------------------------------------------------------

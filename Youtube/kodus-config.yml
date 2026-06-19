@@ -9,7 +9,7 @@ summary:
 ignorePaths:
   - .env
   - .env.*
-  - frontend/package-lock.json
+  - frontend/bun.lock
   - uv.lock
   - '**/*.woff2'
   - '**/*.png'
