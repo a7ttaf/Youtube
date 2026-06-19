@@ -430,12 +430,46 @@ def test_sql_group_registry_exposes_active_and_full_member_views(tmp_path):
 
 
 def test_sql_group_registry_get_group_matches_list_groups_full_member_view(tmp_path):
-    """get_group and list_groups must agree on the full member set.
+    """get_group and list_groups_full must agree on the full member set.
 
-    Regression for Gitar review #122: list_groups and get_group should
+    Regression for Gitar review #122: list_groups_full and get_group should
     return the same ChannelGroupEntry (with the full member set) for the
     same group. The active-only filter is applied separately via
-    get_active_member_channels for the revenue read path.
+    get_active_member_channels for the revenue read path, and list_groups
+    (used by the scope selector) returns the same active-only member set.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        channel = session.get(YouTubeChannelORM, CHANNEL_TV_ROW_ID)
+        channel.active = False
+        session.commit()
+
+    with Session(engine) as session:
+        registry = SqlAlchemyChannelGroupRegistry(session)
+        via_list_full = {g.id: g for g in registry.list_groups_full()}
+        via_list = {g.id: g for g in registry.list_groups()}
+        via_get = registry.get_group(str(GROUP_TV_ID))
+
+    assert via_get is not None
+    assert via_get.channel_ids == via_list_full[str(GROUP_TV_ID)].channel_ids
+    assert via_get.channel_ids == ("group-channel-tv",)
+    # list_groups (scope selector) reports the active-only member set,
+    # which excludes the deactivated channel.
+    assert via_list[str(GROUP_TV_ID)].channel_ids == ()
+
+
+def test_sql_group_registry_list_groups_full_includes_inactive_members(tmp_path):
+    """list_groups_full reports every member; list_groups excludes inactive ones.
+
+    Regression for chatgpt-codex-connector review #122 (round 2): the
+    groups management API must keep the full member set so _require_manageable_group
+    can authorize over channels that have since been deactivated and
+    may be outside the caller's org scope. The scope selector path
+    (list_groups) continues to use the active-only member set so it
+    advertises exactly the channels the revenue read path will touch.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -449,11 +483,18 @@ def test_sql_group_registry_get_group_matches_list_groups_full_member_view(tmp_p
     with Session(engine) as session:
         registry = SqlAlchemyChannelGroupRegistry(session)
         via_list = {g.id: g for g in registry.list_groups()}
-        via_get = registry.get_group(str(GROUP_TV_ID))
+        via_list_full = {g.id: g for g in registry.list_groups_full()}
 
-    assert via_get is not None
-    assert via_get.channel_ids == via_list[str(GROUP_TV_ID)].channel_ids
-    assert via_get.channel_ids == ("group-channel-tv",)
+    # list_groups: active-only member set (scope selector view).
+    assert via_list[str(GROUP_TV_ID)].channel_ids == ()
+    assert via_list[str(GROUP_MIXED_ID)].channel_ids == ("group-channel-news",)
+    # list_groups_full: every member including the deactivated channel
+    # (management authz view).
+    assert via_list_full[str(GROUP_TV_ID)].channel_ids == ("group-channel-tv",)
+    assert via_list_full[str(GROUP_MIXED_ID)].channel_ids == (
+        "group-channel-news",
+        "group-channel-tv",
+    )
 
 
 def test_sql_group_add_members_treats_duplicate_race_as_idempotent(tmp_path, monkeypatch):
