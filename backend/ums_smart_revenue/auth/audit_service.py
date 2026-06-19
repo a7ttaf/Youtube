@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -82,6 +83,15 @@ def _is_sensitive_audit_record(
     )
 
 
+# ============================================================================
+# Purpose: Create and persist one normalized audit record for a domain event.
+# Database/ORM: None; persistence is delegated to the supplied AuditSink.
+# Standards: Typed boundary, fail-closed sensitive permission handling, sink-owned write.
+# Blast Radius: Authorization, finance-sensitive audit trails, exports.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit.py -> Event definitions and policy.
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> Database-backed sink.
+# ============================================================================
 def record_audit_event(
     *,
     sink: AuditSink,
@@ -90,7 +100,7 @@ def record_audit_event(
     entity_type: str | None = None,
     entity_id: str | None = None,
     scope: AccessScope | None = None,
-    details: dict[str, object] | None = None,
+    details: Mapping[str, object] | None = None,
     reason: str | None = None,
     request_id: str | None = None,
     permission_override: Permission | None = None,
@@ -108,7 +118,7 @@ def record_audit_event(
         definition_permission=definition_permission,
         permission_override=permission_override,
     )
-    normalized_details = deepcopy(details) if details is not None else {}
+    normalized_details: dict[str, object] = deepcopy(dict(details)) if details is not None else {}
     record = AuditRecord(
         user_id=actor.user_id,
         event_type=event_type.value,

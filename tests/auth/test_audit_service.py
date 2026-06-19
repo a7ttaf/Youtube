@@ -1,3 +1,5 @@
+from types import MappingProxyType
+
 import pytest
 
 from ums_smart_revenue.auth.audit import AuditEventType
@@ -89,6 +91,33 @@ def test_record_audit_event_marks_sensitive_event_and_scope():
     assert record.permission == "finance.view_revenue"
     assert record.scope_type == "channel"
     assert record.scope_id == "channel-tv-a"
+    assert sink.records == [record]
+
+
+def test_record_audit_event_copies_read_only_mapping_details():
+    sink = InMemoryAuditSink()
+    source_details: dict[str, object] = {
+        "metric": "net_revenue",
+        "filters": {"currency": "USD"},
+    }
+
+    record = record_audit_event(
+        sink=sink,
+        actor=principal(),
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="channel",
+        entity_id="channel-tv-a",
+        scope=AccessScope.channel("channel-tv-a"),
+        details=MappingProxyType(source_details),
+    )
+
+    source_details["metric"] = "gross_revenue"
+    source_details["filters"] = {"currency": "EUR"}
+
+    assert record.details == {
+        "metric": "net_revenue",
+        "filters": {"currency": "USD"},
+    }
     assert sink.records == [record]
 
 
