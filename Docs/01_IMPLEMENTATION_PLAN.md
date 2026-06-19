@@ -731,20 +731,17 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
 
 ### Acceptance gate
 
-- ⏳ A user can select month + group and receive source-backed gross,
-  deduction, net, currency, and explanation — **MET for global / sector /
-  company rollup** (branch `feat/group-sector-rollup`): the Command Center
-  selector now lists the viewer's authorized scopes from the fail-closed
+- ✅ A user can select month + group and receive source-backed gross,
+  deduction, net, and currency through the rollup reads — **MET for global /
+  sector / company rollup** (branch `feat/group-sector-rollup`) and
+  **channel-GROUP revenue scope** (PR #122, merged 2026-06-19): the Command
+  Center selector lists the viewer's authorized scopes from the fail-closed
   `GET /revenue/scopes` endpoint and threads the chosen month + scope into the
-  source-backed net-revenue + rankings reads (gross/deduction/net per scope);
-  channel + month selection with explanations already shipped in PR #69.
-  Remaining (named follow-up): **channel-GROUP revenue scope** (TV_BRAND /
-  CUSTOM_GROUP etc.) is not a finance `scope_type` today — it needs a
-  `ScopeType.GROUP`, a group_id → member channel_ids resolver, and per-channel
-  authorization as the AND of `AccessScope.channel(cid)` checks; the exports
-  path is the precedent (`api/exports.py` `_require_export_scope_permissions`,
-  which loops the resolved channels asserting `AccessScope.channel(cid)`, plus
-  `_access_scope_from_export_scope` for the non-group scope→AccessScope mapping).
+  source-backed net-revenue + rankings reads. Group options come from the
+  channel-group registry, group reads resolve active member channel IDs, and
+  authorization is enforced as the AND of `AccessScope.channel(cid)` checks.
+  Channel + month explanations remain the explanation surface shipped in
+  PR #69; no separate group-level explanation endpoint is claimed here.
   Optional display conversion is later work and must be labeled non-official
   unless it is the currency reported by Google/AdSense.
 
