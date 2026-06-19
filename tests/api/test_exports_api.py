@@ -621,6 +621,53 @@ def test_analytics_csv_revenue_gate_uses_requested_company_before_lookup(tmp_pat
     assert audit_sink.records == []
 
 
+def test_analytics_csv_analytics_gate_uses_requested_company_before_lookup(tmp_path):
+    """Missing analytics view returns 403 for known and unknown company scopes."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="revenue-only-export@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.global_scope(),
+            ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
+                AccessScope.global_scope(),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    for scope_id in (str(COMPANY_A_ID), str(uuid4())):
+        response = client.post(
+            "/exports",
+            json={
+                "export_type": "ANALYTICS_SUMMARY_CSV",
+                "scope_type": "company",
+                "scope_id": scope_id,
+                "month": "2026-03",
+                "currency": "USD",
+                "reason": "Scoped analytics export",
+            },
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Missing permission: analytics.view"
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+
+    assert export_count == 0
+    assert audit_sink.records == []
+
+
 def test_analytics_csv_wrong_scope_revenue_cannot_probe_group_lookup(tmp_path):
     """Wrong-scope revenue grants get a 403 for unknown groups, not 404."""
     database_url = build_database_url(tmp_path)
@@ -666,6 +713,55 @@ def test_analytics_csv_wrong_scope_revenue_cannot_probe_group_lookup(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+    assert export_count == 0
+    assert audit_sink.records == []
+
+
+def test_analytics_csv_wrong_scope_analytics_cannot_probe_group_lookup(tmp_path):
+    """Wrong-scope analytics grants get a 403 for unknown groups, not 404."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="wrong-scope-analytics@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.global_scope(),
+            ),
+            PermissionGrant(
+                Permission.VIEW_ANALYTICS,
+                AccessScope.company(str(COMPANY_A_ID)),
+            ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
+                AccessScope.global_scope(),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/exports",
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "group",
+            "scope_id": str(uuid4()),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Scoped analytics export",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: analytics.view"
     assert export_count == 0
     assert audit_sink.records == []
 

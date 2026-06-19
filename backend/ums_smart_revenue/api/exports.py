@@ -221,10 +221,10 @@ def request_export(
         required_export_permission = _audit_permission_for_export_type(payload.export_type)
         if not _has_permission_assignment(user, required_export_permission):
             _raise_missing_permission(required_export_permission)
-        analytics_csv_group_lookup_authorized = True
+        analytics_csv_group_lookup_denial_permission: Permission | None = None
         if payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE:
-            analytics_csv_group_lookup_authorized = (
-                _require_analytics_csv_revenue_before_scope_lookup(
+            analytics_csv_group_lookup_denial_permission = (
+                _require_analytics_csv_permissions_before_scope_lookup(
                     user=user,
                     scope_type=payload.scope_type,
                     scope_id=payload.scope_id,
@@ -267,9 +267,9 @@ def request_export(
             if (
                 payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE
                 and payload.scope_type == "group"
-                and not analytics_csv_group_lookup_authorized
+                and analytics_csv_group_lookup_denial_permission is not None
             ):
-                _raise_missing_permission(Permission.VIEW_REVENUE)
+                _raise_missing_permission(analytics_csv_group_lookup_denial_permission)
             raise
         snapshot_tuple = tuple(sorted(snapshot)) if snapshot is not None else None
         _require_export_access_permissions(
@@ -1956,11 +1956,11 @@ def _require_known_channel_scope(scope_id: str, org_index: OrgAccessIndex) -> No
 
 
 # ============================================================================
-# Purpose: Fail analytics summary CSV creation against the requested revenue
-# scope before resolving company, sector, or channel membership. Group exports
-# still need member resolution for company/sector/channel grants, but missing
-# groups are normalized to 403 unless the caller already has global or exact
-# group revenue visibility.
+# Purpose: Fail analytics summary CSV creation against the requested analytics
+# and revenue scopes before resolving company, sector, or channel membership.
+# Group exports still need member resolution for company/sector/channel grants,
+# but missing groups are normalized to 403 unless the caller already has global
+# or exact group visibility for both required view permissions.
 # Database/ORM: None; relies on OrgAccessIndex authorization mappings only.
 # Standards: Fail-closed authorization, safe HTTP errors, route boundary helper.
 # Blast Radius: Authorization for revenue-bearing analytics CSV export creation.
@@ -1968,36 +1968,44 @@ def _require_known_channel_scope(scope_id: str, org_index: OrgAccessIndex) -> No
 #   - File: backend/ums_smart_revenue/auth/policy.py -> Scope containment.
 #   - File: tests/api/test_exports_api.py -> Scope-probe regression coverage.
 # ============================================================================
-def _require_analytics_csv_revenue_before_scope_lookup(
+def _require_analytics_csv_permissions_before_scope_lookup(
     *,
     user: UserPrincipal,
     scope_type: str,
     scope_id: str | None,
     org_index: OrgAccessIndex,
-) -> bool:
-    """Return whether group lookup errors may reveal existence after revenue precheck."""
+) -> Permission | None:
+    """Return a missing group-lookup permission to use for normalized 403s."""
+    required_view_permissions = (Permission.VIEW_REVENUE, Permission.VIEW_ANALYTICS)
     if scope_type == "group":
         if not scope_id:
             raise ExportJobValidationError("scope_id is required for export scope_type: group")
-        if not _has_permission_assignment(user, Permission.VIEW_REVENUE):
-            # FIX: Deny revenue-less analytics operators before resolving group
-            # membership, so group existence cannot be probed through 404s.
-            _raise_missing_permission(Permission.VIEW_REVENUE)
-        return has_permission(
-            user,
-            Permission.VIEW_REVENUE,
-            AccessScope.global_scope(),
-            org_index,
-        ) or has_permission(
-            user,
-            Permission.VIEW_REVENUE,
-            AccessScope.group(scope_id),
-            org_index,
-        )
+        group_lookup_denial_permission: Permission | None = None
+        for permission in required_view_permissions:
+            if not _has_permission_assignment(user, permission):
+                # FIX: Deny missing analytics/revenue view grants before
+                # resolving group membership, so group existence cannot be
+                # probed through 404s.
+                _raise_missing_permission(permission)
+            group_lookup_authorized = has_permission(
+                user,
+                permission,
+                AccessScope.global_scope(),
+                org_index,
+            ) or has_permission(
+                user,
+                permission,
+                AccessScope.group(scope_id),
+                org_index,
+            )
+            if not group_lookup_authorized and group_lookup_denial_permission is None:
+                group_lookup_denial_permission = permission
+        return group_lookup_denial_permission
 
     target_scope = _access_scope_from_export_scope(scope_type, scope_id)
-    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
-    return True
+    for permission in required_view_permissions:
+        _require_permission(user, permission, target_scope, org_index)
+    return None
 
 
 def _access_scope_from_export_scope(scope_type: str, scope_id: str | None) -> AccessScope:
