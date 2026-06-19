@@ -1,9 +1,9 @@
 # Exports and Brand Reports
 
 ## Purpose
-Generate management-ready Excel, PDF, and branded slide reports.
+Generate management-ready Excel, PDF, CSV, and branded slide reports.
 
-Current backend behavior: The foundation records queued export-job metadata and produces read-only finance workbook previews for `FINANCE_EXCEL` export jobs. It can generate and persist `.xlsx` workbook downloads from those previews, executive `.pdf` reports for `EXECUTIVE_PDF` jobs, and `.pptx` branded slide packs for `BRANDED_SLIDE_PACK` jobs. Workbook, PDF, and slide artifacts use SQL-backed finance summaries only. Generated artifacts are persisted through the configured export artifact store and recorded on the export job with `file_url` plus full artifact metadata: filename, content type, byte size, and SHA-256 checksum. CSV export generation and external object storage uploads are not yet implemented.
+Current backend behavior: The foundation records queued export-job metadata and produces read-only finance workbook previews for `FINANCE_EXCEL` export jobs. It can generate and persist `.xlsx` workbook downloads from those previews, executive `.pdf` reports for `EXECUTIVE_PDF` jobs, `.pptx` branded slide packs for `BRANDED_SLIDE_PACK` jobs, and `.csv` analytics summaries for `ANALYTICS_SUMMARY_CSV` jobs. Workbook, PDF, and slide artifacts use SQL-backed finance summaries only. Analytics CSV artifacts use normalized `youtube_analytics` source rows aggregated by channel, metric, value kind, and currency; raw payloads, account IDs, content-owner IDs, and source report IDs are not exported. Generated artifacts are persisted through the configured export artifact store and recorded on the export job with `file_url` plus full artifact metadata: filename, content type, byte size, and SHA-256 checksum. External object storage uploads are not yet implemented.
 
 ## Planned export outputs
 
@@ -57,7 +57,7 @@ Planned slides:
 
 ### 4. Analytics summary CSV (`ANALYTICS_SUMMARY_CSV`)
 
-Planned CSV output for non-financial analytics exports that export operators can request without finance visibility.
+Implemented CSV output for non-financial analytics exports that export operators can request without finance visibility. The artifact is generated from normalized `google_revenue_source_rows` where `source_system='youtube_analytics'`, filtered by tenant, month, and the export's frozen channel scope.
 
 ## Template system
 
@@ -89,7 +89,8 @@ pdf_header_footer
 - Executive PDF downloads persist the PDF artifact, update `file_url` and artifact metadata, mark the job `COMPLETED`, add an `EXPORT_DOWNLOADED` audit event, and return the file.
 - Branded slide pack downloads require the same revenue, finalized-payment, and bank-reconciliation permissions as finance workbook downloads.
 - Branded slide pack downloads persist the PPTX artifact, update `file_url` and artifact metadata, mark the job `COMPLETED`, add an `EXPORT_DOWNLOADED` audit event, and return the file.
-- Artifact storage failures for jobs that have not already completed mark the export job `FAILED` with a failure reason and do not emit `EXPORT_DOWNLOADED`; if a completed job already has a persisted artifact, the existing artifact metadata is preserved and the retry returns an unavailable response without adding a download audit event.
+- Analytics summary CSV downloads require analytics export permission plus analytics visibility for the export scope. The CSV uses the export's frozen channel set for scoped jobs, persists artifact metadata, marks the job `COMPLETED`, adds an `EXPORT_DOWNLOADED` audit event, and returns the file.
+- Artifact storage failures for jobs that have not already completed leave the export job non-terminal and retryable, return `503`, and do not emit `EXPORT_DOWNLOADED`; if a completed job already has a persisted artifact, the existing artifact metadata is preserved and the retry returns an unavailable response without adding a download audit event.
 
 ## Export job fields
 
@@ -117,7 +118,7 @@ updated_at
 ```
 
 Implementation note:
-The backend foundation supports finance export requests for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus non-financial `ANALYTICS_SUMMARY_CSV` requests for export operators. Finance exports require both revenue export permission and revenue visibility for the requested scope. Group exports are checked against every member channel. Currency is currently restricted to USD until source-reported non-USD handling is implemented. Official exports must not use public FX rates as the source for revenue, payment, tax, deduction, or reconciliation values.
+The backend foundation supports finance export requests and downloads for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus non-financial `ANALYTICS_SUMMARY_CSV` requests and CSV downloads for export operators. Finance exports require both revenue export permission and revenue visibility for the requested scope. Analytics CSV exports require analytics export permission and analytics visibility for the requested scope. Group exports are checked against every member channel. Currency is currently restricted to USD until source-reported non-USD handling is implemented. Official exports must not use public FX rates as the source for revenue, payment, tax, deduction, or reconciliation values.
 
 `GET /exports/{export_id}/finance-workbook-preview` is implemented for `FINANCE_EXCEL` only. It builds workbook-ready data from SQL source-of-truth rows: monthly revenue facts, approved/pending manual overrides, AdSense payment metadata, bank reconciliation receipt rows, finance month-close state, net-revenue summary, payment match summary, bank confirmation summary, and smart alerts. Month-wide AdSense payment and bank receipt rows are included only for global exports because phase 1 does not attribute cash receipts to sector, company, group, or channel scopes. It does not depend on a graph database.
 

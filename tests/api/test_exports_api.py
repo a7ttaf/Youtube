@@ -1,5 +1,9 @@
+import csv
+import hashlib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from io import StringIO
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
@@ -24,7 +28,10 @@ from ums_smart_revenue.db.org_models import (
 )
 from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.db.source_models import CurrencyORM, GoogleRevenueSourceRowORM
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.reports.exports import ExportJobEntry, ExportJobPage
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000012001")
 COMPANY_A_ID = UUID("00000000-0000-0000-0000-000000012101")
@@ -62,6 +69,7 @@ def build_database_url(tmp_path) -> str:
 def seed_database(database_url: str) -> None:
     """Seed export tests with authorization, org, finance, and report rows."""
     engine = create_engine(database_url)
+    TenantBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -69,6 +77,15 @@ def seed_database(database_url: str) -> None:
     with Session(engine) as session:
         session.add_all(
             [
+                TenantORM(id=UUID(UMS_TENANT_ID), slug="ums", display_name="UMS"),
+                CurrencyORM(
+                    code="USD",
+                    numeric_code="840",
+                    name="US Dollar",
+                    minor_unit=2,
+                    is_supported=True,
+                    activated_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
                 UserORM(id=USER_ID, email="exports@example.com", display_name="Exports User"),
                 OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
                 OrgUnitORM(
@@ -112,6 +129,43 @@ def seed_database(database_url: str) -> None:
             ]
         )
         session.commit()
+
+
+def _analytics_source_row(
+    *,
+    channel_id: str,
+    amount: Decimal,
+    metric_key: str = "estimatedRevenue",
+    value_kind: str = "estimated",
+    currency_code: str = "USD",
+    month: str = "2026-03",
+    source_system: str = "youtube_analytics",
+    ingested_at: datetime | None = None,
+) -> GoogleRevenueSourceRowORM:
+    """Build one YouTube Analytics source row for export download tests."""
+    row_id = uuid4()
+    return GoogleRevenueSourceRowORM(
+        id=row_id,
+        tenant_id=UUID(UMS_TENANT_ID),
+        source_system=source_system,
+        source_row_key=row_id.hex.ljust(64, "0"),
+        source_account_id="analytics-account-secret",
+        content_owner_id="content-owner-secret",
+        youtube_channel_id=channel_id,
+        report_type="reports.query",
+        report_month=month,
+        period_start=date(2026, 3, 1),
+        period_end=date(2026, 3, 31),
+        metric_key=metric_key,
+        value_kind=value_kind,
+        amount_native=amount,
+        currency_code=currency_code,
+        source_report_id="source-report-secret",
+        raw_file_id=None,
+        raw_payload={"secret": "must-not-leak"},
+        imported_by=None,
+        ingested_at=ingested_at or datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+    )
 
 
 def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_path):
@@ -913,6 +967,193 @@ def test_export_operator_can_get_own_export_job(tmp_path):
         "EXPORT_CREATED",
         "EXPORT_VIEWED",
     }
+
+
+def test_export_operator_downloads_scoped_analytics_summary_csv(tmp_path, monkeypatch):
+    """Verify analytics CSV download persists a scoped, sanitized artifact."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    create_response = client.post(
+        "/exports",
+        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "company",
+            "scope_id": str(COMPANY_A_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Scoped analytics CSV",
+        },
+    )
+    export_id = create_response.json()["id"]
+    base_ingested_at = datetime(2026, 4, 1, 12, 0, tzinfo=UTC)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("12.500000"),
+                    ingested_at=base_ingested_at,
+                ),
+                _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("7.500000"),
+                    ingested_at=base_ingested_at + timedelta(minutes=1),
+                ),
+                _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("2.250000"),
+                    metric_key="estimatedAdRevenue",
+                    ingested_at=base_ingested_at + timedelta(minutes=2),
+                ),
+                _analytics_source_row(
+                    channel_id="channel-b",
+                    amount=Decimal("99.000000"),
+                    ingested_at=base_ingested_at + timedelta(minutes=3),
+                ),
+                _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("88.000000"),
+                    month="2026-02",
+                    ingested_at=base_ingested_at + timedelta(minutes=4),
+                ),
+                _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("77.000000"),
+                    source_system="youtube_reporting",
+                    ingested_at=base_ingested_at + timedelta(minutes=5),
+                ),
+            ]
+        )
+        session.commit()
+
+    response = client.get(
+        f"/exports/{export_id}/analytics-summary.csv",
+        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+    )
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, UUID(export_id))
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert create_response.status_code == 202
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert (
+        response.headers["content-disposition"]
+        == 'attachment; filename="ums-analytics-summary-2026-03-company.csv"'
+    )
+    assert "must-not-leak" not in response.text
+    assert "analytics-account-secret" not in response.text
+    rows = list(csv.DictReader(StringIO(response.text)))
+    assert rows == [
+        {
+            "report_month": "2026-03",
+            "source_system": "youtube_analytics",
+            "youtube_channel_id": "channel-a",
+            "channel_name": "Channel A",
+            "metric_key": "estimatedAdRevenue",
+            "value_kind": "estimated",
+            "currency_code": "USD",
+            "period_start": "2026-03-01",
+            "period_end": "2026-03-31",
+            "source_row_count": "1",
+            "amount_native": "2.25",
+            "formula": "SUM(google_revenue_source_rows.amount_native)",
+            "confidence": "source_rows",
+        },
+        {
+            "report_month": "2026-03",
+            "source_system": "youtube_analytics",
+            "youtube_channel_id": "channel-a",
+            "channel_name": "Channel A",
+            "metric_key": "estimatedRevenue",
+            "value_kind": "estimated",
+            "currency_code": "USD",
+            "period_start": "2026-03-01",
+            "period_end": "2026-03-31",
+            "source_row_count": "2",
+            "amount_native": "20",
+            "formula": "SUM(google_revenue_source_rows.amount_native)",
+            "confidence": "source_rows",
+        },
+    ]
+    persisted_file = (
+        artifact_dir
+        / "exports"
+        / export_id
+        / "ums-analytics-summary-2026-03-company.csv"
+    )
+    assert persisted_file.read_bytes() == response.content
+    assert export_job.status == "COMPLETED"
+    assert export_job.file_url is not None
+    assert export_job.artifact_filename == "ums-analytics-summary-2026-03-company.csv"
+    assert export_job.artifact_content_type == "text/csv"
+    assert export_job.artifact_byte_size == len(response.content)
+    assert export_job.artifact_checksum_sha256 == hashlib.sha256(response.content).hexdigest()
+    assert {event.event_type for event in audit_events} == {
+        "EXPORT_CREATED",
+        "EXPORT_DOWNLOADED",
+    }
+    downloaded_event = next(
+        event for event in audit_events if event.event_type == "EXPORT_DOWNLOADED"
+    )
+    assert downloaded_event.scope_type == "export"
+    assert downloaded_event.scope_id == export_id
+    assert downloaded_event.sensitive is True
+    assert downloaded_event.details["export_type"] == "ANALYTICS_SUMMARY_CSV"
+    assert downloaded_event.details["artifact_type"] == "analytics_summary_csv"
+    assert downloaded_event.details["artifact_metadata_complete"] is True
+    assert downloaded_event.details["artifact_content_type"] == "text/csv"
+
+
+def test_analytics_summary_csv_download_requires_analytics_export_permission(
+    tmp_path, monkeypatch
+):
+    """Users with only finance export permission cannot download analytics CSV artifacts."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = uuid4()
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ExportJobORM(
+                id=export_id,
+                export_type="ANALYTICS_SUMMARY_CSV",
+                scope_type="company",
+                scope_id=str(COMPANY_A_ID),
+                scope_channel_ids=["channel-a"],
+                month="2026-03",
+                currency="USD",
+                requested_by=USER_ID,
+                status="QUEUED",
+                month_lock_status="LOCKED",
+                include_confidence_notes=True,
+                include_manual_override_notes=True,
+            )
+        )
+        session.commit()
+
+    response = TestClient(create_app(database_url=database_url)).get(
+        f"/exports/{export_id}/analytics-summary.csv",
+        headers=auth_headers("finance_approver", "company", str(COMPANY_A_ID)),
+    )
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, export_id)
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.analytics"
+    assert export_job.status == "QUEUED"
+    assert export_job.file_url is None
+    assert audit_count == 0
 
 
 def test_get_export_enforces_scope_even_for_job_owner(tmp_path):

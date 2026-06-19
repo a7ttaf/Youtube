@@ -2,6 +2,7 @@ import logging
 import re
 from dataclasses import dataclass
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
@@ -77,6 +78,10 @@ from ums_smart_revenue.finance.smart_alerts import (
     build_monthly_smart_alert_summary,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
+from ums_smart_revenue.reports.analytics_summary_csv import (
+    AnalyticsSummaryCsvValidationError,
+    build_analytics_summary_csv,
+)
 from ums_smart_revenue.reports.artifact_storage import (
     ExportArtifactStorageError,
     FileSystemExportArtifactStore,
@@ -107,6 +112,7 @@ from ums_smart_revenue.reports.finance_workbook import (
     build_finance_workbook_preview,
     build_finance_workbook_xlsx,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 router = APIRouter(prefix="/exports", tags=["exports"])
 EXPORT_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -452,6 +458,114 @@ def preview_finance_workbook(
     response = preview.to_api()
     response["audit_events"] = [audit_record_to_api(record) for record in audit_records]
     return response
+
+
+@router.get("/{export_id}/analytics-summary.csv")
+def download_analytics_summary_csv(
+    export_id: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    group_registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    repository: Annotated[SqlAlchemyExportJobRepository, Depends(current_export_job_repository)],
+    artifact_store: Annotated[
+        FileSystemExportArtifactStore, Depends(current_export_artifact_store)
+    ],
+    session: Annotated[Session, Depends(current_db_session)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> Response:
+    """Generate or serve the cached analytics summary CSV for an analytics export job."""
+    # ============================================================================
+    # Purpose: Download the persisted or freshly-generated ANALYTICS_SUMMARY_CSV
+    # artifact for the requesting user, with scope authorization tied to the same
+    # resolved channel set used by CSV generation.
+    # Database/ORM: ExportJobORM plus google_revenue_source_rows/youtube_channels.
+    # Standards: Owner-filtered lookup, fail-closed analytics authz, artifact
+    # persistence before audit, and safe typed HTTP errors.
+    # Blast Radius: Analytics export downloads, artifact checksums, audit logs.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/reports/analytics_summary_csv.py -> CSV builder.
+    #   - File: Docs/12_BACKEND_API_SPEC.md -> Route contract.
+    # ============================================================================
+    if not _has_any_export_permission(user):
+        _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
+    try:
+        export_job = repository.get_job(export_id, requested_by=user.user_id)
+        resolved_channel_ids = _resolved_export_channel_ids(
+            export_job=export_job,
+            org_index=org_index,
+            group_registry=group_registry,
+        )
+        _require_analytics_export_artifact_permissions(
+            user=user,
+            scope_type=export_job.scope_type,
+            scope_id=export_job.scope_id,
+            org_index=org_index,
+            group_registry=group_registry,
+            scope_channel_ids=_channel_snapshot_tuple(resolved_channel_ids),
+        )
+        if export_job.export_type != "ANALYTICS_SUMMARY_CSV":
+            raise AnalyticsSummaryCsvValidationError(
+                "analytics summary CSV download only supports ANALYTICS_SUMMARY_CSV exports"
+            )
+        served = _serve_persisted_artifact_bytes(
+            export_job=export_job,
+            expected_export_type="ANALYTICS_SUMMARY_CSV",
+            artifact_store=artifact_store,
+        )
+        if served is not None:
+            csv_bytes, filename, content_type = served
+        else:
+            csv_bytes = build_analytics_summary_csv(
+                session=session,
+                tenant_id=_tenant_uuid(user),
+                export_job=export_job,
+                scope_channel_ids=resolved_channel_ids,
+            )
+            filename = f"ums-analytics-summary-{export_job.month}-{export_job.scope_type}.csv"
+            content_type = "text/csv"
+            export_job, storage_failure_response = _persist_generated_export_artifact(
+                repository=repository,
+                artifact_store=artifact_store,
+                export_job=export_job,
+                content=csv_bytes,
+                filename=filename,
+                content_type=content_type,
+            )
+            if storage_failure_response is not None:
+                return storage_failure_response
+            export_job = _require_persisted_export_job(export_job)
+            csv_bytes, filename, content_type = _require_persisted_artifact_bytes(
+                export_job=export_job,
+                expected_export_type="ANALYTICS_SUMMARY_CSV",
+                artifact_store=artifact_store,
+            )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
+        ) from exc
+    except ExportJobNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ExportArtifactStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Export artifact storage unavailable",
+        ) from exc
+    except (AnalyticsSummaryCsvValidationError, ExportJobValidationError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+    _record_analytics_export_artifact_audit(
+        audit_sink=audit_sink,
+        user=user,
+        export_job=export_job,
+        artifact_type="analytics_summary_csv",
+    )
+    return Response(
+        content=csv_bytes,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{export_id}/finance-workbook.xlsx")
@@ -824,6 +938,11 @@ def _build_finance_workbook_preview_for_export(
     )
 
 
+def _tenant_uuid(user: UserPrincipal) -> UUID:
+    """Return the current tenant UUID, falling back to the UMS default tenant."""
+    return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+
+
 def _persist_generated_export_artifact(
     *,
     repository: SqlAlchemyExportJobRepository,
@@ -1159,6 +1278,35 @@ def _build_finance_source_summaries_for_export(
     )
 
 
+def _record_analytics_export_artifact_audit(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    export_job: ExportJobEntry,
+    artifact_type: str,
+):
+    """Emit the analytics export download audit event with artifact metadata."""
+    details = {
+        "export_type": export_job.export_type,
+        "artifact_type": artifact_type,
+        "month": export_job.month,
+        "scope_type": export_job.scope_type,
+        "scope_id": export_job.scope_id,
+    }
+    if export_job.file_url:
+        details.update(_artifact_metadata_audit_details(export_job))
+    return record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.EXPORT_DOWNLOADED,
+        entity_type="export_job",
+        entity_id=export_job.id,
+        scope=AccessScope.export(export_job.id),
+        permission_override=Permission.EXPORT_ANALYTICS_REPORT,
+        details=details,
+    )
+
+
 def _record_finance_export_artifact_audit(
     *,
     audit_sink: AuditSink,
@@ -1453,6 +1601,28 @@ def _require_export_scope_permissions(
     _require_permission(user, view_permission, target_scope, org_index)
 
 
+def _require_analytics_export_artifact_permissions(
+    *,
+    user: UserPrincipal,
+    scope_type: str,
+    scope_id: str | None,
+    org_index: OrgAccessIndex,
+    group_registry: ChannelGroupRegistryStore,
+    scope_channel_ids: tuple[str, ...] | None = None,
+) -> None:
+    """Assert analytics export and analytics view permissions for the export scope."""
+    _require_export_scope_permissions(
+        user=user,
+        export_permission=Permission.EXPORT_ANALYTICS_REPORT,
+        view_permission=Permission.VIEW_ANALYTICS,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        org_index=org_index,
+        group_registry=group_registry,
+        scope_channel_ids=scope_channel_ids,
+    )
+
+
 def _require_finance_export_artifact_permissions(
     *,
     user: UserPrincipal,
@@ -1507,6 +1677,11 @@ def _resolved_export_channel_ids(
         org_index=org_index,
         group_registry=group_registry,
     )
+
+
+def _channel_snapshot_tuple(channel_ids: set[str] | None) -> tuple[str, ...] | None:
+    """Convert a resolved channel set to the tuple shape used by authorization helpers."""
+    return None if channel_ids is None else tuple(sorted(channel_ids))
 
 
 def _channel_ids_for_export_scope(
