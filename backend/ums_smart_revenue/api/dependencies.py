@@ -82,7 +82,7 @@ def current_principal_from_headers(
     x_ums_trusted_gateway_token: Annotated[str | None, Header()] = None,
 ) -> UserPrincipal:
     """Build a bootstrap principal from trusted identity gateway headers."""
-    if x_user_id is None or x_user_email is None or x_role is None or x_scope_type is None:
+    if not x_user_id or not x_user_email or not x_role or not x_scope_type:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication headers",

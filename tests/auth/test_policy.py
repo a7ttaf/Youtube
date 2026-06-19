@@ -163,6 +163,12 @@ def test_payments_view_granted_any_scope_respects_disabled_user():
     assert not bank_reconciliation_view_granted_any_scope(user)
 
 
+def test_payments_view_granted_any_scope_ignores_org_scoped_finance_viewer():
+    user = principal(assigned(RoleKey.FINANCE_VIEWER, AccessScope.company("company-tv-a")))
+    assert not payments_view_granted_any_scope(user)
+    assert not bank_reconciliation_view_granted_any_scope(user)
+
+
 def test_narrow_connector_scope_does_not_grant_global_connector_admin():
     connector_admin = principal(assigned(RoleKey.CONNECTOR_ADMIN, AccessScope.connector("youtube")))
 

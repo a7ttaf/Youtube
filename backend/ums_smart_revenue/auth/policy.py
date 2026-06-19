@@ -155,39 +155,65 @@ def analytics_view_granted_any_scope(user: UserPrincipal) -> bool:
     return False
 
 
+def _is_payment_or_bank_eligible_scope(scope: AccessScope) -> bool:
+    """Return True for scopes that can satisfy payment/bank reads.
+
+    VIEW_FINALIZED_PAYMENTS and VIEW_BANK_RECONCILIATION authorize against
+    AccessScope.finance_month(month) at the bank-reconciliation endpoint, so
+    org-scoped (company/sector/channel) assignments of those permissions must
+    not hint the SPA to mount the panel. Global and finance-month scopes are
+    the only eligible hint sources.
+    """
+    return scope.type in (ScopeType.GLOBAL, ScopeType.FINANCE_MONTH)
+
+
 def payments_view_granted_any_scope(user: UserPrincipal) -> bool:
-    """Return True if the user holds VIEW_FINALIZED_PAYMENTS at any scope."""
+    """Return True if the user holds VIEW_FINALIZED_PAYMENTS at global or finance-month scope."""
     if user.disabled:
         return False
 
     for grant in user.direct_permissions:
-        if grant.active and grant.permission == Permission.VIEW_FINALIZED_PAYMENTS:
+        if (
+            grant.active
+            and grant.permission == Permission.VIEW_FINALIZED_PAYMENTS
+            and _is_payment_or_bank_eligible_scope(grant.scope)
+        ):
             return True
 
     for assignment in user.role_assignments:
         if not assignment.active:
             continue
         role_permissions = ROLE_PERMISSIONS.get(assignment.role, frozenset())
-        if Permission.VIEW_FINALIZED_PAYMENTS in role_permissions:
+        if (
+            Permission.VIEW_FINALIZED_PAYMENTS in role_permissions
+            and _is_payment_or_bank_eligible_scope(assignment.scope)
+        ):
             return True
 
     return False
 
 
 def bank_reconciliation_view_granted_any_scope(user: UserPrincipal) -> bool:
-    """Return True if the user holds VIEW_BANK_RECONCILIATION at any scope."""
+    """Return True if the user holds VIEW_BANK_RECONCILIATION at global or finance-month scope."""
     if user.disabled:
         return False
 
     for grant in user.direct_permissions:
-        if grant.active and grant.permission == Permission.VIEW_BANK_RECONCILIATION:
+        if (
+            grant.active
+            and grant.permission == Permission.VIEW_BANK_RECONCILIATION
+            and _is_payment_or_bank_eligible_scope(grant.scope)
+        ):
             return True
 
     for assignment in user.role_assignments:
         if not assignment.active:
             continue
         role_permissions = ROLE_PERMISSIONS.get(assignment.role, frozenset())
-        if Permission.VIEW_BANK_RECONCILIATION in role_permissions:
+        if (
+            Permission.VIEW_BANK_RECONCILIATION in role_permissions
+            and _is_payment_or_bank_eligible_scope(assignment.scope)
+        ):
             return True
 
     return False
