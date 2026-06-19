@@ -98,15 +98,14 @@ couples the three perms, so refactoring the endpoint for that unreachable case i
 - `Docs/12_BACKEND_API_SPEC.md`: document `GET /revenue/scopes` (auth, response, no-audit).
 - `Docs/01_IMPLEMENTATION_PLAN.md` + `Docs/15_DELIVERY_BACKLOG.md`: mark the Phase 1/5 acceptance
   gate "select month + group/sector → source-backed totals" as met for global/sector/company;
-  record channel-GROUP revenue scope as a named follow-up (needs `ScopeType.GROUP` + resolver +
-  per-channel auth, exports `_access_scopes_for_export_scope` is the precedent).
+  record channel-GROUP revenue scope as a separate follow-up that was later shipped in PR #122.
 
-## Deferred (recorded, not hidden)
-- **Channel-GROUP revenue scope** (TV_BRAND/CUSTOM_GROUP etc.): not a `scope_type` on the finance
-  routes today (no `ScopeType.GROUP`, no group map in `OrgAccessIndex`). Adding it = new resolver
-  branch (group_id→member channel_ids via the channel-group registry) + group authorization as the
-  AND of per-channel `AccessScope.channel(cid)` checks (mirror `api/exports.py`
-  `_access_scopes_for_export_scope` + `groups.py` `_can_view_group`). Out of this PR's scope.
+## Resolved after this design
+- ✅ **Channel-GROUP revenue scope** (TV_BRAND/CUSTOM_GROUP etc.) shipped in
+  PR #122. `group` is now a runtime finance scope for selector options,
+  net-revenue reads, rankings, and recalculation dry-run previews; reads resolve
+  active member channel IDs through the channel-group registry and authorize as
+  the AND of per-channel `AccessScope.channel(cid)` checks.
 
 ## Cross-cutting rules
 - Fail-closed; no scope leak (the whole point of the new endpoint); tenant-scoped; PostgreSQL

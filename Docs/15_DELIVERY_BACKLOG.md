@@ -874,10 +874,10 @@ single P-tier above.
     or on 403/error (panels still fail-closed on the actual reads). The chosen
     month + scope thread unchanged into the already-wired net-revenue + rankings
     reads.
-  - **Channel-GROUP revenue scope follow-up (branch
-    `codex/channel-group-revenue-scope`)** — `group` is now a runtime finance
-    `scope_type` for the selector, net-revenue reads, rankings, and recalculation
-    dry-run previews. Group options come from the channel-group registry and are
+  - ✅ **Channel-GROUP revenue scope** (PR #122, branch
+    `codex/channel-group-revenue-scope`, merged 2026-06-19) — `group` is now a
+    runtime finance `scope_type` for the selector, net-revenue reads, rankings,
+    and recalculation dry-run previews. Group options come from the channel-group registry and are
     listed only when active, non-empty, and every member channel is covered by
     the caller's revenue grants; read paths resolve group_id -> member
     channel_ids and enforce per-channel authorization as the AND of
