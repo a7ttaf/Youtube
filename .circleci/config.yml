@@ -39,9 +39,12 @@ commands:
           # unverified astral.sh installer to sh.
           command: |
             set -e
-            UV_VERSION="0.7.13"
+            # NOT 0.7.x: that uv resolves `uv python install 3.14` to a 3.14
+            # PRE-RELEASE (3.14.0b2), whose typing internals break pydantic
+            # collection. Use a uv recent enough to install stable 3.14.
+            UV_VERSION="0.11.22"
             UV_ARCHIVE="uv-x86_64-unknown-linux-gnu.tar.gz"
-            UV_SHA256="909278eb197c5ed0e9b5f16317d1255270d1f9ea4196e7179ce934d48c4c2545"
+            UV_SHA256="30075b14624a62021198319f22e08f1651a97d4026a8c84dab6abcbfaba0d81c"
             UV_URL="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ARCHIVE}"
             mkdir -p "$HOME/.local/bin"
             curl -fsSL -o "/tmp/${UV_ARCHIVE}" "$UV_URL"
@@ -273,9 +276,12 @@ jobs:
           # unverified astral.sh installer to sh.
           command: |
             set -e
-            UV_VERSION="0.7.13"
+            # NOT 0.7.x: that uv resolves `uv python install 3.14` to a 3.14
+            # PRE-RELEASE (3.14.0b2), whose typing internals break pydantic
+            # collection. Use a uv recent enough to install stable 3.14.
+            UV_VERSION="0.11.22"
             UV_ARCHIVE="uv-x86_64-unknown-linux-gnu.tar.gz"
-            UV_SHA256="909278eb197c5ed0e9b5f16317d1255270d1f9ea4196e7179ce934d48c4c2545"
+            UV_SHA256="30075b14624a62021198319f22e08f1651a97d4026a8c84dab6abcbfaba0d81c"
             UV_URL="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ARCHIVE}"
             mkdir -p "$HOME/.local/bin"
             curl -fsSL -o "/tmp/${UV_ARCHIVE}" "$UV_URL"
