@@ -2774,20 +2774,22 @@ def _resolve_smart_alert_tenant_id() -> UUID:
 
 
 # ============================================================================
-# Purpose: Normalize supported revenue read scopes into an AccessScope plus the
-#   optional channel filter used by net revenue, rankings, and recalculation
-#   preview reads.
-# Database/ORM: Channel groups are loaded through ChannelGroupRegistryStore;
-#   org hierarchy containment is supplied by OrgAccessIndex. No writes.
-# Standards: Route-boundary shape validation with typed HTTP errors; keeps SQL
-#   filtering outside the route and rejects unknown, missing, inactive, or empty
-#   group scopes before any finance read runs.
+# Purpose: Translate a revenue-read scope string into the AccessScope and
+#   channel filter used by the net-revenue, rankings, and recalculation
+#   preview routes.
+# Database/ORM: None directly; the underlying registry and org index are
+#   supplied by the caller and live in the service layer
+#   (resolve_revenue_read_scope).
+# Standards: Route-boundary shim. Pure transport-layer translation: typed
+#   service errors become HTTP errors with the route's primary gate message
+#   so unauthorized probes and unauthorized reads are indistinguishable.
 # Blast Radius: Finance read scope resolution and audit entity identity.
 # Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_scopes.py ->
+#       resolve_revenue_read_scope owns the actual scope translation and
+#       group registry access.
 #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> PostgreSQL
 #       source for channel-group metadata and member channel IDs.
-#   - File: backend/ums_smart_revenue/finance/revenue_summary.py -> downstream
-#       channel filter consumer for net revenue/ranking summaries.
 # ============================================================================
 def _revenue_read_scope_to_channel_ids(
     *,
@@ -2796,58 +2798,35 @@ def _revenue_read_scope_to_channel_ids(
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
 ) -> tuple[AccessScope, set[str] | None]:
-    """Translate a revenue read scope into an AccessScope and channel filter."""
-    normalized_scope_type = scope_type.strip()
-    normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
-    if normalized_scope_type == "global":
-        if normalized_scope_id:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="scope_id must be omitted for global revenue reads",
-            )
-        return AccessScope.global_scope(), None
-    if not normalized_scope_id:
+    """Thin shim around resolve_revenue_read_scope that maps service errors to HTTP."""
+    from ums_smart_revenue.finance.revenue_scopes import (
+        RevenueReadScopeResolutionError,
+        UnknownRevenueScopeTypeError,
+        resolve_revenue_read_scope,
+    )
+
+    try:
+        return resolve_revenue_read_scope(
+            scope_type=scope_type,
+            scope_id=scope_id,
+            org_index=org_index,
+            group_registry=group_registry,
+        )
+    except UnknownRevenueScopeTypeError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(f"scope_id is required for revenue scope_type: {normalized_scope_type}"),
-        )
-    if normalized_scope_type == "sector":
-        return (
-            AccessScope.sector(normalized_scope_id),
-            {
-                channel_id
-                for channel_id, sector_id in org_index.channel_sector.items()
-                if sector_id == normalized_scope_id
-            },
-        )
-    if normalized_scope_type == "company":
-        return (
-            AccessScope.company(normalized_scope_id),
-            {
-                channel_id
-                for channel_id, company_id in org_index.channel_company.items()
-                if company_id == normalized_scope_id
-            },
-        )
-    if normalized_scope_type == "channel":
-        return AccessScope.channel(normalized_scope_id), {normalized_scope_id}
-    if normalized_scope_type == "group":
+            detail=f"Unknown revenue scope_type: {exc.scope_type}",
+        ) from exc
+    except RevenueReadScopeResolutionError as exc:
         # FIX (Qodo review #122): Normalize invalid group lookups to HTTP 403
         # instead of 404/422 so a caller cannot probe for group existence,
         # active state, or emptiness. The same 403 is returned when the
         # caller lacks VIEW_REVENUE on every member channel, so unauthorized
         # probes and unauthorized reads are indistinguishable.
-        group = group_registry.get_group(normalized_scope_id)
-        if group is None or not group.active or not group.channel_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Missing permission: {Permission.VIEW_REVENUE.value}",
-            )
-        return AccessScope.group(normalized_scope_id), set(group.channel_ids)
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-        detail=f"Unknown revenue scope_type: {scope_type}",
-    )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.VIEW_REVENUE.value}",
+        ) from exc
 
 
 def audit_record_to_api(record: AuditRecord) -> dict[str, object]:

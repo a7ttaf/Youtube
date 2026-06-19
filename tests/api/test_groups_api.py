@@ -392,6 +392,36 @@ def test_malformed_group_id_returns_not_found(tmp_path):
     assert response.json()["detail"] == "Group not found"
 
 
+def test_sql_group_registry_excludes_inactive_member_channels(tmp_path):
+    """A group whose only member channel has been deactivated is reported as empty.
+
+    Regression for Qodo review #122: the revenue scope selector must not offer
+    a group that resolves to zero active member channels, otherwise a
+    net-revenue read against that group 200s with an empty body instead of
+    being omitted like other dead options.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    # Deactivate the only member channel of GROUP_TV_ID.
+    with Session(engine) as session:
+        channel = session.get(YouTubeChannelORM, CHANNEL_TV_ROW_ID)
+        channel.active = False
+        session.commit()
+
+    with Session(engine) as session:
+        registry = SqlAlchemyChannelGroupRegistry(session)
+        groups = {group.id: group for group in registry.list_groups()}
+
+    assert str(GROUP_TV_ID) in groups
+    assert groups[str(GROUP_TV_ID)].channel_ids == ()
+
+    # The mixed group still resolves to its remaining active member.
+    assert str(GROUP_MIXED_ID) in groups
+    assert groups[str(GROUP_MIXED_ID)].channel_ids == ("group-channel-news",)
+
+
 def test_sql_group_add_members_treats_duplicate_race_as_idempotent(tmp_path, monkeypatch):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

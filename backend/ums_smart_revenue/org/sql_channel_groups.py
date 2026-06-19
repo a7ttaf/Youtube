@@ -209,6 +209,12 @@ class SqlAlchemyChannelGroupRegistry:
             .where(
                 ChannelGroupMemberORM.tenant_id == self._tenant_id,
                 ChannelGroupMemberORM.group_id.in_(group_ids),
+                # FIX (Qodo review #122): Exclude deactivated channels from group
+                # membership so a group whose members are all inactive is
+                # reported as empty (and therefore not offerable as a revenue
+                # scope) instead of as a dead option that 200s on selection
+                # and then 200s with empty rows on the net-revenue read.
+                YouTubeChannelORM.active.is_(True),
             )
             .order_by(ChannelGroupMemberORM.group_id, YouTubeChannelORM.youtube_channel_id)
         ).all()

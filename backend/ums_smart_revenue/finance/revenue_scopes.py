@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
-from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
+from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistryStore
 
 
 @dataclass(frozen=True)
@@ -280,3 +280,92 @@ def build_authorized_revenue_scopes(
         company_names,
         group_options,
     )
+
+
+# ============================================================================
+# Purpose: Resolve a revenue-read scope string into an AccessScope and an
+#   optional channel-id filter, raising HTTPException-shaped errors that the
+#   route translates 1:1. The group branch delegates to the registry so the
+#   route never touches ChannelGroupRegistryStore directly.
+# Database/ORM: ChannelGroupRegistryStore is the only data-access dependency
+#   (supplied by the caller); org hierarchy containment comes from the
+#   caller-built OrgAccessIndex. No writes.
+# Standards: Pure service boundary — no FastAPI imports, no logging side
+#   effects, no widened grant storage. Error categories are deliberately
+#   limited to "unknown scope_type" (422) and the per-route gate set
+#   (permission-shaped errors raised by the route after this returns).
+# Blast Radius: Finance read scope resolution and downstream channel filter
+#   for net revenue, rankings, and recalculation preview reads.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py ->
+#       _revenue_read_scope_to_channel_ids is now a thin shim that calls this
+#       helper and translates the service's typed errors.
+#   - File: backend/ums_smart_revenue/org/channel_groups.py -> ChannelGroupEntry
+#       supplies the active flag, label, and member channel IDs.
+# ============================================================================
+class RevenueReadScopeResolutionError(ValueError):
+    """Base error for revenue-read scope resolution failures."""
+
+
+class UnknownRevenueScopeTypeError(RevenueReadScopeResolutionError):
+    """The requested scope_type is not one of the supported revenue scopes."""
+
+    def __init__(self, scope_type: str) -> None:
+        super().__init__(f"Unknown revenue scope_type: {scope_type}")
+        self.scope_type = scope_type
+
+
+def resolve_revenue_read_scope(
+    *,
+    scope_type: str,
+    scope_id: str | None,
+    org_index: OrgAccessIndex,
+    group_registry: ChannelGroupRegistryStore,
+) -> tuple[AccessScope, set[str] | None]:
+    """Translate a revenue read scope into an AccessScope and channel filter.
+
+    Raises UnknownRevenueScopeTypeError for unsupported scope types. Invalid
+    group lookups (missing, inactive, or empty) are normalized to a
+    permission-shaped error by the caller so unauthorized probes and
+    unauthorized reads return the same 403.
+    """
+    normalized_scope_type = scope_type.strip()
+    normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
+    if normalized_scope_type == "global":
+        if normalized_scope_id:
+            raise RevenueReadScopeResolutionError(
+                "scope_id must be omitted for global revenue reads"
+            )
+        return AccessScope.global_scope(), None
+    if not normalized_scope_id:
+        raise RevenueReadScopeResolutionError(
+            f"scope_id is required for revenue scope_type: {normalized_scope_type}"
+        )
+    if normalized_scope_type == "sector":
+        return (
+            AccessScope.sector(normalized_scope_id),
+            {
+                channel_id
+                for channel_id, sector_id in org_index.channel_sector.items()
+                if sector_id == normalized_scope_id
+            },
+        )
+    if normalized_scope_type == "company":
+        return (
+            AccessScope.company(normalized_scope_id),
+            {
+                channel_id
+                for channel_id, company_id in org_index.channel_company.items()
+                if company_id == normalized_scope_id
+            },
+        )
+    if normalized_scope_type == "channel":
+        return AccessScope.channel(normalized_scope_id), {normalized_scope_id}
+    if normalized_scope_type == "group":
+        group = group_registry.get_group(normalized_scope_id)
+        if group is None or not group.active or not group.channel_ids:
+            raise RevenueReadScopeResolutionError(
+                "group revenue reads require an active, non-empty group"
+            )
+        return AccessScope.group(normalized_scope_id), set(group.channel_ids)
+    raise UnknownRevenueScopeTypeError(normalized_scope_type)

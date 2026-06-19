@@ -7,6 +7,8 @@ expands to its companies (reverse company_sector walk); a company grant confers
 only itself (never its sector); names fall back to the raw id when absent.
 """
 
+import pytest
+
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.finance.revenue_scopes import (
     RevenueScopeOption,
@@ -323,3 +325,79 @@ def test_unsupported_scope_type_is_dropped():
         company_names=COMPANY_NAMES,
     )
     assert options == []
+
+
+class _StaticGroupRegistry:
+    """Minimal in-memory ChannelGroupRegistryStore for resolve_revenue_read_scope tests."""
+
+    def __init__(self, groups: dict[str, ChannelGroupEntry]) -> None:
+        self._groups = groups
+
+    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
+        return self._groups.get(group_id)
+
+    def list_groups(self) -> list[ChannelGroupEntry]:
+        return list(self._groups.values())
+
+
+def test_resolve_revenue_read_scope_rejects_unknown_type():
+    """Unknown scope_type raises a typed service error for the route to translate."""
+    from ums_smart_revenue.finance.revenue_scopes import (
+        UnknownRevenueScopeTypeError,
+        resolve_revenue_read_scope,
+    )
+
+    with pytest.raises(UnknownRevenueScopeTypeError) as exc_info:
+        resolve_revenue_read_scope(
+            scope_type="region",
+            scope_id="emea",
+            org_index=ORG_INDEX,
+            group_registry=_StaticGroupRegistry({}),
+        )
+    assert exc_info.value.scope_type == "region"
+
+
+def test_resolve_revenue_read_scope_rejects_invalid_group():
+    """Missing, inactive, or empty groups raise the resolution error (mapped to 403)."""
+    from ums_smart_revenue.finance.revenue_scopes import (
+        RevenueReadScopeResolutionError,
+        resolve_revenue_read_scope,
+    )
+
+    cases = [
+        (None, "missing"),
+        (
+            _group("g1", "Inactive", (CHANNEL_TV_A,), active=False),
+            "inactive",
+        ),
+        (_group("g2", "Empty", ()), "empty"),
+    ]
+    for group_entry, label in cases:
+        registry = _StaticGroupRegistry({"g1": group_entry} if group_entry else {})
+        with pytest.raises(RevenueReadScopeResolutionError):
+            resolve_revenue_read_scope(
+                scope_type="group",
+                scope_id=group_entry.id if group_entry else "missing",
+                org_index=ORG_INDEX,
+                group_registry=registry,
+            )
+
+
+def test_resolve_revenue_read_scope_returns_group_channels():
+    """A valid group resolves to its member channels and the GROUP AccessScope."""
+    from ums_smart_revenue.finance.revenue_scopes import resolve_revenue_read_scope
+
+    registry = _StaticGroupRegistry(
+        {
+            "g1": _group("g1", "Mixed", (CHANNEL_TV_A, CHANNEL_MUSIC)),
+        }
+    )
+    scope, channel_ids = resolve_revenue_read_scope(
+        scope_type="group",
+        scope_id="g1",
+        org_index=ORG_INDEX,
+        group_registry=registry,
+    )
+    assert scope.type.value == "group"
+    assert scope.id == "g1"
+    assert channel_ids == {CHANNEL_TV_A, CHANNEL_MUSIC}
