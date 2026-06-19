@@ -89,6 +89,11 @@ const DOWNLOAD_ROUTES: Partial<Record<ExportType, DownloadRoute>> = {
   },
 };
 
+const hasDownloadRoute = (
+  exportType: string,
+): exportType is ExportType =>
+  Object.prototype.hasOwnProperty.call(DOWNLOAD_ROUTES, exportType);
+
 // ============================================================================
 // Purpose: The real accepted export_type enum values (ALLOWED_EXPORT_TYPES), each
 //   tagged with the per-type capability it needs and whether the create form may
@@ -150,7 +155,9 @@ const downloadFor = (
   job: ExportJob,
   canViewRevenue: boolean,
 ): { href: string; format: string } | null => {
-  const route = DOWNLOAD_ROUTES[job.export_type];
+  const route = hasDownloadRoute(job.export_type)
+    ? DOWNLOAD_ROUTES[job.export_type]
+    : null;
   if (!route || (route.requiresRevenueVisibility && !canViewRevenue)) {
     // FIX: Analytics CSV artifacts include revenue amounts, so the UI must not
     // expose their direct GET route when finance.view_revenue is absent.
