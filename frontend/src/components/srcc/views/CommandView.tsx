@@ -701,19 +701,29 @@ const BANK_RECONCILIATION_USD_CURRENCY = "USD";
 const adsensePaymentBadge = (
   data: MonthBankReconciliationSummary,
 ): BankReconciliationMetric["badge"] => {
-  if (data.paid_payment_count > 0) return { text: "Paid", tone: "green" };
+  if (data.paid_payment_count > 0) {
+    return { text: "Paid", tone: "green" };
+  }
   return { text: "Missing", tone: "amber" };
 };
 
+const adsensePaymentPrimaryNote = (data: MonthBankReconciliationSummary): string =>
+  countLabel(data.paid_payment_count, "paid USD payment");
+
 const adsensePaymentSecondaryNote = (data: MonthBankReconciliationSummary): string => {
+  if (data.unsupported_payment_currency_count > 0) {
+    return countLabel(data.unsupported_payment_currency_count, "unsupported currency payment");
+  }
   if (data.non_paid_payment_count > 0) {
-    return countLabel(data.non_paid_payment_count, "unpaid row");
+    return countLabel(data.non_paid_payment_count, "unpaid USD payment");
   }
   return "AdSense source";
 };
 
 const adsensePaymentTone = (data: MonthBankReconciliationSummary): string => {
-  if (data.paid_payment_count > 0) return "is-payment";
+  if (data.paid_payment_count > 0) {
+    return "is-payment";
+  }
   return "is-review";
 };
 
@@ -727,12 +737,16 @@ const bankReceiptBadge = (
 };
 
 const bankReceiptSourceNote = (data: MonthBankReconciliationSummary): string => {
-  if (data.entry_count > 0) return "Bank source loaded";
+  if (data.entry_count > 0) {
+    return "Bank source loaded";
+  }
   return "Waiting for bank";
 };
 
 const bankReceiptTone = (data: MonthBankReconciliationSummary): string => {
-  if (data.entry_count > 0) return "is-revenue";
+  if (data.entry_count > 0) {
+    return "is-revenue";
+  }
   return "is-review";
 };
 
@@ -749,12 +763,27 @@ const bankGapSecondaryNote = (
   data: MonthBankReconciliationSummary,
   canViewFinance: boolean,
 ): string => {
-  if (data.bank_gap_usd === null) return "Needs both sources";
+  if (data.bank_gap_usd === null) {
+    return "Needs both sources";
+  }
   return `Tolerance ${financeDisplay(data.tolerance_usd, canViewFinance, {
     currency: BANK_RECONCILIATION_USD_CURRENCY,
   })}`;
 };
 
+// ============================================================================
+// Purpose: Convert the backend month bank-reconciliation summary into the three
+//   Command Center metric cards without recomputing official finance values.
+// Database/ORM: None (frontend). Consumes backend values derived from AdSense
+//   payments and bank_reconciliation_entries.
+// Standards: Official money values are rendered only through financeDisplay;
+//   notes distinguish paid USD payments from unsupported non-USD payment rows.
+// Blast Radius: Finance display only. No mutation, export, lock, or audit write.
+// Connections:
+//   - File: frontend/src/lib/api/types.ts -> MonthBankReconciliationSummary.
+//   - File: backend/ums_smart_revenue/finance/bank_reconciliation.py -> money
+//     fields and provenance serialized by MonthBankReconciliationSummary.to_api().
+// ============================================================================
 const buildBankReconciliationMetrics = (
   data: MonthBankReconciliationSummary,
   canViewFinance: boolean,
@@ -767,10 +796,7 @@ const buildBankReconciliationMetrics = (
       label: "AdSense payment",
       value: financeDisplay(data.adsense_paid_amount_usd, canViewFinance, { currency }),
       badge: adsensePaymentBadge(data),
-      note: [
-        `${data.paid_payment_count}/${data.payment_count} paid`,
-        adsensePaymentSecondaryNote(data),
-      ],
+      note: [adsensePaymentPrimaryNote(data), adsensePaymentSecondaryNote(data)],
       tone: adsensePaymentTone(data),
     },
     {
@@ -792,25 +818,44 @@ const buildBankReconciliationMetrics = (
   ];
 };
 
+// ============================================================================
+// Purpose: Translate bank-reconciliation fetch failures into safe inline copy
+//   for the strip without exposing backend diagnostic details.
+// Database/ORM: None (frontend).
+// Standards: 403s get a role/permission message; non-permission API failures
+//   retain only the status code and a generic retryable detail.
+// Blast Radius: Error display only. No authorization, finance, audit, or export
+//   behavior changes.
+// Connections:
+//   - File: frontend/src/lib/api/client.ts -> ApiError status boundary.
+//   - File: backend/ums_smart_revenue/api/revenue.py -> endpoint may return
+//     typed 403/422/5xx responses that must not leak details in this card.
+// ============================================================================
 const bankReconciliationErrorCopy = (
   error: ApiError | Error,
 ): { title: string; detail: string } => {
   if (error instanceof ApiError) {
-    if (error.status === 403)
+    if (error.status === 403) {
       return {
         title: "No permission",
         detail: "Your role cannot view payment and bank reconciliation for this month.",
       };
-    return { title: `Request failed (${error.status})`, detail: extractApiErrorDetail(error) };
+    }
+    return {
+      title: `Request failed (${error.status})`,
+      detail: "Could not load payment and bank reconciliation for this month.",
+    };
   }
   return {
     title: "Network error",
-    detail: error.message || "Could not reach the bank reconciliation service.",
+    detail: "Could not reach the bank reconciliation service.",
   };
 };
 
 const bankReconciliationErrorTone = (title: string): Severity => {
-  if (title === "No permission") return "blue";
+  if (title === "No permission") {
+    return "blue";
+  }
   return "red";
 };
 
@@ -848,7 +893,7 @@ const RestrictedBankReconciliationStrip = () => (
         </header>
         <div className="metric-value finance-data">{RESTRICTED_FINANCE_VALUE}</div>
         <div className="metric-note">
-          <span>Finance access required</span>
+          <span>Payment and bank permissions required</span>
         </div>
       </article>
     ))}
@@ -937,8 +982,9 @@ const PopulatedBankReconciliationStrip = ({
 // Standards: Official finance values are backend strings rendered via
 //   financeDisplay; USD-suffixed fields are always rendered as USD with no
 //   browser-side finance calculation. The read is disabled
-//   when finance values are withheld, and endpoint 403s render inside this strip
-//   without replacing the rest of CommandView.
+//   unless the session has both backend-derived payment and bank-reconciliation
+//   read grants, and endpoint 403s render inside this strip without replacing
+//   the rest of CommandView.
 // Blast Radius: Finance display only. No mutation, export, lock, or audit write
 //   from the browser beyond the backend endpoint's read audit events.
 // Connections:
@@ -948,17 +994,17 @@ const PopulatedBankReconciliationStrip = ({
 // ============================================================================
 const BankReconciliationStatusStrip = ({
   month,
-  canViewFinance,
+  canViewBankReconciliationSummary,
 }: {
   month: string;
-  canViewFinance: boolean;
+  canViewBankReconciliationSummary: boolean;
 }) => {
   const { data, loading, error } = useBankReconciliation({
     month,
-    enabled: canViewFinance,
+    enabled: canViewBankReconciliationSummary,
   });
 
-  if (!canViewFinance) {
+  if (!canViewBankReconciliationSummary) {
     return <RestrictedBankReconciliationStrip />;
   }
 
@@ -974,7 +1020,7 @@ const BankReconciliationStatusStrip = ({
     return <EmptyBankReconciliationStrip />;
   }
 
-  const metrics = buildBankReconciliationMetrics(data, canViewFinance);
+  const metrics = buildBankReconciliationMetrics(data, canViewBankReconciliationSummary);
 
   return <PopulatedBankReconciliationStrip metrics={metrics} />;
 };
@@ -1959,12 +2005,18 @@ const RankingsPanel = ({
 const CommandView = ({
   canViewFinance,
   canViewAnalytics = false,
+  canViewPayments = false,
+  canViewBankReconciliation = false,
 }: {
   canViewFinance: boolean;
   // Optional so the existing prop contract (canViewFinance-only) stays valid; a
   // missing flag fails closed (false) — the analytics monitor never mounts and
   // fires no request without an explicit, backend-derived grant.
   canViewAnalytics?: boolean;
+  // Optional session-derived gates for the bank reconciliation endpoint. Missing
+  // values fail closed so standalone tests cannot accidentally grant this read.
+  canViewPayments?: boolean;
+  canViewBankReconciliation?: boolean;
 }) => {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   // Stable {scopeType, scopeId} identity instead of a positional index: the
@@ -2028,6 +2080,7 @@ const CommandView = ({
     () => selectedChannel?.youtube_channel_id ?? null,
     [selectedChannel],
   );
+  const canViewBankReconciliationSummary = canViewPayments && canViewBankReconciliation;
 
   return (
     <>
@@ -2099,7 +2152,7 @@ const CommandView = ({
       {/* payment/bank reconciliation — REAL data, sourced from the backend summary */}
       <BankReconciliationStatusStrip
         month={month}
-        canViewFinance={canViewFinance}
+        canViewBankReconciliationSummary={canViewBankReconciliationSummary}
       />
 
       {/* smart-alerts / problem panel — REAL data, fails independently */}

@@ -224,6 +224,21 @@ export type BankReconciliationEntry = {
   recorded_by: string;
 };
 
+export type MoneyProvenance = {
+  source: string;
+  formula: string;
+  confidence: string;
+  export_value: MoneyString | null;
+};
+
+export type BankReconciliationMoneyField =
+  | "adsense_paid_amount_usd"
+  | "bank_received_amount_usd"
+  | "bank_gap_usd"
+  | "transfer_fee_usd"
+  | "fx_difference_usd"
+  | "tolerance_usd";
+
 export type MonthBankReconciliationSummary = {
   month: string;
   currency: string;
@@ -242,6 +257,7 @@ export type MonthBankReconciliationSummary = {
   issues: ReconciliationIssue[];
   entries: BankReconciliationEntry[];
   audit_events: NetRevenueAuditEvent[];
+  money_provenance: Record<BankReconciliationMoneyField, MoneyProvenance>;
 };
 
 // ============================================================================

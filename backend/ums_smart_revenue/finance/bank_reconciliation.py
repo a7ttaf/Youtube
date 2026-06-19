@@ -95,6 +95,7 @@ class MonthBankReconciliationSummary:
 
     def to_api(self) -> dict[str, object]:
         """Convert the reconciliation summary into an API-friendly dictionary."""
+        provenance = _summary_money_provenance(self)
         return {
             "month": self.month,
             "currency": self.currency,
@@ -112,6 +113,7 @@ class MonthBankReconciliationSummary:
             "tolerance_usd": _decimal_to_api(self.tolerance_usd),
             "issues": [issue.to_api() for issue in self.issues],
             "entries": [entry.to_api() for entry in self.entries],
+            "money_provenance": provenance,
         }
 
 
@@ -330,6 +332,104 @@ def _sum_and_quantize(items: Iterable[object], attr: str) -> Decimal:
         Decimal: Sum of the attribute quantized to two decimal places.
     """
     return _quantize_money(sum((getattr(item, attr) for item in items), Decimal("0")))
+
+
+def _source_backed_confidence(source_count: int) -> str:
+    """Return the provenance confidence token for a source-backed total."""
+    if source_count > 0:
+        return "SOURCE_BACKED"
+    return "MISSING_SOURCE"
+
+
+def _bank_gap_confidence(summary: MonthBankReconciliationSummary) -> str:
+    """Return the provenance confidence token for the computed bank gap."""
+    if summary.bank_gap_usd is None:
+        return "MISSING_SOURCE"
+    if summary.status == "BANK_CONFIRMED":
+        return "RECONCILED"
+    return "VARIANCE"
+
+
+def _money_provenance(
+    *,
+    source: str,
+    formula: str,
+    confidence: str,
+    export_value: Decimal | None,
+) -> dict[str, str | None]:
+    """Build one API provenance record for a serialized money field."""
+    return {
+        "source": source,
+        "formula": formula,
+        "confidence": confidence,
+        "export_value": _decimal_to_api(export_value),
+    }
+
+
+# ============================================================================
+# Purpose: Attach source/formula/confidence/export-value metadata to every
+#   official money field in the month bank-reconciliation API payload.
+# Database/ORM: None. Uses MonthBankReconciliationSummary values already derived
+#   from AdSense payments and bank_reconciliation_entries.
+# Standards: Additive serializer contract only; values stay Decimal-backed until
+#   the shared decimal_to_api boundary formats them for API/export consistency.
+# Blast Radius: Finance API/report payload provenance. No authorization,
+#   persistence, migration, or audit-write behavior changes.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> GET
+#     /revenue/months/{month}/bank-reconciliation returns this serializer.
+#   - File: frontend/src/lib/api/types.ts -> MonthBankReconciliationSummary
+#     mirrors this money_provenance map.
+# ============================================================================
+def _summary_money_provenance(
+    summary: MonthBankReconciliationSummary,
+) -> dict[str, dict[str, str | None]]:
+    """Build provenance for the bank-reconciliation summary money fields."""
+    bank_confidence = _source_backed_confidence(summary.entry_count)
+    return {
+        "adsense_paid_amount_usd": _money_provenance(
+            source="adsense_payments",
+            formula=(
+                "sum(payment_amount) for records in the month where "
+                "payment_currency = USD and payment_status = PAID"
+            ),
+            confidence=_source_backed_confidence(summary.paid_payment_count),
+            export_value=summary.adsense_paid_amount_usd,
+        ),
+        "bank_received_amount_usd": _money_provenance(
+            source="bank_reconciliation_entries",
+            formula="sum(bank_received_amount_usd) for bank entries in the month",
+            confidence=bank_confidence,
+            export_value=summary.bank_received_amount_usd,
+        ),
+        "bank_gap_usd": _money_provenance(
+            source="adsense_payments_and_bank_reconciliation_entries",
+            formula=(
+                "adsense_paid_amount_usd - bank_received_amount_usd when both "
+                "paid AdSense and bank receipt sources exist"
+            ),
+            confidence=_bank_gap_confidence(summary),
+            export_value=summary.bank_gap_usd,
+        ),
+        "transfer_fee_usd": _money_provenance(
+            source="bank_reconciliation_entries",
+            formula="sum(transfer_fee_usd) for bank entries in the month",
+            confidence=bank_confidence,
+            export_value=summary.transfer_fee_usd,
+        ),
+        "fx_difference_usd": _money_provenance(
+            source="bank_reconciliation_entries",
+            formula="sum(fx_difference_usd) for bank entries in the month",
+            confidence=bank_confidence,
+            export_value=summary.fx_difference_usd,
+        ),
+        "tolerance_usd": _money_provenance(
+            source="bank_reconciliation_policy",
+            formula="configured month bank-reconciliation tolerance",
+            confidence="POLICY",
+            export_value=summary.tolerance_usd,
+        ),
+    }
 
 
 def build_month_bank_reconciliation_summary(

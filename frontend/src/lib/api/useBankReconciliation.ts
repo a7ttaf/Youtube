@@ -7,8 +7,8 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 export type BankReconciliationQuery = {
   month: string;
   // When false, the hook issues NO request. CommandView uses this to avoid
-  // calling the payment/bank endpoint when the current UI session cannot render
-  // finance values.
+  // calling the payment/bank endpoint when the current UI session lacks the
+  // backend-derived payment or bank-reconciliation read grant.
   enabled?: boolean;
 };
 

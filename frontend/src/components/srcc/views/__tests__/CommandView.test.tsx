@@ -114,10 +114,48 @@ const BANK_RECONCILIATION_SUMMARY: MonthBankReconciliationSummary = {
     },
   ],
   audit_events: [],
+  money_provenance: {
+    adsense_paid_amount_usd: {
+      source: "adsense_payments",
+      formula: "sum paid USD payments",
+      confidence: "SOURCE_BACKED",
+      export_value: "930",
+    },
+    bank_received_amount_usd: {
+      source: "bank_reconciliation_entries",
+      formula: "sum bank received USD",
+      confidence: "SOURCE_BACKED",
+      export_value: "928.5",
+    },
+    bank_gap_usd: {
+      source: "adsense_payments_and_bank_reconciliation_entries",
+      formula: "adsense paid USD minus bank received USD",
+      confidence: "VARIANCE",
+      export_value: "1.5",
+    },
+    transfer_fee_usd: {
+      source: "bank_reconciliation_entries",
+      formula: "sum transfer fees",
+      confidence: "SOURCE_BACKED",
+      export_value: "0.5",
+    },
+    fx_difference_usd: {
+      source: "bank_reconciliation_entries",
+      formula: "sum FX differences",
+      confidence: "SOURCE_BACKED",
+      export_value: "0",
+    },
+    tolerance_usd: {
+      source: "bank_reconciliation_policy",
+      formula: "configured tolerance",
+      confidence: "POLICY",
+      export_value: "0.01",
+    },
+  },
 };
 
-// CommandView also mounts finance-gated bank-reconciliation and rankings panels
-// (canViewFinance=true in these tests). Default the bank summary to a backend
+// CommandView also mounts payment/bank-gated bank-reconciliation and
+// finance-gated rankings panels. Default the bank summary to a backend
 // shaped payment/bank body and rankings to empty rows so neither panel collides
 // with the net-revenue assertions below. (The analytics monitor stays unmounted
 // — canViewAnalytics defaults to false here — so no /channels/* monitor request
@@ -183,10 +221,20 @@ const routeFetch = (
   return fetchMock;
 };
 
-const renderCommandView = (canViewFinance: boolean) => {
+const renderCommandView = (
+  canViewFinance: boolean,
+  options: {
+    canViewPayments?: boolean;
+    canViewBankReconciliation?: boolean;
+  } = {},
+) => {
   return render(
     <TenantProvider initialSlug="ums">
-      <CommandView canViewFinance={canViewFinance} />
+      <CommandView
+        canViewFinance={canViewFinance}
+        canViewPayments={options.canViewPayments ?? canViewFinance}
+        canViewBankReconciliation={options.canViewBankReconciliation ?? canViewFinance}
+      />
     </TenantProvider>,
   );
 };
@@ -223,7 +271,22 @@ describe("CommandView wired to net-revenue", () => {
     expect(within(reconciliation).getByText("$930.00")).toBeInTheDocument();
     expect(within(reconciliation).getByText("$928.50")).toBeInTheDocument();
     expect(within(reconciliation).getByText("$1.50")).toBeInTheDocument();
+    expect(within(reconciliation).getByText("1 paid USD payment")).toBeInTheDocument();
     expect(within(reconciliation).getByText("Variance")).toBeInTheDocument();
+  });
+
+  it("uses payment and bank grants instead of revenue visibility for reconciliation", async () => {
+    const fetchMock = routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(false, {
+      canViewPayments: true,
+      canViewBankReconciliation: true,
+    });
+
+    await screen.findByText("$930.00");
+    expect(screen.queryByText("$1,000.00")).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some((call) => String(call[0]).includes("/bank-reconciliation")),
+    ).toBe(true);
   });
 
   it("withholds money cells as Restricted when finance is not visible", async () => {
@@ -239,6 +302,22 @@ describe("CommandView wired to net-revenue", () => {
     expect(
       fetchMock.mock.calls.some((call) => String(call[0]).includes("/bank-reconciliation")),
     ).toBe(false);
+  });
+
+  it("does not request bank reconciliation when payment or bank grants are missing", async () => {
+    const fetchMock = routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(true, {
+      canViewPayments: false,
+      canViewBankReconciliation: true,
+    });
+
+    await waitFor(() =>
+      expect(screen.getAllByText("$1,000.00").length).toBeGreaterThan(0),
+    );
+    expect(
+      fetchMock.mock.calls.some((call) => String(call[0]).includes("/bank-reconciliation")),
+    ).toBe(false);
+    expect(screen.getAllByText("Payment and bank permissions required").length).toBeGreaterThan(0);
   });
 
   it("keeps net revenue visible when bank reconciliation 403s", async () => {
@@ -264,6 +343,27 @@ describe("CommandView wired to net-revenue", () => {
       within(reconciliation).getByText("Payment reconciliation unavailable"),
     ).toBeInTheDocument();
     expect(within(reconciliation).getByText("No permission")).toBeInTheDocument();
+  });
+
+  it("hides non-permission bank reconciliation API error details", async () => {
+    routeFetch(
+      () => jsonResponse(NET_REVENUE_BODY),
+      undefined,
+      undefined,
+      () => jsonResponse({ detail: "internal SQL diagnostic" }, 500),
+    );
+    renderCommandView(true);
+
+    const reconciliation = await screen.findByRole("alert", {
+      name: "Payment reconciliation summary",
+    });
+    expect(within(reconciliation).getByText("Request failed (500)")).toBeInTheDocument();
+    expect(
+      within(reconciliation).getByText(
+        "Could not load payment and bank reconciliation for this month.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("internal SQL diagnostic")).not.toBeInTheDocument();
   });
 
   it("renders the human confidence label with the raw code in title/aria", async () => {
