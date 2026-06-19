@@ -48,6 +48,7 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
+from typing import cast
 
 from sqlalchemy.orm import Session
 from starlette.datastructures import Headers, MutableHeaders
@@ -156,10 +157,13 @@ class TenantResolverMiddleware:
             return
 
         try:
-            tenant = await self._run_blocking_with_timeout(
-                self._resolve,
-                normalised_slug,
-                timeout=self._lookup_timeout_seconds,
+            tenant = cast(
+                Tenant,
+                await self._run_blocking_with_timeout(
+                    self._resolve,
+                    normalised_slug,
+                    timeout=self._lookup_timeout_seconds,
+                ),
             )
         except _ResolverError as error:
             await error.to_response()(scope, receive, send_with_tenant_vary)
@@ -276,11 +280,13 @@ class TenantResolverMiddleware:
     async def _is_authorized_with_timeout(self, scope: Scope, normalised_slug: str) -> bool:
         """Run authorization off-loop and fail closed if it exceeds its budget."""
         try:
-            return await self._run_blocking_with_timeout(
-                self._is_authorized,
-                scope,
-                normalised_slug,
-                timeout=self._authorization_timeout_seconds,
+            return bool(
+                await self._run_blocking_with_timeout(
+                    self._is_authorized,
+                    scope,
+                    normalised_slug,
+                    timeout=self._authorization_timeout_seconds,
+                )
             )
         except (asyncio.CancelledError, FutureCancelledError) as _:
             raise

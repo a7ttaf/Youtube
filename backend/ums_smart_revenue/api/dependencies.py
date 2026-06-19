@@ -82,7 +82,7 @@ def current_principal_from_headers(
     x_ums_trusted_gateway_token: Annotated[str | None, Header()] = None,
 ) -> UserPrincipal:
     """Build a bootstrap principal from trusted identity gateway headers."""
-    if not all([x_user_id, x_user_email, x_role, x_scope_type]):
+    if x_user_id is None or x_user_email is None or x_role is None or x_scope_type is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication headers",
@@ -100,12 +100,12 @@ def current_principal_from_headers(
     return UserPrincipal(
         user_id=x_user_id,
         email=x_user_email,
-        role_assignments=[
+        role_assignments=(
             RoleAssignment(
                 role=role,
                 scope=scope_from_header(x_scope_type, x_scope_id),
-            )
-        ],
+            ),
+        ),
         is_service_account=role == RoleKey.SYSTEM_INTEGRATION_USER,
     )
 
@@ -255,6 +255,8 @@ def _load_database_principal_with_retries(
                 raise
             session.rollback()
             logger.warning("Retrying database principal lookup after storage failure")
+
+    raise RuntimeError("database principal load did not return")
 
 
 def _is_retryable_principal_storage_error(exc: SQLAlchemyError) -> bool:

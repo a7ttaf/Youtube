@@ -165,6 +165,10 @@ def test_session_me_header_mode_finance_month_scope_has_bank_capabilities(
         {"role": "finance_admin", "scope_type": "finance-month", "scope_id": "2026-03"}
     ]
 
+
+def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(
+    client_headers_mode,
+):
     """revenue_operations_admin: canRunConnectorJobs true, canViewRevenue false."""
     response = client_headers_mode.get(
         "/session/me",
