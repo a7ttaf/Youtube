@@ -716,6 +716,7 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
           canCreateExport={canCreateAnyExport(permissions)}
           canExportFinance={permissions.canExportFinanceReports}
           canExportAnalytics={permissions.canExportAnalyticsReports}
+          canViewRevenue={permissions.canViewFinance}
         />
       )}
       {view === "connectors" && (

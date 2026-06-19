@@ -337,6 +337,10 @@ def test_group_export_request_freezes_member_channels_at_creation(tmp_path):
                 Permission.VIEW_ANALYTICS,
                 AccessScope.global_scope(),
             ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
+                AccessScope.global_scope(),
+            ),
         ),
     )
     client = TestClient(app)
@@ -396,6 +400,10 @@ def test_group_export_read_uses_snapshot_authorization_after_group_deletion(tmp_
             ),
             PermissionGrant(
                 Permission.VIEW_ANALYTICS,
+                AccessScope.global_scope(),
+            ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
                 AccessScope.global_scope(),
             ),
         ),
@@ -500,8 +508,8 @@ def test_finance_export_request_requires_artifact_read_permissions(tmp_path):
     assert export_count == 0
 
 
-def test_export_operator_can_request_analytics_export_for_assigned_company(tmp_path):
-    """Test that an export operator can request an analytics export for their assigned company."""
+def test_export_operator_cannot_request_analytics_summary_csv_without_revenue_visibility(tmp_path):
+    """Analytics-only export users cannot create CSV jobs containing revenue amounts."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     app = create_app(database_url=database_url)
@@ -522,12 +530,14 @@ def test_export_operator_can_request_analytics_export_for_assigned_company(tmp_p
         },
     )
 
-    assert response.status_code == 202
-    assert response.json()["export_type"] == "ANALYTICS_SUMMARY_CSV"
-    assert response.json()["scope_id"] == str(COMPANY_A_ID)
-    assert response.json()["status"] == "QUEUED"
-    assert audit_sink.records[0].event_type == "EXPORT_CREATED"
-    assert audit_sink.records[0].permission == "exports.analytics"
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+    assert export_count == 0
+    assert audit_sink.records == []
 
 
 def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
@@ -536,7 +546,7 @@ def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
     headers = auth_headers(
-        "export_operator",
+        "finance_admin",
         "company",
         str(COMPANY_A_ID),
         user_id="gateway-subject-export",
@@ -844,7 +854,7 @@ def test_export_list_returns_requesting_users_jobs_only(tmp_path):
     client = TestClient(create_app(database_url=database_url))
     create_response = client.post(
         "/exports",
-        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
         json={
             "export_type": "ANALYTICS_SUMMARY_CSV",
             "scope_type": "company",
@@ -897,7 +907,7 @@ def test_user_without_export_permission_cannot_list_historical_export_jobs(tmp_p
     client = TestClient(create_app(database_url=database_url))
     create_response = client.post(
         "/exports",
-        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
         json={
             "export_type": "ANALYTICS_SUMMARY_CSV",
             "scope_type": "company",
@@ -925,7 +935,7 @@ def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
     client = TestClient(create_app(database_url=database_url))
     company_a_analytics = client.post(
         "/exports",
-        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
         json={
             "export_type": "ANALYTICS_SUMMARY_CSV",
             "scope_type": "company",
@@ -937,7 +947,7 @@ def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
     )
     company_b_analytics = client.post(
         "/exports",
-        headers=auth_headers("export_operator", "company", str(COMPANY_B_ID)),
+        headers=auth_headers("finance_admin", "company", str(COMPANY_B_ID)),
         json={
             "export_type": "ANALYTICS_SUMMARY_CSV",
             "scope_type": "company",
@@ -986,7 +996,7 @@ def test_export_operator_can_get_own_export_job(tmp_path):
     client = TestClient(create_app(database_url=database_url))
     create_response = client.post(
         "/exports",
-        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
         json={
             "export_type": "ANALYTICS_SUMMARY_CSV",
             "scope_type": "company",
@@ -1148,8 +1158,17 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
     assert export_job.artifact_checksum_sha256 == hashlib.sha256(response.content).hexdigest()
     assert {event.event_type for event in audit_events} == {
         "EXPORT_CREATED",
+        "REVENUE_VIEWED",
         "EXPORT_DOWNLOADED",
     }
+    revenue_events = [event for event in audit_events if event.event_type == "REVENUE_VIEWED"]
+    assert len(revenue_events) == 1
+    revenue_event = revenue_events[0]
+    assert revenue_event.scope_type == "export"
+    assert revenue_event.scope_id == export_id
+    assert revenue_event.sensitive is True
+    assert revenue_event.details["export_type"] == "ANALYTICS_SUMMARY_CSV"
+    assert revenue_event.details["artifact_type"] == "analytics_summary_csv"
     downloaded_events = [event for event in audit_events if event.event_type == "EXPORT_DOWNLOADED"]
     assert len(downloaded_events) == 1
     downloaded_event = downloaded_events[0]

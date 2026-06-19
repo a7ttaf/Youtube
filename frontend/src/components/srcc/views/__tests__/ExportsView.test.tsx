@@ -76,7 +76,7 @@ const FAILED_JOB: ExportJob = {
   completed_at: null,
 };
 
-// A QUEUED analytics CSV job: never gets a download link (no GET route).
+// A QUEUED analytics CSV job: exposes the generate-on-demand CSV route.
 const CSV_JOB: ExportJob = {
   ...QUEUED_FINANCE_JOB,
   id: "55555555-5555-5555-5555-555555555555",
@@ -120,7 +120,12 @@ function renderExportsView( // skipcq: JS-0067
   {
     canExportFinance = true,
     canExportAnalytics = true,
-  }: { canExportFinance?: boolean; canExportAnalytics?: boolean } = {},
+    canViewRevenue = true,
+  }: {
+    canExportFinance?: boolean;
+    canExportAnalytics?: boolean;
+    canViewRevenue?: boolean;
+  } = {},
 ) {
   return render(
     <TenantProvider initialSlug="ums">
@@ -128,6 +133,7 @@ function renderExportsView( // skipcq: JS-0067
         canCreateExport={canCreateExport}
         canExportFinance={canExportFinance}
         canExportAnalytics={canExportAnalytics}
+        canViewRevenue={canViewRevenue}
       />
     </TenantProvider>,
   );
@@ -342,7 +348,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("never exposes a download link for an analytics CSV job (no GET route)", async () => {
+  it("exposes a Generate CSV link for a queued analytics CSV job", async () => {
     fetchMock().mockResolvedValue(
       jsonResponse({
         items: [CSV_JOB],
@@ -354,13 +360,15 @@ describe("ExportsView wired to the exports endpoint", () => {
     await waitFor(() =>
       expect(screen.getByText("ANALYTICS_SUMMARY_CSV")).toBeInTheDocument(),
     );
-    expect(
-      screen.queryByRole("link", { name: /download|generate/i }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByText("Not ready")).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /generate csv/i });
+    expect(link).toHaveAttribute(
+      "href",
+      "/exports/55555555-5555-5555-5555-555555555555/analytics-summary.csv",
+    );
+    expect(link).toHaveAttribute("download");
   });
 
-  it("shows the no-creatable-types state for an analytics-only viewer (CSV is held back until a download route exists)", async () => {
+  it("offers the analytics CSV create option when analytics export and revenue visibility are both granted", async () => {
     fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
     renderExportsView(true, { canExportFinance: false, canExportAnalytics: true });
 
@@ -368,19 +376,29 @@ describe("ExportsView wired to the exports endpoint", () => {
       expect(screen.getByText(/No export jobs yet/i)).toBeInTheDocument(),
     );
 
-    // The CSV is never OFFERED in the create form (no GET download route yet), so
-    // an analytics-only viewer has zero creatable types and sees the honest
-    // disabled empty state instead of an enabled form defaulting to the CSV.
     const reportType = screen.getByLabelText("Report type") as HTMLSelectElement;
-    expect(reportType).toBeDisabled();
+    expect(reportType).not.toBeDisabled();
     const optionLabels = Array.from(reportType.options).map((o) => o.textContent);
-    expect(optionLabels).toEqual([
-      "No export types are currently available for your role.",
-    ]);
-    // With no creatable type, Generate cannot submit even once a reason is typed.
+    expect(optionLabels).toEqual(["Analytics summary (CSV)"]);
     fireEvent.change(screen.getByLabelText("Reason"), {
       target: { value: "Need it" },
     });
+    expect(screen.getByRole("button", { name: /^generate$/i })).not.toBeDisabled();
+  });
+
+  it("hides analytics CSV creation when revenue visibility is withheld", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
+    renderExportsView(true, {
+      canExportFinance: false,
+      canExportAnalytics: true,
+      canViewRevenue: false,
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText(/No export jobs yet/i)).toBeInTheDocument(),
+    );
+
+    expect(screen.getByLabelText("Report type")).toBeDisabled();
     expect(screen.getByRole("button", { name: /^generate$/i })).toBeDisabled();
   });
 

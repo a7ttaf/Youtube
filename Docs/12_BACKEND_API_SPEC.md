@@ -567,23 +567,28 @@ numbers deterministic per export.
 }
 ```
 
-`GET /exports/{export_id}/analytics-summary.csv` supports
-`ANALYTICS_SUMMARY_CSV` export jobs. It requires `exports.analytics` and
-`analytics.view` for the export scope, using the frozen `scope_channel_ids`
-snapshot for non-global jobs. The endpoint generates an on-demand UTF-8 CSV
+`POST /exports` accepts `ANALYTICS_SUMMARY_CSV` jobs only when the caller has
+`exports.analytics`, `analytics.view`, and `finance.view_revenue` for the
+requested export scope; this prevents queuing a revenue-bearing CSV that the
+same caller cannot download. `GET /exports/{export_id}/analytics-summary.csv`
+supports `ANALYTICS_SUMMARY_CSV` export jobs. It requires `exports.analytics`,
+`analytics.view`, and `finance.view_revenue` for the export scope, using the
+frozen `scope_channel_ids` snapshot for non-global jobs. The endpoint generates
+an on-demand UTF-8 CSV
 response with media type `text/csv` and an attachment filename. Rows are sourced
 from normalized `google_revenue_source_rows` where
-`source_system='youtube_analytics'`, filtered by tenant, month, and scope, then
-aggregated by channel, metric, value kind, and currency. The CSV includes
+`source_system='youtube_analytics'`, filtered by tenant, month, export currency,
+and scope, then aggregated by channel, metric, value kind, and currency. The CSV includes
 `report_month`, `source_system`, `youtube_channel_id`, `channel_name`,
 `metric_key`, `value_kind`, `currency_code`, period bounds, `source_row_count`,
 `amount_native`, `formula`, and `confidence`; it does not export raw payloads,
 account IDs, content-owner IDs, or source report IDs. The endpoint persists the
 generated artifact through the configured export artifact store, records
 `file_url`, filename, content type, byte size, SHA-256 checksum, marks the export
-job `COMPLETED`, and emits `EXPORT_DOWNLOADED` with artifact metadata. If
-artifact storage fails before completion, the job remains non-terminal and
-retryable, the endpoint returns `503`, and no download audit event is emitted.
+job `COMPLETED`, and emits `REVENUE_VIEWED` plus `EXPORT_DOWNLOADED` with
+artifact metadata. If artifact storage fails before completion, the job remains
+non-terminal and retryable, the endpoint returns `503`, and no revenue/download
+audit event is emitted.
 
 `GET /exports/{export_id}/finance-workbook-preview` is an implemented read-only
 foundation for future `FINANCE_EXCEL` generation. It requires `exports.revenue`

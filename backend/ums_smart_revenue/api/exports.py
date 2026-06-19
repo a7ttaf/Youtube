@@ -131,6 +131,7 @@ router = APIRouter(prefix="/exports", tags=["exports"])
 EXPORT_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 logger = logging.getLogger(__name__)
 MAX_AUTHORIZED_EXPORT_JOB_SCAN_PAGES = 10
+_ANALYTICS_SUMMARY_CSV_TYPE = "ANALYTICS_SUMMARY_CSV"
 
 
 @dataclass(frozen=True)
@@ -262,6 +263,19 @@ def request_export(
             group_registry=group_registry,
             scope_channel_ids=snapshot_tuple,
         )
+        if payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE:
+            # FIX: The CSV carries revenue amounts, so creation must match the
+            # download gate and reject analytics-only users before a queued,
+            # undownloadable export job is persisted.
+            _require_export_scope_view_permission(
+                user=user,
+                view_permission=Permission.VIEW_REVENUE,
+                scope_type=payload.scope_type,
+                scope_id=payload.scope_id,
+                org_index=org_index,
+                group_registry=group_registry,
+                scope_channel_ids=snapshot_tuple,
+            )
         export_job = repository.request_export(
             export_type=payload.export_type,
             scope_type=payload.scope_type,
@@ -963,13 +977,13 @@ def _load_analytics_summary_csv_artifact(
     scope_channel_ids: set[str] | None,
 ) -> _ExportDownloadArtifact | JSONResponse:
     """Return a cached/generated analytics CSV artifact or a retryable storage response."""
-    if export_job.export_type != "ANALYTICS_SUMMARY_CSV":
+    if export_job.export_type != _ANALYTICS_SUMMARY_CSV_TYPE:
         raise AnalyticsSummaryCsvValidationError(
             "analytics summary CSV download only supports ANALYTICS_SUMMARY_CSV exports"
         )
     served = _serve_persisted_artifact_bytes(
         export_job=export_job,
-        expected_export_type="ANALYTICS_SUMMARY_CSV",
+        expected_export_type=_ANALYTICS_SUMMARY_CSV_TYPE,
         artifact_store=artifact_store,
     )
     if served is not None:
@@ -1002,7 +1016,7 @@ def _load_analytics_summary_csv_artifact(
     persisted_export_job = _require_persisted_export_job(persisted_export_job)
     csv_bytes, filename, content_type = _require_persisted_artifact_bytes(
         export_job=persisted_export_job,
-        expected_export_type="ANALYTICS_SUMMARY_CSV",
+        expected_export_type=_ANALYTICS_SUMMARY_CSV_TYPE,
         artifact_store=artifact_store,
     )
     return _ExportDownloadArtifact(
@@ -1355,38 +1369,49 @@ def _record_analytics_export_artifact_audit(
     export_job: ExportJobEntry,
     artifact_type: str,
 ):
-    """Emit the analytics export download audit event with artifact metadata."""
+    """Emit analytics export revenue-view and download audit events."""
     # ============================================================================
-    # Purpose: Emit the sensitive EXPORT_DOWNLOADED audit record for the exact
-    # persisted analytics CSV artifact returned to the caller.
+    # Purpose: Emit sensitive REVENUE_VIEWED and EXPORT_DOWNLOADED audit records
+    # for the exact persisted analytics CSV artifact returned to the caller.
     # Database/ORM: audit_logs insert through AuditSink.
     # Standards: Typed detail payload; artifact locator is redacted while checksum
     # and size metadata remain audit-visible.
-    # Blast Radius: Audit trail for analytics CSV downloads.
+    # Blast Radius: Audit trail for analytics CSV revenue reads and downloads.
     # Connections:
     #   - File: backend/ums_smart_revenue/auth/audit_service.py -> Audit persistence.
     #   - File: backend/ums_smart_revenue/reports/exports.py -> Artifact metadata.
     # ============================================================================
-    details: dict[str, object] = {
-        "export_type": export_job.export_type,
-        "artifact_type": artifact_type,
-        "month": export_job.month,
-        "scope_type": export_job.scope_type,
-        "scope_id": export_job.scope_id,
-    }
+    details: dict[str, object] = dict(
+        export_type=export_job.export_type,
+        artifact_type=artifact_type,
+        month=export_job.month,
+        scope_type=export_job.scope_type,
+        scope_id=export_job.scope_id,
+    )
     if export_job.file_url:
         for field_name, field_value in _artifact_metadata_audit_details(export_job).items():
             details[field_name] = field_value
-    return record_audit_event(
+    export_scope = AccessScope.export(export_job.id)
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="export_job",
+        entity_id=export_job.id,
+        scope=export_scope,
+        details=details.copy(),
+    )
+    download_record = record_audit_event(
         sink=audit_sink,
         actor=user,
         event_type=AuditEventType.EXPORT_DOWNLOADED,
         entity_type="export_job",
         entity_id=export_job.id,
-        scope=AccessScope.export(export_job.id),
+        scope=export_scope,
         permission_override=Permission.EXPORT_ANALYTICS_REPORT,
         details=details,
     )
+    return revenue_record, download_record
 
 
 def _record_finance_export_artifact_audit(
