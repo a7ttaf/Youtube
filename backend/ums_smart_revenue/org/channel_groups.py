@@ -25,7 +25,13 @@ class ChannelGroupRegistryStore(Protocol):
     def list_groups(self) -> list[ChannelGroupEntry]:
         pass
 
+    def list_groups_full(self) -> list[ChannelGroupEntry]:
+        pass
+
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
+        pass
+
+    def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         pass
 
     def create_group(
@@ -50,10 +56,27 @@ class ChannelGroupRegistry:
         self._groups = {group.id: group for group in groups or []}
 
     def list_groups(self) -> list[ChannelGroupEntry]:
+        # In-memory registry: every member is treated as active. The full
+        # member set is the same as the active member set, so list_groups
+        # and list_groups_full return the same payload.
+        return sorted(self._groups.values(), key=lambda group: group.name)
+
+    def list_groups_full(self) -> list[ChannelGroupEntry]:
         return sorted(self._groups.values(), key=lambda group: group.name)
 
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         return self._groups.get(group_id)
+
+    def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
+        """Return active member channel ids for a group, or None if the group is missing.
+
+        In-memory implementation: every member is treated as active. The
+        SQL counterpart filters by YouTubeChannelORM.active.
+        """
+        group = self._groups.get(group_id)
+        if group is None:
+            return None
+        return group.channel_ids
 
     def create_group(
         self, *, name: str, group_type: str, channel_ids: list[str]

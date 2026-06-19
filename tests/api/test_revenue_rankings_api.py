@@ -20,7 +20,13 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
     RevenueManualOverrideORM,
 )
-from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.db.org_models import (
+    ChannelGroupMemberORM,
+    ChannelGroupORM,
+    OrgBase,
+    OrgUnitORM,
+    YouTubeChannelORM,
+)
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.finance.channel_account_links import (
@@ -42,6 +48,7 @@ CHANNEL_A_ROW_ID = UUID("00000000-0000-0000-0000-00000000d301")
 CHANNEL_B_ROW_ID = UUID("00000000-0000-0000-0000-00000000d302")
 CHANNEL_C_ROW_ID = UUID("00000000-0000-0000-0000-00000000d303")
 CHANNEL_D_ROW_ID = UUID("00000000-0000-0000-0000-00000000d304")
+GROUP_ID = UUID("00000000-0000-0000-0000-00000000d501")
 USER_ID = UUID("00000000-0000-0000-0000-00000000d401")
 APPROVER_ID = UUID("00000000-0000-0000-0000-00000000d402")
 
@@ -72,6 +79,21 @@ def _company_finance_principal() -> UserPrincipal:
         direct_permissions=(
             PermissionGrant(Permission.VIEW_REVENUE, AccessScope.company(str(COMPANY_ID))),
             PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.company(str(COMPANY_ID))),
+            PermissionGrant(
+                Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month("2026-03")
+            ),
+        ),
+    )
+
+
+def _channel_a_finance_principal() -> UserPrincipal:
+    """Return a principal authorized for channel-tv-a rankings reads."""
+    return UserPrincipal(
+        user_id=str(USER_ID),
+        email="rankings@example.com",
+        direct_permissions=(
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.channel("channel-tv-a")),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.channel("channel-tv-a")),
             PermissionGrant(
                 Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month("2026-03")
             ),
@@ -173,6 +195,27 @@ def seed_database(database_url: str) -> None:
         session.commit()
 
 
+def _seed_group(database_url: str, *, channel_row_ids: tuple[UUID, ...]) -> None:
+    """Seed one active channel group for group-scoped rankings."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ChannelGroupORM(
+                id=GROUP_ID,
+                name="TV A Group",
+                group_type="CUSTOM_GROUP",
+                active=True,
+            )
+        )
+        session.add_all(
+            [
+                ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=channel_row_id)
+                for channel_row_id in channel_row_ids
+            ]
+        )
+        session.commit()
+
+
 def test_finance_viewer_reads_month_rankings_with_audit(tmp_path):
     """A company-scoped finance viewer reads ranked channels/companies + audit."""
     database_url = build_database_url(tmp_path)
@@ -207,6 +250,72 @@ def test_finance_viewer_reads_month_rankings_with_audit(tmp_path):
         "PAYMENT_VIEWED",
     }
     assert audit_kinds == {"REVENUE_VIEWED", "PAYMENT_VIEWED"}
+
+
+def test_group_scope_reads_only_member_channel_rankings_with_audit(tmp_path):
+    """A group-scoped rankings read is filtered to group members and audited."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_group(database_url, channel_row_ids=(CHANNEL_A_ROW_ID,))
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _channel_a_finance_principal
+    client = TestClient(app)
+
+    response = client.get(
+        f"/revenue/months/2026-03/rankings?scope_type=group&scope_id={GROUP_ID}",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [channel["entity_id"] for channel in body["channels"]] == ["channel-tv-a"]
+    assert body["channels"][0]["gross_revenue_usd"] == "1050"
+    assert [company["entity_id"] for company in body["companies"]] == [str(COMPANY_ID)]
+    assert {event["event_type"] for event in body["audit_events"]} == {
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+    }
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        revenue_event = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "REVENUE_VIEWED")
+        ).one()
+    assert revenue_event.scope_type == "group"
+    assert revenue_event.scope_id == str(GROUP_ID)
+
+
+def test_group_scope_normalizes_missing_group_to_403(tmp_path):
+    """A missing group_id returns 403 (not 404) to prevent scope discovery."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _channel_a_finance_principal
+    client = TestClient(app)
+    missing_group_id = UUID("00000000-0000-0000-0000-00000000c999")
+
+    response = client.get(
+        f"/revenue/months/2026-03/rankings?scope_type=group&scope_id={missing_group_id}",
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_group_scope_normalizes_empty_group_to_403(tmp_path):
+    """An active but empty channel group returns 403 (not 422)."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_group(database_url, channel_row_ids=())
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _channel_a_finance_principal
+    client = TestClient(app)
+
+    response = client.get(
+        f"/revenue/months/2026-03/rankings?scope_type=group&scope_id={GROUP_ID}",
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
 def test_assistant_cannot_read_month_rankings_by_default(tmp_path):

@@ -7,11 +7,14 @@ expands to its companies (reverse company_sector walk); a company grant confers
 only itself (never its sector); names fall back to the raw id when absent.
 """
 
+import pytest
+
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.finance.revenue_scopes import (
     RevenueScopeOption,
     build_authorized_revenue_scopes,
 )
+from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
 
 # Two sectors, three companies. company_sector maps company_id -> sector_id.
 SECTOR_TV = "sector-tv"
@@ -19,10 +22,21 @@ SECTOR_MUSIC = "sector-music"
 COMPANY_TV_A = "company-tv-a"
 COMPANY_TV_B = "company-tv-b"
 COMPANY_MUSIC = "company-music"
+CHANNEL_TV_A = "channel-tv-a"
+CHANNEL_TV_B = "channel-tv-b"
+CHANNEL_MUSIC = "channel-music"
 
 ORG_INDEX = OrgAccessIndex(
-    channel_company={},
-    channel_sector={},
+    channel_company={
+        CHANNEL_TV_A: COMPANY_TV_A,
+        CHANNEL_TV_B: COMPANY_TV_B,
+        CHANNEL_MUSIC: COMPANY_MUSIC,
+    },
+    channel_sector={
+        CHANNEL_TV_A: SECTOR_TV,
+        CHANNEL_TV_B: SECTOR_TV,
+        CHANNEL_MUSIC: SECTOR_MUSIC,
+    },
     company_sector={
         COMPANY_TV_A: SECTOR_TV,
         COMPANY_TV_B: SECTOR_TV,
@@ -37,13 +51,31 @@ COMPANY_NAMES = {
 }
 
 
-def _build(granted):
+def _build(granted, *, groups=()):
     """Invoke the service with the shared org fixtures and given grants."""
     return build_authorized_revenue_scopes(
         granted=granted,
         org_index=ORG_INDEX,
         sector_names=SECTOR_NAMES,
         company_names=COMPANY_NAMES,
+        groups=groups,
+    )
+
+
+def _group(
+    group_id: str,
+    name: str,
+    channel_ids: tuple[str, ...],
+    *,
+    active: bool = True,
+) -> ChannelGroupEntry:
+    """Build an in-memory channel-group entry for pure scope tests."""
+    return ChannelGroupEntry(
+        id=group_id,
+        name=name,
+        group_type="CUSTOM_GROUP",
+        active=active,
+        channel_ids=channel_ids,
     )
 
 
@@ -142,6 +174,72 @@ def test_global_grant_with_other_scoped_grants_still_lists_full_universe():
     assert len(options) == 6
 
 
+def test_global_grant_emits_active_non_empty_groups():
+    """A global grant lists active channel groups after org rollup options."""
+    options = _build(
+        (AccessScope.global_scope(),),
+        groups=(
+            _group("group-tv", "TV Group", (CHANNEL_TV_A, CHANNEL_TV_B)),
+            _group("group-empty", "Empty Group", ()),
+            _group("group-inactive", "Inactive Group", (CHANNEL_TV_A,), active=False),
+        ),
+    )
+
+    keys = [(option.scope_type, option.scope_id) for option in options]
+    assert ("group", "group-tv") in keys
+    assert ("group", "group-empty") not in keys
+    assert ("group", "group-inactive") not in keys
+    assert keys[-1] == ("group", "group-tv")
+
+
+def test_channel_grants_for_every_member_emit_group_option():
+    """A group can be listed from channel grants only when every member is covered."""
+    options = _build(
+        (
+            AccessScope.channel(CHANNEL_TV_A),
+            AccessScope.channel(CHANNEL_MUSIC),
+        ),
+        groups=(
+            _group("group-mixed", "Mixed Group", (CHANNEL_TV_A, CHANNEL_MUSIC)),
+            _group("group-tv", "TV Group", (CHANNEL_TV_A, CHANNEL_TV_B)),
+        ),
+    )
+
+    assert [(option.scope_type, option.scope_id) for option in options] == [
+        ("group", "group-mixed")
+    ]
+
+
+def test_company_grant_excludes_group_with_foreign_member_channel():
+    """A company grant does not authorize a group that includes another company."""
+    options = _build(
+        (AccessScope.company(COMPANY_TV_A),),
+        groups=(
+            _group("group-tv-a", "TV A Group", (CHANNEL_TV_A,)),
+            _group("group-mixed", "Mixed Group", (CHANNEL_TV_A, CHANNEL_MUSIC)),
+        ),
+    )
+
+    keys = {(option.scope_type, option.scope_id) for option in options}
+    assert ("group", "group-tv-a") in keys
+    assert ("group", "group-mixed") not in keys
+
+
+def test_sector_grant_emits_group_when_all_members_are_in_sector():
+    """A sector grant can authorize groups whose members are all in that sector."""
+    options = _build(
+        (AccessScope.sector(SECTOR_TV),),
+        groups=(
+            _group("group-tv", "TV Group", (CHANNEL_TV_A, CHANNEL_TV_B)),
+            _group("group-mixed", "Mixed Group", (CHANNEL_TV_A, CHANNEL_MUSIC)),
+        ),
+    )
+
+    keys = {(option.scope_type, option.scope_id) for option in options}
+    assert ("group", "group-tv") in keys
+    assert ("group", "group-mixed") not in keys
+
+
 def test_raw_id_fallback_when_name_missing():
     """An active unit absent from the name maps falls back to its raw id as the label.
 
@@ -188,6 +286,29 @@ def test_no_grants_returns_empty_list():
     assert _build(()) == []
 
 
+def test_covered_channel_ids_uses_set_containment():
+    """Regression for the Qodo #122 performance fix.
+
+    The precomputed covered-channel set is computed once and reused for every
+    group; semantically equivalent to the prior per-channel/per-grant scan.
+    """
+    # FIX: a sector grant must cover every channel mapped to that sector via
+    # the org_index, and a group whose members are a strict subset must be
+    # listed exactly once (no per-channel duplication).
+    options = _build(
+        (AccessScope.sector(SECTOR_TV),),
+        groups=(
+            _group("group-tv", "TV Group", (CHANNEL_TV_A, CHANNEL_TV_B)),
+            _group("group-tv-a-only", "TV A Only", (CHANNEL_TV_A,)),
+            _group("group-foreign", "Foreign", (CHANNEL_MUSIC,)),
+        ),
+    )
+    keys = [(option.scope_type, option.scope_id) for option in options]
+    assert keys.count(("group", "group-tv")) == 1
+    assert ("group", "group-tv-a-only") in keys
+    assert ("group", "group-foreign") not in keys
+
+
 def test_unsupported_scope_type_is_dropped():
     """Only global/sector/company become options; an unexpected granted type
     (channel/connector/finance-month, the HOLDING-equivalent here) is dropped so
@@ -204,3 +325,82 @@ def test_unsupported_scope_type_is_dropped():
         company_names=COMPANY_NAMES,
     )
     assert options == []
+
+
+class _StaticGroupRegistry:
+    """Minimal in-memory ChannelGroupRegistryStore for resolve_revenue_read_scope tests."""
+
+    def __init__(self, groups: dict[str, ChannelGroupEntry]) -> None:
+        self._groups = groups
+
+    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
+        return self._groups.get(group_id)
+
+    def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
+        group = self._groups.get(group_id)
+        if group is None:
+            return None
+        return group.channel_ids
+
+    def list_groups(self) -> list[ChannelGroupEntry]:
+        return list(self._groups.values())
+
+
+def test_resolve_revenue_read_scope_rejects_unknown_type():
+    """Unknown scope_type raises a typed service error for the route to translate."""
+    from ums_smart_revenue.finance.revenue_scopes import (
+        UnknownRevenueScopeTypeError,
+        resolve_revenue_read_scope,
+    )
+
+    with pytest.raises(UnknownRevenueScopeTypeError) as exc_info:
+        resolve_revenue_read_scope(
+            scope_type="region",
+            scope_id="emea",
+            org_index=ORG_INDEX,
+            group_registry=_StaticGroupRegistry({}),
+        )
+    assert exc_info.value.scope_type == "region"
+
+
+def test_resolve_revenue_read_scope_rejects_invalid_group():
+    """Missing, inactive, or empty groups raise the resolution error (mapped to 403)."""
+    from ums_smart_revenue.finance.revenue_scopes import (
+        RevenueReadScopeResolutionError,
+        resolve_revenue_read_scope,
+    )
+
+    cases = (
+        None,
+        _group("g1", "Inactive", (CHANNEL_TV_A,), active=False),
+        _group("g2", "Empty", ()),
+    )
+    for group_entry in cases:
+        registry = _StaticGroupRegistry({group_entry.id: group_entry} if group_entry else {})
+        with pytest.raises(RevenueReadScopeResolutionError):
+            resolve_revenue_read_scope(
+                scope_type="group",
+                scope_id=group_entry.id if group_entry else "missing",
+                org_index=ORG_INDEX,
+                group_registry=registry,
+            )
+
+
+def test_resolve_revenue_read_scope_returns_group_channels():
+    """A valid group resolves to its member channels and the GROUP AccessScope."""
+    from ums_smart_revenue.finance.revenue_scopes import resolve_revenue_read_scope
+
+    registry = _StaticGroupRegistry(
+        {
+            "g1": _group("g1", "Mixed", (CHANNEL_TV_A, CHANNEL_MUSIC)),
+        }
+    )
+    scope, channel_ids = resolve_revenue_read_scope(
+        scope_type="group",
+        scope_id="g1",
+        org_index=ORG_INDEX,
+        group_registry=registry,
+    )
+    assert scope.type.value == "group"
+    assert scope.id == "g1"
+    assert channel_ids == {CHANNEL_TV_A, CHANNEL_MUSIC}

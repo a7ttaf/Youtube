@@ -1,8 +1,8 @@
 # Delivery Backlog
 
-## Status (2026-06-17)
+## Status (2026-06-18)
 
-Reconciled through PR #113 (finance/security doc-correctness sweep). Marker conventions
+Reconciled through PR #121 (skipped source-row smart alerts). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
 
 - `✅ PR #N` — shipped end-to-end at the layer being marked.
@@ -874,14 +874,16 @@ single P-tier above.
     or on 403/error (panels still fail-closed on the actual reads). The chosen
     month + scope thread unchanged into the already-wired net-revenue + rankings
     reads.
-  - **Remaining (named follow-up): channel-GROUP revenue scope** (TV_BRAND /
-    CUSTOM_GROUP etc.) is not a finance `scope_type` today — it needs a
-    `ScopeType.GROUP`, a group_id -> member channel_ids resolver, and
-    per-channel authorization as the AND of `AccessScope.channel(cid)` checks;
-    the exports path is the precedent (`api/exports.py`
-    `_require_export_scope_permissions`, which loops the resolved channels
-    asserting `AccessScope.channel(cid)`, plus `_access_scope_from_export_scope`
-    for the non-group scope->AccessScope mapping).
+  - **Channel-GROUP revenue scope follow-up (branch
+    `codex/channel-group-revenue-scope`)** — `group` is now a runtime finance
+    `scope_type` for the selector, net-revenue reads, rankings, and recalculation
+    dry-run previews. Group options come from the channel-group registry and are
+    listed only when active, non-empty, and every member channel is covered by
+    the caller's revenue grants; read paths resolve group_id -> member
+    channel_ids and enforce per-channel authorization as the AND of
+    `AccessScope.channel(cid)` checks. Stored grant scopes remain
+    global/sector/company/channel/etc.; no persisted group grant or migration is
+    required.
 - ✅ Surface projection-skipped source rows (PR #111) — `normalize_after_run`
   previously discarded `result.skipped` silently, so revenue rows for
   unknown/inactive channels vanished from the fact projection with no

@@ -27,7 +27,36 @@ class SqlAlchemyChannelGroupRegistry:
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def list_groups(self) -> list[ChannelGroupEntry]:
-        """Return active channel groups with their member channel ids."""
+        """Return active channel groups with their member channel ids.
+
+        Member channels are filtered to active rows so the revenue scope
+        selector operates on the same set the revenue read path uses
+        (via get_active_member_channels). Management callers that need
+        the full member set should call list_groups_full instead.
+        """
+        rows = self._session.scalars(
+            select(ChannelGroupORM)
+            .where(
+                ChannelGroupORM.tenant_id == self._tenant_id,
+                ChannelGroupORM.active.is_(True),
+            )
+            .order_by(ChannelGroupORM.name)
+        ).all()
+        group_ids = [row.id for row in rows]
+        channel_ids_by_group = self._channel_ids_by_group_active(group_ids)
+        return [
+            self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
+        ]
+
+    def list_groups_full(self) -> list[ChannelGroupEntry]:
+        """Return active channel groups with their FULL member channel ids.
+
+        Distinct from list_groups so the groups management API can
+        authorize over the complete member set (including channels that
+        have since been deactivated and are outside the caller's org
+        scope), while the scope selector continues to operate on the
+        active-only member set.
+        """
         rows = self._session.scalars(
             select(ChannelGroupORM)
             .where(
@@ -47,6 +76,34 @@ class SqlAlchemyChannelGroupRegistry:
         if row is None:
             return None
         return self._to_entry(row)
+
+    def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
+        """Return active member channel ids for a group, or None if the group is missing.
+
+        Distinct from get_group (which returns ALL members for management authz)
+        so the revenue read path operates on the same set the scope selector
+        advertises, while the groups management API can still authorize over
+        the full member set (including channels that have since been
+        deactivated and are outside the caller's org scope).
+        """
+        row = self._get_group_row(group_id)
+        if row is None:
+            return None
+        rows = self._session.execute(
+            select(YouTubeChannelORM.youtube_channel_id)
+            .join(
+                ChannelGroupMemberORM,
+                (ChannelGroupMemberORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (ChannelGroupMemberORM.channel_id == YouTubeChannelORM.id),
+            )
+            .where(
+                ChannelGroupMemberORM.tenant_id == self._tenant_id,
+                ChannelGroupMemberORM.group_id == row.id,
+                YouTubeChannelORM.active.is_(True),
+            )
+            .order_by(YouTubeChannelORM.youtube_channel_id)
+        ).all()
+        return tuple(row.youtube_channel_id for row in rows)
 
     def create_group(
         self, *, name: str, group_type: str, channel_ids: list[str]
@@ -209,6 +266,37 @@ class SqlAlchemyChannelGroupRegistry:
             .where(
                 ChannelGroupMemberORM.tenant_id == self._tenant_id,
                 ChannelGroupMemberORM.group_id.in_(group_ids),
+            )
+            .order_by(ChannelGroupMemberORM.group_id, YouTubeChannelORM.youtube_channel_id)
+        ).all()
+        channel_ids_by_group: dict[UUID, list[str]] = {}
+        for group_id, youtube_channel_id in rows:
+            channel_ids_by_group.setdefault(group_id, []).append(youtube_channel_id)
+        return {
+            group_id: tuple(channel_ids) for group_id, channel_ids in channel_ids_by_group.items()
+        }
+
+    def _channel_ids_by_group_active(self, group_ids: list[UUID]) -> dict[UUID, tuple[str, ...]]:
+        """Same shape as _channel_ids_by_group but excludes inactive channels.
+
+        Used by list_groups (the scope selector) so the selector advertises
+        the same member set the revenue read path will filter to. The
+        full-member set is still available via _channel_ids_by_group for
+        management authz (list_groups_full).
+        """
+        if not group_ids:
+            return {}
+        rows = self._session.execute(
+            select(ChannelGroupMemberORM.group_id, YouTubeChannelORM.youtube_channel_id)
+            .join(
+                YouTubeChannelORM,
+                (ChannelGroupMemberORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (ChannelGroupMemberORM.channel_id == YouTubeChannelORM.id),
+            )
+            .where(
+                ChannelGroupMemberORM.tenant_id == self._tenant_id,
+                ChannelGroupMemberORM.group_id.in_(group_ids),
+                YouTubeChannelORM.active.is_(True),
             )
             .order_by(ChannelGroupMemberORM.group_id, YouTubeChannelORM.youtube_channel_id)
         ).all()

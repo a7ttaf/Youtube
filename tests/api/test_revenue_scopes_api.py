@@ -18,7 +18,13 @@ from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.db.org_models import (
+    ChannelGroupMemberORM,
+    ChannelGroupORM,
+    OrgBase,
+    OrgUnitORM,
+    YouTubeChannelORM,
+)
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
 SECTOR_TV_ID = UUID("00000000-0000-0000-0000-0000000051a1")
@@ -28,6 +34,9 @@ COMPANY_TV_B_ID = UUID("00000000-0000-0000-0000-0000000051b2")
 COMPANY_MUSIC_ID = UUID("00000000-0000-0000-0000-0000000051b3")
 CHANNEL_TV_A_ROW_ID = UUID("00000000-0000-0000-0000-0000000051c1")
 CHANNEL_MUSIC_ROW_ID = UUID("00000000-0000-0000-0000-0000000051c2")
+GROUP_TV_ID = UUID("00000000-0000-0000-0000-0000000051e1")
+GROUP_MIXED_ID = UUID("00000000-0000-0000-0000-0000000051e2")
+GROUP_EMPTY_ID = UUID("00000000-0000-0000-0000-0000000051e3")
 USER_ID = UUID("00000000-0000-0000-0000-0000000051d1")
 
 
@@ -139,6 +148,34 @@ def seed_database(database_url: str) -> None:
         session.commit()
 
 
+def seed_group(
+    database_url: str,
+    *,
+    group_id: UUID,
+    name: str,
+    channel_row_ids: tuple[UUID, ...],
+    active: bool = True,
+) -> None:
+    """Seed one channel group and its members for scope-option tests."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ChannelGroupORM(
+                id=group_id,
+                name=name,
+                group_type="CUSTOM_GROUP",
+                active=active,
+            )
+        )
+        session.add_all(
+            [
+                ChannelGroupMemberORM(group_id=group_id, channel_id=channel_row_id)
+                for channel_row_id in channel_row_ids
+            ]
+        )
+        session.commit()
+
+
 def test_global_viewer_lists_global_all_sectors_all_companies(tmp_path):
     """A global VIEW_REVENUE viewer gets global + all sectors + all companies."""
     database_url = build_database_url(tmp_path)
@@ -167,6 +204,90 @@ def test_global_viewer_lists_global_all_sectors_all_companies(tmp_path):
     labels = {s["scope_id"]: s["label"] for s in scopes if s["scope_id"]}
     assert labels[str(SECTOR_TV_ID)] == "TV"
     assert labels[str(COMPANY_MUSIC_ID)] == "Music Co"
+
+
+def test_global_viewer_lists_active_non_empty_group_scope(tmp_path):
+    """A global VIEW_REVENUE viewer also sees active non-empty channel groups."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_group(
+        database_url,
+        group_id=GROUP_TV_ID,
+        name="TV Watchlist",
+        channel_row_ids=(CHANNEL_TV_A_ROW_ID,),
+    )
+    seed_group(
+        database_url,
+        group_id=GROUP_EMPTY_ID,
+        name="Empty Watchlist",
+        channel_row_ids=(),
+    )
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: _principal(
+        PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
+    )
+    client = TestClient(app)
+
+    response = client.get("/revenue/scopes")
+
+    assert response.status_code == 200
+    scopes = response.json()["scopes"]
+    keys = {(scope["scope_type"], scope["scope_id"]) for scope in scopes}
+    assert ("group", str(GROUP_TV_ID)) in keys
+    assert ("group", str(GROUP_EMPTY_ID)) not in keys
+    labels = {scope["scope_id"]: scope["label"] for scope in scopes if scope["scope_id"]}
+    assert labels[str(GROUP_TV_ID)] == "TV Watchlist"
+
+
+def test_channel_grants_for_all_group_members_list_group_scope(tmp_path):
+    """Channel-only VIEW_REVENUE grants can list a fully covered group."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_group(
+        database_url,
+        group_id=GROUP_MIXED_ID,
+        name="Mixed Group",
+        channel_row_ids=(CHANNEL_TV_A_ROW_ID, CHANNEL_MUSIC_ROW_ID),
+    )
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: _principal(
+        PermissionGrant(Permission.VIEW_REVENUE, AccessScope.channel("channel-tv-a")),
+        PermissionGrant(Permission.VIEW_REVENUE, AccessScope.channel("channel-music")),
+    )
+    client = TestClient(app)
+
+    response = client.get("/revenue/scopes")
+
+    assert response.status_code == 200
+    assert response.json()["scopes"] == [
+        {
+            "scope_type": "group",
+            "scope_id": str(GROUP_MIXED_ID),
+            "label": "Mixed Group",
+        }
+    ]
+
+
+def test_group_scope_requires_access_to_every_member_channel(tmp_path):
+    """A partially covered group is not listed and the endpoint stays 403."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_group(
+        database_url,
+        group_id=GROUP_MIXED_ID,
+        name="Mixed Group",
+        channel_row_ids=(CHANNEL_TV_A_ROW_ID, CHANNEL_MUSIC_ROW_ID),
+    )
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: _principal(
+        PermissionGrant(Permission.VIEW_REVENUE, AccessScope.channel("channel-tv-a")),
+    )
+    client = TestClient(app)
+
+    response = client.get("/revenue/scopes")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
 def test_company_scoped_viewer_lists_only_their_company_no_leak(tmp_path):

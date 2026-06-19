@@ -10,7 +10,13 @@ from ums_smart_revenue.db.finance_models import (
     FinanceBase,
     MonthlyChannelRevenueFactORM,
 )
-from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.db.org_models import (
+    ChannelGroupMemberORM,
+    ChannelGroupORM,
+    OrgBase,
+    OrgUnitORM,
+    YouTubeChannelORM,
+)
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000d101")
@@ -19,6 +25,7 @@ OTHER_COMPANY_ID = UUID("00000000-0000-0000-0000-00000000d202")
 CHANNEL_A_ROW_ID = UUID("00000000-0000-0000-0000-00000000d301")
 CHANNEL_B_ROW_ID = UUID("00000000-0000-0000-0000-00000000d302")
 OTHER_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000d303")
+GROUP_ID = UUID("00000000-0000-0000-0000-00000000d501")
 USER_ID = UUID("00000000-0000-0000-0000-00000000d401")
 
 
@@ -151,6 +158,27 @@ def seed_database(database_url: str) -> None:
         session.commit()
 
 
+def seed_group(database_url: str, *, channel_row_ids: tuple[UUID, ...]) -> None:
+    """Seed one active channel group for recalculation scope tests."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ChannelGroupORM(
+                id=GROUP_ID,
+                name="TV A Group",
+                group_type="CUSTOM_GROUP",
+                active=True,
+            )
+        )
+        session.add_all(
+            [
+                ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=channel_row_id)
+                for channel_row_id in channel_row_ids
+            ]
+        )
+        session.commit()
+
+
 def recalculation_payload(**overrides) -> dict[str, object]:
     """Return a default recalculation request payload with optional overrides."""
     payload: dict[str, object] = {
@@ -207,6 +235,139 @@ def test_finance_admin_requests_recalculation_preview_with_audit(tmp_path):
     assert audit_log.scope_type == "finance-month"
     assert audit_log.scope_id == "2026-03"
     assert audit_log.sensitive is True
+
+
+def test_recalculation_preview_supports_group_scope(tmp_path):
+    """A group-scoped dry run filters source rows to the group's member channels."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_group(database_url, channel_row_ids=(CHANNEL_A_ROW_ID,))
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="group", scope_id=str(GROUP_ID)),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == {"scope_type": "group", "scope_id": str(GROUP_ID)}
+    assert body["source_summary"]["revenue_fact_count"] == 1
+    assert body["source_summary"]["source_channel_count"] == 1
+    assert body["source_summary"]["net_revenue_source_count"] == 1
+
+
+def test_recalculation_preview_normalizes_invalid_group_to_403(tmp_path):
+    """Invalid group_id returns 403 (not 404) to prevent scope discovery surface.
+
+    A group_id that does not exist, is inactive, or has no channels must
+    return the same 403 as an unauthorized access, so a caller cannot probe
+    for group existence by observing the HTTP status code.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    missing_group_id = UUID("00000000-0000-0000-0000-00000000d999")
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="group", scope_id=str(missing_group_id)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_recalculation_preview_returns_422_for_malformed_non_group_scope(tmp_path):
+    """Request-shape errors (missing scope_id, extra scope_id on global) are 422, not 403.
+
+    chatgpt-codex-connector review #122: only group-validity errors stay
+    normalized to 403. A missing scope_id on a non-global scope, or a
+    scope_id on a global scope, is a malformed request and must return
+    422 so the caller can distinguish it from an unauthorized read.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    # Missing scope_id on a company scope.
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="company", scope_id=None),
+    )
+    assert response.status_code == 422
+    assert "scope_id is required" in response.json()["detail"]
+
+    # Extra scope_id on a global scope.
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="global", scope_id=str(COMPANY_ID)),
+    )
+    assert response.status_code == 422
+    assert "scope_id must be omitted" in response.json()["detail"]
+
+    # Unknown scope_type.
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="region", scope_id="emea"),
+    )
+    assert response.status_code == 422
+    assert "Unknown revenue scope_type" in response.json()["detail"]
+
+
+def test_recalculation_preview_normalizes_empty_group_to_403(tmp_path):
+    """An active but empty channel group returns 403, not 422, for the same
+    fail-closed reason as a missing group lookup.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_group(database_url, channel_row_ids=())
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="group", scope_id=str(GROUP_ID)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_recalculation_preview_normalizes_inactive_group_to_403(tmp_path):
+    """An inactive channel group returns 403, not 404, for the same
+    fail-closed reason as a missing group lookup.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    # Re-seed with active=False to cover the inactive branch.
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ChannelGroupORM(
+                id=GROUP_ID,
+                name="Inactive Group",
+                group_type="CUSTOM_GROUP",
+                active=False,
+            )
+        )
+        session.add(ChannelGroupMemberORM(group_id=GROUP_ID, channel_id=CHANNEL_A_ROW_ID))
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(scope_type="group", scope_id=str(GROUP_ID)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
 def test_finance_viewer_cannot_request_recalculation(tmp_path):

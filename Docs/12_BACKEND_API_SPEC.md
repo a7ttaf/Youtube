@@ -298,17 +298,21 @@ degrades that to an in-card "No permission" state — it is not a leak.) A globa
 `finance.view_revenue`
 grant yields the `global` option (`scope_id: null`) plus every active sector and
 company; a sector grant yields that sector plus its member companies; a company
-grant yields that company only (it does not confer the sector). The `global`
-option is present only when a global grant exists. Names resolve through the
-org-unit reader with a raw-id fallback, and the list is deterministically
-ordered (global first, then sectors by name, then companies by name).
+grant yields that company only (it does not confer the sector). An active,
+non-empty channel group yields a `group` option when every member channel is
+covered by the caller's `finance.view_revenue` grants; there is no persisted
+group grant scope. The `global` option is present only when a global grant
+exists. Names resolve through the org-unit or channel-group reader with a raw-id
+fallback for org units, and the list is deterministically ordered (global first,
+then sectors by name, companies by name, and groups by name).
 
 `POST /revenue/recalculate` is an implemented recalculation endpoint that supports
 both a dry-run preview and a committed write path. The request includes `month`,
 `allocation_method`, `scope_type`, optional `scope_id`, `currency`, `dry_run`,
 `idempotency_key`, and `reason`. It always requires `finance.view_revenue` for the
-selected data scope and `finance.change_allocation_rule` for the requested
-`finance_month`. `allocation_method=manual` is accepted for dry-run previews
+selected data scope (channel-group scopes require every member channel to be
+covered) and `finance.change_allocation_rule` for the requested `finance_month`.
+`allocation_method=manual` is accepted for dry-run previews
 (`dry_run=true`) but rejected with HTTP 422 on committed writes (`dry_run=false`);
 manual allocations require explicit lines and must use the dedicated commit
 endpoint (`POST /revenue/months/{month}/account-allocations/commit`). With `dry_run=true`
