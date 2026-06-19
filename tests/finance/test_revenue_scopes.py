@@ -373,7 +373,9 @@ def test_resolve_revenue_read_scope_rejects_invalid_group():
         (_group("g2", "Empty", ()), "empty"),
     ]
     for group_entry, label in cases:
-        registry = _StaticGroupRegistry({"g1": group_entry} if group_entry else {})
+        registry = _StaticGroupRegistry(
+            {group_entry.id: group_entry} if group_entry else {}
+        )
         with pytest.raises(RevenueReadScopeResolutionError):
             resolve_revenue_read_scope(
                 scope_type="group",
