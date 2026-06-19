@@ -221,13 +221,16 @@ def request_export(
         required_export_permission = _audit_permission_for_export_type(payload.export_type)
         if not _has_permission_assignment(user, required_export_permission):
             _raise_missing_permission(required_export_permission)
-        if payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE and not _has_permission_assignment(
-            user, Permission.VIEW_REVENUE
-        ):
-            # FIX: Deny callers with no revenue visibility before resolving
-            # group/company/channel scope membership, so revenue-less analytics
-            # operators cannot probe scope existence through non-403 errors.
-            _raise_missing_permission(Permission.VIEW_REVENUE)
+        analytics_csv_group_lookup_authorized = True
+        if payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE:
+            analytics_csv_group_lookup_authorized = (
+                _require_analytics_csv_revenue_before_scope_lookup(
+                    user=user,
+                    scope_type=payload.scope_type,
+                    scope_id=payload.scope_id,
+                    org_index=org_index,
+                )
+            )
         # Pre-check channel-scope authorization before resolving the channel
         # snapshot so an unauthorized caller cannot probe channel existence
         # via 404 responses. Snapshot resolution can still raise 404 below,
@@ -253,12 +256,21 @@ def request_export(
         # Standards: Authorization must mirror persisted data.
         # Blast Radius: Group export authorization and snapshot drift.
         # ================================================================
-        snapshot = _channel_ids_for_export_scope(
-            scope_type=payload.scope_type,
-            scope_id=payload.scope_id,
-            org_index=org_index,
-            group_registry=group_registry,
-        )
+        try:
+            snapshot = _channel_ids_for_export_scope(
+                scope_type=payload.scope_type,
+                scope_id=payload.scope_id,
+                org_index=org_index,
+                group_registry=group_registry,
+            )
+        except KeyError:
+            if (
+                payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE
+                and payload.scope_type == "group"
+                and not analytics_csv_group_lookup_authorized
+            ):
+                _raise_missing_permission(Permission.VIEW_REVENUE)
+            raise
         snapshot_tuple = tuple(sorted(snapshot)) if snapshot is not None else None
         _require_export_access_permissions(
             user=user,
@@ -1939,6 +1951,51 @@ def _require_known_channel_scope(scope_id: str, org_index: OrgAccessIndex) -> No
     """Raise KeyError if the channel ID is not present in the org index."""
     if scope_id not in org_index.channel_company and scope_id not in org_index.channel_sector:
         raise KeyError(f"Channel not found: {scope_id}")
+
+
+# ============================================================================
+# Purpose: Fail analytics summary CSV creation against the requested revenue
+# scope before resolving company, sector, or channel membership. Group exports
+# still need member resolution for company/sector/channel grants, but missing
+# groups are normalized to 403 unless the caller already has global or exact
+# group revenue visibility.
+# Database/ORM: None; relies on OrgAccessIndex authorization mappings only.
+# Standards: Fail-closed authorization, safe HTTP errors, route boundary helper.
+# Blast Radius: Authorization for revenue-bearing analytics CSV export creation.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/policy.py -> Scope containment.
+#   - File: tests/api/test_exports_api.py -> Scope-probe regression coverage.
+# ============================================================================
+def _require_analytics_csv_revenue_before_scope_lookup(
+    *,
+    user: UserPrincipal,
+    scope_type: str,
+    scope_id: str | None,
+    org_index: OrgAccessIndex,
+) -> bool:
+    """Return whether group lookup errors may reveal existence after revenue precheck."""
+    if scope_type == "group":
+        if not scope_id:
+            raise ExportJobValidationError("scope_id is required for export scope_type: group")
+        if not _has_permission_assignment(user, Permission.VIEW_REVENUE):
+            # FIX: Deny revenue-less analytics operators before resolving group
+            # membership, so group existence cannot be probed through 404s.
+            _raise_missing_permission(Permission.VIEW_REVENUE)
+        return has_permission(
+            user,
+            Permission.VIEW_REVENUE,
+            AccessScope.global_scope(),
+            org_index,
+        ) or has_permission(
+            user,
+            Permission.VIEW_REVENUE,
+            AccessScope.group(scope_id),
+            org_index,
+        )
+
+    target_scope = _access_scope_from_export_scope(scope_type, scope_id)
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    return True
 
 
 def _access_scope_from_export_scope(scope_type: str, scope_id: str | None) -> AccessScope:
