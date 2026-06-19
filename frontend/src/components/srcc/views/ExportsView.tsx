@@ -63,6 +63,32 @@ const CURRENCY_OPTIONS = ["USD"];
 const NO_CREATABLE_TYPES_MESSAGE =
   "No export types are currently available for your role.";
 
+type DownloadRoute = {
+  readonly path: (id: string) => string;
+  readonly format: string;
+  readonly requiresRevenueVisibility?: boolean;
+};
+
+const DOWNLOAD_ROUTES: Partial<Record<ExportType, DownloadRoute>> = {
+  FINANCE_EXCEL: {
+    path: (id) => `/exports/${id}/finance-workbook.xlsx`,
+    format: "XLSX",
+  },
+  EXECUTIVE_PDF: {
+    path: (id) => `/exports/${id}/executive.pdf`,
+    format: "PDF",
+  },
+  BRANDED_SLIDE_PACK: {
+    path: (id) => `/exports/${id}/branded-slide-pack.pptx`,
+    format: "PPTX",
+  },
+  ANALYTICS_SUMMARY_CSV: {
+    path: (id) => `/exports/${id}/analytics-summary.csv`,
+    format: "CSV",
+    requiresRevenueVisibility: true,
+  },
+};
+
 // ============================================================================
 // Purpose: The real accepted export_type enum values (ALLOWED_EXPORT_TYPES), each
 //   tagged with the per-type capability it needs and whether the create form may
@@ -120,37 +146,18 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
  * Returns the binary download route (resolved against the configured API origin)
  * and artifact format for a job, or null if the type has no GET route.
  */
-function downloadFor( // skipcq: JS-0067
+function downloadFor(
   job: ExportJob,
   canViewRevenue: boolean,
 ): { href: string; format: string } | null {
-  const id = encodeURIComponent(job.id);
-  switch (job.export_type) {
-    case "FINANCE_EXCEL":
-      return {
-        href: resolveUrl(`/exports/${id}/finance-workbook.xlsx`),
-        format: "XLSX",
-      };
-    case "EXECUTIVE_PDF":
-      return { href: resolveUrl(`/exports/${id}/executive.pdf`), format: "PDF" };
-    case "BRANDED_SLIDE_PACK":
-      return {
-        href: resolveUrl(`/exports/${id}/branded-slide-pack.pptx`),
-        format: "PPTX",
-      };
-    case "ANALYTICS_SUMMARY_CSV":
-      if (!canViewRevenue) {
-        // FIX: Analytics CSV artifacts include revenue amounts, so the UI must
-        // not expose their direct GET route when finance.view_revenue is absent.
-        return null;
-      }
-      return {
-        href: resolveUrl(`/exports/${id}/analytics-summary.csv`),
-        format: "CSV",
-      };
-    default:
-      return null;
+  const route = DOWNLOAD_ROUTES[job.export_type];
+  if (!route || (route.requiresRevenueVisibility && !canViewRevenue)) {
+    // FIX: Analytics CSV artifacts include revenue amounts, so the UI must not
+    // expose their direct GET route when finance.view_revenue is absent.
+    return null;
   }
+  const id = encodeURIComponent(job.id);
+  return { href: resolveUrl(route.path(id)), format: route.format };
 }
 
 // ============================================================================

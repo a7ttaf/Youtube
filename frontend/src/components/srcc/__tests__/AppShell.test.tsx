@@ -348,28 +348,27 @@ const EMPTY_EXPORTS = {
   pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
 };
 
+type FetchRoute = readonly [path: string, respond: () => Response];
+
+function routeFetchWithSessionRoutes(sessionResponder: () => Response): FetchRoute[] {
+  return [
+    ["/session/me", sessionResponder],
+    ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
+    ["/connectors/credentials", () => jsonResponse(EMPTY_CONNECTOR_CREDENTIALS)],
+    ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
+    ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
+  ];
+}
+
 // Route fetch with a caller-supplied /session/me responder; connector, AdSense,
 // and export list calls get empty real-shaped bodies, tenant gets a fixed UMS
 // body, and the net-revenue call gets the neutral body.
-function routeFetchWithSession(sessionResponder: () => Response) { // skipcq: JS-0067
+function routeFetchWithSession(sessionResponder: () => Response) {
+  const routes = routeFetchWithSessionRoutes(sessionResponder);
   return (input: unknown) => {
-    if (isSessionCall(input)) return Promise.resolve(sessionResponder());
-    if (isTenantCall(input)) {
-      return Promise.resolve(
-        jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }),
-      );
-    }
     const url = urlOf(input);
-    if (url.includes("/connectors/credentials")) {
-      return Promise.resolve(jsonResponse(EMPTY_CONNECTOR_CREDENTIALS));
-    }
-    if (url.includes("/adsense/payments")) {
-      return Promise.resolve(jsonResponse(EMPTY_ADSENSE_PAYMENTS));
-    }
-    if (url.includes("/exports")) {
-      return Promise.resolve(jsonResponse(EMPTY_EXPORTS));
-    }
-    return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+    const route = routes.find(([path]) => url.includes(path));
+    return Promise.resolve(route ? route[1]() : jsonResponse(NET_REVENUE_BODY));
   };
 }
 

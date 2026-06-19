@@ -1399,16 +1399,10 @@ def _record_analytics_export_artifact_audit(
         scope_channel_ids=export_job.scope_channel_ids,
         export_id=export_job.id,
     )
-    details: dict[str, object] = dict(
-        export_type=export_job.export_type,
+    details = _export_artifact_audit_details(
+        export_job=export_job,
         artifact_type=artifact_type,
-        month=export_job.month,
-        scope_type=export_job.scope_type,
-        scope_id=export_job.scope_id,
     )
-    if export_job.file_url:
-        for field_name, field_value in _artifact_metadata_audit_details(export_job).items():
-            details[field_name] = field_value
     export_scope = AccessScope.export(export_job.id)
     revenue_records = tuple(
         record_audit_event(
@@ -1454,15 +1448,10 @@ def _record_finance_export_artifact_audit(
         export_id=export_job.id,
     )
     month_scope = AccessScope.finance_month(export_job.month)
-    details = {
-        "export_type": export_job.export_type,
-        "artifact_type": artifact_type,
-        "month": export_job.month,
-        "scope_type": export_job.scope_type,
-        "scope_id": export_job.scope_id,
-    }
-    if export_job.file_url:
-        details.update(_artifact_metadata_audit_details(export_job))
+    details = _export_artifact_audit_details(
+        export_job=export_job,
+        artifact_type=artifact_type,
+    )
     audit_records = [
         record_audit_event(
             sink=audit_sink,
@@ -1566,6 +1555,24 @@ def _artifact_metadata_audit_details(export_job: ExportJobEntry) -> dict[str, ob
         details["artifact_metadata_missing_fields"] = missing_fields
     else:
         details.update(artifact_metadata)
+    return details
+
+
+def _export_artifact_audit_details(
+    *,
+    export_job: ExportJobEntry,
+    artifact_type: str,
+) -> dict[str, object]:
+    """Build the typed export artifact details payload used by audit events."""
+    details: dict[str, object] = {
+        "export_type": export_job.export_type,
+        "artifact_type": artifact_type,
+        "month": export_job.month,
+        "scope_type": export_job.scope_type,
+        "scope_id": export_job.scope_id,
+    }
+    if export_job.file_url:
+        details.update(_artifact_metadata_audit_details(export_job))
     return details
 
 
