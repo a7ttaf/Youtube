@@ -992,21 +992,11 @@ const PopulatedBankReconciliationStrip = ({
 //   - File: frontend/src/lib/api/types.ts -> MonthBankReconciliationSummary.
 //   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_bank_reconciliation().
 // ============================================================================
-const BankReconciliationStatusStrip = ({
-  month,
-  canViewBankReconciliationSummary,
-}: {
-  month: string;
-  canViewBankReconciliationSummary: boolean;
-}) => {
+const BankReconciliationDataStrip = ({ month }: { month: string }) => {
   const { data, loading, error } = useBankReconciliation({
     month,
-    enabled: canViewBankReconciliationSummary,
+    enabled: true,
   });
-
-  if (!canViewBankReconciliationSummary) {
-    return <RestrictedBankReconciliationStrip />;
-  }
 
   if (error) {
     return <BankReconciliationErrorStrip error={error} />;
@@ -1020,9 +1010,22 @@ const BankReconciliationStatusStrip = ({
     return <EmptyBankReconciliationStrip />;
   }
 
-  const metrics = buildBankReconciliationMetrics(data, canViewBankReconciliationSummary);
-
+  const metrics = buildBankReconciliationMetrics(data, true);
   return <PopulatedBankReconciliationStrip metrics={metrics} />;
+};
+
+const BankReconciliationStatusStrip = ({
+  month,
+  canViewBankReconciliationSummary,
+}: {
+  month: string;
+  canViewBankReconciliationSummary: boolean;
+}) => {
+  if (!canViewBankReconciliationSummary) {
+    return <RestrictedBankReconciliationStrip />;
+  }
+
+  return <BankReconciliationDataStrip month={month} />;
 };
 
 /** Static header row for the channel revenue table. */

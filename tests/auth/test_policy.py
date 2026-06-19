@@ -3,6 +3,7 @@ import pytest
 from ums_smart_revenue.auth.models import PermissionGrant, RoleAssignment, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import (
+    bank_reconciliation_view_granted_any_scope,
     can_assign_roles,
     can_change_allocation_rule,
     can_export_finance_report,
@@ -13,6 +14,7 @@ from ums_smart_revenue.auth.policy import (
     can_view_channel_analytics,
     can_view_channel_revenue,
     can_view_company_revenue,
+    payments_view_granted_any_scope,
 )
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
@@ -37,12 +39,13 @@ def org_index() -> OrgAccessIndex:
     )
 
 
-def principal(*assignments: RoleAssignment, grants=None) -> UserPrincipal:
+def principal(*assignments: RoleAssignment, grants=None, disabled: bool = False) -> UserPrincipal:
     return UserPrincipal(
         user_id="user-1",
         email="user@example.com",
         role_assignments=list(assignments),
         direct_permissions=list(grants or []),
+        disabled=disabled,
     )
 
 
@@ -135,6 +138,29 @@ def test_connector_admin_can_manage_connectors_but_revenue_ops_can_only_run_jobs
     assert not can_manage_connectors(revenue_ops)
     assert can_run_connector_job(revenue_ops, "youtube")
     assert not can_run_connector_job(assistant, "youtube")
+
+
+def test_payments_view_granted_any_scope_sees_finance_month_assignment():
+    user = principal(
+        assigned(RoleKey.FINANCE_ADMIN, AccessScope.finance_month("2026-03")),
+    )
+    assert payments_view_granted_any_scope(user)
+    assert bank_reconciliation_view_granted_any_scope(user)
+
+
+def test_payments_view_granted_any_scope_fail_closed_for_non_finance_role():
+    user = principal(assigned(RoleKey.ASSISTANT_ANALYST, AccessScope.global_scope()))
+    assert not payments_view_granted_any_scope(user)
+    assert not bank_reconciliation_view_granted_any_scope(user)
+
+
+def test_payments_view_granted_any_scope_respects_disabled_user():
+    user = principal(
+        assigned(RoleKey.FINANCE_ADMIN, AccessScope.global_scope()),
+        disabled=True,
+    )
+    assert not payments_view_granted_any_scope(user)
+    assert not bank_reconciliation_view_granted_any_scope(user)
 
 
 def test_narrow_connector_scope_does_not_grant_global_connector_admin():

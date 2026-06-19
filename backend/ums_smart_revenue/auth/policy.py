@@ -155,6 +155,44 @@ def analytics_view_granted_any_scope(user: UserPrincipal) -> bool:
     return False
 
 
+def payments_view_granted_any_scope(user: UserPrincipal) -> bool:
+    """Return True if the user holds VIEW_FINALIZED_PAYMENTS at any scope."""
+    if user.disabled:
+        return False
+
+    for grant in user.direct_permissions:
+        if grant.active and grant.permission == Permission.VIEW_FINALIZED_PAYMENTS:
+            return True
+
+    for assignment in user.role_assignments:
+        if not assignment.active:
+            continue
+        role_permissions = ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        if Permission.VIEW_FINALIZED_PAYMENTS in role_permissions:
+            return True
+
+    return False
+
+
+def bank_reconciliation_view_granted_any_scope(user: UserPrincipal) -> bool:
+    """Return True if the user holds VIEW_BANK_RECONCILIATION at any scope."""
+    if user.disabled:
+        return False
+
+    for grant in user.direct_permissions:
+        if grant.active and grant.permission == Permission.VIEW_BANK_RECONCILIATION:
+            return True
+
+    for assignment in user.role_assignments:
+        if not assignment.active:
+            continue
+        role_permissions = ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        if Permission.VIEW_BANK_RECONCILIATION in role_permissions:
+            return True
+
+    return False
+
+
 def can_view_channel_analytics(
     user: UserPrincipal,
     channel_id: str,
