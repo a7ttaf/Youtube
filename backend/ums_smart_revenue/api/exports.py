@@ -1413,7 +1413,7 @@ def _record_analytics_export_artifact_audit(
         scope_channel_ids=export_job.scope_channel_ids,
         export_id=export_job.id,
     )
-    details = _export_artifact_audit_details(
+    details: dict[str, object] = _export_artifact_audit_details(
         export_job=export_job,
         artifact_type=artifact_type,
     )
