@@ -1083,10 +1083,7 @@ def test_export_operator_downloads_scoped_analytics_summary_csv(tmp_path, monkey
         },
     ]
     persisted_file = (
-        artifact_dir
-        / "exports"
-        / export_id
-        / "ums-analytics-summary-2026-03-company.csv"
+        artifact_dir / "exports" / export_id / "ums-analytics-summary-2026-03-company.csv"
     )
     assert persisted_file.read_bytes() == response.content
     assert export_job.status == "COMPLETED"
@@ -1111,9 +1108,7 @@ def test_export_operator_downloads_scoped_analytics_summary_csv(tmp_path, monkey
     assert downloaded_event.details["artifact_content_type"] == "text/csv"
 
 
-def test_analytics_summary_csv_download_requires_analytics_export_permission(
-    tmp_path, monkeypatch
-):
+def test_analytics_summary_csv_download_requires_analytics_export_permission(tmp_path, monkeypatch):
     """Users with only finance export permission cannot download analytics CSV artifacts."""
     artifact_dir = tmp_path / "export-artifacts"
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
