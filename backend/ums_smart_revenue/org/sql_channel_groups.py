@@ -242,6 +242,15 @@ class SqlAlchemyChannelGroupRegistry:
                     .where(
                         ChannelGroupMemberORM.tenant_id == self._tenant_id,
                         ChannelGroupMemberORM.group_id == row.id,
+                        # FIX (Gitar review #122 #asymmetry): Exclude inactive
+                        # member channels in the get_group fallback query so
+                        # list_groups and get_group agree on which channels
+                        # the group contains. Without this, the scope
+                        # selector would offer a group based on its active
+                        # members while the read path would authorize and
+                        # filter over the full (active + inactive) member
+                        # set, producing asymmetric net-revenue results.
+                        YouTubeChannelORM.active.is_(True),
                     )
                     .order_by(YouTubeChannelORM.youtube_channel_id)
                 ).all()

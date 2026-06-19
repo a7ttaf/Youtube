@@ -422,6 +422,34 @@ def test_sql_group_registry_excludes_inactive_member_channels(tmp_path):
     assert groups[str(GROUP_MIXED_ID)].channel_ids == ("group-channel-news",)
 
 
+def test_sql_group_registry_get_group_matches_list_groups_active_filter(tmp_path):
+    """get_group and list_groups must agree on which member channels are active.
+
+    Regression for Gitar review #122: the list_groups path filters
+    YouTubeChannelORM.active in _channel_ids_by_group, but the get_group
+    fallback in _to_entry previously did not, causing the scope selector and
+    the revenue read path to operate on different member sets for the same
+    group.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        channel = session.get(YouTubeChannelORM, CHANNEL_TV_ROW_ID)
+        channel.active = False
+        session.commit()
+
+    with Session(engine) as session:
+        registry = SqlAlchemyChannelGroupRegistry(session)
+        via_list = {g.id: g for g in registry.list_groups()}
+        via_get = registry.get_group(str(GROUP_TV_ID))
+
+    assert via_get is not None
+    assert via_get.channel_ids == via_list[str(GROUP_TV_ID)].channel_ids
+    assert via_get.channel_ids == ()
+
+
 def test_sql_group_add_members_treats_duplicate_race_as_idempotent(tmp_path, monkeypatch):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
