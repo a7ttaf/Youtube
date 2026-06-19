@@ -1413,7 +1413,7 @@ def _record_analytics_export_artifact_audit(
         scope_channel_ids=export_job.scope_channel_ids,
         export_id=export_job.id,
     )
-    details: dict[str, object] = _export_artifact_audit_details(
+    base_details: dict[str, object] = _export_artifact_audit_details(
         export_job=export_job,
         artifact_type=artifact_type,
     )
@@ -1426,7 +1426,7 @@ def _record_analytics_export_artifact_audit(
             entity_type="export_job",
             entity_id=export_job.id,
             scope=revenue_scope,
-            details=details,
+            details=dict(base_details),
         )
         for revenue_scope in revenue_scopes
     )
@@ -1438,7 +1438,7 @@ def _record_analytics_export_artifact_audit(
         entity_id=export_job.id,
         scope=export_scope,
         permission_override=Permission.EXPORT_ANALYTICS_REPORT,
-        details=details,
+        details=dict(base_details),
     )
     return (*revenue_records, download_record)
 
