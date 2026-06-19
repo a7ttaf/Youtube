@@ -703,17 +703,19 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
   dimension by gross|net|deduction with None-sink + stable id tie-break, top-N)
   + a CommandView rankings panel (own hook, money gated on `canViewFinance`,
   metric toggle, surfaces `allocation_source`).
-- ✅ Group/sector rollup scope selector — shipped (branch
-  `feat/group-sector-rollup`): new fail-closed `GET /revenue/scopes`
+- ✅ Group/sector/channel-GROUP rollup scope selector — shipped
+  (`feat/group-sector-rollup` plus PR #122): new fail-closed
+  `GET /revenue/scopes`
   (`finance.view_revenue`, read-only, no audit; pure
   `finance/revenue_scopes.py` `build_authorized_revenue_scopes`) returns ONLY
   the viewer's authorized rollup scopes (global / their sectors / their
-  companies), so the selector can never over-list the org structure or offer a
-  dead option that 403s on the rollup read. CommandView now populates its
-  `<select aria-label="Scope">` from that endpoint (keyed on a stable
-  `{scopeType, scopeId}` pair, global-only fallback on load/403) and threads the
-  chosen scope into the already-wired net-revenue + rankings reads. Channel
-  GROUP scope is a named follow-up (see acceptance gate below).
+  companies / their channel groups), so the selector can never over-list the org
+  structure or offer a dead option that 403s on the rollup read. CommandView now
+  populates its `<select aria-label="Scope">` from that endpoint (keyed on a
+  stable `{scopeType, scopeId}` pair, global-only fallback on load/403) and
+  threads the chosen scope into the already-wired net-revenue + rankings reads.
+  Channel-GROUP scope now resolves active member channels and enforces
+  per-channel authorization before serving the rollup.
 - ✅ Outside-CMS issue monitor — shipped (PR #98): CommandView monitor panel
   wired to `GET /channels/outside-cms` + `GET /channels/issues`
   (VIEW_ANALYTICS-gated, no-fetch-when-restricted; 403 -> denied copy, never
