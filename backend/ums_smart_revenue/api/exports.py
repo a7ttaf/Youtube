@@ -219,8 +219,15 @@ def request_export(
         if payload.export_type not in ALLOWED_EXPORT_TYPES:
             raise ExportJobValidationError(f"Unknown export_type: {payload.export_type}")
         required_export_permission = _audit_permission_for_export_type(payload.export_type)
-        if not _has_export_permission_assignment(user, required_export_permission):
+        if not _has_permission_assignment(user, required_export_permission):
             _raise_missing_permission(required_export_permission)
+        if payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE and not _has_permission_assignment(
+            user, Permission.VIEW_REVENUE
+        ):
+            # FIX: Deny callers with no revenue visibility before resolving
+            # group/company/channel scope membership, so revenue-less analytics
+            # operators cannot probe scope existence through non-403 errors.
+            _raise_missing_permission(Permission.VIEW_REVENUE)
         # Pre-check channel-scope authorization before resolving the channel
         # snapshot so an unauthorized caller cannot probe channel existence
         # via 404 responses. Snapshot resolution can still raise 404 below,
@@ -571,6 +578,7 @@ def download_analytics_summary_csv(
         audit_sink=audit_sink,
         user=user,
         export_job=artifact.export_job,
+        group_registry=group_registry,
         artifact_type="analytics_summary_csv",
     )
     return Response(
@@ -1364,8 +1372,10 @@ def _build_finance_source_summaries_for_export(
 
 # ============================================================================
 # Purpose: Emit sensitive REVENUE_VIEWED and EXPORT_DOWNLOADED audit records
-# for the exact persisted analytics CSV artifact returned to the caller.
-# Database/ORM: audit_logs insert through AuditSink.
+# for the exact persisted analytics CSV artifact returned to the caller, with
+# revenue views scoped to the exported channel set.
+# Database/ORM: audit_logs insert through AuditSink; ChannelGroupORM read only
+# for legacy group exports without a frozen channel snapshot.
 # Standards: Typed detail payload; artifact locator is redacted while checksum
 # and size metadata remain audit-visible.
 # Blast Radius: Audit trail for analytics CSV revenue reads and downloads.
@@ -1378,9 +1388,17 @@ def _record_analytics_export_artifact_audit(
     audit_sink: AuditSink,
     user: UserPrincipal,
     export_job: ExportJobEntry,
+    group_registry: ChannelGroupRegistryStore,
     artifact_type: str,
 ):
     """Emit analytics export revenue-view and download audit events."""
+    revenue_scopes = _audit_revenue_scopes_for_export(
+        scope_type=export_job.scope_type,
+        scope_id=export_job.scope_id,
+        group_registry=group_registry,
+        scope_channel_ids=export_job.scope_channel_ids,
+        export_id=export_job.id,
+    )
     details: dict[str, object] = dict(
         export_type=export_job.export_type,
         artifact_type=artifact_type,
@@ -1392,14 +1410,17 @@ def _record_analytics_export_artifact_audit(
         for field_name, field_value in _artifact_metadata_audit_details(export_job).items():
             details[field_name] = field_value
     export_scope = AccessScope.export(export_job.id)
-    revenue_record = record_audit_event(
-        sink=audit_sink,
-        actor=user,
-        event_type=AuditEventType.REVENUE_VIEWED,
-        entity_type="export_job",
-        entity_id=export_job.id,
-        scope=export_scope,
-        details=details.copy(),
+    revenue_records = tuple(
+        record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.REVENUE_VIEWED,
+            entity_type="export_job",
+            entity_id=export_job.id,
+            scope=revenue_scope,
+            details=details,
+        )
+        for revenue_scope in revenue_scopes
     )
     download_record = record_audit_event(
         sink=audit_sink,
@@ -1411,7 +1432,7 @@ def _record_analytics_export_artifact_audit(
         permission_override=Permission.EXPORT_ANALYTICS_REPORT,
         details=details,
     )
-    return revenue_record, download_record
+    return (*revenue_records, download_record)
 
 
 def _record_finance_export_artifact_audit(
@@ -1955,12 +1976,10 @@ def _has_any_export_permission(user: UserPrincipal) -> bool:
         Permission.EXPORT_ANALYTICS_REPORT,
         Permission.EXPORT_REVENUE_REPORT,
     }
-    return any(
-        _has_export_permission_assignment(user, permission) for permission in export_permissions
-    )
+    return any(_has_permission_assignment(user, permission) for permission in export_permissions)
 
 
-def _has_export_permission_assignment(
+def _has_permission_assignment(
     user: UserPrincipal,
     permission: Permission,
 ) -> bool:

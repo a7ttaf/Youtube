@@ -149,7 +149,10 @@ function canCreateAnyExport(permissions: AccessPermissions) { // skipcq: JS-0067
   return (
     permissions.canCreateGlobalExports ||
     permissions.canCreateScopedExports ||
-    permissions.canRequestRawExports
+    permissions.canRequestRawExports ||
+    // FIX: Analytics summary CSV creation is controlled by the analytics export
+    // capability, not by the legacy finance/global/scoped export flags.
+    permissions.canExportAnalyticsReports
   );
 }
 

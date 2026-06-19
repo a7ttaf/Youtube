@@ -343,10 +343,14 @@ const EMPTY_ADSENSE_PAYMENTS = {
   pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
   audit_event: {},
 };
+const EMPTY_EXPORTS = {
+  items: [],
+  pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
+};
 
-// Route fetch with a caller-supplied /session/me responder; connector + AdSense
-// list calls get empty real-shaped bodies, tenant gets a fixed UMS body, and the
-// net-revenue call gets the neutral body.
+// Route fetch with a caller-supplied /session/me responder; connector, AdSense,
+// and export list calls get empty real-shaped bodies, tenant gets a fixed UMS
+// body, and the net-revenue call gets the neutral body.
 function routeFetchWithSession(sessionResponder: () => Response) { // skipcq: JS-0067
   return (input: unknown) => {
     if (isSessionCall(input)) return Promise.resolve(sessionResponder());
@@ -361,6 +365,9 @@ function routeFetchWithSession(sessionResponder: () => Response) { // skipcq: JS
     }
     if (url.includes("/adsense/payments")) {
       return Promise.resolve(jsonResponse(EMPTY_ADSENSE_PAYMENTS));
+    }
+    if (url.includes("/exports")) {
+      return Promise.resolve(jsonResponse(EMPTY_EXPORTS));
     }
     return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
   };
@@ -414,6 +421,37 @@ describe("AppShell production session hydration", () => {
     // The dashboard renders (no access denied), but money is withheld.
     expect(await screen.findByText(/money withheld/i)).toBeInTheDocument();
     expect(screen.queryByText(/access denied/i)).not.toBeInTheDocument();
+  });
+
+  it("EXPORTS: analytics export plus revenue visibility enables analytics CSV creation", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() =>
+        jsonResponse(
+          sessionBody({
+            canExportAnalyticsReports: true,
+            canViewAnalytics: true,
+            canViewRevenue: true,
+          }),
+        ),
+      ),
+    );
+    renderShell();
+
+    fireEvent.click(await screen.findByText("Exports"));
+    expect(
+      await screen.findByRole("heading", { name: "Export Center", level: 1 }),
+    ).toBeInTheDocument();
+    const reportType = screen.getByLabelText("Report type") as HTMLSelectElement;
+    expect(reportType).not.toBeDisabled();
+    expect(Array.from(reportType.options).map((option) => option.textContent)).toEqual([
+      "Analytics summary (CSV)",
+    ]);
+    fireEvent.change(screen.getByLabelText("Reason"), {
+      target: { value: "Need it" },
+    });
+    expect(screen.getByRole("button", { name: /^generate$/i })).not.toBeDisabled();
   });
 
   it("FAIL CLOSED: a 401 /session/me hydration renders AccessDeniedState", async () => {

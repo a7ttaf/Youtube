@@ -540,6 +540,38 @@ def test_export_operator_cannot_request_analytics_summary_csv_without_revenue_vi
     assert audit_sink.records == []
 
 
+def test_analytics_csv_revenue_gate_runs_before_group_lookup(tmp_path):
+    """Revenue-less analytics export users get a 403 before group scope lookup."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    client = TestClient(app)
+
+    response = client.post(
+        "/exports",
+        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "group",
+            "scope_id": str(uuid4()),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Scoped analytics export",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+    assert export_count == 0
+    assert audit_sink.records == []
+
+
 def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
     """Test that a non-UUID gateway actor can create an export and list it successfully."""
     database_url = build_database_url(tmp_path)
@@ -775,7 +807,7 @@ def test_export_list_uses_snapshot_authorization_for_channel_grants(tmp_path):
 
 
 def test_company_manager_cannot_request_export_for_another_company(tmp_path):
-    """Ensure that a company manager cannot request exports for a different company."""
+    """Ensure cross-company analytics CSV requests fail before scope details leak."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -794,11 +826,11 @@ def test_company_manager_cannot_request_export_for_another_company(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Missing permission: exports.analytics"
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
 def test_group_export_requires_access_to_every_member_channel(tmp_path):
-    """Ensure that group exports are rejected if user lacks access to all member channels."""
+    """Ensure analytics CSV group requests fail before group membership details leak."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -817,7 +849,7 @@ def test_group_export_requires_access_to_every_member_channel(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Missing permission: exports.analytics"
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
 def test_export_request_rejects_non_usd_currency_until_exchange_rates_exist(tmp_path):
@@ -1164,8 +1196,8 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
     revenue_events = [event for event in audit_events if event.event_type == "REVENUE_VIEWED"]
     assert len(revenue_events) == 1
     revenue_event = revenue_events[0]
-    assert revenue_event.scope_type == "export"
-    assert revenue_event.scope_id == export_id
+    assert revenue_event.scope_type == "channel"
+    assert revenue_event.scope_id == "channel-a"
     assert revenue_event.sensitive is True
     assert revenue_event.details["export_type"] == "ANALYTICS_SUMMARY_CSV"
     assert revenue_event.details["artifact_type"] == "analytics_summary_csv"

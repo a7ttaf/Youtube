@@ -57,7 +57,7 @@ Planned slides:
 
 ### 4. Analytics summary CSV (`ANALYTICS_SUMMARY_CSV`)
 
-Implemented CSV output for non-financial analytics exports that export operators can request without finance visibility. The artifact is generated from normalized `google_revenue_source_rows` where `source_system='youtube_analytics'`, filtered by tenant, month, and the export's frozen channel scope.
+Implemented CSV output for revenue-bearing analytics summaries. Requests require `exports.analytics`, `analytics.view`, and `finance.view_revenue` for the requested scope. The artifact is generated from normalized `google_revenue_source_rows` where `source_system='youtube_analytics'`, filtered by tenant, month, export currency, and the export's frozen channel scope. Downloads emit channel-scoped `REVENUE_VIEWED` audit records plus an export-scoped `EXPORT_DOWNLOADED` record.
 
 ## Template system
 
@@ -118,7 +118,7 @@ updated_at
 ```
 
 Implementation note:
-The backend foundation supports finance export requests and downloads for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus non-financial `ANALYTICS_SUMMARY_CSV` requests and CSV downloads for export operators. Finance exports require both revenue export permission and revenue visibility for the requested scope. Analytics CSV exports require analytics export permission and analytics visibility for the requested scope. Group exports are checked against every member channel. Currency is currently restricted to USD until source-reported non-USD handling is implemented. Official exports must not use public FX rates as the source for revenue, payment, tax, deduction, or reconciliation values.
+The backend foundation supports finance export requests and downloads for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus revenue-bearing `ANALYTICS_SUMMARY_CSV` requests and CSV downloads. Finance exports require both revenue export permission and revenue visibility for the requested scope. Analytics CSV exports require analytics export permission, analytics visibility, and revenue visibility for the requested scope. Group exports are checked against every member channel. Currency is currently restricted to USD until source-reported non-USD handling is implemented. Official exports must not use public FX rates as the source for revenue, payment, tax, deduction, or reconciliation values.
 
 `GET /exports/{export_id}/finance-workbook-preview` is implemented for `FINANCE_EXCEL` only. It builds workbook-ready data from SQL source-of-truth rows: monthly revenue facts, approved/pending manual overrides, AdSense payment metadata, bank reconciliation receipt rows, finance month-close state, net-revenue summary, payment match summary, bank confirmation summary, and smart alerts. Month-wide AdSense payment and bank receipt rows are included only for global exports because phase 1 does not attribute cash receipts to sector, company, group, or channel scopes. It does not depend on a graph database.
 

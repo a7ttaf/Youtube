@@ -368,6 +368,28 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(link).toHaveAttribute("download");
   });
 
+  it("hides analytics CSV download links when revenue visibility is withheld", async () => {
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        items: [CSV_JOB],
+        pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
+      }),
+    );
+    renderExportsView(true, {
+      canExportFinance: false,
+      canExportAnalytics: true,
+      canViewRevenue: false,
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("ANALYTICS_SUMMARY_CSV")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("link", { name: /generate csv/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Not ready")).toBeInTheDocument();
+  });
+
   it("offers the analytics CSV create option when analytics export and revenue visibility are both granted", async () => {
     fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
     renderExportsView(true, { canExportFinance: false, canExportAnalytics: true });

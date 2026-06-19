@@ -122,6 +122,7 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
  */
 function downloadFor( // skipcq: JS-0067
   job: ExportJob,
+  canViewRevenue: boolean,
 ): { href: string; format: string } | null {
   const id = encodeURIComponent(job.id);
   switch (job.export_type) {
@@ -138,6 +139,11 @@ function downloadFor( // skipcq: JS-0067
         format: "PPTX",
       };
     case "ANALYTICS_SUMMARY_CSV":
+      if (!canViewRevenue) {
+        // FIX: Analytics CSV artifacts include revenue amounts, so the UI must
+        // not expose their direct GET route when finance.view_revenue is absent.
+        return null;
+      }
       return {
         href: resolveUrl(`/exports/${id}/analytics-summary.csv`),
         format: "CSV",
@@ -329,6 +335,7 @@ export default function ExportsView({ // skipcq: JS-0067, JS-R1005
             loading={loading}
             error={error}
             onRefresh={reload}
+            canViewRevenue={canViewRevenue}
           />
         </section>
 
@@ -601,11 +608,13 @@ function ExportJobsTable({ // skipcq: JS-0067
   loading,
   error,
   onRefresh,
+  canViewRevenue,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
   onRefresh: () => void;
+  canViewRevenue: boolean;
 }) {
   return (
     <>
@@ -624,7 +633,12 @@ function ExportJobsTable({ // skipcq: JS-0067
           ↻
         </button>
       </div>
-      <ExportJobsTableBody jobs={jobs} loading={loading} error={error} />
+      <ExportJobsTableBody
+        jobs={jobs}
+        loading={loading}
+        error={error}
+        canViewRevenue={canViewRevenue}
+      />
     </>
   );
 }
@@ -634,10 +648,12 @@ function ExportJobsTableBody({ // skipcq: JS-0067
   jobs,
   loading,
   error,
+  canViewRevenue,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
+  canViewRevenue: boolean;
 }) {
   if (error) {
     const { title, detail } = describeError(error);
@@ -677,7 +693,11 @@ function ExportJobsTableBody({ // skipcq: JS-0067
         <ExportJobsTableHead />
         <tbody>
           {jobs.map((job) => (
-            <ExportJobRow key={job.id} job={job} />
+            <ExportJobRow
+              key={job.id}
+              job={job}
+              canViewRevenue={canViewRevenue}
+            />
           ))}
         </tbody>
       </table>
@@ -703,7 +723,13 @@ function ExportJobsTableHead() { // skipcq: JS-0067
 }
 
 /** A single export-job table row, including its status badge and download cell. */
-function ExportJobRow({ job }: { job: ExportJob }) { // skipcq: JS-0067
+function ExportJobRow({ // skipcq: JS-0067
+  job,
+  canViewRevenue,
+}: {
+  job: ExportJob;
+  canViewRevenue: boolean;
+}) {
   return (
     <tr>
       <td>{job.export_type}</td>
@@ -715,7 +741,7 @@ function ExportJobRow({ job }: { job: ExportJob }) { // skipcq: JS-0067
       <td>{formatTimestamp(job.created_at)}</td>
       <td>{formatTimestamp(job.completed_at)}</td>
       <td>
-        <ExportDownloadCell job={job} />
+        <ExportDownloadCell job={job} canViewRevenue={canViewRevenue} />
       </td>
     </tr>
   );
@@ -726,8 +752,14 @@ function ExportJobRow({ job }: { job: ExportJob }) { // skipcq: JS-0067
  * COMPLETED) when the type has a route, otherwise a failure reason or
  * not-ready note.
  */
-function ExportDownloadCell({ job }: { job: ExportJob }) { // skipcq: JS-0067
-  const download = downloadFor(job);
+function ExportDownloadCell({ // skipcq: JS-0067
+  job,
+  canViewRevenue,
+}: {
+  job: ExportJob;
+  canViewRevenue: boolean;
+}) {
+  const download = downloadFor(job, canViewRevenue);
   if (isDownloadable(job) && download) {
     // Plain anchor: the href is resolved against the configured API origin
     // (resolveUrl). When no base is set it stays relative so the dev proxy
