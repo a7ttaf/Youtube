@@ -363,7 +363,7 @@ describe("RegistryView Phase 2: Map action (PATCH /channels/{id}/mapping)", () =
       reason: "March source evidence received",
     });
     // Success refetches the channel list (initial mount + post-mutation reload).
-    expect(channelCalls()).toHaveLength(2);
+    await waitFor(() => expect(channelCalls()).toHaveLength(2));
   });
 
   it("surfaces a 403 mapping failure inline and keeps the form for retry", async () => {
@@ -526,7 +526,7 @@ describe("RegistryView Phase 2: Assign action (propose account link)", () => {
       reason: "owner statement received",
     });
     expect(body.effective_month_start).toMatch(/^\d{4}-\d{2}$/);
-    expect(channelCalls()).toHaveLength(2);
+    await waitFor(() => expect(channelCalls()).toHaveLength(2));
   });
 
   it("surfaces a 422 proposal failure inline", async () => {
