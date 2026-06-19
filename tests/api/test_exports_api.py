@@ -12,7 +12,10 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import current_audit_sink
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
-from ums_smart_revenue.api.exports import _list_authorized_export_jobs
+from ums_smart_revenue.api.exports import (
+    _list_authorized_export_jobs,
+    current_export_artifact_store,
+)
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
@@ -30,6 +33,7 @@ from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 from ums_smart_revenue.db.source_models import CurrencyORM, GoogleRevenueSourceRowORM
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
+from ums_smart_revenue.reports.artifact_storage import FileSystemExportArtifactStore
 from ums_smart_revenue.reports.exports import ExportJobEntry, ExportJobPage
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
@@ -82,6 +86,14 @@ def seed_database(database_url: str) -> None:
                     code="USD",
                     numeric_code="840",
                     name="US Dollar",
+                    minor_unit=2,
+                    is_supported=True,
+                    activated_at=datetime(2026, 1, 1, tzinfo=UTC),
+                ),
+                CurrencyORM(
+                    code="EUR",
+                    numeric_code="978",
+                    name="Euro",
                     minor_unit=2,
                     is_supported=True,
                     activated_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -166,6 +178,42 @@ def _analytics_source_row(
         imported_by=None,
         ingested_at=ingested_at or datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
     )
+
+
+def _seed_analytics_csv_export_job(
+    database_url: str,
+    *,
+    export_id: UUID | None = None,
+    scope_type: str = "company",
+    scope_id: str | None = str(COMPANY_A_ID),
+    scope_channel_ids: tuple[str, ...] | None = ("channel-a",),
+    currency: str = "USD",
+    requested_by: UUID = USER_ID,
+) -> UUID:
+    """Persist one queued analytics CSV export job for download-gate tests."""
+    export_uuid = export_id or uuid4()
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ExportJobORM(
+                id=export_uuid,
+                export_type="ANALYTICS_SUMMARY_CSV",
+                scope_type=scope_type,
+                scope_id=scope_id,
+                scope_channel_ids=(
+                    list(scope_channel_ids) if scope_channel_ids is not None else None
+                ),
+                month="2026-03",
+                currency=currency,
+                requested_by=requested_by,
+                status="QUEUED",
+                month_lock_status="LOCKED",
+                include_confidence_notes=True,
+                include_manual_override_notes=True,
+            )
+        )
+        session.commit()
+    return export_uuid
 
 
 def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_path):
@@ -969,8 +1017,8 @@ def test_export_operator_can_get_own_export_job(tmp_path):
     }
 
 
-def test_export_operator_downloads_scoped_analytics_summary_csv(tmp_path, monkeypatch):
-    """Verify analytics CSV download persists a scoped, sanitized artifact."""
+def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypatch):
+    """Verify revenue-visible analytics CSV download persists a sanitized artifact."""
     artifact_dir = tmp_path / "export-artifacts"
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
@@ -978,7 +1026,7 @@ def test_export_operator_downloads_scoped_analytics_summary_csv(tmp_path, monkey
     client = TestClient(create_app(database_url=database_url))
     create_response = client.post(
         "/exports",
-        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
         json={
             "export_type": "ANALYTICS_SUMMARY_CSV",
             "scope_type": "company",
@@ -1011,21 +1059,27 @@ def test_export_operator_downloads_scoped_analytics_summary_csv(tmp_path, monkey
                     ingested_at=base_ingested_at + timedelta(minutes=2),
                 ),
                 _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("41.000000"),
+                    currency_code="EUR",
+                    ingested_at=base_ingested_at + timedelta(minutes=3),
+                ),
+                _analytics_source_row(
                     channel_id="channel-b",
                     amount=Decimal("99.000000"),
-                    ingested_at=base_ingested_at + timedelta(minutes=3),
+                    ingested_at=base_ingested_at + timedelta(minutes=4),
                 ),
                 _analytics_source_row(
                     channel_id="channel-a",
                     amount=Decimal("88.000000"),
                     month="2026-02",
-                    ingested_at=base_ingested_at + timedelta(minutes=4),
+                    ingested_at=base_ingested_at + timedelta(minutes=5),
                 ),
                 _analytics_source_row(
                     channel_id="channel-a",
                     amount=Decimal("77.000000"),
                     source_system="youtube_reporting",
-                    ingested_at=base_ingested_at + timedelta(minutes=5),
+                    ingested_at=base_ingested_at + timedelta(minutes=6),
                 ),
             ]
         )
@@ -1033,7 +1087,7 @@ def test_export_operator_downloads_scoped_analytics_summary_csv(tmp_path, monkey
 
     response = client.get(
         f"/exports/{export_id}/analytics-summary.csv",
-        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
     )
 
     with Session(engine) as session:
@@ -1096,9 +1150,9 @@ def test_export_operator_downloads_scoped_analytics_summary_csv(tmp_path, monkey
         "EXPORT_CREATED",
         "EXPORT_DOWNLOADED",
     }
-    downloaded_event = next(
-        event for event in audit_events if event.event_type == "EXPORT_DOWNLOADED"
-    )
+    downloaded_events = [event for event in audit_events if event.event_type == "EXPORT_DOWNLOADED"]
+    assert len(downloaded_events) == 1
+    downloaded_event = downloaded_events[0]
     assert downloaded_event.scope_type == "export"
     assert downloaded_event.scope_id == export_id
     assert downloaded_event.sensitive is True
@@ -1114,26 +1168,8 @@ def test_analytics_summary_csv_download_requires_analytics_export_permission(tmp
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    export_id = uuid4()
+    export_id = _seed_analytics_csv_export_job(database_url)
     engine = create_engine(database_url)
-    with Session(engine) as session:
-        session.add(
-            ExportJobORM(
-                id=export_id,
-                export_type="ANALYTICS_SUMMARY_CSV",
-                scope_type="company",
-                scope_id=str(COMPANY_A_ID),
-                scope_channel_ids=["channel-a"],
-                month="2026-03",
-                currency="USD",
-                requested_by=USER_ID,
-                status="QUEUED",
-                month_lock_status="LOCKED",
-                include_confidence_notes=True,
-                include_manual_override_notes=True,
-            )
-        )
-        session.commit()
 
     response = TestClient(create_app(database_url=database_url)).get(
         f"/exports/{export_id}/analytics-summary.csv",
@@ -1146,6 +1182,120 @@ def test_analytics_summary_csv_download_requires_analytics_export_permission(tmp
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: exports.analytics"
+    assert export_job.status == "QUEUED"
+    assert export_job.file_url is None
+    assert audit_count == 0
+
+
+def test_analytics_summary_csv_download_requires_authenticated_principal(tmp_path, monkeypatch):
+    """Unauthenticated callers cannot generate artifacts or write download audit."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = _seed_analytics_csv_export_job(database_url)
+    engine = create_engine(database_url)
+
+    response = TestClient(create_app(database_url=database_url)).get(
+        f"/exports/{export_id}/analytics-summary.csv"
+    )
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, export_id)
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing authentication headers"
+    assert export_job.status == "QUEUED"
+    assert export_job.file_url is None
+    assert audit_count == 0
+
+
+def test_analytics_summary_csv_download_requires_revenue_visibility(tmp_path, monkeypatch):
+    """Analytics export-only users cannot download CSVs containing revenue amounts."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = _seed_analytics_csv_export_job(database_url)
+    engine = create_engine(database_url)
+
+    response = TestClient(create_app(database_url=database_url)).get(
+        f"/exports/{export_id}/analytics-summary.csv",
+        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+    )
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, export_id)
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+    assert export_job.status == "QUEUED"
+    assert export_job.file_url is None
+    assert audit_count == 0
+
+
+def test_analytics_summary_csv_download_enforces_snapshot_scope(tmp_path, monkeypatch):
+    """A caller scoped to company A cannot download a company B export snapshot."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = _seed_analytics_csv_export_job(
+        database_url,
+        scope_id=str(COMPANY_B_ID),
+        scope_channel_ids=("channel-b",),
+    )
+    engine = create_engine(database_url)
+
+    response = TestClient(create_app(database_url=database_url)).get(
+        f"/exports/{export_id}/analytics-summary.csv",
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
+    )
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, export_id)
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.analytics"
+    assert export_job.status == "QUEUED"
+    assert export_job.file_url is None
+    assert audit_count == 0
+
+
+def test_analytics_summary_csv_storage_failure_is_retryable_without_audit(tmp_path):
+    """Artifact storage failures leave the export queued and do not emit download audit."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = _seed_analytics_csv_export_job(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            _analytics_source_row(
+                channel_id="channel-a",
+                amount=Decimal("12.500000"),
+            )
+        )
+        session.commit()
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_export_artifact_store] = lambda: FileSystemExportArtifactStore(
+        tmp_path / "tiny-artifacts",
+        max_artifact_size_bytes=1,
+    )
+
+    response = TestClient(app).get(
+        f"/exports/{export_id}/analytics-summary.csv",
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
+    )
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, export_id)
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Export artifact storage unavailable"
     assert export_job.status == "QUEUED"
     assert export_job.file_url is None
     assert audit_count == 0

@@ -1,3 +1,14 @@
+# ============================================================================
+# Purpose: Build deterministic analytics summary CSV artifacts from normalized
+# YouTube Analytics source rows without exposing raw payload/account metadata.
+# Database/ORM: google_revenue_source_rows and youtube_channels read-only queries.
+# Standards: Service-layer CSV generation, USD-only export contract, injection
+# guarded text cells, and typed validation errors.
+# Blast Radius: Analytics exports, revenue amount disclosure, artifact checksums.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/exports.py -> Download route/auth/audit.
+#   - File: backend/ums_smart_revenue/db/source_models.py -> Source-row schema.
+# ============================================================================
 from __future__ import annotations
 
 import csv
@@ -79,10 +90,16 @@ def build_analytics_summary_csv(
         raise AnalyticsSummaryCsvValidationError(
             "analytics summary CSV download only supports ANALYTICS_SUMMARY_CSV exports"
         )
+    export_currency = export_job.currency.upper()
+    if export_currency != "USD":
+        raise AnalyticsSummaryCsvValidationError(
+            "analytics summary CSV exports currently support USD only"
+        )
     rows = list_analytics_summary_csv_rows(
         session=session,
         tenant_id=tenant_id,
         month=export_job.month,
+        currency_code=export_currency,
         scope_channel_ids=scope_channel_ids,
     )
     return render_analytics_summary_csv(report_month=export_job.month, rows=rows)
@@ -93,6 +110,7 @@ def list_analytics_summary_csv_rows(
     session: Session,
     tenant_id: UUID,
     month: str,
+    currency_code: str,
     scope_channel_ids: set[str] | None,
 ) -> tuple[AnalyticsSummaryCsvRow, ...]:
     """Aggregate YouTube Analytics source rows for one tenant/month/scope."""
@@ -101,7 +119,6 @@ def list_analytics_summary_csv_rows(
 
     source_row = GoogleRevenueSourceRowORM
     channel = YouTubeChannelORM
-    amount_sum = sa.func.coalesce(sa.func.sum(source_row.amount_native), 0)
     stmt = (
         sa.select(
             source_row.youtube_channel_id,
@@ -112,7 +129,7 @@ def list_analytics_summary_csv_rows(
             sa.func.min(source_row.period_start),
             sa.func.max(source_row.period_end),
             sa.func.count(source_row.id),
-            amount_sum,
+            sa.func.coalesce(sa.func.sum(source_row.amount_native), 0),
         )
         .select_from(source_row)
         .join(
@@ -127,6 +144,7 @@ def list_analytics_summary_csv_rows(
             source_row.tenant_id == tenant_id,
             source_row.source_system == _SOURCE_SYSTEM,
             source_row.report_month == month,
+            source_row.currency_code == currency_code,
             source_row.youtube_channel_id.is_not(None),
         )
         .group_by(
@@ -188,18 +206,18 @@ def render_analytics_summary_csv(
         writer.writerow(
             {
                 "report_month": _csv_safe(report_month),
-                "source_system": _SOURCE_SYSTEM,
+                "source_system": _csv_safe(_SOURCE_SYSTEM),
                 "youtube_channel_id": _csv_safe(row.youtube_channel_id),
                 "channel_name": _csv_safe(row.channel_name),
                 "metric_key": _csv_safe(row.metric_key),
                 "value_kind": _csv_safe(row.value_kind),
-                "currency_code": row.currency_code,
-                "period_start": row.period_start.isoformat() if row.period_start else "",
-                "period_end": row.period_end.isoformat() if row.period_end else "",
+                "currency_code": _csv_safe(row.currency_code),
+                "period_start": _csv_safe(row.period_start.isoformat() if row.period_start else ""),
+                "period_end": _csv_safe(row.period_end.isoformat() if row.period_end else ""),
                 "source_row_count": str(row.source_row_count),
                 "amount_native": decimal_to_api(row.amount_native),
-                "formula": _FORMULA,
-                "confidence": _CONFIDENCE,
+                "formula": _csv_safe(_FORMULA),
+                "confidence": _csv_safe(_CONFIDENCE),
             }
         )
     return buffer.getvalue().encode("utf-8")
