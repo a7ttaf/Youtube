@@ -127,7 +127,7 @@ def test_gate_commands_cover_required_local_validation_contract(monkeypatch):
         ),
         GateCommand(
             label="Frontend tests (Vitest)",
-            command=(FAKE_BUN, "--cwd", "frontend", "run", "test"),
+            command=(FAKE_BUN, "run", "--cwd", "frontend", "test"),
         ),
         GateCommand(
             label="Git diff whitespace check",

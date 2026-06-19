@@ -77,7 +77,7 @@ def build_gate_commands(*, python: str = sys.executable) -> tuple[GateCommand, .
         *build_test_gate_commands(python=python),
         GateCommand(
             label="Frontend tests (Vitest)",
-            command=(_resolve_bun(), "--cwd", "frontend", "run", "test"),
+            command=(_resolve_bun(), "run", "--cwd", "frontend", "test"),
         ),
         GateCommand(
             label="Git diff whitespace check",
