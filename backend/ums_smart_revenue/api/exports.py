@@ -416,7 +416,7 @@ def get_export(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
-    details = {
+    details: dict[str, object] = {
         "export_type": export_job.export_type,
         "scope_type": export_job.scope_type,
         "scope_id": export_job.scope_id,
@@ -650,7 +650,7 @@ def download_finance_workbook(
             workbook_bytes = build_finance_workbook_xlsx(preview)
             filename = f"ums-finance-{export_job.month}-{export_job.scope_type}.xlsx"
             content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            export_job, storage_failure_response = _persist_generated_export_artifact(
+            persisted_export_job, storage_failure_response = _persist_generated_export_artifact(
                 repository=repository,
                 artifact_store=artifact_store,
                 export_job=export_job,
@@ -660,7 +660,7 @@ def download_finance_workbook(
             )
             if storage_failure_response is not None:
                 return storage_failure_response
-            export_job = _require_persisted_export_job(export_job)
+            export_job = _require_persisted_export_job(persisted_export_job)
             workbook_bytes, filename, content_type = _require_persisted_artifact_bytes(
                 export_job=export_job,
                 expected_export_type="FINANCE_EXCEL",
@@ -766,7 +766,7 @@ def download_executive_pdf(
             pdf_bytes = build_executive_pdf_bytes(report)
             filename = f"ums-executive-{export_job.month}-{export_job.scope_type}.pdf"
             content_type = "application/pdf"
-            export_job, storage_failure_response = _persist_generated_export_artifact(
+            persisted_export_job, storage_failure_response = _persist_generated_export_artifact(
                 repository=repository,
                 artifact_store=artifact_store,
                 export_job=export_job,
@@ -776,7 +776,7 @@ def download_executive_pdf(
             )
             if storage_failure_response is not None:
                 return storage_failure_response
-            export_job = _require_persisted_export_job(export_job)
+            export_job = _require_persisted_export_job(persisted_export_job)
             pdf_bytes, filename, content_type = _require_persisted_artifact_bytes(
                 export_job=export_job,
                 expected_export_type="EXECUTIVE_PDF",
@@ -884,7 +884,7 @@ def download_branded_slide_pack(
             content_type = (
                 "application/vnd.openxmlformats-officedocument.presentationml.presentation"
             )
-            export_job, storage_failure_response = _persist_generated_export_artifact(
+            persisted_export_job, storage_failure_response = _persist_generated_export_artifact(
                 repository=repository,
                 artifact_store=artifact_store,
                 export_job=export_job,
@@ -894,7 +894,7 @@ def download_branded_slide_pack(
             )
             if storage_failure_response is not None:
                 return storage_failure_response
-            export_job = _require_persisted_export_job(export_job)
+            export_job = _require_persisted_export_job(persisted_export_job)
             pptx_bytes, filename, content_type = _require_persisted_artifact_bytes(
                 export_job=export_job,
                 expected_export_type="BRANDED_SLIDE_PACK",
@@ -1342,6 +1342,8 @@ def _build_finance_source_summaries_for_export(
     # exports suppress this tenant-wide audit signal until source rows can be
     # tied to the export's frozen channel set.
     audit_scope = AccessScope.global_scope()
+    skipped_source_row_count: int
+    skipped_source_rows_by_reason: dict[str, int]
     if (
         include_audit_derived_alerts
         and channel_ids is None
@@ -1359,7 +1361,7 @@ def _build_finance_source_summaries_for_export(
         )
     else:
         skipped_source_row_count = 0
-        skipped_source_rows_by_reason: dict[str, int] = {}
+        skipped_source_rows_by_reason = {}
     smart_alerts = build_monthly_smart_alert_summary(
         month=export_job.month,
         payment_match=payment_match,
