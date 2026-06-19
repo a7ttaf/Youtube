@@ -33,9 +33,25 @@ commands:
     description: "Install uv, provision the locked Python 3.14 venv (cached)"
     steps:
       - run:
-          name: Install uv
+          name: Install uv (pinned, checksum-verified)
+          # Download the pinned uv GitHub release tarball and fail closed on a
+          # SHA-256 mismatch (mirrors the Bun install), instead of piping an
+          # unverified astral.sh installer to sh.
           command: |
-            curl -LsSf https://astral.sh/uv/install.sh | sh
+            set -e
+            # NOT 0.7.x: that uv resolves `uv python install 3.14` to a 3.14
+            # PRE-RELEASE (3.14.0b2), whose typing internals break pydantic
+            # collection. Use a uv recent enough to install stable 3.14.
+            UV_VERSION="0.11.22"
+            UV_ARCHIVE="uv-x86_64-unknown-linux-gnu.tar.gz"
+            UV_SHA256="30075b14624a62021198319f22e08f1651a97d4026a8c84dab6abcbfaba0d81c"
+            UV_URL="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ARCHIVE}"
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL -o "/tmp/${UV_ARCHIVE}" "$UV_URL"
+            echo "${UV_SHA256}  /tmp/${UV_ARCHIVE}" | sha256sum -c -
+            tar -xzf "/tmp/${UV_ARCHIVE}" -C /tmp
+            install -m 0755 "/tmp/uv-x86_64-unknown-linux-gnu/uv" "$HOME/.local/bin/uv"
+            install -m 0755 "/tmp/uv-x86_64-unknown-linux-gnu/uvx" "$HOME/.local/bin/uvx"
             echo 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' >> "$BASH_ENV"
       - restore_cache:
           keys:
@@ -211,14 +227,21 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Install shellcheck + shfmt
+          name: Install shellcheck + shfmt (pinned, checksum-verified)
+          # Download each release asset, verify its SHA-256, then extract — no
+          # piping an unverified download straight into tar (mirrors Bun/uv).
           command: |
+            set -e
             SHELLCHECK_VERSION=0.10.0
-            curl -sSfL "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
-              | tar -xJ -C /tmp
+            SHELLCHECK_SHA256="6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87"
+            curl -sSfL -o /tmp/shellcheck.tar.xz "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+            echo "${SHELLCHECK_SHA256}  /tmp/shellcheck.tar.xz" | sha256sum -c -
+            tar -xJf /tmp/shellcheck.tar.xz -C /tmp
             sudo mv "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
             SHFMT_VERSION=3.10.0
-            curl -sSfL "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64" -o /tmp/shfmt
+            SHFMT_SHA256="1f57a384d59542f8fac5f503da1f3ea44242f46dff969569e80b524d64b71dbc"
+            curl -sSfL -o /tmp/shfmt "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64"
+            echo "${SHFMT_SHA256}  /tmp/shfmt" | sha256sum -c -
             chmod +x /tmp/shfmt && sudo mv /tmp/shfmt /usr/local/bin/shfmt
             shellcheck --version | sed -n '1,3p'
             shfmt --version
@@ -247,9 +270,25 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Install uv
+          name: Install uv (pinned, checksum-verified)
+          # Download the pinned uv GitHub release tarball and fail closed on a
+          # SHA-256 mismatch (mirrors the Bun install), instead of piping an
+          # unverified astral.sh installer to sh.
           command: |
-            curl -LsSf https://astral.sh/uv/install.sh | sh
+            set -e
+            # NOT 0.7.x: that uv resolves `uv python install 3.14` to a 3.14
+            # PRE-RELEASE (3.14.0b2), whose typing internals break pydantic
+            # collection. Use a uv recent enough to install stable 3.14.
+            UV_VERSION="0.11.22"
+            UV_ARCHIVE="uv-x86_64-unknown-linux-gnu.tar.gz"
+            UV_SHA256="30075b14624a62021198319f22e08f1651a97d4026a8c84dab6abcbfaba0d81c"
+            UV_URL="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${UV_ARCHIVE}"
+            mkdir -p "$HOME/.local/bin"
+            curl -fsSL -o "/tmp/${UV_ARCHIVE}" "$UV_URL"
+            echo "${UV_SHA256}  /tmp/${UV_ARCHIVE}" | sha256sum -c -
+            tar -xzf "/tmp/${UV_ARCHIVE}" -C /tmp
+            install -m 0755 "/tmp/uv-x86_64-unknown-linux-gnu/uv" "$HOME/.local/bin/uv"
+            install -m 0755 "/tmp/uv-x86_64-unknown-linux-gnu/uvx" "$HOME/.local/bin/uvx"
             echo 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"' >> "$BASH_ENV"
       - run:
           name: sqlfluff lint (advisory, postgres dialect)
@@ -276,9 +315,12 @@ jobs:
       - run:
           name: gitleaks secret scan (blocking)
           command: |
+            set -e
             GITLEAKS_VERSION=8.21.2
-            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-              | tar -xz -C /tmp gitleaks
+            GITLEAKS_SHA256="5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba"
+            curl -sSfL -o /tmp/gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+            echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+            tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
             # Blocking: no --exit-code override, so gitleaks exits non-zero on any
             # leak and fails this lane. The current tree scans clean (verified
             # locally with the same 8.21.2 release). If a false positive lands,
