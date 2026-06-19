@@ -497,7 +497,6 @@ def preview_finance_workbook(
     return response
 
 
-@router.get("/{export_id}/analytics-summary.csv")
 # ============================================================================
 # Purpose: Download a persisted or freshly-generated ANALYTICS_SUMMARY_CSV
 # artifact for the requesting user after export-owner and scoped read checks.
@@ -511,6 +510,7 @@ def preview_finance_workbook(
 #   - File: backend/ums_smart_revenue/reports/analytics_summary_csv.py -> CSV builder.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> Route contract.
 # ============================================================================
+@router.get("/{export_id}/analytics-summary.csv")
 def download_analytics_summary_csv(
     export_id: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -1362,6 +1362,17 @@ def _build_finance_source_summaries_for_export(
     )
 
 
+# ============================================================================
+# Purpose: Emit sensitive REVENUE_VIEWED and EXPORT_DOWNLOADED audit records
+# for the exact persisted analytics CSV artifact returned to the caller.
+# Database/ORM: audit_logs insert through AuditSink.
+# Standards: Typed detail payload; artifact locator is redacted while checksum
+# and size metadata remain audit-visible.
+# Blast Radius: Audit trail for analytics CSV revenue reads and downloads.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> Audit persistence.
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Artifact metadata.
+# ============================================================================
 def _record_analytics_export_artifact_audit(
     *,
     audit_sink: AuditSink,
@@ -1370,17 +1381,6 @@ def _record_analytics_export_artifact_audit(
     artifact_type: str,
 ):
     """Emit analytics export revenue-view and download audit events."""
-    # ============================================================================
-    # Purpose: Emit sensitive REVENUE_VIEWED and EXPORT_DOWNLOADED audit records
-    # for the exact persisted analytics CSV artifact returned to the caller.
-    # Database/ORM: audit_logs insert through AuditSink.
-    # Standards: Typed detail payload; artifact locator is redacted while checksum
-    # and size metadata remain audit-visible.
-    # Blast Radius: Audit trail for analytics CSV revenue reads and downloads.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/auth/audit_service.py -> Audit persistence.
-    #   - File: backend/ums_smart_revenue/reports/exports.py -> Artifact metadata.
-    # ============================================================================
     details: dict[str, object] = dict(
         export_type=export_job.export_type,
         artifact_type=artifact_type,
@@ -1708,6 +1708,19 @@ def _require_export_scope_permissions(
     _require_permission(user, view_permission, target_scope, org_index)
 
 
+# ============================================================================
+# Purpose: Authorize analytics CSV artifact reads across the frozen export
+# channel set, including finance visibility because the CSV carries revenue
+# amounts from google_revenue_source_rows.
+# Database/ORM: ChannelGroupORM may be read for legacy group exports without
+# a frozen channel snapshot.
+# Standards: Fail-closed boundary check before source-row reads or artifact
+# writes; no audit side effects on denial.
+# Blast Radius: Authorization for analytics CSV downloads and finance amounts.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/permissions.py -> Permission catalog.
+#   - File: backend/ums_smart_revenue/reports/analytics_summary_csv.py -> Revenue rows.
+# ============================================================================
 def _require_analytics_export_artifact_permissions(
     *,
     user: UserPrincipal,
@@ -1717,20 +1730,7 @@ def _require_analytics_export_artifact_permissions(
     group_registry: ChannelGroupRegistryStore,
     scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
-    """Assert analytics export and analytics view permissions for the export scope."""
-    # ============================================================================
-    # Purpose: Authorize analytics CSV artifact reads across the frozen export
-    # channel set, including finance visibility because the CSV carries revenue
-    # amounts from google_revenue_source_rows.
-    # Database/ORM: ChannelGroupORM may be read for legacy group exports without
-    # a frozen channel snapshot.
-    # Standards: Fail-closed boundary check before source-row reads or artifact
-    # writes; no audit side effects on denial.
-    # Blast Radius: Authorization for analytics CSV downloads and finance amounts.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/auth/permissions.py -> Permission catalog.
-    #   - File: backend/ums_smart_revenue/reports/analytics_summary_csv.py -> Revenue rows.
-    # ============================================================================
+    """Assert analytics export, analytics view, and revenue view permissions."""
     _require_export_scope_permissions(
         user=user,
         export_permission=Permission.EXPORT_ANALYTICS_REPORT,
