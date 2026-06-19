@@ -105,6 +105,12 @@ def record_audit_event(
     request_id: str | None = None,
     permission_override: Permission | None = None,
 ) -> AuditRecord:
+    """Create and persist one normalized audit record for a domain event.
+
+    Persistence is delegated to the supplied audit sink. Details are copied
+    into an owned dictionary so callers may pass read-only or typed mappings
+    without exposing later source mutations to the persisted audit record.
+    """
     definition = AUDIT_EVENT_DEFINITIONS.get(event_type)
     normalized_reason = _normalize_audit_reason(
         event_type=event_type,
