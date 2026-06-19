@@ -82,7 +82,16 @@ def current_principal_from_headers(
     x_ums_trusted_gateway_token: Annotated[str | None, Header()] = None,
 ) -> UserPrincipal:
     """Build a bootstrap principal from trusted identity gateway headers."""
-    if not all([x_user_id, x_user_email, x_role, x_scope_type]):
+    normalized_user_id = x_user_id.strip() if x_user_id else ""
+    normalized_user_email = x_user_email.strip() if x_user_email else ""
+    normalized_role = x_role.strip() if x_role else ""
+    normalized_scope_type = x_scope_type.strip() if x_scope_type else ""
+    if (
+        not normalized_user_id
+        or not normalized_user_email
+        or not normalized_role
+        or not normalized_scope_type
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication headers",
@@ -90,22 +99,22 @@ def current_principal_from_headers(
     _require_trusted_gateway_token(x_ums_trusted_gateway_token)
 
     try:
-        role = RoleKey(x_role)
+        role = RoleKey(normalized_role)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unknown role: {x_role}",
+            detail=f"Unknown role: {normalized_role}",
         ) from exc
 
     return UserPrincipal(
-        user_id=x_user_id,
-        email=x_user_email,
-        role_assignments=[
+        user_id=normalized_user_id,
+        email=normalized_user_email,
+        role_assignments=(
             RoleAssignment(
                 role=role,
-                scope=scope_from_header(x_scope_type, x_scope_id),
-            )
-        ],
+                scope=scope_from_header(normalized_scope_type, x_scope_id),
+            ),
+        ),
         is_service_account=role == RoleKey.SYSTEM_INTEGRATION_USER,
     )
 
@@ -255,6 +264,8 @@ def _load_database_principal_with_retries(
                 raise
             session.rollback()
             logger.warning("Retrying database principal lookup after storage failure")
+
+    raise RuntimeError("database principal load did not return")
 
 
 def _is_retryable_principal_storage_error(exc: SQLAlchemyError) -> bool:

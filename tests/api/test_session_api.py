@@ -142,9 +142,28 @@ def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
     assert response.headers.get("Vary") and "Authorization" in response.headers["Vary"]
 
 
-# ---------------------------------------------------------------------------
-# Header mode — connector/ops role: canRunConnectorJobs TRUE
-# ---------------------------------------------------------------------------
+def test_session_me_header_mode_finance_month_scope_has_bank_capabilities(
+    client_headers_mode,
+):
+    """A finance_month-scoped finance_admin still gets payment/bank UI hints."""
+    response = client_headers_mode.get(
+        "/session/me",
+        headers=_header_principal(
+            role="finance_admin",
+            scope_type="finance-month",
+            scope_id="2026-03",
+        ),
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    caps = payload["capabilities"]
+    assert caps["canViewPayments"] is True
+    assert caps["canViewBankReconciliation"] is True
+    # Global-only capabilities stay false because the assignment is scoped.
+    assert caps["canViewRevenue"] is False
+    assert payload["roles"] == [
+        {"role": "finance_admin", "scope_type": "finance-month", "scope_id": "2026-03"}
+    ]
 
 
 def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(

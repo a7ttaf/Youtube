@@ -13,8 +13,10 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import (
     analytics_view_granted_any_scope,
+    bank_reconciliation_view_granted_any_scope,
     connector_health_connector_ids,
     has_permission,
+    payments_view_granted_any_scope,
 )
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -91,10 +93,12 @@ class SessionMe(BaseModel):
 def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
     """Derive UI capabilities from the principal's permission grants."""
     # ========================================================================
-    # Purpose: Evaluate each UI capability against the principal in-memory at
-    #          GLOBAL scope. A GLOBAL grant satisfies a global target; a
-    #          narrower (scoped-only) grant does not, so capabilities stay
-    #          conservative and are never hardcoded true.
+    # Purpose: Evaluate each UI capability against the principal in-memory.
+    #          Most are evaluated at GLOBAL scope; analytics, payments, and
+    #          bank-reconciliation are scope-aware (any scope grants the hint)
+    #          because scoped users legitimately need those panels. The
+    #          underlying routes still re-check the grant for the requested
+    #          scope, so capabilities remain conservative render hints.
     # Database/ORM: None — pure policy evaluation over the already-loaded
     #               principal; no SQL is issued here.
     # Standards: Single source of truth is the policy layer (has_permission);
@@ -124,8 +128,13 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         # scoped analytics user. The analytics routes still re-check the grant
         # per requested scope, so this stays a render hint, not the boundary.
         can_view_analytics=analytics_view_granted_any_scope(principal),
-        can_view_payments=_can(Permission.VIEW_FINALIZED_PAYMENTS),
-        can_view_bank_reconciliation=_can(Permission.VIEW_BANK_RECONCILIATION),
+        # Scope-aware (NOT the global-only _can): VIEW_FINALIZED_PAYMENTS and
+        # VIEW_BANK_RECONCILIATION are frequently granted only at finance_month
+        # scope. A global-only check would hide the bank-reconciliation panel from
+        # legitimately month-scoped finance users; the underlying routes still
+        # re-check the grant for the requested month, so this stays a render hint.
+        can_view_payments=payments_view_granted_any_scope(principal),
+        can_view_bank_reconciliation=bank_reconciliation_view_granted_any_scope(principal),
         can_close_month=_can(Permission.LOCK_FINANCE_MONTH),
         can_unlock_month=_can(Permission.UNLOCK_FINANCE_MONTH),
         can_change_allocation=_can(Permission.CHANGE_ALLOCATION_RULE),

@@ -209,6 +209,25 @@ def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
     assert response.json()["adsense_paid_amount_usd"] == "930"
     assert response.json()["bank_received_amount_usd"] == "928.5"
     assert response.json()["bank_gap_usd"] == "1.5"
+    money_provenance = response.json()["money_provenance"]
+    assert money_provenance["adsense_paid_amount_usd"] == {
+        "source": "adsense_payments",
+        "formula": (
+            "sum(payment_amount) for records in the month where "
+            "payment_currency = USD and payment_status = PAID"
+        ),
+        "confidence": "SOURCE_BACKED",
+        "export_value": "930",
+    }
+    assert money_provenance["bank_gap_usd"] == {
+        "source": "adsense_payments_and_bank_reconciliation_entries",
+        "formula": (
+            "adsense_paid_amount_usd - bank_received_amount_usd when both "
+            "paid AdSense and bank receipt sources exist"
+        ),
+        "confidence": "VARIANCE",
+        "export_value": "1.5",
+    }
     assert response.json()["entries"][0]["bank_reference"] == ("bank-transfer-2026-04-22")
     assert response.json()["audit_events"][0]["event_type"] == ("BANK_RECONCILIATION_VIEWED")
     assert response.json()["audit_events"][1]["event_type"] == "PAYMENT_VIEWED"

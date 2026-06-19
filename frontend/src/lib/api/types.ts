@@ -184,6 +184,83 @@ export type NetRevenueResponse = {
 };
 
 // ============================================================================
+// Purpose: TypeScript mirror of the backend finance-month bank reconciliation
+//   summary consumed by the Command Center payment cards. The backend remains
+//   the source of truth for AdSense paid amount, bank received amount, and the
+//   unresolved bank gap; the UI only formats the decimal strings.
+// Database/ORM: None (frontend) — mirrors backend reconciliation DTOs only.
+// Standards: Read-only typed boundary at the API surface; no client-side finance
+//   math. Money values stay STRINGS (decimal_to_api), and bank_gap_usd can be
+//   null until both payment and bank receipt sources exist.
+// Blast Radius: Finance display contract only. No mutation, export, lock, or
+//   browser-side calculation.
+// Connections:
+//   - File: backend/ums_smart_revenue/finance/bank_reconciliation.py
+//       BankReconciliationEntry.to_api()         -> BankReconciliationEntry
+//       MonthBankReconciliationSummary.to_api()  -> MonthBankReconciliationSummary
+//   - File: backend/ums_smart_revenue/finance/reconciliation.py
+//       ReconciliationIssue.to_api()             -> ReconciliationIssue
+//   - File: backend/ums_smart_revenue/api/revenue.py
+//       get_month_bank_reconciliation()          -> adds audit_events.
+// ============================================================================
+export type ReconciliationIssue = {
+  issue_type: string;
+  severity: string;
+  message: string;
+};
+
+export type BankReconciliationEntry = {
+  id: string;
+  month: string;
+  bank_reference: string;
+  bank_received_date: string; // ISO-8601 date
+  bank_received_amount: MoneyString;
+  bank_received_currency: string;
+  bank_received_amount_usd: MoneyString;
+  transfer_fee_usd: MoneyString;
+  fx_difference_usd: MoneyString;
+  notes: string | null;
+  source_report_id: string | null;
+  recorded_by: string;
+};
+
+export type MoneyProvenance = {
+  source: string;
+  formula: string;
+  confidence: string;
+  export_value: MoneyString | null;
+};
+
+export type BankReconciliationMoneyField =
+  | "adsense_paid_amount_usd"
+  | "bank_received_amount_usd"
+  | "bank_gap_usd"
+  | "transfer_fee_usd"
+  | "fx_difference_usd"
+  | "tolerance_usd";
+
+export type MonthBankReconciliationSummary = {
+  month: string;
+  currency: string;
+  status: string;
+  adsense_paid_amount_usd: MoneyString;
+  bank_received_amount_usd: MoneyString;
+  bank_gap_usd: MoneyString | null;
+  transfer_fee_usd: MoneyString;
+  fx_difference_usd: MoneyString;
+  payment_count: number;
+  paid_payment_count: number;
+  non_paid_payment_count: number;
+  unsupported_payment_currency_count: number;
+  entry_count: number;
+  tolerance_usd: MoneyString;
+  issues: ReconciliationIssue[];
+  entries: BankReconciliationEntry[];
+  audit_events: NetRevenueAuditEvent[];
+  money_provenance: Record<BankReconciliationMoneyField, MoneyProvenance>;
+};
+
+// ============================================================================
 // Purpose: TypeScript mirror of the backend finance month-close JSON contract
 //   consumed by the Month-Close screen. Fields are matched 1:1 against the
 //   backend serializers (not guessed); nullable fields serialize as null.

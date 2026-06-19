@@ -194,7 +194,7 @@ describe("AppShell tenant proof tag", () => {
     await screen.findByTestId("tenant-proof");
     // The wired CommandView fires its own net-revenue call; the re-entry guard
     // is specifically about the single /tenants/me bootstrap call.
-    expect(tenantFetchCalls()).toHaveLength(1);
+    await waitFor(() => expect(tenantFetchCalls()).toHaveLength(1));
   });
 
   it("clears stale tenantError on successful retry after an earlier failure (outside-diff CodeRabbit regression)", async () => {

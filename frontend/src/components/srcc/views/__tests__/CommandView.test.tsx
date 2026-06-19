@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import CommandView from "@/components/srcc/views/CommandView";
 import type {
+  MonthBankReconciliationSummary,
   MonthRankingsResponse,
   NetRevenueResponse,
   RevenueScopeOption,
@@ -62,8 +63,8 @@ const NET_REVENUE_BODY: NetRevenueResponse = {
   audit_events: [],
 };
 
-// CommandView now fires a SECOND request for the smart-alerts panel. Default it
-// to a CLEAR (no-alert) summary so it never interferes with the net-revenue
+// CommandView fires an independent request for the smart-alerts panel. Default
+// it to a CLEAR (no-alert) summary so it never interferes with the net-revenue
 // assertions below; the panel's own behaviour is covered in SmartAlertsPanel.test.
 const SMART_ALERTS_CLEAR: SmartAlertsSummary = {
   month: "2026-03",
@@ -74,12 +75,91 @@ const SMART_ALERTS_CLEAR: SmartAlertsSummary = {
   audit_events: [],
 };
 
-// CommandView also mounts a finance-gated rankings panel (canViewFinance=true in
-// these tests), so it fires a THIRD request to /rankings. Default it to an empty
-// rankings body with NO allocation_source so it never collides with the
-// net-revenue assertions below; the rankings panel's own behaviour is covered in
-// RankingsPanel.test. (The analytics monitor stays unmounted — canViewAnalytics
-// defaults to false here — so no /channels/* monitor request fires.)
+const BANK_RECONCILIATION_SUMMARY: MonthBankReconciliationSummary = {
+  month: "2026-03",
+  currency: "USD",
+  status: "BANK_VARIANCE",
+  adsense_paid_amount_usd: "930",
+  bank_received_amount_usd: "928.5",
+  bank_gap_usd: "1.5",
+  transfer_fee_usd: "0.5",
+  fx_difference_usd: "0",
+  payment_count: 1,
+  paid_payment_count: 1,
+  non_paid_payment_count: 0,
+  unsupported_payment_currency_count: 0,
+  entry_count: 1,
+  tolerance_usd: "0.01",
+  issues: [
+    {
+      issue_type: "BANK_VARIANCE",
+      severity: "HIGH",
+      message: "Bank received amount differs from AdSense payment.",
+    },
+  ],
+  entries: [
+    {
+      id: "bank-1",
+      month: "2026-03",
+      bank_reference: "bank-transfer-2026-04-22",
+      bank_received_date: "2026-04-22",
+      bank_received_amount: "928.5",
+      bank_received_currency: "USD",
+      bank_received_amount_usd: "928.5",
+      transfer_fee_usd: "0.5",
+      fx_difference_usd: "0",
+      notes: null,
+      source_report_id: "bank-report-1",
+      recorded_by: "finance-user",
+    },
+  ],
+  audit_events: [],
+  money_provenance: {
+    adsense_paid_amount_usd: {
+      source: "adsense_payments",
+      formula: "sum paid USD payments",
+      confidence: "SOURCE_BACKED",
+      export_value: "930",
+    },
+    bank_received_amount_usd: {
+      source: "bank_reconciliation_entries",
+      formula: "sum bank received USD",
+      confidence: "SOURCE_BACKED",
+      export_value: "928.5",
+    },
+    bank_gap_usd: {
+      source: "adsense_payments_and_bank_reconciliation_entries",
+      formula: "adsense paid USD minus bank received USD",
+      confidence: "VARIANCE",
+      export_value: "1.5",
+    },
+    transfer_fee_usd: {
+      source: "bank_reconciliation_entries",
+      formula: "sum transfer fees",
+      confidence: "SOURCE_BACKED",
+      export_value: "0.5",
+    },
+    fx_difference_usd: {
+      source: "bank_reconciliation_entries",
+      formula: "sum FX differences",
+      confidence: "SOURCE_BACKED",
+      export_value: "0",
+    },
+    tolerance_usd: {
+      source: "bank_reconciliation_policy",
+      formula: "configured tolerance",
+      confidence: "POLICY",
+      export_value: "0.01",
+    },
+  },
+};
+
+// CommandView also mounts payment/bank-gated bank-reconciliation and
+// finance-gated rankings panels. Default the bank summary to a backend
+// shaped payment/bank body and rankings to empty rows so neither panel collides
+// with the net-revenue assertions below. (The analytics monitor stays unmounted
+// — canViewAnalytics defaults to false here — so no /channels/* monitor request
+// fires.)
 const RANKINGS_EMPTY: MonthRankingsResponse = {
   month: "2026-03",
   metric: "gross",
@@ -103,8 +183,8 @@ const jsonResponse = (body: unknown, status = 200) =>
   });
 
 // Route each fetch by URL and return a FRESH Response per call (a Response body
-// can only be read once, so the net-revenue + smart-alerts requests cannot share
-// one). net-revenue is driven by the test; smart-alerts + rankings + scopes
+// can only be read once, so the mounted panels cannot share one). net-revenue is
+// driven by the test; smart-alerts + bank reconciliation + rankings + scopes
 // default to a quiet body so this suite isolates net-revenue behaviour. The
 // scope selector defaults to global-only so the existing assertions are unchanged.
 // Dispatch is a URL-substring -> responder table (data-driven) rather than a
@@ -114,6 +194,7 @@ const routeFetch = (
   netRevenue: () => Response,
   smartAlerts?: () => Response,
   scopes?: () => Response,
+  bankReconciliation?: () => Response,
 ) => {
   const routes: ReadonlyArray<{ match: string; respond: () => Response }> = [
     {
@@ -123,6 +204,10 @@ const routeFetch = (
     {
       match: "/smart-alerts",
       respond: smartAlerts ?? (() => jsonResponse(SMART_ALERTS_CLEAR)),
+    },
+    {
+      match: "/bank-reconciliation",
+      respond: bankReconciliation ?? (() => jsonResponse(BANK_RECONCILIATION_SUMMARY)),
     },
     { match: "/rankings", respond: () => jsonResponse(RANKINGS_EMPTY) },
   ];
@@ -136,10 +221,20 @@ const routeFetch = (
   return fetchMock;
 };
 
-const renderCommandView = (canViewFinance: boolean) => {
+const renderCommandView = (
+  canViewFinance: boolean,
+  options: {
+    canViewPayments?: boolean;
+    canViewBankReconciliation?: boolean;
+  } = {},
+) => {
   return render(
     <TenantProvider initialSlug="ums">
-      <CommandView canViewFinance={canViewFinance} />
+      <CommandView
+        canViewFinance={canViewFinance}
+        canViewPayments={options.canViewPayments ?? canViewFinance}
+        canViewBankReconciliation={options.canViewBankReconciliation ?? canViewFinance}
+      />
     </TenantProvider>,
   );
 };
@@ -162,8 +257,40 @@ describe("CommandView wired to net-revenue", () => {
     expect(screen.getByText("Live compute")).toBeInTheDocument();
   });
 
-  it("withholds money cells as Restricted when finance is not visible", async () => {
+  it("renders payment reconciliation cards from the backend month summary", async () => {
     routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(true);
+
+    await screen.findByText("$930.00");
+    const reconciliation = screen.getByRole("region", {
+      name: "Payment reconciliation summary",
+    });
+    expect(within(reconciliation).getByText("AdSense payment")).toBeInTheDocument();
+    expect(within(reconciliation).getByText("Bank received")).toBeInTheDocument();
+    expect(within(reconciliation).getByText("Unresolved gap")).toBeInTheDocument();
+    expect(within(reconciliation).getByText("$930.00")).toBeInTheDocument();
+    expect(within(reconciliation).getByText("$928.50")).toBeInTheDocument();
+    expect(within(reconciliation).getByText("$1.50")).toBeInTheDocument();
+    expect(within(reconciliation).getByText("1 paid USD payment")).toBeInTheDocument();
+    expect(within(reconciliation).getByText("Variance")).toBeInTheDocument();
+  });
+
+  it("uses payment and bank grants instead of revenue visibility for reconciliation", async () => {
+    const fetchMock = routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(false, {
+      canViewPayments: true,
+      canViewBankReconciliation: true,
+    });
+
+    await screen.findByText("$930.00");
+    expect(screen.queryByText("$1,000.00")).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some((call) => String(call[0]).includes("/bank-reconciliation")),
+    ).toBe(true);
+  });
+
+  it("withholds money cells as Restricted when finance is not visible", async () => {
+    const fetchMock = routeFetch(() => jsonResponse(NET_REVENUE_BODY));
     renderCommandView(false);
 
     await waitFor(() =>
@@ -172,6 +299,71 @@ describe("CommandView wired to net-revenue", () => {
     // No formatted money should leak.
     expect(screen.queryByText("$1,000.00")).not.toBeInTheDocument();
     expect(screen.getAllByText("Restricted").length).toBeGreaterThan(0);
+    expect(
+      fetchMock.mock.calls.some((call) => String(call[0]).includes("/bank-reconciliation")),
+    ).toBe(false);
+  });
+
+  it("does not request bank reconciliation when payment or bank grants are missing", async () => {
+    const fetchMock = routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(true, {
+      canViewPayments: false,
+      canViewBankReconciliation: true,
+    });
+
+    await waitFor(() =>
+      expect(screen.getAllByText("$1,000.00").length).toBeGreaterThan(0),
+    );
+    expect(
+      fetchMock.mock.calls.some((call) => String(call[0]).includes("/bank-reconciliation")),
+    ).toBe(false);
+    expect(screen.getAllByText("Payment and bank permissions required").length).toBeGreaterThan(0);
+  });
+
+  it("keeps net revenue visible when bank reconciliation 403s", async () => {
+    routeFetch(
+      () => jsonResponse(NET_REVENUE_BODY),
+      undefined,
+      undefined,
+      () =>
+        jsonResponse(
+          { detail: "Missing permission: finance.view_bank_reconciliation" },
+          403,
+        ),
+    );
+    renderCommandView(true);
+
+    await waitFor(() =>
+      expect(screen.getAllByText("$1,000.00").length).toBeGreaterThan(0),
+    );
+    const reconciliation = screen.getByRole("alert", {
+      name: "Payment reconciliation summary",
+    });
+    expect(
+      within(reconciliation).getByText("Payment reconciliation unavailable"),
+    ).toBeInTheDocument();
+    expect(within(reconciliation).getByText("No permission")).toBeInTheDocument();
+  });
+
+  it("hides non-permission bank reconciliation API error details", async () => {
+    routeFetch(
+      () => jsonResponse(NET_REVENUE_BODY),
+      undefined,
+      undefined,
+      () => jsonResponse({ detail: "internal SQL diagnostic" }, 500),
+    );
+    renderCommandView(true);
+
+    const reconciliation = await screen.findByRole("alert", {
+      name: "Payment reconciliation summary",
+    });
+    expect(within(reconciliation).getByText("Request failed (500)")).toBeInTheDocument();
+    expect(
+      within(reconciliation).getByText(
+        "Could not load payment and bank reconciliation for this month.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("internal SQL diagnostic")).not.toBeInTheDocument();
   });
 
   it("renders the human confidence label with the raw code in title/aria", async () => {
@@ -213,6 +405,9 @@ describe("CommandView wired to net-revenue", () => {
         const url = String(input);
         if (url.includes("/smart-alerts")) {
           return Promise.resolve(jsonResponse(SMART_ALERTS_CLEAR));
+        }
+        if (url.includes("/bank-reconciliation")) {
+          return Promise.resolve(jsonResponse(BANK_RECONCILIATION_SUMMARY));
         }
         // Resolve scopes + rankings immediately so scopesReady flips and the
         // gated net-revenue read can fire — the load-under-test is net-revenue's.
@@ -344,8 +539,12 @@ describe("CommandView dynamic scope selector", () => {
             resolveScopes = resolve;
           });
         }
+        if (url.includes("/bank-reconciliation")) {
+          return Promise.resolve(jsonResponse(BANK_RECONCILIATION_SUMMARY));
+        }
         // Any other read (net-revenue / rankings / smart-alerts) is recorded if
-        // it fires; it should NOT fire until the scopes promise resolves.
+        // it fires; net-revenue and rankings should NOT fire until the scopes
+        // promise resolves.
         return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
       },
     );

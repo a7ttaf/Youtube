@@ -36,6 +36,8 @@ const ROLE_LABELS: Record<Role, string> = {
 type AccessPermissions = {
   role: Role;
   canViewFinance: boolean;
+  canViewPayments: boolean;
+  canViewBankReconciliation: boolean;
   canManageRegistry: boolean;
   canManageConnectors: boolean;
   canCloseMonth: boolean;
@@ -110,6 +112,8 @@ function capabilitiesToPermissions( // skipcq: JS-0067
   return {
     role,
     canViewFinance: capabilities.canViewRevenue,
+    canViewPayments: capabilities.canViewPayments,
+    canViewBankReconciliation: capabilities.canViewBankReconciliation,
     canManageRegistry: capabilities.canManageRegistry,
     canManageConnectors: capabilities.canManageConnectors,
     canCloseMonth: capabilities.canCloseMonth,
@@ -688,6 +692,8 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
         <CommandView
           canViewFinance={canViewFinance}
           canViewAnalytics={permissions.canViewAnalytics}
+          canViewPayments={permissions.canViewPayments}
+          canViewBankReconciliation={permissions.canViewBankReconciliation}
         />
       )}
       {view === "registry" && (
