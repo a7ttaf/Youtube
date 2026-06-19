@@ -141,11 +141,25 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Install Bun 1.3.14 (pinned)
-          # Same curl|bash pattern as the uv installer above; the VERSION is
-          # pinned so the frontend toolchain cannot drift between runs.
+          name: Install Bun 1.3.14 from GitHub release (pinned + checksum verified)
+          # Hardened: download the release zip directly from GitHub and verify its
+          # SHA-256 checksum, instead of piping an install script from bun.sh.
+          # The checksum is pinned alongside the version so the frontend toolchain
+          # cannot drift between runs and a compromised install script cannot execute
+          # arbitrary code in CI. Asset: oven-sh/bun releases, bun-v1.3.14.
           command: |
-            curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
+            BUN_VERSION="1.3.14"
+            BUN_ASSET="bun-linux-x64.zip"
+            BUN_SHA256="951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
+            BUN_BASE="https://github.com/oven-sh/bun/releases/download"
+            BUN_URL="${BUN_BASE}/bun-v${BUN_VERSION}/${BUN_ASSET}"
+            mkdir -p /tmp/bun-install
+            curl -fsSL "${BUN_URL}" -o "/tmp/bun-install/${BUN_ASSET}"
+            echo "${BUN_SHA256}  /tmp/bun-install/${BUN_ASSET}" | sha256sum -c -
+            unzip -o -q "/tmp/bun-install/${BUN_ASSET}" -d /tmp/bun-install/extract
+            mkdir -p "$HOME/.bun/bin"
+            mv "/tmp/bun-install/extract/bun-linux-x64/bun" "$HOME/.bun/bin/bun"
+            chmod +x "$HOME/.bun/bin/bun"
             echo 'export BUN_INSTALL="$HOME/.bun"' >> "$BASH_ENV"
             echo 'export PATH="$HOME/.bun/bin:$PATH"' >> "$BASH_ENV"
       - run:

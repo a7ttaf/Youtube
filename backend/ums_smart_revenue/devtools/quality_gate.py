@@ -38,12 +38,12 @@ class GateCommand:
     command: tuple[str, ...]
 
 
-def _resolve_npm() -> str:
-    """Resolve an npm executable. On Windows, npm is npm.cmd."""
-    npm = shutil.which("npm") or shutil.which("npm.cmd")
-    if npm is None:
-        raise RuntimeError("npm not found on PATH; install Node.js to run frontend tests.")
-    return npm
+def _resolve_bun() -> str:
+    """Resolve a Bun executable. On Windows, Bun is bun.exe."""
+    bun = shutil.which("bun") or shutil.which("bun.exe")
+    if bun is None:
+        raise RuntimeError("Bun not found on PATH; install Bun to run frontend tests.")
+    return bun
 
 
 # ============================================================================
@@ -77,7 +77,7 @@ def build_gate_commands(*, python: str = sys.executable) -> tuple[GateCommand, .
         *build_test_gate_commands(python=python),
         GateCommand(
             label="Frontend tests (Vitest)",
-            command=(_resolve_npm(), "--prefix", "frontend", "run", "test"),
+            command=(_resolve_bun(), "--cwd", "frontend", "run", "test"),
         ),
         GateCommand(
             label="Git diff whitespace check",
