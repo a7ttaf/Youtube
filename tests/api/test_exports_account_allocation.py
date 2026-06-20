@@ -684,7 +684,9 @@ def test_finance_export_failed_connector_self_audit_is_not_reason_redacted():
         audit_summary=_smart_alert_summary("CONNECTOR_RUNS_FAILED"),
     )
 
-    audit_record = next(record for record in records if record.event_type == "AUDIT_LOG_VIEWED")
+    audit_records = [record for record in records if record.event_type == "AUDIT_LOG_VIEWED"]
+    assert len(audit_records) == 1
+    audit_record = audit_records[0]
     assert audit_record.details["connector_alert_codes"] == ["CONNECTOR_RUNS_FAILED"]
     assert audit_record.details["source_rows_skipped_returned"] == 0
     assert audit_record.details["connector_runs_failed_returned"] == 1
@@ -704,7 +706,9 @@ def test_finance_export_skipped_source_self_audit_is_reason_redacted_without_sen
         audit_summary=_smart_alert_summary("SOURCE_ROWS_SKIPPED"),
     )
 
-    audit_record = next(record for record in records if record.event_type == "AUDIT_LOG_VIEWED")
+    audit_records = [record for record in records if record.event_type == "AUDIT_LOG_VIEWED"]
+    assert len(audit_records) == 1
+    audit_record = audit_records[0]
     assert audit_record.details["connector_alert_codes"] == ["SOURCE_ROWS_SKIPPED"]
     assert audit_record.details["source_rows_skipped_returned"] == 1
     assert audit_record.details["connector_runs_failed_returned"] == 0
