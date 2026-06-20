@@ -396,11 +396,7 @@ def test_global_export_preview_includes_failed_connector_run_alert_for_audit_use
         )
 
     failed = next(
-        (
-            alert
-            for alert in summaries.smart_alerts.alerts
-            if alert.code == "CONNECTOR_RUNS_FAILED"
-        ),
+        (alert for alert in summaries.smart_alerts.alerts if alert.code == "CONNECTOR_RUNS_FAILED"),
         None,
     )
     assert failed is not None

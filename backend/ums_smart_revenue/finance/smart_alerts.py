@@ -342,10 +342,7 @@ def _connector_runs_failed_alert(
     return MonthlySmartAlert(
         code="CONNECTOR_RUNS_FAILED",
         severity="HIGH",
-        message=(
-            f"{effective_count} connector run(s) failed or partially failed "
-            f"for {month}."
-        ),
+        message=(f"{effective_count} connector run(s) failed or partially failed for {month}."),
         source="connector_job_run",
         confidence="E_MISSING",
         details={

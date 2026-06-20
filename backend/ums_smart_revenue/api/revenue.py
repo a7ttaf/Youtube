@@ -1306,9 +1306,7 @@ def get_month_smart_alerts(
     audit_records = [revenue_record, payment_record, bank_record]
     if has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
         details_redacted = skipped_source_row_count > 0 and not include_sensitive_details
-        connector_signal_returned = (
-            skipped_source_row_count > 0 or failed_connector_run_count > 0
-        )
+        connector_signal_returned = skipped_source_row_count > 0 or failed_connector_run_count > 0
         audit_records.append(
             record_audit_event(
                 sink=audit_sink,
@@ -1323,9 +1321,7 @@ def get_month_smart_alerts(
                     "entity_id": month,
                     "returned": 1 if connector_signal_returned else 0,
                     "source_rows_skipped_returned": 1 if skipped_source_row_count > 0 else 0,
-                    "connector_runs_failed_returned": (
-                        1 if failed_connector_run_count > 0 else 0
-                    ),
+                    "connector_runs_failed_returned": (1 if failed_connector_run_count > 0 else 0),
                     "details_redacted": details_redacted,
                 },
             )
@@ -2764,9 +2760,7 @@ def failed_connector_run_count_and_statuses(
             continue
         if details.get("report_month") != month:
             continue
-        connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(
-            scope_id
-        )
+        connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(scope_id)
         account_id = _non_blank_text(details.get("account_id"))
         if connector_key is None or account_id is None:
             continue

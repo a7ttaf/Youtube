@@ -594,11 +594,7 @@ def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
     codes = [alert["code"] for alert in response.json()["alerts"]]
     assert codes.index("CONNECTOR_RUNS_FAILED") < codes.index("PAYMENT_NOT_MATCHED")
     failed = next(
-        (
-            alert
-            for alert in response.json()["alerts"]
-            if alert["code"] == "CONNECTOR_RUNS_FAILED"
-        ),
+        (alert for alert in response.json()["alerts"] if alert["code"] == "CONNECTOR_RUNS_FAILED"),
         None,
     )
     assert failed is not None

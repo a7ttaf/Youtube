@@ -1938,7 +1938,8 @@ def _prepare_and_link_raw_reports(
     raw_files: list[RawReportFileORM] = []
     seen_raw_file_ids: set[UUID] = set()
     newly_downloaded_raw_file_ids: set[UUID] = set()
-    report_state["raw_file_ids"] = []
+    raw_file_ids: list[UUID] = []
+    report_state["raw_file_ids"] = raw_file_ids
 
     for raw_report in raw_reports:
         raw_file, newly_downloaded = _prepare_raw_report_file(
@@ -1960,7 +1961,7 @@ def _prepare_and_link_raw_reports(
         if newly_downloaded:
             newly_downloaded_raw_file_ids.add(raw_file.id)
         raw_files.append(raw_file)
-        report_state["raw_file_ids"].append(raw_file.id)
+        raw_file_ids.append(raw_file.id)
         report_state.setdefault("raw_file_id", raw_file.id)
 
     if not raw_files:
