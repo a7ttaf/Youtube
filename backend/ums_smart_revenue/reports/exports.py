@@ -571,13 +571,24 @@ class SqlAlchemyExportJobRepository:
         if template_id is None:
             return None
         template_uuid = _parse_uuid(template_id, field_name="template_id")
-        row = self._session.scalars(
-            select(ExportTemplateORM).where(
+        # FIX: Lock the template row while validating the active/matching
+        # selection. deactivate_template() rewrites is_active under FOR UPDATE;
+        # an unlocked read here could observe is_active=true before a concurrent
+        # deactivation commits, then insert an export job pointing at a template
+        # that is inactive by the time this request commits. Taking the matching
+        # row lock serializes the validate-then-insert against template
+        # retirement. (SQLite's SELECT FOR UPDATE is a no-op, preserving the
+        # test-only single-writer behavior.)
+        statement = (
+            select(ExportTemplateORM)
+            .where(
                 ExportTemplateORM.id == template_uuid,
                 ExportTemplateORM.tenant_id == self._tenant_id,
                 ExportTemplateORM.is_active.is_(True),
             )
-        ).one_or_none()
+            .with_for_update()
+        )
+        row = self._session.execute(statement).scalar_one_or_none()
         if row is None:
             raise ExportJobValidationError("Export template not found or inactive")
         if row.export_type != export_type:
