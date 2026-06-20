@@ -29,7 +29,7 @@ def _alert_by_code(summary, code: str):
     for alert in summary.alerts:
         if alert.code == code:
             return alert
-    pytest.fail(f"expected {code} alert")
+    raise AssertionError(f"expected {code} alert")
 
 
 def payment_summary(**overrides):
