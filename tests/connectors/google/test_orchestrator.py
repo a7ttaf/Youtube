@@ -105,6 +105,21 @@ DEFAULT_RESOLVER_REF = "local-secret://yt-creds"
 _SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
 
 
+def _next_produced_report(
+    produced_iter: Iterator[ProducedReportSuccess | ProducedReportFailure],
+) -> ProducedReportSuccess | ProducedReportFailure:
+    for produced in produced_iter:
+        return produced
+    raise AssertionError("expected one aggregated YouTube report")
+
+
+def _assert_produced_reports_exhausted(
+    produced_iter: Iterator[ProducedReportSuccess | ProducedReportFailure],
+) -> None:
+    for extra_report in produced_iter:
+        raise AssertionError(f"expected produced reports to be exhausted, got {extra_report!r}")
+
+
 @pytest.fixture(autouse=True)
 def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Set UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID for orchestrator live-path tests.
@@ -414,10 +429,7 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
             account_id=ACCOUNT_ID,
         )
         try:
-            produced = next(produced_iter)
-        except StopIteration as exc:
-            raise AssertionError("expected one aggregated YouTube report") from exc
-        try:
+            produced = _next_produced_report(produced_iter)
             assert isinstance(produced, ProducedReportSuccess)
             assert produced.report_type == "content_owner_estimated_revenue_a1"
             assert produced.parser_payload["report_metadata"] == {
@@ -450,8 +462,7 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
                 b"date,channel_id,estimated_partner_revenue,currency_code\n"
                 b"2026-05-02,UC_orch_alpha,2.75,USD\n"
             )
-            with pytest.raises(StopIteration):
-                next(produced_iter)
+            _assert_produced_reports_exhausted(produced_iter)
         finally:
             produced_iter.close()
 
@@ -491,7 +502,7 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
             account_id=ACCOUNT_ID,
         )
         try:
-            produced = next(produced_iter)
+            produced = _next_produced_report(produced_iter)
             assert isinstance(produced, ProducedReportFailure)
             assert produced.report_type == "content_owner_estimated_revenue_a1"
             assert [report.report_id for report in produced.raw_reports] == [
@@ -505,8 +516,7 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
             assert produced.raw_reports[1].read_bytes() == (
                 b"date,channel_id,currency_code\n2026-05-02,UC_orch_alpha,USD\n"
             )
-            with pytest.raises(StopIteration):
-                next(produced_iter)
+            _assert_produced_reports_exhausted(produced_iter)
         finally:
             produced_iter.close()
 
@@ -543,13 +553,12 @@ def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
             account_id=ACCOUNT_ID,
         )
         try:
-            produced = next(produced_iter)
+            produced = _next_produced_report(produced_iter)
             assert isinstance(produced, ProducedReportSuccess)
             assert produced.report_type == "content_owner_estimated_revenue_a1"
             assert client.list_reports_for_month.call_count == 1
             assert client.list_reports_for_month.call_args.kwargs["job_id"] == ("job-primary")
-            with pytest.raises(StopIteration):
-                next(produced_iter)
+            _assert_produced_reports_exhausted(produced_iter)
         finally:
             produced_iter.close()
 

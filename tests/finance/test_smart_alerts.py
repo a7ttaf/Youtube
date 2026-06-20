@@ -25,6 +25,13 @@ from ums_smart_revenue.finance.reconciliation import ReconciliationIssue
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
 
+def _alert_by_code(summary, code: str):
+    for alert in summary.alerts:
+        if alert.code == code:
+            return alert
+    pytest.fail(f"expected {code} alert")
+
+
 def payment_summary(**overrides):
     values = {
         "month": "2026-03",
@@ -166,11 +173,7 @@ def test_smart_alerts_flag_missing_channel_revenue_facts():
         codes.index("MISSING_REVENUE_SOURCE") + 1
     )
     assert codes.index("CHANNELS_MISSING_REVENUE_FACTS") < codes.index("PAYMENT_NOT_MATCHED")
-    coverage_alert = next(
-        (alert for alert in summary.alerts if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"),
-        None,
-    )
-    assert coverage_alert is not None, "expected CHANNELS_MISSING_REVENUE_FACTS alert"
+    coverage_alert = _alert_by_code(summary, "CHANNELS_MISSING_REVENUE_FACTS")
     assert coverage_alert.severity == "HIGH"
     assert coverage_alert.confidence == "E_MISSING"
     assert coverage_alert.details == {
@@ -186,11 +189,7 @@ def test_smart_alerts_cap_missing_channel_sample_at_twenty():
         missing_revenue_fact_channel_sample=sample,
     )
 
-    coverage_alert = next(
-        (alert for alert in summary.alerts if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"),
-        None,
-    )
-    assert coverage_alert is not None, "expected CHANNELS_MISSING_REVENUE_FACTS alert"
+    coverage_alert = _alert_by_code(summary, "CHANNELS_MISSING_REVENUE_FACTS")
     assert coverage_alert.details["channel_count"] == 25
     assert coverage_alert.details["sample_channel_ids"] == sorted(sample)[:20]
 
@@ -219,11 +218,7 @@ def test_smart_alerts_flag_skipped_source_rows():
     codes = [alert.code for alert in summary.alerts]
     assert codes.index("SOURCE_ROWS_SKIPPED") == (codes.index("CHANNELS_MISSING_REVENUE_FACTS") + 1)
     assert codes.index("SOURCE_ROWS_SKIPPED") < codes.index("PAYMENT_NOT_MATCHED")
-    skipped_alert = next(
-        (alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED"),
-        None,
-    )
-    assert skipped_alert is not None, "expected SOURCE_ROWS_SKIPPED alert"
+    skipped_alert = _alert_by_code(summary, "SOURCE_ROWS_SKIPPED")
     assert skipped_alert.severity == "HIGH"
     assert skipped_alert.confidence == "E_MISSING"
     assert skipped_alert.source == "connector_job_run"
@@ -250,11 +245,7 @@ def test_smart_alerts_flag_failed_connector_runs():
     codes = [alert.code for alert in summary.alerts]
     assert codes.index("CONNECTOR_RUNS_FAILED") == (codes.index("SOURCE_ROWS_SKIPPED") + 1)
     assert codes.index("CONNECTOR_RUNS_FAILED") < codes.index("PAYMENT_NOT_MATCHED")
-    failed_alert = next(
-        (alert for alert in summary.alerts if alert.code == "CONNECTOR_RUNS_FAILED"),
-        None,
-    )
-    assert failed_alert is not None, "expected CONNECTOR_RUNS_FAILED alert"
+    failed_alert = _alert_by_code(summary, "CONNECTOR_RUNS_FAILED")
     assert failed_alert.severity == "HIGH"
     assert failed_alert.confidence == "E_MISSING"
     assert failed_alert.source == "connector_job_run"
