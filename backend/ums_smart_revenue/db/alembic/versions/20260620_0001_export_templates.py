@@ -85,6 +85,12 @@ def upgrade() -> None:
             server_default=_TENANT_ID_DEFAULT,
         ),
         sa.UniqueConstraint("tenant_id", "name", name="uq_export_templates_tenant_id_name"),
+        # Composite (tenant_id, id) unique key is the target of the
+        # export_jobs (tenant_id, template_id) foreign key, so a template
+        # reference can never cross tenants at the DB level. id is the primary
+        # key, so this is functionally redundant for uniqueness but required by
+        # PostgreSQL as the explicit unique target of the composite FK.
+        sa.UniqueConstraint("tenant_id", "id", name="uq_export_templates_tenant_id_id"),
         sa.CheckConstraint("length(trim(name)) > 0", name="ck_export_templates_name_not_blank"),
         sa.CheckConstraint(
             "export_type IN ('FINANCE_EXCEL', 'EXECUTIVE_PDF', "
@@ -106,12 +112,15 @@ def upgrade() -> None:
 
     with op.batch_alter_table("export_jobs") as batch:
         batch.add_column(sa.Column("template_id", sa.Uuid(as_uuid=True), nullable=True))
+        # Composite tenant-scoped FK so a template_id reference can never point
+        # at another tenant's template at the DB level. NO ACTION (default)
+        # blocks hard-deleting a template still referenced by a job; the
+        # operational lifecycle is soft deactivation, which never trips this FK.
         batch.create_foreign_key(
-            "fk_export_jobs_template_id",
+            "fk_export_jobs_tenant_template",
             "export_templates",
-            ["template_id"],
-            ["id"],
-            ondelete="SET NULL",
+            ["tenant_id", "template_id"],
+            ["tenant_id", "id"],
         )
         batch.create_index("ix_export_jobs_template_id", ["template_id"])
 
@@ -120,7 +129,7 @@ def downgrade() -> None:
     """Remove template references and drop export_templates."""
     with op.batch_alter_table("export_jobs") as batch:
         batch.drop_index("ix_export_jobs_template_id")
-        batch.drop_constraint("fk_export_jobs_template_id", type_="foreignkey")
+        batch.drop_constraint("fk_export_jobs_tenant_template", type_="foreignkey")
         batch.drop_column("template_id")
 
     op.drop_index("ix_export_templates_tenant_created", table_name="export_templates")

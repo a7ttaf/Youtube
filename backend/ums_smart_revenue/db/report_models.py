@@ -18,7 +18,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Text,
     UniqueConstraint,
@@ -154,6 +154,14 @@ class ExportTemplateORM(ReportBase):
     )
 
     __table_args__ = (
+        # Composite (tenant_id, id) unique key serves as the target for the
+        # export_jobs (tenant_id, template_id) foreign key so a template
+        # reference can never cross tenants at the DB level (mirrors the
+        # uq_<table>_tenant_id_id pattern used by org_units / youtube_channels /
+        # connector_runs). id is already the primary key, so this constraint is
+        # functionally redundant for uniqueness but required by PostgreSQL as the
+        # explicit unique target of the composite FK.
+        UniqueConstraint("tenant_id", "id", name="uq_export_templates_tenant_id_id"),
         UniqueConstraint("tenant_id", "name", name="uq_export_templates_tenant_id_name"),
         CheckConstraint("length(trim(name)) > 0", name="ck_export_templates_name_not_blank"),
         CheckConstraint(
@@ -172,11 +180,13 @@ class ExportJobORM(ReportBase):
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    template_id: Mapped[UUID | None] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey("export_templates.id", ondelete="SET NULL"),
-        nullable=True,
-    )
+    # The tenant-scoped (tenant_id, template_id) -> export_templates(tenant_id,
+    # id) foreign key is declared in __table_args__ (composite FKs cannot use
+    # the column-level ForeignKey()). NO ACTION (Postgres default) means a
+    # template still referenced by a job cannot be hard-deleted; the operational
+    # lifecycle is soft deactivation (deactivate_template sets is_active=false),
+    # which never trips the FK and preserves historical job references.
+    template_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     export_type: Mapped[str] = mapped_column(Text, nullable=False)
     scope_type: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -230,6 +240,16 @@ class ExportJobORM(ReportBase):
     )
 
     __table_args__ = (
+        # Composite tenant-scoped FK: a template_id reference can never point at
+        # another tenant's template at the DB level, even for a write path that
+        # bypasses SqlAlchemyExportJobRepository. NO ACTION (default) blocks
+        # hard-deleting a template still referenced by a job; the operational
+        # lifecycle is soft deactivation, which never trips this FK.
+        ForeignKeyConstraint(
+            ["tenant_id", "template_id"],
+            ["export_templates.tenant_id", "export_templates.id"],
+            name="fk_export_jobs_tenant_template",
+        ),
         CheckConstraint(
             "export_type IN ('FINANCE_EXCEL', 'EXECUTIVE_PDF', "
             "'BRANDED_SLIDE_PACK', 'ANALYTICS_SUMMARY_CSV')",
