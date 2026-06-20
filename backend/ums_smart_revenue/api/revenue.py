@@ -454,21 +454,25 @@ def check_channel_revenue_authorization(
 # Purpose: Enforce the dry_run=False request-shape contract that is stricter
 #   than a dry run: a committed write must be whole-month (scope_type=global),
 #   carry an idempotency_key, and never run the manual method (manual needs the
-#   explicit-lines commit endpoint). Returns the NORMALIZED allocation method for
-#   the downstream commit so the manual check and the service agree on casing.
+#   explicit-lines commit endpoint). Returns the NORMALIZED allocation method and
+#   non-empty idempotency key for the downstream commit so validation and the
+#   service agree on casing and non-null write identity.
 # Database/ORM: None.
 # Standards: typed 422s with safe, actionable messages; runs AFTER the auth gates
 #   (authorization-before-validation parity with the commit endpoint).
 # Blast Radius: Authorization order + write-path validation. No finance number.
 # ============================================================================
-def _validate_recalculation_write_request(payload: RevenueRecalculationRequest) -> str:
-    """Validate the dry_run=False request shape; return the normalized method."""
+def _validate_recalculation_write_request(
+    payload: RevenueRecalculationRequest,
+) -> tuple[str, str]:
+    """Validate the dry_run=False request shape; return the normalized write context."""
     if payload.scope_type.strip() != "global":
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="committed recalculation requires scope_type=global",
         )
-    if not payload.idempotency_key:
+    idempotency_key = payload.idempotency_key
+    if not idempotency_key:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="idempotency_key is required when dry_run=false",
@@ -487,7 +491,7 @@ def _validate_recalculation_write_request(payload: RevenueRecalculationRequest) 
                 "/revenue/months/{month}/account-allocations/commit"
             ),
         )
-    return normalized_method
+    return normalized_method, idempotency_key
 
 
 # ============================================================================
@@ -515,6 +519,7 @@ def _commit_recalculation_write(
     *,
     payload: RevenueRecalculationRequest,
     normalized_method: str,
+    idempotency_key: str,
     user: UserPrincipal,
     org_index: OrgAccessIndex,
     month_scope: AccessScope,
@@ -543,7 +548,7 @@ def _commit_recalculation_write(
         outcome = committed_repository.commit_allocation(
             month=payload.month,
             allocation_method=normalized_method,
-            idempotency_key=payload.idempotency_key,
+            idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
             reason=payload.reason,
             committed_by=user.user_id,  # str; repo -> UUID
@@ -675,8 +680,11 @@ def request_revenue_recalculation(
         _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
 
     normalized_write_method: str | None = None
+    write_idempotency_key: str | None = None
     if not payload.dry_run:
-        normalized_write_method = _validate_recalculation_write_request(payload)
+        normalized_write_method, write_idempotency_key = _validate_recalculation_write_request(
+            payload
+        )
 
     try:
         facts = revenue_repository.list_month_facts(
@@ -716,6 +724,8 @@ def request_revenue_recalculation(
 
     write_fragment: dict[str, object] | None = None
     if not payload.dry_run:
+        if normalized_write_method is None or write_idempotency_key is None:
+            raise RuntimeError("validated recalculation write context missing")
         # FIX: check idempotency BEFORE the preflight gate. If a run was already
         # committed under this key the preflight is irrelevant — the request is a
         # replay regardless of what the current facts look like. Without this check
@@ -724,7 +734,7 @@ def request_revenue_recalculation(
         # the key/fingerprint already identifies a completed write.
         _existing_run = committed_repository.get_run_by_idempotency_key(
             month=payload.month,
-            idempotency_key=payload.idempotency_key,
+            idempotency_key=write_idempotency_key,
         )
         if _existing_run is None:
             # No existing run — enforce the preflight gate before any write.
@@ -739,6 +749,7 @@ def request_revenue_recalculation(
         write_fragment = _commit_recalculation_write(
             payload=payload,
             normalized_method=normalized_write_method,  # set on the write path
+            idempotency_key=write_idempotency_key,
             user=user,
             org_index=org_index,
             month_scope=month_scope,
@@ -1359,16 +1370,18 @@ def get_month_deduction_components(
             detail=str(exc),
         ) from exc
 
-    grouped: dict[str, list[dict[str, object]]] = {}
+    grouped: dict[str, list[DeductionComponentApiItem]] = {}
     for component in page.components:
-        grouped.setdefault(component.scope_kind, []).append(component.to_api())
+        grouped.setdefault(component.scope_kind, []).append(
+            DeductionComponentApiItem.model_validate(component.to_api())
+        )
     scopes = [
-        {
-            "scope_kind": total.scope_kind,
-            "component_count": total.component_count,
-            "total_amount_usd": _decimal_to_api(total.total_amount_usd),
-            "components": grouped.get(total.scope_kind, []),
-        }
+        DeductionComponentScopeGroup(
+            scope_kind=total.scope_kind,
+            component_count=total.component_count,
+            total_amount_usd=_decimal_to_api(total.total_amount_usd),
+            components=grouped.get(total.scope_kind, []),
+        )
         for total in page.scope_totals
     ]
 
@@ -1378,7 +1391,7 @@ def get_month_deduction_components(
         "returned_count": len(page.components),
     }
     scope_kinds = {total.scope_kind for total in page.scope_totals}
-    audit_events = []
+    audit_events: list[AuditEventResponse] = []
     revenue_record = record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -1388,7 +1401,7 @@ def get_month_deduction_components(
         scope=global_scope,
         details=audit_details,
     )
-    audit_events.append(audit_record_to_api(revenue_record))
+    audit_events.append(audit_record_to_response(revenue_record))
     if scope_kinds & {"ACCOUNT", "PAYMENT"}:
         payment_record = record_audit_event(
             sink=audit_sink,
@@ -1399,7 +1412,7 @@ def get_month_deduction_components(
             scope=month_scope,
             details=audit_details,
         )
-        audit_events.append(audit_record_to_api(payment_record))
+        audit_events.append(audit_record_to_response(payment_record))
     if "PAYMENT" in scope_kinds:
         bank_record = record_audit_event(
             sink=audit_sink,
@@ -1410,19 +1423,19 @@ def get_month_deduction_components(
             scope=month_scope,
             details=audit_details,
         )
-        audit_events.append(audit_record_to_api(bank_record))
+        audit_events.append(audit_record_to_response(bank_record))
     has_more = offset + len(page.components) < page.total_count
     return MonthDeductionComponentsResponse(
         month=month,
         total_count=page.total_count,
         returned_count=len(page.components),
         scopes=scopes,
-        pagination={
-            "limit": limit,
-            "offset": offset,
-            "next_offset": (offset + limit) if has_more else None,
-            "has_more": has_more,
-        },
+        pagination=DeductionComponentsPagination(
+            limit=limit,
+            offset=offset,
+            next_offset=(offset + limit) if has_more else None,
+            has_more=has_more,
+        ),
         audit_events=audit_events,
     )
 
@@ -1870,7 +1883,10 @@ def _channel_name_map(session: Session) -> dict[str, str]:
         YouTubeChannelORM.tenant_id == tenant_id,
         YouTubeChannelORM.active.is_(True),
     )
-    return dict(session.execute(statement).all())
+    return {
+        youtube_channel_id: channel_name
+        for youtube_channel_id, channel_name in session.execute(statement).all()
+    }
 
 
 @router.post(
@@ -2796,6 +2812,11 @@ def audit_record_to_api(record: AuditRecord) -> dict[str, object]:
         "reason": record.reason,
         "sensitive": record.sensitive,
     }
+
+
+def audit_record_to_response(record: AuditRecord) -> AuditEventResponse:
+    """Serialize an AuditRecord to the typed finance read audit-event response."""
+    return AuditEventResponse.model_validate(audit_record_to_api(record))
 
 
 def _with_audit_event(fact: RevenueFactEntry, record: AuditRecord) -> dict[str, object]:

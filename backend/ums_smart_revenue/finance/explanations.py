@@ -43,14 +43,14 @@ REVENUE_RECONCILIATION_METRIC = "revenue_reconciliation_usd"
 SUPPORTED_METRICS = frozenset({ADJUSTED_GROSS_REVENUE_METRIC, NET_REVENUE_METRIC})
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
-_NET_CONFIDENCE_TO_EXPLAIN: dict[str, dict[str, str]] = {
+_NET_CONFIDENCE_TO_EXPLAIN: dict[str, dict[str, object]] = {
     "B_RECONCILED": {"label": "HIGH", "score": "0.95"},
     "D_ESTIMATED": {"label": "MEDIUM", "score": "0.80"},
     "E_MISSING": {"label": "LOW", "score": "0"},
 }
 
 
-def map_net_confidence(net_confidence_label: str) -> dict[str, str]:
+def map_net_confidence(net_confidence_label: str) -> dict[str, object]:
     """Map a net-revenue confidence label to the explain HIGH/MEDIUM/LOW + score shape."""
     # ========================================================================
     # Purpose: Map a net-revenue confidence label (B_RECONCILED/D_ESTIMATED/
@@ -345,6 +345,11 @@ def _build_net_revenue_explanation(
     # carries source_report_id (the summary exposes only primary_source_kind), which
     # the baseline component must include per spec §5.5 (parity with the gross path).
     primary_fact = _primary_fact(facts)
+    if primary_fact is None:
+        raise NumberExplanationValidationError(
+            f"net_revenue_usd is determinate for {youtube_channel_id} in {month} "
+            "but no primary revenue fact was available for explanation provenance."
+        )
 
     components: list[dict[str, object]] = [
         {
@@ -363,12 +368,18 @@ def _build_net_revenue_explanation(
     ]
 
     if summary.status == "COMPONENT_DERIVED":
+        primary_source_kind = summary.primary_source_kind
+        if primary_source_kind is None:
+            raise NumberExplanationValidationError(
+                f"component-derived net revenue for {youtube_channel_id} in {month} "
+                "requires primary_source_kind."
+            )
         channel_direct, account_allocated = resolve_applicable_channel_deductions(
             deduction_components=deduction_components,
             account_allocations=account_allocations,
             month=month,
             youtube_channel_id=youtube_channel_id,
-            primary_source_kind=summary.primary_source_kind,
+            primary_source_kind=primary_source_kind,
         )
         channel_direct = sorted(
             channel_direct, key=lambda component: (component.source_system, component.component_key)
@@ -393,7 +404,7 @@ def _build_net_revenue_explanation(
                 ],
             }
         )
-        account_component = {
+        account_component: dict[str, object] = {
             "key": "account_allocated_deduction_usd",
             "label": "Account-allocated deductions",
             "value": _decimal_to_api(summary.account_allocated_deduction_amount_usd),

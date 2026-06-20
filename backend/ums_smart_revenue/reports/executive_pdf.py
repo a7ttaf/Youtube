@@ -295,7 +295,13 @@ def _executive_summary(
 
 def _summary_table(report: ExecutivePdfReport) -> Table:
     """Create a summary table with key executive summary metrics for display in the PDF."""
-    summary = report.to_api()["executive_summary"]
+    summary = _executive_summary(
+        export_job=report.export_job,
+        net_revenue=report.net_revenue,
+        payment_match=report.payment_match,
+        bank_reconciliation=report.bank_reconciliation,
+        smart_alerts=report.smart_alerts,
+    )
     return _key_value_table(
         {
             "Month": summary["month"],
@@ -353,40 +359,37 @@ def _ranking_table(report: ExecutivePdfReport, *, ranking_label: str) -> Table:
     Build a table displaying company ranking information based on net
     revenue, labeled by the given ranking label.
     """
-    return _styled_table(
-        [["Ranking", "Channels", "Total Net Revenue USD"]]
-        + [
-            [
-                ranking_label,
-                str(report.net_revenue.channel_count),
-                _decimal_to_api(report.net_revenue.total_net_revenue_usd),
-            ]
-        ]
-    )
+    rows: list[list[object]] = [
+        ["Ranking", "Channels", "Total Net Revenue USD"],
+        [
+            ranking_label,
+            str(report.net_revenue.channel_count),
+            _decimal_to_api(report.net_revenue.total_net_revenue_usd),
+        ],
+    ]
+    return _styled_table(rows)
 
 
 def _channel_ranking_table(report: ExecutivePdfReport) -> Table:
     """Generate a styled table of top channels by net revenue."""
-    rows = [
+    rows: list[list[object]] = [
         ["Channel", "Net Revenue USD", "Deduction USD", "Confidence"],
-        *[
+    ]
+    for channel in sorted(
+        report.net_revenue.channels,
+        key=lambda item: (
+            item.net_revenue_usd if item.net_revenue_usd is not None else Decimal("-Infinity")
+        ),
+        reverse=True,
+    )[:10]:
+        rows.append(
             [
                 channel.youtube_channel_id,
                 _decimal_to_api(channel.net_revenue_usd),
                 _decimal_to_api(channel.deduction_amount_usd),
                 channel.confidence,
             ]
-            for channel in sorted(
-                report.net_revenue.channels,
-                key=lambda item: (
-                    item.net_revenue_usd
-                    if item.net_revenue_usd is not None
-                    else Decimal("-Infinity")
-                ),
-                reverse=True,
-            )[:10]
-        ],
-    ]
+        )
     return _styled_table(rows)
 
 
@@ -422,7 +425,9 @@ def _recommendations(report: ExecutivePdfReport, styles: dict[str, ParagraphStyl
 
 def _key_value_table(values: dict[str, object]) -> Table:
     """Construct a key-value styled table from a dictionary of metrics and their values."""
-    rows = [["Metric", "Value"], *[[key, value] for key, value in values.items()]]
+    rows: list[list[object]] = [["Metric", "Value"]]
+    for key, value in values.items():
+        rows.append([key, value])
     return _styled_table(rows)
 
 

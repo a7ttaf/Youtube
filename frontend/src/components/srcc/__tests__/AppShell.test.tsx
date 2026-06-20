@@ -358,15 +358,23 @@ const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRou
   ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
 ];
 
+const responseForRoutedSessionRequest = (routes: FetchRoute[], input: unknown) => {
+  const url = urlOf(input);
+  const route = routes.find(([path]) => url.includes(path));
+  if (!route) {
+    return jsonResponse(NET_REVENUE_BODY);
+  }
+  const [, respond] = route;
+  return respond();
+};
+
 // Route fetch with a caller-supplied /session/me responder; connector, AdSense,
 // and export list calls get empty real-shaped bodies, tenant gets a fixed UMS
 // body, and the net-revenue call gets the neutral body.
 const routeFetchWithSession = (sessionResponder: () => Response) => {
   const routes = routeFetchWithSessionRoutes(sessionResponder);
   return (input: unknown) => {
-    const url = urlOf(input);
-    const route = routes.find(([path]) => url.includes(path));
-    return Promise.resolve(route ? route[1]() : jsonResponse(NET_REVENUE_BODY));
+    return Promise.resolve(responseForRoutedSessionRequest(routes, input));
   };
 };
 

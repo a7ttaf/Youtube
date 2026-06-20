@@ -2,7 +2,6 @@ from collections import defaultdict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from typing import overload
 
 from ums_smart_revenue.finance.allocation import AllocationLine, UnallocatedIssue
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
@@ -305,7 +304,12 @@ def _calculated_channel_summary(
     pending_count: int,
 ) -> ChannelNetRevenueSummary:
     """Build a channel summary when the primary source already has net revenue."""
-    adjusted_net = primary.net_revenue_usd + approved_total
+    baseline_net = primary.net_revenue_usd
+    if baseline_net is None:
+        raise NetRevenueValidationError(
+            f"primary source net revenue is missing for {youtube_channel_id} in {month}"
+        )
+    adjusted_net = baseline_net + approved_total
     deduction_amount = adjusted_gross - adjusted_net
     return ChannelNetRevenueSummary(
         month=month,
@@ -313,7 +317,7 @@ def _calculated_channel_summary(
         status="PENDING_OVERRIDE_REVIEW" if pending_count else "CALCULATED",
         primary_source_kind=primary.source_kind,
         baseline_gross_revenue_usd=primary.gross_revenue_usd,
-        baseline_net_revenue_usd=primary.net_revenue_usd,
+        baseline_net_revenue_usd=baseline_net,
         approved_manual_override_total_usd=approved_total,
         adjusted_gross_revenue_usd=adjusted_gross,
         net_revenue_usd=adjusted_net,
@@ -480,33 +484,17 @@ def build_channel_net_revenue_summary(
     )
 
 
-@overload
-def _group_by_channel(
-    items: Iterable[RevenueFactEntry],
+def _group_by_channel[T: (RevenueFactEntry, RevenueManualOverrideEntry)](
+    items: Iterable[T],
     *,
     month: str,
-) -> dict[str, list[RevenueFactEntry]]: ...
-
-
-@overload
-def _group_by_channel(
-    items: Iterable[RevenueManualOverrideEntry],
-    *,
-    month: str,
-) -> dict[str, list[RevenueManualOverrideEntry]]: ...
-
-
-def _group_by_channel(
-    items: Iterable[RevenueFactEntry] | Iterable[RevenueManualOverrideEntry],
-    *,
-    month: str,
-) -> dict[str, list[RevenueFactEntry]] | dict[str, list[RevenueManualOverrideEntry]]:
+) -> dict[str, list[T]]:
     """Group entries for the requested month by YouTube channel ID."""
-    grouped = defaultdict(list)
+    grouped: defaultdict[str, list[T]] = defaultdict(list)
     for item in items:
         if item.month == month:
             grouped[item.youtube_channel_id].append(item)
-    return grouped
+    return dict(grouped)
 
 
 def _facts_by_channel(
@@ -558,6 +546,21 @@ def _month_net_revenue_counts(
     missing_count = sum(1 for channel in channels if channel.status == "NET_REVENUE_SOURCE_MISSING")
     pending_count = sum(channel.pending_manual_override_count for channel in channels)
     return calculated, missing_count, pending_count
+
+
+def _required_summary_decimal(
+    value: Decimal | None,
+    *,
+    field_name: str,
+    channel: ChannelNetRevenueSummary,
+) -> Decimal:
+    """Return a required calculated summary value or fail closed on invariant drift."""
+    if value is None:
+        raise NetRevenueValidationError(
+            f"{field_name} is missing for calculated channel {channel.youtube_channel_id} "
+            f"in {channel.month}"
+        )
+    return value
 
 
 # ============================================================================
@@ -680,11 +683,25 @@ def build_month_net_revenue_summary(
             Decimal("0"),
         ),
         total_net_revenue_usd=sum(
-            (channel.net_revenue_usd for channel in calculated),
+            (
+                _required_summary_decimal(
+                    channel.net_revenue_usd,
+                    field_name="net_revenue_usd",
+                    channel=channel,
+                )
+                for channel in calculated
+            ),
             Decimal("0"),
         ),
         total_deduction_amount_usd=sum(
-            (channel.deduction_amount_usd for channel in calculated),
+            (
+                _required_summary_decimal(
+                    channel.deduction_amount_usd,
+                    field_name="deduction_amount_usd",
+                    channel=channel,
+                )
+                for channel in calculated
+            ),
             Decimal("0"),
         ),
         # Breakdown fields are None on source-net channels, so coalesce to 0;

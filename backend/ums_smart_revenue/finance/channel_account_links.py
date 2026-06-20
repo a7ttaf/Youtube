@@ -580,7 +580,7 @@ class SqlAlchemyChannelAccountLinkRepository:
         # blocks until we commit (and we keep the month OPEN) or commits first (and
         # we read LOCKED and skip). This closes the absent-row window that remains
         # as N9 on the verify/reject path. Advisory lock + FOR UPDATE no-op on SQLite.
-        observed = self._session.execute(
+        observed_rows = self._session.execute(
             select(
                 GoogleRevenueSourceRowORM.content_owner_id,
                 GoogleRevenueSourceRowORM.youtube_channel_id,
@@ -608,9 +608,9 @@ class SqlAlchemyChannelAccountLinkRepository:
         # bogus active link. Drop blank/whitespace-only identities here (str.strip()
         # also covers tabs/newlines) before grouping. Stored values are otherwise
         # left as-is — interior normalization would change the derived link key.
-        observed = [
+        observed: list[tuple[str, str, str, str]] = [
             (owner, channel, month, key)
-            for owner, channel, month, key in observed
+            for owner, channel, month, key in observed_rows
             if owner and owner.strip() and channel and channel.strip()
         ]
         locked_months: set[str] = set()

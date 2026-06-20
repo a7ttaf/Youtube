@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
@@ -374,7 +375,11 @@ def _visibility_filter_condition(visibility_filter: ExportJobVisibilityFilter):
         raise ExportJobValidationError(
             "visibility filter must include scope_type when scope_id is set"
         )
-    conditions = [ExportJobORM.export_type.in_(sorted(visibility_filter.export_types))]
+    # FIX: SQLAlchemy returns different boolean expression subclasses for IN,
+    # equality, and NULL checks; keep the accumulator typed to their shared base.
+    conditions: list[ColumnElement[bool]] = [
+        ExportJobORM.export_type.in_(sorted(visibility_filter.export_types))
+    ]
     if visibility_filter.scope_type is not None:
         conditions.append(ExportJobORM.scope_type == visibility_filter.scope_type)
         if visibility_filter.scope_id is None:

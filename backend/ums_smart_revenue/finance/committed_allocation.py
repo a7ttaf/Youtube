@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import select
@@ -41,6 +42,15 @@ from ums_smart_revenue.finance.manual_allocation import (
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
+
+if TYPE_CHECKING:
+    from ums_smart_revenue.finance.channel_account_links import (
+        SqlAlchemyChannelAccountLinkRepository,
+    )
+    from ums_smart_revenue.finance.deduction_ingestion import (
+        SqlAlchemyDeductionComponentRepository,
+    )
+    from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
@@ -228,9 +238,9 @@ class SqlAlchemyCommittedAllocationRepository:
         request_fingerprint: str,
         reason: str,
         committed_by: str,
-        deduction_repository: object,
-        revenue_repository: object,
-        link_repository: object,
+        deduction_repository: SqlAlchemyDeductionComponentRepository,
+        revenue_repository: SqlAlchemyRevenueFactRepository,
+        link_repository: SqlAlchemyChannelAccountLinkRepository,
         channel_company: Mapping[str, str] | None = None,
         manual_lines: tuple[ManualAllocationInput, ...] | None = None,
     ) -> CommitAllocationOutcome:
@@ -422,9 +432,9 @@ class SqlAlchemyCommittedAllocationRepository:
         *,
         month: str,
         allocation_method: str,
-        deduction_repository: object,
-        revenue_repository: object,
-        link_repository: object,
+        deduction_repository: SqlAlchemyDeductionComponentRepository,
+        revenue_repository: SqlAlchemyRevenueFactRepository,
+        link_repository: SqlAlchemyChannelAccountLinkRepository,
         channel_company: Mapping[str, str] | None,
         manual_lines: tuple[ManualAllocationInput, ...] | None,
     ) -> AccountAllocationResult:

@@ -147,7 +147,10 @@ def _validate_amount_native(row: ParsedSourceRow) -> None:
 
     # FIX: amount_native maps to Numeric(20, 6). Reject values the database
     # would round or overflow so source-reported finance values stay exact.
-    if row.amount_native.as_tuple().exponent < -_AMOUNT_NATIVE_SCALE:
+    exponent = row.amount_native.as_tuple().exponent
+    if not isinstance(exponent, int):
+        raise GoogleRevenueSourceRowValidationError("amount_native must be a finite Decimal >= 0")
+    if exponent < -_AMOUNT_NATIVE_SCALE:
         raise GoogleRevenueSourceRowValidationError(
             "amount_native must not exceed 6 fractional digits "
             f"(column is Numeric(20, 6)), got {row.amount_native}"
