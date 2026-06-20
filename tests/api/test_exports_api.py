@@ -621,6 +621,68 @@ def test_analytics_csv_revenue_gate_uses_requested_company_before_lookup(tmp_pat
     assert audit_sink.records == []
 
 
+def test_analytics_csv_revenue_gate_masks_empty_company_scope(tmp_path):
+    """Wrong-scope revenue grants return 403 for known empty company scopes."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    empty_company_id = uuid4()
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            OrgUnitORM(
+                id=empty_company_id,
+                parent_id=SECTOR_ID,
+                type="COMPANY",
+                name="Empty Company",
+                active=True,
+            )
+        )
+        session.commit()
+
+    app = create_app(database_url=database_url)
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="wrong-scope-empty-company@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.global_scope(),
+            ),
+            PermissionGrant(
+                Permission.VIEW_ANALYTICS,
+                AccessScope.global_scope(),
+            ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
+                AccessScope.company(str(COMPANY_A_ID)),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/exports",
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "company",
+            "scope_id": str(empty_company_id),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Scoped analytics export",
+        },
+    )
+
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+    assert export_count == 0
+    assert audit_sink.records == []
+
+
 def test_analytics_csv_analytics_gate_uses_requested_company_before_lookup(tmp_path):
     """Missing analytics view returns 403 for known and unknown company scopes."""
     database_url = build_database_url(tmp_path)
@@ -1531,6 +1593,14 @@ def test_analytics_summary_csv_download_filters_blank_channel_ids(tmp_path, monk
                 _analytics_source_row(
                     channel_id="   ",
                     amount=Decimal("88.000000"),
+                ),
+                _analytics_source_row(
+                    channel_id="\t",
+                    amount=Decimal("77.000000"),
+                ),
+                _analytics_source_row(
+                    channel_id="\n",
+                    amount=Decimal("66.000000"),
                 ),
             ]
         )

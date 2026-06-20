@@ -64,6 +64,7 @@ _SOURCE_SYSTEM = "youtube_analytics"
 _FORMULA = "SUM(google_revenue_source_rows.amount_native)"
 _CONFIDENCE = "source_rows"
 _CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+_BLANK_CHANNEL_ID_CHARACTERS = (" ", "\t", "\r", "\n", "\f", "\v")
 
 
 # ============================================================================
@@ -119,6 +120,13 @@ def list_analytics_summary_csv_rows(
 
     source_row = GoogleRevenueSourceRowORM
     channel = YouTubeChannelORM
+    channel_id_without_blank_chars = source_row.youtube_channel_id
+    for blank_character in _BLANK_CHANNEL_ID_CHARACTERS:
+        channel_id_without_blank_chars = sa.func.replace(
+            channel_id_without_blank_chars,
+            blank_character,
+            "",
+        )
     stmt = (
         sa.select(
             source_row.youtube_channel_id,
@@ -146,7 +154,9 @@ def list_analytics_summary_csv_rows(
             source_row.report_month == month,
             source_row.currency_code == currency_code,
             source_row.youtube_channel_id.is_not(None),
-            sa.func.length(sa.func.trim(source_row.youtube_channel_id)) > 0,
+            # FIX: SQL trim() only strips spaces by default on PostgreSQL/SQLite;
+            # remove ASCII whitespace so tab/newline-only IDs never enter CSV rows.
+            sa.func.length(channel_id_without_blank_chars) > 0,
         )
         .group_by(
             source_row.youtube_channel_id,

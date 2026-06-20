@@ -276,6 +276,15 @@ def request_export(
                 _raise_missing_permission(analytics_csv_lookup_denial_permission)
             raise
         snapshot_tuple = tuple(sorted(snapshot)) if snapshot is not None else None
+        if (
+            payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE
+            and analytics_csv_lookup_denial_permission is not None
+            and snapshot_tuple is not None
+            and not snapshot_tuple
+        ):
+            # FIX: Known-but-empty org scopes should not reveal existence to a
+            # caller missing the requested analytics CSV permission scope.
+            _raise_missing_permission(analytics_csv_lookup_denial_permission)
         _require_export_access_permissions(
             user=user,
             export_type=payload.export_type,
