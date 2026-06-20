@@ -6,6 +6,7 @@ from decimal import Decimal
 from io import StringIO
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
@@ -189,6 +190,7 @@ def _seed_analytics_csv_export_job(
     scope_channel_ids: tuple[str, ...] | None = ("channel-a",),
     currency: str = "USD",
     requested_by: UUID = USER_ID,
+    job_status: str = "QUEUED",
 ) -> UUID:
     """Persist one queued analytics CSV export job for download-gate tests."""
     export_uuid = export_id or uuid4()
@@ -206,7 +208,7 @@ def _seed_analytics_csv_export_job(
                 month="2026-03",
                 currency=currency,
                 requested_by=requested_by,
-                status="QUEUED",
+                status=job_status,
                 month_lock_status="LOCKED",
                 include_confidence_notes=True,
                 include_manual_override_notes=True,
@@ -1877,6 +1879,50 @@ def test_analytics_summary_csv_storage_failure_is_retryable_without_audit(tmp_pa
     assert response.status_code == 503
     assert response.json()["detail"] == "Export artifact storage unavailable"
     assert export_job.status == "QUEUED"
+    assert export_job.file_url is None
+    assert audit_count == 0
+
+
+@pytest.mark.parametrize("terminal_status", ["FAILED", "CANCELLED"])
+def test_analytics_summary_csv_terminal_job_rejects_before_source_row_read(
+    tmp_path, monkeypatch, terminal_status
+):
+    """Terminal analytics CSV jobs reject before builder source-row reads."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = _seed_analytics_csv_export_job(database_url, job_status=terminal_status)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            _analytics_source_row(
+                channel_id="channel-a",
+                amount=Decimal("12.500000"),
+            )
+        )
+        session.commit()
+
+    def fail_build(*_args, **_kwargs):
+        raise AssertionError("terminal CSV jobs must not build source-row exports")
+
+    monkeypatch.setattr(
+        "ums_smart_revenue.api.exports.build_analytics_summary_csv",
+        fail_build,
+    )
+
+    response = TestClient(create_app(database_url=database_url)).get(
+        f"/exports/{export_id}/analytics-summary.csv",
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
+    )
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, export_id)
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        f"Export job is already in terminal status {terminal_status}"
+    )
+    assert export_job.status == terminal_status
     assert export_job.file_url is None
     assert audit_count == 0
 

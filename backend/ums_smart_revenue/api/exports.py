@@ -137,6 +137,7 @@ _ANALYTICS_SUMMARY_CSV_REQUIRED_PERMISSIONS = (
     Permission.VIEW_ANALYTICS,
     Permission.VIEW_REVENUE,
 )
+_TERMINAL_EXPORT_JOB_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
 
 @dataclass(frozen=True)
@@ -963,12 +964,31 @@ def _tenant_uuid(user: UserPrincipal) -> UUID:
 
 
 # ============================================================================
+# Purpose: Return a safe conflict response when a terminal export lacks a
+# persisted artifact that can be served.
+# Database/ORM: None.
+# Standards: Fail closed before source-row reads or artifact writes.
+# Blast Radius: Analytics CSV downloads, revenue source confidentiality, audit.
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Terminal job model.
+#   - File: tests/api/test_exports_api.py -> Terminal CSV download regression.
+# ============================================================================
+def _terminal_export_conflict_response(export_job: ExportJobEntry) -> JSONResponse:
+    """Return a safe 409 response for terminal jobs without served artifacts."""
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": f"Export job is already in terminal status {export_job.status}"},
+    )
+
+
+# ============================================================================
 # Purpose: Resolve the bytes, filename, content type, and persisted job metadata
 # for an analytics CSV download, serving cached artifacts before generating.
-# Database/ORM: ExportJobORM complete_artifact write; source-row reads happen in
-# build_analytics_summary_csv.
+# Database/ORM: ExportJobORM complete_artifact write; non-terminal source-row
+# reads happen in build_analytics_summary_csv.
 # Standards: Route stays thin; storage failures remain retryable 503 responses;
-# completed artifact metadata is re-read before audit emission.
+# completed artifact metadata is re-read before audit emission; terminal rows
+# without artifacts are rejected before source-row reads.
 # Blast Radius: Analytics CSV artifact bytes, checksum metadata, export status.
 # Connections:
 #   - File: backend/ums_smart_revenue/reports/analytics_summary_csv.py -> CSV builder.
@@ -1001,6 +1021,11 @@ def _load_analytics_summary_csv_artifact(
             filename=filename,
             content_type=content_type,
         )
+
+    if export_job.status in _TERMINAL_EXPORT_JOB_STATUSES:
+        # FIX: Terminal analytics CSV jobs must stop before source-row reads or
+        # temporary artifact writes when no persisted artifact is available.
+        return _terminal_export_conflict_response(export_job)
 
     csv_bytes = build_analytics_summary_csv(
         session=session,
@@ -1107,10 +1132,7 @@ def _persist_generated_export_artifact(
         if _has_completed_artifact(latest_job):
             return latest_job, None
         _discard_saved_artifact(artifact_store=artifact_store, file_url=artifact.file_url)
-        return None, JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={"detail": (f"Export job is already in terminal status {latest_job.status}")},
-        )
+        return None, _terminal_export_conflict_response(latest_job)
     except Exception:
         logger.exception("Export artifact completion failed for export %s", export_job.id)
         _discard_saved_artifact(artifact_store=artifact_store, file_url=artifact.file_url)
