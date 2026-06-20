@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from io import BytesIO
+from typing import TYPE_CHECKING
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
@@ -19,6 +20,9 @@ from ums_smart_revenue.finance.net_revenue import MonthNetRevenueSummary
 from ums_smart_revenue.finance.payment_matching import MonthlyPaymentMatchSummary
 from ums_smart_revenue.finance.smart_alerts import MonthlySmartAlertSummary
 from ums_smart_revenue.reports.exports import ExportJobEntry
+
+if TYPE_CHECKING:
+    from pptx.presentation import Presentation as PresentationType
 
 BRANDED_SLIDE_NAMES = (
     "Cover",
@@ -295,7 +299,7 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
     return stream.getvalue()
 
 
-def _add_cover_slide(presentation: Presentation, report: BrandedSlidePackReport) -> None:
+def _add_cover_slide(presentation: "PresentationType", report: BrandedSlidePackReport) -> None:
     """Add a cover slide with the branded bar, title, and footer to the presentation."""
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     _add_brand_bar(slide)
@@ -325,7 +329,7 @@ def _add_cover_slide(presentation: Presentation, report: BrandedSlidePackReport)
     _add_footer(slide)
 
 
-def _add_content_slide(presentation: Presentation, title: str, bullets: list[str]) -> None:
+def _add_content_slide(presentation: "PresentationType", title: str, bullets: list[str]) -> None:
     """Add a content slide with a title and bullet points to the presentation."""
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     _add_brand_bar(slide)

@@ -723,7 +723,7 @@ def request_connector_job(
     return response
 
 
-@router.post("/credentials/{connector_key}/{account_id}/test")
+@router.post("/credentials/{connector_key}/{account_id}/test", response_model=None)
 def test_connector_connection(
     connector_key: str,
     account_id: str,
@@ -731,7 +731,7 @@ def test_connector_connection(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
-) -> dict[str, object]:
+) -> dict[str, object] | JSONResponse:
     """Probe credential OAuth health; every probe (including 404) is audited as CONNECTOR_TESTED."""
     # ============================================================================
     # Purpose: Probe the stored credential for (connector_key, account_id) by

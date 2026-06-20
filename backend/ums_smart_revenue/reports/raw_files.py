@@ -1,9 +1,11 @@
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -203,21 +205,24 @@ class SqlAlchemyRawReportFileRepository:
         raw_file_uuid = _parse_uuid(raw_file_id, field_name="raw_report_file_id")
         actor_uuid = _actor_identity_uuid(actor_user_id)
         now = datetime.now(UTC)
-        result = self._session.execute(
-            update(RawReportFileORM)
-            .where(
-                RawReportFileORM.tenant_id == self._tenant_id,
-                RawReportFileORM.id == raw_file_uuid,
-                RawReportFileORM.parse_status != PURGED_PARSE_STATUS,
-            )
-            .values(
-                parse_status=PURGED_PARSE_STATUS,
-                file_url="",
-                purged_by=actor_uuid,
-                purged_at=now,
-                updated_at=now,
-            )
-            .execution_options(synchronize_session=False)
+        result = cast(
+            "CursorResult[Any]",
+            self._session.execute(
+                update(RawReportFileORM)
+                .where(
+                    RawReportFileORM.tenant_id == self._tenant_id,
+                    RawReportFileORM.id == raw_file_uuid,
+                    RawReportFileORM.parse_status != PURGED_PARSE_STATUS,
+                )
+                .values(
+                    parse_status=PURGED_PARSE_STATUS,
+                    file_url="",
+                    purged_by=actor_uuid,
+                    purged_at=now,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            ),
         )
         self._session.flush()
         if result.rowcount != 1:
