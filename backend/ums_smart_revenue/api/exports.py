@@ -34,7 +34,7 @@ from ums_smart_revenue.api.revenue import (
     skipped_source_row_count_and_reasons,
 )
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
+from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
@@ -144,6 +144,7 @@ _ANALYTICS_SUMMARY_CSV_REQUIRED_PERMISSIONS = (
     Permission.VIEW_REVENUE,
 )
 _TERMINAL_EXPORT_JOB_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+_CONNECTOR_SMART_ALERT_CODES = frozenset({"CONNECTOR_RUNS_FAILED", "SOURCE_ROWS_SKIPPED"})
 
 
 @dataclass(frozen=True)
@@ -1578,45 +1579,15 @@ def _record_finance_export_artifact_audit(
     # /audit/events redaction-on-use pattern and the get_month_smart_alerts
     # self-audit so an export generated with VIEW_AUDIT_LOG leaves an audit
     # trail of its audit-derived read.
-    audit_scope = AccessScope.global_scope()
-    if audit_summary is not None and has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
-        connector_alert_codes = sorted(
-            alert.code
-            for alert in audit_summary.alerts
-            if alert.code in {"CONNECTOR_RUNS_FAILED", "SOURCE_ROWS_SKIPPED"}
+    audit_records.extend(
+        _finance_export_connector_smart_alert_audit_records(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            artifact_type=artifact_type,
+            audit_summary=audit_summary,
         )
-        returned = bool(connector_alert_codes)
-        source_rows_skipped_returned = "SOURCE_ROWS_SKIPPED" in connector_alert_codes
-        connector_runs_failed_returned = "CONNECTOR_RUNS_FAILED" in connector_alert_codes
-        details_redacted = source_rows_skipped_returned and not has_permission(
-            user,
-            Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
-            audit_scope,
-        )
-        audit_records.append(
-            record_audit_event(
-                sink=audit_sink,
-                actor=user,
-                event_type=AuditEventType.AUDIT_LOG_VIEWED,
-                entity_type="audit_log_page",
-                entity_id=f"{export_job.id}:connector_smart_alerts",
-                scope=audit_scope,
-                details={
-                    "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
-                    "entity_type": "finance_export",
-                    "entity_id": export_job.id,
-                    "month": export_job.month,
-                    "scope_type": export_job.scope_type,
-                    "scope_id": export_job.scope_id,
-                    "artifact_type": artifact_type,
-                    "connector_alert_codes": connector_alert_codes,
-                    "returned": 1 if returned else 0,
-                    "source_rows_skipped_returned": 1 if source_rows_skipped_returned else 0,
-                    "connector_runs_failed_returned": 1 if connector_runs_failed_returned else 0,
-                    "details_redacted": details_redacted,
-                },
-            )
-        )
+    )
     if include_download_event:
         audit_records.append(
             record_audit_event(
@@ -1630,6 +1601,87 @@ def _record_finance_export_artifact_audit(
             )
         )
     return audit_records
+
+
+# ============================================================================
+# Purpose: Emit optional AUDIT_LOG_VIEWED self-audit records for finance export
+#   connector smart-alert reads while keeping export audit orchestration narrow.
+# Database/ORM: AuditSink append only; no direct SQLAlchemy reads.
+# Standards: Preserves VIEW_AUDIT_LOG gating and sensitive skipped-row redaction.
+# Blast Radius: Finance export audit trail only.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> source summary
+#     alert codes used to summarize connector-backed audit-derived reads.
+# ============================================================================
+def _finance_export_connector_smart_alert_audit_records(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    export_job: ExportJobEntry,
+    artifact_type: str,
+    audit_summary: MonthlySmartAlertSummary | None,
+) -> tuple[AuditRecord, ...]:
+    """Return the optional export self-audit record for connector smart-alert reads."""
+    audit_scope = AccessScope.global_scope()
+    if audit_summary is None or not has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
+        return ()
+    connector_alert_codes = _connector_smart_alert_codes(audit_summary)
+    return (
+        record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.AUDIT_LOG_VIEWED,
+            entity_type="audit_log_page",
+            entity_id=f"{export_job.id}:connector_smart_alerts",
+            scope=audit_scope,
+            details=_finance_export_connector_smart_alert_audit_details(
+                user=user,
+                export_job=export_job,
+                artifact_type=artifact_type,
+                audit_scope=audit_scope,
+                connector_alert_codes=connector_alert_codes,
+            ),
+        ),
+    )
+
+
+def _connector_smart_alert_codes(audit_summary: MonthlySmartAlertSummary) -> list[str]:
+    """Return sorted connector-backed smart-alert codes from an export summary."""
+    return sorted(
+        alert.code for alert in audit_summary.alerts if alert.code in _CONNECTOR_SMART_ALERT_CODES
+    )
+
+
+def _finance_export_connector_smart_alert_audit_details(
+    *,
+    user: UserPrincipal,
+    export_job: ExportJobEntry,
+    artifact_type: str,
+    audit_scope: AccessScope,
+    connector_alert_codes: list[str],
+) -> dict[str, object]:
+    """Build stable audit details for finance export connector-alert reads."""
+    source_rows_skipped_returned = "SOURCE_ROWS_SKIPPED" in connector_alert_codes
+    connector_runs_failed_returned = "CONNECTOR_RUNS_FAILED" in connector_alert_codes
+    details_redacted = source_rows_skipped_returned and not has_permission(
+        user,
+        Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
+        audit_scope,
+    )
+    return {
+        "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
+        "entity_type": "finance_export",
+        "entity_id": export_job.id,
+        "month": export_job.month,
+        "scope_type": export_job.scope_type,
+        "scope_id": export_job.scope_id,
+        "artifact_type": artifact_type,
+        "connector_alert_codes": connector_alert_codes,
+        "returned": int(bool(connector_alert_codes)),
+        "source_rows_skipped_returned": int(source_rows_skipped_returned),
+        "connector_runs_failed_returned": int(connector_runs_failed_returned),
+        "details_redacted": details_redacted,
+    }
 
 
 def _artifact_metadata_audit_details(export_job: ExportJobEntry) -> dict[str, object]:

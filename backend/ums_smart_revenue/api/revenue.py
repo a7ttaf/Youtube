@@ -1288,38 +1288,74 @@ def get_month_smart_alerts(
     # surfaced data AND the caller lacks VIEW_SENSITIVE_AUDIT_PAYLOADS.
     audit_records = [revenue_record, payment_record, bank_record]
     if can_view_audit_log:
-        details_redacted = (
-            audit_signals.skipped_source_row_count > 0 and not include_sensitive_details
-        )
-        connector_signal_returned = (
-            audit_signals.skipped_source_row_count > 0
-            or audit_signals.failed_connector_run_count > 0
-        )
         audit_records.append(
-            record_audit_event(
-                sink=audit_sink,
-                actor=user,
-                event_type=AuditEventType.AUDIT_LOG_VIEWED,
-                entity_type="audit_log_page",
-                entity_id=f"{month}:connector_smart_alerts",
-                scope=audit_scope,
-                details={
-                    "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
-                    "entity_type": "monthly_smart_alerts",
-                    "entity_id": month,
-                    "returned": 1 if connector_signal_returned else 0,
-                    "source_rows_skipped_returned": (
-                        1 if audit_signals.skipped_source_row_count > 0 else 0
-                    ),
-                    "connector_runs_failed_returned": (
-                        1 if audit_signals.failed_connector_run_count > 0 else 0
-                    ),
-                    "details_redacted": details_redacted,
-                },
+            _record_month_connector_smart_alert_audit(
+                audit_sink=audit_sink,
+                user=user,
+                month=month,
+                audit_scope=audit_scope,
+                audit_signals=audit_signals,
+                include_sensitive_details=include_sensitive_details,
             )
         )
     summary_api["audit_events"] = [audit_record_to_api(r) for r in audit_records]
     return summary_api
+
+
+# ============================================================================
+# Purpose: Emit the AUDIT_LOG_VIEWED self-audit for connector-backed monthly
+#   smart-alert reads without adding branch-heavy bookkeeping to the route.
+# Database/ORM: AuditSink append only; no direct SQLAlchemy reads.
+# Standards: Caller has already passed VIEW_AUDIT_LOG; details preserve the
+#   same redaction and returned flags as get_month_smart_alerts.
+# Blast Radius: Finance dashboard audit trail only.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> provides the
+#     connector-backed smart-alert aggregate counts used in the audit details.
+# ============================================================================
+def _record_month_connector_smart_alert_audit(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    month: str,
+    audit_scope: AccessScope,
+    audit_signals: MonthlySmartAlertAuditSignals,
+    include_sensitive_details: bool,
+) -> AuditRecord:
+    """Record that a monthly smart-alert response read connector audit signals."""
+    return record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.AUDIT_LOG_VIEWED,
+        entity_type="audit_log_page",
+        entity_id=f"{month}:connector_smart_alerts",
+        scope=audit_scope,
+        details=_month_connector_smart_alert_audit_details(
+            month=month,
+            audit_signals=audit_signals,
+            include_sensitive_details=include_sensitive_details,
+        ),
+    )
+
+
+def _month_connector_smart_alert_audit_details(
+    *,
+    month: str,
+    audit_signals: MonthlySmartAlertAuditSignals,
+    include_sensitive_details: bool,
+) -> dict[str, object]:
+    """Build stable audit details for connector-backed smart-alert reads."""
+    source_rows_skipped_returned = audit_signals.skipped_source_row_count > 0
+    connector_runs_failed_returned = audit_signals.failed_connector_run_count > 0
+    return {
+        "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
+        "entity_type": "monthly_smart_alerts",
+        "entity_id": month,
+        "returned": int(source_rows_skipped_returned or connector_runs_failed_returned),
+        "source_rows_skipped_returned": int(source_rows_skipped_returned),
+        "connector_runs_failed_returned": int(connector_runs_failed_returned),
+        "details_redacted": source_rows_skipped_returned and not include_sensitive_details,
+    }
 
 
 # ============================================================================
