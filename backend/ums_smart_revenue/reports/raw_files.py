@@ -1,11 +1,10 @@
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Protocol, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
-from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -20,6 +19,10 @@ ALLOWED_PARSE_STATUSES = frozenset({"DOWNLOADED", "PARSED", "FAILED", "QUARANTIN
 ALLOWED_STORAGE_PREFIXES = ("s3://", "gs://", "azure://", "blob://", "file-store://")
 MAX_RAW_REPORT_FILE_PAGE_SIZE = 100
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
+
+
+class _RowCountResult(Protocol):
+    rowcount: int
 
 
 @dataclass(frozen=True)
@@ -206,7 +209,7 @@ class SqlAlchemyRawReportFileRepository:
         actor_uuid = _actor_identity_uuid(actor_user_id)
         now = datetime.now(UTC)
         result = cast(
-            CursorResult[Any],
+            _RowCountResult,
             self._session.execute(
                 update(RawReportFileORM)
                 .where(
