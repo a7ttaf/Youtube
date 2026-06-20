@@ -658,6 +658,72 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     assert source_rows[0].raw_file_id == raw_files[0].id
 
 
+def test_run_one_marks_missing_youtube_reporting_report_as_failed(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A configured YouTube job with no monthly report must finish FAILED."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = []
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.counts["reports_attempted"] == 1
+    assert outcome.counts["reports_succeeded"] == 0
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.counts["rows_upserted_total"] == 0
+    assert outcome.per_report_failures == [("channel_basic_a2", "GoogleApiResponseError")]
+
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
+    assert run_row is not None
+    assert run_row.status == "FAILED"
+    assert run_row.error_summary is not None
+    assert "GoogleApiResponseError" in run_row.error_summary
+    assert "missing YouTube Reporting report for 2026-05" in run_row.error_summary
+    assert local_cls.return_value.upload.call_count == 0
+    assert (
+        session.scalar(select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID))
+        is None
+    )
+    assert (
+        session.scalar(
+            select(GoogleRevenueSourceRowORM).where(
+                GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+            )
+        )
+        is None
+    )
+
+
 def test_run_one_reuses_raw_file_inserted_by_racing_worker(
     session: Session, _stub_secret_resolver, monkeypatch: pytest.MonkeyPatch
 ) -> None:

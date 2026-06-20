@@ -9,7 +9,7 @@
 #   negative thresholds/counts at the boundary; preserves reason totals
 #   deterministically; keeps highest_severity == None when no alerts fire.
 # Blast Radius: Finance dashboard read surface (no auth, no money, no Neo4j).
-#   Adds the SOURCE_ROWS_SKIPPED alert code for connector normalization drops.
+#   Adds connector-backed alert codes for normalization drops and failed runs.
 # Connections:
 #   - File: backend/ums_smart_revenue/api/revenue.py -> pre-reads coverage and
 #     audit-derived inputs and calls build_monthly_smart_alert_summary.
@@ -83,13 +83,14 @@ class MonthlySmartAlertSummary:
 # ============================================================================
 # Purpose: Compose the dashboard smart-alert list for one finance month from
 #   pre-aggregated cross-domain inputs (payment match, bank reconciliation,
-#   coverage gap, audit-derived skipped rows, overrides, MoM revenue anomaly,
-#   close status). Each per-alert helper is a pure function returning the alert
-#   or None, so this builder only orders and ranks them.
+#   coverage gap, audit-derived skipped rows, audit-derived failed connector
+#   runs, overrides, MoM revenue anomaly, close status). Each per-alert helper
+#   is a pure function returning the alert or None, so this builder only orders
+#   and ranks them.
 # Database/ORM: None (pure).
 # Standards: Boundary validation rejects negative thresholds and counts;
 #   deterministically orders alerts; assigns the highest severity from the
-#   produced set; preserves reason totals for SOURCE_ROWS_SKIPPED.
+#   produced set; preserves reason/status totals for connector-backed alerts.
 # Blast Radius: Finance dashboard read surface. No auth, no money, no Neo4j.
 #   Adding/changing an alert code is an API contract change — keep wire-stable.
 # Connections:
@@ -108,6 +109,8 @@ def build_monthly_smart_alert_summary(
     missing_revenue_fact_channel_sample: Sequence[str] = (),
     skipped_source_row_count: int = 0,
     skipped_source_rows_by_reason: Mapping[str, int] | None = None,
+    failed_connector_run_count: int = 0,
+    failed_connector_runs_by_status: Mapping[str, int] | None = None,
     current_revenue_facts: Iterable[RevenueFactEntry] = (),
     previous_revenue_facts: Iterable[RevenueFactEntry] = (),
     high_gap_threshold_usd: Decimal = DEFAULT_HIGH_GAP_THRESHOLD_USD,
@@ -133,6 +136,12 @@ def build_monthly_smart_alert_summary(
         count < 0 for count in skipped_source_rows_by_reason.values()
     ):
         raise ValueError("skipped_source_rows_by_reason counts must be non-negative")
+    if failed_connector_run_count < 0:
+        raise ValueError("failed_connector_run_count must be non-negative")
+    if failed_connector_runs_by_status is not None and any(
+        count < 0 for count in failed_connector_runs_by_status.values()
+    ):
+        raise ValueError("failed_connector_runs_by_status counts must be non-negative")
     normalized_close_status = close_status or "OPEN"
     overrides = list(manual_overrides)
 
@@ -152,6 +161,11 @@ def build_monthly_smart_alert_summary(
             month,
             skipped_source_row_count,
             skipped_source_rows_by_reason,
+        ),
+        lambda: _connector_runs_failed_alert(
+            month,
+            failed_connector_run_count,
+            failed_connector_runs_by_status,
         ),
         lambda: _payment_not_matched_alert(month, payment_match),
         lambda: _bank_reconciliation_alert(month, bank_reconciliation),
@@ -285,6 +299,58 @@ def _source_rows_skipped_alert(
         details={
             "skipped_count": effective_count,
             "skipped_by_reason": reason_counts,
+        },
+    )
+
+
+# ============================================================================
+# Purpose: Surface connector runs whose latest terminal audit edge for a month
+#   is FAILED or PARTIAL. This catches missing upstream reports and per-report
+#   failures even when no source rows were normalized.
+# Database/ORM: None (pure; count + status totals are pre-read by the API).
+# Standards: Preserve status counts, omit zero-count statuses, and reconcile
+#   total vs breakdown via max() so legacy/malformed audit rows cannot produce
+#   internally inconsistent details.
+# Blast Radius: Finance dashboard read surface only; audit-derived signal.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/audit.py -> emits
+#     CONNECTOR_JOB_RUN/FINISHED audit edges with status and report_month.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> aggregates latest
+#     terminal connector-run audit edges into this pure builder input.
+# ============================================================================
+def _connector_runs_failed_alert(
+    month: str,
+    count: int,
+    failed_by_status: Mapping[str, int] | None,
+) -> MonthlySmartAlert | None:
+    status_counts = {
+        status: status_count
+        for status, status_count in sorted((failed_by_status or {}).items())
+        if status_count > 0
+    }
+    statuses_total = sum(status_counts.values())
+    if count > 0 and statuses_total > 0:
+        effective_count = max(count, statuses_total)
+    elif count > 0:
+        effective_count = count
+    elif statuses_total > 0:
+        effective_count = statuses_total
+    else:
+        effective_count = 0
+    if effective_count <= 0:
+        return None
+    return MonthlySmartAlert(
+        code="CONNECTOR_RUNS_FAILED",
+        severity="HIGH",
+        message=(
+            f"{effective_count} connector run(s) failed or partially failed "
+            f"for {month}."
+        ),
+        source="connector_job_run",
+        confidence="E_MISSING",
+        details={
+            "failed_run_count": effective_count,
+            "failed_by_status": status_counts,
         },
     )
 

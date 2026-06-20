@@ -240,14 +240,15 @@ source-of-truth data already stored by the backend: monthly revenue facts,
 approved/pending manual overrides, official AdSense payment metadata,
 finance-entered bank reconciliation receipt rows, finance month-close state,
 and finance-month-scoped connector audit edges for projection-skipped source
-rows. It requires global `finance.view_revenue`, global
+rows plus connector-scoped terminal run audit edges for failed or partial
+upstream runs. It requires global `finance.view_revenue`, global
 `analytics.view_confidence`, `finance.view_finalized_payments` for the requested
 finance-month scope, and `finance.view_bank_reconciliation` for the requested
 finance-month scope. The response includes alert codes such as
 `MISSING_REVENUE_SOURCE`, `CHANNELS_MISSING_REVENUE_FACTS`,
-`SOURCE_ROWS_SKIPPED`, `PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`,
-`UNEXPLAINED_GAP_HIGH`, `REVENUE_TREND_ANOMALY`, `MONTH_NOT_LOCKED`, and
-`MANUAL_OVERRIDE_USED`.
+`SOURCE_ROWS_SKIPPED`, `CONNECTOR_RUNS_FAILED`, `PAYMENT_NOT_MATCHED`,
+`BANK_AMOUNT_MISSING`, `UNEXPLAINED_GAP_HIGH`, `REVENUE_TREND_ANOMALY`,
+`MONTH_NOT_LOCKED`, and `MANUAL_OVERRIDE_USED`.
 `CHANNELS_MISSING_REVENUE_FACTS` flags active, revenue-required channels that
 have no revenue fact for the month (per-channel coverage, distinct from the
 month-level `MISSING_REVENUE_SOURCE`); its details report `channel_count` and a
@@ -261,7 +262,14 @@ redaction rule applied to `/audit/events`. The latest
 `CONNECTOR_JOB_RUN` audit edge with `lifecycle=ROWS_SKIPPED` for the requested
 finance month is the only signal consumed; historical or re-run edges do not
 compound, and `skipped_count` is reconciled against `sum(skipped_by_reason)`
-via `max()` so the details are internally consistent. `REVENUE_TREND_ANOMALY` compares
+via `max()` so the details are internally consistent.
+`CONNECTOR_RUNS_FAILED` is also gated on global `audit.view` and is omitted
+without that permission. It derives from the latest `CONNECTOR_JOB_RUN`
+`lifecycle=FINISHED` audit edge per `(connector_key, account_id)` for the
+requested month and reports `failed_run_count` plus `failed_by_status` for
+latest `FAILED` or `PARTIAL` runs; a later `SUCCEEDED` terminal edge for the
+same connector/account clears older failure history. No connector error summary
+or raw payload is returned by this alert. `REVENUE_TREND_ANOMALY` compares
 each channel's selected primary current-month SQL revenue fact with the
 selected primary previous-month
 SQL revenue fact and reports only channel ids plus current/prior gross revenue

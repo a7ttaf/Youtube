@@ -30,6 +30,7 @@ from ums_smart_revenue.api.dependencies import (
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import (
     current_org_access_index,
+    failed_connector_run_count_and_statuses,
     missing_revenue_fact_channel_count_and_sample,
     skipped_source_row_count_and_reasons,
 )
@@ -1349,13 +1350,15 @@ def _build_finance_source_summaries_for_export(
         month=export_job.month,
         youtube_channel_ids=channel_ids,
     )
-    # FIX: preview may surface the audit-derived skipped-row signal, but
-    # persisted downloadable bytes must stay permission-invariant. Scoped
-    # exports suppress this tenant-wide audit signal until source rows can be
-    # tied to the export's frozen channel set.
+    # FIX: preview may surface audit-derived connector smart-alert signals,
+    # but persisted downloadable bytes must stay permission-invariant. Scoped
+    # exports suppress these tenant-wide audit signals until source rows and
+    # connector runs can be tied to the export's frozen channel set.
     audit_scope = AccessScope.global_scope()
     skipped_source_row_count: int
     skipped_source_rows_by_reason: dict[str, int]
+    failed_connector_run_count: int
+    failed_connector_runs_by_status: dict[str, int]
     if (
         include_audit_derived_alerts
         and channel_ids is None
@@ -1371,9 +1374,14 @@ def _build_finance_source_summaries_for_export(
                 include_sensitive_details=include_sensitive_details,
             )
         )
+        failed_connector_run_count, failed_connector_runs_by_status = (
+            failed_connector_run_count_and_statuses(session, month=export_job.month)
+        )
     else:
         skipped_source_row_count = 0
         skipped_source_rows_by_reason = {}
+        failed_connector_run_count = 0
+        failed_connector_runs_by_status = {}
     smart_alerts = build_monthly_smart_alert_summary(
         month=export_job.month,
         payment_match=payment_match,
@@ -1384,6 +1392,8 @@ def _build_finance_source_summaries_for_export(
         missing_revenue_fact_channel_sample=missing_fact_channel_sample,
         skipped_source_row_count=skipped_source_row_count,
         skipped_source_rows_by_reason=skipped_source_rows_by_reason,
+        failed_connector_run_count=failed_connector_run_count,
+        failed_connector_runs_by_status=failed_connector_runs_by_status,
         current_revenue_facts=facts,
         previous_revenue_facts=previous_facts,
     )
@@ -1514,20 +1524,25 @@ def _record_finance_export_artifact_audit(
             )
         )
     # FIX: Record an AUDIT_LOG_VIEWED self-audit when the export builder reads
-    # audit_logs to derive the SOURCE_ROWS_SKIPPED alert. Mirrors the
+    # audit_logs to derive connector-backed smart alerts. Mirrors the
     # /audit/events redaction-on-use pattern and the get_month_smart_alerts
     # self-audit so an export generated with VIEW_AUDIT_LOG leaves an audit
     # trail of its audit-derived read.
     audit_scope = AccessScope.global_scope()
     if audit_summary is not None and has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
-        returned = any(alert.code == "SOURCE_ROWS_SKIPPED" for alert in audit_summary.alerts)
+        connector_alert_codes = sorted(
+            alert.code
+            for alert in audit_summary.alerts
+            if alert.code in {"CONNECTOR_RUNS_FAILED", "SOURCE_ROWS_SKIPPED"}
+        )
+        returned = bool(connector_alert_codes)
         audit_records.append(
             record_audit_event(
                 sink=audit_sink,
                 actor=user,
                 event_type=AuditEventType.AUDIT_LOG_VIEWED,
                 entity_type="audit_log_page",
-                entity_id=f"{export_job.id}:skipped_source_rows",
+                entity_id=f"{export_job.id}:connector_smart_alerts",
                 scope=audit_scope,
                 details={
                     "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
@@ -1537,6 +1552,7 @@ def _record_finance_export_artifact_audit(
                     "scope_type": export_job.scope_type,
                     "scope_id": export_job.scope_id,
                     "artifact_type": artifact_type,
+                    "connector_alert_codes": connector_alert_codes,
                     "returned": 1 if returned else 0,
                     "details_redacted": returned
                     and not has_permission(

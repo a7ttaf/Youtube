@@ -223,6 +223,47 @@ def test_smart_alerts_flag_skipped_source_rows():
     }
 
 
+def test_smart_alerts_flag_failed_connector_runs():
+    summary = build_alerts(
+        skipped_source_row_count=1,
+        skipped_source_rows_by_reason={"unknown_channel": 1},
+        failed_connector_run_count=2,
+        failed_connector_runs_by_status={
+            "PARTIAL": 1,
+            "FAILED": 1,
+        },
+    )
+
+    codes = [alert.code for alert in summary.alerts]
+    assert codes.index("CONNECTOR_RUNS_FAILED") == (codes.index("SOURCE_ROWS_SKIPPED") + 1)
+    assert codes.index("CONNECTOR_RUNS_FAILED") < codes.index("PAYMENT_NOT_MATCHED")
+    failed_alert = next(
+        (alert for alert in summary.alerts if alert.code == "CONNECTOR_RUNS_FAILED"),
+        None,
+    )
+    assert failed_alert is not None, "expected CONNECTOR_RUNS_FAILED alert"
+    assert failed_alert.severity == "HIGH"
+    assert failed_alert.confidence == "E_MISSING"
+    assert failed_alert.source == "connector_job_run"
+    assert failed_alert.details == {
+        "failed_run_count": 2,
+        "failed_by_status": {
+            "FAILED": 1,
+            "PARTIAL": 1,
+        },
+    }
+
+
+def test_smart_alerts_omit_failed_connector_runs_when_empty():
+    summary = build_alerts(
+        failed_connector_run_count=0,
+        failed_connector_runs_by_status={},
+    )
+
+    codes = [alert.code for alert in summary.alerts]
+    assert "CONNECTOR_RUNS_FAILED" not in codes
+
+
 def test_smart_alerts_omit_skipped_source_rows_when_empty():
     summary = build_alerts(
         skipped_source_row_count=0,
@@ -245,6 +286,20 @@ def test_smart_alerts_reject_negative_skipped_source_row_inputs():
         match="skipped_source_rows_by_reason counts must be non-negative",
     ):
         build_alerts(skipped_source_rows_by_reason={"unknown_channel": -1})
+
+
+def test_smart_alerts_reject_negative_failed_connector_run_inputs():
+    with pytest.raises(
+        ValueError,
+        match="failed_connector_run_count must be non-negative",
+    ):
+        build_alerts(failed_connector_run_count=-1)
+
+    with pytest.raises(
+        ValueError,
+        match="failed_connector_runs_by_status counts must be non-negative",
+    ):
+        build_alerts(failed_connector_runs_by_status={"FAILED": -1})
 
 
 def test_smart_alerts_reject_negative_missing_channel_count():

@@ -89,6 +89,7 @@ from ums_smart_revenue.connectors.google.errors import (
     BlobStorageConfigurationError,
     ConnectorServicePrincipalUnavailableError,
     CredentialNotFoundError,
+    GoogleApiResponseError,
     GoogleConnectorError,
     InactiveCredentialError,
     OAuthRefreshError,
@@ -2337,6 +2338,11 @@ def _produce_youtube_job_report(
     )
     if isinstance(reports, ProducedReportFailure):
         return reports
+    if not reports:
+        return _missing_youtube_report_failure(
+            report_type=report_type,
+            report_month=report_month,
+        )
     return _build_youtube_report_success(
         client=client,
         reports=reports,
@@ -2365,6 +2371,35 @@ def _list_youtube_reports_for_job(
         raise
     except GoogleConnectorError as exc:
         return ProducedReportFailure(report_type=report_type, error=exc)
+
+
+# ============================================================================
+# Purpose: Convert an empty YouTube Reporting report list into an explicit
+#   per-report failure so a configured job that produces no monthly report is
+#   visible in connector run status and downstream smart-alert audit signals.
+# Database/ORM: None.
+# Standards: Typed GoogleApiResponseError with a sanitized synthetic URL; no
+#   report listing URL, credential, or upstream payload is exposed.
+# Blast Radius: YouTube Reporting connector run status only. No finance rows,
+#   raw files, or parser behavior change because there is no report to ingest.
+# Connections:
+#   - Function: _produce_youtube_job_report -> calls this before parser handoff.
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> failed runs
+#     emitted by the live path can surface as CONNECTOR_RUNS_FAILED.
+# ============================================================================
+def _missing_youtube_report_failure(
+    *,
+    report_type: str,
+    report_month: str,
+) -> ProducedReportFailure:
+    """Return a safe per-report failure for an expected but missing report list."""
+    return ProducedReportFailure(
+        report_type=report_type,
+        error=GoogleApiResponseError(
+            url="<youtube-reporting-report-list>",
+            reason=f"missing YouTube Reporting report for {report_month}",
+        ),
+    )
 
 
 def _build_youtube_report_success(

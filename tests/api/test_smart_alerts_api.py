@@ -487,6 +487,138 @@ def test_month_smart_alerts_clear_stale_skipped_source_after_clean_rerun(tmp_pat
     assert audit_reads[0].details["details_redacted"] is False
 
 
+def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
+    """Latest FINISHED connector/account edges surface failed connector runs."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    tenant_id = UUID(UMS_TENANT_ID)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-youtube-old-failed",
+                    scope_type="connector",
+                    scope_id="youtube-reporting",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "youtube-reporting",
+                        "account_id": "content-owner-1",
+                        "report_month": "2026-03",
+                        "status": "FAILED",
+                        "counts": {"reports_failed": 1},
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 1, tzinfo=UTC),
+                ),
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-youtube-clean",
+                    scope_type="connector",
+                    scope_id="youtube-reporting",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "youtube-reporting",
+                        "account_id": "content-owner-1",
+                        "report_month": "2026-03",
+                        "status": "SUCCEEDED",
+                        "counts": {"reports_succeeded": 1},
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 2, tzinfo=UTC),
+                ),
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-adsense-partial",
+                    scope_type="connector",
+                    scope_id="adsense-management",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "adsense-management",
+                        "account_id": "pub-1",
+                        "report_month": "2026-03",
+                        "status": "PARTIAL",
+                        "counts": {"reports_failed": 1, "reports_succeeded": 2},
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 3, tzinfo=UTC),
+                ),
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-other-month-failed",
+                    scope_type="connector",
+                    scope_id="youtube-reporting",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "youtube-reporting",
+                        "account_id": "content-owner-1",
+                        "report_month": "2026-02",
+                        "status": "FAILED",
+                        "counts": {"reports_failed": 1},
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 4, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_approver", "global"),
+    )
+
+    assert response.status_code == 200
+    codes = [alert["code"] for alert in response.json()["alerts"]]
+    assert codes.index("CONNECTOR_RUNS_FAILED") < codes.index("PAYMENT_NOT_MATCHED")
+    failed = next(
+        (
+            alert
+            for alert in response.json()["alerts"]
+            if alert["code"] == "CONNECTOR_RUNS_FAILED"
+        ),
+        None,
+    )
+    assert failed is not None
+    assert failed["severity"] == "HIGH"
+    assert failed["source"] == "connector_job_run"
+    assert failed["details"] == {
+        "failed_run_count": 1,
+        "failed_by_status": {"PARTIAL": 1},
+    }
+    with Session(engine) as session:
+        audit_reads = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+        ).all()
+    assert len(audit_reads) == 1
+    assert audit_reads[0].details["returned"] == 1
+    assert audit_reads[0].details["source_rows_skipped_returned"] == 0
+    assert audit_reads[0].details["connector_runs_failed_returned"] == 1
+    assert audit_reads[0].details["details_redacted"] is False
+
+
 def test_month_smart_alerts_omit_skipped_source_alert_without_audit_permission(
     tmp_path,
 ):
@@ -496,25 +628,47 @@ def test_month_smart_alerts_omit_skipped_source_alert_without_audit_permission(
     engine = create_engine(database_url)
     tenant_id = UUID(UMS_TENANT_ID)
     with Session(engine) as session:
-        session.add(
-            AuditLogORM(
-                id=uuid4(),
-                tenant_id=tenant_id,
-                user_id=USER_ID,
-                event_type="CONNECTOR_JOB_RUN",
-                entity_type="connector_run",
-                entity_id="run-skipped-only",
-                scope_type="finance-month",
-                scope_id="2026-03",
-                reason="connector normalize: source rows skipped during projection",
-                details={
-                    "lifecycle": "ROWS_SKIPPED",
-                    "skipped_count": 5,
-                    "skipped_by_reason": {"unknown_channel": 5},
-                },
-                sensitive=True,
-                created_at=datetime(2026, 4, 2, tzinfo=UTC),
-            )
+        session.add_all(
+            [
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-skipped-only",
+                    scope_type="finance-month",
+                    scope_id="2026-03",
+                    reason="connector normalize: source rows skipped during projection",
+                    details={
+                        "lifecycle": "ROWS_SKIPPED",
+                        "skipped_count": 5,
+                        "skipped_by_reason": {"unknown_channel": 5},
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 2, tzinfo=UTC),
+                ),
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-failed-only",
+                    scope_type="connector",
+                    scope_id="youtube-reporting",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "youtube-reporting",
+                        "account_id": "content-owner-1",
+                        "report_month": "2026-03",
+                        "status": "FAILED",
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 3, tzinfo=UTC),
+                ),
+            ]
         )
         session.commit()
     client = TestClient(create_app(database_url=database_url))
@@ -527,6 +681,7 @@ def test_month_smart_alerts_omit_skipped_source_alert_without_audit_permission(
     assert response.status_code == 200
     codes = [alert["code"] for alert in response.json()["alerts"]]
     assert "SOURCE_ROWS_SKIPPED" not in codes
+    assert "CONNECTOR_RUNS_FAILED" not in codes
     with Session(engine) as session:
         audit_reads = session.scalars(
             select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")

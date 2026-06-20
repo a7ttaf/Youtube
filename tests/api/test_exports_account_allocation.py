@@ -213,6 +213,34 @@ def _seed_skipped_source_row_audit_edge(session) -> None:
     session.commit()
 
 
+def _seed_failed_connector_run_audit_edge(session) -> None:
+    """Seed a current FINISHED/PARTIAL connector-run audit edge for the export month."""
+    session.add(
+        AuditLogORM(
+            id=uuid4(),
+            tenant_id=TENANT,
+            user_id=None,
+            event_type="CONNECTOR_JOB_RUN",
+            entity_type="connector_run",
+            entity_id="run-partial",
+            scope_type="connector",
+            scope_id="youtube-reporting",
+            reason="connector finished",
+            details={
+                "lifecycle": "FINISHED",
+                "connector_key": "youtube-reporting",
+                "account_id": "content-owner-1",
+                "report_month": MONTH,
+                "status": "PARTIAL",
+                "counts": {"reports_failed": 1, "reports_succeeded": 2},
+            },
+            sensitive=True,
+            created_at=datetime(2026, 4, 3, tzinfo=UTC),
+        )
+    )
+    session.commit()
+
+
 def _seed_out_of_scope_account_allocation(session):
     """A second channel ("chB") with gross but no source net + an ACCOUNT
     deduction mapped to it via a VERIFIED link. It is outside a chA-scoped
@@ -351,12 +379,44 @@ def test_global_export_preview_includes_skipped_source_alert_for_audit_user(tmp_
     }
 
 
+def test_global_export_preview_includes_failed_connector_run_alert_for_audit_user(
+    tmp_path,
+):
+    """Global preview can surface latest failed connector-run audit signals."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        _seed_failed_connector_run_audit_edge(session)
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(include_audit=True),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+
+    failed = next(
+        (
+            alert
+            for alert in summaries.smart_alerts.alerts
+            if alert.code == "CONNECTOR_RUNS_FAILED"
+        ),
+        None,
+    )
+    assert failed is not None
+    assert failed.details == {
+        "failed_run_count": 1,
+        "failed_by_status": {"PARTIAL": 1},
+    }
+
+
 def test_scoped_export_suppresses_tenant_wide_skipped_source_alert(tmp_path):
     """Scoped exports must not leak tenant-wide skipped-row audit signals."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed_missing_net_with_components(session)
         _seed_skipped_source_row_audit_edge(session)
+        _seed_failed_connector_run_audit_edge(session)
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
             user=_test_export_user(include_audit=True),
@@ -365,7 +425,9 @@ def test_scoped_export_suppresses_tenant_wide_skipped_source_alert(tmp_path):
             group_registry=ChannelGroupRegistry(),
         )
 
-    assert "SOURCE_ROWS_SKIPPED" not in {alert.code for alert in summaries.smart_alerts.alerts}
+    codes = {alert.code for alert in summaries.smart_alerts.alerts}
+    assert "SOURCE_ROWS_SKIPPED" not in codes
+    assert "CONNECTOR_RUNS_FAILED" not in codes
 
 
 def test_persisted_artifact_source_summary_is_permission_invariant(tmp_path):
@@ -374,6 +436,7 @@ def test_persisted_artifact_source_summary_is_permission_invariant(tmp_path):
     with Session(engine) as session:
         _seed_missing_net_with_components(session)
         _seed_skipped_source_row_audit_edge(session)
+        _seed_failed_connector_run_audit_edge(session)
         summaries = _build_finance_source_summaries_for_export(
             export_job=_export_job(scope_type="global", scope_channel_ids=None),
             user=_test_export_user(include_audit=True, include_sensitive=True),
@@ -383,7 +446,9 @@ def test_persisted_artifact_source_summary_is_permission_invariant(tmp_path):
             include_audit_derived_alerts=False,
         )
 
-    assert "SOURCE_ROWS_SKIPPED" not in {alert.code for alert in summaries.smart_alerts.alerts}
+    codes = {alert.code for alert in summaries.smart_alerts.alerts}
+    assert "SOURCE_ROWS_SKIPPED" not in codes
+    assert "CONNECTOR_RUNS_FAILED" not in codes
 
 
 def _commit_snapshot_and_lock(session):
