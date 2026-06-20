@@ -153,11 +153,18 @@ def build_monthly_smart_alert_summary(
     trend_signals: MonthlySmartAlertTrendSignals = _DEFAULT_TREND_SIGNALS,
     thresholds: MonthlySmartAlertThresholds = _DEFAULT_THRESHOLDS,
 ) -> MonthlySmartAlertSummary:
-    """Build a monthly smart alert summary from finance signal inputs.
+    """Build a monthly smart alert summary from pre-aggregated signal groups.
 
-    The coverage alert takes a (count, sample) pair instead of a full id
-    list so the route can bound the read at the SQL LIMIT clause. The
-    alert details keep the same wire shape (channel_count + sample_channel_ids).
+    Args:
+        month: Finance month in ``YYYY-MM`` format.
+        finance: Payment, bank, close-status, and manual-override inputs.
+        audit_signals: Coverage and connector-audit inputs, including the
+            bounded missing-channel sample used by the coverage alert.
+        trend_signals: Current and previous revenue facts for trend analysis.
+        thresholds: Non-negative gap and trend thresholds.
+
+    Returns:
+        The alert summary ordered by the canonical alert priority sequence.
     """
     _validate_monthly_smart_alert_inputs(
         thresholds=thresholds,
