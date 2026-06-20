@@ -206,7 +206,7 @@ class SqlAlchemyRawReportFileRepository:
         actor_uuid = _actor_identity_uuid(actor_user_id)
         now = datetime.now(UTC)
         result = cast(
-            "CursorResult[Any]",
+            CursorResult[Any],
             self._session.execute(
                 update(RawReportFileORM)
                 .where(
