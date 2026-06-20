@@ -693,10 +693,8 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     assert source_rows[0].raw_file_id == raw_files[0].id
 
 
-def test_run_one_marks_missing_youtube_reporting_report_as_failed(
-    session: Session, _stub_secret_resolver
-) -> None:
-    """A configured YouTube job with no monthly report must finish FAILED."""
+def _run_missing_youtube_reporting_report(session: Session) -> tuple[ConnectorRunOutcome, int]:
+    """Run the no-report YouTube path and return the outcome plus upload calls."""
     _make_credential_row(
         session,
         tenant_id=TENANT_ID,
@@ -730,6 +728,14 @@ def test_run_one_marks_missing_youtube_reporting_report_as_failed(
         )
 
     assert isinstance(outcome, ConnectorRunOutcome)
+    return outcome, local_cls.return_value.upload.call_count
+
+
+def _assert_missing_report_failed_outcome(
+    outcome: ConnectorRunOutcome,
+    upload_call_count: int,
+) -> None:
+    """Verify the in-memory outcome for a missing YouTube report."""
     assert outcome.run is not None
     assert outcome.run.status == "FAILED"
     assert outcome.counts["reports_attempted"] == 1
@@ -737,14 +743,17 @@ def test_run_one_marks_missing_youtube_reporting_report_as_failed(
     assert outcome.counts["reports_failed"] == 1
     assert outcome.counts["rows_upserted_total"] == 0
     assert outcome.per_report_failures == [("channel_basic_a2", "GoogleApiResponseError")]
+    assert upload_call_count == 0
 
+
+def _assert_missing_report_persisted_state(session: Session) -> None:
+    """Verify the stored connector state for a missing YouTube report."""
     run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
     assert run_row is not None
     assert run_row.status == "FAILED"
     assert run_row.error_summary is not None
     assert "GoogleApiResponseError" in run_row.error_summary
     assert "missing YouTube Reporting report for 2026-05" in run_row.error_summary
-    assert local_cls.return_value.upload.call_count == 0
     assert (
         session.scalar(select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID))
         is None
@@ -757,6 +766,18 @@ def test_run_one_marks_missing_youtube_reporting_report_as_failed(
         )
         is None
     )
+
+
+def test_run_one_marks_missing_youtube_reporting_report_as_failed(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A configured YouTube job with no monthly report must finish FAILED."""
+    outcome, upload_call_count = _run_missing_youtube_reporting_report(
+        session,
+    )
+
+    _assert_missing_report_failed_outcome(outcome, upload_call_count)
+    _assert_missing_report_persisted_state(session)
 
 
 def test_run_one_reuses_raw_file_inserted_by_racing_worker(
