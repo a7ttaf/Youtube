@@ -28,7 +28,7 @@
 import re
 from datetime import date
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -1883,10 +1883,8 @@ def _channel_name_map(session: Session) -> dict[str, str]:
         YouTubeChannelORM.tenant_id == tenant_id,
         YouTubeChannelORM.active.is_(True),
     )
-    return {
-        youtube_channel_id: channel_name
-        for youtube_channel_id, channel_name in session.execute(statement).all()
-    }
+    rows = cast("list[tuple[str, str]]", session.execute(statement).all())
+    return dict(rows)
 
 
 @router.post(
