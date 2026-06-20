@@ -234,14 +234,15 @@ export default function ExportsView({ // skipcq: JS-0067, JS-R1005
   canViewRevenue: boolean;
 }) {
   // Offer a report type only when it is currently creatable AND the caller holds
-  // its per-type capability. Revenue-bearing analytics CSV exports also require
-  // the session's revenue visibility signal, matching the backend
-  // finance.view_revenue gate before a user submits a request that must fail.
+  // its per-type capability. Analytics CSV creation can be scoped by the
+  // backend, so the global revenue visibility signal only controls downloads.
   const reportTypeOptions = REPORT_TYPE_OPTIONS.filter((option) => {
     const hasCapability =
       option.capability === "analytics" ? canExportAnalytics : canExportFinance;
     const hasRevenueVisibility =
-      !option.requiresRevenueVisibility || canViewRevenue;
+      option.capability === "analytics" ||
+      !option.requiresRevenueVisibility ||
+      canViewRevenue;
     return option.creatable && hasCapability && hasRevenueVisibility;
   });
   const hasCreatableType = reportTypeOptions.length > 0;

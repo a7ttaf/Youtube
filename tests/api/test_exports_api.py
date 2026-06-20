@@ -668,6 +668,103 @@ def test_analytics_csv_analytics_gate_uses_requested_company_before_lookup(tmp_p
     assert audit_sink.records == []
 
 
+def test_analytics_csv_export_gate_uses_requested_company_before_lookup(tmp_path):
+    """Wrong-scope export grants return 403 before company existence lookup."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="wrong-scope-export@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.company(str(COMPANY_A_ID)),
+            ),
+            PermissionGrant(
+                Permission.VIEW_ANALYTICS,
+                AccessScope.global_scope(),
+            ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
+                AccessScope.global_scope(),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    for scope_id in (str(COMPANY_B_ID), str(uuid4())):
+        response = client.post(
+            "/exports",
+            json={
+                "export_type": "ANALYTICS_SUMMARY_CSV",
+                "scope_type": "company",
+                "scope_id": scope_id,
+                "month": "2026-03",
+                "currency": "USD",
+                "reason": "Scoped analytics export",
+            },
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Missing permission: exports.analytics"
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+
+    assert export_count == 0
+    assert audit_sink.records == []
+
+
+def test_analytics_csv_company_request_allows_full_child_channel_grants(tmp_path):
+    """Channel-level grants covering the company snapshot can create a scoped CSV."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="channel-covered-export@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.channel("channel-a"),
+            ),
+            PermissionGrant(
+                Permission.VIEW_ANALYTICS,
+                AccessScope.channel("channel-a"),
+            ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
+                AccessScope.channel("channel-a"),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/exports",
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "company",
+            "scope_id": str(COMPANY_A_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Scoped analytics export",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+
+    assert response.status_code == 202
+    assert response.json()["scope_channel_ids"] == ["channel-a"]
+    assert export_count == 1
+
+
 def test_analytics_csv_wrong_scope_revenue_cannot_probe_group_lookup(tmp_path):
     """Wrong-scope revenue grants get a 403 for unknown groups, not 404."""
     database_url = build_database_url(tmp_path)
@@ -1407,6 +1504,49 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
     assert downloaded_event.details["artifact_content_type"] == "text/csv"
 
 
+def test_analytics_summary_csv_download_filters_blank_channel_ids(tmp_path, monkeypatch):
+    """Global analytics CSV downloads exclude source rows without a real channel ID."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = _seed_analytics_csv_export_job(
+        database_url,
+        scope_type="global",
+        scope_id=None,
+        scope_channel_ids=None,
+    )
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                _analytics_source_row(
+                    channel_id="channel-a",
+                    amount=Decimal("12.500000"),
+                ),
+                _analytics_source_row(
+                    channel_id="",
+                    amount=Decimal("99.000000"),
+                ),
+                _analytics_source_row(
+                    channel_id="   ",
+                    amount=Decimal("88.000000"),
+                ),
+            ]
+        )
+        session.commit()
+
+    response = TestClient(create_app(database_url=database_url)).get(
+        f"/exports/{export_id}/analytics-summary.csv",
+        headers=auth_headers("finance_admin"),
+    )
+
+    assert response.status_code == 200
+    rows = list(csv.DictReader(StringIO(response.text)))
+    assert [row["youtube_channel_id"] for row in rows] == ["channel-a"]
+    assert rows[0]["amount_native"] == "12.5"
+
+
 def test_analytics_summary_csv_download_requires_analytics_export_permission(tmp_path, monkeypatch):
     """Users with only finance export permission cannot download analytics CSV artifacts."""
     artifact_dir = tmp_path / "export-artifacts"
@@ -1508,6 +1648,39 @@ def test_analytics_summary_csv_download_enforces_snapshot_scope(tmp_path, monkey
     assert export_job.status == "QUEUED"
     assert export_job.file_url is None
     assert audit_count == 0
+
+
+def test_analytics_summary_csv_download_honors_declared_scope_after_org_drift(
+    tmp_path, monkeypatch
+):
+    """Company-scoped queued CSVs remain downloadable after channel membership moves."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = _seed_analytics_csv_export_job(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        channel = session.get(YouTubeChannelORM, CHANNEL_A_ROW_ID)
+        assert channel is not None
+        channel.primary_org_unit_id = COMPANY_B_ID
+        session.add(
+            _analytics_source_row(
+                channel_id="channel-a",
+                amount=Decimal("12.500000"),
+            )
+        )
+        session.commit()
+
+    response = TestClient(create_app(database_url=database_url)).get(
+        f"/exports/{export_id}/analytics-summary.csv",
+        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
+    )
+
+    assert response.status_code == 200
+    rows = list(csv.DictReader(StringIO(response.text)))
+    assert [row["youtube_channel_id"] for row in rows] == ["channel-a"]
+    assert rows[0]["amount_native"] == "12.5"
 
 
 def test_analytics_summary_csv_storage_failure_is_retryable_without_audit(tmp_path):

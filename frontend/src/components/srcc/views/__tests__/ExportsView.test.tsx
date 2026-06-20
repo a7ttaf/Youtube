@@ -408,7 +408,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(screen.getByRole("button", { name: /^generate$/i })).not.toBeDisabled();
   });
 
-  it("hides analytics CSV creation when revenue visibility is withheld", async () => {
+  it("offers analytics CSV creation when global revenue visibility is withheld", async () => {
     fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
     renderExportsView(true, {
       canExportFinance: false,
@@ -420,8 +420,14 @@ describe("ExportsView wired to the exports endpoint", () => {
       expect(screen.getByText(/No export jobs yet/i)).toBeInTheDocument(),
     );
 
-    expect(screen.getByLabelText("Report type")).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^generate$/i })).toBeDisabled();
+    const reportType = screen.getByLabelText("Report type") as HTMLSelectElement;
+    expect(reportType).not.toBeDisabled();
+    const optionLabels = Array.from(reportType.options).map((o) => o.textContent);
+    expect(optionLabels).toEqual(["Analytics summary (CSV)"]);
+    fireEvent.change(screen.getByLabelText("Reason"), {
+      target: { value: "Scoped backend gate" },
+    });
+    expect(screen.getByRole("button", { name: /^generate$/i })).not.toBeDisabled();
   });
 
   it("hides the analytics CSV when analytics export is not permitted", async () => {

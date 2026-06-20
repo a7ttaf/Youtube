@@ -146,6 +146,7 @@ def list_analytics_summary_csv_rows(
             source_row.report_month == month,
             source_row.currency_code == currency_code,
             source_row.youtube_channel_id.is_not(None),
+            sa.func.length(sa.func.trim(source_row.youtube_channel_id)) > 0,
         )
         .group_by(
             source_row.youtube_channel_id,
