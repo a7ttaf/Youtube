@@ -90,7 +90,10 @@ from ums_smart_revenue.finance.revenue_facts import (
     SqlAlchemyRevenueFactRepository,
 )
 from ums_smart_revenue.finance.smart_alerts import (
+    MonthlySmartAlertAuditSignals,
+    MonthlySmartAlertFinanceInputs,
     MonthlySmartAlertSummary,
+    MonthlySmartAlertTrendSignals,
     build_monthly_smart_alert_summary,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
@@ -1410,18 +1413,24 @@ def _build_finance_source_summaries_for_export(
         failed_connector_runs_by_status = {}
     smart_alerts = build_monthly_smart_alert_summary(
         month=export_job.month,
-        payment_match=payment_match,
-        bank_reconciliation=bank_reconciliation,
-        close_status=close_status,
-        manual_overrides=manual_overrides,
-        missing_revenue_fact_channel_count=missing_fact_channel_count,
-        missing_revenue_fact_channel_sample=missing_fact_channel_sample,
-        skipped_source_row_count=skipped_source_row_count,
-        skipped_source_rows_by_reason=skipped_source_rows_by_reason,
-        failed_connector_run_count=failed_connector_run_count,
-        failed_connector_runs_by_status=failed_connector_runs_by_status,
-        current_revenue_facts=facts,
-        previous_revenue_facts=previous_facts,
+        finance=MonthlySmartAlertFinanceInputs(
+            payment_match=payment_match,
+            bank_reconciliation=bank_reconciliation,
+            close_status=close_status,
+            manual_overrides=manual_overrides,
+        ),
+        audit_signals=MonthlySmartAlertAuditSignals(
+            missing_revenue_fact_channel_count=missing_fact_channel_count,
+            missing_revenue_fact_channel_sample=missing_fact_channel_sample,
+            skipped_source_row_count=skipped_source_row_count,
+            skipped_source_rows_by_reason=skipped_source_rows_by_reason,
+            failed_connector_run_count=failed_connector_run_count,
+            failed_connector_runs_by_status=failed_connector_runs_by_status,
+        ),
+        trend_signals=MonthlySmartAlertTrendSignals(
+            current_revenue_facts=facts,
+            previous_revenue_facts=previous_facts,
+        ),
     )
     return _FinanceExportSourceSummaries(
         net_revenue=net_revenue,

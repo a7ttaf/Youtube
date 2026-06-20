@@ -158,6 +158,9 @@ from ums_smart_revenue.finance.revenue_facts import (
 from ums_smart_revenue.finance.revenue_scopes import build_authorized_revenue_scopes
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
 from ums_smart_revenue.finance.smart_alerts import (
+    MonthlySmartAlertAuditSignals,
+    MonthlySmartAlertFinanceInputs,
+    MonthlySmartAlertTrendSignals,
     build_monthly_smart_alert_summary,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
@@ -1255,18 +1258,24 @@ def get_month_smart_alerts(
 
     summary = build_monthly_smart_alert_summary(
         month=month,
-        payment_match=payment_match,
-        bank_reconciliation=bank_reconciliation,
-        close_status=close.status if close else "OPEN",
-        manual_overrides=manual_overrides,
-        missing_revenue_fact_channel_count=missing_fact_channel_count,
-        missing_revenue_fact_channel_sample=missing_fact_channel_sample,
-        skipped_source_row_count=skipped_source_row_count,
-        skipped_source_rows_by_reason=skipped_source_rows_by_reason,
-        failed_connector_run_count=failed_connector_run_count,
-        failed_connector_runs_by_status=failed_connector_runs_by_status,
-        current_revenue_facts=facts,
-        previous_revenue_facts=previous_facts,
+        finance=MonthlySmartAlertFinanceInputs(
+            payment_match=payment_match,
+            bank_reconciliation=bank_reconciliation,
+            close_status=close.status if close else "OPEN",
+            manual_overrides=manual_overrides,
+        ),
+        audit_signals=MonthlySmartAlertAuditSignals(
+            missing_revenue_fact_channel_count=missing_fact_channel_count,
+            missing_revenue_fact_channel_sample=missing_fact_channel_sample,
+            skipped_source_row_count=skipped_source_row_count,
+            skipped_source_rows_by_reason=skipped_source_rows_by_reason,
+            failed_connector_run_count=failed_connector_run_count,
+            failed_connector_runs_by_status=failed_connector_runs_by_status,
+        ),
+        trend_signals=MonthlySmartAlertTrendSignals(
+            current_revenue_facts=facts,
+            previous_revenue_facts=previous_facts,
+        ),
     )
     summary_api = summary.to_api()
     audit_details = {

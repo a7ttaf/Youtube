@@ -16,6 +16,8 @@
 #   - File: backend/ums_smart_revenue/connectors/runs/normalization.py -> emits
 #     PROJECTION_FAILED connector edges consumed here.
 # ============================================================================
+"""Read-only connector audit aggregates for finance smart alerts."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable

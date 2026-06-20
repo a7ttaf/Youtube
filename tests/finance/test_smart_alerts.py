@@ -135,7 +135,41 @@ def build_alerts(**overrides):
         "manual_overrides": [manual_override()],
     }
     values.update(overrides)
-    return module.build_monthly_smart_alert_summary(**values)
+    finance = module.MonthlySmartAlertFinanceInputs(
+        payment_match=values["payment_match"],
+        bank_reconciliation=values["bank_reconciliation"],
+        close_status=values["close_status"],
+        manual_overrides=values["manual_overrides"],
+    )
+    audit_signals = module.MonthlySmartAlertAuditSignals(
+        missing_revenue_fact_channel_count=values.get("missing_revenue_fact_channel_count", 0),
+        missing_revenue_fact_channel_sample=values.get("missing_revenue_fact_channel_sample", ()),
+        skipped_source_row_count=values.get("skipped_source_row_count", 0),
+        skipped_source_rows_by_reason=values.get("skipped_source_rows_by_reason"),
+        failed_connector_run_count=values.get("failed_connector_run_count", 0),
+        failed_connector_runs_by_status=values.get("failed_connector_runs_by_status"),
+    )
+    trend_signals = module.MonthlySmartAlertTrendSignals(
+        current_revenue_facts=values.get("current_revenue_facts", ()),
+        previous_revenue_facts=values.get("previous_revenue_facts", ()),
+    )
+    thresholds = module.MonthlySmartAlertThresholds(
+        high_gap_threshold_usd=values.get(
+            "high_gap_threshold_usd",
+            module.DEFAULT_HIGH_GAP_THRESHOLD_USD,
+        ),
+        revenue_trend_anomaly_threshold_percent=values.get(
+            "revenue_trend_anomaly_threshold_percent",
+            module.DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT,
+        ),
+    )
+    return module.build_monthly_smart_alert_summary(
+        month=values["month"],
+        finance=finance,
+        audit_signals=audit_signals,
+        trend_signals=trend_signals,
+        thresholds=thresholds,
+    )
 
 
 def test_smart_alerts_detect_payment_bank_month_and_override_risks():
