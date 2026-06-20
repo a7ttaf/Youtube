@@ -124,24 +124,15 @@ def build_monthly_smart_alert_summary(
     list so the route can bound the read at the SQL LIMIT clause. The
     alert details keep the same wire shape (channel_count + sample_channel_ids).
     """
-    if high_gap_threshold_usd < 0:
-        raise ValueError("high_gap_threshold_usd must be non-negative")
-    if revenue_trend_anomaly_threshold_percent < 0:
-        raise ValueError("revenue_trend_anomaly_threshold_percent must be non-negative")
-    if missing_revenue_fact_channel_count < 0:
-        raise ValueError("missing_revenue_fact_channel_count must be non-negative")
-    if skipped_source_row_count < 0:
-        raise ValueError("skipped_source_row_count must be non-negative")
-    if skipped_source_rows_by_reason is not None and any(
-        count < 0 for count in skipped_source_rows_by_reason.values()
-    ):
-        raise ValueError("skipped_source_rows_by_reason counts must be non-negative")
-    if failed_connector_run_count < 0:
-        raise ValueError("failed_connector_run_count must be non-negative")
-    if failed_connector_runs_by_status is not None and any(
-        count < 0 for count in failed_connector_runs_by_status.values()
-    ):
-        raise ValueError("failed_connector_runs_by_status counts must be non-negative")
+    _validate_monthly_smart_alert_inputs(
+        high_gap_threshold_usd=high_gap_threshold_usd,
+        revenue_trend_anomaly_threshold_percent=revenue_trend_anomaly_threshold_percent,
+        missing_revenue_fact_channel_count=missing_revenue_fact_channel_count,
+        skipped_source_row_count=skipped_source_row_count,
+        skipped_source_rows_by_reason=skipped_source_rows_by_reason,
+        failed_connector_run_count=failed_connector_run_count,
+        failed_connector_runs_by_status=failed_connector_runs_by_status,
+    )
     normalized_close_status = close_status or "OPEN"
     overrides = list(manual_overrides)
 
@@ -190,6 +181,53 @@ def build_monthly_smart_alert_summary(
         highest_severity=highest_severity,
         alerts=alerts,
     )
+
+
+def _validate_monthly_smart_alert_inputs(
+    *,
+    high_gap_threshold_usd: Decimal,
+    revenue_trend_anomaly_threshold_percent: Decimal,
+    missing_revenue_fact_channel_count: int,
+    skipped_source_row_count: int,
+    skipped_source_rows_by_reason: Mapping[str, int] | None,
+    failed_connector_run_count: int,
+    failed_connector_runs_by_status: Mapping[str, int] | None,
+) -> None:
+    """Reject impossible negative smart-alert thresholds and counts."""
+    _ensure_non_negative("high_gap_threshold_usd", high_gap_threshold_usd)
+    _ensure_non_negative(
+        "revenue_trend_anomaly_threshold_percent",
+        revenue_trend_anomaly_threshold_percent,
+    )
+    _ensure_non_negative(
+        "missing_revenue_fact_channel_count",
+        missing_revenue_fact_channel_count,
+    )
+    _ensure_non_negative("skipped_source_row_count", skipped_source_row_count)
+    _ensure_mapping_counts_non_negative(
+        "skipped_source_rows_by_reason",
+        skipped_source_rows_by_reason,
+    )
+    _ensure_non_negative("failed_connector_run_count", failed_connector_run_count)
+    _ensure_mapping_counts_non_negative(
+        "failed_connector_runs_by_status",
+        failed_connector_runs_by_status,
+    )
+
+
+def _ensure_non_negative(name: str, value: Decimal | int) -> None:
+    """Raise a stable ValueError when a count or threshold is negative."""
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
+
+
+def _ensure_mapping_counts_non_negative(
+    name: str,
+    counts: Mapping[str, int] | None,
+) -> None:
+    """Raise a stable ValueError when any mapping count is negative."""
+    if counts is not None and any(count < 0 for count in counts.values()):
+        raise ValueError(f"{name} counts must be non-negative")
 
 
 def _missing_revenue_source_alert(

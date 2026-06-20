@@ -18,6 +18,7 @@
 # ============================================================================
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
@@ -40,6 +41,7 @@ _CANONICAL_CONNECTOR_KEYS = {
     "adsense-management": "adsense_management",
     "adsense_management": "adsense_management",
 }
+ConnectorTerminalEdge = tuple[tuple[str, str], datetime, str]
 
 
 # ============================================================================
@@ -100,46 +102,93 @@ def failed_connector_run_count_and_statuses(
     latest_seen_at_by_connector_account: dict[tuple[str, str], datetime] = {}
     latest_statuses_by_connector_account: dict[tuple[str, str], set[str]] = {}
     for details, scope_id, entity_id, created_at in details_rows:
-        if not isinstance(details, dict):
-            continue
-        lifecycle = _connector_terminal_lifecycle(details.get("lifecycle"))
-        if lifecycle is None:
-            continue
-        raw_connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(
-            scope_id
+        terminal_edge = _connector_terminal_edge(
+            details=details,
+            scope_id=scope_id,
+            entity_id=entity_id,
+            created_at=created_at,
         )
-        connector_key = _canonical_connector_key(raw_connector_key)
-        raw_account_id = _non_blank_text(details.get("account_id")) or _connector_entity_account_id(
-            entity_id=entity_id, connector_key=raw_connector_key
-        )
-        account_id = _canonical_connector_account_id(
-            connector_key=connector_key,
-            value=raw_account_id,
-        )
-        if connector_key is None or account_id is None:
+        if terminal_edge is None:
             continue
-        lookup_key = (connector_key, account_id)
-        terminal_status = _connector_terminal_status(
-            lifecycle=lifecycle,
-            value=details.get("status"),
+        _record_latest_terminal_status(
+            terminal_edge=terminal_edge,
+            latest_seen_at_by_connector_account=latest_seen_at_by_connector_account,
+            latest_statuses_by_connector_account=latest_statuses_by_connector_account,
         )
-        latest_seen_at = latest_seen_at_by_connector_account.get(lookup_key)
-        if latest_seen_at is None:
-            latest_seen_at_by_connector_account[lookup_key] = created_at
-            latest_statuses_by_connector_account[lookup_key] = {terminal_status}
-            continue
-        if created_at == latest_seen_at:
-            latest_statuses_by_connector_account[lookup_key].add(terminal_status)
 
-    status_counts: dict[str, int] = {}
-    for terminal_statuses in latest_statuses_by_connector_account.values():
-        if "" in terminal_statuses or "SUCCEEDED" in terminal_statuses:
-            continue
-        if "FAILED" in terminal_statuses:
-            status_counts["FAILED"] = status_counts.get("FAILED", 0) + 1
-        elif "PARTIAL" in terminal_statuses:
-            status_counts["PARTIAL"] = status_counts.get("PARTIAL", 0) + 1
+    status_counts = _failed_connector_status_counts(latest_statuses_by_connector_account.values())
     return sum(status_counts.values()), dict(sorted(status_counts.items()))
+
+
+def _connector_terminal_edge(
+    *,
+    details: object,
+    scope_id: object,
+    entity_id: object,
+    created_at: datetime,
+) -> ConnectorTerminalEdge | None:
+    """Normalize one audit-log row into a latest-run grouping key and status."""
+    if not isinstance(details, dict):
+        return None
+    lifecycle = _connector_terminal_lifecycle(details.get("lifecycle"))
+    if lifecycle is None:
+        return None
+    raw_connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(scope_id)
+    connector_key = _canonical_connector_key(raw_connector_key)
+    raw_account_id = _non_blank_text(details.get("account_id")) or _connector_entity_account_id(
+        entity_id=entity_id, connector_key=raw_connector_key
+    )
+    account_id = _canonical_connector_account_id(
+        connector_key=connector_key,
+        value=raw_account_id,
+    )
+    if connector_key is None or account_id is None:
+        return None
+    terminal_status = _connector_terminal_status(
+        lifecycle=lifecycle,
+        value=details.get("status"),
+    )
+    return (connector_key, account_id), created_at, terminal_status
+
+
+def _record_latest_terminal_status(
+    *,
+    terminal_edge: ConnectorTerminalEdge,
+    latest_seen_at_by_connector_account: dict[tuple[str, str], datetime],
+    latest_statuses_by_connector_account: dict[tuple[str, str], set[str]],
+) -> None:
+    """Keep the latest terminal status set for one connector/account pair."""
+    lookup_key, created_at, terminal_status = terminal_edge
+    latest_seen_at = latest_seen_at_by_connector_account.get(lookup_key)
+    if latest_seen_at is None:
+        latest_seen_at_by_connector_account[lookup_key] = created_at
+        latest_statuses_by_connector_account[lookup_key] = {terminal_status}
+        return
+    if created_at == latest_seen_at:
+        latest_statuses_by_connector_account[lookup_key].add(terminal_status)
+
+
+def _failed_connector_status_counts(
+    latest_terminal_statuses: Iterable[set[str]],
+) -> dict[str, int]:
+    """Count latest failed/partial terminal status sets, ignoring cleared runs."""
+    status_counts: dict[str, int] = {}
+    for terminal_statuses in latest_terminal_statuses:
+        status = _failed_connector_status(terminal_statuses)
+        if status is not None:
+            status_counts[status] = status_counts.get(status, 0) + 1
+    return status_counts
+
+
+def _failed_connector_status(terminal_statuses: set[str]) -> str | None:
+    """Return the alertable status for one latest terminal status set."""
+    if "" in terminal_statuses or "SUCCEEDED" in terminal_statuses:
+        return None
+    if "FAILED" in terminal_statuses:
+        return "FAILED"
+    if "PARTIAL" in terminal_statuses:
+        return "PARTIAL"
+    return None
 
 
 def _non_blank_text(value: object) -> str | None:
