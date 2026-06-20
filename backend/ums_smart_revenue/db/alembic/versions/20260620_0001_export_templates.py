@@ -9,12 +9,20 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from ums_smart_revenue.db.rls import (
+    APP_PLATFORM_ROLE,
+    APP_TENANT_ROLE,
+    TENANT_CONTEXT_GETTER,
+    tenant_rls_policy_name,
+)
+
 revision = "20260620_0001"
 down_revision = "20260618_0001"
 branch_labels = None
 depends_on = None
 
 _TENANT_ID_DEFAULT = sa.text("'00000000-0000-0000-0000-000000000001'")
+_EXPORT_TEMPLATES_TABLE = "export_templates"
 
 
 # ============================================================================
@@ -85,6 +93,7 @@ def upgrade() -> None:
         "export_templates",
         ["tenant_id", "created_at"],
     )
+    _configure_export_templates_rls(op.get_bind())
 
     with op.batch_alter_table("export_jobs") as batch:
         batch.add_column(sa.Column("template_id", sa.Uuid(as_uuid=True), nullable=True))
@@ -108,3 +117,48 @@ def downgrade() -> None:
     op.drop_index("ix_export_templates_tenant_created", table_name="export_templates")
     op.drop_index("ix_export_templates_tenant_type_active", table_name="export_templates")
     op.drop_table("export_templates")
+
+
+# ============================================================================
+# Purpose: Install tenant isolation for the new export_templates table in the
+# same revision that creates it, including owner-bound FORCE RLS.
+# Database/ORM: PostgreSQL public.export_templates; no SQLAlchemy ORM writes.
+# Standards: Dialect-guarded, idempotent DROP/CREATE policy, and internal
+# table/role constants only.
+# Blast Radius: Authorization and export configuration isolation.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/rls.py -> RLS roles and policy helper.
+#   - File: tests/db/test_export_template_migration.py -> SQL contract coverage.
+# ============================================================================
+def _configure_export_templates_rls(bind) -> None:
+    """Enable RLS, policy, FORCE, and app role grants for export templates."""
+    if bind.dialect.name != "postgresql":
+        return
+
+    policy = tenant_rls_policy_name(_EXPORT_TEMPLATES_TABLE)
+    bind.execute(
+        sa.text(f'ALTER TABLE public."{_EXPORT_TEMPLATES_TABLE}" ENABLE ROW LEVEL SECURITY')
+    )
+    bind.execute(sa.text(f'DROP POLICY IF EXISTS {policy} ON public."{_EXPORT_TEMPLATES_TABLE}"'))
+    bind.execute(
+        sa.text(
+            f'CREATE POLICY {policy} ON public."{_EXPORT_TEMPLATES_TABLE}" '
+            f"USING (tenant_id = {TENANT_CONTEXT_GETTER}()) "
+            f"WITH CHECK (tenant_id = {TENANT_CONTEXT_GETTER}())"
+        )
+    )
+    bind.execute(
+        sa.text(f'ALTER TABLE public."{_EXPORT_TEMPLATES_TABLE}" FORCE ROW LEVEL SECURITY')
+    )
+    bind.execute(
+        sa.text(
+            f'GRANT SELECT, INSERT, UPDATE, DELETE ON public."{_EXPORT_TEMPLATES_TABLE}" '
+            f'TO "{APP_TENANT_ROLE}"'
+        )
+    )
+    bind.execute(
+        sa.text(
+            f'GRANT SELECT, INSERT, UPDATE, DELETE ON public."{_EXPORT_TEMPLATES_TABLE}" '
+            f'TO "{APP_PLATFORM_ROLE}"'
+        )
+    )

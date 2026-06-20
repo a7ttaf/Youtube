@@ -59,6 +59,23 @@ def test_export_template_migration_creates_template_table_and_job_reference():
     )
 
 
+def test_export_template_migration_configures_postgres_rls():
+    migration = _load_migration()
+    bind = _RecordingBind()
+
+    migration._configure_export_templates_rls(bind)
+
+    statements = "\n".join(bind.statements)
+    assert 'ALTER TABLE public."export_templates" ENABLE ROW LEVEL SECURITY' in statements
+    assert (
+        'CREATE POLICY export_templates_tenant_isolation ON public."export_templates"' in statements
+    )
+    assert "tenant_id = app_current_tenant_id()" in statements
+    assert 'ALTER TABLE public."export_templates" FORCE ROW LEVEL SECURITY' in statements
+    assert 'TO "app_tenant"' in statements
+    assert 'TO "app_platform"' in statements
+
+
 def _create_prior_export_jobs_table(connection) -> None:
     metadata = sa.MetaData()
     sa.Table(
@@ -70,11 +87,7 @@ def _create_prior_export_jobs_table(connection) -> None:
 
 
 def _apply_migration(connection) -> None:
-    spec = importlib.util.spec_from_file_location("export_template_migration", MIGRATION_PATH)
-    assert spec is not None
-    migration = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(migration)
+    migration = _load_migration()
 
     context = MigrationContext.configure(connection)
     operations = Operations(context)
@@ -84,3 +97,26 @@ def _apply_migration(connection) -> None:
         migration.upgrade()
     finally:
         migration.op = original_op
+
+
+def _load_migration():
+    spec = importlib.util.spec_from_file_location("export_template_migration", MIGRATION_PATH)
+    assert spec is not None
+    migration = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(migration)
+    return migration
+
+
+class _RecordingDialect:
+    name = "postgresql"
+
+
+class _RecordingBind:
+    dialect = _RecordingDialect()
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    def execute(self, statement) -> None:
+        self.statements.append(str(statement))

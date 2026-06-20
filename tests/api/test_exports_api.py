@@ -334,6 +334,75 @@ def test_corporate_admin_manages_export_template_lifecycle_with_audit(tmp_path):
     assert all(event.sensitive is True for event in audit_events)
 
 
+def test_export_template_update_rejects_null_only_noop(tmp_path):
+    """Verify nullable PATCH fields cannot create a fake update audit event."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("corporate_admin")
+
+    create_response = client.post(
+        "/export-templates",
+        headers=headers,
+        json={
+            "name": "Finance workbook standard",
+            "export_type": "FINANCE_EXCEL",
+            "layout_config": {"sheets": ["summary"]},
+            "reason": "Create reusable finance layout",
+        },
+    )
+    template_id = create_response.json()["id"]
+    response = client.patch(
+        f"/export-templates/{template_id}",
+        headers=headers,
+        json={"name": None, "is_active": None, "reason": "No effective update"},
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        template = session.scalars(select(ExportTemplateORM)).one()
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert create_response.status_code == 201
+    assert response.status_code == 422
+    assert template.name == "Finance workbook standard"
+    assert [event.event_type for event in audit_events] == ["EXPORT_TEMPLATE_CHANGED"]
+
+
+def test_export_template_create_rejects_excessively_nested_layout(tmp_path):
+    """Verify layout_config is bounded before it reaches storage."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    layout_config: dict[str, object] = {"level": {}}
+    nested = layout_config["level"]
+    assert isinstance(nested, dict)
+    for index in range(10):
+        nested[f"level_{index}"] = {}
+        nested = nested[f"level_{index}"]
+
+    response = client.post(
+        "/export-templates",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "name": "Overly nested workbook layout",
+            "export_type": "FINANCE_EXCEL",
+            "layout_config": layout_config,
+            "reason": "Validate layout guard",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        template_count = session.scalar(select(func.count()).select_from(ExportTemplateORM))
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 422
+    assert "layout_config nesting" in response.json()["detail"]
+    assert template_count == 0
+    assert audit_count == 0
+
+
 def test_export_template_management_requires_permission(tmp_path):
     """Verify export template writes fail closed without template management grants."""
     database_url = build_database_url(tmp_path)

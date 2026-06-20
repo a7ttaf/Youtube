@@ -9,6 +9,7 @@ def test_allowlist_is_nonempty_and_excludes_platform_tables():
     """Validate the tenant-table allowlist covers scoped tables only."""
     assert "monthly_channel_revenue_facts" in TENANT_SCOPED_TABLES
     assert "google_revenue_source_rows" in TENANT_SCOPED_TABLES
+    assert "export_templates" in TENANT_SCOPED_TABLES
     assert "tenants" not in TENANT_SCOPED_TABLES
     assert "currencies" not in TENANT_SCOPED_TABLES
     # No duplicates.

@@ -29,6 +29,7 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
     "content_owner_channel_links",
     "deduction_components",
     "export_jobs",
+    "export_templates",
     "finance_month_close",
     "google_revenue_source_rows",
     "monthly_channel_revenue_facts",

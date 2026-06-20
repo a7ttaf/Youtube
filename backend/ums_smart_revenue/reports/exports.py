@@ -6,6 +6,7 @@ from typing import cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -29,6 +30,9 @@ ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES = (
 )
 MAX_EXPORT_JOB_PAGE_SIZE = 100
 MAX_EXPORT_TEMPLATE_PAGE_SIZE = 100
+MAX_EXPORT_TEMPLATE_LAYOUT_BYTES = 65536
+MAX_EXPORT_TEMPLATE_LAYOUT_DEPTH = 8
+MAX_EXPORT_TEMPLATE_LAYOUT_KEYS = 200
 _TERMINAL_EXPORT_JOB_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
@@ -178,6 +182,10 @@ class SqlAlchemyExportTemplateRepository:
     # Standards: Tenant-scoped duplicate guard, JSON-serializable config, and
     #   actor identity normalization.
     # Blast Radius: Export configuration and audit only.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/db/report_models.py -> Template ORM.
+    #   - File: backend/ums_smart_revenue/api/export_templates.py -> Route
+    #     boundary translating validation errors to HTTP 422.
     # ========================================================================
     def create_template(
         self,
@@ -205,7 +213,7 @@ class SqlAlchemyExportTemplateRepository:
             tenant_id=self._tenant_id,
         )
         self._session.add(row)
-        self._session.flush()
+        _flush_template_write(self._session)
         return self._to_template_entry(row)
 
     def get_template(
@@ -253,6 +261,10 @@ class SqlAlchemyExportTemplateRepository:
     # Standards: Tenant-scoped lookup, duplicate-name guard, and JSON shape
     #   validation before persistence.
     # Blast Radius: Export configuration and audit only.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/db/report_models.py -> Template ORM.
+    #   - File: backend/ums_smart_revenue/api/export_templates.py -> Route
+    #     boundary translating validation errors to HTTP 422.
     # ========================================================================
     def update_template(
         self,
@@ -279,7 +291,7 @@ class SqlAlchemyExportTemplateRepository:
         if is_active is not None:
             row.is_active = bool(is_active)
         row.updated_at = datetime.now(UTC)
-        self._session.flush()
+        _flush_template_write(self._session)
         return self._to_template_entry(row)
 
     def deactivate_template(self, template_id: str) -> ExportTemplateEntry:
@@ -674,20 +686,76 @@ def _normalize_optional_string(value: str | None, field_name: str) -> str | None
 def _normalize_template_layout_config(value: dict[str, object]) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ExportTemplateValidationError("layout_config must be an object")
-    if any(not isinstance(key, str) or not key.strip() for key in value):
-        raise ExportTemplateValidationError("layout_config keys must be non-blank strings")
+    _validate_template_layout_value(value, depth=1, key_count=0)
     try:
         return _clone_json_object(value)
+    except ExportTemplateValidationError:
+        raise
     except (TypeError, ValueError) as exc:
         raise ExportTemplateValidationError("layout_config must be JSON serializable") from exc
 
 
+def _validate_template_layout_value(value: object, *, depth: int, key_count: int) -> int:
+    if depth > MAX_EXPORT_TEMPLATE_LAYOUT_DEPTH:
+        raise ExportTemplateValidationError(
+            f"layout_config nesting must be {MAX_EXPORT_TEMPLATE_LAYOUT_DEPTH} levels or fewer"
+        )
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ExportTemplateValidationError("layout_config keys must be non-blank strings")
+            key_count += 1
+            if key_count > MAX_EXPORT_TEMPLATE_LAYOUT_KEYS:
+                raise ExportTemplateValidationError(
+                    f"layout_config must have {MAX_EXPORT_TEMPLATE_LAYOUT_KEYS} keys or fewer"
+                )
+            key_count = _validate_template_layout_value(
+                nested_value, depth=depth + 1, key_count=key_count
+            )
+        return key_count
+    if isinstance(value, list):
+        for nested_value in value:
+            key_count = _validate_template_layout_value(
+                nested_value, depth=depth + 1, key_count=key_count
+            )
+    return key_count
+
+
 def _clone_json_object(value: dict[str, object]) -> dict[str, object]:
     encoded = json.dumps(value, sort_keys=True, allow_nan=False)
+    if len(encoded.encode("utf-8")) > MAX_EXPORT_TEMPLATE_LAYOUT_BYTES:
+        raise ExportTemplateValidationError(
+            f"layout_config must be {MAX_EXPORT_TEMPLATE_LAYOUT_BYTES} bytes or smaller"
+        )
     decoded = json.loads(encoded)
     if not isinstance(decoded, dict):
         raise ExportTemplateValidationError("layout_config must be an object")
     return cast(dict[str, object], decoded)
+
+
+def _flush_template_write(session: Session) -> None:
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        session.rollback()
+        if _is_export_template_name_integrity_error(exc):
+            raise ExportTemplateValidationError("Export template name already exists") from exc
+        raise ExportTemplateValidationError("Failed to persist export template") from exc
+
+
+def _is_export_template_name_integrity_error(exc: IntegrityError) -> bool:
+    original = exc.orig
+    diagnostics = getattr(original, "diag", None)
+    constraint_name = getattr(diagnostics, "constraint_name", None) or getattr(
+        original, "constraint_name", None
+    )
+    if constraint_name == "uq_export_templates_tenant_id_name":
+        return True
+    message = str(original or exc).lower()
+    return (
+        "uq_export_templates_tenant_id_name" in message
+        or "unique constraint failed: export_templates.tenant_id, export_templates.name" in message
+    )
 
 
 def _normalize_export_type(value: str) -> str:

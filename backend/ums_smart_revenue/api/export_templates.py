@@ -112,11 +112,24 @@ class ExportTemplateUpdateRequest(BaseModel):
         updated_fields = self.model_fields_set - {"reason"}
         if not updated_fields:
             raise ValueError("at least one template field must be supplied")
+        if "name" in updated_fields and self.name is None:
+            raise ValueError("name must not be null")
         if "layout_config" in updated_fields and self.layout_config is None:
             raise ValueError("layout_config must be an object")
+        if "is_active" in updated_fields and self.is_active is None:
+            raise ValueError("is_active must not be null")
         return self
 
 
+# ============================================================================
+# Purpose: Bind each request to the tenant-scoped export-template repository.
+# Database/ORM: ExportTemplateORM through the request SQLAlchemy Session.
+# Standards: Dependency-only wiring; business rules stay in reports/exports.py.
+# Blast Radius: Export configuration request handling only.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> Session provider.
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Repository class.
+# ============================================================================
 def current_export_template_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyExportTemplateRepository:
@@ -124,6 +137,15 @@ def current_export_template_repository(
     return SqlAlchemyExportTemplateRepository(session)
 
 
+# ============================================================================
+# Purpose: Create an audited reusable export-template definition.
+# Database/ORM: INSERT export_templates through repository; audit_logs write.
+# Standards: Thin route, fail-closed permission check, typed validation errors.
+# Blast Radius: Export configuration and audit only.
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Create contract.
+#   - File: backend/ums_smart_revenue/auth/audit.py -> Audit event enum.
+# ============================================================================
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_export_template(
     payload: ExportTemplateCreateRequest,
@@ -157,6 +179,15 @@ def create_export_template(
     )
 
 
+# ============================================================================
+# Purpose: List export templates available to global template managers.
+# Database/ORM: SELECT export_templates through repository.
+# Standards: Thin route with query bounds enforced by FastAPI and repository.
+# Blast Radius: Export configuration reads only.
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Pagination bounds.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> API response contract.
+# ============================================================================
 @router.get("")
 def list_export_templates(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -193,6 +224,15 @@ def list_export_templates(
     }
 
 
+# ============================================================================
+# Purpose: Return a single export template for managers or scoped operators.
+# Database/ORM: SELECT export_templates through repository.
+# Standards: Thin route with template-scoped permission fallback.
+# Blast Radius: Export configuration reads only.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> export(template_id).
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Lookup contract.
+# ============================================================================
 @router.get("/{template_id}")
 def get_export_template(
     template_id: str,
@@ -214,6 +254,15 @@ def get_export_template(
         ) from exc
 
 
+# ============================================================================
+# Purpose: Apply audited metadata/layout updates to an existing export template.
+# Database/ORM: UPDATE export_templates through repository; audit_logs write.
+# Standards: Reject null-only no-ops and translate typed repository errors.
+# Blast Radius: Export configuration and audit only.
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Update contract.
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> export(template_id).
+# ============================================================================
 @router.patch("/{template_id}")
 def update_export_template(
     template_id: str,
@@ -252,6 +301,15 @@ def update_export_template(
     )
 
 
+# ============================================================================
+# Purpose: Soft-delete an export template without breaking historical jobs.
+# Database/ORM: UPDATE export_templates.is_active through repository; audit log.
+# Standards: Query reason normalization and template-scoped permission fallback.
+# Blast Radius: Export configuration and audit only.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/report_models.py -> Nullable FK.
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Deactivate contract.
+# ============================================================================
 @router.delete("/{template_id}")
 def delete_export_template(
     template_id: str,
@@ -283,6 +341,15 @@ def delete_export_template(
     )
 
 
+# ============================================================================
+# Purpose: Enforce global template management or a matching template scope.
+# Database/ORM: None.
+# Standards: Fail-closed permission check with safe HTTP 403 message.
+# Blast Radius: Authorization for export-template management only.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/permissions.py -> Permission enum.
+#   - File: backend/ums_smart_revenue/auth/policy.py -> Permission evaluator.
+# ============================================================================
 def _require_manage_export_templates(user: UserPrincipal, template_id: str | None) -> None:
     """Require global template management or a matching export-template scope."""
     permission = Permission.MANAGE_EXPORT_TEMPLATES
@@ -298,6 +365,15 @@ def _require_manage_export_templates(user: UserPrincipal, template_id: str | Non
     )
 
 
+# ============================================================================
+# Purpose: Attach an audit event to successful export-template write responses.
+# Database/ORM: audit_logs through AuditSink.
+# Standards: Sensitive audit event, scoped entity id, and safe response payload.
+# Blast Radius: Audit trail for export-template configuration changes.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> Audit writer.
+#   - File: backend/ums_smart_revenue/api/channels.py -> Audit API serializer.
+# ============================================================================
 def _template_response_with_audit(
     *,
     audit_sink: AuditSink,

@@ -6,11 +6,13 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceBase
-from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
+from ums_smart_revenue.db.report_models import ExportJobORM, ExportTemplateORM, ReportBase
 from ums_smart_revenue.reports.exports import (
     ExportJobNotFoundError,
     ExportJobValidationError,
+    ExportTemplateValidationError,
     SqlAlchemyExportJobRepository,
+    SqlAlchemyExportTemplateRepository,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import TENANT_CTX
@@ -67,6 +69,37 @@ def test_request_export_uses_ambient_tenant_context():
 
         row = session.scalars(select(ExportJobORM)).one()
         assert row.tenant_id == OTHER_TENANT_UUID
+
+
+def test_template_create_translates_duplicate_name_race(monkeypatch):
+    with build_session() as session:
+        repo = SqlAlchemyExportTemplateRepository(session)
+        repo.create_template(
+            name="Finance workbook standard",
+            export_type="FINANCE_EXCEL",
+            layout_config={"sheets": ["summary"]},
+            actor_user_id=ACTOR_USER_ID,
+        )
+        session.commit()
+
+        racing_repo = SqlAlchemyExportTemplateRepository(session)
+        monkeypatch.setattr(
+            racing_repo,
+            "_ensure_template_name_available",
+            lambda *args, **kwargs: None,
+        )
+
+        with pytest.raises(ExportTemplateValidationError, match="already exists"):
+            racing_repo.create_template(
+                name="Finance workbook standard",
+                export_type="FINANCE_EXCEL",
+                layout_config={"sheets": ["payments"]},
+                actor_user_id=ACTOR_USER_ID,
+            )
+
+        template_names = session.scalars(select(ExportTemplateORM.name)).all()
+
+    assert template_names == ["Finance workbook standard"]
 
 
 def test_complete_artifact_does_not_update_other_tenants_job():
