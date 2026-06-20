@@ -36,6 +36,7 @@ const ROLE_LABELS: Record<Role, string> = {
 type AccessPermissions = {
   role: Role;
   canViewFinance: boolean;
+  canViewRevenue: boolean;
   canViewPayments: boolean;
   canViewBankReconciliation: boolean;
   canManageRegistry: boolean;
@@ -113,6 +114,7 @@ function capabilitiesToPermissions( // skipcq: JS-0067
   return {
     role,
     canViewFinance: capabilities.canViewRevenue,
+    canViewRevenue: capabilities.canViewRevenue,
     canViewPayments: capabilities.canViewPayments,
     canViewBankReconciliation: capabilities.canViewBankReconciliation,
     canManageRegistry: capabilities.canManageRegistry,
@@ -153,7 +155,7 @@ function canCreateAnyExport(permissions: AccessPermissions) { // skipcq: JS-0067
     permissions.canRequestRawExports ||
     // FIX: Analytics summary CSV creation is controlled by the analytics export
     // capability plus revenue visibility, not by legacy finance export flags.
-    (permissions.canExportAnalyticsReports && permissions.canViewFinance)
+    (permissions.canExportAnalyticsReports && permissions.canViewRevenue)
   );
 }
 
@@ -720,7 +722,7 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
           canCreateExport={canCreateAnyExport(permissions)}
           canExportFinance={permissions.canExportFinanceReports}
           canExportAnalytics={permissions.canExportAnalyticsReports}
-          canViewRevenue={permissions.canViewFinance}
+          canViewRevenue={permissions.canViewRevenue}
         />
       )}
       {view === "connectors" && (
