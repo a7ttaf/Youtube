@@ -7,12 +7,25 @@ at argparse time.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING
 
 from ums_smart_revenue.connectors.google.errors import ConnectorAlreadyRegisteredError
 
-_RunnerFn = Callable[..., Any]
+if TYPE_CHECKING:
+    # Imported only for type-checking to avoid a runtime import cycle:
+    # orchestrator.py imports register_connector/dispatch_connector from this
+    # module at load time, so this module cannot import orchestrator at runtime.
+    from ums_smart_revenue.connectors.runs.orchestrator import ConnectorRunner
+
+# The registry stores connector runner instances (e.g. YouTubeReportingRunner)
+# that structurally satisfy the ConnectorRunner Protocol. Each runner carries
+# per-connector configuration and exposes produce_reports(); typing the value
+# as the Protocol (rather than Callable[..., Any]) lets mypy verify that every
+# registered runner honors the dispatch contract the orchestrator relies on.
+# Declared with the PEP 695 ``type`` statement so the alias resolves lazily:
+# ConnectorRunner is only imported under TYPE_CHECKING, so a plain runtime
+# assignment (``_RunnerFn = ConnectorRunner``) would raise NameError at import.
+type _RunnerFn = ConnectorRunner
 _REGISTRY: dict[str, _RunnerFn] = {}
 
 # Canonical operator-facing key for the AdSense Management connector slice.

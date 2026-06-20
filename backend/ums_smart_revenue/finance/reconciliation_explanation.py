@@ -3,7 +3,7 @@ channel-month from a ChannelReconciliation. Deterministic; no LLM."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from types import MappingProxyType
 
@@ -69,8 +69,8 @@ _LOW_CONFIDENCE_WARNING_PREFIXES = (
 
 
 def _confidence_for_warnings(
-    warnings: list[dict[str, str]],
-) -> dict[str, str]:
+    warnings: Sequence[Mapping[str, str]],
+) -> dict[str, object]:
     """Pick a confidence label for the persisted explanation.
 
     LOW when any warning indicates the reconciliation basis was suppressed
@@ -85,7 +85,7 @@ def build_reconciliation_explanation(
     *,
     month: str,
     line: ChannelReconciliation,
-    warnings: list[dict[str, str]],
+    warnings: Sequence[Mapping[str, str]],
     gross_source_kind: str | None = None,
 ) -> NumberExplanationEntry:
     """Assemble the persisted explanation for one channel-month reconciliation."""
@@ -143,5 +143,5 @@ def build_reconciliation_explanation(
         formula=("estimated_gross - us_tax - yt_adsense_fee - adsense_bank_fee - fx_variance"),
         confidence=confidence,
         components=components,
-        warnings=list(warnings),
+        warnings=[dict[str, object](warning) for warning in warnings],
     )
