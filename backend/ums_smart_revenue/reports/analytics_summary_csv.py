@@ -16,10 +16,12 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from io import StringIO
+from typing import Any, cast
 from uuid import UUID
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
@@ -120,7 +122,7 @@ def list_analytics_summary_csv_rows(
 
     source_row = GoogleRevenueSourceRowORM
     channel = YouTubeChannelORM
-    channel_id_without_blank_chars = source_row.youtube_channel_id
+    channel_id_without_blank_chars = cast(ColumnElement[Any], source_row.youtube_channel_id)
     for blank_character in _BLANK_CHANNEL_ID_CHARACTERS:
         channel_id_without_blank_chars = sa.func.replace(
             channel_id_without_blank_chars,

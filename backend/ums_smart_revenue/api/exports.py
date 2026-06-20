@@ -251,40 +251,14 @@ def request_export(
                 group_registry=group_registry,
                 scope_channel_ids=(payload.scope_id,),
             )
-        # ================================================================
-        # Purpose: Resolve the channel set ONCE so the authorization
-        #   check, the audit trail, and the persisted snapshot all see
-        #   the same membership. Re-resolving live group/sector/company
-        #   data twice creates a window where a concurrent edit could
-        #   authorize the request against one set and persist another.
-        # Database/ORM: org_index, ChannelGroupRegistryStore.
-        # Standards: Authorization must mirror persisted data.
-        # Blast Radius: Group export authorization and snapshot drift.
-        # ================================================================
-        try:
-            snapshot = _channel_ids_for_export_scope(
-                scope_type=payload.scope_type,
-                scope_id=payload.scope_id,
-                org_index=org_index,
-                group_registry=group_registry,
-            )
-        except KeyError:
-            if (
-                payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE
-                and analytics_csv_lookup_denial_permission is not None
-            ):
-                _raise_missing_permission(analytics_csv_lookup_denial_permission)
-            raise
-        snapshot_tuple = tuple(sorted(snapshot)) if snapshot is not None else None
-        if (
-            payload.export_type == _ANALYTICS_SUMMARY_CSV_TYPE
-            and analytics_csv_lookup_denial_permission is not None
-            and snapshot_tuple is not None
-            and not snapshot_tuple
-        ):
-            # FIX: Known-but-empty org scopes should not reveal existence to a
-            # caller missing the requested analytics CSV permission scope.
-            _raise_missing_permission(analytics_csv_lookup_denial_permission)
+        snapshot_tuple = _resolve_export_scope_snapshot(
+            export_type=payload.export_type,
+            scope_type=payload.scope_type,
+            scope_id=payload.scope_id,
+            org_index=org_index,
+            group_registry=group_registry,
+            analytics_csv_lookup_denial_permission=analytics_csv_lookup_denial_permission,
+        )
         _require_export_access_permissions(
             user=user,
             export_type=payload.export_type,
@@ -1944,6 +1918,60 @@ def _resolved_export_channel_ids(
 def _channel_snapshot_tuple(channel_ids: set[str] | None) -> tuple[str, ...] | None:
     """Convert a resolved channel set to the tuple shape used by authorization helpers."""
     return None if channel_ids is None else tuple(sorted(channel_ids))
+
+
+# ============================================================================
+# Purpose: Resolve a request-time channel snapshot and mask analytics CSV scope
+#   lookup details for callers missing the requested revenue/analytics scope.
+# Database/ORM: OrgAccessIndex and ChannelGroupRegistryStore read models.
+# Standards: Fail-closed authorization before exposing org-scope existence.
+# Blast Radius: Analytics CSV authorization, export audit scope, persisted jobs.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/exports.py -> request_export caller.
+#   - File: tests/api/test_exports_api.py -> CSV permission masking regressions.
+# ============================================================================
+def _resolve_export_scope_snapshot(
+    *,
+    export_type: str,
+    scope_type: str,
+    scope_id: str | None,
+    org_index: OrgAccessIndex,
+    group_registry: ChannelGroupRegistryStore,
+    analytics_csv_lookup_denial_permission: Permission | None,
+) -> tuple[str, ...] | None:
+    """Resolve the one channel snapshot used for auth, audit, and persistence."""
+    denial_permission = _analytics_csv_scope_denial_permission(
+        export_type=export_type,
+        analytics_csv_lookup_denial_permission=analytics_csv_lookup_denial_permission,
+    )
+    try:
+        snapshot = _channel_ids_for_export_scope(
+            scope_type=scope_type,
+            scope_id=scope_id,
+            org_index=org_index,
+            group_registry=group_registry,
+        )
+    except KeyError:
+        if denial_permission is not None:
+            _raise_missing_permission(denial_permission)
+        raise
+    snapshot_tuple = _channel_snapshot_tuple(snapshot)
+    if denial_permission is not None and snapshot_tuple is not None and not snapshot_tuple:
+        # FIX: Known-but-empty org scopes should not reveal existence to a
+        # caller missing the requested analytics CSV permission scope.
+        _raise_missing_permission(denial_permission)
+    return snapshot_tuple
+
+
+def _analytics_csv_scope_denial_permission(
+    *,
+    export_type: str,
+    analytics_csv_lookup_denial_permission: Permission | None,
+) -> Permission | None:
+    """Return the permission used to mask analytics CSV scope lookup details."""
+    if export_type != _ANALYTICS_SUMMARY_CSV_TYPE:
+        return None
+    return analytics_csv_lookup_denial_permission
 
 
 def _channel_ids_for_export_scope(
