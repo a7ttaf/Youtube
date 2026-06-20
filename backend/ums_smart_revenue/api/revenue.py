@@ -33,7 +33,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import Integer, literal_column, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
@@ -2574,7 +2574,7 @@ def _previous_month(month: str) -> str:
 #   turn the alert endpoint into an unbounded scan/transfer.
 # Database/ORM: Read-only LEFT JOIN of YouTubeChannelORM x
 #   MonthlyChannelRevenueFactORM (no FOR UPDATE), tenant-scoped, source of
-#   truth in PostgreSQL. The count uses `func.count()` server-side; the
+#   truth in PostgreSQL. The count uses `COUNT(*)` server-side; the
 #   sample is a separate ordered `LIMIT 20` SELECT.
 # Standards: Mirrors month_close_readiness._missing_required_revenue_fact_count
 #   exactly (active.is_(True) AND revenue_required.is_(True) AND fact.id IS NULL).
@@ -2623,7 +2623,7 @@ def missing_revenue_fact_channel_count_and_sample(
     if youtube_channel_ids is not None:
         where_predicates.append(YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids))
     count_statement = (
-        select(func.count())
+        select(literal_column("COUNT(*)", type_=Integer()))
         .select_from(YouTubeChannelORM)
         .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
         .where(*where_predicates)
