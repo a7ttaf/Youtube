@@ -1,3 +1,12 @@
+# ============================================================================
+# Purpose: Define audit event types and structured audit record contracts.
+# Database/ORM: None directly; AuditLogORM persistence is in audit_service.py.
+# Standards: Typed event enum, permission metadata, and safe audit payloads.
+# Blast Radius: Audit trail classification and event naming across APIs.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> Persistence.
+#   - File: backend/ums_smart_revenue/api/export_templates.py -> New event use.
+# ============================================================================
 """Audit event types and structured audit record dataclasses."""
 
 from dataclasses import dataclass
@@ -31,6 +40,7 @@ class AuditEventType(StrEnum):
     EXPORT_CREATED = "EXPORT_CREATED"
     EXPORT_VIEWED = "EXPORT_VIEWED"
     EXPORT_DOWNLOADED = "EXPORT_DOWNLOADED"
+    EXPORT_TEMPLATE_CHANGED = "EXPORT_TEMPLATE_CHANGED"
     USER_ACCOUNT_CHANGED = "USER_ACCOUNT_CHANGED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
     USER_PERMISSION_CHANGED = "USER_PERMISSION_CHANGED"
@@ -135,6 +145,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.EXPORT_DOWNLOADED: AuditEventDefinition(
         AuditEventType.EXPORT_DOWNLOADED,
         permission=Permission.EXPORT_REVENUE_REPORT,
+    ),
+    AuditEventType.EXPORT_TEMPLATE_CHANGED: AuditEventDefinition(
+        AuditEventType.EXPORT_TEMPLATE_CHANGED,
+        reason_required=True,
+        permission=Permission.MANAGE_EXPORT_TEMPLATES,
     ),
     AuditEventType.USER_ACCOUNT_CHANGED: AuditEventDefinition(
         AuditEventType.USER_ACCOUNT_CHANGED,

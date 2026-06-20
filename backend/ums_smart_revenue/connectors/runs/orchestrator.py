@@ -55,13 +55,13 @@ import os
 import tempfile
 import types as _types  # SimpleNamespace used for dry-run tenant_id proxy
 from calendar import monthrange
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from datetime import date as date_cls
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -2648,7 +2648,7 @@ def _accumulate_csv_report_bytes(
 #   - Function: _accumulate_csv_report_bytes -> calls this before row parsing.
 # ============================================================================
 def _validate_csv_headers(
-    fieldnames: list[str] | None, *, report_id: str, report_type: str
+    fieldnames: Sequence[str] | None, *, report_id: str, report_type: str
 ) -> str | None:
     """Confirm the CSV header set contains the metric column expected for ``report_type``."""
     if not fieldnames:
@@ -2979,7 +2979,9 @@ def _zero_counts() -> dict[str, int]:
     return {key: 0 for key in CONNECTOR_RUN_COUNT_KEYS}
 
 
-def _derive_terminal_status(counts: dict[str, int]) -> str:
+def _derive_terminal_status(
+    counts: dict[str, int],
+) -> Literal["SUCCEEDED", "PARTIAL", "FAILED"]:
     """Pick the connector_runs terminal status from per-report counters.
 
     ``finish_run`` accepts only ``{SUCCEEDED, PARTIAL, FAILED}``. ``RUNNING``

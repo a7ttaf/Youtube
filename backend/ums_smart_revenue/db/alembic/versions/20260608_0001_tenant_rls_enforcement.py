@@ -7,10 +7,10 @@ Create Date: 2026-06-08
 Postgres-only in effect (SQLite has no RLS/roles; the whole body is guarded and
 no-ops there). Creates the two roles idempotently, installs the backend-owned
 tenant-context helpers, enables RLS + an isolation policy on every
-tenant-scoped table, and grants the least-privilege tenant/platform DML
-surface. A drift guard fails the migration if the live set of tenant_id tables
-does not equal db.rls.TENANT_SCOPED_TABLES, so a new tenant table cannot ship
-unprotected.
+tenant-scoped table that existed at this revision, and grants the
+least-privilege tenant/platform DML surface. A drift guard fails the migration
+if the live set of tenant_id tables does not equal this revision's snapshot, so
+the revision cannot silently skip one of its owned tables.
 
 Deploy precondition: the migration/bootstrap DB user needs role-management
 privilege (CREATEROLE or membership-admin on these roles), OR a DBA pre-creates
@@ -34,7 +34,6 @@ from ums_smart_revenue.db.rls import (
     TENANT_CONTEXT_GETTER,
     TENANT_CONTEXT_SETTER,
     TENANT_CONTEXT_TABLE,
-    TENANT_SCOPED_TABLES,
     discover_tenant_tables_sql,
     tenant_rls_policy_name,
 )
@@ -60,6 +59,33 @@ PLATFORM_ONLY_WRITE_TABLES: tuple[str, ...] = (
     "committed_allocation_lines",
     "committed_allocation_notes",
     "committed_allocation_unallocated",
+)
+_REVISION_TENANT_SCOPED_TABLES: tuple[str, ...] = (
+    "access_scopes",
+    "adsense_content_owner_links",
+    "adsense_payments",
+    "api_connector_credentials",
+    "audit_logs",
+    "bank_reconciliation_entries",
+    "channel_group_members",
+    "channel_groups",
+    "committed_allocation_runs",
+    "connector_run_raw_files",
+    "connector_runs",
+    "content_owner_channel_links",
+    "deduction_components",
+    "export_jobs",
+    "finance_month_close",
+    "google_revenue_source_rows",
+    "monthly_channel_revenue_facts",
+    "number_explanations",
+    "org_units",
+    "raw_report_files",
+    "revenue_manual_overrides",
+    "user_permission_grants",
+    "user_role_assignments",
+    "users",
+    "youtube_channels",
 )
 
 
@@ -90,7 +116,7 @@ def _create_role(bind, role: str) -> None:
 def _assert_no_drift(bind) -> None:
     """Fail if the live tenant_id table set != the allowlist constant."""
     live = set(bind.execute(sa.text(discover_tenant_tables_sql())).scalars())
-    expected = set(TENANT_SCOPED_TABLES)
+    expected = set(_REVISION_TENANT_SCOPED_TABLES)
     if live != expected:
         missing = expected - live
         extra = live - expected
@@ -98,7 +124,7 @@ def _assert_no_drift(bind) -> None:
             "Tenant RLS allowlist drift. "
             f"In allowlist but not in schema: {sorted(missing)}; "
             f"in schema but not in allowlist: {sorted(extra)}. "
-            "Update db.rls.TENANT_SCOPED_TABLES."
+            "Update this revision's tenant table snapshot or db.rls.TENANT_SCOPED_TABLES."
         )
 
 
@@ -257,7 +283,7 @@ def upgrade() -> None:
     _create_tenant_context_helpers(bind)
     bind.execute(sa.text(f'GRANT USAGE ON SCHEMA public TO "{APP_TENANT_ROLE}"'))
     bind.execute(sa.text(f'GRANT USAGE ON SCHEMA public TO "{APP_PLATFORM_ROLE}"'))
-    for table in TENANT_SCOPED_TABLES:
+    for table in _REVISION_TENANT_SCOPED_TABLES:
         policy = tenant_rls_policy_name(table)
         bind.execute(sa.text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
         # DROP-then-CREATE so a half-applied dev run / re-run does not wedge on
@@ -312,7 +338,7 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
-    for table in TENANT_SCOPED_TABLES:
+    for table in _REVISION_TENANT_SCOPED_TABLES:
         policy = tenant_rls_policy_name(table)
         bind.execute(sa.text(f"DROP POLICY IF EXISTS {policy} ON {table}"))
         bind.execute(sa.text(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY"))

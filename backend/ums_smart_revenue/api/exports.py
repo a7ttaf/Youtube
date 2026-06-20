@@ -165,6 +165,7 @@ class ExportRequest(BaseModel):
     """Pydantic request model for creating a new export job."""
 
     export_type: str = Field(min_length=1)
+    template_id: str | None = None
     scope_type: str = Field(min_length=1)
     scope_id: str | None = None
     month: str = Field(min_length=1)
@@ -184,7 +185,7 @@ class ExportRequest(BaseModel):
             return stripped
         return value
 
-    @field_validator("scope_id", mode="before")
+    @field_validator("scope_id", "template_id", mode="before")
     @classmethod
     def strip_optional_string(cls, value):
         """Strip whitespace from optional string fields and coerce blank to None."""
@@ -293,6 +294,7 @@ def request_export(
             include_confidence_notes=payload.include_confidence_notes,
             include_manual_override_notes=payload.include_manual_override_notes,
             scope_channel_ids=snapshot_tuple,
+            template_id=payload.template_id,
         )
     except KeyError as exc:
         raise HTTPException(
@@ -314,6 +316,7 @@ def request_export(
         permission_override=_audit_permission_for_export_type(export_job.export_type),
         details={
             "export_type": export_job.export_type,
+            "template_id": export_job.template_id,
             "scope_type": export_job.scope_type,
             "scope_id": export_job.scope_id,
             "month": export_job.month,

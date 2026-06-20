@@ -88,7 +88,7 @@ def test_force_rls_migration_sets_force_flag_on_all_tenant_tables():
         with engine.connect() as conn:
             flags = _force_flags(conn)
             for table in TENANT_SCOPED_TABLES:
-                assert flags.get(table) is False, f"{table} still FORCEd"
+                assert flags.get(table, False) is False, f"{table} still FORCEd"
     finally:
         engine.dispose()
         # Leave the DB at head for the rest of the PG tier.

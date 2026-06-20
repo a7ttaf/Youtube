@@ -543,6 +543,11 @@ GET /exports/{export_id}/analytics-summary.csv
 GET /exports/{export_id}/finance-workbook.xlsx
 GET /exports/{export_id}/executive.pdf
 GET /exports/{export_id}/branded-slide-pack.pptx
+POST /export-templates
+GET /export-templates?limit=50&offset=0&export_type=FINANCE_EXCEL&include_inactive=false
+GET /export-templates/{template_id}
+PATCH /export-templates/{template_id}
+DELETE /export-templates/{template_id}?reason=...
 ```
 
 `POST /exports`, `GET /exports/{export_id}`, and the `GET /exports` list
@@ -552,6 +557,13 @@ field is `null` for `scope_type='global'` jobs and for pre-snapshot legacy
 rows. Subsequent edits to the source group, sector, or company membership do
 not change the data returned for the same `export_id`, keeping finance
 numbers deterministic per export.
+
+`POST /exports` also accepts an optional `template_id`. When supplied, the
+backend validates that the export template exists in the tenant, is active, and
+has the same `export_type` as the requested export job. The selected template is
+persisted on `export_jobs.template_id`, returned in export job API payloads, and
+included in `EXPORT_CREATED` audit details. Template selection does not change
+source SQL reads, formulas, scope snapshots, or finance calculations.
 
 `GET /exports` is paginated. Query parameters are `limit` (default `50`, maximum `100`) and `offset` (default `0`). Requests above the maximum are rejected with `422`. Responses include paging metadata:
 
@@ -589,6 +601,17 @@ job `COMPLETED`, and emits `REVENUE_VIEWED` plus `EXPORT_DOWNLOADED` with
 artifact metadata. If artifact storage fails before completion, the job remains
 non-terminal and retryable, the endpoint returns `503`, and no revenue/download
 audit event is emitted.
+
+`/export-templates` manages tenant-scoped reusable export layout configuration.
+Create/list operations require global `exports.manage_templates`; item reads,
+updates, and soft-deletes accept either the global grant or a matching
+`export:{template_id}` scoped grant. Templates include `name`, `export_type`,
+optional `description`, JSON-object `layout_config`, `is_active`, `created_by`,
+`created_at`, and `updated_at`. `DELETE /export-templates/{template_id}` does
+not remove the row; it sets `is_active=false` so historical export jobs can keep
+their nullable `template_id` reference. Template writes emit
+`EXPORT_TEMPLATE_CHANGED` with a required operator reason. No backfill is
+required for existing export jobs because `export_jobs.template_id` is nullable.
 
 `GET /exports/{export_id}/finance-workbook-preview` is an implemented read-only
 foundation for future `FINANCE_EXCEL` generation. It requires `exports.revenue`

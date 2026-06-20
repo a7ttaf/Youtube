@@ -1,3 +1,13 @@
+# ============================================================================
+# Purpose: Define report, export job, and export-template ORM mappings.
+# Database/ORM: ReportBase, export_jobs, export_templates, and report files.
+# Standards: SQLAlchemy declarative mappings with tenant defaults and indexes.
+# Blast Radius: Report storage, export configuration persistence, and tenant
+# scoped query surfaces.
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Repository usage.
+#   - File: backend/ums_smart_revenue/db/alembic/versions -> Schema migrations.
+# ============================================================================
 from datetime import datetime
 from uuid import UUID
 
@@ -8,6 +18,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    ForeignKeyConstraint,
     Index,
     Text,
     UniqueConstraint,
@@ -99,12 +110,83 @@ class RawReportFileORM(ReportBase):
     )
 
 
+# ============================================================================
+# Purpose: Store operator-managed export templates that define reusable layout
+# choices for future export generation without changing the underlying finance
+# or analytics source reads.
+# Database/ORM: export_templates, referenced by export_jobs.template_id.
+# Standards: Tenant-scoped uniqueness, app-layer JSON validation, and soft
+# deactivation for historical export-job references.
+# Blast Radius: Export configuration and audit only. No finance math changes.
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Template repository.
+#   - File: backend/ums_smart_revenue/api/export_templates.py -> CRUD boundary.
+# ============================================================================
+class ExportTemplateORM(ReportBase):
+    __tablename__ = "export_templates"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    export_type: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    layout_config: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=False,
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
+
+    __table_args__ = (
+        # Composite (tenant_id, id) unique key serves as the target for the
+        # export_jobs (tenant_id, template_id) foreign key so a template
+        # reference can never cross tenants at the DB level (mirrors the
+        # uq_<table>_tenant_id_id pattern used by org_units / youtube_channels /
+        # connector_runs). id is already the primary key, so this constraint is
+        # functionally redundant for uniqueness but required by PostgreSQL as the
+        # explicit unique target of the composite FK.
+        UniqueConstraint("tenant_id", "id", name="uq_export_templates_tenant_id_id"),
+        UniqueConstraint("tenant_id", "name", name="uq_export_templates_tenant_id_name"),
+        CheckConstraint("length(trim(name)) > 0", name="ck_export_templates_name_not_blank"),
+        CheckConstraint(
+            "export_type IN ('FINANCE_EXCEL', 'EXECUTIVE_PDF', "
+            "'BRANDED_SLIDE_PACK', 'ANALYTICS_SUMMARY_CSV')",
+            name="ck_export_templates_export_type",
+        ),
+        Index("ix_export_templates_tenant_type_active", "tenant_id", "export_type", "is_active"),
+        Index("ix_export_templates_tenant_created", "tenant_id", "created_at"),
+    )
+
+
 class ExportJobORM(ReportBase):
     __tablename__ = "export_jobs"
 
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
+    # The tenant-scoped (tenant_id, template_id) -> export_templates(tenant_id,
+    # id) foreign key is declared in __table_args__ (composite FKs cannot use
+    # the column-level ForeignKey()). NO ACTION (Postgres default) means a
+    # template still referenced by a job cannot be hard-deleted; the operational
+    # lifecycle is soft deactivation (deactivate_template sets is_active=false),
+    # which never trips the FK and preserves historical job references.
+    template_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     export_type: Mapped[str] = mapped_column(Text, nullable=False)
     scope_type: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -158,6 +240,16 @@ class ExportJobORM(ReportBase):
     )
 
     __table_args__ = (
+        # Composite tenant-scoped FK: a template_id reference can never point at
+        # another tenant's template at the DB level, even for a write path that
+        # bypasses SqlAlchemyExportJobRepository. NO ACTION (default) blocks
+        # hard-deleting a template still referenced by a job; the operational
+        # lifecycle is soft deactivation, which never trips this FK.
+        ForeignKeyConstraint(
+            ["tenant_id", "template_id"],
+            ["export_templates.tenant_id", "export_templates.id"],
+            name="fk_export_jobs_tenant_template",
+        ),
         CheckConstraint(
             "export_type IN ('FINANCE_EXCEL', 'EXECUTIVE_PDF', "
             "'BRANDED_SLIDE_PACK', 'ANALYTICS_SUMMARY_CSV')",
@@ -211,6 +303,7 @@ class ExportJobORM(ReportBase):
         ),
         Index("ix_export_jobs_requested_by_created", "requested_by", "created_at"),
         Index("ix_export_jobs_scope_month", "scope_type", "scope_id", "month"),
+        Index("ix_export_jobs_template_id", "template_id"),
         # Mirror the migration 0006 GIN index on scope_channel_ids so ORM-built
         # schemas (e.g. ReportBase.metadata.create_all in tests) include the
         # PostgreSQL index. On SQLite postgresql_using is silently ignored and

@@ -1,3 +1,12 @@
+# ============================================================================
+# Purpose: Validate export job and export-template API behavior.
+# Database/ORM: SQLite test database with finance, report, org, and audit ORM.
+# Standards: Route-level behavior checks with real app wiring and audit asserts.
+# Blast Radius: Export API contracts, finance lock snapshots, and template CRUD.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/exports.py -> Export job API.
+#   - File: backend/ums_smart_revenue/api/export_templates.py -> Template API.
+# ============================================================================
 import csv
 import hashlib
 import logging
@@ -30,7 +39,7 @@ from ums_smart_revenue.db.org_models import (
     OrgUnitORM,
     YouTubeChannelORM,
 )
-from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
+from ums_smart_revenue.db.report_models import ExportJobORM, ExportTemplateORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 from ums_smart_revenue.db.source_models import CurrencyORM, GoogleRevenueSourceRowORM
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
@@ -256,6 +265,266 @@ def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_
     assert export_job.month_lock_status == "LOCKED"
     assert audit_log.event_type == "EXPORT_CREATED"
     assert audit_log.sensitive is True
+
+
+def test_corporate_admin_manages_export_template_lifecycle_with_audit(tmp_path):
+    """Verify template CRUD is audited and soft-deletes active list visibility."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("corporate_admin")
+
+    create_response = client.post(
+        "/export-templates",
+        headers=headers,
+        json={
+            "name": "Finance workbook standard",
+            "export_type": "FINANCE_EXCEL",
+            "description": "Monthly finance workbook layout",
+            "layout_config": {"sheets": ["summary", "payments"], "version": 1},
+            "reason": "Create reusable finance layout",
+        },
+    )
+    template_id = create_response.json()["id"]
+
+    list_response = client.get(
+        "/export-templates?export_type=FINANCE_EXCEL",
+        headers=headers,
+    )
+    update_response = client.patch(
+        f"/export-templates/{template_id}",
+        headers=headers,
+        json={
+            "name": "Finance workbook board pack",
+            "description": None,
+            "layout_config": {"sheets": ["summary", "alerts"], "version": 2},
+            "reason": "Update workbook layout",
+        },
+    )
+    delete_response = client.delete(
+        f"/export-templates/{template_id}?reason=Retire%20template",
+        headers=headers,
+    )
+    active_list_response = client.get("/export-templates", headers=headers)
+    inactive_list_response = client.get(
+        "/export-templates?include_inactive=true",
+        headers=headers,
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        template = session.scalars(select(ExportTemplateORM)).one()
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert create_response.status_code == 201
+    assert create_response.json()["name"] == "Finance workbook standard"
+    assert create_response.json()["is_active"] is True
+    assert create_response.json()["audit_event"]["event_type"] == "EXPORT_TEMPLATE_CHANGED"
+    assert list_response.status_code == 200
+    assert [item["id"] for item in list_response.json()["items"]] == [template_id]
+    assert update_response.status_code == 200
+    assert update_response.json()["name"] == "Finance workbook board pack"
+    assert update_response.json()["description"] is None
+    assert update_response.json()["layout_config"] == {
+        "sheets": ["summary", "alerts"],
+        "version": 2,
+    }
+    assert delete_response.status_code == 200
+    assert delete_response.json()["is_active"] is False
+    assert active_list_response.json()["items"] == []
+    assert [item["id"] for item in inactive_list_response.json()["items"]] == [template_id]
+    assert template.name == "Finance workbook board pack"
+    assert template.is_active is False
+    assert [event.event_type for event in audit_events] == [
+        "EXPORT_TEMPLATE_CHANGED",
+        "EXPORT_TEMPLATE_CHANGED",
+        "EXPORT_TEMPLATE_CHANGED",
+    ]
+    assert all(event.sensitive is True for event in audit_events)
+
+
+def test_export_template_update_rejects_null_only_noop(tmp_path):
+    """Verify nullable PATCH fields cannot create a fake update audit event."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("corporate_admin")
+
+    create_response = client.post(
+        "/export-templates",
+        headers=headers,
+        json={
+            "name": "Finance workbook standard",
+            "export_type": "FINANCE_EXCEL",
+            "layout_config": {"sheets": ["summary"]},
+            "reason": "Create reusable finance layout",
+        },
+    )
+    template_id = create_response.json()["id"]
+    response = client.patch(
+        f"/export-templates/{template_id}",
+        headers=headers,
+        json={"name": None, "is_active": None, "reason": "No effective update"},
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        template = session.scalars(select(ExportTemplateORM)).one()
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert create_response.status_code == 201
+    assert response.status_code == 422
+    assert template.name == "Finance workbook standard"
+    assert [event.event_type for event in audit_events] == ["EXPORT_TEMPLATE_CHANGED"]
+
+
+def test_export_template_create_rejects_excessively_nested_layout(tmp_path):
+    """Verify layout_config is bounded before it reaches storage."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    layout_config: dict[str, object] = {"level": {}}
+    nested = layout_config["level"]
+    assert isinstance(nested, dict)
+    for index in range(10):
+        nested[f"level_{index}"] = {}
+        nested = nested[f"level_{index}"]
+
+    response = client.post(
+        "/export-templates",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "name": "Overly nested workbook layout",
+            "export_type": "FINANCE_EXCEL",
+            "layout_config": layout_config,
+            "reason": "Validate layout guard",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        template_count = session.scalar(select(func.count()).select_from(ExportTemplateORM))
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 422
+    assert "layout_config nesting" in response.json()["detail"]
+    assert template_count == 0
+    assert audit_count == 0
+
+
+def test_export_template_management_requires_permission(tmp_path):
+    """Verify export template writes fail closed without template management grants."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/export-templates",
+        headers=auth_headers("assistant_analyst"),
+        json={
+            "name": "Analyst template probe",
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "layout_config": {"columns": ["report_month"]},
+            "reason": "Probe template access",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        template_count = session.scalar(select(func.count()).select_from(ExportTemplateORM))
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.manage_templates"
+    assert template_count == 0
+    assert audit_count == 0
+
+
+def test_finance_export_request_persists_active_template_selection(tmp_path):
+    """Verify export job creation stores the selected active matching template."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    template_response = client.post(
+        "/export-templates",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "name": "Finance workbook standard",
+            "export_type": "FINANCE_EXCEL",
+            "layout_config": {"sheets": ["summary", "payments"]},
+            "reason": "Create reusable finance layout",
+        },
+    )
+    template_id = template_response.json()["id"]
+    response = client.post(
+        "/exports",
+        headers=auth_headers("finance_admin"),
+        json={
+            "export_type": "FINANCE_EXCEL",
+            "template_id": template_id,
+            "scope_type": "company",
+            "scope_id": str(COMPANY_A_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Monthly finance close workbook",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_job = session.scalars(select(ExportJobORM)).one()
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    export_created = [event for event in audit_events if event.event_type == "EXPORT_CREATED"]
+    assert template_response.status_code == 201
+    assert response.status_code == 202
+    assert response.json()["template_id"] == template_id
+    assert export_job.template_id == UUID(template_id)
+    assert len(export_created) == 1
+    assert export_created[0].details["template_id"] == template_id
+
+
+def test_export_request_rejects_mismatched_export_template(tmp_path):
+    """Verify template export_type must match the requested export job type."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    template_response = client.post(
+        "/export-templates",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "name": "Analytics CSV standard",
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "layout_config": {"columns": ["report_month", "amount_native"]},
+            "reason": "Create analytics layout",
+        },
+    )
+    response = client.post(
+        "/exports",
+        headers=auth_headers("finance_admin"),
+        json={
+            "export_type": "FINANCE_EXCEL",
+            "template_id": template_response.json()["id"],
+            "scope_type": "company",
+            "scope_id": str(COMPANY_A_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Reject mismatched template",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert template_response.status_code == 201
+    assert response.status_code == 422
+    assert "export_type must match" in response.json()["detail"]
+    assert export_count == 0
+    assert [event.event_type for event in audit_events] == ["EXPORT_TEMPLATE_CHANGED"]
 
 
 def test_channel_export_request_rejects_unknown_channel_scope(tmp_path):

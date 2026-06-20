@@ -21,9 +21,9 @@ fetch_bytes() (raw download bodies):
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from google.auth.exceptions import GoogleAuthError
@@ -47,7 +47,20 @@ _MAX_TIMEOUT_ATTEMPTS = 4
 _MAX_CONNECT_ATTEMPTS = 3
 _BACKOFF_CAP_SECONDS = 64.0
 
-_QueryParams = Mapping[str, str] | Sequence[tuple[str, str]]
+_QueryParams = (
+    # FIX: Type the query params exactly as callers build them and as
+    # httpx.Client.request accepts (TYP-050). Every caller passes either a
+    # ``dict`` of str->str (youtube_reporting_client / youtube_analytics_client
+    # via _build_query_request) or a ``list[tuple[str, str]]``
+    # (adsense_management_client). The previous
+    # ``Mapping[str, str] | Sequence[tuple[str, str]]`` form failed because
+    # httpx's params stub expects a concrete list of pairs, not the covariant
+    # ``Sequence``; using the concrete ``list[tuple[str, str]]`` keeps the
+    # runtime contract identical (callers still pass only str-valued mappings)
+    # while satisfying the static type contract for the forward at
+    # client.request(params=...).
+    Mapping[str, str] | list[tuple[str, str]]
+)
 
 
 @dataclass
@@ -201,11 +214,29 @@ def _request_or_retry_transport(
     Execute an HTTP request using the client, catching timeout and transport errors
     to trigger retries by returning None and adjusting the retry state.
     """
+    # FIX: Normalize the caller-built params into httpx.QueryParams once. The
+    # _QueryParams alias matches the concrete shapes callers pass (dict[str,str]
+    # or list[tuple[str,str]]); building QueryParams from those literal shapes
+    # (instead of the union) satisfies httpx's params stub (TYP-050) without
+    # changing the wire contract — QueryParams preserves the exact keys/values
+    # and ordering of the caller's mapping or pair list. mypy/httpx-stub treat
+    # tuple value types invariantly, so the list[tuple[str,str]] branch uses a
+    # cast: this is NOT suppressing a bug (the pair list is a valid httpx params
+    # input by construction) but bridging a known stub invariance limitation at
+    # the library boundary.
+    normalized_params: httpx.QueryParams | None
+    if params is None:
+        normalized_params = None
+    elif isinstance(params, Mapping):
+        normalized_params = httpx.QueryParams(dict(params))
+    else:
+        pair_list = cast("list[tuple[str, str | int | float | bool | None]]", params)
+        normalized_params = httpx.QueryParams(pair_list)
     try:
         return client.request(
             method=method,
             url=url,
-            params=params,
+            params=normalized_params,
             json=json_body,
             headers=headers,
         )

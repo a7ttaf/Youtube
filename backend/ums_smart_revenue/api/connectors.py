@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # pylint: disable=too-many-arguments, too-many-positional-arguments
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
@@ -202,24 +203,37 @@ def list_connector_runs(
     # FIX: Mirror the test-connection route's tenant resolution so a truthy but
     # non-UUID tenant_id falls back to the bootstrap tenant instead of raising a
     # raw ValueError that would surface as an unhandled 500.
+    # FIX: Resolve the connector filter to explicit values and pass them as
+    # typed keyword arguments. The previous dict[str, object] + **unpack form
+    # defeated mypy (TYP-050): the unpacked values are typed object, so none of
+    # them match list_runs' concrete parameter types. Building the three
+    # mutually-exclusive filter shapes first keeps the runtime contract
+    # identical (connector_key vs connector_keys still cannot both be set)
+    # while letting the static type-check verify the call.
     try:
-        list_runs_kwargs: dict[str, object] = {
-            "session": session,
-            "tenant_id": _resolve_tenant_uuid(user),
-            "account_id": account_id,
-            "cursor_started_at": cursor_started_at,
-            "cursor_id": cursor_id,
-            "limit": limit,
-        }
+        resolved_connector_key: str | None
+        resolved_connector_keys: Iterable[str] | None
         if allowed_connector_ids is None:
-            list_runs_kwargs["connector_key"] = connector_key
+            resolved_connector_key = connector_key
+            resolved_connector_keys = None
         elif connector_key is not None:
             if connector_key not in allowed_connector_ids:
                 _raise_missing_connector_permission(Permission.VIEW_CONNECTOR_HEALTH)
-            list_runs_kwargs["connector_key"] = connector_key
+            resolved_connector_key = connector_key
+            resolved_connector_keys = None
         else:
-            list_runs_kwargs["connector_keys"] = allowed_connector_ids
-        page = list_runs(**list_runs_kwargs)
+            resolved_connector_key = None
+            resolved_connector_keys = allowed_connector_ids
+        page = list_runs(
+            session,
+            tenant_id=_resolve_tenant_uuid(user),
+            connector_key=resolved_connector_key,
+            connector_keys=resolved_connector_keys,
+            account_id=account_id,
+            cursor_started_at=cursor_started_at,
+            cursor_id=cursor_id,
+            limit=limit,
+        )
     except ConnectorRunValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
