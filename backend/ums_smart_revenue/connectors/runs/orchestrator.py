@@ -1,3 +1,19 @@
+# ============================================================================
+# Purpose: Orchestrate one connector run from credential resolution through
+#   report production, blob evidence, parsing, source-row upsert, lifecycle
+#   audit, normalization, and terminal outcome reporting.
+# Database/ORM: ConnectorRunORM, RawReportFileORM, GoogleRevenueSourceRowORM,
+#   ApiConnectorCredentialORM, AuditLogORM, and org/finance projection reads.
+# Standards: Typed connector outcomes/errors, transaction boundaries around
+#   dependent writes, fail-closed tenant checks, and safe audit/error payloads.
+# Blast Radius: Connector ingestion, audit trail, source-row persistence, and
+#   finance projection inputs. No UI-side official finance calculation.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/audit.py -> lifecycle
+#     audit emitters used by run finalization.
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py -> post
+#     run fact projection and skipped/projection-failed audit signals.
+# ============================================================================
 """B2.4 orchestrator: the public ``run_one(...)`` surface.
 
 Happy path (this task, T27):

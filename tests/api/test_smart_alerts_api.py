@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: Verify Smart Alerts API authorization, finance-signal composition,
+#   and audit-log disclosure behavior through request-level tests.
+# Database/ORM: SQLite test app with FinanceBase, OrgBase, SecurityBase, and
+#   seeded AuditLogORM connector/source-row edges.
+# Standards: Endpoint tests use real dependency wiring, permission headers, and
+#   persisted audit reads instead of bypassing route-level auth/audit behavior.
+# Blast Radius: Test coverage only for smart-alert API, finance monitoring, and
+#   connector/source-row audit-derived alert disclosure.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> smart-alert endpoint.
+#   - File: backend/ums_smart_revenue/connectors/runs/audit_alerts.py -> failed
+#     connector-run audit read model.
+# ============================================================================
 """Tests for the Smart Alerts API authorization and database behavior."""
 
 from datetime import UTC, date, datetime
@@ -613,6 +627,155 @@ def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
     assert audit_reads[0].details["source_rows_skipped_returned"] == 0
     assert audit_reads[0].details["connector_runs_failed_returned"] == 1
     assert audit_reads[0].details["details_redacted"] is False
+
+
+def test_month_smart_alerts_normalize_connector_aliases_before_latest_edge(
+    tmp_path,
+):
+    """A canonical underscore success clears an older public hyphen-key failure."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    tenant_id = UUID(UMS_TENANT_ID)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-hyphen-failed",
+                    scope_type="connector",
+                    scope_id="youtube-reporting",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "youtube-reporting",
+                        "account_id": "content-owner-1",
+                        "report_month": "2026-03",
+                        "status": "FAILED",
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 1, tzinfo=UTC),
+                ),
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-underscore-success",
+                    scope_type="connector",
+                    scope_id="youtube_reporting",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "youtube_reporting",
+                        "account_id": "content-owner-1",
+                        "report_month": "2026-03",
+                        "status": "SUCCEEDED",
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 2, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_approver", "global"),
+    )
+
+    assert response.status_code == 200
+    codes = [alert["code"] for alert in response.json()["alerts"]]
+    assert "CONNECTOR_RUNS_FAILED" not in codes
+    with Session(engine) as session:
+        audit_reads = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+        ).all()
+    assert len(audit_reads) == 1
+    assert audit_reads[0].details["returned"] == 0
+    assert audit_reads[0].details["connector_runs_failed_returned"] == 0
+
+
+def test_month_smart_alerts_include_projection_failed_connector_run(tmp_path):
+    """A projection-failed audit edge is a failed connector-run signal."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    tenant_id = UUID(UMS_TENANT_ID)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-clean-before-projection",
+                    scope_type="connector",
+                    scope_id="youtube_reporting",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "youtube_reporting",
+                        "account_id": "content-owner-1",
+                        "report_month": "2026-03",
+                        "status": "SUCCEEDED",
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 1, tzinfo=UTC),
+                ),
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-projection-failed",
+                    scope_type="connector",
+                    scope_id="youtube_reporting",
+                    reason="post-run normalize failed; run rewritten to FAILED",
+                    details={
+                        "lifecycle": "PROJECTION_FAILED",
+                        "connector_key": "youtube_reporting",
+                        "account_id": "content-owner-1",
+                        "report_month": "2026-03",
+                        "error_summary_present": True,
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 2, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_approver", "global"),
+    )
+
+    assert response.status_code == 200
+    failed = next(
+        (alert for alert in response.json()["alerts"] if alert["code"] == "CONNECTOR_RUNS_FAILED"),
+        None,
+    )
+    assert failed is not None
+    assert failed["details"]["failed_run_count"] == 1
+    assert failed["details"]["failed_by_status"] == {"FAILED": 1}
+    with Session(engine) as session:
+        audit_reads = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+        ).all()
+    assert len(audit_reads) == 1
+    assert audit_reads[0].details["returned"] == 1
+    assert audit_reads[0].details["connector_runs_failed_returned"] == 1
 
 
 def test_month_smart_alerts_clear_stale_failed_connector_on_malformed_latest_edge(

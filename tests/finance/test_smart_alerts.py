@@ -1,3 +1,16 @@
+# ============================================================================
+# Purpose: Verify pure finance smart-alert composition rules independent of
+#   FastAPI route wiring.
+# Database/ORM: None; tests build typed finance summary objects directly.
+# Standards: Keep alert severity, status, detail payload, and ordering rules
+#   covered without database or authorization side effects.
+# Blast Radius: Test coverage only for monthly smart-alert calculation.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> alert builder
+#     under test.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> consumes these summaries
+#     for the dashboard endpoint.
+# ============================================================================
 from decimal import Decimal
 from importlib import import_module
 

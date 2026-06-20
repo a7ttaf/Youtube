@@ -13,6 +13,8 @@
 #   - File: backend/ums_smart_revenue/api/exports.py -> export smart alerts.
 #   - File: backend/ums_smart_revenue/connectors/google/audit.py -> emits
 #     FINISHED connector audit edges consumed here.
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py -> emits
+#     PROJECTION_FAILED connector edges consumed here.
 # ============================================================================
 from __future__ import annotations
 
@@ -27,13 +29,23 @@ from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.scopes import ScopeType
 from ums_smart_revenue.db.security_models import AuditLogORM
 
+_TERMINAL_LIFECYCLES = frozenset({"FINISHED", "PROJECTION_FAILED"})
+_CANONICAL_CONNECTOR_KEYS = {
+    "youtube-reporting": "youtube_reporting",
+    "youtube_reporting": "youtube_reporting",
+    "youtube-analytics": "youtube_analytics",
+    "youtube_analytics": "youtube_analytics",
+    "adsense-management": "adsense_management",
+    "adsense_management": "adsense_management",
+}
+
 
 # ============================================================================
-# Purpose: Read connector-run FINISHED audit edges for a finance month and
-#   derive the current failed-run smart-alert signal from the latest terminal
-#   edge per connector/account. Same-timestamp ties are treated conservatively:
-#   any tied success or malformed status clears the failed signal to avoid
-#   surfacing stale or ambiguous connector failures.
+# Purpose: Read connector-run terminal audit edges for a finance month and
+#   derive the current failed-run smart-alert signal from the latest edge per
+#   connector/account. Same-timestamp ties are treated conservatively: any tied
+#   success or malformed status clears the failed signal to avoid surfacing
+#   stale or ambiguous connector failures.
 # Database/ORM: Bounded read-only SELECT on AuditLogORM / audit_logs; filters
 #   tenant, event/entity/scope, lifecycle, and report_month in SQL before
 #   applying per-connector latest-edge aggregation in Python.
@@ -46,6 +58,8 @@ from ums_smart_revenue.db.security_models import AuditLogORM
 # Connections:
 #   - File: backend/ums_smart_revenue/connectors/google/audit.py -> emits
 #     lifecycle=FINISHED with connector_key/account_id/report_month/status.
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py -> emits
+#     lifecycle=PROJECTION_FAILED after a post-run projection failure.
 #   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes the
 #     aggregate as CONNECTOR_RUNS_FAILED.
 # ============================================================================
@@ -64,7 +78,7 @@ def failed_connector_run_count_and_statuses(
             AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
             AuditLogORM.entity_type == "connector_run",
             AuditLogORM.scope_type == ScopeType.CONNECTOR.value,
-            details_column["lifecycle"].as_string() == "FINISHED",
+            details_column["lifecycle"].as_string().in_(tuple(sorted(_TERMINAL_LIFECYCLES))),
             details_column["report_month"].as_string() == month,
         )
         .order_by(AuditLogORM.created_at.desc())
@@ -74,12 +88,21 @@ def failed_connector_run_count_and_statuses(
     for details, scope_id, created_at in details_rows:
         if not isinstance(details, dict):
             continue
-        connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(scope_id)
+        lifecycle = _connector_terminal_lifecycle(details.get("lifecycle"))
+        if lifecycle is None:
+            continue
+        raw_connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(
+            scope_id
+        )
+        connector_key = _canonical_connector_key(raw_connector_key)
         account_id = _non_blank_text(details.get("account_id"))
         if connector_key is None or account_id is None:
             continue
         lookup_key = (connector_key, account_id)
-        terminal_status = _connector_terminal_status(details.get("status")) or ""
+        terminal_status = _connector_terminal_status(
+            lifecycle=lifecycle,
+            value=details.get("status"),
+        )
         latest_seen_at = latest_seen_at_by_connector_account.get(lookup_key)
         if latest_seen_at is None:
             latest_seen_at_by_connector_account[lookup_key] = created_at
@@ -108,11 +131,30 @@ def _non_blank_text(value: object) -> str | None:
     return None
 
 
-def _connector_terminal_status(value: object) -> str | None:
-    """Normalize terminal connector-run status values from audit JSON."""
+def _canonical_connector_key(value: str | None) -> str | None:
+    """Collapse known public hyphen aliases to their stored source-system key."""
+    if value is None:
+        return None
+    return _CANONICAL_CONNECTOR_KEYS.get(value, value)
+
+
+def _connector_terminal_lifecycle(value: object) -> str | None:
+    """Normalize connector audit lifecycle values relevant to failed-run alerts."""
     if not isinstance(value, str):
         return None
+    lifecycle_value = value.strip().upper()
+    if lifecycle_value in _TERMINAL_LIFECYCLES:
+        return lifecycle_value
+    return None
+
+
+def _connector_terminal_status(*, lifecycle: str, value: object) -> str:
+    """Normalize terminal connector-run status values from audit JSON."""
+    if lifecycle == "PROJECTION_FAILED":
+        return "FAILED"
+    if not isinstance(value, str):
+        return ""
     status_value = value.strip().upper()
     if status_value in {"SUCCEEDED", "PARTIAL", "FAILED"}:
         return status_value
-    return None
+    return ""

@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: Verify finance export previews/artifacts include account-allocation,
+#   source-summary, smart-alert, and audit metadata with the right visibility.
+# Database/ORM: SQLite-backed finance/org/security models plus in-memory audit
+#   sinks for export-artifact self-audit assertions.
+# Standards: Tests exercise export helpers with realistic principals, scopes,
+#   frozen channel sets, and permission-dependent alert disclosure.
+# Blast Radius: Test coverage only for finance export source summaries and
+#   audit-event detail contracts.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/exports.py -> export helper behavior.
+#   - File: backend/ums_smart_revenue/reports/finance_workbook.py -> workbook
+#     preview output shape.
+# ============================================================================
 import json
 from datetime import UTC, datetime
 from decimal import Decimal

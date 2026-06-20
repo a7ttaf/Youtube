@@ -1,3 +1,19 @@
+# ============================================================================
+# Purpose: Verify the Google connector run_one orchestration path, including
+#   credential loading, report download/parse/upsert, lifecycle auditing, and
+#   failure handling.
+# Database/ORM: SQLite test database covering connector_runs, raw_report_files,
+#   google_revenue_source_rows, audit_logs, credentials, and org/finance rows.
+# Standards: Tests use faked Google/blob dependencies while preserving real
+#   repository/session transitions and audit lifecycle assertions.
+# Blast Radius: Test coverage only for connector ingestion, normalization,
+#   audit lifecycle, and source-row projection behavior.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> public
+#     run_one orchestration surface under test.
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py -> post
+#     run projection and skipped-row audit behavior.
+# ============================================================================
 """run_one orchestrator tests (B2.4 happy path + failure handlers, T27 & T28).
 
 The happy-path test stubs the YouTube Reporting client and blob backend so
