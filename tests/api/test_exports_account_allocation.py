@@ -58,6 +58,18 @@ MONTH = "2026-04"
 TENANT = UUID(UMS_TENANT_ID)
 
 
+def _smart_alert_by_code(
+    summary: MonthlySmartAlertSummary,
+    code: str,
+) -> MonthlySmartAlert | None:
+    """Return the only alert with the requested code, when present."""
+    matches = [alert for alert in summary.alerts if alert.code == code]
+    if not matches:
+        return None
+    assert len(matches) == 1
+    return matches[0]
+
+
 def _engine(tmp_path):
     """Create an in-memory SQLite engine with org and finance schemas."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
@@ -403,10 +415,7 @@ def test_global_export_preview_includes_skipped_source_alert_for_audit_user(tmp_
             group_registry=ChannelGroupRegistry(),
         )
 
-    skipped = next(
-        (alert for alert in summaries.smart_alerts.alerts if alert.code == "SOURCE_ROWS_SKIPPED"),
-        None,
-    )
+    skipped = _smart_alert_by_code(summaries.smart_alerts, "SOURCE_ROWS_SKIPPED")
     assert skipped is not None
     assert skipped.details == {
         "skipped_count": 4,
@@ -430,10 +439,7 @@ def test_global_export_preview_includes_failed_connector_run_alert_for_audit_use
             group_registry=ChannelGroupRegistry(),
         )
 
-    failed = next(
-        (alert for alert in summaries.smart_alerts.alerts if alert.code == "CONNECTOR_RUNS_FAILED"),
-        None,
-    )
+    failed = _smart_alert_by_code(summaries.smart_alerts, "CONNECTOR_RUNS_FAILED")
     assert failed is not None
     assert failed.details == {
         "failed_run_count": 1,
@@ -746,14 +752,7 @@ def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):
         )
     coverage_codes = [alert.code for alert in summaries.smart_alerts.alerts]
     assert "CHANNELS_MISSING_REVENUE_FACTS" in coverage_codes
-    coverage = next(
-        (
-            alert
-            for alert in summaries.smart_alerts.alerts
-            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
-        ),
-        None,
-    )
+    coverage = _smart_alert_by_code(summaries.smart_alerts, "CHANNELS_MISSING_REVENUE_FACTS")
     assert coverage is not None
     assert coverage.details["channel_count"] == 1
     assert coverage.details["sample_channel_ids"] == ["chB"]
@@ -793,14 +792,7 @@ def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
             org_index=OrgAccessIndex(),
             group_registry=ChannelGroupRegistry(),
         )
-    coverage = next(
-        (
-            alert
-            for alert in summaries.smart_alerts.alerts
-            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
-        ),
-        None,
-    )
+    coverage = _smart_alert_by_code(summaries.smart_alerts, "CHANNELS_MISSING_REVENUE_FACTS")
     # The scoped export's channel set has no factless channel, so the
     # coverage alert is absent (or zero-count) for the scoped view.
     if coverage is not None:
@@ -814,13 +806,9 @@ def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
         org_index=OrgAccessIndex(),
         group_registry=ChannelGroupRegistry(),
     )
-    global_coverage = next(
-        (
-            alert
-            for alert in global_summaries.smart_alerts.alerts
-            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
-        ),
-        None,
+    global_coverage = _smart_alert_by_code(
+        global_summaries.smart_alerts,
+        "CHANNELS_MISSING_REVENUE_FACTS",
     )
     assert global_coverage is not None
     assert global_coverage.details["channel_count"] == 1

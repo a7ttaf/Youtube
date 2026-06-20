@@ -43,6 +43,15 @@ USER_ID = UUID("00000000-0000-0000-0000-00000000b401")
 APPROVER_ID = UUID("00000000-0000-0000-0000-00000000b402")
 
 
+def _json_alert_by_code(alerts, code: str):
+    """Return the only JSON alert with the requested code, when present."""
+    matches = [alert for alert in alerts if alert["code"] == code]
+    if not matches:
+        return None
+    assert len(matches) == 1
+    return matches[0]
+
+
 def auth_headers(
     role: str,
     scope_type: str = "global",
@@ -267,10 +276,7 @@ def test_month_smart_alerts_include_month_over_month_revenue_anomaly(tmp_path):
     )
 
     assert response.status_code == 200
-    anomaly = next(
-        (alert for alert in response.json()["alerts"] if alert["code"] == "REVENUE_TREND_ANOMALY"),
-        None,
-    )
+    anomaly = _json_alert_by_code(response.json()["alerts"], "REVENUE_TREND_ANOMALY")
     assert anomaly is not None
     assert anomaly["details"]["channels"] == [
         {
@@ -308,14 +314,7 @@ def test_month_smart_alerts_flag_channel_missing_revenue_facts(tmp_path):
     )
 
     assert response.status_code == 200
-    coverage = next(
-        (
-            alert
-            for alert in response.json()["alerts"]
-            if alert["code"] == "CHANNELS_MISSING_REVENUE_FACTS"
-        ),
-        None,
-    )
+    coverage = _json_alert_by_code(response.json()["alerts"], "CHANNELS_MISSING_REVENUE_FACTS")
     assert coverage is not None
     assert coverage["severity"] == "HIGH"
     assert coverage["confidence"] == "E_MISSING"
@@ -416,10 +415,7 @@ def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
     assert response.status_code == 200
     codes = [alert["code"] for alert in response.json()["alerts"]]
     assert codes.index("SOURCE_ROWS_SKIPPED") < codes.index("PAYMENT_NOT_MATCHED")
-    skipped = next(
-        (alert for alert in response.json()["alerts"] if alert["code"] == "SOURCE_ROWS_SKIPPED"),
-        None,
-    )
+    skipped = _json_alert_by_code(response.json()["alerts"], "SOURCE_ROWS_SKIPPED")
     assert skipped is not None
     assert skipped["severity"] == "HIGH"
     assert skipped["source"] == "connector_job_run"
@@ -607,10 +603,7 @@ def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
     assert response.status_code == 200
     codes = [alert["code"] for alert in response.json()["alerts"]]
     assert codes.index("CONNECTOR_RUNS_FAILED") < codes.index("PAYMENT_NOT_MATCHED")
-    failed = next(
-        (alert for alert in response.json()["alerts"] if alert["code"] == "CONNECTOR_RUNS_FAILED"),
-        None,
-    )
+    failed = _json_alert_by_code(response.json()["alerts"], "CONNECTOR_RUNS_FAILED")
     assert failed is not None
     assert failed["severity"] == "HIGH"
     assert failed["source"] == "connector_job_run"
@@ -896,10 +889,7 @@ def test_month_smart_alerts_include_projection_failed_connector_run(tmp_path):
     )
 
     assert response.status_code == 200
-    failed = next(
-        (alert for alert in response.json()["alerts"] if alert["code"] == "CONNECTOR_RUNS_FAILED"),
-        None,
-    )
+    failed = _json_alert_by_code(response.json()["alerts"], "CONNECTOR_RUNS_FAILED")
     assert failed is not None
     assert failed["details"]["failed_run_count"] == 1
     assert failed["details"]["failed_by_status"] == {"FAILED": 1}
@@ -1170,10 +1160,7 @@ def test_month_smart_alerts_audit_viewer_redacts_reason_breakdown(tmp_path):
     )
 
     assert response.status_code == 200
-    skipped = next(
-        (alert for alert in response.json()["alerts"] if alert["code"] == "SOURCE_ROWS_SKIPPED"),
-        None,
-    )
+    skipped = _json_alert_by_code(response.json()["alerts"], "SOURCE_ROWS_SKIPPED")
     assert skipped is not None
     assert skipped["details"]["skipped_count"] == 5
     assert skipped["details"]["skipped_by_reason"] == {}
@@ -1228,14 +1215,7 @@ def test_coverage_alert_excludes_inactive_and_non_required_channels(tmp_path):
     )
 
     assert response.status_code == 200
-    coverage = next(
-        (
-            alert
-            for alert in response.json()["alerts"]
-            if alert["code"] == "CHANNELS_MISSING_REVENUE_FACTS"
-        ),
-        None,
-    )
+    coverage = _json_alert_by_code(response.json()["alerts"], "CHANNELS_MISSING_REVENUE_FACTS")
     assert coverage is not None
     # Only the active, revenue-required, factless channel is flagged.
     assert coverage["details"]["channel_count"] == 1
