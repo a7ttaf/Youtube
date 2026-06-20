@@ -228,9 +228,7 @@ class SqlAlchemyExportTemplateRepository:
             )
         if offset < 0:
             raise ExportTemplateValidationError("offset must be greater than or equal to 0")
-        statement = select(ExportTemplateORM).where(
-            ExportTemplateORM.tenant_id == self._tenant_id
-        )
+        statement = select(ExportTemplateORM).where(ExportTemplateORM.tenant_id == self._tenant_id)
         if export_type is not None:
             statement = statement.where(
                 ExportTemplateORM.export_type == _normalize_template_export_type(export_type)

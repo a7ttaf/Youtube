@@ -8,8 +8,7 @@ from sqlalchemy import create_engine, inspect
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
-    PROJECT_ROOT
-    / "backend/ums_smart_revenue/db/alembic/versions/20260620_0001_export_templates.py"
+    PROJECT_ROOT / "backend/ums_smart_revenue/db/alembic/versions/20260620_0001_export_templates.py"
 )
 
 
