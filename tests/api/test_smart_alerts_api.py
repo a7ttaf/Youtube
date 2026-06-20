@@ -702,6 +702,140 @@ def test_month_smart_alerts_normalize_connector_aliases_before_latest_edge(
     assert audit_reads[0].details["connector_runs_failed_returned"] == 0
 
 
+def test_month_smart_alerts_normalize_adsense_resource_account_before_latest_edge(
+    tmp_path,
+):
+    """An AdSense raw-id success clears an older resource-name account failure."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    tenant_id = UUID(UMS_TENANT_ID)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-adsense-resource-failed",
+                    scope_type="connector",
+                    scope_id="adsense-management",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "adsense-management",
+                        "account_id": "accounts/pub-1",
+                        "report_month": "2026-03",
+                        "status": "FAILED",
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 1, tzinfo=UTC),
+                ),
+                AuditLogORM(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    user_id=USER_ID,
+                    event_type="CONNECTOR_JOB_RUN",
+                    entity_type="connector_run",
+                    entity_id="run-adsense-raw-success",
+                    scope_type="connector",
+                    scope_id="adsense_management",
+                    reason="connector finished",
+                    details={
+                        "lifecycle": "FINISHED",
+                        "connector_key": "adsense_management",
+                        "account_id": "pub-1",
+                        "report_month": "2026-03",
+                        "status": "SUCCEEDED",
+                    },
+                    sensitive=True,
+                    created_at=datetime(2026, 4, 2, tzinfo=UTC),
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_approver", "global"),
+    )
+
+    assert response.status_code == 200
+    codes = [alert["code"] for alert in response.json()["alerts"]]
+    assert "CONNECTOR_RUNS_FAILED" not in codes
+    with Session(engine) as session:
+        audit_reads = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+        ).all()
+    assert len(audit_reads) == 1
+    assert audit_reads[0].details["returned"] == 0
+    assert audit_reads[0].details["connector_runs_failed_returned"] == 0
+
+
+def test_month_smart_alerts_include_superseded_connector_run_terminal_edge(
+    tmp_path,
+):
+    """Superseded stale RUNNING rows are failed terminal connector-run signals."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    tenant_id = UUID(UMS_TENANT_ID)
+    with Session(engine) as session:
+        session.add(
+            AuditLogORM(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                user_id=USER_ID,
+                event_type="CONNECTOR_JOB_RUN",
+                entity_type="api_connector",
+                entity_id="youtube-reporting:content-owner-1",
+                scope_type="connector",
+                scope_id="youtube-reporting",
+                reason="orphaned RUNNING run superseded by new job",
+                details={
+                    "action": "run_superseded",
+                    "run_id": "run-old",
+                    "report_month": "2026-03",
+                    "lifecycle": "FINISHED",
+                    "status": "FAILED",
+                    "error_summary_present": True,
+                },
+                sensitive=True,
+                created_at=datetime(2026, 4, 1, tzinfo=UTC),
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_approver", "global"),
+    )
+
+    assert response.status_code == 200
+    alerts = [
+        alert for alert in response.json()["alerts"] if alert["code"] == "CONNECTOR_RUNS_FAILED"
+    ]
+    assert len(alerts) == 1
+    failed = alerts[0]
+    assert failed["severity"] == "HIGH"
+    assert failed["source"] == "connector_job_run"
+    assert failed["details"] == {
+        "failed_run_count": 1,
+        "failed_by_status": {"FAILED": 1},
+    }
+    with Session(engine) as session:
+        audit_reads = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+        ).all()
+    assert len(audit_reads) == 1
+    assert audit_reads[0].details["returned"] == 1
+    assert audit_reads[0].details["connector_runs_failed_returned"] == 1
+
+
 def test_month_smart_alerts_include_projection_failed_connector_run(tmp_path):
     """A projection-failed audit edge is a failed connector-run signal."""
     database_url = build_database_url(tmp_path)
