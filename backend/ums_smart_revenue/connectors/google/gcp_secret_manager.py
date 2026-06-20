@@ -25,8 +25,16 @@ _NAME_PATTERN = re.compile(r"^projects/[^/]+/secrets/[^/]+/versions/[^/]+$")
 _SUPPORTED_PREFIXES = ("gcp-secret-manager://", "secret-manager://")
 
 
+class _SecretPayload(Protocol):
+    data: bytes
+
+
+class _SecretVersionResponse(Protocol):
+    payload: _SecretPayload
+
+
 class _SecretManagerClient(Protocol):
-    def access_secret_version(self, *, request: dict) -> object: ...
+    def access_secret_version(self, *, request: dict) -> _SecretVersionResponse: ...
 
 
 class GcpSecretManagerResolver:

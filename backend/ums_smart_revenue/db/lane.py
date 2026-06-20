@@ -173,6 +173,8 @@ def _restore_tenant_lane(session: Session) -> None:
         return
     connection = session.connection()
     driver_connection = connection.connection.driver_connection
+    if driver_connection is None:
+        return
     transaction_status = driver_connection.info.transaction_status
     # Compare by name ("INERROR") to avoid a module-level psycopg import in a
     # module the SQLite test tier imports; psycopg.pq.TransactionStatus.INERROR

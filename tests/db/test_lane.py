@@ -68,17 +68,28 @@ class _StubDriverConnection:
 class _StubDbapiConnection:
     """Mimic the SQLAlchemy connection.connection (DBAPI wrapper)."""
 
-    def __init__(self, status_name: str) -> None:
-        self.driver_connection = _StubDriverConnection(status_name)
+    def __init__(self, status_name: str, *, has_driver_connection: bool = True) -> None:
+        self.driver_connection = (
+            _StubDriverConnection(status_name) if has_driver_connection else None
+        )
 
 
 class _StubConnection:
     """Record ``exec_driver_sql`` calls and report a fixed dialect name."""
 
-    def __init__(self, dialect_name: str, *, txn_status: str = "INTRANS") -> None:
+    def __init__(
+        self,
+        dialect_name: str,
+        *,
+        txn_status: str = "INTRANS",
+        has_driver_connection: bool = True,
+    ) -> None:
         self.dialect = type("Dialect", (), {"name": dialect_name})()
         self.calls: list[str] = []
-        self.connection = _StubDbapiConnection(txn_status)
+        self.connection = _StubDbapiConnection(
+            txn_status,
+            has_driver_connection=has_driver_connection,
+        )
 
     def exec_driver_sql(self, sql: str, parameters=None):  # skipcq: PYL-R1711
         self.calls.append(sql)
@@ -110,9 +121,14 @@ class _StubSession:
         dialect_name: str,
         in_transaction: bool = True,
         txn_status: str = "INTRANS",
+        has_driver_connection: bool = True,
     ) -> None:
         self.info = {_SESSION_ROLE_KEY: role}
-        self._connection = _StubConnection(dialect_name, txn_status=txn_status)
+        self._connection = _StubConnection(
+            dialect_name,
+            txn_status=txn_status,
+            has_driver_connection=has_driver_connection,
+        )
         self.connection_calls = 0
         self._in_transaction = in_transaction
         self._bind = _StubBind(dialect_name)
@@ -243,6 +259,19 @@ def test_platform_lane_swallowed_error_clean_exit_skips_restore() -> None:
         txn_status="INERROR",
     )
     # Body swallows its own DB error and exits cleanly -> no raise from __exit__.
+    with platform_lane(session):
+        pass
+    assert session._connection.calls == [f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"']
+
+
+def test_platform_lane_missing_driver_connection_skips_restore() -> None:
+    """A missing DBAPI driver connection cannot report txn status, so skip restore."""
+    session = _StubSession(
+        role=APP_TENANT_ROLE,
+        dialect_name="postgresql",
+        in_transaction=True,
+        has_driver_connection=False,
+    )
     with platform_lane(session):
         pass
     assert session._connection.calls == [f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"']
