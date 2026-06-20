@@ -34,6 +34,7 @@ from ums_smart_revenue.finance.deduction_ingestion import (
     SqlAlchemyDeductionComponentRepository,
 )
 from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
+from ums_smart_revenue.finance.smart_alerts import MonthlySmartAlert, MonthlySmartAlertSummary
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistry
 from ums_smart_revenue.reports.exports import ExportJobEntry
 from ums_smart_revenue.reports.finance_workbook import build_finance_workbook_preview
@@ -185,6 +186,26 @@ def _test_export_user(
         user_id="user-1",
         email="exp@example.com",
         direct_permissions=tuple(grants),
+    )
+
+
+def _smart_alert_summary(*codes: str) -> MonthlySmartAlertSummary:
+    """Build a minimal monthly smart-alert summary with the requested codes."""
+    return MonthlySmartAlertSummary(
+        month=MONTH,
+        status="OPEN",
+        highest_severity="HIGH" if codes else None,
+        alerts=[
+            MonthlySmartAlert(
+                code=code,
+                severity="HIGH",
+                message=f"{code} test alert",
+                source="connector_job_run",
+                confidence="E_MISSING",
+                details={},
+            )
+            for code in codes
+        ],
     )
 
 
@@ -634,6 +655,46 @@ def test_global_finance_export_still_records_bank_reconciliation_viewed():
     )
     kinds = {record.event_type for record in records}
     assert {"REVENUE_VIEWED", "PAYMENT_VIEWED", "BANK_RECONCILIATION_VIEWED"} <= kinds
+
+
+def test_finance_export_failed_connector_self_audit_is_not_reason_redacted():
+    """A failed-run alert carries no skipped-row reason payload to redact."""
+    sink = InMemoryAuditSink()
+    records = _record_finance_export_artifact_audit(
+        audit_sink=sink,
+        user=_test_export_user(include_audit=True),
+        export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        group_registry=ChannelGroupRegistry(),
+        artifact_type="finance_workbook_xlsx",
+        include_download_event=False,
+        audit_summary=_smart_alert_summary("CONNECTOR_RUNS_FAILED"),
+    )
+
+    audit_record = next(record for record in records if record.event_type == "AUDIT_LOG_VIEWED")
+    assert audit_record.details["connector_alert_codes"] == ["CONNECTOR_RUNS_FAILED"]
+    assert audit_record.details["source_rows_skipped_returned"] == 0
+    assert audit_record.details["connector_runs_failed_returned"] == 1
+    assert audit_record.details["details_redacted"] is False
+
+
+def test_finance_export_skipped_source_self_audit_is_reason_redacted_without_sensitive_grant():
+    """Skipped-row alerts suppress reason details unless sensitive audit payloads are allowed."""
+    sink = InMemoryAuditSink()
+    records = _record_finance_export_artifact_audit(
+        audit_sink=sink,
+        user=_test_export_user(include_audit=True),
+        export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        group_registry=ChannelGroupRegistry(),
+        artifact_type="finance_workbook_xlsx",
+        include_download_event=False,
+        audit_summary=_smart_alert_summary("SOURCE_ROWS_SKIPPED"),
+    )
+
+    audit_record = next(record for record in records if record.event_type == "AUDIT_LOG_VIEWED")
+    assert audit_record.details["connector_alert_codes"] == ["SOURCE_ROWS_SKIPPED"]
+    assert audit_record.details["source_rows_skipped_returned"] == 1
+    assert audit_record.details["connector_runs_failed_returned"] == 0
+    assert audit_record.details["details_redacted"] is True
 
 
 def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):

@@ -69,6 +69,9 @@ from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.connectors.runs.audit_alerts import (
+    failed_connector_run_count_and_statuses,
+)
 from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM
@@ -1223,7 +1226,11 @@ def get_month_smart_alerts(
             (
                 failed_connector_run_count,
                 failed_connector_runs_by_status,
-            ) = failed_connector_run_count_and_statuses(session, month=month)
+            ) = failed_connector_run_count_and_statuses(
+                session,
+                tenant_id=_resolve_smart_alert_tenant_id(),
+                month=month,
+            )
         payment_match = build_monthly_payment_match_summary(
             month=month,
             facts=facts,
@@ -2716,85 +2723,6 @@ def skipped_source_row_count_and_reasons(
         # Redact per-reason breakdown; keep total count visible.
         return effective_count, {}
     return effective_count, dict(sorted(reason_counts.items()))
-
-
-# ============================================================================
-# Purpose: Read connector-run FINISHED audit edges for a finance month and
-#   derive the current failed-run smart-alert signal from the latest terminal
-#   edge per connector/account. This surfaces missing upstream reports and
-#   per-report connector failures even when no source rows were normalized.
-# Database/ORM: Read-only SELECT on AuditLogORM / audit_logs; no locks or
-#   writes. PostgreSQL remains the source of truth for audit observability.
-# Standards: Tenant-scoped via _resolve_smart_alert_tenant_id; malformed detail
-#   payloads are ignored except that a newer malformed terminal edge for the
-#   same connector/account clears stale older failures; deterministic status
-#   counts; no error summaries or sensitive payloads are returned.
-# Blast Radius: Finance dashboard read surface; no finance calculation,
-#   authorization, export, ingestion, or audit-write behavior changes.
-# Connections:
-#   - File: backend/ums_smart_revenue/connectors/google/audit.py -> emits
-#     lifecycle=FINISHED with connector_key/account_id/report_month/status.
-#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes the
-#     aggregate as CONNECTOR_RUNS_FAILED.
-# ============================================================================
-def failed_connector_run_count_and_statuses(
-    session: Session,
-    *,
-    month: str,
-) -> tuple[int, dict[str, int]]:
-    """Return latest failed/partial connector-run counts for one finance month."""
-    tenant_id = _resolve_smart_alert_tenant_id()
-    details_rows = session.execute(
-        select(AuditLogORM.details, AuditLogORM.scope_id)
-        .where(
-            AuditLogORM.tenant_id == tenant_id,
-            AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
-            AuditLogORM.entity_type == "connector_run",
-            AuditLogORM.scope_type == ScopeType.CONNECTOR.value,
-        )
-        .order_by(AuditLogORM.created_at.desc(), AuditLogORM.id.desc())
-    ).all()
-    latest_status_by_connector_account: dict[tuple[str, str], str] = {}
-    for details, scope_id in details_rows:
-        if not isinstance(details, dict) or details.get("lifecycle") != "FINISHED":
-            continue
-        if details.get("report_month") != month:
-            continue
-        connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(scope_id)
-        account_id = _non_blank_text(details.get("account_id"))
-        if connector_key is None or account_id is None:
-            continue
-        lookup_key = (connector_key, account_id)
-        if lookup_key in latest_status_by_connector_account:
-            continue
-        latest_status_by_connector_account[lookup_key] = (
-            _connector_terminal_status(details.get("status")) or ""
-        )
-
-    status_counts: dict[str, int] = {}
-    for terminal_status in latest_status_by_connector_account.values():
-        if terminal_status in {"FAILED", "PARTIAL"}:
-            status_counts[terminal_status] = status_counts.get(terminal_status, 0) + 1
-    return sum(status_counts.values()), dict(sorted(status_counts.items()))
-
-
-def _non_blank_text(value: object) -> str | None:
-    """Return stripped non-empty text for audit detail values."""
-    if isinstance(value, str):
-        text = value.strip()
-        if text:
-            return text
-    return None
-
-
-def _connector_terminal_status(value: object) -> str | None:
-    """Normalize terminal connector-run status values from audit JSON."""
-    if not isinstance(value, str):
-        return None
-    status_value = value.strip().upper()
-    if status_value in {"SUCCEEDED", "PARTIAL", "FAILED"}:
-        return status_value
-    return None
 
 
 def _skipped_reason_counts_from_details(details: dict[str, object]) -> dict[str, int]:

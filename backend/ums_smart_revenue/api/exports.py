@@ -30,7 +30,6 @@ from ums_smart_revenue.api.dependencies import (
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import (
     current_org_access_index,
-    failed_connector_run_count_and_statuses,
     missing_revenue_fact_channel_count_and_sample,
     skipped_source_row_count_and_reasons,
 )
@@ -41,6 +40,9 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
+from ums_smart_revenue.connectors.runs.audit_alerts import (
+    failed_connector_run_count_and_statuses,
+)
 from ums_smart_revenue.finance.account_allocation_read import (
     AllocationProvenance,
     resolve_month_account_allocation,
@@ -1229,6 +1231,26 @@ def _discard_saved_artifact(
         logger.warning("Saved export artifact cleanup failed: %s", file_url, exc_info=True)
 
 
+# ============================================================================
+# Purpose: Build the finance workbook source summaries for preview/download
+#   generation while keeping route handlers out of finance read orchestration.
+# Database/ORM: Reads finance facts, payments, deductions, close state,
+#   account-allocation inputs, channel coverage, and optional audit_logs
+#   connector edges through repositories/read models.
+# Standards: Scoped exports use the frozen channel set; persisted artifacts
+#   suppress caller-specific audit-derived alerts; preview-only audit-derived
+#   alerts require VIEW_AUDIT_LOG and sensitive reason payloads require
+#   VIEW_SENSITIVE_AUDIT_PAYLOADS.
+# Blast Radius: Finance export numbers, smart-alert export disclosure, and
+#   audit-derived alert visibility. No finance writes or auth weakening.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> dashboard smart-alert
+#     data sources mirrored here for export parity.
+#   - File: backend/ums_smart_revenue/connectors/runs/audit_alerts.py -> failed
+#     connector-run smart-alert read model.
+#   - File: backend/ums_smart_revenue/reports/finance_workbook.py -> consumes
+#     the returned summary bundle.
+# ============================================================================
 def _build_finance_source_summaries_for_export(
     *,
     export_job,
@@ -1375,7 +1397,11 @@ def _build_finance_source_summaries_for_export(
             )
         )
         failed_connector_run_count, failed_connector_runs_by_status = (
-            failed_connector_run_count_and_statuses(session, month=export_job.month)
+            failed_connector_run_count_and_statuses(
+                session,
+                tenant_id=_tenant_uuid(user),
+                month=export_job.month,
+            )
         )
     else:
         skipped_source_row_count = 0
@@ -1465,6 +1491,21 @@ def _record_analytics_export_artifact_audit(
     return (*revenue_records, download_record)
 
 
+# ============================================================================
+# Purpose: Emit sensitive revenue/payment/bank-reconciliation/download audit
+#   records for a finance export artifact, plus a self-audit when export
+#   generation reads audit_logs to derive connector-backed smart alerts.
+# Database/ORM: audit_logs insert through AuditSink; ChannelGroupORM read only
+#   for legacy group exports without a frozen channel snapshot.
+# Standards: Typed detail payload; artifact locator is redacted while checksum
+#   and size metadata remain audit-visible; audit-log self-audit marks
+#   details_redacted only when SOURCE_ROWS_SKIPPED reasons were suppressed.
+# Blast Radius: Finance export audit trail and connector smart-alert self-audit.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> Audit persistence.
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> alert codes
+#     summarized into the audit-log self-audit.
+# ============================================================================
 def _record_finance_export_artifact_audit(
     *,
     audit_sink: AuditSink,
@@ -1536,6 +1577,13 @@ def _record_finance_export_artifact_audit(
             if alert.code in {"CONNECTOR_RUNS_FAILED", "SOURCE_ROWS_SKIPPED"}
         )
         returned = bool(connector_alert_codes)
+        source_rows_skipped_returned = "SOURCE_ROWS_SKIPPED" in connector_alert_codes
+        connector_runs_failed_returned = "CONNECTOR_RUNS_FAILED" in connector_alert_codes
+        details_redacted = source_rows_skipped_returned and not has_permission(
+            user,
+            Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
+            audit_scope,
+        )
         audit_records.append(
             record_audit_event(
                 sink=audit_sink,
@@ -1554,12 +1602,9 @@ def _record_finance_export_artifact_audit(
                     "artifact_type": artifact_type,
                     "connector_alert_codes": connector_alert_codes,
                     "returned": 1 if returned else 0,
-                    "details_redacted": returned
-                    and not has_permission(
-                        user,
-                        Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
-                        audit_scope,
-                    ),
+                    "source_rows_skipped_returned": 1 if source_rows_skipped_returned else 0,
+                    "connector_runs_failed_returned": 1 if connector_runs_failed_returned else 0,
+                    "details_redacted": details_redacted,
                 },
             )
         )
