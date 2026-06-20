@@ -1827,8 +1827,7 @@ def _has_export_scope_permissions(
 ) -> bool:
     target_scope = _access_scope_from_export_scope(scope_type, scope_id)
     return all(
-        has_permission(user, permission, target_scope, org_index)
-        for permission in permissions
+        has_permission(user, permission, target_scope, org_index) for permission in permissions
     )
 
 
@@ -2019,9 +2018,8 @@ def _require_analytics_csv_permissions_before_scope_lookup(
             # FIX: Deny missing export/analytics/revenue grants before resolving
             # scoped membership, so scope existence cannot be probed through 404s.
             _raise_missing_permission(permission)
-        if (
-            lookup_denial_permission is None
-            and not has_permission(user, permission, target_scope, org_index)
+        if lookup_denial_permission is None and not has_permission(
+            user, permission, target_scope, org_index
         ):
             lookup_denial_permission = permission
     return lookup_denial_permission
