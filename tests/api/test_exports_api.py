@@ -925,6 +925,56 @@ def test_analytics_csv_wrong_scope_analytics_cannot_probe_group_lookup(tmp_path)
     assert audit_sink.records == []
 
 
+def test_analytics_csv_group_only_grants_cannot_probe_unknown_group_lookup(tmp_path):
+    """Direct group-scope CSV grants get a 403 for unknown groups, not 404."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    audit_sink = InMemoryAuditSink()
+    unknown_group_id = str(uuid4())
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="group-only-csv@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.group(unknown_group_id),
+            ),
+            PermissionGrant(
+                Permission.VIEW_ANALYTICS,
+                AccessScope.group(unknown_group_id),
+            ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
+                AccessScope.group(unknown_group_id),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/exports",
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "group",
+            "scope_id": unknown_group_id,
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Group lookup probe",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.analytics"
+    assert export_count == 0
+    assert audit_sink.records == []
+
+
 def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
     """Test that a non-UUID gateway actor can create an export and list it successfully."""
     database_url = build_database_url(tmp_path)

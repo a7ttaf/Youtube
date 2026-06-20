@@ -38,7 +38,7 @@ from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
-from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.finance.account_allocation_read import (
     AllocationProvenance,
@@ -2058,11 +2058,81 @@ def _require_analytics_csv_permissions_before_scope_lookup(
             # FIX: Deny missing export/analytics/revenue grants before resolving
             # scoped membership, so scope existence cannot be probed through 404s.
             _raise_missing_permission(permission)
-        if lookup_denial_permission is None and not has_permission(
-            user, permission, target_scope, org_index
+        if lookup_denial_permission is None and not _has_csv_lookup_permission(
+            user=user,
+            permission=permission,
+            target_scope=target_scope,
+            org_index=org_index,
         ):
             lookup_denial_permission = permission
     return lookup_denial_permission
+
+
+# ============================================================================
+# Purpose: Decide whether analytics CSV creation may expose scope lookup results
+# before a group snapshot is available.
+# Database/ORM: None; evaluates in-memory permission grants and OrgAccessIndex.
+# Standards: Fail-closed authorization helper; route remains the HTTP boundary.
+# Blast Radius: Analytics CSV export creation and group existence masking.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/policy.py -> Scope containment.
+#   - File: tests/api/test_exports_api.py -> Group lookup probe regression.
+# ============================================================================
+def _has_csv_lookup_permission(
+    *,
+    user: UserPrincipal,
+    permission: Permission,
+    target_scope: AccessScope,
+    org_index: OrgAccessIndex,
+) -> bool:
+    """Return whether a grant is enough to expose pre-snapshot scope lookup details."""
+    if target_scope.type != ScopeType.GROUP:
+        return has_permission(user, permission, target_scope, org_index)
+    # FIX: Direct group grants do not prove access to every member channel until
+    # the group snapshot has been loaded. Ignore that exact group grant for the
+    # lookup mask so unknown group IDs cannot be distinguished from unauthorized
+    # groups by users who only hold group-scoped CSV permissions.
+    return _has_permission_without_exact_scope(
+        user=user,
+        permission=permission,
+        excluded_scope=target_scope,
+        org_index=org_index,
+    )
+
+
+def _has_permission_without_exact_scope(
+    *,
+    user: UserPrincipal,
+    permission: Permission,
+    excluded_scope: AccessScope,
+    org_index: OrgAccessIndex,
+) -> bool:
+    """Return whether a permission is held through any scope except one exact scope."""
+    if user.disabled:
+        return False
+    for grant in user.direct_permissions:
+        if grant.scope == excluded_scope:
+            continue
+        if (
+            grant.active
+            and grant.permission == permission
+            and org_index.contains(
+                grant.scope,
+                excluded_scope,
+            )
+        ):
+            return True
+    for assignment in user.role_assignments:
+        if assignment.scope == excluded_scope:
+            continue
+        role_permissions = ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        if (
+            assignment.active
+            and permission in role_permissions
+            and org_index.contains(assignment.scope, excluded_scope)
+        ):
+            return True
+    return False
 
 
 def _access_scope_from_export_scope(scope_type: str, scope_id: str | None) -> AccessScope:
