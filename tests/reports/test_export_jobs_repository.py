@@ -97,6 +97,7 @@ def test_template_create_translates_duplicate_name_race(monkeypatch):
                 actor_user_id=ACTOR_USER_ID,
             )
 
+        session.rollback()
         template_names = session.scalars(select(ExportTemplateORM.name)).all()
 
     assert template_names == ["Finance workbook standard"]

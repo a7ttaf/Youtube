@@ -748,10 +748,11 @@ def _flush_template_write(session: Session) -> None:
     try:
         session.flush()
     except IntegrityError as exc:
-        session.rollback()
         if _is_export_template_name_integrity_error(exc):
+            # FIX: Keep rollback ownership with the request/session boundary.
+            # After a failed flush the caller must abort the unit of work.
             raise ExportTemplateValidationError("Export template name already exists") from exc
-        raise ExportTemplateValidationError("Failed to persist export template") from exc
+        raise
 
 
 def _is_export_template_name_integrity_error(exc: IntegrityError) -> bool:
