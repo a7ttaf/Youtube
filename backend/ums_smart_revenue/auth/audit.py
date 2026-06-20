@@ -1,3 +1,12 @@
+# ============================================================================
+# Purpose: Define audit event types and structured audit record contracts.
+# Database/ORM: None directly; AuditLogORM persistence is in audit_service.py.
+# Standards: Typed event enum, permission metadata, and safe audit payloads.
+# Blast Radius: Audit trail classification and event naming across APIs.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> Persistence.
+#   - File: backend/ums_smart_revenue/api/export_templates.py -> New event use.
+# ============================================================================
 """Audit event types and structured audit record dataclasses."""
 
 from dataclasses import dataclass

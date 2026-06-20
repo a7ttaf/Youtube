@@ -1,3 +1,14 @@
+# ============================================================================
+# Purpose: Persist export jobs and reusable export-template definitions.
+# Database/ORM: ExportJobORM, ExportTemplateORM, and FinanceMonthCloseORM.
+# Standards: Repository-owned SQLAlchemy writes, typed validation errors, and
+# tenant-scoped persistence through the active request context.
+# Blast Radius: Export jobs, template configuration, artifact metadata, and
+# month-lock snapshots for finance exports.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/exports.py -> Export job routes.
+#   - File: backend/ums_smart_revenue/api/export_templates.py -> Template API.
+# ============================================================================
 import json
 import re
 from dataclasses import dataclass

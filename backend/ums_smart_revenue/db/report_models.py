@@ -1,3 +1,13 @@
+# ============================================================================
+# Purpose: Define report, export job, and export-template ORM mappings.
+# Database/ORM: ReportBase, export_jobs, export_templates, and report files.
+# Standards: SQLAlchemy declarative mappings with tenant defaults and indexes.
+# Blast Radius: Report storage, export configuration persistence, and tenant
+# scoped query surfaces.
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/exports.py -> Repository usage.
+#   - File: backend/ums_smart_revenue/db/alembic/versions -> Schema migrations.
+# ============================================================================
 from datetime import datetime
 from uuid import UUID
 

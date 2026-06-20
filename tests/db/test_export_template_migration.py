@@ -1,3 +1,14 @@
+# ============================================================================
+# Purpose: Validate the export-template Alembic migration contract.
+# Database/ORM: export_templates and export_jobs schema in SQLite plus recorded
+# PostgreSQL RLS statements.
+# Standards: Migration-level assertions without weakening production DDL.
+# Blast Radius: Export template schema, nullable job reference, and RLS setup.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/alembic/versions/
+#     20260620_0001_export_templates.py -> Migration under test.
+#   - File: backend/ums_smart_revenue/db/rls.py -> Expected policy constants.
+# ============================================================================
 import importlib.util
 from pathlib import Path
 

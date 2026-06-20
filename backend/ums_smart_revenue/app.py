@@ -1,3 +1,13 @@
+# ============================================================================
+# Purpose: Build the FastAPI application and wire API routers/dependencies.
+# Database/ORM: SQLAlchemy session dependencies for request and platform flows.
+# Standards: Factory-owned middleware/router wiring and explicit dependency
+# overrides for tests and configured deployments.
+# Blast Radius: HTTP routing, authentication dependencies, and app startup.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/export_templates.py -> Router wiring.
+#   - File: backend/ums_smart_revenue/config/settings.py -> Runtime settings.
+# ============================================================================
 """FastAPI application factory and router wiring."""
 
 from collections.abc import Iterable

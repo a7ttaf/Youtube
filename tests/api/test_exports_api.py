@@ -1,3 +1,12 @@
+# ============================================================================
+# Purpose: Validate export job and export-template API behavior.
+# Database/ORM: SQLite test database with finance, report, org, and audit ORM.
+# Standards: Route-level behavior checks with real app wiring and audit asserts.
+# Blast Radius: Export API contracts, finance lock snapshots, and template CRUD.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/exports.py -> Export job API.
+#   - File: backend/ums_smart_revenue/api/export_templates.py -> Template API.
+# ============================================================================
 import csv
 import hashlib
 import logging

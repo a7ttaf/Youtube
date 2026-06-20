@@ -1,3 +1,12 @@
+# ============================================================================
+# Purpose: Define the additive export-template schema migration and tenant RLS.
+# Database/ORM: export_templates table and export_jobs.template_id.
+# Standards: Alembic-owned DDL, dialect-guarded RLS, and app-role grants.
+# Blast Radius: Export configuration, tenant isolation, and historical jobs.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/report_models.py -> ORM mirror.
+#   - File: backend/ums_smart_revenue/db/rls.py -> Tenant isolation constants.
+# ============================================================================
 """Add tenant-scoped export templates.
 
 Revision ID: 20260620_0001
