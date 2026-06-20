@@ -348,25 +348,23 @@ const EMPTY_EXPORTS = {
   pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
 };
 
-type FetchRoute = readonly [path: string, respond: () => Response];
+type FetchRouteMap = ReadonlyMap<string, () => Response>;
 
-const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRoute[] => [
+const defaultSessionRouteResponse = () => jsonResponse(NET_REVENUE_BODY);
+
+const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRouteMap => new Map([
   ["/session/me", sessionResponder],
   ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
   ["/connectors/credentials", () => jsonResponse(EMPTY_CONNECTOR_CREDENTIALS)],
   ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
   ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
-];
+]);
 
-const responseForRoutedSessionRequest = (routes: FetchRoute[], input: unknown) => {
-  const url = urlOf(input);
-  const route = routes.find(([path]) => url.includes(path));
-  if (!route) {
-    return jsonResponse(NET_REVENUE_BODY);
-  }
-  const [, respond] = route;
-  return respond();
-};
+const requestPathOf = (input: unknown) =>
+  new URL(urlOf(input), "http://ums.local").pathname;
+
+const responseForRoutedSessionRequest = (routes: FetchRouteMap, input: unknown) =>
+  (routes.get(requestPathOf(input)) ?? defaultSessionRouteResponse)();
 
 // Route fetch with a caller-supplied /session/me responder; connector, AdSense,
 // and export list calls get empty real-shaped bodies, tenant gets a fixed UMS

@@ -139,36 +139,36 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
   { value: "group", label: "Group" },
 ];
 
-function hasReportCapability(
+const hasReportCapability = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
-): boolean {
+): boolean => {
   return option.capability === "analytics"
     ? permissions.canExportAnalytics
     : permissions.canExportFinance;
-}
+};
 
-function hasCreateRevenueVisibility(
+const hasCreateRevenueVisibility = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
-): boolean {
+): boolean => {
   return (
     option.capability === "analytics" ||
     !option.requiresRevenueVisibility ||
     permissions.canViewRevenue
   );
-}
+};
 
-function canOfferReportType(
+const canOfferReportType = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
-): boolean {
+): boolean => {
   return (
     option.creatable &&
     hasReportCapability(option, permissions) &&
     hasCreateRevenueVisibility(option, permissions)
   );
-}
+};
 
 // ============================================================================
 // Purpose: Map an export_type to its binary download route + artifact format.
