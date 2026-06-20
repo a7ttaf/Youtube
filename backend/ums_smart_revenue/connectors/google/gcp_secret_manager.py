@@ -92,5 +92,6 @@ class GcpSecretManagerResolver:
 def _name_from_ref(ref: str) -> str:
     for prefix in _SUPPORTED_PREFIXES:
         if ref.startswith(prefix):
-            return ref[len(prefix) :]
+            prefix_length = len(prefix)
+            return ref[prefix_length:]
     raise MalformedSecretUriError(ref=ref)
