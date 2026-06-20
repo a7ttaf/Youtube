@@ -110,6 +110,12 @@ type ReportTypeOption = {
   requiresRevenueVisibility?: boolean;
 };
 
+type ReportTypePermissions = {
+  canExportFinance: boolean;
+  canExportAnalytics: boolean;
+  canViewRevenue: boolean;
+};
+
 const REPORT_TYPE_OPTIONS: ReportTypeOption[] = [
   { value: "FINANCE_EXCEL", label: "Finance workbook (XLSX)", capability: "finance", creatable: true },
   { value: "EXECUTIVE_PDF", label: "Executive summary (PDF)", capability: "finance", creatable: true },
@@ -132,6 +138,37 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
   { value: "channel", label: "Channel" },
   { value: "group", label: "Group" },
 ];
+
+function hasReportCapability(
+  option: ReportTypeOption,
+  permissions: ReportTypePermissions,
+): boolean {
+  return option.capability === "analytics"
+    ? permissions.canExportAnalytics
+    : permissions.canExportFinance;
+}
+
+function hasCreateRevenueVisibility(
+  option: ReportTypeOption,
+  permissions: ReportTypePermissions,
+): boolean {
+  return (
+    option.capability === "analytics" ||
+    !option.requiresRevenueVisibility ||
+    permissions.canViewRevenue
+  );
+}
+
+function canOfferReportType(
+  option: ReportTypeOption,
+  permissions: ReportTypePermissions,
+): boolean {
+  return (
+    option.creatable &&
+    hasReportCapability(option, permissions) &&
+    hasCreateRevenueVisibility(option, permissions)
+  );
+}
 
 // ============================================================================
 // Purpose: Map an export_type to its binary download route + artifact format.
@@ -236,15 +273,14 @@ export default function ExportsView({ // skipcq: JS-0067, JS-R1005
   // Offer a report type only when it is currently creatable AND the caller holds
   // its per-type capability. Analytics CSV creation can be scoped by the
   // backend, so the global revenue visibility signal only controls downloads.
-  const reportTypeOptions = REPORT_TYPE_OPTIONS.filter((option) => {
-    const hasCapability =
-      option.capability === "analytics" ? canExportAnalytics : canExportFinance;
-    const hasRevenueVisibility =
-      option.capability === "analytics" ||
-      !option.requiresRevenueVisibility ||
-      canViewRevenue;
-    return option.creatable && hasCapability && hasRevenueVisibility;
-  });
+  const reportTypePermissions = {
+    canExportFinance,
+    canExportAnalytics,
+    canViewRevenue,
+  };
+  const reportTypeOptions = REPORT_TYPE_OPTIONS.filter((option) =>
+    canOfferReportType(option, reportTypePermissions),
+  );
   const hasCreatableType = reportTypeOptions.length > 0;
   const defaultExportType = reportTypeOptions[0]?.value ?? "FINANCE_EXCEL";
 
