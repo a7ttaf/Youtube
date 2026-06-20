@@ -31,6 +31,7 @@ class AuditEventType(StrEnum):
     EXPORT_CREATED = "EXPORT_CREATED"
     EXPORT_VIEWED = "EXPORT_VIEWED"
     EXPORT_DOWNLOADED = "EXPORT_DOWNLOADED"
+    EXPORT_TEMPLATE_CHANGED = "EXPORT_TEMPLATE_CHANGED"
     USER_ACCOUNT_CHANGED = "USER_ACCOUNT_CHANGED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
     USER_PERMISSION_CHANGED = "USER_PERMISSION_CHANGED"
@@ -135,6 +136,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.EXPORT_DOWNLOADED: AuditEventDefinition(
         AuditEventType.EXPORT_DOWNLOADED,
         permission=Permission.EXPORT_REVENUE_REPORT,
+    ),
+    AuditEventType.EXPORT_TEMPLATE_CHANGED: AuditEventDefinition(
+        AuditEventType.EXPORT_TEMPLATE_CHANGED,
+        reason_required=True,
+        permission=Permission.MANAGE_EXPORT_TEMPLATES,
     ),
     AuditEventType.USER_ACCOUNT_CHANGED: AuditEventDefinition(
         AuditEventType.USER_ACCOUNT_CHANGED,

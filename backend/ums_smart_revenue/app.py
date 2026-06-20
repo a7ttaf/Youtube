@@ -37,6 +37,7 @@ from ums_smart_revenue.api.dependencies import (
     current_trusted_gateway_identity,
 )
 from ums_smart_revenue.api.exchange_rates import router as exchange_rates_router
+from ums_smart_revenue.api.export_templates import router as export_templates_router
 from ums_smart_revenue.api.exports import router as exports_router
 from ums_smart_revenue.api.finance_close import router as finance_close_router
 from ums_smart_revenue.api.groups import (
@@ -187,6 +188,7 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
     _app.include_router(channels_router)
     _app.include_router(connectors_router)
     _app.include_router(exchange_rates_router)
+    _app.include_router(export_templates_router)
     _app.include_router(exports_router)
     _app.include_router(finance_close_router)
     _app.include_router(groups_router)

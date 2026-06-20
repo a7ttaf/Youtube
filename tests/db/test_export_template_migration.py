@@ -1,0 +1,87 @@
+import importlib.util
+from pathlib import Path
+
+import sqlalchemy as sa
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import create_engine, inspect
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MIGRATION_PATH = (
+    PROJECT_ROOT
+    / "backend/ums_smart_revenue/db/alembic/versions/20260620_0001_export_templates.py"
+)
+
+
+def test_export_template_migration_creates_template_table_and_job_reference():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+
+    with engine.begin() as connection:
+        _create_prior_export_jobs_table(connection)
+        _apply_migration(connection)
+        inspector = inspect(connection)
+        template_columns = {
+            column["name"]: column for column in inspector.get_columns("export_templates")
+        }
+        template_indexes = {
+            index["name"]: tuple(index["column_names"])
+            for index in inspector.get_indexes("export_templates")
+        }
+        template_uniques = {
+            constraint["name"]: tuple(constraint["column_names"])
+            for constraint in inspector.get_unique_constraints("export_templates")
+        }
+        job_columns = {column["name"] for column in inspector.get_columns("export_jobs")}
+        job_indexes = {
+            index["name"]: tuple(index["column_names"])
+            for index in inspector.get_indexes("export_jobs")
+        }
+        job_foreign_keys = inspector.get_foreign_keys("export_jobs")
+        table_names = inspector.get_table_names()
+
+    assert "export_templates" in table_names
+    assert template_columns["id"]["nullable"] is False
+    assert template_columns["layout_config"]["nullable"] is False
+    assert template_columns["is_active"]["nullable"] is False
+    assert template_uniques["uq_export_templates_tenant_id_name"] == ("tenant_id", "name")
+    assert template_indexes["ix_export_templates_tenant_type_active"] == (
+        "tenant_id",
+        "export_type",
+        "is_active",
+    )
+    assert template_indexes["ix_export_templates_tenant_created"] == ("tenant_id", "created_at")
+    assert "template_id" in job_columns
+    assert job_indexes["ix_export_jobs_template_id"] == ("template_id",)
+    assert any(
+        foreign_key["referred_table"] == "export_templates"
+        and tuple(foreign_key["constrained_columns"]) == ("template_id",)
+        and tuple(foreign_key["referred_columns"]) == ("id",)
+        for foreign_key in job_foreign_keys
+    )
+
+
+def _create_prior_export_jobs_table(connection) -> None:
+    metadata = sa.MetaData()
+    sa.Table(
+        "export_jobs",
+        metadata,
+        sa.Column("id", sa.Uuid(as_uuid=True), primary_key=True),
+    )
+    metadata.create_all(connection)
+
+
+def _apply_migration(connection) -> None:
+    spec = importlib.util.spec_from_file_location("export_template_migration", MIGRATION_PATH)
+    assert spec is not None
+    migration = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(migration)
+
+    context = MigrationContext.configure(connection)
+    operations = Operations(context)
+    original_op = migration.op
+    try:
+        migration.op = operations
+        migration.upgrade()
+    finally:
+        migration.op = original_op
