@@ -16,12 +16,13 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Final, List  # noqa: UP035
+from typing import Any, Final, List, cast  # noqa: UP035
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
@@ -706,7 +707,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         )
         if keep_keys:
             stmt = stmt.where(~GoogleRevenueSourceRowORM.source_row_key.in_(sorted(keep_keys)))
-        result = self._session.execute(stmt)
+        result = cast(CursorResult[Any], self._session.execute(stmt))
         self._session.flush()
         return int(result.rowcount or 0)
 

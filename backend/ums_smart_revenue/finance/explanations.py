@@ -3,9 +3,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.explanation_models import NumberExplanationORM
@@ -214,7 +216,7 @@ class SqlAlchemyNumberExplanationRepository:
             statement = statement.where(
                 ~NumberExplanationORM.entity_id.in_(sorted(keep_entity_ids))
             )
-        result = self._session.execute(statement)
+        result = cast(CursorResult[Any], self._session.execute(statement))
         self._session.flush()
         return int(result.rowcount or 0)
 

@@ -2,10 +2,19 @@ from dataclasses import dataclass
 from decimal import Decimal
 from io import BytesIO
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import LETTER
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.lib import colors  # type: ignore[import-untyped]
+from reportlab.lib.pagesizes import LETTER  # type: ignore[import-untyped]
+from reportlab.lib.styles import (  # type: ignore[import-untyped]
+    ParagraphStyle,
+    getSampleStyleSheet,
+)
+from reportlab.platypus import (  # type: ignore[import-untyped]
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from ums_smart_revenue.finance.account_allocation_read import (
     AllocationProvenance,
