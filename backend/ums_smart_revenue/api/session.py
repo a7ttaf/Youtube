@@ -16,6 +16,7 @@ from ums_smart_revenue.auth.policy import (
     bank_reconciliation_view_granted_any_scope,
     connector_health_connector_ids,
     has_permission,
+    org_data_permission_granted_any_scope,
     payments_view_granted_any_scope,
 )
 from ums_smart_revenue.auth.scopes import AccessScope
@@ -53,9 +54,9 @@ class SessionCapabilities(BaseModel):
 
     Python attributes stay snake_case (lint-clean); the wire/JSON keys are
     camelCase via the alias generator so the SPA consumes canViewRevenue etc.
-    Most capabilities are global-scope checks; connector health and analytics
-    are scope-aware so scoped users can open their panels (run-history /
-    analytics) without over-broadening the underlying grant.
+    Most capabilities are global-scope checks; connector health, analytics, and
+    revenue-valued analytics CSV hints are scope-aware so scoped users can open
+    legitimate panels without over-broadening the underlying grant.
     """
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -94,15 +95,16 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
     """Derive UI capabilities from the principal's permission grants."""
     # ========================================================================
     # Purpose: Evaluate each UI capability against the principal in-memory.
-    #          Most are evaluated at GLOBAL scope; analytics, payments, and
-    #          bank-reconciliation are scope-aware (any scope grants the hint)
-    #          because scoped users legitimately need those panels. The
+    #          Most are evaluated at GLOBAL scope; analytics CSV hints, payments,
+    #          and bank-reconciliation are scope-aware where scoped users
+    #          legitimately need those panels or export controls. The
     #          underlying routes still re-check the grant for the requested
     #          scope, so capabilities remain conservative render hints.
     # Database/ORM: None — pure policy evaluation over the already-loaded
     #               principal; no SQL is issued here.
-    # Standards: Single source of truth is the policy layer (has_permission);
-    #            permission identity comes from the Permission enum.
+    # Standards: Single source of truth is the policy layer (has_permission and
+    #            scope-aware hint helpers); permission identity comes from the
+    #            Permission enum.
     # Blast Radius: Authorization read-only. No write, no broadening — mirrors
     #               the same Permission checks each guarded route enforces.
     #               No graph projection impact detected.
@@ -120,7 +122,10 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
     connector_health_ids = connector_health_connector_ids(principal)
 
     return SessionCapabilities(
-        can_view_revenue=_can(Permission.VIEW_REVENUE),
+        can_view_revenue=org_data_permission_granted_any_scope(
+            principal,
+            Permission.VIEW_REVENUE,
+        ),
         can_view_confidence=_can(Permission.VIEW_CONFIDENCE),
         # Scope-aware (NOT the global-only _can): VIEW_ANALYTICS is held by
         # nearly every role, many only at company/sector/channel scope. A
@@ -139,7 +144,10 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         can_unlock_month=_can(Permission.UNLOCK_FINANCE_MONTH),
         can_change_allocation=_can(Permission.CHANGE_ALLOCATION_RULE),
         can_export_revenue=_can(Permission.EXPORT_REVENUE_REPORT),
-        can_export_analytics_reports=_can(Permission.EXPORT_ANALYTICS_REPORT),
+        can_export_analytics_reports=org_data_permission_granted_any_scope(
+            principal,
+            Permission.EXPORT_ANALYTICS_REPORT,
+        ),
         # FIX: Map/Assign are gated on MANAGE_ORG_MAPPING at the backend routes
         # (PATCH /channels/{id}/mapping requires it on current + target scope;
         # POST /revenue/channel-account-links requires it globally).

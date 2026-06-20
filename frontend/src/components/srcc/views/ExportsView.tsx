@@ -152,11 +152,7 @@ const hasCreateRevenueVisibility = (
   option: ReportTypeOption,
   permissions: ReportTypePermissions,
 ): boolean => {
-  return (
-    option.capability === "analytics" ||
-    !option.requiresRevenueVisibility ||
-    permissions.canViewRevenue
-  );
+  return !option.requiresRevenueVisibility || permissions.canViewRevenue;
 };
 
 const canOfferReportType = (
@@ -271,8 +267,8 @@ export default function ExportsView({ // skipcq: JS-0067, JS-R1005
   canViewRevenue: boolean;
 }) {
   // Offer a report type only when it is currently creatable AND the caller holds
-  // its per-type capability. Analytics CSV creation can be scoped by the
-  // backend, so the global revenue visibility signal only controls downloads.
+  // its per-type capability. Revenue-valued CSVs also require the scoped/global
+  // revenue hint that /session/me derives from the backend grants.
   const reportTypePermissions = {
     canExportFinance,
     canExportAnalytics,

@@ -1720,6 +1720,48 @@ def test_analytics_summary_csv_download_enforces_snapshot_scope(tmp_path, monkey
     assert audit_count == 0
 
 
+def test_analytics_summary_csv_download_rejects_group_only_grants_for_snapshot(
+    tmp_path, monkeypatch
+):
+    """Group grants alone cannot bypass the frozen member-channel CSV snapshot."""
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = _seed_analytics_csv_export_job(
+        database_url,
+        scope_type="group",
+        scope_id=str(GROUP_ID),
+        scope_channel_ids=("channel-a", "channel-b"),
+    )
+    engine = create_engine(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="group-only-csv@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.group(str(GROUP_ID)),
+            ),
+            PermissionGrant(Permission.VIEW_ANALYTICS, AccessScope.group(str(GROUP_ID))),
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.group(str(GROUP_ID))),
+        ),
+    )
+
+    response = TestClient(app).get(f"/exports/{export_id}/analytics-summary.csv")
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, export_id)
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.analytics"
+    assert export_job.status == "QUEUED"
+    assert export_job.file_url is None
+    assert audit_count == 0
+
+
 def test_analytics_summary_csv_download_honors_declared_scope_after_org_drift(
     tmp_path, monkeypatch
 ):

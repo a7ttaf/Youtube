@@ -1760,7 +1760,10 @@ def _require_analytics_export_artifact_permissions(
     scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
     """Assert analytics export, analytics view, and revenue view permissions."""
-    if _has_export_scope_permissions(
+    # FIX: A direct grant on AccessScope.group(id) does not prove access to each
+    # frozen member channel. Group CSV downloads must fall through to the
+    # snapshot/channel checks below so mixed-company revenue rows stay protected.
+    if scope_type != "group" and _has_export_scope_permissions(
         user=user,
         permissions=_ANALYTICS_SUMMARY_CSV_REQUIRED_PERMISSIONS,
         scope_type=scope_type,
