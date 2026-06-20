@@ -4,9 +4,11 @@ import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
@@ -230,7 +232,7 @@ class SqlAlchemyRevenueFactRepository:
             statement = statement.where(
                 MonthlyChannelRevenueFactORM.source_report_id == source_report_id
             )
-        result = self._session.execute(statement)
+        result = cast(CursorResult[Any], self._session.execute(statement))
         self._session.flush()
         return int(result.rowcount or 0)
 

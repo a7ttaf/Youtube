@@ -36,6 +36,7 @@ const ROLE_LABELS: Record<Role, string> = {
 type AccessPermissions = {
   role: Role;
   canViewFinance: boolean;
+  canViewRevenue: boolean;
   canViewPayments: boolean;
   canViewBankReconciliation: boolean;
   canManageRegistry: boolean;
@@ -85,11 +86,12 @@ function canPreviewRoles(): boolean { // skipcq: JS-0067
 //          capability, so the UI never grants a surface the backend did not.
 // Database/ORM: None (frontend).
 // Standards: Capabilities are authoritative — no gate is invented. Finance
-//            visibility maps to VIEW_REVENUE; close to LOCK_FINANCE_MONTH;
-//            allocation editing to CHANGE_ALLOCATION_RULE; finance export variants
-//            (global/scoped/raw/report) to EXPORT_REVENUE_REPORT; analytics CSV
-//            exports to EXPORT_ANALYTICS_REPORT (a distinct permission held by 8
-//            of 10 roles, incl. ops-admin, that don't hold revenue-export);
+//            visibility maps to VIEW_REVENUE (global or scoped org data grant);
+//            close to LOCK_FINANCE_MONTH; allocation editing to
+//            CHANGE_ALLOCATION_RULE; finance export variants (global/scoped/raw/
+//            report) to EXPORT_REVENUE_REPORT; analytics CSV exports to
+//            EXPORT_ANALYTICS_REPORT plus VIEW_REVENUE because the CSV includes
+//            source-row revenue amounts;
 //            audit to VIEW_AUDIT_LOG; connector management UI to MANAGE_CONNECTORS;
 //            connector job controls to RUN_CONNECTOR_JOBS (NOT to finance,
 //            honoring that a finance admin must not trigger connector jobs).
@@ -112,6 +114,7 @@ function capabilitiesToPermissions( // skipcq: JS-0067
   return {
     role,
     canViewFinance: capabilities.canViewRevenue,
+    canViewRevenue: capabilities.canViewRevenue,
     canViewPayments: capabilities.canViewPayments,
     canViewBankReconciliation: capabilities.canViewBankReconciliation,
     canManageRegistry: capabilities.canManageRegistry,
@@ -149,7 +152,10 @@ function canCreateAnyExport(permissions: AccessPermissions) { // skipcq: JS-0067
   return (
     permissions.canCreateGlobalExports ||
     permissions.canCreateScopedExports ||
-    permissions.canRequestRawExports
+    permissions.canRequestRawExports ||
+    // FIX: Analytics summary CSV creation is controlled by the analytics export
+    // capability plus revenue visibility, not by legacy finance export flags.
+    (permissions.canExportAnalyticsReports && permissions.canViewRevenue)
   );
 }
 
@@ -716,6 +722,7 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
           canCreateExport={canCreateAnyExport(permissions)}
           canExportFinance={permissions.canExportFinanceReports}
           canExportAnalytics={permissions.canExportAnalyticsReports}
+          canViewRevenue={permissions.canViewRevenue}
         />
       )}
       {view === "connectors" && (

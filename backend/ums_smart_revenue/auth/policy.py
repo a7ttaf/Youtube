@@ -13,6 +13,14 @@ from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 
 EMPTY_ORG_INDEX = OrgAccessIndex()
+_ORG_DATA_RENDER_HINT_SCOPES = frozenset(
+    {
+        ScopeType.GLOBAL,
+        ScopeType.SECTOR,
+        ScopeType.COMPANY,
+        ScopeType.CHANNEL,
+    }
+)
 _CONNECTOR_KEY_ALIASES = MappingProxyType(
     {
         "youtube-reporting": ("youtube_reporting",),
@@ -112,6 +120,49 @@ def _connector_key_candidates(connector_id: str) -> tuple[str, ...]:
     candidates = [connector_id]
     candidates.extend(_CONNECTOR_KEY_ALIASES.get(connector_id, ()))
     return tuple(dict.fromkeys(candidates))
+
+
+# ============================================================================
+# Purpose: Decide whether a principal holds a permission on a global, sector,
+#          company, or channel scope. /session/me uses this as a render hint for
+#          revenue-valued analytics CSV controls because those backend routes can
+#          authorize those same org scopes or their contained channel snapshots.
+# Database/ORM: None — pure policy evaluation over the already-loaded principal.
+# Standards: Fail closed for disabled users and inactive grants/assignments.
+#            Group, finance-month, export, and connector scopes are excluded
+#            because they do not prove access to the CSV channel revenue rows.
+# Blast Radius: Authorization read hints only; route-level checks remain the
+#               enforcement boundary before reads, writes, artifacts, or audits.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/session.py -> /session/me capability
+#     derivation for analytics CSV UI gates.
+#   - File: backend/ums_smart_revenue/auth/scopes.py -> Org scope taxonomy.
+# ============================================================================
+def org_data_permission_granted_any_scope(
+    user: UserPrincipal,
+    permission: Permission,
+) -> bool:
+    """Return True if the permission is held on a global/sector/company/channel scope."""
+    if user.disabled:
+        return False
+
+    for grant in user.direct_permissions:
+        if (
+            grant.active
+            and grant.permission == permission
+            and grant.scope.type in _ORG_DATA_RENDER_HINT_SCOPES
+        ):
+            return True
+
+    for assignment in user.role_assignments:
+        if (
+            assignment.active
+            and assignment.scope.type in _ORG_DATA_RENDER_HINT_SCOPES
+            and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        ):
+            return True
+
+    return False
 
 
 # ============================================================================

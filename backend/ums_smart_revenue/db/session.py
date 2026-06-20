@@ -84,11 +84,6 @@ def build_session_factory(database_url: str, engine: Engine | None = None) -> Se
             if database_url not in _engine_cache:
                 _engine_cache[database_url] = build_engine(database_url)
             engine = _engine_cache[database_url]
-    kwargs: dict[str, object] = {
-        "autoflush": True,
-        "expire_on_commit": False,
-        "info": {_SESSION_ROLE_KEY: APP_TENANT_ROLE},
-    }
     # NOTE: We deliberately do NOT set `join_transaction_mode` on the
     # engine-bound sessionmaker. Codex P2 review on PR #88 confirmed that
     # `join_transaction_mode="create_savepoint"` does not actually open a
@@ -102,7 +97,12 @@ def build_session_factory(database_url: str, engine: Engine | None = None) -> Se
     # multi-Session contention that would otherwise need SAVEPOINT isolation.
     # Postgres keeps the default ("conditional_savepoint") because each
     # Session gets a distinct pooled connection with its own outer transaction.
-    return sessionmaker(bind=engine, **kwargs)
+    return sessionmaker(
+        bind=engine,
+        autoflush=True,
+        expire_on_commit=False,
+        info={_SESSION_ROLE_KEY: APP_TENANT_ROLE},
+    )
 
 
 # ============================================================================

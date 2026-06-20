@@ -16,12 +16,13 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Final, List  # noqa: UP035
+from typing import Any, Final, List, cast  # noqa: UP035
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
@@ -147,7 +148,10 @@ def _validate_amount_native(row: ParsedSourceRow) -> None:
 
     # FIX: amount_native maps to Numeric(20, 6). Reject values the database
     # would round or overflow so source-reported finance values stay exact.
-    if row.amount_native.as_tuple().exponent < -_AMOUNT_NATIVE_SCALE:
+    exponent = row.amount_native.as_tuple().exponent
+    if not isinstance(exponent, int):
+        raise GoogleRevenueSourceRowValidationError("amount_native must be a finite Decimal >= 0")
+    if exponent < -_AMOUNT_NATIVE_SCALE:
         raise GoogleRevenueSourceRowValidationError(
             "amount_native must not exceed 6 fractional digits "
             f"(column is Numeric(20, 6)), got {row.amount_native}"
@@ -703,7 +707,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         )
         if keep_keys:
             stmt = stmt.where(~GoogleRevenueSourceRowORM.source_row_key.in_(sorted(keep_keys)))
-        result = self._session.execute(stmt)
+        result = cast(CursorResult[Any], self._session.execute(stmt))
         self._session.flush()
         return int(result.rowcount or 0)
 

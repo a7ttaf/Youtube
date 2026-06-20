@@ -159,11 +159,33 @@ def test_session_me_header_mode_finance_month_scope_has_bank_capabilities(
     caps = payload["capabilities"]
     assert caps["canViewPayments"] is True
     assert caps["canViewBankReconciliation"] is True
-    # Global-only capabilities stay false because the assignment is scoped.
+    # Org-data capabilities stay false because finance-month is not a channel,
+    # company, sector, or global scope.
     assert caps["canViewRevenue"] is False
+    assert caps["canExportAnalyticsReports"] is False
     assert payload["roles"] == [
         {"role": "finance_admin", "scope_type": "finance-month", "scope_id": "2026-03"}
     ]
+
+
+def test_session_me_header_mode_company_scoped_finance_admin_gets_csv_hints(
+    client_headers_mode,
+):
+    """A company-scoped finance_admin can render scoped analytics CSV controls."""
+    response = client_headers_mode.get(
+        "/session/me",
+        headers=_header_principal(
+            role="finance_admin",
+            scope_type="company",
+            scope_id="acme",
+        ),
+    )
+    assert response.status_code == 200, response.text
+    caps = response.json()["capabilities"]
+    assert caps["canViewRevenue"] is True
+    assert caps["canExportAnalyticsReports"] is True
+    # Revenue workbook exports stay global-only in this session hint.
+    assert caps["canExportRevenue"] is False
 
 
 def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(

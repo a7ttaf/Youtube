@@ -59,35 +59,74 @@ import { describeError } from "./CommandView";
 const CURRENCY_OPTIONS = ["USD"];
 
 // Honest empty-state copy when the caller's permissions leave zero creatable
-// export types (e.g. an analytics-only viewer, since the CSV is held back below).
+// export types for their current backend grants.
 const NO_CREATABLE_TYPES_MESSAGE =
   "No export types are currently available for your role.";
+
+type DownloadRoute = {
+  readonly path: (id: string) => string;
+  readonly format: string;
+  readonly requiresRevenueVisibility?: boolean;
+};
+
+const DOWNLOAD_ROUTES: Partial<Record<ExportType, DownloadRoute>> = {
+  FINANCE_EXCEL: {
+    path: (id) => `/exports/${id}/finance-workbook.xlsx`,
+    format: "XLSX",
+  },
+  EXECUTIVE_PDF: {
+    path: (id) => `/exports/${id}/executive.pdf`,
+    format: "PDF",
+  },
+  BRANDED_SLIDE_PACK: {
+    path: (id) => `/exports/${id}/branded-slide-pack.pptx`,
+    format: "PPTX",
+  },
+  ANALYTICS_SUMMARY_CSV: {
+    path: (id) => `/exports/${id}/analytics-summary.csv`,
+    format: "CSV",
+    requiresRevenueVisibility: true,
+  },
+};
+
+const hasDownloadRoute = (
+  exportType: string,
+): exportType is ExportType =>
+  Object.prototype.hasOwnProperty.call(DOWNLOAD_ROUTES, exportType);
 
 // ============================================================================
 // Purpose: The real accepted export_type enum values (ALLOWED_EXPORT_TYPES), each
 //   tagged with the per-type capability it needs and whether the create form may
-//   currently OFFER it. The first three are finance exports; the CSV is analytics.
-//   ANALYTICS_SUMMARY_CSV is `creatable: false` because the backend has NO GET
-//   download route for it yet — offering it would let a user queue a CSV job that
-//   shows "Not ready" forever (downloadFor() returns null for it). Existing CSV
-//   jobs still render in the list; we only refuse to CREATE new ones. The
-//   `capability` flag stays wired to canExportAnalytics so analytics gating
-//   becomes meaningful again the moment a CSV download route ships and the type
-//   is flipped back to `creatable: true`. The label is UI-only.
+//   currently OFFER it. The first three are finance exports; the CSV is analytics
+//   and is downloadable through the dedicated analytics-summary route. The
+//   backend remains authoritative for the additional finance.view_revenue gate
+//   because the CSV carries revenue amounts.
 // ============================================================================
 type ReportTypeOption = {
   value: ExportType;
   label: string;
   capability: "finance" | "analytics";
   creatable: boolean;
+  requiresRevenueVisibility?: boolean;
+};
+
+type ReportTypePermissions = {
+  canExportFinance: boolean;
+  canExportAnalytics: boolean;
+  canViewRevenue: boolean;
 };
 
 const REPORT_TYPE_OPTIONS: ReportTypeOption[] = [
   { value: "FINANCE_EXCEL", label: "Finance workbook (XLSX)", capability: "finance", creatable: true },
   { value: "EXECUTIVE_PDF", label: "Executive summary (PDF)", capability: "finance", creatable: true },
   { value: "BRANDED_SLIDE_PACK", label: "Branded slide pack (PPTX)", capability: "finance", creatable: true },
-  // Held back from the create form until a CSV GET download route exists.
-  { value: "ANALYTICS_SUMMARY_CSV", label: "Analytics summary (CSV)", capability: "analytics", creatable: false },
+  {
+    value: "ANALYTICS_SUMMARY_CSV",
+    label: "Analytics summary (CSV)",
+    capability: "analytics",
+    creatable: true,
+    requiresRevenueVisibility: true,
+  },
 ];
 
 // The real accepted scope_type enum values (ALLOWED_EXPORT_SCOPE_TYPES). Global
@@ -100,12 +139,38 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
   { value: "group", label: "Group" },
 ];
 
+const hasReportCapability = (
+  option: ReportTypeOption,
+  permissions: ReportTypePermissions,
+): boolean => {
+  return option.capability === "analytics"
+    ? permissions.canExportAnalytics
+    : permissions.canExportFinance;
+};
+
+const hasCreateRevenueVisibility = (
+  option: ReportTypeOption,
+  permissions: ReportTypePermissions,
+): boolean => {
+  return !option.requiresRevenueVisibility || permissions.canViewRevenue;
+};
+
+const canOfferReportType = (
+  option: ReportTypeOption,
+  permissions: ReportTypePermissions,
+): boolean => {
+  return (
+    option.creatable &&
+    hasReportCapability(option, permissions) &&
+    hasCreateRevenueVisibility(option, permissions)
+  );
+};
+
 // ============================================================================
 // Purpose: Map an export_type to its binary download route + artifact format.
-//   Only one route is valid per type (the backend 422s a mismatched type); the
-//   analytics CSV has no GET download endpoint yet, so it returns null and no
-//   link shows. The action verb (Download vs Generate) is derived from job
-//   status by the caller; this returns the route and the format suffix only.
+//   Only one route is valid per type (the backend 422s a mismatched type). The
+//   action verb (Download vs Generate) is derived from job status by the caller;
+//   this returns the route and the format suffix only.
 // Standards: The href is resolved through the SAME base-URL logic the JSON
 //   client uses (resolveUrl), so when VITE_API_BASE_URL points at a separate API
 //   origin the download anchor targets that origin instead of the frontend's.
@@ -119,27 +184,21 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
  * Returns the binary download route (resolved against the configured API origin)
  * and artifact format for a job, or null if the type has no GET route.
  */
-function downloadFor( // skipcq: JS-0067
+const downloadFor = (
   job: ExportJob,
-): { href: string; format: string } | null {
-  const id = encodeURIComponent(job.id);
-  switch (job.export_type) {
-    case "FINANCE_EXCEL":
-      return {
-        href: resolveUrl(`/exports/${id}/finance-workbook.xlsx`),
-        format: "XLSX",
-      };
-    case "EXECUTIVE_PDF":
-      return { href: resolveUrl(`/exports/${id}/executive.pdf`), format: "PDF" };
-    case "BRANDED_SLIDE_PACK":
-      return {
-        href: resolveUrl(`/exports/${id}/branded-slide-pack.pptx`),
-        format: "PPTX",
-      };
-    default:
-      return null;
+  canViewRevenue: boolean,
+): { href: string; format: string } | null => {
+  const route = hasDownloadRoute(job.export_type)
+    ? DOWNLOAD_ROUTES[job.export_type]
+    : null;
+  if (!route || (route.requiresRevenueVisibility && !canViewRevenue)) {
+    // FIX: Analytics CSV artifacts include revenue amounts, so the UI must not
+    // expose their direct GET route when finance.view_revenue is absent.
+    return null;
   }
-}
+  const id = encodeURIComponent(job.id);
+  return { href: resolveUrl(route.path(id)), format: route.format };
+};
 
 // ============================================================================
 // Purpose: The action verb for a downloadable job's link. A QUEUED job triggers
@@ -200,22 +259,24 @@ export default function ExportsView({ // skipcq: JS-0067, JS-R1005
   canCreateExport,
   canExportFinance,
   canExportAnalytics,
+  canViewRevenue,
 }: {
   canCreateExport: boolean;
   canExportFinance: boolean;
   canExportAnalytics: boolean;
+  canViewRevenue: boolean;
 }) {
   // Offer a report type only when it is currently creatable AND the caller holds
-  // its per-type capability. The capability check stays wired to
-  // canExportFinance/canExportAnalytics so analytics gating is meaningful the
-  // moment the CSV type flips back to creatable; the `creatable` check is what
-  // holds the CSV out of the form today (no GET download route yet — see
-  // REPORT_TYPE_OPTIONS). An analytics-only viewer therefore gets zero options.
-  const reportTypeOptions = REPORT_TYPE_OPTIONS.filter((option) => {
-    const hasCapability =
-      option.capability === "analytics" ? canExportAnalytics : canExportFinance;
-    return option.creatable && hasCapability;
-  });
+  // its per-type capability. Revenue-valued CSVs also require the scoped/global
+  // revenue hint that /session/me derives from the backend grants.
+  const reportTypePermissions = {
+    canExportFinance,
+    canExportAnalytics,
+    canViewRevenue,
+  };
+  const reportTypeOptions = REPORT_TYPE_OPTIONS.filter((option) =>
+    canOfferReportType(option, reportTypePermissions),
+  );
   const hasCreatableType = reportTypeOptions.length > 0;
   const defaultExportType = reportTypeOptions[0]?.value ?? "FINANCE_EXCEL";
 
@@ -321,6 +382,7 @@ export default function ExportsView({ // skipcq: JS-0067, JS-R1005
             loading={loading}
             error={error}
             onRefresh={reload}
+            canViewRevenue={canViewRevenue}
           />
         </section>
 
@@ -593,11 +655,13 @@ function ExportJobsTable({ // skipcq: JS-0067
   loading,
   error,
   onRefresh,
+  canViewRevenue,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
   onRefresh: () => void;
+  canViewRevenue: boolean;
 }) {
   return (
     <>
@@ -616,7 +680,12 @@ function ExportJobsTable({ // skipcq: JS-0067
           ↻
         </button>
       </div>
-      <ExportJobsTableBody jobs={jobs} loading={loading} error={error} />
+      <ExportJobsTableBody
+        jobs={jobs}
+        loading={loading}
+        error={error}
+        canViewRevenue={canViewRevenue}
+      />
     </>
   );
 }
@@ -626,10 +695,12 @@ function ExportJobsTableBody({ // skipcq: JS-0067
   jobs,
   loading,
   error,
+  canViewRevenue,
 }: {
   jobs: ExportJob[];
   loading: boolean;
   error: ApiError | Error | null;
+  canViewRevenue: boolean;
 }) {
   if (error) {
     const { title, detail } = describeError(error);
@@ -669,7 +740,11 @@ function ExportJobsTableBody({ // skipcq: JS-0067
         <ExportJobsTableHead />
         <tbody>
           {jobs.map((job) => (
-            <ExportJobRow key={job.id} job={job} />
+            <ExportJobRow
+              key={job.id}
+              job={job}
+              canViewRevenue={canViewRevenue}
+            />
           ))}
         </tbody>
       </table>
@@ -695,7 +770,13 @@ function ExportJobsTableHead() { // skipcq: JS-0067
 }
 
 /** A single export-job table row, including its status badge and download cell. */
-function ExportJobRow({ job }: { job: ExportJob }) { // skipcq: JS-0067
+function ExportJobRow({ // skipcq: JS-0067
+  job,
+  canViewRevenue,
+}: {
+  job: ExportJob;
+  canViewRevenue: boolean;
+}) {
   return (
     <tr>
       <td>{job.export_type}</td>
@@ -707,7 +788,7 @@ function ExportJobRow({ job }: { job: ExportJob }) { // skipcq: JS-0067
       <td>{formatTimestamp(job.created_at)}</td>
       <td>{formatTimestamp(job.completed_at)}</td>
       <td>
-        <ExportDownloadCell job={job} />
+        <ExportDownloadCell job={job} canViewRevenue={canViewRevenue} />
       </td>
     </tr>
   );
@@ -718,8 +799,14 @@ function ExportJobRow({ job }: { job: ExportJob }) { // skipcq: JS-0067
  * COMPLETED) when the type has a route, otherwise a failure reason or
  * not-ready note.
  */
-function ExportDownloadCell({ job }: { job: ExportJob }) { // skipcq: JS-0067
-  const download = downloadFor(job);
+function ExportDownloadCell({ // skipcq: JS-0067
+  job,
+  canViewRevenue,
+}: {
+  job: ExportJob;
+  canViewRevenue: boolean;
+}) {
+  const download = downloadFor(job, canViewRevenue);
   if (isDownloadable(job) && download) {
     // Plain anchor: the href is resolved against the configured API origin
     // (resolveUrl). When no base is set it stays relative so the dev proxy
