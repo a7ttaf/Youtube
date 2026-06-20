@@ -44,6 +44,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from google.auth.exceptions import RefreshError
+from google.oauth2.credentials import Credentials
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -69,6 +70,7 @@ from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_modul
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
+    ProducedReport,
     ProducedReportFailure,
     ProducedReportSuccess,
     YouTubeReportingRunner,
@@ -106,18 +108,26 @@ _SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
 
 
 def _next_produced_report(
-    produced_iter: Iterator[ProducedReportSuccess | ProducedReportFailure],
-) -> ProducedReportSuccess | ProducedReportFailure:
+    produced_iter: Iterator[ProducedReport],
+) -> ProducedReport:
     for produced in produced_iter:
         return produced
     raise AssertionError("expected one aggregated YouTube report")
 
 
-def _assert_produced_reports_exhausted(
-    produced_iter: Iterator[ProducedReportSuccess | ProducedReportFailure],
-) -> None:
+def _assert_produced_reports_exhausted(produced_iter: Iterator[ProducedReport]) -> None:
     for extra_report in produced_iter:
         raise AssertionError(f"expected produced reports to be exhausted, got {extra_report!r}")
+
+
+def _close_produced_reports(produced_iter: Iterator[ProducedReport]) -> None:
+    close = getattr(produced_iter, "close", None)
+    if callable(close):
+        close()
+
+
+def _runner_credentials() -> Credentials:
+    return Credentials(token="test-token")
 
 
 @pytest.fixture(autouse=True)
@@ -147,7 +157,7 @@ def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 
 
 @pytest.fixture(name="session")
-def _session_fixture() -> Session:
+def _session_fixture() -> Iterator[Session]:
     """In-memory SQLite with the multi-base schema and FK seeds the
     orchestrator's source-row upsert + credential lookup need.
 
@@ -424,7 +434,7 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
         produced_iter = YouTubeReportingRunner().produce_reports(
             session=session,
             run=None,
-            credentials=object(),
+            credentials=_runner_credentials(),
             report_month="2026-05",
             account_id=ACCOUNT_ID,
         )
@@ -464,7 +474,7 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
             )
             _assert_produced_reports_exhausted(produced_iter)
         finally:
-            produced_iter.close()
+            _close_produced_reports(produced_iter)
 
 
 def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails(
@@ -497,7 +507,7 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
         produced_iter = YouTubeReportingRunner().produce_reports(
             session=session,
             run=None,
-            credentials=object(),
+            credentials=_runner_credentials(),
             report_month="2026-05",
             account_id=ACCOUNT_ID,
         )
@@ -518,7 +528,7 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
             )
             _assert_produced_reports_exhausted(produced_iter)
         finally:
-            produced_iter.close()
+            _close_produced_reports(produced_iter)
 
 
 def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
@@ -548,7 +558,7 @@ def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
         produced_iter = YouTubeReportingRunner().produce_reports(
             session=session,
             run=None,
-            credentials=object(),
+            credentials=_runner_credentials(),
             report_month="2026-05",
             account_id=ACCOUNT_ID,
         )
@@ -560,7 +570,7 @@ def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
             assert client.list_reports_for_month.call_args.kwargs["job_id"] == ("job-primary")
             _assert_produced_reports_exhausted(produced_iter)
         finally:
-            produced_iter.close()
+            _close_produced_reports(produced_iter)
 
 
 def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
@@ -4189,12 +4199,24 @@ def _connector_audit_events(session: Session) -> list[AuditLogORM]:
             .order_by(AuditLogORM.created_at, AuditLogORM.id)
         )
     )
-    return [row for row in rows if row.details.get("lifecycle") != "ROWS_SKIPPED"]
+    return [row for row in rows if _audit_details(row).get("lifecycle") != "ROWS_SKIPPED"]
+
+
+def _audit_details(event: AuditLogORM) -> dict[str, object]:
+    """Return the JSON audit details as a mapping for typed test assertions."""
+    details = event.details
+    assert isinstance(details, dict)
+    return details
 
 
 def _audit_lifecycles(events: list[AuditLogORM]) -> list[str]:
     """Extract the ordered ``details["lifecycle"]`` discriminator chain."""
-    return [event.details["lifecycle"] for event in events]
+    lifecycles: list[str] = []
+    for event in events:
+        lifecycle = _audit_details(event).get("lifecycle")
+        assert isinstance(lifecycle, str)
+        lifecycles.append(lifecycle)
+    return lifecycles
 
 
 def test_run_one_emits_audit_started_finished_for_clean_run(
@@ -4263,12 +4285,15 @@ def test_run_one_emits_audit_started_finished_for_clean_run(
     ]
     # FINISHED carries the terminal status + counts payload.
     finished = events[-1]
-    assert finished.details["status"] == "SUCCEEDED"
-    assert finished.details["counts"]["reports_succeeded"] == 1
-    assert finished.details["counts"]["reports_failed"] == 0
+    finished_details = _audit_details(finished)
+    assert finished_details["status"] == "SUCCEEDED"
+    finished_counts = finished_details["counts"]
+    assert isinstance(finished_counts, dict)
+    assert finished_counts["reports_succeeded"] == 1
+    assert finished_counts["reports_failed"] == 0
     # PARSED carries the upsert count from the source-row repository.
     parsed = events[2]
-    assert parsed.details["count_upserted"] == outcome.counts["rows_upserted_total"]
+    assert _audit_details(parsed)["count_upserted"] == outcome.counts["rows_upserted_total"]
 
 
 def test_run_one_emits_audit_event_sequence_for_partial_run(
@@ -4372,14 +4397,17 @@ def test_run_one_emits_audit_event_sequence_for_partial_run(
     # copied into the audit details.
     failed = events[4]
     assert failed.event_type == "REPORT_IMPORTED"
-    assert failed.details["error_class"] == "ParserError"
+    assert _audit_details(failed)["error_class"] == "ParserError"
     # FINISHED reflects the partial outcome.
     finished = events[-1]
     assert finished.event_type == "CONNECTOR_JOB_RUN"
-    assert finished.details["status"] == "PARTIAL"
-    assert finished.details["counts"]["reports_succeeded"] == 1
-    assert finished.details["counts"]["reports_failed"] == 1
-    assert finished.details["error_summary_present"] is True
+    finished_details = _audit_details(finished)
+    assert finished_details["status"] == "PARTIAL"
+    finished_counts = finished_details["counts"]
+    assert isinstance(finished_counts, dict)
+    assert finished_counts["reports_succeeded"] == 1
+    assert finished_counts["reports_failed"] == 1
+    assert finished_details["error_summary_present"] is True
 
 
 def test_run_one_dry_run_emits_zero_audit_events(session: Session, _stub_secret_resolver) -> None:
@@ -5008,7 +5036,15 @@ def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
     # Run 3: only ESTIMATED_EARNINGS amount changes → 1 UPDATED + 1 UNCHANGED
     # (the TOTAL_EARNINGS row's cells are identical, so its content matches).
     mutated_payload = deepcopy(base_payload)
-    mutated_payload["rows"][0]["cells"][1]["value"] = "200.000000"
+    rows = mutated_payload["rows"]
+    assert isinstance(rows, list)
+    first_row = rows[0]
+    assert isinstance(first_row, dict)
+    cells = first_row["cells"]
+    assert isinstance(cells, list)
+    earnings_cell = cells[1]
+    assert isinstance(earnings_cell, dict)
+    earnings_cell["value"] = "200.000000"
     third = _run_adsense_orchestrator_with_payload(
         session,
         account_id=_ADSENSE_ACCOUNT_ID,
