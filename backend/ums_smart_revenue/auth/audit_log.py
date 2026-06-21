@@ -178,6 +178,7 @@ class SqlAlchemyAuditLogRepository:
         )
 
     def count_summary(self, *, window_hours: int) -> AuditSummaryCounts:
+        """Return tenant-scoped audit counts for the configured recent window."""
         # ====================================================================
         # Purpose: Compute tenant-scoped audit aggregate counts (lifetime
         #   total, lifetime sensitive, and a recent count within the supplied
