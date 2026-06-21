@@ -230,6 +230,7 @@ class SqlAlchemyAuditLogRepository:
         )
 
     def connector_run_failure_summary(self, *, month: str) -> ConnectorRunFailureSummary:
+        """Return latest failed connector-run counts for one finance month."""
         # ====================================================================
         # Purpose: Read connector-run terminal audit edges for a finance month
         #   and derive the current failed-run smart-alert signal from the
@@ -252,7 +253,7 @@ class SqlAlchemyAuditLogRepository:
         #   - File: backend/ums_smart_revenue/connectors/runs/normalization.py
         #     -> emits PROJECTION_FAILED connector edges consumed here.
         # ====================================================================
-        details_column = cast("Any", AuditLogORM.details)
+        details_column = cast(Any, AuditLogORM.details)
         details_rows = self._session.execute(
             select(
                 AuditLogORM.details,
