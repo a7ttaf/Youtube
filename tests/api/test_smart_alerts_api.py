@@ -52,6 +52,67 @@ def _json_alert_by_code(alerts, code: str):
     return matches[0]
 
 
+def _connector_run_audit_edge(
+    *,
+    tenant_id: UUID,
+    entity_id: str,
+    scope_id: str,
+    details: dict[str, object],
+    created_at: datetime,
+    entity_type: str = "connector_run",
+    reason: str = "connector finished",
+) -> AuditLogORM:
+    """Build a connector-run audit row with the test defaults."""
+    return AuditLogORM(
+        id=uuid4(),
+        tenant_id=tenant_id,
+        user_id=USER_ID,
+        event_type="CONNECTOR_JOB_RUN",
+        entity_type=entity_type,
+        entity_id=entity_id,
+        scope_type="connector",
+        scope_id=scope_id,
+        reason=reason,
+        details=details,
+        sensitive=True,
+        created_at=created_at,
+    )
+
+
+def _assert_connector_failed_alert(
+    response,
+    *,
+    expected_details: dict[str, object],
+) -> None:
+    """Assert a successful response contains the connector-run alert payload."""
+    assert response.status_code == 200
+    failed = _json_alert_by_code(response.json()["alerts"], "CONNECTOR_RUNS_FAILED")
+    assert failed is not None
+    assert {
+        "severity": failed["severity"],
+        "source": failed["source"],
+        "details": failed["details"],
+    } == {
+        "severity": "HIGH",
+        "source": "connector_job_run",
+        "details": expected_details,
+    }
+
+
+def _assert_single_audit_read_details(
+    engine,
+    *,
+    expected_details: dict[str, object],
+) -> None:
+    """Assert the endpoint wrote one audit-read row with selected details."""
+    with Session(engine) as session:
+        audit_reads = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+        ).all()
+    assert len(audit_reads) == 1
+    assert {key: audit_reads[0].details[key] for key in expected_details} == expected_details
+
+
 def auth_headers(
     role: str,
     scope_type: str = "global",
@@ -506,16 +567,10 @@ def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
     with Session(engine) as session:
         session.add_all(
             [
-                AuditLogORM(
-                    id=uuid4(),
+                _connector_run_audit_edge(
                     tenant_id=tenant_id,
-                    user_id=USER_ID,
-                    event_type="CONNECTOR_JOB_RUN",
-                    entity_type="connector_run",
                     entity_id="run-youtube-old-failed",
-                    scope_type="connector",
                     scope_id="youtube-reporting",
-                    reason="connector finished",
                     details={
                         "lifecycle": "FINISHED",
                         "connector_key": "youtube-reporting",
@@ -524,19 +579,12 @@ def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
                         "status": "FAILED",
                         "counts": {"reports_failed": 1},
                     },
-                    sensitive=True,
                     created_at=datetime(2026, 4, 1, tzinfo=UTC),
                 ),
-                AuditLogORM(
-                    id=uuid4(),
+                _connector_run_audit_edge(
                     tenant_id=tenant_id,
-                    user_id=USER_ID,
-                    event_type="CONNECTOR_JOB_RUN",
-                    entity_type="connector_run",
                     entity_id="run-youtube-clean",
-                    scope_type="connector",
                     scope_id="youtube-reporting",
-                    reason="connector finished",
                     details={
                         "lifecycle": "FINISHED",
                         "connector_key": "youtube-reporting",
@@ -545,19 +593,12 @@ def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
                         "status": "SUCCEEDED",
                         "counts": {"reports_succeeded": 1},
                     },
-                    sensitive=True,
                     created_at=datetime(2026, 4, 2, tzinfo=UTC),
                 ),
-                AuditLogORM(
-                    id=uuid4(),
+                _connector_run_audit_edge(
                     tenant_id=tenant_id,
-                    user_id=USER_ID,
-                    event_type="CONNECTOR_JOB_RUN",
-                    entity_type="connector_run",
                     entity_id="run-adsense-partial",
-                    scope_type="connector",
                     scope_id="adsense-management",
-                    reason="connector finished",
                     details={
                         "lifecycle": "FINISHED",
                         "connector_key": "adsense-management",
@@ -566,19 +607,12 @@ def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
                         "status": "PARTIAL",
                         "counts": {"reports_failed": 1, "reports_succeeded": 2},
                     },
-                    sensitive=True,
                     created_at=datetime(2026, 4, 3, tzinfo=UTC),
                 ),
-                AuditLogORM(
-                    id=uuid4(),
+                _connector_run_audit_edge(
                     tenant_id=tenant_id,
-                    user_id=USER_ID,
-                    event_type="CONNECTOR_JOB_RUN",
-                    entity_type="connector_run",
                     entity_id="run-other-month-failed",
-                    scope_type="connector",
                     scope_id="youtube-reporting",
-                    reason="connector finished",
                     details={
                         "lifecycle": "FINISHED",
                         "connector_key": "youtube-reporting",
@@ -587,7 +621,6 @@ def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
                         "status": "FAILED",
                         "counts": {"reports_failed": 1},
                     },
-                    sensitive=True,
                     created_at=datetime(2026, 4, 4, tzinfo=UTC),
                 ),
             ]
@@ -603,23 +636,22 @@ def test_month_smart_alerts_surface_failed_connector_run_audit_edges(tmp_path):
     assert response.status_code == 200
     codes = [alert["code"] for alert in response.json()["alerts"]]
     assert codes.index("CONNECTOR_RUNS_FAILED") < codes.index("PAYMENT_NOT_MATCHED")
-    failed = _json_alert_by_code(response.json()["alerts"], "CONNECTOR_RUNS_FAILED")
-    assert failed is not None
-    assert failed["severity"] == "HIGH"
-    assert failed["source"] == "connector_job_run"
-    assert failed["details"] == {
-        "failed_run_count": 1,
-        "failed_by_status": {"PARTIAL": 1},
-    }
-    with Session(engine) as session:
-        audit_reads = session.scalars(
-            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
-        ).all()
-    assert len(audit_reads) == 1
-    assert audit_reads[0].details["returned"] == 1
-    assert audit_reads[0].details["source_rows_skipped_returned"] == 0
-    assert audit_reads[0].details["connector_runs_failed_returned"] == 1
-    assert audit_reads[0].details["details_redacted"] is False
+    _assert_connector_failed_alert(
+        response,
+        expected_details={
+            "failed_run_count": 1,
+            "failed_by_status": {"PARTIAL": 1},
+        },
+    )
+    _assert_single_audit_read_details(
+        engine,
+        expected_details={
+            "returned": 1,
+            "source_rows_skipped_returned": 0,
+            "connector_runs_failed_returned": 1,
+            "details_redacted": False,
+        },
+    )
 
 
 def test_month_smart_alerts_normalize_connector_aliases_before_latest_edge(
@@ -778,14 +810,10 @@ def test_month_smart_alerts_include_superseded_connector_run_terminal_edge(
     tenant_id = UUID(UMS_TENANT_ID)
     with Session(engine) as session:
         session.add(
-            AuditLogORM(
-                id=uuid4(),
+            _connector_run_audit_edge(
                 tenant_id=tenant_id,
-                user_id=USER_ID,
-                event_type="CONNECTOR_JOB_RUN",
                 entity_type="api_connector",
                 entity_id="youtube-reporting:content-owner-1",
-                scope_type="connector",
                 scope_id="youtube-reporting",
                 reason="orphaned RUNNING run superseded by new job",
                 details={
@@ -796,7 +824,6 @@ def test_month_smart_alerts_include_superseded_connector_run_terminal_edge(
                     "status": "FAILED",
                     "error_summary_present": True,
                 },
-                sensitive=True,
                 created_at=datetime(2026, 4, 1, tzinfo=UTC),
             )
         )
@@ -808,25 +835,17 @@ def test_month_smart_alerts_include_superseded_connector_run_terminal_edge(
         headers=auth_headers("finance_approver", "global"),
     )
 
-    assert response.status_code == 200
-    alerts = [
-        alert for alert in response.json()["alerts"] if alert["code"] == "CONNECTOR_RUNS_FAILED"
-    ]
-    assert len(alerts) == 1
-    failed = alerts[0]
-    assert failed["severity"] == "HIGH"
-    assert failed["source"] == "connector_job_run"
-    assert failed["details"] == {
-        "failed_run_count": 1,
-        "failed_by_status": {"FAILED": 1},
-    }
-    with Session(engine) as session:
-        audit_reads = session.scalars(
-            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
-        ).all()
-    assert len(audit_reads) == 1
-    assert audit_reads[0].details["returned"] == 1
-    assert audit_reads[0].details["connector_runs_failed_returned"] == 1
+    _assert_connector_failed_alert(
+        response,
+        expected_details={
+            "failed_run_count": 1,
+            "failed_by_status": {"FAILED": 1},
+        },
+    )
+    _assert_single_audit_read_details(
+        engine,
+        expected_details={"returned": 1, "connector_runs_failed_returned": 1},
+    )
 
 
 def test_month_smart_alerts_include_projection_failed_connector_run(tmp_path):

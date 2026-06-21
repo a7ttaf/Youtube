@@ -4240,6 +4240,74 @@ def _audit_lifecycles(events: list[AuditLogORM]) -> list[str]:
     return lifecycles
 
 
+def _assert_clean_run_audit_sequence(
+    events: list[AuditLogORM],
+    *,
+    rows_upserted_total: int,
+) -> None:
+    """Verify the audit chain and terminal details for a clean one-report run."""
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "FINISHED",
+    ]
+    assert [event.event_type for event in events] == [
+        "CONNECTOR_JOB_RUN",
+        "REPORT_IMPORTED",
+        "REPORT_IMPORTED",
+        "CONNECTOR_JOB_RUN",
+    ]
+
+    finished_details = _audit_details(events[-1])
+    finished_counts = finished_details["counts"]
+    assert isinstance(finished_counts, dict)
+    assert {
+        "status": finished_details["status"],
+        "reports_succeeded": finished_counts["reports_succeeded"],
+        "reports_failed": finished_counts["reports_failed"],
+        "count_upserted": _audit_details(events[2])["count_upserted"],
+    } == {
+        "status": "SUCCEEDED",
+        "reports_succeeded": 1,
+        "reports_failed": 0,
+        "count_upserted": rows_upserted_total,
+    }
+
+
+def _assert_partial_run_audit_sequence(events: list[AuditLogORM]) -> None:
+    """Verify the audit chain and terminal details for a one-failure partial run."""
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "DOWNLOADED",
+        "FAILED",
+        "FINISHED",
+    ]
+    failed_details = _audit_details(events[4])
+    finished_details = _audit_details(events[-1])
+    finished_counts = finished_details["counts"]
+    assert isinstance(finished_counts, dict)
+    assert {
+        "failed_event_type": events[4].event_type,
+        "failed_error_class": failed_details["error_class"],
+        "finished_event_type": events[-1].event_type,
+        "finished_status": finished_details["status"],
+        "reports_succeeded": finished_counts["reports_succeeded"],
+        "reports_failed": finished_counts["reports_failed"],
+        "error_summary_present": finished_details["error_summary_present"],
+    } == {
+        "failed_event_type": "REPORT_IMPORTED",
+        "failed_error_class": "ParserError",
+        "finished_event_type": "CONNECTOR_JOB_RUN",
+        "finished_status": "PARTIAL",
+        "reports_succeeded": 1,
+        "reports_failed": 1,
+        "error_summary_present": True,
+    }
+
+
 def test_run_one_emits_audit_started_finished_for_clean_run(
     session: Session, _stub_secret_resolver
 ) -> None:
@@ -4289,32 +4357,10 @@ def test_run_one_emits_audit_started_finished_for_clean_run(
     assert outcome.run.status == "SUCCEEDED"
 
     events = _connector_audit_events(session)
-    # Lifecycle ordering: STARTED -> DOWNLOADED -> PARSED -> FINISHED.
-    assert _audit_lifecycles(events) == [
-        "STARTED",
-        "DOWNLOADED",
-        "PARSED",
-        "FINISHED",
-    ]
-    # Event type discriminator: run-lifecycle vs raw-file-lifecycle.
-    event_types = [event.event_type for event in events]
-    assert event_types == [
-        "CONNECTOR_JOB_RUN",
-        "REPORT_IMPORTED",
-        "REPORT_IMPORTED",
-        "CONNECTOR_JOB_RUN",
-    ]
-    # FINISHED carries the terminal status + counts payload.
-    finished = events[-1]
-    finished_details = _audit_details(finished)
-    assert finished_details["status"] == "SUCCEEDED"
-    finished_counts = finished_details["counts"]
-    assert isinstance(finished_counts, dict)
-    assert finished_counts["reports_succeeded"] == 1
-    assert finished_counts["reports_failed"] == 0
-    # PARSED carries the upsert count from the source-row repository.
-    parsed = events[2]
-    assert _audit_details(parsed)["count_upserted"] == outcome.counts["rows_upserted_total"]
+    _assert_clean_run_audit_sequence(
+        events,
+        rows_upserted_total=outcome.counts["rows_upserted_total"],
+    )
 
 
 def test_run_one_emits_audit_event_sequence_for_partial_run(
@@ -4403,32 +4449,7 @@ def test_run_one_emits_audit_event_sequence_for_partial_run(
     assert outcome.run.status == "PARTIAL"
 
     events = _connector_audit_events(session)
-    # Lifecycle ordering: STARTED -> DOWNLOADED (r1) -> PARSED (r1) ->
-    # DOWNLOADED (r2) -> FAILED (r2) -> FINISHED.
-    assert _audit_lifecycles(events) == [
-        "STARTED",
-        "DOWNLOADED",
-        "PARSED",
-        "DOWNLOADED",
-        "FAILED",
-        "FINISHED",
-    ]
-    # The FAILED audit row carries the exception class only -- the
-    # exception MESSAGE is the source-of-truth ``error_summary`` and is not
-    # copied into the audit details.
-    failed = events[4]
-    assert failed.event_type == "REPORT_IMPORTED"
-    assert _audit_details(failed)["error_class"] == "ParserError"
-    # FINISHED reflects the partial outcome.
-    finished = events[-1]
-    assert finished.event_type == "CONNECTOR_JOB_RUN"
-    finished_details = _audit_details(finished)
-    assert finished_details["status"] == "PARTIAL"
-    finished_counts = finished_details["counts"]
-    assert isinstance(finished_counts, dict)
-    assert finished_counts["reports_succeeded"] == 1
-    assert finished_counts["reports_failed"] == 1
-    assert finished_details["error_summary_present"] is True
+    _assert_partial_run_audit_sequence(events)
 
 
 def test_run_one_dry_run_emits_zero_audit_events(session: Session, _stub_secret_resolver) -> None:
@@ -4676,6 +4697,57 @@ def _run_adsense_orchestrator_with_payload(
             account_id=expected_account_id,
             report_month=expected_report_month,
         )
+
+
+_UPSERT_COUNT_KEYS = (
+    "rows_upserted_total",
+    "rows_upserted_created",
+    "rows_upserted_updated",
+    "rows_upserted_unchanged",
+)
+
+
+def _assert_successful_upsert_counts(
+    outcome: ConnectorRunOutcome,
+    expected_counts: dict[str, int],
+) -> None:
+    """Assert a successful run returned the selected source-row upsert counts."""
+    assert outcome.run is not None and outcome.run.status == "SUCCEEDED"
+    assert {key: outcome.counts[key] for key in _UPSERT_COUNT_KEYS} == expected_counts
+
+
+def _adsense_payload_with_estimated_earnings(
+    payload: dict[str, object],
+    *,
+    value: str,
+) -> dict[str, object]:
+    """Return a payload copy with the ESTIMATED_EARNINGS cell changed."""
+    mutated_payload = deepcopy(payload)
+    rows = mutated_payload["rows"]
+    assert isinstance(rows, list)
+    first_row = rows[0]
+    assert isinstance(first_row, dict)
+    cells = first_row["cells"]
+    assert isinstance(cells, list)
+    earnings_cell = cells[1]
+    assert isinstance(earnings_cell, dict)
+    earnings_cell["value"] = value
+    return mutated_payload
+
+
+def _assert_persisted_connector_run_counts(
+    session: Session,
+    expected_counts: list[dict[str, int]],
+) -> None:
+    """Assert persisted connector_runs.counts_json carries the run count split."""
+    persisted = session.scalars(
+        select(ConnectorRunORM)
+        .where(ConnectorRunORM.tenant_id == TENANT_ID)
+        .order_by(ConnectorRunORM.started_at, ConnectorRunORM.id)
+    ).all()
+    assert [
+        {key: run.counts_json[key] for key in _UPSERT_COUNT_KEYS} for run in persisted
+    ] == expected_counts
 
 
 def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
@@ -5035,11 +5107,15 @@ def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
         report_month=report_month,
         payload=base_payload,
     )
-    assert first.run is not None and first.run.status == "SUCCEEDED"
-    assert first.counts["rows_upserted_total"] == 2
-    assert first.counts["rows_upserted_created"] == 2
-    assert first.counts["rows_upserted_updated"] == 0
-    assert first.counts["rows_upserted_unchanged"] == 0
+    _assert_successful_upsert_counts(
+        first,
+        {
+            "rows_upserted_total": 2,
+            "rows_upserted_created": 2,
+            "rows_upserted_updated": 0,
+            "rows_upserted_unchanged": 0,
+        },
+    )
 
     # Run 2: identical payload → both rows UNCHANGED.
     second = _run_adsense_orchestrator_with_payload(
@@ -5048,59 +5124,61 @@ def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
         report_month=report_month,
         payload=base_payload,
     )
-    assert second.run is not None and second.run.status == "SUCCEEDED"
-    assert second.counts["rows_upserted_total"] == 2
-    assert second.counts["rows_upserted_created"] == 0
-    assert second.counts["rows_upserted_updated"] == 0
-    assert second.counts["rows_upserted_unchanged"] == 2
+    _assert_successful_upsert_counts(
+        second,
+        {
+            "rows_upserted_total": 2,
+            "rows_upserted_created": 0,
+            "rows_upserted_updated": 0,
+            "rows_upserted_unchanged": 2,
+        },
+    )
 
     # Run 3: only ESTIMATED_EARNINGS amount changes → 1 UPDATED + 1 UNCHANGED
     # (the TOTAL_EARNINGS row's cells are identical, so its content matches).
-    mutated_payload = deepcopy(base_payload)
-    rows = mutated_payload["rows"]
-    assert isinstance(rows, list)
-    first_row = rows[0]
-    assert isinstance(first_row, dict)
-    cells = first_row["cells"]
-    assert isinstance(cells, list)
-    earnings_cell = cells[1]
-    assert isinstance(earnings_cell, dict)
-    earnings_cell["value"] = "200.000000"
+    mutated_payload = _adsense_payload_with_estimated_earnings(
+        base_payload,
+        value="200.000000",
+    )
     third = _run_adsense_orchestrator_with_payload(
         session,
         account_id=_ADSENSE_ACCOUNT_ID,
         report_month=report_month,
         payload=mutated_payload,
     )
-    assert third.run is not None and third.run.status == "SUCCEEDED"
-    assert third.counts["rows_upserted_total"] == 2
-    assert third.counts["rows_upserted_created"] == 0
-    assert third.counts["rows_upserted_updated"] == 1
-    assert third.counts["rows_upserted_unchanged"] == 1
+    _assert_successful_upsert_counts(
+        third,
+        {
+            "rows_upserted_total": 2,
+            "rows_upserted_created": 0,
+            "rows_upserted_updated": 1,
+            "rows_upserted_unchanged": 1,
+        },
+    )
 
     # Defence in depth: read the persisted counts_json directly to confirm
     # the run-level write picked up the per-category split (not just the
     # finish_run return value).
-    persisted = session.scalars(
-        select(ConnectorRunORM)
-        .where(ConnectorRunORM.tenant_id == TENANT_ID)
-        .order_by(ConnectorRunORM.started_at, ConnectorRunORM.id)
-    ).all()
-    assert len(persisted) == 3
-    persisted_counts = [run.counts_json for run in persisted]
-    assert [counts["rows_upserted_total"] for counts in persisted_counts] == [2, 2, 2]
-    assert [counts["rows_upserted_created"] for counts in persisted_counts] == [
-        2,
-        0,
-        0,
-    ]
-    assert [counts["rows_upserted_updated"] for counts in persisted_counts] == [
-        0,
-        0,
-        1,
-    ]
-    assert [counts["rows_upserted_unchanged"] for counts in persisted_counts] == [
-        0,
-        2,
-        1,
-    ]
+    _assert_persisted_connector_run_counts(
+        session,
+        [
+            {
+                "rows_upserted_total": 2,
+                "rows_upserted_created": 2,
+                "rows_upserted_updated": 0,
+                "rows_upserted_unchanged": 0,
+            },
+            {
+                "rows_upserted_total": 2,
+                "rows_upserted_created": 0,
+                "rows_upserted_updated": 0,
+                "rows_upserted_unchanged": 2,
+            },
+            {
+                "rows_upserted_total": 2,
+                "rows_upserted_created": 0,
+                "rows_upserted_updated": 1,
+                "rows_upserted_unchanged": 1,
+            },
+        ],
+    )
