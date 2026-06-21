@@ -782,8 +782,7 @@ def test_connector_connection(
         # FIX: str(exc) exposes the inner exception class name; safe canned message only.
         conn_status = "auth_failed"
         detail = (
-            "Google credential token refresh failed; "
-            "check that the credential secret is current."
+            "Google credential token refresh failed; check that the credential secret is current."
         )
     except GoogleConnectorError:
         # FIX: str(exc) on GoogleConnectorError subclasses embeds full Google API URLs.
