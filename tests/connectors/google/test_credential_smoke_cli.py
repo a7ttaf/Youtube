@@ -132,6 +132,18 @@ def _patch_settings_and_session(
     monkeypatch.setattr(module, "build_session_factory", _build_factory)
 
 
+class _RaiseOnTenantEnterCtx:
+    def __enter__(self) -> None:
+        raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
+
+    def __exit__(self, *_exc_info: object) -> None:
+        return None
+
+
+def _connector_tenant_context_raises(*_args: object, **_kwargs: object) -> _RaiseOnTenantEnterCtx:
+    return _RaiseOnTenantEnterCtx()
+
+
 def test_credential_smoke_rejects_unknown_connector() -> None:
     out = _run(
         [
@@ -229,16 +241,6 @@ def test_credential_smoke_returns_2_for_tenant_lifecycle_error(
 ) -> None:
     module = _load_cli_module()
     _patch_settings_and_session(module, monkeypatch, engine)
-
-    def _connector_tenant_context_raises(*_args: object, **_kwargs: object) -> _RaiseOnEnterCtx:
-        return _RaiseOnEnterCtx()
-
-    class _RaiseOnEnterCtx:
-        def __enter__(self) -> None:
-            raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
-
-        def __exit__(self, *_exc_info: object) -> None:
-            return None
 
     monkeypatch.setattr(module, "connector_tenant_context", _connector_tenant_context_raises)
 
