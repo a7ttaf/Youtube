@@ -159,6 +159,7 @@ from ums_smart_revenue.finance.revenue_facts import (
 from ums_smart_revenue.finance.revenue_scopes import build_authorized_revenue_scopes
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
 from ums_smart_revenue.finance.smart_alerts import (
+    MISSING_FACT_CHANNEL_SAMPLE_LIMIT,
     MonthlySmartAlertAuditSignals,
     MonthlySmartAlertFinanceInputs,
     MonthlySmartAlertTrendSignals,
@@ -2689,8 +2690,6 @@ def missing_revenue_fact_channel_count_and_sample(
     omitted (None), the read is tenant-global — the smart-alerts API
     endpoint stays global by design.
     """
-    from ums_smart_revenue.finance.smart_alerts import MISSING_FACT_CHANNEL_SAMPLE_LIMIT
-
     tenant_id = _resolve_smart_alert_tenant_id()
     join_predicates = (
         (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)

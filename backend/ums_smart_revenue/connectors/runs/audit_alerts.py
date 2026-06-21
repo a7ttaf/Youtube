@@ -20,17 +20,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from datetime import datetime
-from typing import Any, cast
-from uuid import UUID
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import or_, select
-from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.scopes import ScopeType
 from ums_smart_revenue.db.security_models import AuditLogORM
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from uuid import UUID
+
+    from sqlalchemy.orm import Session
 
 _TERMINAL_LIFECYCLES = frozenset({"FINISHED", "PROJECTION_FAILED"})
 _ADSENSE_ACCOUNT_RESOURCE_PREFIX = "accounts/"
@@ -77,7 +80,7 @@ def failed_connector_run_count_and_statuses(
     month: str,
 ) -> tuple[int, dict[str, int]]:
     """Return latest failed/partial connector-run counts for one finance month."""
-    details_column = cast(Any, AuditLogORM.details)
+    details_column = cast("Any", AuditLogORM.details)
     details_rows = session.execute(
         select(
             AuditLogORM.details,
@@ -99,7 +102,9 @@ def failed_connector_run_count_and_statuses(
                 ),
             ),
         )
-        .order_by(AuditLogORM.created_at.desc())
+        .order_by(
+            AuditLogORM.created_at.desc(),
+        ),
     ).all()
     latest_seen_at_by_connector_account: dict[tuple[str, str], datetime] = {}
     latest_statuses_by_connector_account: dict[tuple[str, str], set[str]] = {}
@@ -138,7 +143,8 @@ def _connector_terminal_edge(
     raw_connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(scope_id)
     connector_key = _canonical_connector_key(raw_connector_key)
     raw_account_id = _non_blank_text(details.get("account_id")) or _connector_entity_account_id(
-        entity_id=entity_id, connector_key=raw_connector_key
+        entity_id=entity_id,
+        connector_key=raw_connector_key,
     )
     account_id = _canonical_connector_account_id(
         connector_key=connector_key,
@@ -229,7 +235,7 @@ def _canonical_connector_account_id(
     if value is None:
         return None
     if connector_key != "adsense_management" or not value.startswith(
-        _ADSENSE_ACCOUNT_RESOURCE_PREFIX
+        _ADSENSE_ACCOUNT_RESOURCE_PREFIX,
     ):
         return value
     candidate = value.removeprefix(_ADSENSE_ACCOUNT_RESOURCE_PREFIX)
@@ -260,6 +266,7 @@ def _connector_terminal_status(*, lifecycle: str, value: object) -> str:
     Returns:
         A canonical status string (SUCCEEDED, PARTIAL, FAILED) or "" when the
         lifecycle or value is unrecognized.
+
     """
     if lifecycle == "PROJECTION_FAILED":
         return "FAILED"
