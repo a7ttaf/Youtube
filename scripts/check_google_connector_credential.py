@@ -1,4 +1,28 @@
 #!/usr/bin/env python
+"""Credential-only smoke CLI for Google connector credentials (PR #132 contract).
+
+Resolves an external secret reference and performs an official Google token
+refresh without creating connector runs, source rows, or finance facts.
+"""
+
+# ============================================================================
+# Purpose: Operator CLI that smoke-checks one Google connector credential by
+#          resolving the external secret reference and performing an official
+#          token refresh only — no connector run, ingestion, or finance writes.
+# Database/ORM: Reads/writes ``api_connector_credentials`` refresh telemetry
+#               inside a tenant-scoped session; no ``connector_runs`` rows.
+# Standards: Thin entrypoint; typed; catches ``GoogleConnectorError`` only and
+#            prints redacted stderr lines with exit code 2; keyword-only calls
+#            into ``resolve_connector_credentials``.
+# Blast Radius: Operator surface only — commits credential refresh telemetry.
+#               No ingestion, finance facts, audit events, or connector runs.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     ``resolve_connector_credentials``.
+#   - File: backend/ums_smart_revenue/connectors/runs/tenant_context.py ->
+#     ``connector_tenant_context``.
+#   - File: Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md -> operator runbook.
+# ============================================================================
 from __future__ import annotations
 
 import argparse
@@ -80,6 +104,22 @@ def _safe_error_line(exc: GoogleConnectorError) -> str:
     return f"{type(exc).__name__}: {message}"
 
 
+# ============================================================================
+# Purpose: CLI entrypoint. Parse argv, open a tenant-scoped session, resolve
+#          the credential via official Google token refresh, commit telemetry,
+#          and print the operator OK line or a redacted stderr failure.
+# Database/ORM: One ``Session``; writes ``api_connector_credentials`` refresh
+#               telemetry only on success.
+# Standards: Fail-closed on typed connector errors (exit 2); keyword-only
+#            resolver call; session rollback on failure before exit.
+# Blast Radius: Public operator contract for credential smoke — exit codes and
+#               redacted stderr lines are consumed by runbooks and automation.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     ``resolve_connector_credentials``.
+#   - File: backend/ums_smart_revenue/db/session.py ->
+#     ``build_session_factory``.
+# ============================================================================
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     try:
@@ -99,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             with connector_tenant_context(args.tenant, session=session):
                 credentials = resolve_connector_credentials(
-                    session,
+                    session=session,
                     tenant_id=args.tenant,
                     connector_key=args.connector,
                     account_id=args.account,

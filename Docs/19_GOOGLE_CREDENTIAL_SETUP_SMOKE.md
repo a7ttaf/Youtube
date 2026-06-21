@@ -93,7 +93,7 @@ POST /connectors/credentials
 
 ```json
 {
-  "connector_key": "youtube_reporting",
+  "connector_key": "youtube-reporting",
   "account_id": "<content-owner-or-account-id>",
   "encrypted_secret_ref": "secret-manager://projects/<project>/secrets/<secret>/versions/latest",
   "reason": "Register owner-approved Google credential reference for smoke"
@@ -144,7 +144,7 @@ Expected result:
 5. Run the audited API credential probe.
 
 ```http
-POST /connectors/credentials/youtube_reporting/<content-owner-or-account-id>/test
+POST /connectors/credentials/youtube-reporting/<content-owner-or-account-id>/test
 ```
 
 ```json

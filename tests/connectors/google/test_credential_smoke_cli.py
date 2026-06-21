@@ -1,15 +1,29 @@
+# ============================================================================
+# Purpose: Exercise the Google credential smoke CLI subprocess and in-process
+#   entrypoints without live Google credentials or connector runs.
+# Database/ORM: Disposable SQLite with tenant + credential fixtures only.
+# Standards: Keyword-only resolver stubs mirror production call shape; typed
+#   helpers; redacted stderr contract asserted for OAuth failures.
+# Blast Radius: Test coverage only for scripts/check_google_connector_credential.py.
+# Connections:
+#   - File: scripts/check_google_connector_credential.py -> CLI under test.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     ``resolve_connector_credentials`` (keyword-only).
+# ============================================================================
 from __future__ import annotations
 
 import importlib.util
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, func, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -42,7 +56,7 @@ def _run(args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _load_cli_module():
+def _load_cli_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("ums_google_credential_smoke_cli", CLI_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -51,7 +65,7 @@ def _load_cli_module():
 
 
 @pytest.fixture
-def engine():
+def engine() -> Iterator[Engine]:
     db_engine = create_engine(
         "sqlite+pysqlite://",
         connect_args={"check_same_thread": False},
@@ -90,7 +104,7 @@ def engine():
         db_engine.dispose()
 
 
-def _session_context_factory(db_engine):
+def _session_context_factory(db_engine: Engine) -> type:
     class _SessionCtx:
         def __enter__(self) -> Session:
             self._session = Session(db_engine)
@@ -102,7 +116,9 @@ def _session_context_factory(db_engine):
     return _SessionCtx
 
 
-def _patch_settings_and_session(module, monkeypatch: pytest.MonkeyPatch, db_engine) -> None:
+def _patch_settings_and_session(
+    module: ModuleType, monkeypatch: pytest.MonkeyPatch, db_engine: Engine
+) -> None:
     class _StubSettings:
         database_url = "sqlite+pysqlite://"
 
@@ -166,7 +182,13 @@ def test_credential_smoke_commits_refresh_telemetry_without_connector_run(
     module = _load_cli_module()
     _patch_settings_and_session(module, monkeypatch, engine)
 
-    def _fake_resolver(session: Session, *, tenant_id: UUID, connector_key: str, account_id: str):
+    def _fake_resolver(
+        *,
+        session: Session,
+        tenant_id: UUID,
+        connector_key: str,
+        account_id: str,
+    ) -> SimpleNamespace:
         assert tenant_id == TENANT_ID
         assert connector_key == CONNECTOR_KEY
         assert account_id == ACCOUNT_ID
@@ -208,17 +230,17 @@ def test_credential_smoke_returns_2_for_tenant_lifecycle_error(
     module = _load_cli_module()
     _patch_settings_and_session(module, monkeypatch, engine)
 
-    class _RaiseOnEnter:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+    def _connector_tenant_context_raises(*_args: object, **_kwargs: object) -> _RaiseOnEnterCtx:
+        return _RaiseOnEnterCtx()
 
+    class _RaiseOnEnterCtx:
         def __enter__(self) -> None:
             raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
 
         def __exit__(self, *_exc_info: object) -> None:
             return None
 
-    monkeypatch.setattr(module, "connector_tenant_context", _RaiseOnEnter)
+    monkeypatch.setattr(module, "connector_tenant_context", _connector_tenant_context_raises)
 
     exit_code = module.main(
         [
@@ -242,7 +264,14 @@ def test_credential_smoke_redacts_oauth_refresh_inner_error(
     module = _load_cli_module()
     _patch_settings_and_session(module, monkeypatch, engine)
 
-    def _raise_oauth_refresh_error(*_args, **_kwargs):
+    def _raise_oauth_refresh_error(
+        *,
+        session: Session,
+        tenant_id: UUID,
+        connector_key: str,
+        account_id: str,
+    ) -> None:
+        _ = (session, tenant_id, connector_key, account_id)
         raise OAuthRefreshError(inner=RuntimeError("inner-refresh-secret-marker"))
 
     monkeypatch.setattr(module, "resolve_connector_credentials", _raise_oauth_refresh_error)
