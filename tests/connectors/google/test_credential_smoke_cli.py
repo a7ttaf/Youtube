@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import importlib.util
 import subprocess
 import sys
@@ -107,12 +106,14 @@ def _patch_settings_and_session(module, monkeypatch: pytest.MonkeyPatch, db_engi
     class _StubSettings:
         database_url = "sqlite+pysqlite://"
 
-    monkeypatch.setattr(module, "load_app_settings", lambda: _StubSettings())
-    monkeypatch.setattr(
-        module,
-        "build_session_factory",
-        lambda _url: _session_context_factory(db_engine),
-    )
+    def _load_settings() -> _StubSettings:
+        return _StubSettings()
+
+    def _build_factory(_url: str):
+        return _session_context_factory(db_engine)
+
+    monkeypatch.setattr(module, "load_app_settings", _load_settings)
+    monkeypatch.setattr(module, "build_session_factory", _build_factory)
 
 
 def test_credential_smoke_rejects_unknown_connector() -> None:
@@ -138,7 +139,10 @@ def test_credential_smoke_returns_2_when_database_url_missing(
     class _StubSettings:
         database_url = ""
 
-    monkeypatch.setattr(module, "load_app_settings", lambda: _StubSettings())
+    def _load_empty_settings() -> _StubSettings:
+        return _StubSettings()
+
+    monkeypatch.setattr(module, "load_app_settings", _load_empty_settings)
 
     exit_code = module.main(
         [
@@ -204,12 +208,17 @@ def test_credential_smoke_returns_2_for_tenant_lifecycle_error(
     module = _load_cli_module()
     _patch_settings_and_session(module, monkeypatch, engine)
 
-    @contextlib.contextmanager
-    def _raise_on_enter(*_args, **_kwargs):
-        raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
-        yield
+    class _RaiseOnEnter:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
 
-    monkeypatch.setattr(module, "connector_tenant_context", _raise_on_enter)
+        def __enter__(self) -> None:
+            raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
+
+        def __exit__(self, *_exc_info: object) -> None:
+            return None
+
+    monkeypatch.setattr(module, "connector_tenant_context", _RaiseOnEnter)
 
     exit_code = module.main(
         [
