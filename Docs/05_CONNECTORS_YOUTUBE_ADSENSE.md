@@ -41,6 +41,13 @@ optional USD component columns on `monthly_channel_revenue_facts` when the
 source report provides them. Null means the report did not provide that
 component; the backend must not infer a missing component from gross revenue.
 
+When a configured YouTube Reporting job returns no report metadata for the
+requested month, the runner records a typed per-report failure instead of
+silently skipping the job. The live run finishes `FAILED` or `PARTIAL` based on
+the rest of the run, records no raw file for the missing report, and emits a
+terminal connector audit edge that can surface as the dashboard
+`CONNECTOR_RUNS_FAILED` smart alert for users with `audit.view`.
+
 ## YouTube Analytics API connector
 
 ### Responsibilities
@@ -94,6 +101,10 @@ SUCCEEDED
 PARTIAL
 FAILED
 ```
+
+The latest terminal `CONNECTOR_JOB_RUN` audit edge per connector/account/month
+is the operator-facing smart-alert signal. A later `SUCCEEDED` run clears an
+older `FAILED` or `PARTIAL` state for the same connector/account/month.
 
 **Credential health state** (derived at read time in `GET /connectors/credentials/health`):
 

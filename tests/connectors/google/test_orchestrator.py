@@ -1,3 +1,19 @@
+# ============================================================================
+# Purpose: Verify the Google connector run_one orchestration path, including
+#   credential loading, report download/parse/upsert, lifecycle auditing, and
+#   failure handling.
+# Database/ORM: SQLite test database covering connector_runs, raw_report_files,
+#   google_revenue_source_rows, audit_logs, credentials, and org/finance rows.
+# Standards: Tests use faked Google/blob dependencies while preserving real
+#   repository/session transitions and audit lifecycle assertions.
+# Blast Radius: Test coverage only for connector ingestion, normalization,
+#   audit lifecycle, and source-row projection behavior.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> public
+#     run_one orchestration surface under test.
+#   - File: backend/ums_smart_revenue/connectors/runs/normalization.py -> post
+#     run projection and skipped-row audit behavior.
+# ============================================================================
 """run_one orchestrator tests (B2.4 happy path + failure handlers, T27 & T28).
 
 The happy-path test stubs the YouTube Reporting client and blob backend so
@@ -28,6 +44,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from google.auth.exceptions import RefreshError
+from google.oauth2.credentials import Credentials
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -53,6 +70,7 @@ from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_modul
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
+    ProducedReport,
     ProducedReportFailure,
     ProducedReportSuccess,
     YouTubeReportingRunner,
@@ -89,6 +107,29 @@ DEFAULT_RESOLVER_REF = "local-secret://yt-creds"
 _SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
 
 
+def _next_produced_report(
+    produced_iter: Iterator[ProducedReport],
+) -> ProducedReport:
+    for produced in produced_iter:
+        return produced
+    raise AssertionError("expected one aggregated YouTube report")
+
+
+def _assert_produced_reports_exhausted(produced_iter: Iterator[ProducedReport]) -> None:
+    for extra_report in produced_iter:
+        raise AssertionError(f"expected produced reports to be exhausted, got {extra_report!r}")
+
+
+def _close_produced_reports(produced_iter: Iterator[ProducedReport]) -> None:
+    close = getattr(produced_iter, "close", None)
+    if callable(close):
+        close()
+
+
+def _runner_credentials() -> Credentials:
+    return Credentials(token="test-token")
+
+
 @pytest.fixture(autouse=True)
 def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Set UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID for orchestrator live-path tests.
@@ -116,7 +157,7 @@ def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 
 
 @pytest.fixture(name="session")
-def _session_fixture() -> Session:
+def _session_fixture() -> Iterator[Session]:
     """In-memory SQLite with the multi-base schema and FK seeds the
     orchestrator's source-row upsert + credential lookup need.
 
@@ -393,15 +434,12 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
         produced_iter = YouTubeReportingRunner().produce_reports(
             session=session,
             run=None,
-            credentials=object(),
+            credentials=_runner_credentials(),
             report_month="2026-05",
             account_id=ACCOUNT_ID,
         )
         try:
-            produced = next(produced_iter)
-        except StopIteration as exc:
-            raise AssertionError("expected one aggregated YouTube report") from exc
-        try:
+            produced = _next_produced_report(produced_iter)
             assert isinstance(produced, ProducedReportSuccess)
             assert produced.report_type == "content_owner_estimated_revenue_a1"
             assert produced.parser_payload["report_metadata"] == {
@@ -434,10 +472,9 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
                 b"date,channel_id,estimated_partner_revenue,currency_code\n"
                 b"2026-05-02,UC_orch_alpha,2.75,USD\n"
             )
-            with pytest.raises(StopIteration):
-                next(produced_iter)
+            _assert_produced_reports_exhausted(produced_iter)
         finally:
-            produced_iter.close()
+            _close_produced_reports(produced_iter)
 
 
 def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails(
@@ -470,12 +507,12 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
         produced_iter = YouTubeReportingRunner().produce_reports(
             session=session,
             run=None,
-            credentials=object(),
+            credentials=_runner_credentials(),
             report_month="2026-05",
             account_id=ACCOUNT_ID,
         )
         try:
-            produced = next(produced_iter)
+            produced = _next_produced_report(produced_iter)
             assert isinstance(produced, ProducedReportFailure)
             assert produced.report_type == "content_owner_estimated_revenue_a1"
             assert [report.report_id for report in produced.raw_reports] == [
@@ -489,10 +526,9 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
             assert produced.raw_reports[1].read_bytes() == (
                 b"date,channel_id,currency_code\n2026-05-02,UC_orch_alpha,USD\n"
             )
-            with pytest.raises(StopIteration):
-                next(produced_iter)
+            _assert_produced_reports_exhausted(produced_iter)
         finally:
-            produced_iter.close()
+            _close_produced_reports(produced_iter)
 
 
 def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
@@ -522,20 +558,19 @@ def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
         produced_iter = YouTubeReportingRunner().produce_reports(
             session=session,
             run=None,
-            credentials=object(),
+            credentials=_runner_credentials(),
             report_month="2026-05",
             account_id=ACCOUNT_ID,
         )
         try:
-            produced = next(produced_iter)
+            produced = _next_produced_report(produced_iter)
             assert isinstance(produced, ProducedReportSuccess)
             assert produced.report_type == "content_owner_estimated_revenue_a1"
             assert client.list_reports_for_month.call_count == 1
             assert client.list_reports_for_month.call_args.kwargs["job_id"] == ("job-primary")
-            with pytest.raises(StopIteration):
-                next(produced_iter)
+            _assert_produced_reports_exhausted(produced_iter)
         finally:
-            produced_iter.close()
+            _close_produced_reports(produced_iter)
 
 
 def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
@@ -656,6 +691,93 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     # raw_file_id provenance survives the upsert: the COALESCE-on-conflict
     # behaviour in the existing repo preserves it on re-runs too.
     assert source_rows[0].raw_file_id == raw_files[0].id
+
+
+def _run_missing_youtube_reporting_report(session: Session) -> tuple[ConnectorRunOutcome, int]:
+    """Run the no-report YouTube path and return the outcome plus upload calls."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ) as yt_client_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend") as local_cls,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials") as refresh,
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient") as http_cls,
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = []
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert isinstance(outcome, ConnectorRunOutcome)
+    return outcome, local_cls.return_value.upload.call_count
+
+
+def _assert_missing_report_failed_outcome(
+    outcome: ConnectorRunOutcome,
+    upload_call_count: int,
+) -> None:
+    """Verify the in-memory outcome for a missing YouTube report."""
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.counts["reports_attempted"] == 1
+    assert outcome.counts["reports_succeeded"] == 0
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.counts["rows_upserted_total"] == 0
+    assert outcome.per_report_failures == [("channel_basic_a2", "GoogleApiResponseError")]
+    assert upload_call_count == 0
+
+
+def _assert_missing_report_persisted_state(session: Session) -> None:
+    """Verify the stored connector state for a missing YouTube report."""
+    run_row = session.scalar(select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID))
+    assert run_row is not None
+    assert run_row.status == "FAILED"
+    assert run_row.error_summary is not None
+    assert "GoogleApiResponseError" in run_row.error_summary
+    assert "missing YouTube Reporting report for 2026-05" in run_row.error_summary
+    assert (
+        session.scalar(select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID))
+        is None
+    )
+    assert (
+        session.scalar(
+            select(GoogleRevenueSourceRowORM).where(
+                GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+            )
+        )
+        is None
+    )
+
+
+def test_run_one_marks_missing_youtube_reporting_report_as_failed(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A configured YouTube job with no monthly report must finish FAILED."""
+    outcome, upload_call_count = _run_missing_youtube_reporting_report(
+        session,
+    )
+
+    _assert_missing_report_failed_outcome(outcome, upload_call_count)
+    _assert_missing_report_persisted_state(session)
 
 
 def test_run_one_reuses_raw_file_inserted_by_racing_worker(
@@ -4098,12 +4220,92 @@ def _connector_audit_events(session: Session) -> list[AuditLogORM]:
             .order_by(AuditLogORM.created_at, AuditLogORM.id)
         )
     )
-    return [row for row in rows if row.details.get("lifecycle") != "ROWS_SKIPPED"]
+    return [row for row in rows if _audit_details(row).get("lifecycle") != "ROWS_SKIPPED"]
+
+
+def _audit_details(event: AuditLogORM) -> dict[str, object]:
+    """Return the JSON audit details as a mapping for typed test assertions."""
+    details = event.details
+    assert isinstance(details, dict)
+    return details
 
 
 def _audit_lifecycles(events: list[AuditLogORM]) -> list[str]:
     """Extract the ordered ``details["lifecycle"]`` discriminator chain."""
-    return [event.details["lifecycle"] for event in events]
+    lifecycles: list[str] = []
+    for event in events:
+        lifecycle = _audit_details(event).get("lifecycle")
+        assert isinstance(lifecycle, str)
+        lifecycles.append(lifecycle)
+    return lifecycles
+
+
+def _assert_clean_run_audit_sequence(
+    events: list[AuditLogORM],
+    *,
+    rows_upserted_total: int,
+) -> None:
+    """Verify the audit chain and terminal details for a clean one-report run."""
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "FINISHED",
+    ]
+    assert [event.event_type for event in events] == [
+        "CONNECTOR_JOB_RUN",
+        "REPORT_IMPORTED",
+        "REPORT_IMPORTED",
+        "CONNECTOR_JOB_RUN",
+    ]
+
+    finished_details = _audit_details(events[-1])
+    finished_counts = finished_details["counts"]
+    assert isinstance(finished_counts, dict)
+    assert {
+        "status": finished_details["status"],
+        "reports_succeeded": finished_counts["reports_succeeded"],
+        "reports_failed": finished_counts["reports_failed"],
+        "count_upserted": _audit_details(events[2])["count_upserted"],
+    } == {
+        "status": "SUCCEEDED",
+        "reports_succeeded": 1,
+        "reports_failed": 0,
+        "count_upserted": rows_upserted_total,
+    }
+
+
+def _assert_partial_run_audit_sequence(events: list[AuditLogORM]) -> None:
+    """Verify the audit chain and terminal details for a one-failure partial run."""
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "DOWNLOADED",
+        "FAILED",
+        "FINISHED",
+    ]
+    failed_details = _audit_details(events[4])
+    finished_details = _audit_details(events[-1])
+    finished_counts = finished_details["counts"]
+    assert isinstance(finished_counts, dict)
+    assert {
+        "failed_event_type": events[4].event_type,
+        "failed_error_class": failed_details["error_class"],
+        "finished_event_type": events[-1].event_type,
+        "finished_status": finished_details["status"],
+        "reports_succeeded": finished_counts["reports_succeeded"],
+        "reports_failed": finished_counts["reports_failed"],
+        "error_summary_present": finished_details["error_summary_present"],
+    } == {
+        "failed_event_type": "REPORT_IMPORTED",
+        "failed_error_class": "ParserError",
+        "finished_event_type": "CONNECTOR_JOB_RUN",
+        "finished_status": "PARTIAL",
+        "reports_succeeded": 1,
+        "reports_failed": 1,
+        "error_summary_present": True,
+    }
 
 
 def test_run_one_emits_audit_started_finished_for_clean_run(
@@ -4155,29 +4357,10 @@ def test_run_one_emits_audit_started_finished_for_clean_run(
     assert outcome.run.status == "SUCCEEDED"
 
     events = _connector_audit_events(session)
-    # Lifecycle ordering: STARTED -> DOWNLOADED -> PARSED -> FINISHED.
-    assert _audit_lifecycles(events) == [
-        "STARTED",
-        "DOWNLOADED",
-        "PARSED",
-        "FINISHED",
-    ]
-    # Event type discriminator: run-lifecycle vs raw-file-lifecycle.
-    event_types = [event.event_type for event in events]
-    assert event_types == [
-        "CONNECTOR_JOB_RUN",
-        "REPORT_IMPORTED",
-        "REPORT_IMPORTED",
-        "CONNECTOR_JOB_RUN",
-    ]
-    # FINISHED carries the terminal status + counts payload.
-    finished = events[-1]
-    assert finished.details["status"] == "SUCCEEDED"
-    assert finished.details["counts"]["reports_succeeded"] == 1
-    assert finished.details["counts"]["reports_failed"] == 0
-    # PARSED carries the upsert count from the source-row repository.
-    parsed = events[2]
-    assert parsed.details["count_upserted"] == outcome.counts["rows_upserted_total"]
+    _assert_clean_run_audit_sequence(
+        events,
+        rows_upserted_total=outcome.counts["rows_upserted_total"],
+    )
 
 
 def test_run_one_emits_audit_event_sequence_for_partial_run(
@@ -4266,29 +4449,7 @@ def test_run_one_emits_audit_event_sequence_for_partial_run(
     assert outcome.run.status == "PARTIAL"
 
     events = _connector_audit_events(session)
-    # Lifecycle ordering: STARTED -> DOWNLOADED (r1) -> PARSED (r1) ->
-    # DOWNLOADED (r2) -> FAILED (r2) -> FINISHED.
-    assert _audit_lifecycles(events) == [
-        "STARTED",
-        "DOWNLOADED",
-        "PARSED",
-        "DOWNLOADED",
-        "FAILED",
-        "FINISHED",
-    ]
-    # The FAILED audit row carries the exception class only -- the
-    # exception MESSAGE is the source-of-truth ``error_summary`` and is not
-    # copied into the audit details.
-    failed = events[4]
-    assert failed.event_type == "REPORT_IMPORTED"
-    assert failed.details["error_class"] == "ParserError"
-    # FINISHED reflects the partial outcome.
-    finished = events[-1]
-    assert finished.event_type == "CONNECTOR_JOB_RUN"
-    assert finished.details["status"] == "PARTIAL"
-    assert finished.details["counts"]["reports_succeeded"] == 1
-    assert finished.details["counts"]["reports_failed"] == 1
-    assert finished.details["error_summary_present"] is True
+    _assert_partial_run_audit_sequence(events)
 
 
 def test_run_one_dry_run_emits_zero_audit_events(session: Session, _stub_secret_resolver) -> None:
@@ -4536,6 +4697,57 @@ def _run_adsense_orchestrator_with_payload(
             account_id=expected_account_id,
             report_month=expected_report_month,
         )
+
+
+_UPSERT_COUNT_KEYS = (
+    "rows_upserted_total",
+    "rows_upserted_created",
+    "rows_upserted_updated",
+    "rows_upserted_unchanged",
+)
+
+
+def _assert_successful_upsert_counts(
+    outcome: ConnectorRunOutcome,
+    expected_counts: dict[str, int],
+) -> None:
+    """Assert a successful run returned the selected source-row upsert counts."""
+    assert outcome.run is not None and outcome.run.status == "SUCCEEDED"
+    assert {key: outcome.counts[key] for key in _UPSERT_COUNT_KEYS} == expected_counts
+
+
+def _adsense_payload_with_estimated_earnings(
+    payload: dict[str, object],
+    *,
+    value: str,
+) -> dict[str, object]:
+    """Return a payload copy with the ESTIMATED_EARNINGS cell changed."""
+    mutated_payload = deepcopy(payload)
+    rows = mutated_payload["rows"]
+    assert isinstance(rows, list)
+    first_row = rows[0]
+    assert isinstance(first_row, dict)
+    cells = first_row["cells"]
+    assert isinstance(cells, list)
+    earnings_cell = cells[1]
+    assert isinstance(earnings_cell, dict)
+    earnings_cell["value"] = value
+    return mutated_payload
+
+
+def _assert_persisted_connector_run_counts(
+    session: Session,
+    expected_counts: list[dict[str, int]],
+) -> None:
+    """Assert persisted connector_runs.counts_json carries the run count split."""
+    persisted = session.scalars(
+        select(ConnectorRunORM)
+        .where(ConnectorRunORM.tenant_id == TENANT_ID)
+        .order_by(ConnectorRunORM.started_at, ConnectorRunORM.id)
+    ).all()
+    assert [
+        {key: run.counts_json[key] for key in _UPSERT_COUNT_KEYS} for run in persisted
+    ] == expected_counts
 
 
 def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
@@ -4895,11 +5107,15 @@ def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
         report_month=report_month,
         payload=base_payload,
     )
-    assert first.run is not None and first.run.status == "SUCCEEDED"
-    assert first.counts["rows_upserted_total"] == 2
-    assert first.counts["rows_upserted_created"] == 2
-    assert first.counts["rows_upserted_updated"] == 0
-    assert first.counts["rows_upserted_unchanged"] == 0
+    _assert_successful_upsert_counts(
+        first,
+        {
+            "rows_upserted_total": 2,
+            "rows_upserted_created": 2,
+            "rows_upserted_updated": 0,
+            "rows_upserted_unchanged": 0,
+        },
+    )
 
     # Run 2: identical payload → both rows UNCHANGED.
     second = _run_adsense_orchestrator_with_payload(
@@ -4908,51 +5124,61 @@ def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
         report_month=report_month,
         payload=base_payload,
     )
-    assert second.run is not None and second.run.status == "SUCCEEDED"
-    assert second.counts["rows_upserted_total"] == 2
-    assert second.counts["rows_upserted_created"] == 0
-    assert second.counts["rows_upserted_updated"] == 0
-    assert second.counts["rows_upserted_unchanged"] == 2
+    _assert_successful_upsert_counts(
+        second,
+        {
+            "rows_upserted_total": 2,
+            "rows_upserted_created": 0,
+            "rows_upserted_updated": 0,
+            "rows_upserted_unchanged": 2,
+        },
+    )
 
     # Run 3: only ESTIMATED_EARNINGS amount changes → 1 UPDATED + 1 UNCHANGED
     # (the TOTAL_EARNINGS row's cells are identical, so its content matches).
-    mutated_payload = deepcopy(base_payload)
-    mutated_payload["rows"][0]["cells"][1]["value"] = "200.000000"
+    mutated_payload = _adsense_payload_with_estimated_earnings(
+        base_payload,
+        value="200.000000",
+    )
     third = _run_adsense_orchestrator_with_payload(
         session,
         account_id=_ADSENSE_ACCOUNT_ID,
         report_month=report_month,
         payload=mutated_payload,
     )
-    assert third.run is not None and third.run.status == "SUCCEEDED"
-    assert third.counts["rows_upserted_total"] == 2
-    assert third.counts["rows_upserted_created"] == 0
-    assert third.counts["rows_upserted_updated"] == 1
-    assert third.counts["rows_upserted_unchanged"] == 1
+    _assert_successful_upsert_counts(
+        third,
+        {
+            "rows_upserted_total": 2,
+            "rows_upserted_created": 0,
+            "rows_upserted_updated": 1,
+            "rows_upserted_unchanged": 1,
+        },
+    )
 
     # Defence in depth: read the persisted counts_json directly to confirm
     # the run-level write picked up the per-category split (not just the
     # finish_run return value).
-    persisted = session.scalars(
-        select(ConnectorRunORM)
-        .where(ConnectorRunORM.tenant_id == TENANT_ID)
-        .order_by(ConnectorRunORM.started_at, ConnectorRunORM.id)
-    ).all()
-    assert len(persisted) == 3
-    persisted_counts = [run.counts_json for run in persisted]
-    assert [counts["rows_upserted_total"] for counts in persisted_counts] == [2, 2, 2]
-    assert [counts["rows_upserted_created"] for counts in persisted_counts] == [
-        2,
-        0,
-        0,
-    ]
-    assert [counts["rows_upserted_updated"] for counts in persisted_counts] == [
-        0,
-        0,
-        1,
-    ]
-    assert [counts["rows_upserted_unchanged"] for counts in persisted_counts] == [
-        0,
-        2,
-        1,
-    ]
+    _assert_persisted_connector_run_counts(
+        session,
+        [
+            {
+                "rows_upserted_total": 2,
+                "rows_upserted_created": 2,
+                "rows_upserted_updated": 0,
+                "rows_upserted_unchanged": 0,
+            },
+            {
+                "rows_upserted_total": 2,
+                "rows_upserted_created": 0,
+                "rows_upserted_updated": 0,
+                "rows_upserted_unchanged": 2,
+            },
+            {
+                "rows_upserted_total": 2,
+                "rows_upserted_created": 0,
+                "rows_upserted_updated": 1,
+                "rows_upserted_unchanged": 1,
+            },
+        ],
+    )

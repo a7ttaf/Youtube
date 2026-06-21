@@ -29,12 +29,14 @@ from ums_smart_revenue.api.dependencies import (
 )
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import (
+    _resolve_smart_alert_tenant_id,
     current_org_access_index,
     missing_revenue_fact_channel_count_and_sample,
     skipped_source_row_count_and_reasons,
 )
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
+from ums_smart_revenue.auth.audit_log import SqlAlchemyAuditLogRepository
+from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
@@ -87,7 +89,10 @@ from ums_smart_revenue.finance.revenue_facts import (
     SqlAlchemyRevenueFactRepository,
 )
 from ums_smart_revenue.finance.smart_alerts import (
+    MonthlySmartAlertAuditSignals,
+    MonthlySmartAlertFinanceInputs,
     MonthlySmartAlertSummary,
+    MonthlySmartAlertTrendSignals,
     build_monthly_smart_alert_summary,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
@@ -138,6 +143,7 @@ _ANALYTICS_SUMMARY_CSV_REQUIRED_PERMISSIONS = (
     Permission.VIEW_REVENUE,
 )
 _TERMINAL_EXPORT_JOB_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+_CONNECTOR_SMART_ALERT_CODES = frozenset({"CONNECTOR_RUNS_FAILED", "SOURCE_ROWS_SKIPPED"})
 
 
 @dataclass(frozen=True)
@@ -159,6 +165,28 @@ class _ExportDownloadArtifact:
     content: bytes
     filename: str
     content_type: str
+
+
+@dataclass(frozen=True)
+class _FinanceExportSourceContext:
+    """Dependencies needed to build finance export source summaries."""
+
+    export_job: ExportJobEntry
+    user: UserPrincipal
+    session: Session
+    org_index: OrgAccessIndex
+    group_registry: ChannelGroupRegistryStore
+    include_audit_derived_alerts: bool = True
+
+
+@dataclass(frozen=True)
+class _FinanceExportAuditContext:
+    """Dependencies shared by finance export artifact audit writers."""
+
+    audit_sink: AuditSink
+    user: UserPrincipal
+    export_job: ExportJobEntry
+    group_registry: ChannelGroupRegistryStore
 
 
 class ExportRequest(BaseModel):
@@ -460,11 +488,13 @@ def preview_finance_workbook(
                 "finance workbook preview only supports FINANCE_EXCEL exports"
             )
         preview = _build_finance_workbook_preview_for_export(
-            export_job=export_job,
-            user=user,
-            session=session,
-            org_index=org_index,
-            group_registry=group_registry,
+            context=_FinanceExportSourceContext(
+                export_job=export_job,
+                user=user,
+                session=session,
+                org_index=org_index,
+                group_registry=group_registry,
+            ),
         )
     except KeyError as exc:
         raise HTTPException(
@@ -494,10 +524,12 @@ def preview_finance_workbook(
         ) from exc
 
     audit_records = _record_finance_export_artifact_audit(
-        audit_sink=audit_sink,
-        user=user,
-        export_job=export_job,
-        group_registry=group_registry,
+        context=_FinanceExportAuditContext(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            group_registry=group_registry,
+        ),
         artifact_type="finance_workbook_preview",
         include_download_event=False,
         audit_summary=preview.smart_alerts if export_job.scope_type == "global" else None,
@@ -631,12 +663,14 @@ def download_finance_workbook(
             workbook_bytes, filename, content_type = served
         else:
             preview = _build_finance_workbook_preview_for_export(
-                export_job=export_job,
-                user=user,
-                session=session,
-                org_index=org_index,
-                group_registry=group_registry,
-                include_audit_derived_alerts=False,
+                context=_FinanceExportSourceContext(
+                    export_job=export_job,
+                    user=user,
+                    session=session,
+                    org_index=org_index,
+                    group_registry=group_registry,
+                    include_audit_derived_alerts=False,
+                ),
             )
             workbook_bytes = build_finance_workbook_xlsx(preview)
             filename = f"ums-finance-{export_job.month}-{export_job.scope_type}.xlsx"
@@ -685,10 +719,12 @@ def download_finance_workbook(
         ) from exc
 
     _record_finance_export_artifact_audit(
-        audit_sink=audit_sink,
-        user=user,
-        export_job=export_job,
-        group_registry=group_registry,
+        context=_FinanceExportAuditContext(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            group_registry=group_registry,
+        ),
         artifact_type="finance_workbook_xlsx",
         include_download_event=True,
     )
@@ -739,12 +775,14 @@ def download_executive_pdf(
             pdf_bytes, filename, content_type = served
         else:
             source_summaries = _build_finance_source_summaries_for_export(
-                export_job=export_job,
-                user=user,
-                session=session,
-                org_index=org_index,
-                group_registry=group_registry,
-                include_audit_derived_alerts=False,
+                context=_FinanceExportSourceContext(
+                    export_job=export_job,
+                    user=user,
+                    session=session,
+                    org_index=org_index,
+                    group_registry=group_registry,
+                    include_audit_derived_alerts=False,
+                ),
             )
             report = build_executive_pdf_report(
                 export_job=export_job,
@@ -801,10 +839,12 @@ def download_executive_pdf(
         ) from exc
 
     _record_finance_export_artifact_audit(
-        audit_sink=audit_sink,
-        user=user,
-        export_job=export_job,
-        group_registry=group_registry,
+        context=_FinanceExportAuditContext(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            group_registry=group_registry,
+        ),
         artifact_type="executive_pdf",
         include_download_event=True,
     )
@@ -855,12 +895,14 @@ def download_branded_slide_pack(
             pptx_bytes, filename, content_type = served
         else:
             source_summaries = _build_finance_source_summaries_for_export(
-                export_job=export_job,
-                user=user,
-                session=session,
-                org_index=org_index,
-                group_registry=group_registry,
-                include_audit_derived_alerts=False,
+                context=_FinanceExportSourceContext(
+                    export_job=export_job,
+                    user=user,
+                    session=session,
+                    org_index=org_index,
+                    group_registry=group_registry,
+                    include_audit_derived_alerts=False,
+                ),
             )
             report = build_branded_slide_pack_report(
                 export_job=export_job,
@@ -919,10 +961,12 @@ def download_branded_slide_pack(
         ) from exc
 
     _record_finance_export_artifact_audit(
-        audit_sink=audit_sink,
-        user=user,
-        export_job=export_job,
-        group_registry=group_registry,
+        context=_FinanceExportAuditContext(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            group_registry=group_registry,
+        ),
         artifact_type="branded_slide_pack_pptx",
         include_download_event=True,
     )
@@ -935,24 +979,14 @@ def download_branded_slide_pack(
 
 def _build_finance_workbook_preview_for_export(
     *,
-    export_job,
-    user: UserPrincipal,
-    session: Session,
-    org_index: OrgAccessIndex,
-    group_registry: ChannelGroupRegistryStore,
-    include_audit_derived_alerts: bool = True,
+    context: _FinanceExportSourceContext,
 ) -> FinanceWorkbookPreview:
     """Build the finance workbook preview model for the given export job."""
     source_summaries = _build_finance_source_summaries_for_export(
-        export_job=export_job,
-        user=user,
-        session=session,
-        org_index=org_index,
-        group_registry=group_registry,
-        include_audit_derived_alerts=include_audit_derived_alerts,
+        context=context,
     )
     return build_finance_workbook_preview(
-        export_job=export_job,
+        export_job=context.export_job,
         net_revenue=source_summaries.net_revenue,
         payment_match=source_summaries.payment_match,
         bank_reconciliation=source_summaries.bank_reconciliation,
@@ -1228,16 +1262,36 @@ def _discard_saved_artifact(
         logger.warning("Saved export artifact cleanup failed: %s", file_url, exc_info=True)
 
 
+# ============================================================================
+# Purpose: Build the finance workbook source summaries for preview/download
+#   generation while keeping route handlers out of finance read orchestration.
+# Database/ORM: Reads finance facts, payments, deductions, close state,
+#   account-allocation inputs, channel coverage, and optional audit_logs
+#   connector edges through repositories/read models.
+# Standards: Scoped exports use the frozen channel set; persisted artifacts
+#   suppress caller-specific audit-derived alerts; preview-only audit-derived
+#   alerts require VIEW_AUDIT_LOG and sensitive reason payloads require
+#   VIEW_SENSITIVE_AUDIT_PAYLOADS.
+# Blast Radius: Finance export numbers, smart-alert export disclosure, and
+#   audit-derived alert visibility. No finance writes or auth weakening.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> dashboard smart-alert
+#     data sources mirrored here for export parity.
+#   - File: backend/ums_smart_revenue/auth/audit_log.py -> failed
+#     connector-run smart-alert read model.
+#   - File: backend/ums_smart_revenue/reports/finance_workbook.py -> consumes
+#     the returned summary bundle.
+# ============================================================================
 def _build_finance_source_summaries_for_export(
     *,
-    export_job,
-    user: UserPrincipal,
-    session: Session,
-    org_index: OrgAccessIndex,
-    group_registry: ChannelGroupRegistryStore,
-    include_audit_derived_alerts: bool = True,
+    context: _FinanceExportSourceContext,
 ) -> _FinanceExportSourceSummaries:
     """Resolve all finance source summaries (net revenue, payments, bank, alerts) for an export."""
+    export_job = context.export_job
+    user = context.user
+    session = context.session
+    org_index = context.org_index
+    group_registry = context.group_registry
     # ====================================================================
     # Purpose: Resolve the YouTube channel set the export was issued for.
     #   Prefers the snapshot frozen on the export row so post-creation
@@ -1349,15 +1403,17 @@ def _build_finance_source_summaries_for_export(
         month=export_job.month,
         youtube_channel_ids=channel_ids,
     )
-    # FIX: preview may surface the audit-derived skipped-row signal, but
-    # persisted downloadable bytes must stay permission-invariant. Scoped
-    # exports suppress this tenant-wide audit signal until source rows can be
-    # tied to the export's frozen channel set.
+    # FIX: preview may surface audit-derived connector smart-alert signals,
+    # but persisted downloadable bytes must stay permission-invariant. Scoped
+    # exports suppress these tenant-wide audit signals until source rows and
+    # connector runs can be tied to the export's frozen channel set.
     audit_scope = AccessScope.global_scope()
     skipped_source_row_count: int
     skipped_source_rows_by_reason: dict[str, int]
+    failed_connector_run_count: int
+    failed_connector_runs_by_status: dict[str, int]
     if (
-        include_audit_derived_alerts
+        context.include_audit_derived_alerts
         and channel_ids is None
         and has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
     ):
@@ -1371,21 +1427,39 @@ def _build_finance_source_summaries_for_export(
                 include_sensitive_details=include_sensitive_details,
             )
         )
+        failed_connector_runs = SqlAlchemyAuditLogRepository(
+            session,
+            tenant_id=_resolve_smart_alert_tenant_id(),
+        ).connector_run_failure_summary(
+            month=export_job.month,
+        )
+        failed_connector_run_count = failed_connector_runs.count
+        failed_connector_runs_by_status = failed_connector_runs.by_status
     else:
         skipped_source_row_count = 0
         skipped_source_rows_by_reason = {}
+        failed_connector_run_count = 0
+        failed_connector_runs_by_status = {}
     smart_alerts = build_monthly_smart_alert_summary(
         month=export_job.month,
-        payment_match=payment_match,
-        bank_reconciliation=bank_reconciliation,
-        close_status=close_status,
-        manual_overrides=manual_overrides,
-        missing_revenue_fact_channel_count=missing_fact_channel_count,
-        missing_revenue_fact_channel_sample=missing_fact_channel_sample,
-        skipped_source_row_count=skipped_source_row_count,
-        skipped_source_rows_by_reason=skipped_source_rows_by_reason,
-        current_revenue_facts=facts,
-        previous_revenue_facts=previous_facts,
+        finance=MonthlySmartAlertFinanceInputs(
+            payment_match=payment_match,
+            bank_reconciliation=bank_reconciliation,
+            close_status=close_status,
+            manual_overrides=manual_overrides,
+        ),
+        audit_signals=MonthlySmartAlertAuditSignals(
+            missing_revenue_fact_channel_count=missing_fact_channel_count,
+            missing_revenue_fact_channel_sample=missing_fact_channel_sample,
+            skipped_source_row_count=skipped_source_row_count,
+            skipped_source_rows_by_reason=skipped_source_rows_by_reason,
+            failed_connector_run_count=failed_connector_run_count,
+            failed_connector_runs_by_status=failed_connector_runs_by_status,
+        ),
+        trend_signals=MonthlySmartAlertTrendSignals(
+            current_revenue_facts=facts,
+            previous_revenue_facts=previous_facts,
+        ),
     )
     return _FinanceExportSourceSummaries(
         net_revenue=net_revenue,
@@ -1416,7 +1490,7 @@ def _record_analytics_export_artifact_audit(
     export_job: ExportJobEntry,
     group_registry: ChannelGroupRegistryStore,
     artifact_type: str,
-):
+) -> tuple[AuditRecord, ...]:
     """Emit analytics export revenue-view and download audit events."""
     revenue_scopes = _audit_revenue_scopes_for_export(
         scope_type=export_job.scope_type,
@@ -1455,17 +1529,33 @@ def _record_analytics_export_artifact_audit(
     return (*revenue_records, download_record)
 
 
+# ============================================================================
+# Purpose: Emit sensitive revenue/payment/bank-reconciliation/download audit
+#   records for a finance export artifact, plus a self-audit when export
+#   generation reads audit_logs to derive connector-backed smart alerts.
+# Database/ORM: audit_logs insert through AuditSink; ChannelGroupORM read only
+#   for legacy group exports without a frozen channel snapshot.
+# Standards: Typed detail payload; artifact locator is redacted while checksum
+#   and size metadata remain audit-visible; audit-log self-audit marks
+#   details_redacted only when SOURCE_ROWS_SKIPPED reasons were suppressed.
+# Blast Radius: Finance export audit trail and connector smart-alert self-audit.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> Audit persistence.
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> alert codes
+#     summarized into the audit-log self-audit.
+# ============================================================================
 def _record_finance_export_artifact_audit(
     *,
-    audit_sink: AuditSink,
-    user: UserPrincipal,
-    export_job,
-    group_registry: ChannelGroupRegistryStore,
+    context: _FinanceExportAuditContext,
     artifact_type: str,
     include_download_event: bool,
     audit_summary: MonthlySmartAlertSummary | None = None,
-):
+) -> list[AuditRecord]:
     """Emit revenue, payment, bank-reconciliation, and optional download audit events."""
+    audit_sink = context.audit_sink
+    user = context.user
+    export_job = context.export_job
+    group_registry = context.group_registry
     revenue_scopes = _audit_revenue_scopes_for_export(
         scope_type=export_job.scope_type,
         scope_id=export_job.scope_id,
@@ -1514,39 +1604,19 @@ def _record_finance_export_artifact_audit(
             )
         )
     # FIX: Record an AUDIT_LOG_VIEWED self-audit when the export builder reads
-    # audit_logs to derive the SOURCE_ROWS_SKIPPED alert. Mirrors the
+    # audit_logs to derive connector-backed smart alerts. Mirrors the
     # /audit/events redaction-on-use pattern and the get_month_smart_alerts
     # self-audit so an export generated with VIEW_AUDIT_LOG leaves an audit
     # trail of its audit-derived read.
-    audit_scope = AccessScope.global_scope()
-    if audit_summary is not None and has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
-        returned = any(alert.code == "SOURCE_ROWS_SKIPPED" for alert in audit_summary.alerts)
-        audit_records.append(
-            record_audit_event(
-                sink=audit_sink,
-                actor=user,
-                event_type=AuditEventType.AUDIT_LOG_VIEWED,
-                entity_type="audit_log_page",
-                entity_id=f"{export_job.id}:skipped_source_rows",
-                scope=audit_scope,
-                details={
-                    "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
-                    "entity_type": "finance_export",
-                    "entity_id": export_job.id,
-                    "month": export_job.month,
-                    "scope_type": export_job.scope_type,
-                    "scope_id": export_job.scope_id,
-                    "artifact_type": artifact_type,
-                    "returned": 1 if returned else 0,
-                    "details_redacted": returned
-                    and not has_permission(
-                        user,
-                        Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
-                        audit_scope,
-                    ),
-                },
-            )
+    audit_records.extend(
+        _finance_export_connector_smart_alert_audit_records(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            artifact_type=artifact_type,
+            audit_summary=audit_summary,
         )
+    )
     if include_download_event:
         audit_records.append(
             record_audit_event(
@@ -1560,6 +1630,87 @@ def _record_finance_export_artifact_audit(
             )
         )
     return audit_records
+
+
+# ============================================================================
+# Purpose: Emit optional AUDIT_LOG_VIEWED self-audit records for finance export
+#   connector smart-alert reads while keeping export audit orchestration narrow.
+# Database/ORM: AuditSink append only; no direct SQLAlchemy reads.
+# Standards: Preserves VIEW_AUDIT_LOG gating and sensitive skipped-row redaction.
+# Blast Radius: Finance export audit trail only.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> source summary
+#     alert codes used to summarize connector-backed audit-derived reads.
+# ============================================================================
+def _finance_export_connector_smart_alert_audit_records(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    export_job: ExportJobEntry,
+    artifact_type: str,
+    audit_summary: MonthlySmartAlertSummary | None,
+) -> tuple[AuditRecord, ...]:
+    """Return the optional export self-audit record for connector smart-alert reads."""
+    audit_scope = AccessScope.global_scope()
+    if audit_summary is None or not has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
+        return ()
+    connector_alert_codes = _connector_smart_alert_codes(audit_summary)
+    return (
+        record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.AUDIT_LOG_VIEWED,
+            entity_type="audit_log_page",
+            entity_id=f"{export_job.id}:connector_smart_alerts",
+            scope=audit_scope,
+            details=_finance_export_connector_smart_alert_audit_details(
+                user=user,
+                export_job=export_job,
+                artifact_type=artifact_type,
+                audit_scope=audit_scope,
+                connector_alert_codes=connector_alert_codes,
+            ),
+        ),
+    )
+
+
+def _connector_smart_alert_codes(audit_summary: MonthlySmartAlertSummary) -> list[str]:
+    """Return sorted connector-backed smart-alert codes from an export summary."""
+    return sorted(
+        alert.code for alert in audit_summary.alerts if alert.code in _CONNECTOR_SMART_ALERT_CODES
+    )
+
+
+def _finance_export_connector_smart_alert_audit_details(
+    *,
+    user: UserPrincipal,
+    export_job: ExportJobEntry,
+    artifact_type: str,
+    audit_scope: AccessScope,
+    connector_alert_codes: list[str],
+) -> dict[str, object]:
+    """Build stable audit details for finance export connector-alert reads."""
+    source_rows_skipped_returned = "SOURCE_ROWS_SKIPPED" in connector_alert_codes
+    connector_runs_failed_returned = "CONNECTOR_RUNS_FAILED" in connector_alert_codes
+    details_redacted = source_rows_skipped_returned and not has_permission(
+        user,
+        Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
+        audit_scope,
+    )
+    return {
+        "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
+        "entity_type": "finance_export",
+        "entity_id": export_job.id,
+        "month": export_job.month,
+        "scope_type": export_job.scope_type,
+        "scope_id": export_job.scope_id,
+        "artifact_type": artifact_type,
+        "connector_alert_codes": connector_alert_codes,
+        "returned": int(bool(connector_alert_codes)),
+        "source_rows_skipped_returned": int(source_rows_skipped_returned),
+        "connector_runs_failed_returned": int(connector_runs_failed_returned),
+        "details_redacted": details_redacted,
+    }
 
 
 def _artifact_metadata_audit_details(export_job: ExportJobEntry) -> dict[str, object]:

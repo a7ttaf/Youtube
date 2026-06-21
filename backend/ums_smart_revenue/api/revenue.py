@@ -26,6 +26,7 @@
 #   - File: Docs/12_BACKEND_API_SPEC.md -> endpoint contracts and alert codes.
 # ============================================================================
 import re
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, cast
@@ -33,7 +34,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import Integer, literal_column, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
@@ -57,6 +58,7 @@ from ums_smart_revenue.api.dependencies_finance import (
 from ums_smart_revenue.api.org_units import current_org_unit_reader
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.auth.audit import AuditEventType
+from ums_smart_revenue.auth.audit_log import SqlAlchemyAuditLogRepository
 from ums_smart_revenue.auth.audit_service import (
     AuditRecord,
     AuditSink,
@@ -155,6 +157,10 @@ from ums_smart_revenue.finance.revenue_facts import (
 from ums_smart_revenue.finance.revenue_scopes import build_authorized_revenue_scopes
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
 from ums_smart_revenue.finance.smart_alerts import (
+    MISSING_FACT_CHANNEL_SAMPLE_LIMIT,
+    MonthlySmartAlertAuditSignals,
+    MonthlySmartAlertFinanceInputs,
+    MonthlySmartAlertTrendSignals,
     build_monthly_smart_alert_summary,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
@@ -175,6 +181,16 @@ _REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY = {
     "manual_upload": {RevenueFactSourceKind.MANUAL_UPLOAD.value},
     "allocation": {RevenueFactSourceKind.ALLOCATION.value},
 }
+
+
+@dataclass(frozen=True)
+class _MonthConnectorSmartAlertAuditContext:
+    """Dependencies shared by monthly connector smart-alert self-audit records."""
+
+    audit_sink: AuditSink
+    user: UserPrincipal
+    month: str
+    audit_scope: AccessScope
 
 
 class AuthorizationCheckResponse(BaseModel):
@@ -232,6 +248,28 @@ class AuditEventResponse(BaseModel):
     scope_id: str | None
     reason: str | None
     sensitive: bool
+
+
+class MonthlySmartAlertItemResponse(BaseModel):
+    """Typed smart-alert item returned by the monthly dashboard endpoint."""
+
+    code: str
+    severity: str
+    message: str
+    source: str
+    confidence: str
+    details: dict[str, object]
+
+
+class MonthSmartAlertsResponse(BaseModel):
+    """Typed monthly smart-alert dashboard response."""
+
+    month: str
+    status: str
+    highest_severity: str | None
+    alert_count: int
+    alerts: list[MonthlySmartAlertItemResponse]
+    audit_events: list[AuditEventResponse]
 
 
 class MonthDeductionComponentsResponse(BaseModel):
@@ -1120,12 +1158,14 @@ def get_month_payment_match(
 # ============================================================================
 # Purpose: Serve the monthly smart-alerts dashboard endpoint. Aggregates
 #   cross-domain finance health signals (payment match, bank reconciliation,
-#   coverage gap, audit-derived skipped source rows, overrides, MoM revenue
-#   anomaly, close status) into a prioritized alert summary + self-audit
-#   trail. Read-only; never mutates finance numbers.
+#   coverage gap, audit-derived skipped source rows, audit-derived failed
+#   connector runs, overrides, MoM revenue anomaly, close status) into a
+#   prioritized alert summary + self-audit trail. Read-only; never mutates
+#   finance numbers.
 # Database/ORM: Reads via RevenueFact/AdSensePayment/BankReconciliation/
 #   ManualOverride/FinanceMonthClose repositories plus a tenant-scoped
-#   AuditLogORM scan for ROWS_SKIPPED connector edges.
+#   AuditLogORM scan for ROWS_SKIPPED and the audit-log repository for
+#   FINISHED/PROJECTION_FAILED connector-run edges.
 # Standards: smart-alerts four-permission gate (VIEW_REVENUE/VIEW_CONFIDENCE
 #   global + VIEW_FINALIZED_PAYMENTS/VIEW_BANK_RECONCILIATION month-scoped).
 #   Audit-derived inputs require VIEW_AUDIT_LOG; without it the alert is
@@ -1144,7 +1184,7 @@ def get_month_payment_match(
 #     emits the ROWS_SKIPPED audit edges this endpoint aggregates.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> alert code wire contract.
 # ============================================================================
-@router.get("/months/{month}/smart-alerts")
+@router.get("/months/{month}/smart-alerts", response_model=MonthSmartAlertsResponse)
 def get_month_smart_alerts(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -1170,7 +1210,7 @@ def get_month_smart_alerts(
     ],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
-) -> dict[str, object]:
+) -> MonthSmartAlertsResponse:
     """Aggregate cross-domain health signals for a month into a prioritized smart-alert summary."""
     global_scope = AccessScope.global_scope()
     month_scope = AccessScope.finance_month(month)
@@ -1184,14 +1224,10 @@ def get_month_smart_alerts(
     # additionally requires VIEW_SENSITIVE_AUDIT_PAYLOADS; without it the
     # count is returned but the breakdown is redacted, mirroring audit.py.
     audit_scope = AccessScope.global_scope()
-    if has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
-        include_sensitive_details = has_permission(
-            user, Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS, audit_scope
-        )
-    else:
-        skipped_source_row_count = 0
-        skipped_source_rows_by_reason: dict[str, int] = {}
-        include_sensitive_details = False
+    can_view_audit_log = has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
+    include_sensitive_details = can_view_audit_log and has_permission(
+        user, Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS, audit_scope
+    )
     try:
         facts = revenue_repository.list_month_facts(month=month)
         previous_facts = revenue_repository.list_month_facts(month=_previous_month(month))
@@ -1199,24 +1235,12 @@ def get_month_smart_alerts(
         bank_entries = bank_repository.list_month_entries(month=month)
         manual_overrides = override_repository.list_month_overrides(month=month)
         close = close_repository.get(month)
-        # FIX: Bounded coverage query — total count plus an ordered, capped
-        # sample. The previous shape materialized the full id list, which
-        # turns the alert endpoint into an unbounded scan/transfer on bad
-        # ingestion months. The alert details (channel_count + sample) keep
-        # the same wire shape; only the source of the sample changed.
-        (
-            missing_fact_channel_count,
-            missing_fact_channel_sample,
-        ) = missing_revenue_fact_channel_count_and_sample(session, month=month)
-        if has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
-            (
-                skipped_source_row_count,
-                skipped_source_rows_by_reason,
-            ) = skipped_source_row_count_and_reasons(
-                session,
-                month=month,
-                include_sensitive_details=include_sensitive_details,
-            )
+        audit_signals = _month_smart_alert_audit_signals(
+            session,
+            month=month,
+            can_view_audit_log=can_view_audit_log,
+            include_sensitive_details=include_sensitive_details,
+        )
         payment_match = build_monthly_payment_match_summary(
             month=month,
             facts=facts,
@@ -1241,16 +1265,17 @@ def get_month_smart_alerts(
 
     summary = build_monthly_smart_alert_summary(
         month=month,
-        payment_match=payment_match,
-        bank_reconciliation=bank_reconciliation,
-        close_status=close.status if close else "OPEN",
-        manual_overrides=manual_overrides,
-        missing_revenue_fact_channel_count=missing_fact_channel_count,
-        missing_revenue_fact_channel_sample=missing_fact_channel_sample,
-        skipped_source_row_count=skipped_source_row_count,
-        skipped_source_rows_by_reason=skipped_source_rows_by_reason,
-        current_revenue_facts=facts,
-        previous_revenue_facts=previous_facts,
+        finance=MonthlySmartAlertFinanceInputs(
+            payment_match=payment_match,
+            bank_reconciliation=bank_reconciliation,
+            close_status=close.status if close else "OPEN",
+            manual_overrides=manual_overrides,
+        ),
+        audit_signals=audit_signals,
+        trend_signals=MonthlySmartAlertTrendSignals(
+            current_revenue_facts=facts,
+            previous_revenue_facts=previous_facts,
+        ),
     )
     summary_api = summary.to_api()
     audit_details = {
@@ -1291,31 +1316,78 @@ def get_month_smart_alerts(
     # when the caller has VIEW_AUDIT_LOG regardless of whether the helper
     # returned data; the `returned` field carries 0 or 1 so a clean month
     # still leaves a record of the read. `details_redacted` reflects whether
-    # sensitive per-reason breakdown was redacted in the alert response,
-    # mirroring /audit/events: True only when the alert actually surfaced
-    # data AND the caller lacks VIEW_SENSITIVE_AUDIT_PAYLOADS.
+    # sensitive per-reason skipped-row breakdown was redacted in the alert
+    # response, mirroring /audit/events: True only when that alert actually
+    # surfaced data AND the caller lacks VIEW_SENSITIVE_AUDIT_PAYLOADS.
     audit_records = [revenue_record, payment_record, bank_record]
-    if has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope):
-        details_redacted = skipped_source_row_count > 0 and not include_sensitive_details
+    if can_view_audit_log:
         audit_records.append(
-            record_audit_event(
-                sink=audit_sink,
-                actor=user,
-                event_type=AuditEventType.AUDIT_LOG_VIEWED,
-                entity_type="audit_log_page",
-                entity_id=f"{month}:skipped_source_rows",
-                scope=audit_scope,
-                details={
-                    "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
-                    "entity_type": "monthly_smart_alerts",
-                    "entity_id": month,
-                    "returned": 1 if skipped_source_row_count > 0 else 0,
-                    "details_redacted": details_redacted,
-                },
+            _record_month_connector_smart_alert_audit(
+                context=_MonthConnectorSmartAlertAuditContext(
+                    audit_sink=audit_sink,
+                    user=user,
+                    month=month,
+                    audit_scope=audit_scope,
+                ),
+                audit_signals=audit_signals,
+                include_sensitive_details=include_sensitive_details,
             )
         )
     summary_api["audit_events"] = [audit_record_to_api(r) for r in audit_records]
-    return summary_api
+    return MonthSmartAlertsResponse.model_validate(summary_api)
+
+
+# ============================================================================
+# Purpose: Emit the AUDIT_LOG_VIEWED self-audit for connector-backed monthly
+#   smart-alert reads without adding branch-heavy bookkeeping to the route.
+# Database/ORM: AuditSink append only; no direct SQLAlchemy reads.
+# Standards: Caller has already passed VIEW_AUDIT_LOG; details preserve the
+#   same redaction and returned flags as get_month_smart_alerts.
+# Blast Radius: Finance dashboard audit trail only.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> provides the
+#     connector-backed smart-alert aggregate counts used in the audit details.
+# ============================================================================
+def _record_month_connector_smart_alert_audit(
+    *,
+    context: _MonthConnectorSmartAlertAuditContext,
+    audit_signals: MonthlySmartAlertAuditSignals,
+    include_sensitive_details: bool,
+) -> AuditRecord:
+    """Record that a monthly smart-alert response read connector audit signals."""
+    return record_audit_event(
+        sink=context.audit_sink,
+        actor=context.user,
+        event_type=AuditEventType.AUDIT_LOG_VIEWED,
+        entity_type="audit_log_page",
+        entity_id=f"{context.month}:connector_smart_alerts",
+        scope=context.audit_scope,
+        details=_month_connector_smart_alert_audit_details(
+            month=context.month,
+            audit_signals=audit_signals,
+            include_sensitive_details=include_sensitive_details,
+        ),
+    )
+
+
+def _month_connector_smart_alert_audit_details(
+    *,
+    month: str,
+    audit_signals: MonthlySmartAlertAuditSignals,
+    include_sensitive_details: bool,
+) -> dict[str, object]:
+    """Build stable audit details for connector-backed smart-alert reads."""
+    source_rows_skipped_returned = audit_signals.skipped_source_row_count > 0
+    connector_runs_failed_returned = audit_signals.failed_connector_run_count > 0
+    return {
+        "event_type": AuditEventType.CONNECTOR_JOB_RUN.value,
+        "entity_type": "monthly_smart_alerts",
+        "entity_id": month,
+        "returned": int(source_rows_skipped_returned or connector_runs_failed_returned),
+        "source_rows_skipped_returned": int(source_rows_skipped_returned),
+        "connector_runs_failed_returned": int(connector_runs_failed_returned),
+        "details_redacted": source_rows_skipped_returned and not include_sensitive_details,
+    }
 
 
 # ============================================================================
@@ -2539,6 +2611,67 @@ def _previous_month(month: str) -> str:
 
 
 # ============================================================================
+# Purpose: Assemble the coverage and audit-derived smart-alert inputs for the
+#   monthly dashboard route. The missing-facts coverage signal is always
+#   available; connector audit signals are only read when the caller already
+#   passed the VIEW_AUDIT_LOG gate.
+# Database/ORM: Read-only channel/fact coverage SELECT plus optional AuditLogORM
+#   and audit-log repository connector-run scans. No locks or writes.
+# Standards: Keeps the route from carrying branch-local audit counters across
+#   permission paths; sensitive skipped-row reasons remain controlled by
+#   VIEW_SENSITIVE_AUDIT_PAYLOADS.
+# Blast Radius: Finance dashboard read surface and audit-observability boundary.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> dataclass
+#     consumed by the pure alert builder.
+#   - File: backend/ums_smart_revenue/auth/audit_log.py -> failed
+#     connector-run audit status aggregation used here.
+# ============================================================================
+def _month_smart_alert_audit_signals(
+    session: Session,
+    *,
+    month: str,
+    can_view_audit_log: bool,
+    include_sensitive_details: bool,
+) -> MonthlySmartAlertAuditSignals:
+    """Return coverage inputs plus permission-gated audit signals for a month."""
+    # FIX: Bounded coverage query — total count plus an ordered, capped
+    # sample. The previous shape materialized the full id list, which
+    # turns the alert endpoint into an unbounded scan/transfer on bad
+    # ingestion months. The alert details (channel_count + sample) keep
+    # the same wire shape; only the source of the sample changed.
+    (
+        missing_fact_channel_count,
+        missing_fact_channel_sample,
+    ) = missing_revenue_fact_channel_count_and_sample(session, month=month)
+    if not can_view_audit_log:
+        return MonthlySmartAlertAuditSignals(
+            missing_revenue_fact_channel_count=missing_fact_channel_count,
+            missing_revenue_fact_channel_sample=missing_fact_channel_sample,
+        )
+
+    skipped_source_row_count, skipped_source_rows_by_reason = skipped_source_row_count_and_reasons(
+        session,
+        month=month,
+        include_sensitive_details=include_sensitive_details,
+    )
+    failed_connector_runs = SqlAlchemyAuditLogRepository(
+        session,
+        tenant_id=_resolve_smart_alert_tenant_id(),
+    ).connector_run_failure_summary(
+        month=month,
+    )
+    return MonthlySmartAlertAuditSignals(
+        missing_revenue_fact_channel_count=missing_fact_channel_count,
+        missing_revenue_fact_channel_sample=missing_fact_channel_sample,
+        skipped_source_row_count=skipped_source_row_count,
+        skipped_source_rows_by_reason=skipped_source_rows_by_reason,
+        failed_connector_run_count=failed_connector_runs.count,
+        failed_connector_runs_by_status=failed_connector_runs.by_status,
+    )
+
+
+# ============================================================================
 # Purpose: Read the active, revenue-required channels that have no revenue fact
 #   for the month, so the smart-alert builder can emit per-channel coverage
 #   gaps. Bounded: returns the total COUNT plus an ordered sample capped at
@@ -2546,7 +2679,7 @@ def _previous_month(month: str) -> str:
 #   turn the alert endpoint into an unbounded scan/transfer.
 # Database/ORM: Read-only LEFT JOIN of YouTubeChannelORM x
 #   MonthlyChannelRevenueFactORM (no FOR UPDATE), tenant-scoped, source of
-#   truth in PostgreSQL. The count uses `func.count()` server-side; the
+#   truth in PostgreSQL. The count uses `COUNT(*)` server-side; the
 #   sample is a separate ordered `LIMIT 20` SELECT.
 # Standards: Mirrors month_close_readiness._missing_required_revenue_fact_count
 #   exactly (active.is_(True) AND revenue_required.is_(True) AND fact.id IS NULL).
@@ -2577,8 +2710,6 @@ def missing_revenue_fact_channel_count_and_sample(
     omitted (None), the read is tenant-global — the smart-alerts API
     endpoint stays global by design.
     """
-    from ums_smart_revenue.finance.smart_alerts import MISSING_FACT_CHANNEL_SAMPLE_LIMIT
-
     tenant_id = _resolve_smart_alert_tenant_id()
     join_predicates = (
         (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
@@ -2595,7 +2726,7 @@ def missing_revenue_fact_channel_count_and_sample(
     if youtube_channel_ids is not None:
         where_predicates.append(YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids))
     count_statement = (
-        select(func.count())
+        select(literal_column("COUNT(*)", type_=Integer()))
         .select_from(YouTubeChannelORM)
         .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
         .where(*where_predicates)

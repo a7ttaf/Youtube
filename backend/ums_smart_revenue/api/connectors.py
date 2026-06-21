@@ -43,10 +43,10 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
 )
 from ums_smart_revenue.connectors.google.registry import known_keys
+from ums_smart_revenue.connectors.keys import source_system_for_connector
 from ums_smart_revenue.connectors.runs.executor import ConnectorJobActor
 from ums_smart_revenue.connectors.runs.orchestrator import (
     _credential_key_candidates,
-    _source_system_for_connector,
     resolve_connector_credentials,
 )
 from ums_smart_revenue.connectors.runs.repository import (
@@ -403,7 +403,7 @@ def _canonicalize_connector_job_payload(
             detail="Unknown connector key",
         )
     return payload.model_copy(
-        update={"connector_key": _source_system_for_connector(payload.connector_key)}
+        update={"connector_key": source_system_for_connector(payload.connector_key)}
     )
 
 
@@ -723,7 +723,7 @@ def request_connector_job(
     return response
 
 
-@router.post("/credentials/{connector_key}/{account_id}/test")
+@router.post("/credentials/{connector_key}/{account_id}/test", response_model=None)
 def test_connector_connection(
     connector_key: str,
     account_id: str,
@@ -731,7 +731,7 @@ def test_connector_connection(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
-) -> dict[str, object]:
+) -> dict[str, object] | JSONResponse:
     """Probe credential OAuth health; every probe (including 404) is audited as CONNECTOR_TESTED."""
     # ============================================================================
     # Purpose: Probe the stored credential for (connector_key, account_id) by

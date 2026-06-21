@@ -2,10 +2,11 @@ import json
 from dataclasses import dataclass
 from decimal import Decimal
 from io import BytesIO
+from typing import cast
 
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.worksheet.worksheet import Worksheet
+from openpyxl import Workbook  # type: ignore[import-untyped]
+from openpyxl.styles import Alignment, Font, PatternFill  # type: ignore[import-untyped]
+from openpyxl.worksheet.worksheet import Worksheet  # type: ignore[import-untyped]
 
 from ums_smart_revenue.finance.account_allocation_read import (
     AllocationProvenance,
@@ -344,11 +345,12 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
         ]
         or [["CLEAR", None, "smart_alerts", None, "No smart alerts for this scope."]],
     )
+    source_summaries = cast("dict[str, object]", preview.to_api()["source_summaries"])
     _write_key_value_sheet(
         workbook.create_sheet("Raw Appendix"),
         {
             source_name: json.dumps(payload, sort_keys=True)
-            for source_name, payload in preview.to_api()["source_summaries"].items()
+            for source_name, payload in source_summaries.items()
         },
     )
 

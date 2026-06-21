@@ -1,3 +1,16 @@
+# ============================================================================
+# Purpose: Verify pure finance smart-alert composition rules independent of
+#   FastAPI route wiring.
+# Database/ORM: None; tests build typed finance summary objects directly.
+# Standards: Keep alert severity, status, detail payload, and ordering rules
+#   covered without database or authorization side effects.
+# Blast Radius: Test coverage only for monthly smart-alert calculation.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> alert builder
+#     under test.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> consumes these summaries
+#     for the dashboard endpoint.
+# ============================================================================
 from decimal import Decimal
 from importlib import import_module
 
@@ -10,6 +23,13 @@ from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntr
 from ums_smart_revenue.finance.payment_matching import MonthlyPaymentMatchSummary
 from ums_smart_revenue.finance.reconciliation import ReconciliationIssue
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
+
+
+def _alert_by_code(summary, code: str):
+    for alert in summary.alerts:
+        if alert.code == code:
+            return alert
+    raise AssertionError(f"expected {code} alert")
 
 
 def payment_summary(**overrides):
@@ -115,7 +135,41 @@ def build_alerts(**overrides):
         "manual_overrides": [manual_override()],
     }
     values.update(overrides)
-    return module.build_monthly_smart_alert_summary(**values)
+    finance = module.MonthlySmartAlertFinanceInputs(
+        payment_match=values["payment_match"],
+        bank_reconciliation=values["bank_reconciliation"],
+        close_status=values["close_status"],
+        manual_overrides=values["manual_overrides"],
+    )
+    audit_signals = module.MonthlySmartAlertAuditSignals(
+        missing_revenue_fact_channel_count=values.get("missing_revenue_fact_channel_count", 0),
+        missing_revenue_fact_channel_sample=values.get("missing_revenue_fact_channel_sample", ()),
+        skipped_source_row_count=values.get("skipped_source_row_count", 0),
+        skipped_source_rows_by_reason=values.get("skipped_source_rows_by_reason"),
+        failed_connector_run_count=values.get("failed_connector_run_count", 0),
+        failed_connector_runs_by_status=values.get("failed_connector_runs_by_status"),
+    )
+    trend_signals = module.MonthlySmartAlertTrendSignals(
+        current_revenue_facts=values.get("current_revenue_facts", ()),
+        previous_revenue_facts=values.get("previous_revenue_facts", ()),
+    )
+    thresholds = module.MonthlySmartAlertThresholds(
+        high_gap_threshold_usd=values.get(
+            "high_gap_threshold_usd",
+            module.DEFAULT_HIGH_GAP_THRESHOLD_USD,
+        ),
+        revenue_trend_anomaly_threshold_percent=values.get(
+            "revenue_trend_anomaly_threshold_percent",
+            module.DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT,
+        ),
+    )
+    return module.build_monthly_smart_alert_summary(
+        month=values["month"],
+        finance=finance,
+        audit_signals=audit_signals,
+        trend_signals=trend_signals,
+        thresholds=thresholds,
+    )
 
 
 def test_smart_alerts_detect_payment_bank_month_and_override_risks():
@@ -153,11 +207,7 @@ def test_smart_alerts_flag_missing_channel_revenue_facts():
         codes.index("MISSING_REVENUE_SOURCE") + 1
     )
     assert codes.index("CHANNELS_MISSING_REVENUE_FACTS") < codes.index("PAYMENT_NOT_MATCHED")
-    coverage_alert = next(
-        (alert for alert in summary.alerts if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"),
-        None,
-    )
-    assert coverage_alert is not None, "expected CHANNELS_MISSING_REVENUE_FACTS alert"
+    coverage_alert = _alert_by_code(summary, "CHANNELS_MISSING_REVENUE_FACTS")
     assert coverage_alert.severity == "HIGH"
     assert coverage_alert.confidence == "E_MISSING"
     assert coverage_alert.details == {
@@ -173,11 +223,7 @@ def test_smart_alerts_cap_missing_channel_sample_at_twenty():
         missing_revenue_fact_channel_sample=sample,
     )
 
-    coverage_alert = next(
-        (alert for alert in summary.alerts if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"),
-        None,
-    )
-    assert coverage_alert is not None, "expected CHANNELS_MISSING_REVENUE_FACTS alert"
+    coverage_alert = _alert_by_code(summary, "CHANNELS_MISSING_REVENUE_FACTS")
     assert coverage_alert.details["channel_count"] == 25
     assert coverage_alert.details["sample_channel_ids"] == sorted(sample)[:20]
 
@@ -206,11 +252,7 @@ def test_smart_alerts_flag_skipped_source_rows():
     codes = [alert.code for alert in summary.alerts]
     assert codes.index("SOURCE_ROWS_SKIPPED") == (codes.index("CHANNELS_MISSING_REVENUE_FACTS") + 1)
     assert codes.index("SOURCE_ROWS_SKIPPED") < codes.index("PAYMENT_NOT_MATCHED")
-    skipped_alert = next(
-        (alert for alert in summary.alerts if alert.code == "SOURCE_ROWS_SKIPPED"),
-        None,
-    )
-    assert skipped_alert is not None, "expected SOURCE_ROWS_SKIPPED alert"
+    skipped_alert = _alert_by_code(summary, "SOURCE_ROWS_SKIPPED")
     assert skipped_alert.severity == "HIGH"
     assert skipped_alert.confidence == "E_MISSING"
     assert skipped_alert.source == "connector_job_run"
@@ -221,6 +263,43 @@ def test_smart_alerts_flag_skipped_source_rows():
             "unknown_channel": 2,
         },
     }
+
+
+def test_smart_alerts_flag_failed_connector_runs():
+    summary = build_alerts(
+        skipped_source_row_count=1,
+        skipped_source_rows_by_reason={"unknown_channel": 1},
+        failed_connector_run_count=2,
+        failed_connector_runs_by_status={
+            "PARTIAL": 1,
+            "FAILED": 1,
+        },
+    )
+
+    codes = [alert.code for alert in summary.alerts]
+    assert codes.index("CONNECTOR_RUNS_FAILED") == (codes.index("SOURCE_ROWS_SKIPPED") + 1)
+    assert codes.index("CONNECTOR_RUNS_FAILED") < codes.index("PAYMENT_NOT_MATCHED")
+    failed_alert = _alert_by_code(summary, "CONNECTOR_RUNS_FAILED")
+    assert failed_alert.severity == "HIGH"
+    assert failed_alert.confidence == "E_MISSING"
+    assert failed_alert.source == "connector_job_run"
+    assert failed_alert.details == {
+        "failed_run_count": 2,
+        "failed_by_status": {
+            "FAILED": 1,
+            "PARTIAL": 1,
+        },
+    }
+
+
+def test_smart_alerts_omit_failed_connector_runs_when_empty():
+    summary = build_alerts(
+        failed_connector_run_count=0,
+        failed_connector_runs_by_status={},
+    )
+
+    codes = [alert.code for alert in summary.alerts]
+    assert "CONNECTOR_RUNS_FAILED" not in codes
 
 
 def test_smart_alerts_omit_skipped_source_rows_when_empty():
@@ -245,6 +324,20 @@ def test_smart_alerts_reject_negative_skipped_source_row_inputs():
         match="skipped_source_rows_by_reason counts must be non-negative",
     ):
         build_alerts(skipped_source_rows_by_reason={"unknown_channel": -1})
+
+
+def test_smart_alerts_reject_negative_failed_connector_run_inputs():
+    with pytest.raises(
+        ValueError,
+        match="failed_connector_run_count must be non-negative",
+    ):
+        build_alerts(failed_connector_run_count=-1)
+
+    with pytest.raises(
+        ValueError,
+        match="failed_connector_runs_by_status counts must be non-negative",
+    ):
+        build_alerts(failed_connector_runs_by_status={"FAILED": -1})
 
 
 def test_smart_alerts_reject_negative_missing_channel_count():

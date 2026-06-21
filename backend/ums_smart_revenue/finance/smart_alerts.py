@@ -9,7 +9,7 @@
 #   negative thresholds/counts at the boundary; preserves reason totals
 #   deterministically; keeps highest_severity == None when no alerts fire.
 # Blast Radius: Finance dashboard read surface (no auth, no money, no Neo4j).
-#   Adds the SOURCE_ROWS_SKIPPED alert code for connector normalization drops.
+#   Adds connector-backed alert codes for normalization drops and failed runs.
 # Connections:
 #   - File: backend/ums_smart_revenue/api/revenue.py -> pre-reads coverage and
 #     audit-derived inputs and calls build_monthly_smart_alert_summary.
@@ -18,6 +18,8 @@
 #   - File: Docs/12_BACKEND_API_SPEC.md -> alert code contract (severity,
 #     source, confidence, details shape).
 # ============================================================================
+"""Pure monthly smart-alert composition for finance dashboard and exports."""
+
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
@@ -80,16 +82,62 @@ class MonthlySmartAlertSummary:
         }
 
 
+@dataclass(frozen=True)
+class MonthlySmartAlertFinanceInputs:
+    """Finance-domain inputs required by monthly smart-alert composition."""
+
+    payment_match: MonthlyPaymentMatchSummary
+    bank_reconciliation: MonthBankReconciliationSummary
+    close_status: str | None
+    manual_overrides: Iterable[RevenueManualOverrideEntry]
+
+
+@dataclass(frozen=True)
+class MonthlySmartAlertAuditSignals:
+    """Audit-derived and coverage inputs for monthly smart-alert composition."""
+
+    missing_revenue_fact_channel_count: int = 0
+    missing_revenue_fact_channel_sample: Sequence[str] = ()
+    skipped_source_row_count: int = 0
+    skipped_source_rows_by_reason: Mapping[str, int] | None = None
+    failed_connector_run_count: int = 0
+    failed_connector_runs_by_status: Mapping[str, int] | None = None
+
+
+@dataclass(frozen=True)
+class MonthlySmartAlertTrendSignals:
+    """Revenue trend inputs for monthly smart-alert composition."""
+
+    current_revenue_facts: Iterable[RevenueFactEntry] = ()
+    previous_revenue_facts: Iterable[RevenueFactEntry] = ()
+
+
+@dataclass(frozen=True)
+class MonthlySmartAlertThresholds:
+    """Thresholds applied by monthly smart-alert composition."""
+
+    high_gap_threshold_usd: Decimal = DEFAULT_HIGH_GAP_THRESHOLD_USD
+    revenue_trend_anomaly_threshold_percent: Decimal = (
+        DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT
+    )
+
+
+_DEFAULT_AUDIT_SIGNALS = MonthlySmartAlertAuditSignals()
+_DEFAULT_TREND_SIGNALS = MonthlySmartAlertTrendSignals()
+_DEFAULT_THRESHOLDS = MonthlySmartAlertThresholds()
+
+
 # ============================================================================
 # Purpose: Compose the dashboard smart-alert list for one finance month from
 #   pre-aggregated cross-domain inputs (payment match, bank reconciliation,
-#   coverage gap, audit-derived skipped rows, overrides, MoM revenue anomaly,
-#   close status). Each per-alert helper is a pure function returning the alert
-#   or None, so this builder only orders and ranks them.
+#   coverage gap, audit-derived skipped rows, audit-derived failed connector
+#   runs, overrides, MoM revenue anomaly, close status). Each per-alert helper
+#   is a pure function returning the alert or None, so this builder only orders
+#   and ranks them.
 # Database/ORM: None (pure).
 # Standards: Boundary validation rejects negative thresholds and counts;
 #   deterministically orders alerts; assigns the highest severity from the
-#   produced set; preserves reason totals for SOURCE_ROWS_SKIPPED.
+#   produced set; preserves reason/status totals for connector-backed alerts.
 # Blast Radius: Finance dashboard read surface. No auth, no money, no Neo4j.
 #   Adding/changing an alert code is an API contract change — keep wire-stable.
 # Connections:
@@ -100,41 +148,30 @@ class MonthlySmartAlertSummary:
 def build_monthly_smart_alert_summary(
     *,
     month: str,
-    payment_match: MonthlyPaymentMatchSummary,
-    bank_reconciliation: MonthBankReconciliationSummary,
-    close_status: str | None,
-    manual_overrides: Iterable[RevenueManualOverrideEntry],
-    missing_revenue_fact_channel_count: int = 0,
-    missing_revenue_fact_channel_sample: Sequence[str] = (),
-    skipped_source_row_count: int = 0,
-    skipped_source_rows_by_reason: Mapping[str, int] | None = None,
-    current_revenue_facts: Iterable[RevenueFactEntry] = (),
-    previous_revenue_facts: Iterable[RevenueFactEntry] = (),
-    high_gap_threshold_usd: Decimal = DEFAULT_HIGH_GAP_THRESHOLD_USD,
-    revenue_trend_anomaly_threshold_percent: Decimal = (
-        DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT
-    ),
+    finance: MonthlySmartAlertFinanceInputs,
+    audit_signals: MonthlySmartAlertAuditSignals = _DEFAULT_AUDIT_SIGNALS,
+    trend_signals: MonthlySmartAlertTrendSignals = _DEFAULT_TREND_SIGNALS,
+    thresholds: MonthlySmartAlertThresholds = _DEFAULT_THRESHOLDS,
 ) -> MonthlySmartAlertSummary:
-    """Build a monthly smart alert summary from finance signal inputs.
+    """Build a monthly smart alert summary from pre-aggregated signal groups.
 
-    The coverage alert takes a (count, sample) pair instead of a full id
-    list so the route can bound the read at the SQL LIMIT clause. The
-    alert details keep the same wire shape (channel_count + sample_channel_ids).
+    Args:
+        month: Finance month in ``YYYY-MM`` format.
+        finance: Payment, bank, close-status, and manual-override inputs.
+        audit_signals: Coverage and connector-audit inputs, including the
+            bounded missing-channel sample used by the coverage alert.
+        trend_signals: Current and previous revenue facts for trend analysis.
+        thresholds: Non-negative gap and trend thresholds.
+
+    Returns:
+        The alert summary ordered by the canonical alert priority sequence.
     """
-    if high_gap_threshold_usd < 0:
-        raise ValueError("high_gap_threshold_usd must be non-negative")
-    if revenue_trend_anomaly_threshold_percent < 0:
-        raise ValueError("revenue_trend_anomaly_threshold_percent must be non-negative")
-    if missing_revenue_fact_channel_count < 0:
-        raise ValueError("missing_revenue_fact_channel_count must be non-negative")
-    if skipped_source_row_count < 0:
-        raise ValueError("skipped_source_row_count must be non-negative")
-    if skipped_source_rows_by_reason is not None and any(
-        count < 0 for count in skipped_source_rows_by_reason.values()
-    ):
-        raise ValueError("skipped_source_rows_by_reason counts must be non-negative")
-    normalized_close_status = close_status or "OPEN"
-    overrides = list(manual_overrides)
+    _validate_monthly_smart_alert_inputs(
+        thresholds=thresholds,
+        audit_signals=audit_signals,
+    )
+    normalized_close_status = finance.close_status or "OPEN"
+    overrides = list(finance.manual_overrides)
 
     # Per-alert builders. Each one is a small pure function that returns a
     # MonthlySmartAlert or None (None is dropped). Splitting them out drops
@@ -142,27 +179,35 @@ def build_monthly_smart_alert_summary(
     # PY-R1000 high-risk threshold and makes each branch independently
     # testable / rewritable without touching the others.
     builders: list[Callable[[], MonthlySmartAlert | None]] = [
-        lambda: _missing_revenue_source_alert(month, payment_match),
+        lambda: _missing_revenue_source_alert(month, finance.payment_match),
         lambda: _channels_missing_revenue_facts_alert(
             month,
-            missing_revenue_fact_channel_count,
-            missing_revenue_fact_channel_sample,
+            audit_signals.missing_revenue_fact_channel_count,
+            audit_signals.missing_revenue_fact_channel_sample,
         ),
         lambda: _source_rows_skipped_alert(
             month,
-            skipped_source_row_count,
-            skipped_source_rows_by_reason,
+            audit_signals.skipped_source_row_count,
+            audit_signals.skipped_source_rows_by_reason,
         ),
-        lambda: _payment_not_matched_alert(month, payment_match),
-        lambda: _bank_reconciliation_alert(month, bank_reconciliation),
+        lambda: _connector_runs_failed_alert(
+            month,
+            audit_signals.failed_connector_run_count,
+            audit_signals.failed_connector_runs_by_status,
+        ),
+        lambda: _payment_not_matched_alert(month, finance.payment_match),
+        lambda: _bank_reconciliation_alert(month, finance.bank_reconciliation),
         lambda: _unexplained_gap_alert(
-            month, payment_match, bank_reconciliation, high_gap_threshold_usd
+            month,
+            finance.payment_match,
+            finance.bank_reconciliation,
+            thresholds.high_gap_threshold_usd,
         ),
         lambda: _revenue_trend_anomaly_alert(
             month,
-            current_revenue_facts,
-            previous_revenue_facts,
-            revenue_trend_anomaly_threshold_percent,
+            trend_signals.current_revenue_facts,
+            trend_signals.previous_revenue_facts,
+            thresholds.revenue_trend_anomaly_threshold_percent,
         ),
         lambda: _month_not_locked_alert(month, normalized_close_status),
         lambda: _manual_overrides_alert(month, overrides),
@@ -176,6 +221,51 @@ def build_monthly_smart_alert_summary(
         highest_severity=highest_severity,
         alerts=alerts,
     )
+
+
+def _validate_monthly_smart_alert_inputs(
+    *,
+    thresholds: MonthlySmartAlertThresholds,
+    audit_signals: MonthlySmartAlertAuditSignals,
+) -> None:
+    """Reject impossible negative smart-alert thresholds and counts."""
+    _ensure_non_negative("high_gap_threshold_usd", thresholds.high_gap_threshold_usd)
+    _ensure_non_negative(
+        "revenue_trend_anomaly_threshold_percent",
+        thresholds.revenue_trend_anomaly_threshold_percent,
+    )
+    _ensure_non_negative(
+        "missing_revenue_fact_channel_count",
+        audit_signals.missing_revenue_fact_channel_count,
+    )
+    _ensure_non_negative("skipped_source_row_count", audit_signals.skipped_source_row_count)
+    _ensure_mapping_counts_non_negative(
+        "skipped_source_rows_by_reason",
+        audit_signals.skipped_source_rows_by_reason,
+    )
+    _ensure_non_negative(
+        "failed_connector_run_count",
+        audit_signals.failed_connector_run_count,
+    )
+    _ensure_mapping_counts_non_negative(
+        "failed_connector_runs_by_status",
+        audit_signals.failed_connector_runs_by_status,
+    )
+
+
+def _ensure_non_negative(name: str, value: Decimal | int) -> None:
+    """Raise a stable ValueError when a count or threshold is negative."""
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative")
+
+
+def _ensure_mapping_counts_non_negative(
+    name: str,
+    counts: Mapping[str, int] | None,
+) -> None:
+    """Raise a stable ValueError when any mapping count is negative."""
+    if counts is not None and any(count < 0 for count in counts.values()):
+        raise ValueError(f"{name} counts must be non-negative")
 
 
 def _missing_revenue_source_alert(
@@ -285,6 +375,55 @@ def _source_rows_skipped_alert(
         details={
             "skipped_count": effective_count,
             "skipped_by_reason": reason_counts,
+        },
+    )
+
+
+# ============================================================================
+# Purpose: Surface connector runs whose latest terminal audit edge for a month
+#   is FAILED or PARTIAL. This catches missing upstream reports and per-report
+#   failures even when no source rows were normalized.
+# Database/ORM: None (pure; count + status totals are pre-read by the API).
+# Standards: Preserve status counts, omit zero-count statuses, and reconcile
+#   total vs breakdown via max() so legacy/malformed audit rows cannot produce
+#   internally inconsistent details.
+# Blast Radius: Finance dashboard read surface only; audit-derived signal.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/audit.py -> emits
+#     CONNECTOR_JOB_RUN/FINISHED audit edges with status and report_month.
+#   - File: backend/ums_smart_revenue/api/revenue.py -> aggregates latest
+#     terminal connector-run audit edges into this pure builder input.
+# ============================================================================
+def _connector_runs_failed_alert(
+    month: str,
+    count: int,
+    failed_by_status: Mapping[str, int] | None,
+) -> MonthlySmartAlert | None:
+    status_counts = {
+        status: status_count
+        for status, status_count in sorted((failed_by_status or {}).items())
+        if status_count > 0
+    }
+    statuses_total = sum(status_counts.values())
+    if count > 0 and statuses_total > 0:
+        effective_count = max(count, statuses_total)
+    elif count > 0:
+        effective_count = count
+    elif statuses_total > 0:
+        effective_count = statuses_total
+    else:
+        effective_count = 0
+    if effective_count <= 0:
+        return None
+    return MonthlySmartAlert(
+        code="CONNECTOR_RUNS_FAILED",
+        severity="HIGH",
+        message=(f"{effective_count} connector run(s) failed or partially failed for {month}."),
+        source="connector_job_run",
+        confidence="E_MISSING",
+        details={
+            "failed_run_count": effective_count,
+            "failed_by_status": status_counts,
         },
     )
 
