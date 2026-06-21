@@ -29,6 +29,7 @@ from ums_smart_revenue.api.dependencies import (
 )
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import (
+    _resolve_smart_alert_tenant_id,
     current_org_access_index,
     missing_revenue_fact_channel_count_and_sample,
     skipped_source_row_count_and_reasons,
@@ -1428,7 +1429,7 @@ def _build_finance_source_summaries_for_export(
         )
         failed_connector_runs = SqlAlchemyAuditLogRepository(
             session,
-            tenant_id=_tenant_uuid(user),
+            tenant_id=_resolve_smart_alert_tenant_id(),
         ).connector_run_failure_summary(
             month=export_job.month,
         )
