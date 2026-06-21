@@ -7,6 +7,37 @@ AdSense are the official source for finance ingestion; connector code must
 preserve the reported currency and source evidence instead of deriving official
 amounts from market FX rates.
 
+## Google credential contract
+
+UMS must use only Google-issued credential material for live connectors. The
+operator must not link a personal Gmail session directly, store Google account
+passwords, reuse browser cookies, or automate Gmail login as a substitute for
+official API authorization.
+
+Credential scope by API:
+
+- YouTube Data API public metadata can use an API key where Google allows
+  key-only access. Private or owner-specific metadata still requires an
+  authorized Google credential.
+- YouTube Reporting API, YouTube Analytics API revenue/account queries, and
+  AdSense Management API account or payment data require official Google
+  OAuth 2.0 authorization tokens with the narrowest needed scopes. API-key-only
+  access is not a valid contract for those private revenue surfaces.
+
+UMS stores connector credentials as external secret references and refreshes
+Google authorization tokens server-side. The credential owner decision remains
+blocked until the operator supplies approved Google Cloud project credentials
+and confirms the allowed API/scopes for each live connector.
+
+References:
+
+- <https://developers.google.com/youtube/v3/getting-started>
+- <https://developers.google.com/youtube/reporting/guides/registering_an_application>
+- <https://developers.google.com/youtube/analytics/reference/reports/query>
+- <https://developers.google.com/adsense/management/getting_started>
+- <https://developers.google.com/identity/protocols/oauth2>
+- <https://developers.google.com/terms/api-services-user-data-policy>
+
 ## YouTube Reporting API connector
 
 ### Responsibilities

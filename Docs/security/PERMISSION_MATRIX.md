@@ -23,7 +23,7 @@
 | `registry.manage_groups` | Manage dynamic channel groups. | Yes |
 | `connectors.view_health` | View connector health and run status. | No |
 | `connectors.run_jobs` | Run ingestion/sync jobs. | Yes |
-| `connectors.manage` | Manage OAuth/API connector configuration. | Yes |
+| `connectors.manage` | Manage Google/API connector credential configuration. | Yes |
 | `raw_files.view` | View raw API payloads and raw report files. | Yes |
 | `audit.view` | View audit log entries. | Yes |
 | `audit.view_sensitive_payloads` | View unmasked sensitive audit payloads. | Yes |

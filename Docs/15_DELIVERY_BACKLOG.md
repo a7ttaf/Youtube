@@ -53,8 +53,12 @@ closed; Docs/01 status header and 12 "this PR" placeholders updated.
   in PR #30).
 - ⏳ YouTube report ingestion — remaining: the live pull engine + `run_one`
   orchestrator + C1 normalizer wiring + executing `POST /connectors/jobs` are all
-  built and mock-tested (PRs #47-#50, #90/#93, #94/#95/#97); blocked only on real
-  OAuth credentials.
+  built and mock-tested (PRs #47-#50, #90/#93, #94/#95/#97); blocked only on
+  owner-approved Google connector credentials. API-key-only access is valid
+  only for YouTube Data API public metadata where Google permits it; private
+  YouTube Reporting/Analytics and AdSense revenue/account data require official
+  Google authorization tokens/scopes, never Gmail passwords, browser cookies, or
+  linked personal Gmail sessions.
     - ✅ PR #47 — Google live connector foundation (B2.1-B2.4 in one
       stack, merged 2026-05-27 as commit 52734a3): credential foundation (secret resolver dispatch +
       gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
@@ -182,8 +186,8 @@ closed; Docs/01 status header and 12 "this PR" placeholders updated.
       GET /connectors/credentials.
     - Deferred: no celery/redis broker (in-process only); no partial-unique
       index on RUNNING runs (TOCTOU is code-level, accepted at max_workers=1);
-      no live-OAuth credentials; no auto-flip of credential `status` to
-      `failed_auth` on refresh failure.
+      no owner-approved live Google connector credentials; no auto-flip of
+      credential `status` to `failed_auth` on refresh failure.
     - ✅ Executor Bucket-A audit RLS regression fix (PR #97) — three post-#95
       reverts (`bdf5b71`/`15c0818`/`06af2ed`) dropped the `TENANT_CTX`
       minimal-tenant set
@@ -653,7 +657,7 @@ single P-tier above.
   endpoint coming" disclaimer — branch `feat/audit-summary-endpoint`.
 - ✅ Connector credential test-connection probe — `POST /connectors/credentials/{connector_key}/{account_id}/test`
   (branch `docs/plan-hygiene-post-71`): wraps `resolve_connector_credentials()` (load
-  credential row → resolve secret URI → OAuth token refresh, no live data pull).
+  credential row → resolve secret URI → official Google token refresh, no live data pull).
   Surfaces `CredentialNotFoundError` as 404; `InactiveCredentialError` / `OAuthRefreshError` /
   other `GoogleConnectorError` as 200 with machine-readable `status` field (`inactive_credential` /
   `auth_failed` / `error`) and a string `detail`. Every probe is audited (`CONNECTOR_TESTED`
@@ -671,8 +675,9 @@ single P-tier above.
   per-credential Test Connection button (fixed audit reason). `/session/me` now
   exposes `canViewConnectorHealth` so the SPA gate mirrors the route gate exactly.
   No migration; no live credentials needed. Remaining Track D is creds/schema
-  blocked: OAuth consent flow, live pulls, token-expiry/last-error schema +
-  background monitoring (the refresh-telemetry columns landed in PR #95 Part 2).
+  blocked: official Google authorization setup, live pulls,
+  token-expiry/last-error schema + background monitoring (the refresh-telemetry
+  columns landed in PR #95 Part 2).
 - ✅ Connector credential token-health surface — branch
   `feat/connector-credential-health`: new read-only `GET
   /connectors/credentials/health` (`VIEW_CONNECTOR_HEALTH` gate, fail-closed;
@@ -681,7 +686,7 @@ single P-tier above.
   the credential metadata + four refresh-telemetry fields and appends a derived
   `health_state` (`healthy`/`expiring`/`auth_failed`/`missing`/`unknown`) from a
   pure, unit-testable `derive_credential_health_state(entry, *, as_of)` helper
-  over already-persisted columns (no live OAuth refresh). Connector-scoped
+  over already-persisted columns (no live token refresh). Connector-scoped
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
@@ -722,7 +727,7 @@ single P-tier above.
   raw_payload) + provenance-preserving upsert (COALESCE), AdSense fail-closed
   accountId / empty-report handling, and strict YYYY-MM-DD parsing — see
   `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-report.md`.
-  Remaining: live OAuth/API connector
+  Remaining: live Google connector credential setup
   (B2), FX/conversion (B3). Marked ⏳ (not ✅) per the scaffolding-only honesty
   rule above — no real ingestion path yet.
 - ⏳ Google source-rows -> revenue facts normalization bridge: pure
@@ -738,8 +743,8 @@ single P-tier above.
   a production caller: `run_one` runs `GoogleSourceNormalizer.normalize_month`
   as a post-run step (PR #90, refactored into
   `connectors/runs/normalization.py` by PR #93), so a connector run projects
-  source rows to `MonthlyChannelRevenueFactORM`. Remaining: live OAuth/API
-  connector creds (B2), FX/conversion (B3). Marked ⏳ (not ✅) — the wiring is
+  source rows to `MonthlyChannelRevenueFactORM`. Remaining: live Google
+  connector credentials (B2), FX/conversion (B3). Marked ⏳ (not ✅) — the wiring is
   done but no live data source has produced facts yet. See
   `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`
   and `Docs/superpowers/plans/2026-05-25-spec-c1-google-source-normalizer.md`.

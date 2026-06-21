@@ -36,7 +36,13 @@ Reconciled through PR #113. Decisions that are now made are listed under
   `ThreadPoolExecutor` (off by default via `connector_job_executor_enabled`)
   ships with PR #95. Durable out-of-process queue remains a future upgrade.
 
-## Data decisions (open — blocked on real OAuth credentials)
+## Data decisions (open — blocked on owner-approved Google connector credentials)
+
+The blocker is not a direct Gmail account link. UMS needs approved Google Cloud
+project credential material: API-key-only access for YouTube Data API public
+metadata where Google permits it, and official Google authorization-token
+credentials/scopes for private YouTube Reporting, YouTube Analytics, and
+AdSense account or revenue data.
 
 - Exact list of YouTube report types available in UMS account.
 - Which reports cover outside-CMS channels.

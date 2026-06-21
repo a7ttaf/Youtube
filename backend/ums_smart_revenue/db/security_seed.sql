@@ -60,7 +60,7 @@ VALUES
     ('export_operator', 'Export Operator', 'Scoped export operator for approved analytics or finance exports.', false),
     ('audit_viewer', 'Audit Viewer', 'Read-only audit and compliance reviewer.', false),
     ('system_integration_user', 'System Integration User', 'Non-human role for scheduled connector jobs and backend service flows.', true),
-    ('connector_admin', 'Connector Admin', 'Technical owner for OAuth/API connector configuration.', false),
+    ('connector_admin', 'Connector Admin', 'Technical owner for Google/API connector credential configuration.', false),
     ('data_steward', 'Data Steward', 'Scoped owner for channel registry, groups, and organization mapping.', false)
 ON CONFLICT (key) DO UPDATE
 SET label = EXCLUDED.label,

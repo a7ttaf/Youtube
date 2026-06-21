@@ -448,7 +448,23 @@ GET /connectors/runs?limit=50&cursor_started_at=2026-05-10T12:00:00Z&cursor_id=<
 
 `/connectors` is an implemented API group in this draft and owns credential-reference metadata plus connector job requests.
 
-Connector credential responses expose metadata only, never raw credential material or secret references.
+Connector credential responses expose metadata only, never raw credential material or secret references. The response shape (`ConnectorCredentialEntry.to_api()`) returns only a `has_secret_ref` boolean plus refresh telemetry, never the secret reference value itself.
+
+Google connector credential contract:
+
+- API-key-only access is valid only for YouTube Data API public metadata where
+  Google permits it.
+- YouTube Reporting API, YouTube Analytics API revenue/account queries, and
+  AdSense Management API account/payment data require official Google OAuth 2.0
+  authorization tokens with the narrowest needed scopes.
+- UMS must not store Gmail passwords, reuse browser cookies, automate Gmail
+  login, or link a personal Gmail session as a substitute for official API
+  authorization.
+- Storage and response exposure are separate concerns. The backend stores only
+  external secret references (a locator, not the raw credential material) and
+  token-refresh telemetry in the database. API responses expose only metadata
+  and telemetry — the `has_secret_ref` flag and refresh columns — and never
+  return the secret reference value or raw credential material.
 
 `POST /connectors/jobs` submits a real Google ingest pull to the module-owned,
 bounded, in-process `ConnectorJobExecutor` and returns **202** immediately with
@@ -503,7 +519,7 @@ capped at `100`; `offset` defaults to `0`). Authorization mirrors
 connector ids they are granted** (no foreign-credential leak), and a caller
 without `connectors.view_health` at any scope (or a disabled principal) is
 rejected `403`. The endpoint is read-only: no audit write, no migration, and it
-derives `health_state` purely from already-persisted columns (no live OAuth
+derives `health_state` purely from already-persisted columns (no live token
 refresh is performed).
 
 `GET /connectors/runs` lists connector run history (read-only operational
