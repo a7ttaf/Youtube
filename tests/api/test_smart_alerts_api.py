@@ -20,7 +20,9 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
 from sqlalchemy import create_engine, select
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.revenue import _previous_month
@@ -59,8 +61,6 @@ def _connector_run_audit_edge(
     scope_id: str,
     details: dict[str, object],
     created_at: datetime,
-    entity_type: str = "connector_run",
-    reason: str = "connector finished",
 ) -> AuditLogORM:
     """Build a connector-run audit row with the test defaults."""
     return AuditLogORM(
@@ -68,11 +68,34 @@ def _connector_run_audit_edge(
         tenant_id=tenant_id,
         user_id=USER_ID,
         event_type="CONNECTOR_JOB_RUN",
-        entity_type=entity_type,
+        entity_type="connector_run",
         entity_id=entity_id,
         scope_type="connector",
         scope_id=scope_id,
-        reason=reason,
+        reason="connector finished",
+        details=details,
+        sensitive=True,
+        created_at=created_at,
+    )
+
+
+def _superseded_connector_run_audit_edge(
+    *,
+    tenant_id: UUID,
+    details: dict[str, object],
+    created_at: datetime,
+) -> AuditLogORM:
+    """Build the superseded RUNNING audit edge used by the alert projection."""
+    return AuditLogORM(
+        id=uuid4(),
+        tenant_id=tenant_id,
+        user_id=USER_ID,
+        event_type="CONNECTOR_JOB_RUN",
+        entity_type="api_connector",
+        entity_id="youtube-reporting:content-owner-1",
+        scope_type="connector",
+        scope_id="youtube-reporting",
+        reason="orphaned RUNNING run superseded by new job",
         details=details,
         sensitive=True,
         created_at=created_at,
@@ -80,7 +103,7 @@ def _connector_run_audit_edge(
 
 
 def _assert_connector_failed_alert(
-    response,
+    response: Response,
     *,
     expected_details: dict[str, object],
 ) -> None:
@@ -100,14 +123,14 @@ def _assert_connector_failed_alert(
 
 
 def _assert_single_audit_read_details(
-    engine,
+    engine: Engine,
     *,
     expected_details: dict[str, object],
 ) -> None:
     """Assert the endpoint wrote one audit-read row with selected details."""
     with Session(engine) as session:
         audit_reads = session.scalars(
-            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED")
+            select(AuditLogORM).where(AuditLogORM.event_type == "AUDIT_LOG_VIEWED"),
         ).all()
     assert len(audit_reads) == 1
     assert {key: audit_reads[0].details[key] for key in expected_details} == expected_details
@@ -810,12 +833,8 @@ def test_month_smart_alerts_include_superseded_connector_run_terminal_edge(
     tenant_id = UUID(UMS_TENANT_ID)
     with Session(engine) as session:
         session.add(
-            _connector_run_audit_edge(
+            _superseded_connector_run_audit_edge(
                 tenant_id=tenant_id,
-                entity_type="api_connector",
-                entity_id="youtube-reporting:content-owner-1",
-                scope_id="youtube-reporting",
-                reason="orphaned RUNNING run superseded by new job",
                 details={
                     "action": "run_superseded",
                     "run_id": "run-old",
