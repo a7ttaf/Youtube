@@ -1,9 +1,10 @@
 # Open Decisions
 
-## Status (2026-06-17)
+## Status (2026-06-21)
 
-Reconciled through PR #113. Decisions that are now made are listed under
-"Closed (with PR ref)". Items in the topic sections below remain genuinely open.
+Reconciled through PR #132 plus the Google credential setup/smoke runbook
+branch. Decisions that are now made are listed under "Closed (with PR ref)".
+Items in the topic sections below remain genuinely open.
 
 ## Closed (with PR ref)
 
@@ -43,6 +44,12 @@ project credential material: API-key-only access for YouTube Data API public
 metadata where Google permits it, and official Google authorization-token
 credentials/scopes for private YouTube Reporting, YouTube Analytics, and
 AdSense account or revenue data.
+
+The setup/smoke process is documented in
+`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`; it prepares credential registration,
+credential-only CLI smoke, audited token-refresh probing, and ingestion dry-run
+smoke, but it does not close the data questions below until real
+owner-approved Google credentials and reports are available.
 
 - Exact list of YouTube report types available in UMS account.
 - Which reports cover outside-CMS channels.

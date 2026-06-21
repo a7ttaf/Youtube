@@ -59,6 +59,14 @@ closed; Docs/01 status header and 12 "this PR" placeholders updated.
   YouTube Reporting/Analytics and AdSense revenue/account data require official
   Google authorization tokens/scopes, never Gmail passwords, browser cookies, or
   linked personal Gmail sessions.
+    - ✅ Google credential setup/smoke runbook (branch
+      `codex/google-credential-smoke`) — adds the credential-only smoke CLI and
+      defines the owner approval packet, GCP Secret Manager payload/ref
+      contract, UMS metadata-only credential registration, audited credential
+      token-refresh probe, ingestion CLI `--dry-run` smoke, live-run gate,
+      rollback/rotation notes, and test coverage references. No live
+      credentials are added and live ingestion remains blocked until
+      owner-approved Google material/scopes are supplied.
     - ✅ PR #47 — Google live connector foundation (B2.1-B2.4 in one
       stack, merged 2026-05-27 as commit 52734a3): credential foundation (secret resolver dispatch +
       gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);

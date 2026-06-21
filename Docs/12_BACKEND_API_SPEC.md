@@ -466,6 +466,19 @@ Google connector credential contract:
   and telemetry — the `has_secret_ref` flag and refresh columns — and never
   return the secret reference value or raw credential material.
 
+Owner-approved setup and smoke are specified in
+`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`. The required sequence is:
+register the external secret reference with `POST /connectors/credentials`,
+read metadata/health without exposing the locator, run
+`scripts/check_google_connector_credential.py` for a credential-only token
+refresh smoke, run
+`POST /connectors/credentials/{connector_key}/{account_id}/test` until the
+machine-readable status is `ok`, then run an ingestion CLI `--dry-run` smoke
+before any `dry_run: false` connector job. Current production resolver support
+is GCP Secret Manager via `secret-manager://` or `gcp-secret-manager://`; other
+admin-accepted secret-reference prefixes fail closed until their resolvers are
+implemented.
+
 `POST /connectors/jobs` submits a real Google ingest pull to the module-owned,
 bounded, in-process `ConnectorJobExecutor` and returns **202** immediately with
 `execution_status: "submitted"`. The worker thread runs the proven CLI pattern on

@@ -29,6 +29,13 @@ Google authorization tokens server-side. The credential owner decision remains
 blocked until the operator supplies approved Google Cloud project credentials
 and confirms the allowed API/scopes for each live connector.
 
+Operational setup and smoke must follow
+`Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`. The runbook defines the owner
+approval packet, GCP Secret Manager payload shape, metadata-only UMS credential
+registration, credential-only CLI smoke, audited token-refresh probe, and first
+ingestion dry-run smoke. It does not permit a live pull before the owner
+approves the exact Google project, scopes, account ids, and smoke evidence.
+
 References:
 
 - <https://developers.google.com/youtube/v3/getting-started>
@@ -171,3 +178,8 @@ error_message
 - No connector path uses public FX rates to create official revenue,
   payment, tax, or deduction values.
 - Failed runs create dashboard alerts.
+- Owner-approved credential setup follows
+  `Docs/19_GOOGLE_CREDENTIAL_SETUP_SMOKE.md`: external secret reference only,
+  no raw secret material in UMS, credential-only CLI smoke exits `0`,
+  credential probe returns `status: "ok"`, and ingestion CLI `--dry-run` passes
+  before any live connector job.
