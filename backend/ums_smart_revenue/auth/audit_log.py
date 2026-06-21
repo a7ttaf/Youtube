@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.scopes import ScopeType
+from ums_smart_revenue.connectors.keys import canonical_connector_source_system
 from ums_smart_revenue.db.security_models import AuditLogORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -20,14 +21,6 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _CONNECTOR_TERMINAL_LIFECYCLES = frozenset({"FINISHED", "PROJECTION_FAILED"})
 _ADSENSE_ACCOUNT_RESOURCE_PREFIX = "accounts/"
 _ADSENSE_ACCOUNT_ID_RESERVED_CHARS = frozenset("/?#%")
-_CANONICAL_CONNECTOR_KEYS = {
-    "youtube-reporting": "youtube_reporting",
-    "youtube_reporting": "youtube_reporting",
-    "youtube-analytics": "youtube_analytics",
-    "youtube_analytics": "youtube_analytics",
-    "adsense-management": "adsense_management",
-    "adsense_management": "adsense_management",
-}
 ConnectorTerminalEdge = tuple[tuple[str, str], datetime, str]
 
 
@@ -376,7 +369,7 @@ def _connector_terminal_edge(
     if lifecycle is None:
         return None
     raw_connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(scope_id)
-    connector_key = _canonical_connector_key(raw_connector_key)
+    connector_key = canonical_connector_source_system(raw_connector_key)
     raw_account_id = _non_blank_text(details.get("account_id")) or _connector_entity_account_id(
         entity_id=entity_id,
         connector_key=raw_connector_key,
@@ -441,13 +434,6 @@ def _non_blank_text(value: object) -> str | None:
         if text:
             return text
     return None
-
-
-def _canonical_connector_key(value: str | None) -> str | None:
-    """Collapse known public hyphen aliases to their stored source-system key."""
-    if value is None:
-        return None
-    return _CANONICAL_CONNECTOR_KEYS.get(value, value)
 
 
 def _connector_entity_account_id(*, entity_id: object, connector_key: str | None) -> str | None:

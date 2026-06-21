@@ -144,6 +144,7 @@ from ums_smart_revenue.connectors.google_source_rows import (
     ParsedSourceRow,
     SqlAlchemyGoogleRevenueSourceRowRepository,
 )
+from ums_smart_revenue.connectors.keys import source_system_for_connector
 from ums_smart_revenue.connectors.runs.blob_storage import (
     BlobStorageBackend,
     GcsBlobStorageBackend,
@@ -1147,7 +1148,7 @@ def _handle_live_produced_report(
                     tenant_id=tenant_id,
                     connector_key=connector_key,
                     run_entry=run_entry,
-                    source_system=_source_system_for_connector(connector_key),
+                    source_system=source_system_for_connector(connector_key),
                     report_type=report_type,
                     report_month=report_month,
                     raw_reports=raw_reports,
@@ -1467,7 +1468,7 @@ def _process_one_report(
     Failures BEFORE the first flush leave the key absent, signalling "no
     raw_file in flight to mark FAILED".
     """
-    source_system = _source_system_for_connector(connector_key)
+    source_system = source_system_for_connector(connector_key)
     deferred_cleanup_plans: tuple[_DeferredStaleCleanupPlan, ...] = ()
     rows_deleted_stale = 0
     raw_files = _prepare_and_link_raw_reports(
@@ -3015,7 +3016,7 @@ def _credential_key_candidates(connector_key: str) -> tuple[str, ...]:
     # FIX: Credential lookup must be symmetric across public hyphen keys and
     # stored source-system underscore keys; operators can dispatch either alias.
     candidates.extend(_CREDENTIAL_KEY_ALIASES.get(connector_key, ()))
-    source_key = _source_system_for_connector(connector_key)
+    source_key = source_system_for_connector(connector_key)
     if source_key != connector_key:
         candidates.append(source_key)
     return tuple(dict.fromkeys(candidates))
@@ -3145,29 +3146,6 @@ def _build_blob_backend() -> tuple[BlobStorageBackend, str, str]:
     )
 
 
-def _source_system_for_connector(connector_key: str) -> str:
-    """Map the connector_key to the ALLOWED_SOURCE_SYSTEMS member.
-
-    Keeps the orchestrator decoupled from B1's source_system string set
-    while still letting the raw_report_files row carry the value the
-    existing PR #43 repository expects.
-    """
-    mapping = {
-        "youtube-reporting": "youtube_reporting",
-        "youtube_reporting": "youtube_reporting",
-        "youtube-analytics": "youtube_analytics",
-        "youtube_analytics": "youtube_analytics",
-        "adsense-management": "adsense_management",
-        "adsense_management": "adsense_management",
-    }
-    try:
-        return mapping[connector_key]
-    except KeyError as exc:
-        raise ValueError(
-            f"unknown connector_key for source_system mapping: {connector_key!r}"
-        ) from exc
-
-
 _EXTENSIONS: dict[str, str] = {
     "youtube-reporting": "csv",
     "youtube_reporting": "csv",
@@ -3184,7 +3162,7 @@ def _extension_for_connector(connector_key: str) -> str:
     YouTube Reporting downloads are CSV; YouTube Analytics (B2.5) and
     AdSense (B2.6) return JSON. Centralised here so the path-builder stays
     consistent across slices. Mirrors the explicit-mapping + KeyError ->
-    ValueError pattern of ``_source_system_for_connector`` so a missing
+    ValueError pattern of ``source_system_for_connector`` so a missing
     entry for a future B2.5/B2.6 registration fails loudly instead of
     silently emitting ``.json``.
     """

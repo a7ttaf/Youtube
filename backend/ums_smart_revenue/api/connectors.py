@@ -43,10 +43,10 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
 )
 from ums_smart_revenue.connectors.google.registry import known_keys
+from ums_smart_revenue.connectors.keys import source_system_for_connector
 from ums_smart_revenue.connectors.runs.executor import ConnectorJobActor
 from ums_smart_revenue.connectors.runs.orchestrator import (
     _credential_key_candidates,
-    _source_system_for_connector,
     resolve_connector_credentials,
 )
 from ums_smart_revenue.connectors.runs.repository import (
@@ -403,7 +403,7 @@ def _canonicalize_connector_job_payload(
             detail="Unknown connector key",
         )
     return payload.model_copy(
-        update={"connector_key": _source_system_for_connector(payload.connector_key)}
+        update={"connector_key": source_system_for_connector(payload.connector_key)}
     )
 
 
