@@ -13,11 +13,9 @@ from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.scopes import ScopeType
 from ums_smart_revenue.connectors.keys import canonical_connector_source_system
 from ums_smart_revenue.db.security_models import AuditLogORM
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
-from ums_smart_revenue.tenancy.context import get_current_tenant
+from ums_smart_revenue.tenancy.ids import resolve_repository_tenant_id
 
 MAX_AUDIT_LOG_PAGE_SIZE = 100
-_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _CONNECTOR_TERMINAL_LIFECYCLES = frozenset({"FINISHED", "PROJECTION_FAILED"})
 _ADSENSE_ACCOUNT_RESOURCE_PREFIX = "accounts/"
 _ADSENSE_ACCOUNT_ID_RESERVED_CHARS = frozenset("/?#%")
@@ -106,7 +104,10 @@ class SqlAlchemyAuditLogRepository:
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind this repository instance to an explicit or current request tenant."""
         self._session = session
-        self._tenant_id = _resolve_tenant_id(tenant_id)
+        try:
+            self._tenant_id = resolve_repository_tenant_id(tenant_id)
+        except ValueError as exc:
+            raise AuditLogValidationError(str(exc)) from exc
 
     def list_events(
         self,
@@ -333,26 +334,6 @@ def _parse_uuid(value: str, field_name: str) -> UUID:
         return UUID(value)
     except ValueError as exc:
         raise AuditLogValidationError(f"{field_name} must be a valid UUID") from exc
-
-
-def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
-    """Resolve an explicit, request-scoped, or bootstrap audit tenant id."""
-    if tenant_id is not None:
-        return _parse_tenant_uuid(tenant_id)
-    current_tenant = get_current_tenant()
-    if current_tenant is not None:
-        return current_tenant.id
-    return _DEFAULT_TENANT_UUID
-
-
-def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
-    """Normalize tenant constructor input into a UUID object."""
-    if isinstance(tenant_id, UUID):
-        return tenant_id
-    try:
-        return UUID(tenant_id.strip())
-    except (AttributeError, ValueError) as exc:
-        raise AuditLogValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _connector_terminal_edge(

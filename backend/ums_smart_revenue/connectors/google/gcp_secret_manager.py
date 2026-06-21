@@ -10,7 +10,6 @@ exact name expected by SecretManagerServiceClient.access_secret_version.
 from __future__ import annotations
 
 import re
-from typing import Protocol
 
 from google.api_core import exceptions as gcp_exceptions
 
@@ -25,18 +24,6 @@ _NAME_PATTERN = re.compile(r"^projects/[^/]+/secrets/[^/]+/versions/[^/]+$")
 _SUPPORTED_PREFIXES = ("gcp-secret-manager://", "secret-manager://")
 
 
-class _SecretPayload(Protocol):
-    data: bytes
-
-
-class _SecretVersionResponse(Protocol):
-    payload: _SecretPayload
-
-
-class _SecretManagerClient(Protocol):
-    def access_secret_version(self, *, request: dict) -> _SecretVersionResponse: ...
-
-
 class GcpSecretManagerResolver:
     """Resolver for GCP Secret Manager URI schemes.
 
@@ -44,7 +31,7 @@ class GcpSecretManagerResolver:
     SecretManagerServiceClient; tests use a mock).
     """
 
-    def __init__(self, *, client: _SecretManagerClient | None = None) -> None:
+    def __init__(self, *, client: object | None = None) -> None:
         self._client = client
 
     def resolve(self, ref: str) -> str:
@@ -52,18 +39,18 @@ class GcpSecretManagerResolver:
         if not _NAME_PATTERN.match(name):
             raise MalformedSecretUriError(ref=ref)
         try:
-            response = self._get_client(ref=ref).access_secret_version(request={"name": name})
+            response = _access_secret_version(self._get_client(ref=ref), name=name, ref=ref)
         except gcp_exceptions.NotFound as exc:
             raise SecretNotFoundError(ref=ref) from exc
         except gcp_exceptions.GoogleAPICallError as exc:
             raise SecretFetchError(ref=ref, inner=exc) from exc
-        payload: bytes = response.payload.data
+        payload = _secret_payload_bytes(response)
         try:
             return payload.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise MalformedSecretPayloadError(detail="payload is not utf-8") from exc
 
-    def _get_client(self, *, ref: str) -> _SecretManagerClient:
+    def _get_client(self, *, ref: str) -> object:
         # ============================================================================
         # Purpose: Lazily construct the GCP Secret Manager client and preserve
         #          construction/import/auth failures behind the connector's typed
@@ -95,3 +82,21 @@ def _name_from_ref(ref: str) -> str:
             prefix_length = len(prefix)
             return ref[prefix_length:]
     raise MalformedSecretUriError(ref=ref)
+
+
+def _access_secret_version(client: object, *, name: str, ref: str) -> object:
+    """Call Secret Manager with a runtime check for injected test/client doubles."""
+    access_secret_version = getattr(client, "access_secret_version", None)
+    if not callable(access_secret_version):
+        error = TypeError("secret manager client missing access_secret_version")
+        raise SecretFetchError(ref=ref, inner=error) from error
+    return access_secret_version(request={"name": name})
+
+
+def _secret_payload_bytes(response: object) -> bytes:
+    """Extract and validate the byte payload from a Secret Manager response."""
+    payload_container = getattr(response, "payload", None)
+    payload = getattr(payload_container, "data", None)
+    if not isinstance(payload, bytes):
+        raise MalformedSecretPayloadError(detail="payload data is not bytes")
+    return payload

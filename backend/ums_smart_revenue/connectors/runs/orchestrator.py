@@ -1144,22 +1144,27 @@ def _handle_live_produced_report(
         if produced_error is not None:
             if raw_reports:
                 _prepare_and_link_raw_reports(
-                    session=session,
-                    tenant_id=tenant_id,
-                    connector_key=connector_key,
-                    run_entry=run_entry,
-                    source_system=source_system_for_connector(connector_key),
-                    report_type=report_type,
-                    report_month=report_month,
+                    context=_RawReportLinkContext(
+                        session=session,
+                        tenant_id=tenant_id,
+                        run_entry=run_entry,
+                        report=_RawReportDescriptor(
+                            connector_key=connector_key,
+                            source_system=source_system_for_connector(connector_key),
+                            report_type=report_type,
+                            report_month=report_month,
+                        ),
+                        storage=_RawReportStorageContext(
+                            backend=backend,
+                            scheme=scheme,
+                            bucket=bucket,
+                            triggered_by_user_id=triggered_by_user_id,
+                        ),
+                        ordering_index=ordering_index,
+                        audit=_RawReportAuditContext(sink=audit_sink, actor=audit_actor),
+                    ),
                     raw_reports=raw_reports,
-                    backend=backend,
-                    scheme=scheme,
-                    bucket=bucket,
-                    ordering_index=ordering_index,
-                    triggered_by_user_id=triggered_by_user_id,
                     report_state=report_state,
-                    audit_sink=audit_sink,
-                    audit_actor=audit_actor,
                 )
             raise produced_error
         if parser_payload is None or raw_reports is None or not raw_reports:
@@ -1472,22 +1477,27 @@ def _process_one_report(
     deferred_cleanup_plans: tuple[_DeferredStaleCleanupPlan, ...] = ()
     rows_deleted_stale = 0
     raw_files = _prepare_and_link_raw_reports(
-        session=session,
-        tenant_id=tenant_id,
-        connector_key=connector_key,
-        run_entry=run_entry,
-        source_system=source_system,
-        report_type=report_type,
-        report_month=report_month,
+        context=_RawReportLinkContext(
+            session=session,
+            tenant_id=tenant_id,
+            run_entry=run_entry,
+            report=_RawReportDescriptor(
+                connector_key=connector_key,
+                source_system=source_system,
+                report_type=report_type,
+                report_month=report_month,
+            ),
+            storage=_RawReportStorageContext(
+                backend=backend,
+                scheme=scheme,
+                bucket=bucket,
+                triggered_by_user_id=triggered_by_user_id,
+            ),
+            ordering_index=ordering_index,
+            audit=_RawReportAuditContext(sink=audit_sink, actor=audit_actor),
+        ),
         raw_reports=raw_reports,
-        backend=backend,
-        scheme=scheme,
-        bucket=bucket,
-        ordering_index=ordering_index,
-        triggered_by_user_id=triggered_by_user_id,
         report_state=report_state,
-        audit_sink=audit_sink,
-        audit_actor=audit_actor,
     )
 
     # 5-7. Parse, upsert, and mark_parsed inside a SAVEPOINT. The raw_file
@@ -1920,6 +1930,39 @@ def _delete_stale_source_rows(
     return rows_deleted_stale
 
 
+@dataclass(frozen=True)
+class _RawReportDescriptor:
+    connector_key: str
+    source_system: str
+    report_type: str
+    report_month: str
+
+
+@dataclass(frozen=True)
+class _RawReportStorageContext:
+    backend: BlobStorageBackend
+    scheme: str
+    bucket: str
+    triggered_by_user_id: UUID | None
+
+
+@dataclass(frozen=True)
+class _RawReportAuditContext:
+    sink: AuditSink
+    actor: UserPrincipal
+
+
+@dataclass(frozen=True)
+class _RawReportLinkContext:
+    session: Session
+    tenant_id: UUID
+    run_entry: ConnectorRunEntry
+    report: _RawReportDescriptor
+    storage: _RawReportStorageContext
+    ordering_index: int
+    audit: _RawReportAuditContext
+
+
 # ============================================================================
 # Purpose: Persist and link every raw CSV evidence file yielded for one logical
 #          report before parsing/upsert work begins.
@@ -1934,22 +1977,9 @@ def _delete_stale_source_rows(
 # ============================================================================
 def _prepare_and_link_raw_reports(
     *,
-    session: Session,
-    tenant_id: UUID,
-    connector_key: str,
-    run_entry: ConnectorRunEntry,
-    source_system: str,
-    report_type: str,
-    report_month: str,
+    context: _RawReportLinkContext,
     raw_reports: tuple[_CsvReportDownload, ...],
-    backend: BlobStorageBackend,
-    scheme: str,
-    bucket: str,
-    ordering_index: int,
-    triggered_by_user_id: UUID | None,
     report_state: dict[str, object],
-    audit_sink: AuditSink,
-    audit_actor: UserPrincipal,
 ) -> list[RawReportFileORM]:
     """Upload each ``raw_report`` and link raw_file rows to the active report."""
     raw_files: list[RawReportFileORM] = []
@@ -1960,17 +1990,17 @@ def _prepare_and_link_raw_reports(
 
     for raw_report in raw_reports:
         raw_file, newly_downloaded = _prepare_raw_report_file(
-            session=session,
-            tenant_id=tenant_id,
-            connector_key=connector_key,
-            source_system=source_system,
-            report_type=report_type,
-            report_month=report_month,
+            session=context.session,
+            tenant_id=context.tenant_id,
+            connector_key=context.report.connector_key,
+            source_system=context.report.source_system,
+            report_type=context.report.report_type,
+            report_month=context.report.report_month,
             raw_bytes=raw_report.read_bytes(),
-            backend=backend,
-            scheme=scheme,
-            bucket=bucket,
-            triggered_by_user_id=triggered_by_user_id,
+            backend=context.storage.backend,
+            scheme=context.storage.scheme,
+            bucket=context.storage.bucket,
+            triggered_by_user_id=context.storage.triggered_by_user_id,
         )
         if raw_file.id in seen_raw_file_ids:
             continue
@@ -1986,11 +2016,11 @@ def _prepare_and_link_raw_reports(
 
     for offset, raw_file in enumerate(raw_files):
         link_raw_file(
-            session,
-            tenant_id=tenant_id,
-            connector_run_id=UUID(run_entry.id),
+            context.session,
+            tenant_id=context.tenant_id,
+            connector_run_id=UUID(context.run_entry.id),
             raw_report_file_id=raw_file.id,
-            ordering_index=ordering_index + offset,
+            ordering_index=context.ordering_index + offset,
         )
         # Spec §8.4: stage the DOWNLOADED audit edge in the main transaction
         # alongside the link join, so the audit row commits with its evidence.
@@ -2007,9 +2037,9 @@ def _prepare_and_link_raw_reports(
         # if parsing fails afterward.
         if raw_file.id in newly_downloaded_raw_file_ids:
             emit_raw_file_downloaded(
-                sink=audit_sink,
-                actor=audit_actor,
-                run=run_entry,
+                sink=context.audit.sink,
+                actor=context.audit.actor,
+                run=context.run_entry,
                 raw_file=raw_file,
             )
     return raw_files
@@ -2584,8 +2614,6 @@ def _require_text(mapping: dict[str, object], field_name: str) -> str:
     ``GoogleConnectorError`` so the outer per-report ``except`` records
     ``GoogleApiResponseError`` against the right report.
     """
-    from ums_smart_revenue.connectors.google.errors import GoogleApiResponseError
-
     value = mapping.get(field_name)
     if not isinstance(value, str) or not value.strip():
         raise GoogleApiResponseError(
@@ -2962,8 +2990,6 @@ def _parser_payload_error(*, report_id: str, reason: str) -> GoogleConnectorErro
     failure list, so a CSV-shape failure ends up classed the same as a JSON
     list_reports failure.
     """
-    from ums_smart_revenue.connectors.google.errors import GoogleApiResponseError
-
     return GoogleApiResponseError(url=f"report:{report_id}", reason=reason)
 
 

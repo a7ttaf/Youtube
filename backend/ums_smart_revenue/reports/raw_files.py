@@ -1,28 +1,23 @@
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.report_models import RawReportFileORM
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
-from ums_smart_revenue.tenancy.context import get_current_tenant
+from ums_smart_revenue.tenancy.ids import resolve_repository_tenant_id
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 PURGED_PARSE_STATUS = "PURGED"
 ALLOWED_PARSE_STATUSES = frozenset({"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"})
 ALLOWED_STORAGE_PREFIXES = ("s3://", "gs://", "azure://", "blob://", "file-store://")
 MAX_RAW_REPORT_FILE_PAGE_SIZE = 100
-_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
-
-
-class _RowCountResult(Protocol):
-    rowcount: int
 
 
 @dataclass(frozen=True)
@@ -85,7 +80,10 @@ class SqlAlchemyRawReportFileRepository:
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind raw report file metadata operations to one tenant."""
         self._session = session
-        self._tenant_id = _resolve_tenant_id(tenant_id)
+        try:
+            self._tenant_id = resolve_repository_tenant_id(tenant_id)
+        except ValueError as exc:
+            raise RawReportFileValidationError(str(exc)) from exc
 
     def register_file(
         self,
@@ -209,7 +207,7 @@ class SqlAlchemyRawReportFileRepository:
         actor_uuid = _actor_identity_uuid(actor_user_id)
         now = datetime.now(UTC)
         result = cast(
-            _RowCountResult,
+            CursorResult[Any],
             self._session.execute(
                 update(RawReportFileORM)
                 .where(
@@ -332,26 +330,6 @@ def _parse_uuid(value: str, *, field_name: str = "raw_report_file_id") -> UUID:
         return UUID(value)
     except ValueError as exc:
         raise RawReportFileValidationError(f"{field_name} must be a valid UUID") from exc
-
-
-def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
-    """Resolve tenant id from explicit param, request context, or bootstrap."""
-    if tenant_id is not None:
-        return _parse_tenant_uuid(tenant_id)
-    current_tenant = get_current_tenant()
-    if current_tenant is not None:
-        return current_tenant.id
-    return _DEFAULT_TENANT_UUID
-
-
-def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
-    """Normalize tenant constructor input into a UUID object."""
-    if isinstance(tenant_id, UUID):
-        return tenant_id
-    try:
-        return UUID(tenant_id.strip())
-    except (AttributeError, ValueError) as exc:
-        raise RawReportFileValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _is_duplicate_raw_report_file_integrity_error(error: IntegrityError) -> bool:
