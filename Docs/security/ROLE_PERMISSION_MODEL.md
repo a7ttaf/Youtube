@@ -36,7 +36,7 @@ Global break-glass owner. Can see all analytics, finance, raw files, users, expo
 Global platform administrator for organization structure, users, channel registry, groups, export templates, and non-financial analytics. This role does not automatically include sensitive finance visibility unless paired with a finance role.
 
 ### Revenue Operations Admin
-Global data operations role for channel registry quality, report ingestion visibility, sync health, and non-payment operational troubleshooting. Can run connector jobs but cannot administer OAuth credentials or change finance rules.
+Global data operations role for channel registry quality, report ingestion visibility, sync health, and non-payment operational troubleshooting. Can run connector jobs but cannot administer Google connector credentials or change finance rules.
 
 ### Finance Admin
 Global finance owner for revenue, finalized payments, bank reconciliation reads and receipt recording, manual overrides, allocation rules, exports, and finance month locking. Cannot assign Super Owner without Super Owner approval.
@@ -72,7 +72,7 @@ Read-only audit and compliance role. Can view audit logs and security metadata. 
 Non-human service role for scheduled jobs and connectors. Can run connector jobs, write raw ingestion records through backend services, and create audit events. Cannot use dashboard sessions or assign human roles.
 
 ### Connector Admin
-Technical integration administrator. Can manage OAuth/client configuration, rotate encrypted tokens, and run connector jobs. Does not receive finance visibility unless paired with a finance role.
+Technical integration administrator. Can manage Google/API connector credential configuration, rotate encrypted tokens, and run connector jobs. Does not receive finance visibility unless paired with a finance role.
 
 ### Data Steward
 Scoped registry maintenance role. Can change channel/company/sector mappings and groups within granted scope. Does not receive finance visibility.
@@ -86,7 +86,7 @@ Scoped registry maintenance role. Can change channel/company/sector mappings and
 | Finance control | manual override, override approval, lock/unlock month, change allocation rules, record bank reconciliation receipts. |
 | Registry | manage channel registry, company mapping, sector mapping, groups. |
 | Export | export analytics, export revenue, manage templates, view export history. |
-| Connectors | run connector jobs, manage OAuth/API settings, view connector health. |
+| Connectors | run connector jobs, manage Google/API connector credential settings, view connector health. |
 | Raw data | view raw API payloads, raw report files, parser errors. |
 | Administration | assign roles, manage users, view audit logs, manage platform config. |
 
@@ -106,7 +106,7 @@ Sensitive actions include:
 - assigning users to roles;
 - assigning direct scoped permissions;
 - changing channel/company/sector mapping;
-- managing OAuth/API connector settings;
+- managing Google/API connector credential settings;
 - running connector jobs;
 - viewing raw API or report files;
 

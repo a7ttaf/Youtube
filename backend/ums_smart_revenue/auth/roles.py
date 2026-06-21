@@ -123,7 +123,7 @@ ROLE_DEFINITIONS: dict[RoleKey, RoleDefinition] = {
     RoleKey.CONNECTOR_ADMIN: RoleDefinition(
         RoleKey.CONNECTOR_ADMIN,
         "Connector Admin",
-        "Technical owner for OAuth/API connector configuration.",
+        "Technical owner for Google/API connector credential configuration.",
         allowed_scope_types=frozenset({"global", "connector"}),
     ),
     RoleKey.DATA_STEWARD: RoleDefinition(

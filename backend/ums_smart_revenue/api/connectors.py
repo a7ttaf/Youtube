@@ -262,7 +262,7 @@ def list_connector_credential_health(
 ) -> dict[str, object]:
     """Return credential refresh telemetry plus a derived health_state per credential."""
     # ========================================================================
-    # Purpose: Surface read-only OAuth credential health (the four already-
+    # Purpose: Surface read-only Google credential token health (the four already-
     #   persisted refresh-telemetry columns plus a derived coarse health_state)
     #   for the dashboard. Fail-closed behind VIEW_CONNECTOR_HEALTH at global or
     #   connector scope; connector-scoped callers are narrowed to their granted
@@ -570,7 +570,7 @@ def _submitted_connector_job_response(
 # ============================================================================
 # Purpose: Submit a real Google ingest pull to the module-owned
 #   ConnectorJobExecutor and return 202 "submitted" immediately. Cheap
-#   in-request validation only (no OAuth refresh, no run_one inline). Control
+#   in-request validation only (no live token refresh, no run_one inline). Control
 #   flow order is load-bearing and fail-closed: authz 403 -> 503 disabled ->
 #   503 service_principal_unavailable -> 422 unknown-key -> 422 bad-month ->
 #   422 missing/inactive cred -> 409 dup / orphan-supersede -> 202 submit.
@@ -732,19 +732,19 @@ def test_connector_connection(
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object] | JSONResponse:
-    """Probe credential OAuth health; every probe (including 404) is audited as CONNECTOR_TESTED."""
+    """Probe Google connector credential token health; every probe is audited."""
     # ============================================================================
     # Purpose: Probe the stored credential for (connector_key, account_id) by
-    #   resolving its secret URI and performing an OAuth token refresh. No live
+    #   resolving its secret URI and performing an official Google token refresh. No live
     #   data is fetched. Operators use this to verify that a registered credential
     #   is still valid before relying on it for a connector run.
     # Database/ORM: ApiConnectorCredentialORM (read only via resolve_connector_credentials).
     # Standards: Requires MANAGE_CONNECTORS@connector(connector_key). Every probe
-    #   is audited (CONNECTOR_TESTED) including not-found; credential/OAuth failures
+    #   is audited (CONNECTOR_TESTED) including not-found; credential/token failures
     #   return 200 with a machine-readable status field; not-found returns 404 with
     #   the audit already committed (JSONResponse, not HTTPException, so the session
     #   commits rather than rolls back).
-    # Blast Radius: None (read-only; OAuth refresh touches Google but does not
+    # Blast Radius: None (read-only; token refresh touches Google but does not
     #   mutate stored state).
     # Connections:
     #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py
@@ -781,7 +781,10 @@ def test_connector_connection(
     except OAuthRefreshError:
         # FIX: str(exc) exposes the inner exception class name; safe canned message only.
         conn_status = "auth_failed"
-        detail = "OAuth token refresh failed; check that the credential secret is current."
+        detail = (
+            "Google credential token refresh failed; "
+            "check that the credential secret is current."
+        )
     except GoogleConnectorError:
         # FIX: str(exc) on GoogleConnectorError subclasses embeds full Google API URLs.
         conn_status = "error"

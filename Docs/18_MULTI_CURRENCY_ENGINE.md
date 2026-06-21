@@ -191,9 +191,13 @@ B1 connector behavior:
 5. Normalize selected source rows into existing revenue/payment tables only
    after source provenance is persisted.
 
-The connector layer owns OAuth credentials, retry, quota/auth failures, report
-availability, and parse errors. Finance services consume stored SQL rows; they
-do not call Google APIs directly and do not calculate official FX.
+The connector layer owns Google connector credentials, retry, quota/auth
+failures, report availability, and parse errors. API-key-only access is valid
+only for YouTube Data API public metadata where Google permits it; private
+YouTube Reporting, YouTube Analytics, and AdSense account or revenue data use
+official Google authorization-token credentials/scopes. Finance services
+consume stored SQL rows; they do not call Google APIs directly and do not
+calculate official FX.
 
 Official docs used for this design direction:
 

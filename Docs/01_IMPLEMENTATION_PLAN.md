@@ -202,7 +202,7 @@ running on the operator's workstation.
       for YouTube Reporting / YouTube Analytics / AdSense Management. Legacy
       `currency_exchange_rates` preserved as inert scaffolding. PostgreSQL
       migration round-trip on disposable `postgres:18-alpine`. Remaining: live
-      OAuth/API connector (B2), FX/conversion (B3) — scaffolding-only, so marked
+      Google connector credential setup (B2), FX/conversion (B3) — scaffolding-only, so marked
       ⏳ not ✅.
     - ⏳ PR #44 - Google source-rows -> revenue facts normalizer (Spec C1).
       Adds `backend/ums_smart_revenue/finance/google_source_normalizer.py`,
@@ -249,11 +249,16 @@ running on the operator's workstation.
 
 - ✅ Final stack decision (FastAPI + PostgreSQL + Docker via PRs #1, #11,
   #15).
-- ⏳ OAuth/API access plan — remaining: credentials repository exists
+- ⏳ Google connector credential access plan — remaining: credentials repository exists
   (PRs #33, #34); PR #47 stacks the full Google live connector foundation
-  (B2.1-B2.4 in one PR). Public OAuth consent flows, live connector
-  ingestion against real Google APIs, and token monitoring are not
-  started — they belong to B2.5+ slices that stack on PR #47.
+  (B2.1-B2.4 in one PR). Official Google authorization/consent setup,
+  live connector ingestion against real Google APIs, and token monitoring
+  are not started — they belong to B2.5+ slices that stack on PR #47.
+  API-key-only access is valid only for YouTube Data API public metadata
+  where Google permits it; private YouTube Reporting/Analytics and
+  AdSense account or revenue data require official Google authorization
+  tokens/scopes, never Gmail passwords, browser cookies, or linked
+  personal Gmail sessions.
     - ✅ PR #47 — Google live connector foundation (B2.1-B2.4 in one
       stack, merged 2026-05-27 as commit 52734a3): credential foundation (secret resolver dispatch +
       gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
@@ -429,12 +434,13 @@ unmapped-channel report are the remaining gaps.
 ### Build
 
 - ⏳ YouTube Reporting API jobs — remaining: client + `run_one` orchestrator +
-  CLI built and mock-tested (PR #47); blocked only on real OAuth credentials.
+  CLI built and mock-tested (PR #47); blocked only on owner-approved Google
+  authorization-token credentials.
 - ⏳ YouTube Analytics API targeted queries — remaining: targeted CMS-channel
-  query layer built and mock-tested (PR #48, B2.5); blocked only on real OAuth
-  credentials.
-- ⏳ YouTube Data API metadata sync — remaining: same credentials block; no
-  real sync.
+  query layer built and mock-tested (PR #48, B2.5); blocked only on
+  owner-approved Google authorization-token credentials.
+- ⏳ YouTube Data API metadata sync — remaining: API key or authorized
+  Google credential decision for the exact metadata scope; no real sync.
 - ⏳ Raw report storage — remaining: ORM + repository (PR #32) + blob backends
   + raw-file lifecycle (PR #47) wired into the ingest pipeline; runs only on
   mock fixtures (no live creds).
@@ -442,7 +448,8 @@ unmapped-channel report are the remaining gaps.
   (`GoogleSourceNormalizer.normalize_month`, PR #44) is now WIRED into `run_one`
   as a post-run step (PR #90, refactored into
   `connectors/runs/normalization.py` by PR #93), so a run projects source rows
-  to `MonthlyChannelRevenueFactORM`; blocked only on real OAuth credentials.
+  to `MonthlyChannelRevenueFactORM`; blocked only on owner-approved Google
+  revenue API credentials.
 - ⏳ Missing report alerts — remaining: per-channel coverage is now flagged by
   the `CHANNELS_MISSING_REVENUE_FACTS` smart alert (PR #98); a stored
   expected-connectors/accounts baseline (missing-REPORT detection) is deferred
@@ -464,15 +471,18 @@ unmapped-channel report are the remaining gaps.
 ### Status (2026-06-13)
 
 Engine-complete, credentials-blocked. The live pull engine is fully built and
-mock-tested end-to-end (OAuth refresh wrapper + httpx client + YouTube Reporting
-/ YouTube Analytics / AdSense Management clients + `run_one` orchestrator +
-CLI, PRs #47-#50); the C1 normalizer is wired into `run_one` (PRs #90/#93) so a
-run projects source rows to monthly facts; and `POST /connectors/jobs` now
-executes a real ingest via the in-process `ConnectorJobExecutor` (PR #95, the
-RLS lanes fixed by PRs #94/#97). The single remaining blocker is real Google
-OAuth credentials — no live pull has run against the real APIs. The pipeline
-stores Google-reported monetary values and currencies as source evidence before
-finance facts consume them.
+mock-tested end-to-end (Google authorization-token refresh wrapper + httpx
+client + YouTube Reporting / YouTube Analytics / AdSense Management clients +
+`run_one` orchestrator + CLI, PRs #47-#50); the C1 normalizer is wired into
+`run_one` (PRs #90/#93) so a run projects source rows to monthly facts; and
+`POST /connectors/jobs` now executes a real ingest via the in-process
+`ConnectorJobExecutor` (PR #95, the RLS lanes fixed by PRs #94/#97). The single
+remaining blocker is owner-approved Google connector credential material — no
+live pull has run against the real APIs. API-key-only access can cover only
+permitted YouTube Data API public metadata; private YouTube Reporting,
+Analytics, and AdSense revenue/account pulls require official Google
+authorization tokens/scopes. The pipeline stores Google-reported monetary
+values and currencies as source evidence before finance facts consume them.
 
 ---
 
@@ -481,9 +491,9 @@ finance facts consume them.
 ### Build
 
 - ⏳ AdSense account connector — remaining: automated multi-account
-  discovery/onboarding via the credentials repository (PRs #33, #34). OAuth
-  refresh and the live `accounts.payments.list` pull already ship; today an
-  operator supplies each account id to the sync CLI.
+  discovery/onboarding via the credentials repository (PRs #33, #34). Official
+  Google token refresh and the live `accounts.payments.list` pull already ship;
+  today an operator supplies each account id to the sync CLI.
 - ✅ Monthly payment pull — shipped: live AdSense `accounts.payments.list` pull
   (GoogleAdSensePaymentClient + pure fail-closed mapping/parse +
   AdSensePaymentSyncService with read-only locked-month skip + audit + operator
@@ -802,7 +812,7 @@ now wired to `GET /audit/events` (see below).
   title/aria).
 - ✅ Connector credential test-connection probe — `POST /connectors/credentials/{connector_key}/{account_id}/test`
   (branch `docs/plan-hygiene-post-71`): wraps `resolve_connector_credentials()` (load cred →
-  resolve secret URI → OAuth refresh, no live data pull). 404 on missing credential;
+  resolve secret URI → official Google token refresh, no live data pull). 404 on missing credential;
   200 with `status` field (`ok` / `inactive_credential` / `auth_failed` / `error`) and
   string `detail` otherwise. `CONNECTOR_TESTED` audit event. 5 TDD tests, `MANAGE_CONNECTORS`
   gate. Backend only; no migration. Merged to main as PR #72 (28da1a6).
@@ -813,8 +823,9 @@ now wired to `GET /audit/events` (see below).
   run-history panel replaces the placeholder (status/counts/error_summary + Load
   More id-dedupe); per-credential Test Connection button surfaces the existing
   probe; `/session/me` gains `canViewConnectorHealth` so the SPA gate mirrors the
-  route. No migration. Remaining Track D (OAuth consent, live pulls, token-expiry
-  schema + background monitoring) stays creds/schema-blocked.
+  route. No migration. Remaining Track D (official Google authorization setup,
+  live pulls, token-expiry schema + background monitoring) stays
+  creds/schema-blocked.
 - ✅ Connector credential token-health surface — branch
   `feat/connector-credential-health`: new read-only `GET
   /connectors/credentials/health` (`VIEW_CONNECTOR_HEALTH` gate, fail-closed;
@@ -914,7 +925,7 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   (PR #98, active+revenue_required channels with no monthly fact); broader
   quality checks not built.
 - ⏳ Backup/export retention — remaining: not started.
-- ⏳ OAuth token monitoring — remaining: credentials repo (PRs #33, #34) +
+- ⏳ Google credential token monitoring — remaining: credentials repo (PRs #33, #34) +
   four `api_connector_credentials` refresh-telemetry columns (last-attempt,
   token-expiry, last-status, last-error-class) stamped at the
   `resolve_connector_credentials` chokepoint (PR #95 Part 2, migration
@@ -946,5 +957,5 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
 Audit-log infrastructure shipped end-to-end and tenant-scoped, and the
 smart-alerts surface now flags per-channel missing-revenue-fact coverage
 (`CHANNELS_MISSING_REVENUE_FACTS`, PR #98). Remaining hardening (report-coverage
-baseline, backup/retention, live OAuth token monitoring) awaits the ingestion +
+baseline, backup/retention, live Google credential token monitoring) awaits the ingestion +
 expectation-model work that produces the underlying signals.
