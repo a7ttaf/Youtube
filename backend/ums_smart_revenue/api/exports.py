@@ -168,6 +168,28 @@ class _ExportDownloadArtifact:
     content_type: str
 
 
+@dataclass(frozen=True)
+class _FinanceExportSourceContext:
+    """Dependencies needed to build finance export source summaries."""
+
+    export_job: ExportJobEntry
+    user: UserPrincipal
+    session: Session
+    org_index: OrgAccessIndex
+    group_registry: ChannelGroupRegistryStore
+    include_audit_derived_alerts: bool = True
+
+
+@dataclass(frozen=True)
+class _FinanceExportAuditContext:
+    """Dependencies shared by finance export artifact audit writers."""
+
+    audit_sink: AuditSink
+    user: UserPrincipal
+    export_job: ExportJobEntry
+    group_registry: ChannelGroupRegistryStore
+
+
 class ExportRequest(BaseModel):
     """Pydantic request model for creating a new export job."""
 
@@ -467,11 +489,13 @@ def preview_finance_workbook(
                 "finance workbook preview only supports FINANCE_EXCEL exports"
             )
         preview = _build_finance_workbook_preview_for_export(
-            export_job=export_job,
-            user=user,
-            session=session,
-            org_index=org_index,
-            group_registry=group_registry,
+            context=_FinanceExportSourceContext(
+                export_job=export_job,
+                user=user,
+                session=session,
+                org_index=org_index,
+                group_registry=group_registry,
+            ),
         )
     except KeyError as exc:
         raise HTTPException(
@@ -501,10 +525,12 @@ def preview_finance_workbook(
         ) from exc
 
     audit_records = _record_finance_export_artifact_audit(
-        audit_sink=audit_sink,
-        user=user,
-        export_job=export_job,
-        group_registry=group_registry,
+        context=_FinanceExportAuditContext(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            group_registry=group_registry,
+        ),
         artifact_type="finance_workbook_preview",
         include_download_event=False,
         audit_summary=preview.smart_alerts if export_job.scope_type == "global" else None,
@@ -638,12 +664,14 @@ def download_finance_workbook(
             workbook_bytes, filename, content_type = served
         else:
             preview = _build_finance_workbook_preview_for_export(
-                export_job=export_job,
-                user=user,
-                session=session,
-                org_index=org_index,
-                group_registry=group_registry,
-                include_audit_derived_alerts=False,
+                context=_FinanceExportSourceContext(
+                    export_job=export_job,
+                    user=user,
+                    session=session,
+                    org_index=org_index,
+                    group_registry=group_registry,
+                    include_audit_derived_alerts=False,
+                ),
             )
             workbook_bytes = build_finance_workbook_xlsx(preview)
             filename = f"ums-finance-{export_job.month}-{export_job.scope_type}.xlsx"
@@ -692,10 +720,12 @@ def download_finance_workbook(
         ) from exc
 
     _record_finance_export_artifact_audit(
-        audit_sink=audit_sink,
-        user=user,
-        export_job=export_job,
-        group_registry=group_registry,
+        context=_FinanceExportAuditContext(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            group_registry=group_registry,
+        ),
         artifact_type="finance_workbook_xlsx",
         include_download_event=True,
     )
@@ -746,12 +776,14 @@ def download_executive_pdf(
             pdf_bytes, filename, content_type = served
         else:
             source_summaries = _build_finance_source_summaries_for_export(
-                export_job=export_job,
-                user=user,
-                session=session,
-                org_index=org_index,
-                group_registry=group_registry,
-                include_audit_derived_alerts=False,
+                context=_FinanceExportSourceContext(
+                    export_job=export_job,
+                    user=user,
+                    session=session,
+                    org_index=org_index,
+                    group_registry=group_registry,
+                    include_audit_derived_alerts=False,
+                ),
             )
             report = build_executive_pdf_report(
                 export_job=export_job,
@@ -808,10 +840,12 @@ def download_executive_pdf(
         ) from exc
 
     _record_finance_export_artifact_audit(
-        audit_sink=audit_sink,
-        user=user,
-        export_job=export_job,
-        group_registry=group_registry,
+        context=_FinanceExportAuditContext(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            group_registry=group_registry,
+        ),
         artifact_type="executive_pdf",
         include_download_event=True,
     )
@@ -862,12 +896,14 @@ def download_branded_slide_pack(
             pptx_bytes, filename, content_type = served
         else:
             source_summaries = _build_finance_source_summaries_for_export(
-                export_job=export_job,
-                user=user,
-                session=session,
-                org_index=org_index,
-                group_registry=group_registry,
-                include_audit_derived_alerts=False,
+                context=_FinanceExportSourceContext(
+                    export_job=export_job,
+                    user=user,
+                    session=session,
+                    org_index=org_index,
+                    group_registry=group_registry,
+                    include_audit_derived_alerts=False,
+                ),
             )
             report = build_branded_slide_pack_report(
                 export_job=export_job,
@@ -926,10 +962,12 @@ def download_branded_slide_pack(
         ) from exc
 
     _record_finance_export_artifact_audit(
-        audit_sink=audit_sink,
-        user=user,
-        export_job=export_job,
-        group_registry=group_registry,
+        context=_FinanceExportAuditContext(
+            audit_sink=audit_sink,
+            user=user,
+            export_job=export_job,
+            group_registry=group_registry,
+        ),
         artifact_type="branded_slide_pack_pptx",
         include_download_event=True,
     )
@@ -942,24 +980,14 @@ def download_branded_slide_pack(
 
 def _build_finance_workbook_preview_for_export(
     *,
-    export_job,
-    user: UserPrincipal,
-    session: Session,
-    org_index: OrgAccessIndex,
-    group_registry: ChannelGroupRegistryStore,
-    include_audit_derived_alerts: bool = True,
+    context: _FinanceExportSourceContext,
 ) -> FinanceWorkbookPreview:
     """Build the finance workbook preview model for the given export job."""
     source_summaries = _build_finance_source_summaries_for_export(
-        export_job=export_job,
-        user=user,
-        session=session,
-        org_index=org_index,
-        group_registry=group_registry,
-        include_audit_derived_alerts=include_audit_derived_alerts,
+        context=context,
     )
     return build_finance_workbook_preview(
-        export_job=export_job,
+        export_job=context.export_job,
         net_revenue=source_summaries.net_revenue,
         payment_match=source_summaries.payment_match,
         bank_reconciliation=source_summaries.bank_reconciliation,
@@ -1257,14 +1285,14 @@ def _discard_saved_artifact(
 # ============================================================================
 def _build_finance_source_summaries_for_export(
     *,
-    export_job,
-    user: UserPrincipal,
-    session: Session,
-    org_index: OrgAccessIndex,
-    group_registry: ChannelGroupRegistryStore,
-    include_audit_derived_alerts: bool = True,
+    context: _FinanceExportSourceContext,
 ) -> _FinanceExportSourceSummaries:
     """Resolve all finance source summaries (net revenue, payments, bank, alerts) for an export."""
+    export_job = context.export_job
+    user = context.user
+    session = context.session
+    org_index = context.org_index
+    group_registry = context.group_registry
     # ====================================================================
     # Purpose: Resolve the YouTube channel set the export was issued for.
     #   Prefers the snapshot frozen on the export row so post-creation
@@ -1386,7 +1414,7 @@ def _build_finance_source_summaries_for_export(
     failed_connector_run_count: int
     failed_connector_runs_by_status: dict[str, int]
     if (
-        include_audit_derived_alerts
+        context.include_audit_derived_alerts
         and channel_ids is None
         and has_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
     ):
@@ -1462,7 +1490,7 @@ def _record_analytics_export_artifact_audit(
     export_job: ExportJobEntry,
     group_registry: ChannelGroupRegistryStore,
     artifact_type: str,
-):
+) -> tuple[AuditRecord, ...]:
     """Emit analytics export revenue-view and download audit events."""
     revenue_scopes = _audit_revenue_scopes_for_export(
         scope_type=export_job.scope_type,
@@ -1518,15 +1546,16 @@ def _record_analytics_export_artifact_audit(
 # ============================================================================
 def _record_finance_export_artifact_audit(
     *,
-    audit_sink: AuditSink,
-    user: UserPrincipal,
-    export_job,
-    group_registry: ChannelGroupRegistryStore,
+    context: _FinanceExportAuditContext,
     artifact_type: str,
     include_download_event: bool,
     audit_summary: MonthlySmartAlertSummary | None = None,
-):
+) -> list[AuditRecord]:
     """Emit revenue, payment, bank-reconciliation, and optional download audit events."""
+    audit_sink = context.audit_sink
+    user = context.user
+    export_job = context.export_job
+    group_registry = context.group_registry
     revenue_scopes = _audit_revenue_scopes_for_export(
         scope_type=export_job.scope_type,
         scope_id=export_job.scope_id,

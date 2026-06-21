@@ -22,6 +22,8 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.exports import (
     _build_finance_source_summaries_for_export,
+    _FinanceExportAuditContext,
+    _FinanceExportSourceContext,
     _record_finance_export_artifact_audit,
 )
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
@@ -215,6 +217,39 @@ def _test_export_user(
     )
 
 
+def _finance_source_context(
+    *,
+    export_job: ExportJobEntry,
+    user: UserPrincipal,
+    session: Session,
+    include_audit_derived_alerts: bool = True,
+) -> _FinanceExportSourceContext:
+    """Build the context object expected by finance export source helpers."""
+    return _FinanceExportSourceContext(
+        export_job=export_job,
+        user=user,
+        session=session,
+        org_index=OrgAccessIndex(),
+        group_registry=ChannelGroupRegistry(),
+        include_audit_derived_alerts=include_audit_derived_alerts,
+    )
+
+
+def _finance_audit_context(
+    *,
+    audit_sink: InMemoryAuditSink,
+    user: UserPrincipal,
+    export_job: ExportJobEntry,
+) -> _FinanceExportAuditContext:
+    """Build the context object expected by finance export audit helpers."""
+    return _FinanceExportAuditContext(
+        audit_sink=audit_sink,
+        user=user,
+        export_job=export_job,
+        group_registry=ChannelGroupRegistry(),
+    )
+
+
 def _smart_alert_summary(*codes: str) -> MonthlySmartAlertSummary:
     """Build a minimal monthly smart-alert summary with the requested codes."""
     return MonthlySmartAlertSummary(
@@ -366,11 +401,11 @@ def test_scoped_export_excludes_out_of_scope_account_allocation(tmp_path):
         _seed_missing_net_with_components(session)
         _seed_out_of_scope_account_allocation(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
-            user=_test_export_user(),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
+                user=_test_export_user(),
+                session=session,
+            ),
         )
     channel_ids = {c.youtube_channel_id for c in summaries.net_revenue.channels}
     assert channel_ids == {"chA"}  # chB allocation line filtered out
@@ -388,11 +423,11 @@ def test_export_net_reflects_channel_direct_and_account_deductions(tmp_path):
     with Session(engine) as session:
         _seed_missing_net_with_components(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="global", scope_channel_ids=None),
-            user=_test_export_user(),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="global", scope_channel_ids=None),
+                user=_test_export_user(),
+                session=session,
+            ),
         )
     channel = summaries.net_revenue.channels[0]
     assert channel.status == "COMPONENT_DERIVED"
@@ -408,11 +443,11 @@ def test_global_export_preview_includes_skipped_source_alert_for_audit_user(tmp_
         _seed_missing_net_with_components(session)
         _seed_skipped_source_row_audit_edge(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="global", scope_channel_ids=None),
-            user=_test_export_user(include_audit=True),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="global", scope_channel_ids=None),
+                user=_test_export_user(include_audit=True),
+                session=session,
+            ),
         )
 
     skipped = _smart_alert_by_code(summaries.smart_alerts, "SOURCE_ROWS_SKIPPED")
@@ -432,11 +467,11 @@ def test_global_export_preview_includes_failed_connector_run_alert_for_audit_use
         _seed_missing_net_with_components(session)
         _seed_failed_connector_run_audit_edge(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="global", scope_channel_ids=None),
-            user=_test_export_user(include_audit=True),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="global", scope_channel_ids=None),
+                user=_test_export_user(include_audit=True),
+                session=session,
+            ),
         )
 
     failed = _smart_alert_by_code(summaries.smart_alerts, "CONNECTOR_RUNS_FAILED")
@@ -455,11 +490,11 @@ def test_scoped_export_suppresses_tenant_wide_skipped_source_alert(tmp_path):
         _seed_skipped_source_row_audit_edge(session)
         _seed_failed_connector_run_audit_edge(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
-            user=_test_export_user(include_audit=True),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
+                user=_test_export_user(include_audit=True),
+                session=session,
+            ),
         )
 
     codes = {alert.code for alert in summaries.smart_alerts.alerts}
@@ -475,12 +510,12 @@ def test_persisted_artifact_source_summary_is_permission_invariant(tmp_path):
         _seed_skipped_source_row_audit_edge(session)
         _seed_failed_connector_run_audit_edge(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="global", scope_channel_ids=None),
-            user=_test_export_user(include_audit=True, include_sensitive=True),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
-            include_audit_derived_alerts=False,
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="global", scope_channel_ids=None),
+                user=_test_export_user(include_audit=True, include_sensitive=True),
+                session=session,
+                include_audit_derived_alerts=False,
+            ),
         )
 
     codes = {alert.code for alert in summaries.smart_alerts.alerts}
@@ -520,11 +555,11 @@ def test_export_bundle_locked_month_uses_committed_snapshot_provenance(tmp_path)
         _seed_missing_net_with_components(session)
         _commit_snapshot_and_lock(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="global", scope_channel_ids=None),
-            user=_test_export_user(),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="global", scope_channel_ids=None),
+                user=_test_export_user(),
+                session=session,
+            ),
         )
     assert summaries.account_allocation_provenance.source == "committed_snapshot"
     assert summaries.account_allocation_provenance.commit_version == 1
@@ -536,11 +571,11 @@ def test_export_bundle_open_month_uses_live_compute_provenance(tmp_path):
     with Session(engine) as session:
         _seed_missing_net_with_components(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="global", scope_channel_ids=None),
-            user=_test_export_user(),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="global", scope_channel_ids=None),
+                user=_test_export_user(),
+                session=session,
+            ),
         )
     assert summaries.account_allocation_provenance.source == "live_compute"
     assert summaries.account_allocation_provenance.commit_version is None
@@ -555,11 +590,11 @@ def test_workbook_preview_payload_carries_allocation_provenance(tmp_path):
         _seed_missing_net_with_components(session)
         _commit_snapshot_and_lock(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="global", scope_channel_ids=None),
-            user=_test_export_user(),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="global", scope_channel_ids=None),
+                user=_test_export_user(),
+                session=session,
+            ),
         )
     preview = build_finance_workbook_preview(
         export_job=_export_job(scope_type="global", scope_channel_ids=None),
@@ -614,11 +649,11 @@ def test_export_committed_post_tax_month_renders_only_disclosure_token(tmp_path)
         _seed_missing_net_with_components(session)
         _commit_post_tax_snapshot_and_lock(session)
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="global", scope_channel_ids=None),
-            user=_test_export_user(),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="global", scope_channel_ids=None),
+                user=_test_export_user(),
+                session=session,
+            ),
         )
     # The committed post_tax snapshot is the resolved allocation source.
     assert summaries.account_allocation_provenance.source == "committed_snapshot"
@@ -648,10 +683,11 @@ def test_scoped_finance_export_records_payment_viewed():
     sink = InMemoryAuditSink()
     user = UserPrincipal(user_id="user-1", email="exp@example.com")
     records = _record_finance_export_artifact_audit(
-        audit_sink=sink,
-        user=user,
-        export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
-        group_registry=ChannelGroupRegistry(),
+        context=_finance_audit_context(
+            audit_sink=sink,
+            user=user,
+            export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
+        ),
         artifact_type="finance_workbook_xlsx",
         include_download_event=False,
     )
@@ -666,10 +702,11 @@ def test_global_finance_export_still_records_bank_reconciliation_viewed():
     sink = InMemoryAuditSink()
     user = UserPrincipal(user_id="user-1", email="exp@example.com")
     records = _record_finance_export_artifact_audit(
-        audit_sink=sink,
-        user=user,
-        export_job=_export_job(scope_type="global", scope_channel_ids=None),
-        group_registry=ChannelGroupRegistry(),
+        context=_finance_audit_context(
+            audit_sink=sink,
+            user=user,
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        ),
         artifact_type="finance_workbook_xlsx",
         include_download_event=False,
     )
@@ -681,10 +718,11 @@ def test_finance_export_failed_connector_self_audit_is_not_reason_redacted():
     """A failed-run alert carries no skipped-row reason payload to redact."""
     sink = InMemoryAuditSink()
     records = _record_finance_export_artifact_audit(
-        audit_sink=sink,
-        user=_test_export_user(include_audit=True),
-        export_job=_export_job(scope_type="global", scope_channel_ids=None),
-        group_registry=ChannelGroupRegistry(),
+        context=_finance_audit_context(
+            audit_sink=sink,
+            user=_test_export_user(include_audit=True),
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        ),
         artifact_type="finance_workbook_xlsx",
         include_download_event=False,
         audit_summary=_smart_alert_summary("CONNECTOR_RUNS_FAILED"),
@@ -703,10 +741,11 @@ def test_finance_export_skipped_source_self_audit_is_reason_redacted_without_sen
     """Skipped-row alerts suppress reason details unless sensitive audit payloads are allowed."""
     sink = InMemoryAuditSink()
     records = _record_finance_export_artifact_audit(
-        audit_sink=sink,
-        user=_test_export_user(include_audit=True),
-        export_job=_export_job(scope_type="global", scope_channel_ids=None),
-        group_registry=ChannelGroupRegistry(),
+        context=_finance_audit_context(
+            audit_sink=sink,
+            user=_test_export_user(include_audit=True),
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        ),
         artifact_type="finance_workbook_xlsx",
         include_download_event=False,
         audit_summary=_smart_alert_summary("SOURCE_ROWS_SKIPPED"),
@@ -744,11 +783,11 @@ def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):
         )
         session.commit()
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="global", scope_channel_ids=None),
-            user=_test_export_user(),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="global", scope_channel_ids=None),
+                user=_test_export_user(),
+                session=session,
+            ),
         )
     coverage_codes = [alert.code for alert in summaries.smart_alerts.alerts]
     assert "CHANNELS_MISSING_REVENUE_FACTS" in coverage_codes
@@ -786,11 +825,11 @@ def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
         session.commit()
         # Scoped export: frozen channel_ids = ("chA",) only.
         summaries = _build_finance_source_summaries_for_export(
-            export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
-            user=_test_export_user(),
-            session=session,
-            org_index=OrgAccessIndex(),
-            group_registry=ChannelGroupRegistry(),
+            context=_finance_source_context(
+                export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
+                user=_test_export_user(),
+                session=session,
+            ),
         )
     coverage = _smart_alert_by_code(summaries.smart_alerts, "CHANNELS_MISSING_REVENUE_FACTS")
     # The scoped export's channel set has no factless channel, so the
@@ -800,11 +839,11 @@ def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
         assert "ch-outside" not in coverage.details["sample_channel_ids"]
     # And the global export (no frozen channel set) still surfaces it.
     global_summaries = _build_finance_source_summaries_for_export(
-        export_job=_export_job(scope_type="global", scope_channel_ids=None),
-        user=_test_export_user(),
-        session=session,
-        org_index=OrgAccessIndex(),
-        group_registry=ChannelGroupRegistry(),
+        context=_finance_source_context(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            user=_test_export_user(),
+            session=session,
+        ),
     )
     global_coverage = _smart_alert_by_code(
         global_summaries.smart_alerts,

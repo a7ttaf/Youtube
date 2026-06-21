@@ -26,6 +26,7 @@
 #   - File: Docs/12_BACKEND_API_SPEC.md -> endpoint contracts and alert codes.
 # ============================================================================
 import re
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, cast
@@ -181,6 +182,16 @@ _REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY = {
     "manual_upload": {RevenueFactSourceKind.MANUAL_UPLOAD.value},
     "allocation": {RevenueFactSourceKind.ALLOCATION.value},
 }
+
+
+@dataclass(frozen=True)
+class _MonthConnectorSmartAlertAuditContext:
+    """Dependencies shared by monthly connector smart-alert self-audit records."""
+
+    audit_sink: AuditSink
+    user: UserPrincipal
+    month: str
+    audit_scope: AccessScope
 
 
 class AuthorizationCheckResponse(BaseModel):
@@ -1290,10 +1301,12 @@ def get_month_smart_alerts(
     if can_view_audit_log:
         audit_records.append(
             _record_month_connector_smart_alert_audit(
-                audit_sink=audit_sink,
-                user=user,
-                month=month,
-                audit_scope=audit_scope,
+                context=_MonthConnectorSmartAlertAuditContext(
+                    audit_sink=audit_sink,
+                    user=user,
+                    month=month,
+                    audit_scope=audit_scope,
+                ),
                 audit_signals=audit_signals,
                 include_sensitive_details=include_sensitive_details,
             )
@@ -1315,23 +1328,20 @@ def get_month_smart_alerts(
 # ============================================================================
 def _record_month_connector_smart_alert_audit(
     *,
-    audit_sink: AuditSink,
-    user: UserPrincipal,
-    month: str,
-    audit_scope: AccessScope,
+    context: _MonthConnectorSmartAlertAuditContext,
     audit_signals: MonthlySmartAlertAuditSignals,
     include_sensitive_details: bool,
 ) -> AuditRecord:
     """Record that a monthly smart-alert response read connector audit signals."""
     return record_audit_event(
-        sink=audit_sink,
-        actor=user,
+        sink=context.audit_sink,
+        actor=context.user,
         event_type=AuditEventType.AUDIT_LOG_VIEWED,
         entity_type="audit_log_page",
-        entity_id=f"{month}:connector_smart_alerts",
-        scope=audit_scope,
+        entity_id=f"{context.month}:connector_smart_alerts",
+        scope=context.audit_scope,
         details=_month_connector_smart_alert_audit_details(
-            month=month,
+            month=context.month,
             audit_signals=audit_signals,
             include_sensitive_details=include_sensitive_details,
         ),
