@@ -9,7 +9,7 @@
 #   connector/source-row audit-derived alert disclosure.
 # Connections:
 #   - File: backend/ums_smart_revenue/api/revenue.py -> smart-alert endpoint.
-#   - File: backend/ums_smart_revenue/connectors/runs/audit_alerts.py -> failed
+#   - File: backend/ums_smart_revenue/auth/audit_log.py -> failed
 #     connector-run audit read model.
 # ============================================================================
 """Tests for the Smart Alerts API authorization and database behavior."""

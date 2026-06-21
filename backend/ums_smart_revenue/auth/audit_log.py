@@ -1,19 +1,34 @@
 """Tenant-scoped audit log read models and SQL repository."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit import AuditEventType
+from ums_smart_revenue.auth.scopes import ScopeType
 from ums_smart_revenue.db.security_models import AuditLogORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MAX_AUDIT_LOG_PAGE_SIZE = 100
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
+_CONNECTOR_TERMINAL_LIFECYCLES = frozenset({"FINISHED", "PROJECTION_FAILED"})
+_ADSENSE_ACCOUNT_RESOURCE_PREFIX = "accounts/"
+_ADSENSE_ACCOUNT_ID_RESERVED_CHARS = frozenset("/?#%")
+_CANONICAL_CONNECTOR_KEYS = {
+    "youtube-reporting": "youtube_reporting",
+    "youtube_reporting": "youtube_reporting",
+    "youtube-analytics": "youtube_analytics",
+    "youtube_analytics": "youtube_analytics",
+    "adsense-management": "adsense_management",
+    "adsense_management": "adsense_management",
+}
+ConnectorTerminalEdge = tuple[tuple[str, str], datetime, str]
 
 
 @dataclass(frozen=True)
@@ -70,6 +85,14 @@ class AuditSummaryCounts:
     total_events: int
     sensitive_events: int
     recent_count: int
+
+
+@dataclass(frozen=True)
+class ConnectorRunFailureSummary:
+    """Tenant-scoped failed connector-run aggregate for monthly smart alerts."""
+
+    count: int
+    by_status: dict[str, int]
 
 
 class AuditLogError(ValueError):
@@ -206,6 +229,82 @@ class SqlAlchemyAuditLogRepository:
             recent_count=int(recent_count or 0),
         )
 
+    def connector_run_failure_summary(self, *, month: str) -> ConnectorRunFailureSummary:
+        # ====================================================================
+        # Purpose: Read connector-run terminal audit edges for a finance month
+        #   and derive the current failed-run smart-alert signal from the
+        #   latest edge per connector/account.
+        # Database/ORM: Bounded read-only SELECT on AuditLogORM / audit_logs;
+        #   filters tenant, connector scope, report_month, lifecycle, and
+        #   allowed entity/action shapes before deterministic Python grouping.
+        # Standards: Repository owns the audit-log SQL; callers own auth gates.
+        #   Returned payload is aggregate-only and excludes sensitive connector
+        #   error details.
+        # Blast Radius: Finance dashboard/export read model only. No audit
+        #   writes, connector execution, authorization, or finance mutation.
+        # Connections:
+        #   - File: backend/ums_smart_revenue/api/revenue.py -> dashboard
+        #     smart-alert signal composition.
+        #   - File: backend/ums_smart_revenue/api/exports.py -> export
+        #     smart-alert signal parity with the dashboard.
+        #   - File: backend/ums_smart_revenue/connectors/google/audit.py ->
+        #     emits FINISHED connector audit edges consumed here.
+        #   - File: backend/ums_smart_revenue/connectors/runs/normalization.py
+        #     -> emits PROJECTION_FAILED connector edges consumed here.
+        # ====================================================================
+        details_column = cast("Any", AuditLogORM.details)
+        details_rows = self._session.execute(
+            select(
+                AuditLogORM.details,
+                AuditLogORM.scope_id,
+                AuditLogORM.entity_id,
+                AuditLogORM.created_at,
+            )
+            .where(
+                AuditLogORM.tenant_id == self._tenant_id,
+                AuditLogORM.event_type == AuditEventType.CONNECTOR_JOB_RUN.value,
+                AuditLogORM.scope_type == ScopeType.CONNECTOR.value,
+                details_column["lifecycle"]
+                .as_string()
+                .in_(tuple(sorted(_CONNECTOR_TERMINAL_LIFECYCLES))),
+                details_column["report_month"].as_string() == month,
+                or_(
+                    AuditLogORM.entity_type == "connector_run",
+                    (
+                        (AuditLogORM.entity_type == "api_connector")
+                        & (details_column["action"].as_string() == "run_superseded")
+                    ),
+                ),
+            )
+            .order_by(
+                AuditLogORM.created_at.desc(),
+            ),
+        ).all()
+        latest_seen_at_by_connector_account: dict[tuple[str, str], datetime] = {}
+        latest_statuses_by_connector_account: dict[tuple[str, str], set[str]] = {}
+        for details, scope_id, entity_id, created_at in details_rows:
+            terminal_edge = _connector_terminal_edge(
+                details=details,
+                scope_id=scope_id,
+                entity_id=entity_id,
+                created_at=created_at,
+            )
+            if terminal_edge is None:
+                continue
+            _record_latest_terminal_status(
+                terminal_edge=terminal_edge,
+                latest_seen_at_by_connector_account=latest_seen_at_by_connector_account,
+                latest_statuses_by_connector_account=latest_statuses_by_connector_account,
+            )
+
+        status_counts = _failed_connector_status_counts(
+            latest_statuses_by_connector_account.values()
+        )
+        return ConnectorRunFailureSummary(
+            count=sum(status_counts.values()),
+            by_status=dict(sorted(status_counts.items())),
+        )
+
     @staticmethod
     def _to_entry(row: AuditLogORM) -> AuditLogEntry:
         """Convert a SQLAlchemy row into the API-facing immutable entry."""
@@ -259,6 +358,145 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
         raise AuditLogValidationError("tenant_id must be a valid UUID") from exc
+
+
+def _connector_terminal_edge(
+    *,
+    details: object,
+    scope_id: object,
+    entity_id: object,
+    created_at: datetime,
+) -> ConnectorTerminalEdge | None:
+    """Normalize one connector audit-log row into a grouping key and status."""
+    if not isinstance(details, dict):
+        return None
+    lifecycle = _connector_terminal_lifecycle(details.get("lifecycle"))
+    if lifecycle is None:
+        return None
+    raw_connector_key = _non_blank_text(details.get("connector_key")) or _non_blank_text(scope_id)
+    connector_key = _canonical_connector_key(raw_connector_key)
+    raw_account_id = _non_blank_text(details.get("account_id")) or _connector_entity_account_id(
+        entity_id=entity_id,
+        connector_key=raw_connector_key,
+    )
+    account_id = _canonical_connector_account_id(
+        connector_key=connector_key,
+        value=raw_account_id,
+    )
+    if connector_key is None or account_id is None:
+        return None
+    terminal_status = _connector_terminal_status(
+        lifecycle=lifecycle,
+        value=details.get("status"),
+    )
+    return (connector_key, account_id), created_at, terminal_status
+
+
+def _record_latest_terminal_status(
+    *,
+    terminal_edge: ConnectorTerminalEdge,
+    latest_seen_at_by_connector_account: dict[tuple[str, str], datetime],
+    latest_statuses_by_connector_account: dict[tuple[str, str], set[str]],
+) -> None:
+    """Keep the latest terminal status set for one connector/account pair."""
+    lookup_key, created_at, terminal_status = terminal_edge
+    latest_seen_at = latest_seen_at_by_connector_account.get(lookup_key)
+    if latest_seen_at is None:
+        latest_seen_at_by_connector_account[lookup_key] = created_at
+        latest_statuses_by_connector_account[lookup_key] = {terminal_status}
+        return
+    if created_at == latest_seen_at:
+        latest_statuses_by_connector_account[lookup_key].add(terminal_status)
+
+
+def _failed_connector_status_counts(
+    latest_terminal_statuses: Iterable[set[str]],
+) -> dict[str, int]:
+    """Count latest failed/partial terminal status sets, ignoring cleared runs."""
+    status_counts: dict[str, int] = {}
+    for terminal_statuses in latest_terminal_statuses:
+        status = _failed_connector_status(terminal_statuses)
+        if status is not None:
+            status_counts[status] = status_counts.get(status, 0) + 1
+    return status_counts
+
+
+def _failed_connector_status(terminal_statuses: set[str]) -> str | None:
+    """Return the alertable status for one latest terminal status set."""
+    if "" in terminal_statuses or "SUCCEEDED" in terminal_statuses:
+        return None
+    if "FAILED" in terminal_statuses:
+        return "FAILED"
+    if "PARTIAL" in terminal_statuses:
+        return "PARTIAL"
+    return None
+
+
+def _non_blank_text(value: object) -> str | None:
+    """Return stripped non-empty text for audit detail values."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    return None
+
+
+def _canonical_connector_key(value: str | None) -> str | None:
+    """Collapse known public hyphen aliases to their stored source-system key."""
+    if value is None:
+        return None
+    return _CANONICAL_CONNECTOR_KEYS.get(value, value)
+
+
+def _connector_entity_account_id(*, entity_id: object, connector_key: str | None) -> str | None:
+    """Extract the account suffix from api_connector audit entity ids."""
+    entity_id_text = _non_blank_text(entity_id)
+    if entity_id_text is None or connector_key is None:
+        return None
+    prefix = f"{connector_key}:"
+    if not entity_id_text.startswith(prefix):
+        return None
+    return _non_blank_text(entity_id_text.removeprefix(prefix))
+
+
+def _canonical_connector_account_id(
+    *,
+    connector_key: str | None,
+    value: str | None,
+) -> str | None:
+    """Normalize connector account ids that have public resource-name aliases."""
+    if value is None:
+        return None
+    if connector_key != "adsense_management" or not value.startswith(
+        _ADSENSE_ACCOUNT_RESOURCE_PREFIX,
+    ):
+        return value
+    candidate = value.removeprefix(_ADSENSE_ACCOUNT_RESOURCE_PREFIX)
+    if candidate and not any(char in candidate for char in _ADSENSE_ACCOUNT_ID_RESERVED_CHARS):
+        return candidate
+    return value
+
+
+def _connector_terminal_lifecycle(value: object) -> str | None:
+    """Normalize connector audit lifecycle values relevant to failed-run alerts."""
+    if not isinstance(value, str):
+        return None
+    lifecycle_value = value.strip().upper()
+    if lifecycle_value in _CONNECTOR_TERMINAL_LIFECYCLES:
+        return lifecycle_value
+    return None
+
+
+def _connector_terminal_status(*, lifecycle: str, value: object) -> str:
+    """Normalize terminal connector-run status values from audit JSON."""
+    if lifecycle == "PROJECTION_FAILED":
+        return "FAILED"
+    if not isinstance(value, str):
+        return ""
+    status_value = value.strip().upper()
+    if status_value in {"SUCCEEDED", "PARTIAL", "FAILED"}:
+        return status_value
+    return ""
 
 
 def _next_cursor(items: list[AuditLogEntry]) -> dict[str, str] | None:

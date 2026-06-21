@@ -34,15 +34,13 @@ from ums_smart_revenue.api.revenue import (
     skipped_source_row_count_and_reasons,
 )
 from ums_smart_revenue.auth.audit import AuditEventType
+from ums_smart_revenue.auth.audit_log import SqlAlchemyAuditLogRepository
 from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
-from ums_smart_revenue.connectors.runs.audit_alerts import (
-    failed_connector_run_count_and_statuses,
-)
 from ums_smart_revenue.finance.account_allocation_read import (
     AllocationProvenance,
     resolve_month_account_allocation,
@@ -1278,7 +1276,7 @@ def _discard_saved_artifact(
 # Connections:
 #   - File: backend/ums_smart_revenue/api/revenue.py -> dashboard smart-alert
 #     data sources mirrored here for export parity.
-#   - File: backend/ums_smart_revenue/connectors/runs/audit_alerts.py -> failed
+#   - File: backend/ums_smart_revenue/auth/audit_log.py -> failed
 #     connector-run smart-alert read model.
 #   - File: backend/ums_smart_revenue/reports/finance_workbook.py -> consumes
 #     the returned summary bundle.
@@ -1428,13 +1426,14 @@ def _build_finance_source_summaries_for_export(
                 include_sensitive_details=include_sensitive_details,
             )
         )
-        failed_connector_run_count, failed_connector_runs_by_status = (
-            failed_connector_run_count_and_statuses(
-                session,
-                tenant_id=_tenant_uuid(user),
-                month=export_job.month,
-            )
+        failed_connector_runs = SqlAlchemyAuditLogRepository(
+            session,
+            tenant_id=_tenant_uuid(user),
+        ).connector_run_failure_summary(
+            month=export_job.month,
         )
+        failed_connector_run_count = failed_connector_runs.count
+        failed_connector_runs_by_status = failed_connector_runs.by_status
     else:
         skipped_source_row_count = 0
         skipped_source_rows_by_reason = {}
