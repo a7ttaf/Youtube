@@ -36,8 +36,10 @@ avoid implying that private revenue APIs can run with only an API key.
   2.0 authorization tokens with narrow scopes.
 - UMS must not store Gmail passwords, reuse browser cookies, automate Gmail
   login, or link a personal Gmail session as a credential shortcut.
-- UMS stores external secret references and telemetry, not raw credential
-  material in API responses.
+- UMS stores external secret references (a locator, not the raw credential
+  material) and telemetry in the database; API responses expose only the
+  `has_secret_ref` flag and telemetry, never the secret reference value or raw
+  credential material.
 
 ## Non-goals
 

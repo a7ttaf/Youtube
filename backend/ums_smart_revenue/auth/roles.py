@@ -1,3 +1,19 @@
+# ============================================================================
+# Purpose: Define the platform role catalog (RoleKey enum) and the frozen
+# RoleDefinition registry (label, description, service_only flag, and allowed
+# scope types) consumed by permission, seed, and admin-metadata surfaces.
+# Database/ORM: None directly; seeded into the roles table by security_seed.sql
+# and consumed by auth permissions/policy.
+# Standards: Frozen dataclass registry with a startup completeness check that
+# raises if any RoleKey lacks a definition; descriptions are admin-facing
+# metadata only and must never leak secrets or implementation detail.
+# Blast Radius: RBAC role identity, admin role metadata, and the role-seed
+# contract. Permission evaluation and scope enforcement depend on this catalog.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/security_seed.sql -> Role seed rows.
+#   - File: backend/ums_smart_revenue/auth/permissions.py -> Permission grants.
+#   - File: backend/ums_smart_revenue/auth/policy.py -> Scope enforcement.
+# ============================================================================
 from dataclasses import dataclass, field
 from enum import StrEnum
 

@@ -1,3 +1,24 @@
+# ============================================================================
+# Purpose: FastAPI route handlers for Google connector credential management,
+# credential health surfacing, test-connection probing, and bounded in-process
+# connector job submission. Keeps authorization, token-refresh, and audit writes
+# behind typed helpers and fail-closed permission gates.
+# Database/ORM: ApiConnectorCredentialORM plus connector run/audit reads/writes
+# via SqlAlchemyConnectorCredentialRepository and the audit sink.
+# Standards: Thin FastAPI routes, fail-closed MANAGE_CONNECTORS / VIEW_CONNECTOR_HEALTH
+# permissions, canned safe error messages (no inner-exception leakage), and typed
+# audit emission on credential probes.
+# Blast Radius: Connector credential read/write surface, connector job dispatch,
+# audit trail, and admin-facing health telemetry. Finance/auth-mutation and
+# schema untouched.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/credentials.py ->
+#     Credential resolution, health-state derivation, and listing.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     ConnectorJobExecutor run_one (deferred to worker thread).
+#   - File: backend/ums_smart_revenue/auth/policy.py ->
+#     Permission gating and connector-scoped id resolution.
+# ============================================================================
 """FastAPI route handlers for connector credential management and test-connection probing."""
 
 from __future__ import annotations

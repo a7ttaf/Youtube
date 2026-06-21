@@ -24,6 +24,17 @@ Nothing.
 
 ## Runtime impact
 
-No runtime behavior changed. The backend still catches `OAuthRefreshError` for
-the existing Google token-refresh path; this PR changes only operator-facing
-wording and active documentation contracts.
+No control-flow, schema, permission, or token-refresh path changed. The backend
+still catches `OAuthRefreshError` for the existing Google token-refresh path.
+However, two API-visible / admin-facing string values did change and are called
+out explicitly so release notes are accurate:
+
+- The `POST /connectors/credentials/{key}/{id}/test` 200 response `detail` for
+  the `auth_failed` (`OAuthRefreshError`) case is now the canned message
+  `"Google credential token refresh failed; check that the credential secret is current."`
+  (previously the OAuth-prefixed wording). The status code (`200`) and
+  machine-readable `status: "auth_failed"` field are unchanged.
+- The `Connector Admin` role description (admin metadata surfaced via the roles
+  API and seeded by `security_seed.sql`) is now `"Technical owner for Google/API
+  connector credential configuration."` Existing seeded databases keep the prior
+  description until the seed is rerun; this is label metadata only.
