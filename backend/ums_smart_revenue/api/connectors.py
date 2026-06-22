@@ -56,6 +56,7 @@ from ums_smart_revenue.connectors.credentials import (
     SqlAlchemyConnectorCredentialRepository,
     derive_credential_health_state,
     is_external_secret_ref,
+    live_credential_rejection_detail,
 )
 from ums_smart_revenue.connectors.google.errors import (
     CredentialNotFoundError,
@@ -64,12 +65,12 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
 )
 from ums_smart_revenue.connectors.google.registry import known_keys
-from ums_smart_revenue.connectors.keys import source_system_for_connector
-from ums_smart_revenue.connectors.runs.executor import ConnectorJobActor
-from ums_smart_revenue.connectors.runs.orchestrator import (
-    _credential_key_candidates,
-    resolve_connector_credentials,
+from ums_smart_revenue.connectors.keys import (
+    credential_key_candidates,
+    source_system_for_connector,
 )
+from ums_smart_revenue.connectors.runs.executor import ConnectorJobActor
+from ums_smart_revenue.connectors.runs.orchestrator import resolve_connector_credentials
 from ums_smart_revenue.connectors.runs.repository import (
     MAX_CONNECTOR_RUN_PAGE_SIZE,
     ConnectorRunValidationError,
@@ -388,7 +389,7 @@ def create_connector_credential(
 def _require_connector_job_permission(user: UserPrincipal, connector_key: str) -> None:
     """Authorize connector-job submission against the submitted key and aliases."""
     try:
-        candidate_keys = _credential_key_candidates(connector_key)
+        candidate_keys = credential_key_candidates(connector_key)
     except ValueError:
         candidate_keys = (connector_key,)
     alias_scopes = [AccessScope.connector(key) for key in candidate_keys]
@@ -475,15 +476,11 @@ def _connector_job_preflight_rejection(
 def _find_connector_job_credential(
     *,
     repository: SqlAlchemyConnectorCredentialRepository,
-    session: Session,
-    tenant_id: UUID,
     payload: ConnectorJobRequest,
 ) -> ConnectorCredentialEntry | None:
     """Resolve a credential using the same alias-aware keys as the worker."""
-    for candidate_key in _credential_key_candidates(payload.connector_key):
+    for candidate_key in credential_key_candidates(payload.connector_key):
         credential = repository.get_credential(
-            session,
-            tenant_id=tenant_id,
             connector_key=candidate_key,
             account_id=payload.account_id,
         )
@@ -518,6 +515,17 @@ def _connector_job_credential_rejection(
             rejection="credential_inactive",
             detail="Connector credential is not active",
         )
+    if not payload.dry_run:
+        rejection_detail = live_credential_rejection_detail(credential, as_of=datetime.now(UTC))
+        if rejection_detail is not None:
+            return _reject_connector_job(
+                audit_sink=audit_sink,
+                user=user,
+                payload=payload,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                rejection="credential_smoke_required",
+                detail=rejection_detail,
+            )
     return None
 
 
@@ -662,8 +670,6 @@ def request_connector_job(
     repository = SqlAlchemyConnectorCredentialRepository(session, tenant_id=tenant_id)
     credential = _find_connector_job_credential(
         repository=repository,
-        session=session,
-        tenant_id=tenant_id,
         payload=payload,
     )
     credential_rejection = _connector_job_credential_rejection(

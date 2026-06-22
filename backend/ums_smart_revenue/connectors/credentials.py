@@ -1,3 +1,19 @@
+# ============================================================================
+# Purpose: Connector credential value objects, repository helpers, read-only
+# health labels, and live-run admission rules derived from persisted credential
+# refresh telemetry.
+# Database/ORM: ApiConnectorCredentialORM reads/writes through SQLAlchemy.
+# Standards: Tenant-scoped repository access, safe external-secret reference
+# validation, pure health/admission helpers, and no secret payload exposure.
+# Blast Radius: Connector credential management and live connector preflight
+# only. No finance math, schema, graph projection, or Phantom contract change.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> credential API
+#     routes and live job preflight.
+#   - File: scripts/run_google_connector.py -> operator live-run preflight.
+# ============================================================================
+"""Connector credential repository and live-run admission helpers."""
+
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Self
@@ -71,6 +87,9 @@ class ConnectorCredentialEntry:
 #     appends this label to each credential's to_api() shape.
 # ============================================================================
 CREDENTIAL_EXPIRY_WINDOW = timedelta(hours=24)
+LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL = (
+    "Connector credential must pass credential smoke before live jobs"
+)
 
 
 def derive_credential_health_state(entry: ConnectorCredentialEntry, *, as_of: datetime) -> str:
@@ -103,6 +122,46 @@ def derive_credential_health_state(entry: ConnectorCredentialEntry, *, as_of: da
     if entry.last_refresh_status == "succeeded":
         return "healthy"
     return "unknown"
+
+
+# ============================================================================
+# Purpose: Decide whether persisted credential refresh telemetry is strong
+#   enough to permit a stateful live connector run. This is intentionally
+#   stricter than the read-only health label because live ingestion must prove
+#   the owner-approved credential smoke path has completed a successful refresh
+#   before a live run is allowed to start.
+# Database/ORM: None (operates on a ConnectorCredentialEntry value object).
+# Standards: Pure, side-effect free, safe operator-facing rejection text only.
+# Blast Radius: Connector live-run admission control only; no credential writes,
+#   finance calculations, audit mutation, or schema changes.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> live job preflight.
+#   - File: scripts/run_google_connector.py -> operator CLI live preflight.
+# ============================================================================
+def live_credential_rejection_detail(
+    entry: ConnectorCredentialEntry,
+    *,
+    as_of: datetime,
+) -> str | None:
+    if entry.status != "active":
+        return "Connector credential is not active"
+    if not entry.has_secret_ref:
+        return "Connector credential secret reference is missing"
+    missing_successful_smoke = (
+        entry.last_refresh_status != "succeeded"
+        or bool(entry.last_refresh_error_class)
+        or entry.last_refresh_attempt_at is None
+        or entry.token_expiry_at is None
+    )
+    if missing_successful_smoke:
+        return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
+    token_expiry_at = entry.token_expiry_at
+    if token_expiry_at is None:
+        return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
+    expiry = _as_aware_utc(token_expiry_at)
+    if expiry <= _as_aware_utc(as_of):
+        return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
+    return None
 
 
 def _as_aware_utc(value: datetime) -> datetime:
@@ -262,16 +321,14 @@ class SqlAlchemyConnectorCredentialRepository:
     # ========================================================================
     def get_credential(
         self,
-        session: Session,
         *,
-        tenant_id: UUID,
         connector_key: str,
         account_id: str,
     ) -> ConnectorCredentialEntry | None:
         """Return the tenant-scoped credential entry for the scope, or None."""
-        row = session.scalars(
+        row = self._session.scalars(
             select(ApiConnectorCredentialORM).where(
-                ApiConnectorCredentialORM.tenant_id == tenant_id,
+                ApiConnectorCredentialORM.tenant_id == self._tenant_id,
                 ApiConnectorCredentialORM.connector_key == connector_key,
                 ApiConnectorCredentialORM.account_id == account_id,
             )
@@ -300,7 +357,7 @@ def is_external_secret_ref(value: str) -> bool:
     if not normalized:
         return False
     return any(
-        normalized.startswith(prefix) and bool(normalized[len(prefix) :].strip())
+        normalized.startswith(prefix) and bool(normalized[len(prefix):].strip())
         for prefix in SECRET_REF_PREFIXES
     )
 

@@ -144,7 +144,10 @@ from ums_smart_revenue.connectors.google_source_rows import (
     ParsedSourceRow,
     SqlAlchemyGoogleRevenueSourceRowRepository,
 )
-from ums_smart_revenue.connectors.keys import source_system_for_connector
+from ums_smart_revenue.connectors.keys import (
+    credential_key_candidates,
+    source_system_for_connector,
+)
 from ums_smart_revenue.connectors.runs.blob_storage import (
     BlobStorageBackend,
     GcsBlobStorageBackend,
@@ -3013,7 +3016,7 @@ def _load_credential(
     and the create flow. Adding a new public method to that repo would
     drag in actor/audit semantics this internal load doesn't need.
     """
-    for candidate_key in _credential_key_candidates(connector_key):
+    for candidate_key in credential_key_candidates(connector_key):
         row = session.scalar(
             sa.select(ApiConnectorCredentialORM).where(
                 ApiConnectorCredentialORM.tenant_id == tenant_id,
@@ -3024,28 +3027,6 @@ def _load_credential(
         if row is not None:
             return row
     return None
-
-
-_CREDENTIAL_KEY_ALIASES: dict[str, tuple[str, ...]] = {
-    "youtube-reporting": ("youtube_reporting",),
-    "youtube_reporting": ("youtube-reporting",),
-    "youtube-analytics": ("youtube_analytics",),
-    "youtube_analytics": ("youtube-analytics",),
-    "adsense-management": ("adsense_management",),
-    "adsense_management": ("adsense-management",),
-}
-
-
-def _credential_key_candidates(connector_key: str) -> tuple[str, ...]:
-    """Return the connector_key plus its hyphen/underscore aliases for credential lookup."""
-    candidates = [connector_key]
-    # FIX: Credential lookup must be symmetric across public hyphen keys and
-    # stored source-system underscore keys; operators can dispatch either alias.
-    candidates.extend(_CREDENTIAL_KEY_ALIASES.get(connector_key, ()))
-    source_key = source_system_for_connector(connector_key)
-    if source_key != connector_key:
-        candidates.append(source_key)
-    return tuple(dict.fromkeys(candidates))
 
 
 def _zero_counts() -> dict[str, int]:

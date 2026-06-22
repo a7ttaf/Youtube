@@ -1,7 +1,21 @@
+# ============================================================================
+# Purpose: Integration coverage for connector credential APIs, credential
+# health labels, test-connection probing, and connector job request preflight.
+# Database/ORM: Builds disposable SQLite databases with API/security/report
+# tables, then exercises FastAPI routes through TestClient.
+# Standards: Behavior-focused assertions for permissions, audit details,
+# redacted credential handling, and live-run admission failures.
+# Blast Radius: Test suite only. No production runtime, schema, or finance
+# logic changes live in this module.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> route handlers.
+#   - File: backend/ums_smart_revenue/connectors/credentials.py -> repository
+#     and credential health/admission helpers.
+# ============================================================================
 """Integration tests for connector credential and test-connection API endpoints."""
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Self
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
@@ -12,6 +26,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+import ums_smart_revenue.api.connectors as connectors_module
 from ums_smart_revenue.api.connectors import list_connector_credential_health
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
@@ -160,12 +175,19 @@ def _enable_executor_app(database_url: str, executor):
     return app
 
 
-def _seed_active_credential(database_url: str, *, status="active"):
+def _seed_active_credential(
+    database_url: str,
+    *,
+    status="active",
+    credential_smoked: bool = True,
+    token_expiry_at: datetime | None = None,
+):
     engine = create_engine(database_url)
     # The jobs route reads connector_runs for the dup/orphan guard; ensure the
     # ReportBase tables exist so the reader runs against a real (empty) table.
     ReportBase.metadata.create_all(engine)
     with Session(engine) as session:
+        now = datetime.now(UTC)
         session.add(
             ApiConnectorCredentialORM(
                 id=uuid4(),
@@ -174,6 +196,16 @@ def _seed_active_credential(database_url: str, *, status="active"):
                 account_id="content-owner-1",
                 encrypted_secret_ref="secret-manager://ums/yt/content-owner-1",
                 status=status,
+                last_refresh_attempt_at=now if credential_smoked else None,
+                token_expiry_at=(
+                    token_expiry_at
+                    if token_expiry_at is not None
+                    else now + timedelta(days=7)
+                    if credential_smoked
+                    else None
+                ),
+                last_refresh_status="succeeded" if credential_smoked else None,
+                last_refresh_error_class=None,
             )
         )
         session.commit()
@@ -399,6 +431,74 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
     assert fake.cancel_calls == []
 
 
+def test_request_connector_job_live_requires_successful_credential_smoke(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url, credential_smoked=False)
+    fake = _FakeExecutor(active=False)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Live run before credential smoke",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+
+    assert response.status_code == 422
+    assert "credential smoke" in response.json()["detail"]
+    assert audit_log.details["action"] == "job_rejected"
+    assert audit_log.details["rejection"] == "credential_smoke_required"
+    assert fake.submit_calls == []
+    assert fake.activate_calls == []
+    assert fake.cancel_calls == []
+
+
+def test_request_connector_job_live_requires_unexpired_credential_smoke(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(
+        database_url,
+        credential_smoked=True,
+        token_expiry_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    fake = _FakeExecutor(active=False)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Live run after stale credential smoke",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+
+    assert response.status_code == 422
+    assert "credential smoke" in response.json()["detail"]
+    assert audit_log.details["action"] == "job_rejected"
+    assert audit_log.details["rejection"] == "credential_smoke_required"
+    assert fake.submit_calls == []
+    assert fake.activate_calls == []
+    assert fake.cancel_calls == []
+
+
 def test_request_connector_job_missing_permission_403(tmp_path):
     """assistant_analyst is denied with the run_jobs permission detail (no audit)."""
     database_url = build_database_url(tmp_path)
@@ -593,8 +693,6 @@ def test_request_connector_job_409_duplicate_in_flight(tmp_path):
 
 def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
     """A stale RUNNING row older than the threshold is flipped FAILED + 202."""
-    from datetime import timedelta
-
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url)
@@ -714,7 +812,7 @@ def test_request_connector_job_dry_run_skips_service_principal_preflight(
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_active_credential(database_url)
+    _seed_active_credential(database_url, credential_smoked=False)
     # Drop the service-actor env var the fixture sets so the pre-flight
     # gate WOULD fail closed for a live run.
     os.environ.pop("UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID", None)
@@ -759,7 +857,7 @@ def test_request_connector_job_accepts_hyphen_alias_for_underscore_credential(
     FIX: the preflight used an exact ``connector_key`` lookup, so a caller
     submitting ``youtube-reporting`` (public hyphen alias) could not find a
     credential stored under the source-system ``youtube_reporting`` key.
-    The route now uses the same ``_credential_key_candidates`` fallback that
+    The route now uses the same ``credential_key_candidates`` fallback that
     ``run_one`` uses.
     """
     database_url = build_database_url(tmp_path)
@@ -808,8 +906,6 @@ def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monk
 
     # Patch _supersede_or_block_running_runs to raise so the request
     # session rolls back via FastAPI's session_dependency wrapper.
-    import ums_smart_revenue.api.connectors as connectors_module
-
     def _explode(*_args, **_kwargs):
         raise RuntimeError("simulated DB failure during supersede check")
 
@@ -1407,8 +1503,6 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
     with Session(engine) as session:
         repo = SqlAlchemyConnectorCredentialRepository(session, tenant_id=UMS_TENANT_ID)
         found = repo.get_credential(
-            session,
-            tenant_id=UUID(UMS_TENANT_ID),
             connector_key="youtube_reporting",
             account_id="acct-1",
         )
@@ -1416,17 +1510,17 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
         assert found.status == "active"
         assert (
             repo.get_credential(
-                session,
-                tenant_id=UUID(UMS_TENANT_ID),
                 connector_key="youtube_reporting",
                 account_id="missing",
             )
             is None
         )
+        other_tenant_repo = SqlAlchemyConnectorCredentialRepository(
+            session,
+            tenant_id=other_tenant,
+        )
         assert (
-            repo.get_credential(
-                session,
-                tenant_id=other_tenant,
+            other_tenant_repo.get_credential(
                 connector_key="youtube_reporting",
                 account_id="acct-1",
             )
@@ -1460,8 +1554,6 @@ def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
     with Session(engine) as session:
         repo = SqlAlchemyConnectorCredentialRepository(session, tenant_id=UMS_TENANT_ID)
         entry = repo.get_credential(
-            session,
-            tenant_id=UUID(UMS_TENANT_ID),
             connector_key="youtube_reporting",
             account_id="acct-1",
         )

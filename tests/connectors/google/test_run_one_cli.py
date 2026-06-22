@@ -1,3 +1,18 @@
+# ============================================================================
+# Purpose: CLI argparse and in-process dispatch coverage for
+# scripts/run_google_connector.py, including live-run credential admission
+# failures before run_one starts.
+# Database/ORM: Uses disposable SQLite sessions seeded with tenant and
+# credential rows; patches the CLI session factory to avoid host env coupling.
+# Standards: Subprocess coverage for argparse paths, in-process coverage for
+# typed Bucket-A errors, and no external Google or secret-manager calls.
+# Blast Radius: Test suite only. No production runtime, schema, or finance
+# logic changes live in this module.
+# Connections:
+#   - File: scripts/run_google_connector.py -> CLI entrypoint under test.
+#   - File: backend/ums_smart_revenue/connectors/credentials.py -> live
+#     credential smoke admission rule.
+# ============================================================================
 """CLI argparse + dispatch tests for scripts/run_google_connector.py (T30).
 
 Three tests cover the operator-facing surface:
@@ -31,7 +46,8 @@ import importlib.util
 import io
 import subprocess
 import sys
-from datetime import UTC, datetime
+from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -41,7 +57,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google.errors import TenantLifecycleError
 from ums_smart_revenue.db.report_models import ReportBase
-from ums_smart_revenue.db.security_models import SecurityBase
+from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM, SecurityBase
 from ums_smart_revenue.db.source_models import CurrencyORM
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 
@@ -164,7 +180,7 @@ def test_cli_main_returns_2_when_database_url_missing(
 
 
 @pytest.fixture
-def session() -> Session:
+def session() -> Generator[Session]:
     """Seeded in-memory SQLite with the multi-base schema the orchestrator
     will read.
 
@@ -199,6 +215,60 @@ def session() -> Session:
         )
         test_session.flush()
         yield test_session
+
+
+class _SessionCtx:
+    def __init__(self, db_session: Session) -> None:
+        self._session = db_session
+
+    def __enter__(self) -> Session:
+        return self._session
+
+    def __exit__(self, *_exc_info: object) -> None:
+        return None
+
+
+def _patch_cli_runtime(module, monkeypatch: pytest.MonkeyPatch, db_session: Session) -> None:
+    class _StubSettings:
+        database_url = "sqlite+pysqlite:///:memory:"
+
+    def _load_stub_settings() -> _StubSettings:
+        return _StubSettings()
+
+    def _fake_factory() -> _SessionCtx:
+        return _SessionCtx(db_session)
+
+    def _build_fake_session_factory(_url: str):
+        return _fake_factory
+
+    monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
+    monkeypatch.setattr(module, "build_session_factory", _build_fake_session_factory)
+
+
+def _seed_cli_credential(
+    db_session: Session,
+    *,
+    account_id: str = "content-owner-1",
+    status: str = "active",
+    last_refresh_status: str | None = None,
+    last_refresh_attempt_at: datetime | None = None,
+    token_expiry_at: datetime | None = None,
+) -> None:
+    db_session.add(
+        ApiConnectorCredentialORM(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            connector_key="youtube_reporting",
+            account_id=account_id,
+            encrypted_secret_ref="secret-manager://ums/yt/content-owner-1",
+            status=status,
+            last_refresh_attempt_at=last_refresh_attempt_at,
+            last_refresh_status=last_refresh_status,
+            last_refresh_error_class=None,
+            token_expiry_at=token_expiry_at,
+        )
+    )
+    db_session.commit()
 
 
 def test_cli_main_returns_2_when_credential_missing(
@@ -269,6 +339,165 @@ def test_cli_main_returns_2_when_credential_missing(
 
     assert exit_code == 2
     assert "CredentialNotFoundError" in captured_err.getvalue()
+
+
+def test_cli_main_returns_2_when_live_credential_smoke_missing(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_cli_credential(session)
+    module = _load_cli_module()
+    _patch_cli_runtime(module, monkeypatch, session)
+
+    def _run_one_should_not_run(*_args, **_kwargs):
+        raise AssertionError("run_one must not start before credential smoke passes")
+
+    monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
+    captured_err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", captured_err)
+
+    exit_code = module.main(
+        [
+            "--tenant",
+            str(TENANT_ID),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "content-owner-1",
+            "--month",
+            "2026-05",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "CredentialSmokeRequiredError" in captured_err.getvalue()
+    assert "credential smoke" in captured_err.getvalue()
+
+
+def test_cli_main_returns_2_when_live_credential_smoke_expired(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_cli_credential(
+        session,
+        last_refresh_status="succeeded",
+        last_refresh_attempt_at=datetime.now(UTC) - timedelta(hours=2),
+        token_expiry_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    module = _load_cli_module()
+    _patch_cli_runtime(module, monkeypatch, session)
+
+    def _run_one_should_not_run(*_args, **_kwargs):
+        raise AssertionError("run_one must not start after expired credential smoke")
+
+    monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
+    captured_err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", captured_err)
+
+    exit_code = module.main(
+        [
+            "--tenant",
+            str(TENANT_ID),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "content-owner-1",
+            "--month",
+            "2026-05",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "CredentialSmokeRequiredError" in captured_err.getvalue()
+    assert "credential smoke" in captured_err.getvalue()
+
+
+def test_cli_main_preserves_inactive_credential_error_before_smoke_wrapper(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_cli_credential(
+        session,
+        status="disabled",
+        last_refresh_status="succeeded",
+        last_refresh_attempt_at=datetime.now(UTC),
+        token_expiry_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    module = _load_cli_module()
+    _patch_cli_runtime(module, monkeypatch, session)
+
+    def _run_one_should_not_run(*_args, **_kwargs):
+        raise AssertionError("run_one must not start for inactive credentials")
+
+    monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
+    captured_err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", captured_err)
+
+    exit_code = module.main(
+        [
+            "--tenant",
+            str(TENANT_ID),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "content-owner-1",
+            "--month",
+            "2026-05",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "InactiveCredentialError" in captured_err.getvalue()
+    assert "CredentialSmokeRequiredError" not in captured_err.getvalue()
+
+
+def test_cli_main_allows_live_after_successful_credential_smoke(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_cli_credential(
+        session,
+        last_refresh_status="succeeded",
+        last_refresh_attempt_at=datetime.now(UTC),
+        token_expiry_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    module = _load_cli_module()
+    _patch_cli_runtime(module, monkeypatch, session)
+    calls: list[dict[str, object]] = []
+
+    class _Run:
+        status = "SUCCEEDED"
+
+    class _Outcome:
+        run = _Run()
+        counts = {"reports_seen": 0}
+        per_report_failures: list[object] = []
+
+    def _fake_run_one(*_args, **kwargs):
+        calls.append(kwargs)
+        return _Outcome()
+
+    monkeypatch.setattr(module, "run_one", _fake_run_one)
+
+    exit_code = module.main(
+        [
+            "--tenant",
+            str(TENANT_ID),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "content-owner-1",
+            "--month",
+            "2026-05",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [
+        {
+            "tenant_id": TENANT_ID,
+            "connector_key": "youtube-reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-05",
+            "dry_run": False,
+        }
+    ]
 
 
 def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
