@@ -31,6 +31,7 @@ import importlib.util
 import io
 import subprocess
 import sys
+from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -164,7 +165,7 @@ def test_cli_main_returns_2_when_database_url_missing(
 
 
 @pytest.fixture
-def session() -> Session:
+def session() -> Generator[Session]:
     """Seeded in-memory SQLite with the multi-base schema the orchestrator
     will read.
 
