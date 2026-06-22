@@ -476,15 +476,11 @@ def _connector_job_preflight_rejection(
 def _find_connector_job_credential(
     *,
     repository: SqlAlchemyConnectorCredentialRepository,
-    session: Session,
-    tenant_id: UUID,
     payload: ConnectorJobRequest,
 ) -> ConnectorCredentialEntry | None:
     """Resolve a credential using the same alias-aware keys as the worker."""
     for candidate_key in credential_key_candidates(payload.connector_key):
         credential = repository.get_credential(
-            session,
-            tenant_id=tenant_id,
             connector_key=candidate_key,
             account_id=payload.account_id,
         )
@@ -674,8 +670,6 @@ def request_connector_job(
     repository = SqlAlchemyConnectorCredentialRepository(session, tenant_id=tenant_id)
     credential = _find_connector_job_credential(
         repository=repository,
-        session=session,
-        tenant_id=tenant_id,
         payload=payload,
     )
     credential_rejection = _connector_job_credential_rejection(

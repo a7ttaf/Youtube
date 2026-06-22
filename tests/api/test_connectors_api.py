@@ -26,6 +26,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+import ums_smart_revenue.api.connectors as connectors_module
 from ums_smart_revenue.api.connectors import list_connector_credential_health
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
@@ -692,8 +693,6 @@ def test_request_connector_job_409_duplicate_in_flight(tmp_path):
 
 def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
     """A stale RUNNING row older than the threshold is flipped FAILED + 202."""
-    from datetime import timedelta
-
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url)
@@ -813,7 +812,7 @@ def test_request_connector_job_dry_run_skips_service_principal_preflight(
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    _seed_active_credential(database_url)
+    _seed_active_credential(database_url, credential_smoked=False)
     # Drop the service-actor env var the fixture sets so the pre-flight
     # gate WOULD fail closed for a live run.
     os.environ.pop("UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID", None)
@@ -907,8 +906,6 @@ def test_request_connector_job_after_rollback_cancels_reservation(tmp_path, monk
 
     # Patch _supersede_or_block_running_runs to raise so the request
     # session rolls back via FastAPI's session_dependency wrapper.
-    import ums_smart_revenue.api.connectors as connectors_module
-
     def _explode(*_args, **_kwargs):
         raise RuntimeError("simulated DB failure during supersede check")
 
@@ -1506,8 +1503,6 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
     with Session(engine) as session:
         repo = SqlAlchemyConnectorCredentialRepository(session, tenant_id=UMS_TENANT_ID)
         found = repo.get_credential(
-            session,
-            tenant_id=UUID(UMS_TENANT_ID),
             connector_key="youtube_reporting",
             account_id="acct-1",
         )
@@ -1515,17 +1510,17 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
         assert found.status == "active"
         assert (
             repo.get_credential(
-                session,
-                tenant_id=UUID(UMS_TENANT_ID),
                 connector_key="youtube_reporting",
                 account_id="missing",
             )
             is None
         )
+        other_tenant_repo = SqlAlchemyConnectorCredentialRepository(
+            session,
+            tenant_id=other_tenant,
+        )
         assert (
-            repo.get_credential(
-                session,
-                tenant_id=other_tenant,
+            other_tenant_repo.get_credential(
                 connector_key="youtube_reporting",
                 account_id="acct-1",
             )
@@ -1559,8 +1554,6 @@ def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
     with Session(engine) as session:
         repo = SqlAlchemyConnectorCredentialRepository(session, tenant_id=UMS_TENANT_ID)
         entry = repo.get_credential(
-            session,
-            tenant_id=UUID(UMS_TENANT_ID),
             connector_key="youtube_reporting",
             account_id="acct-1",
         )

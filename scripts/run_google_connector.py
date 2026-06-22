@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # ============================================================================
 # Purpose: Operator CLI surface that drives one end-to-end connector_runs
 #          lifecycle (or a counts-only dry-run) for a single
@@ -189,8 +188,6 @@ def _enforce_live_credential_smoke(
     credential = None
     for candidate_key in credential_key_candidates(connector_key):
         credential = repository.get_credential(
-            session,
-            tenant_id=tenant_id,
             connector_key=candidate_key,
             account_id=account_id,
         )

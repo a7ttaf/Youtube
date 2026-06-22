@@ -12,6 +12,8 @@
 #     routes and live job preflight.
 #   - File: scripts/run_google_connector.py -> operator live-run preflight.
 # ============================================================================
+"""Connector credential repository and live-run admission helpers."""
+
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Self
@@ -145,13 +147,18 @@ def live_credential_rejection_detail(
         return "Connector credential is not active"
     if not entry.has_secret_ref:
         return "Connector credential secret reference is missing"
-    if entry.last_refresh_status != "succeeded" or entry.last_refresh_error_class:
+    missing_successful_smoke = (
+        entry.last_refresh_status != "succeeded"
+        or bool(entry.last_refresh_error_class)
+        or entry.last_refresh_attempt_at is None
+        or entry.token_expiry_at is None
+    )
+    if missing_successful_smoke:
         return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
-    if entry.last_refresh_attempt_at is None:
+    token_expiry_at = entry.token_expiry_at
+    if token_expiry_at is None:
         return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
-    if entry.token_expiry_at is None:
-        return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
-    expiry = _as_aware_utc(entry.token_expiry_at)
+    expiry = _as_aware_utc(token_expiry_at)
     if expiry <= _as_aware_utc(as_of):
         return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
     return None
@@ -314,16 +321,14 @@ class SqlAlchemyConnectorCredentialRepository:
     # ========================================================================
     def get_credential(
         self,
-        session: Session,
         *,
-        tenant_id: UUID,
         connector_key: str,
         account_id: str,
     ) -> ConnectorCredentialEntry | None:
         """Return the tenant-scoped credential entry for the scope, or None."""
-        row = session.scalars(
+        row = self._session.scalars(
             select(ApiConnectorCredentialORM).where(
-                ApiConnectorCredentialORM.tenant_id == tenant_id,
+                ApiConnectorCredentialORM.tenant_id == self._tenant_id,
                 ApiConnectorCredentialORM.connector_key == connector_key,
                 ApiConnectorCredentialORM.account_id == account_id,
             )

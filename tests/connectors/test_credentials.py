@@ -1,3 +1,19 @@
+# ============================================================================
+# Purpose: Unit coverage for connector credential value objects, external-secret
+# validation, repository tenant scoping, and live-run credential admission
+# helpers.
+# Database/ORM: Builds disposable in-memory SQLite security tables through
+# SQLAlchemy; no production database or external secret provider is touched.
+# Standards: Behavior-focused assertions for credential read/write contracts,
+# tenant isolation, secret redaction, and live-smoke fail-closed branches.
+# Blast Radius: Test suite only. No runtime, schema, finance, or Phantom
+# contract changes live in this module.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/credentials.py -> unit under
+#     test for repository methods and credential admission helpers.
+# ============================================================================
+"""Unit tests for connector credential repository and admission helpers."""
+
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -8,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.credentials import (
     CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT,
+    LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL,
     MAX_CREDENTIAL_PAGE_SIZE,
     SECRET_REF_PREFIXES,
     ConnectorCredentialConflictError,
@@ -16,6 +33,7 @@ from ums_smart_revenue.connectors.credentials import (
     SqlAlchemyConnectorCredentialRepository,
     _is_foreign_key_integrity_error,
     is_external_secret_ref,
+    live_credential_rejection_detail,
 )
 from ums_smart_revenue.db.security_models import (
     ApiConnectorCredentialORM,
@@ -187,6 +205,28 @@ def test_entry_to_api_never_exposes_raw_secret_material():
         if isinstance(value, str):
             assert "secret-manager://" not in value
             assert "vault://" not in value
+
+
+def test_live_credential_rejects_success_without_refresh_attempt_timestamp():
+    entry = ConnectorCredentialEntry(
+        id="11111111-1111-1111-1111-111111111111",
+        connector_key="youtube_reporting",
+        account_id="content-owner-1",
+        status="active",
+        has_secret_ref=True,
+        last_refresh_attempt_at=None,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="succeeded",
+        last_refresh_error_class=None,
+    )
+
+    assert (
+        live_credential_rejection_detail(
+            entry,
+            as_of=datetime(2026, 6, 14, 12, 0, tzinfo=UTC),
+        )
+        == LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
+    )
 
 
 # -----------------------------------------------------------------------------
