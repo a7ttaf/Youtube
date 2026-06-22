@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: Connector credential value objects, repository helpers, read-only
+# health labels, and live-run admission rules derived from persisted credential
+# refresh telemetry.
+# Database/ORM: ApiConnectorCredentialORM reads/writes through SQLAlchemy.
+# Standards: Tenant-scoped repository access, safe external-secret reference
+# validation, pure health/admission helpers, and no secret payload exposure.
+# Blast Radius: Connector credential management and live connector preflight
+# only. No finance math, schema, graph projection, or Phantom contract change.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> credential API
+#     routes and live job preflight.
+#   - File: scripts/run_google_connector.py -> operator live-run preflight.
+# ============================================================================
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Self
@@ -122,7 +136,11 @@ def derive_credential_health_state(entry: ConnectorCredentialEntry, *, as_of: da
 #   - File: backend/ums_smart_revenue/api/connectors.py -> live job preflight.
 #   - File: scripts/run_google_connector.py -> operator CLI live preflight.
 # ============================================================================
-def live_credential_rejection_detail(entry: ConnectorCredentialEntry) -> str | None:
+def live_credential_rejection_detail(
+    entry: ConnectorCredentialEntry,
+    *,
+    as_of: datetime,
+) -> str | None:
     if entry.status != "active":
         return "Connector credential is not active"
     if not entry.has_secret_ref:
@@ -132,6 +150,9 @@ def live_credential_rejection_detail(entry: ConnectorCredentialEntry) -> str | N
     if entry.last_refresh_attempt_at is None:
         return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
     if entry.token_expiry_at is None:
+        return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
+    expiry = _as_aware_utc(entry.token_expiry_at)
+    if expiry <= _as_aware_utc(as_of):
         return LIVE_CREDENTIAL_SMOKE_REQUIRED_DETAIL
     return None
 

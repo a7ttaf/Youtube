@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: Integration coverage for connector credential APIs, credential
+# health labels, test-connection probing, and connector job request preflight.
+# Database/ORM: Builds disposable SQLite databases with API/security/report
+# tables, then exercises FastAPI routes through TestClient.
+# Standards: Behavior-focused assertions for permissions, audit details,
+# redacted credential handling, and live-run admission failures.
+# Blast Radius: Test suite only. No production runtime, schema, or finance
+# logic changes live in this module.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> route handlers.
+#   - File: backend/ums_smart_revenue/connectors/credentials.py -> repository
+#     and credential health/admission helpers.
+# ============================================================================
 """Integration tests for connector credential and test-connection API endpoints."""
 
 import os
@@ -165,6 +179,7 @@ def _seed_active_credential(
     *,
     status="active",
     credential_smoked: bool = True,
+    token_expiry_at: datetime | None = None,
 ):
     engine = create_engine(database_url)
     # The jobs route reads connector_runs for the dup/orphan guard; ensure the
@@ -181,7 +196,13 @@ def _seed_active_credential(
                 encrypted_secret_ref="secret-manager://ums/yt/content-owner-1",
                 status=status,
                 last_refresh_attempt_at=now if credential_smoked else None,
-                token_expiry_at=now + timedelta(days=7) if credential_smoked else None,
+                token_expiry_at=(
+                    token_expiry_at
+                    if token_expiry_at is not None
+                    else now + timedelta(days=7)
+                    if credential_smoked
+                    else None
+                ),
                 last_refresh_status="succeeded" if credential_smoked else None,
                 last_refresh_error_class=None,
             )
@@ -424,6 +445,42 @@ def test_request_connector_job_live_requires_successful_credential_smoke(tmp_pat
             "account_id": "content-owner-1",
             "report_month": "2026-03",
             "reason": "Live run before credential smoke",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+
+    assert response.status_code == 422
+    assert "credential smoke" in response.json()["detail"]
+    assert audit_log.details["action"] == "job_rejected"
+    assert audit_log.details["rejection"] == "credential_smoke_required"
+    assert fake.submit_calls == []
+    assert fake.activate_calls == []
+    assert fake.cancel_calls == []
+
+
+def test_request_connector_job_live_requires_unexpired_credential_smoke(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(
+        database_url,
+        credential_smoked=True,
+        token_expiry_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    fake = _FakeExecutor(active=False)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Live run after stale credential smoke",
         },
     )
 

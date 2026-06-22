@@ -1,31 +1,4 @@
 #!/usr/bin/env python
-"""CLI entrypoint for the B2 live Google connector (T30).
-
-Usage:
-    python scripts/run_google_connector.py \
-        --tenant <UUID> \
-        --connector <registered-key> \
-        --account <account-id> \
-        --month <YYYY-MM> \
-        [--dry-run]
-
-Loads runtime config from ``UMS_*`` environment variables (see
-``ums_smart_revenue.config.settings``), opens a SQLAlchemy session via the
-shared session factory, dispatches to ``run_one(...)`` for the selected
-connector, prints a one-line summary to stdout, and translates the
-``GoogleConnectorError`` family into an operator-readable stderr line.
-
-Exit codes (operator contract -- see Docs spec §5.4):
-    0 -- SUCCEEDED, or DRY-RUN that completed without raising a typed error.
-    1 -- run finished PARTIAL or FAILED (one or more reports failed but the
-         orchestrator still wrote a terminal connector_runs row).
-    2 -- Bucket A pre-start_run typed error (e.g. CredentialNotFoundError,
-         InactiveCredentialError, OAuthRefreshError). No connector_runs row
-         was created; the operator sees ``<ClassName>: <message>`` on stderr.
-    !=0 -- argparse rejection (unknown --connector, bad UUID, malformed
-           --month). Always non-zero with argparse's standard exit status.
-"""
-
 # ============================================================================
 # Purpose: Operator CLI surface that drives one end-to-end connector_runs
 #          lifecycle (or a counts-only dry-run) for a single
@@ -60,11 +33,39 @@ Exit codes (operator contract -- see Docs spec §5.4):
 #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
 #     §5.4 -> CLI contract (flags, exit codes, dry-run semantics).
 # ============================================================================
+"""CLI entrypoint for the B2 live Google connector (T30).
+
+Usage:
+    python scripts/run_google_connector.py \
+        --tenant <UUID> \
+        --connector <registered-key> \
+        --account <account-id> \
+        --month <YYYY-MM> \
+        [--dry-run]
+
+Loads runtime config from ``UMS_*`` environment variables (see
+``ums_smart_revenue.config.settings``), opens a SQLAlchemy session via the
+shared session factory, dispatches to ``run_one(...)`` for the selected
+connector, prints a one-line summary to stdout, and translates the
+``GoogleConnectorError`` family into an operator-readable stderr line.
+
+Exit codes (operator contract -- see Docs spec §5.4):
+    0 -- SUCCEEDED, or DRY-RUN that completed without raising a typed error.
+    1 -- run finished PARTIAL or FAILED (one or more reports failed but the
+         orchestrator still wrote a terminal connector_runs row).
+    2 -- Bucket A pre-start_run typed error (e.g. CredentialNotFoundError,
+         InactiveCredentialError, OAuthRefreshError). No connector_runs row
+         was created; the operator sees ``<ClassName>: <message>`` on stderr.
+    !=0 -- argparse rejection (unknown --connector, bad UUID, malformed
+           --month). Always non-zero with argparse's standard exit status.
+"""
+
 from __future__ import annotations
 
 import argparse
 import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -78,6 +79,8 @@ _BACKEND_PATH = str(_PROJECT_ROOT / "backend")
 if _BACKEND_PATH not in sys.path:
     sys.path.insert(0, _BACKEND_PATH)
 
+from sqlalchemy.orm import Session  # noqa: E402
+
 from ums_smart_revenue.config.settings import load_app_settings  # noqa: E402
 from ums_smart_revenue.connectors.credentials import (  # noqa: E402
     SqlAlchemyConnectorCredentialRepository,
@@ -88,6 +91,7 @@ from ums_smart_revenue.connectors.google.errors import (  # noqa: E402
     CredentialNotFoundError,
     CredentialSmokeRequiredError,
     GoogleConnectorError,
+    InactiveCredentialError,
 )
 
 # The orchestrator import is load-bearing for argparse: its module-level
@@ -157,8 +161,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+# ============================================================================
+# Purpose: Fail closed before a live CLI run when the selected credential has
+#          not passed the owner-approved smoke path or its persisted smoke
+#          telemetry is already stale.
+# Database/ORM: Reads ApiConnectorCredentialORM through
+#               SqlAlchemyConnectorCredentialRepository only; no writes.
+# Standards: Alias-aware lookup, typed operator errors, inactive credentials
+#            retain InactiveCredentialError, and short-lived but unexpired
+#            Google tokens are allowed because run_one refreshes credentials.
+# Blast Radius: Live CLI admission control only. Dry-run and API route behavior
+#               remain separately guarded at their own boundaries.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/credentials.py ->
+#     ``live_credential_rejection_detail`` shared admission rule.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     ``_credential_key_candidates`` alias compatibility and ``run_one``.
+# ============================================================================
 def _enforce_live_credential_smoke(
-    session,
+    session: Session,
     *,
     tenant_id: UUID,
     connector_key: str,
@@ -177,7 +198,9 @@ def _enforce_live_credential_smoke(
             break
     if credential is None:
         raise CredentialNotFoundError(connector_key=connector_key, account_id=account_id)
-    rejection_detail = live_credential_rejection_detail(credential)
+    if credential.status != "active":
+        raise InactiveCredentialError(credential_id=credential.id, status=credential.status)
+    rejection_detail = live_credential_rejection_detail(credential, as_of=datetime.now(UTC))
     if rejection_detail is not None:
         raise CredentialSmokeRequiredError(detail=rejection_detail)
 

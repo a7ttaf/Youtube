@@ -1,3 +1,20 @@
+# ============================================================================
+# Purpose: Typed Google connector error hierarchy used by connector operators,
+# orchestrator preflight, Google API adapters, and credential smoke checks.
+# Database/ORM: None directly; errors carry redacted identifiers/status for
+# callers that translate failures into connector_runs rows or operator stderr.
+# Standards: Every expected connector failure subclasses GoogleConnectorError
+# so CLI and orchestrator boundaries can fail closed without catching broad
+# exceptions or leaking secret locators.
+# Blast Radius: Error classification and operator/audit messages only. No
+# connector behavior, schema, or finance calculation change by itself.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     translates typed failures into run/audit outcomes.
+#   - File: scripts/run_google_connector.py -> maps typed failures to exit 2.
+#   - File: scripts/check_google_connector_credential.py -> redacts smoke-check
+#     errors for operators.
+# ============================================================================
 """Typed error hierarchy for the B2 live Google connector.
 
 Every error raised inside connectors/google or connectors/runs subclasses
@@ -197,7 +214,10 @@ class CredentialNotFoundError(GoogleConnectorError):
 
 
 class CredentialSmokeRequiredError(GoogleConnectorError):
+    """Raised when a live run is attempted before fresh smoke telemetry exists."""
+
     def __init__(self, *, detail: str) -> None:
+        """Carry safe operator-facing rejection detail."""
         super().__init__(detail)
         self.detail = detail
 

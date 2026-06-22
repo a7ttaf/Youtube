@@ -1,3 +1,18 @@
+# ============================================================================
+# Purpose: CLI argparse and in-process dispatch coverage for
+# scripts/run_google_connector.py, including live-run credential admission
+# failures before run_one starts.
+# Database/ORM: Uses disposable SQLite sessions seeded with tenant and
+# credential rows; patches the CLI session factory to avoid host env coupling.
+# Standards: Subprocess coverage for argparse paths, in-process coverage for
+# typed Bucket-A errors, and no external Google or secret-manager calls.
+# Blast Radius: Test suite only. No production runtime, schema, or finance
+# logic changes live in this module.
+# Connections:
+#   - File: scripts/run_google_connector.py -> CLI entrypoint under test.
+#   - File: backend/ums_smart_revenue/connectors/credentials.py -> live
+#     credential smoke admission rule.
+# ============================================================================
 """CLI argparse + dispatch tests for scripts/run_google_connector.py (T30).
 
 Three tests cover the operator-facing surface:
@@ -234,6 +249,7 @@ def _seed_cli_credential(
     db_session: Session,
     *,
     account_id: str = "content-owner-1",
+    status: str = "active",
     last_refresh_status: str | None = None,
     last_refresh_attempt_at: datetime | None = None,
     token_expiry_at: datetime | None = None,
@@ -245,7 +261,7 @@ def _seed_cli_credential(
             connector_key="youtube_reporting",
             account_id=account_id,
             encrypted_secret_ref="secret-manager://ums/yt/content-owner-1",
-            status="active",
+            status=status,
             last_refresh_attempt_at=last_refresh_attempt_at,
             last_refresh_status=last_refresh_status,
             last_refresh_error_class=None,
@@ -355,6 +371,81 @@ def test_cli_main_returns_2_when_live_credential_smoke_missing(
     assert exit_code == 2
     assert "CredentialSmokeRequiredError" in captured_err.getvalue()
     assert "credential smoke" in captured_err.getvalue()
+
+
+def test_cli_main_returns_2_when_live_credential_smoke_expired(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_cli_credential(
+        session,
+        last_refresh_status="succeeded",
+        last_refresh_attempt_at=datetime.now(UTC) - timedelta(hours=2),
+        token_expiry_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    module = _load_cli_module()
+    _patch_cli_runtime(module, monkeypatch, session)
+
+    def _run_one_should_not_run(*_args, **_kwargs):
+        raise AssertionError("run_one must not start after expired credential smoke")
+
+    monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
+    captured_err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", captured_err)
+
+    exit_code = module.main(
+        [
+            "--tenant",
+            str(TENANT_ID),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "content-owner-1",
+            "--month",
+            "2026-05",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "CredentialSmokeRequiredError" in captured_err.getvalue()
+    assert "credential smoke" in captured_err.getvalue()
+
+
+def test_cli_main_preserves_inactive_credential_error_before_smoke_wrapper(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_cli_credential(
+        session,
+        status="disabled",
+        last_refresh_status="succeeded",
+        last_refresh_attempt_at=datetime.now(UTC),
+        token_expiry_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    module = _load_cli_module()
+    _patch_cli_runtime(module, monkeypatch, session)
+
+    def _run_one_should_not_run(*_args, **_kwargs):
+        raise AssertionError("run_one must not start for inactive credentials")
+
+    monkeypatch.setattr(module, "run_one", _run_one_should_not_run)
+    captured_err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", captured_err)
+
+    exit_code = module.main(
+        [
+            "--tenant",
+            str(TENANT_ID),
+            "--connector",
+            "youtube-reporting",
+            "--account",
+            "content-owner-1",
+            "--month",
+            "2026-05",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "InactiveCredentialError" in captured_err.getvalue()
+    assert "CredentialSmokeRequiredError" not in captured_err.getvalue()
 
 
 def test_cli_main_allows_live_after_successful_credential_smoke(

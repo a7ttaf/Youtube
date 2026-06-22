@@ -520,7 +520,7 @@ def _connector_job_credential_rejection(
             detail="Connector credential is not active",
         )
     if not payload.dry_run:
-        rejection_detail = live_credential_rejection_detail(credential)
+        rejection_detail = live_credential_rejection_detail(credential, as_of=datetime.now(UTC))
         if rejection_detail is not None:
             return _reject_connector_job(
                 audit_sink=audit_sink,
