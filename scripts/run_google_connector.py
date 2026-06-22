@@ -93,6 +93,7 @@ from ums_smart_revenue.connectors.google.errors import (  # noqa: E402
     GoogleConnectorError,
     InactiveCredentialError,
 )
+from ums_smart_revenue.connectors.keys import credential_key_candidates  # noqa: E402
 
 # The orchestrator import is load-bearing for argparse: its module-level
 # ``register_connector(...)`` calls are what populate the dispatch registry,
@@ -103,10 +104,7 @@ from ums_smart_revenue.connectors.google.errors import (  # noqa: E402
 # ``orchestrator`` does not matter for correctness -- both run at module
 # load, before ``_parse_args`` is first called -- so this file lets ruff's
 # I001 import sorter do its alphabetical thing.
-from ums_smart_revenue.connectors.runs.orchestrator import (  # noqa: E402
-    _credential_key_candidates,
-    run_one,
-)
+from ums_smart_revenue.connectors.runs.orchestrator import run_one  # noqa: E402
 from ums_smart_revenue.connectors.runs.tenant_context import (  # noqa: E402
     connector_tenant_context,
 )
@@ -175,8 +173,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 # Connections:
 #   - File: backend/ums_smart_revenue/connectors/credentials.py ->
 #     ``live_credential_rejection_detail`` shared admission rule.
+#   - File: backend/ums_smart_revenue/connectors/keys.py ->
+#     ``credential_key_candidates`` alias compatibility.
 #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
-#     ``_credential_key_candidates`` alias compatibility and ``run_one``.
+#     ``run_one``.
 # ============================================================================
 def _enforce_live_credential_smoke(
     session: Session,
@@ -187,7 +187,7 @@ def _enforce_live_credential_smoke(
 ) -> None:
     repository = SqlAlchemyConnectorCredentialRepository(session, tenant_id=tenant_id)
     credential = None
-    for candidate_key in _credential_key_candidates(connector_key):
+    for candidate_key in credential_key_candidates(connector_key):
         credential = repository.get_credential(
             session,
             tenant_id=tenant_id,

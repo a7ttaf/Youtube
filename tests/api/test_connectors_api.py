@@ -858,7 +858,7 @@ def test_request_connector_job_accepts_hyphen_alias_for_underscore_credential(
     FIX: the preflight used an exact ``connector_key`` lookup, so a caller
     submitting ``youtube-reporting`` (public hyphen alias) could not find a
     credential stored under the source-system ``youtube_reporting`` key.
-    The route now uses the same ``_credential_key_candidates`` fallback that
+    The route now uses the same ``credential_key_candidates`` fallback that
     ``run_one`` uses.
     """
     database_url = build_database_url(tmp_path)
