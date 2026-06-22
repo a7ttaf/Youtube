@@ -1,7 +1,7 @@
 """Integration tests for connector credential and test-connection API endpoints."""
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Self
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
@@ -160,12 +160,18 @@ def _enable_executor_app(database_url: str, executor):
     return app
 
 
-def _seed_active_credential(database_url: str, *, status="active"):
+def _seed_active_credential(
+    database_url: str,
+    *,
+    status="active",
+    credential_smoked: bool = True,
+):
     engine = create_engine(database_url)
     # The jobs route reads connector_runs for the dup/orphan guard; ensure the
     # ReportBase tables exist so the reader runs against a real (empty) table.
     ReportBase.metadata.create_all(engine)
     with Session(engine) as session:
+        now = datetime.now(UTC)
         session.add(
             ApiConnectorCredentialORM(
                 id=uuid4(),
@@ -174,6 +180,10 @@ def _seed_active_credential(database_url: str, *, status="active"):
                 account_id="content-owner-1",
                 encrypted_secret_ref="secret-manager://ums/yt/content-owner-1",
                 status=status,
+                last_refresh_attempt_at=now if credential_smoked else None,
+                token_expiry_at=now + timedelta(days=7) if credential_smoked else None,
+                last_refresh_status="succeeded" if credential_smoked else None,
+                last_refresh_error_class=None,
             )
         )
         session.commit()
@@ -396,6 +406,38 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
     # Reserve-then-activate: the route held a slot during request handling
     # and the after_commit hook activated it (recorded by the fake).
     assert len(fake.activate_calls) == 1
+    assert fake.cancel_calls == []
+
+
+def test_request_connector_job_live_requires_successful_credential_smoke(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url, credential_smoked=False)
+    fake = _FakeExecutor(active=False)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Live run before credential smoke",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+
+    assert response.status_code == 422
+    assert "credential smoke" in response.json()["detail"]
+    assert audit_log.details["action"] == "job_rejected"
+    assert audit_log.details["rejection"] == "credential_smoke_required"
+    assert fake.submit_calls == []
+    assert fake.activate_calls == []
     assert fake.cancel_calls == []
 
 

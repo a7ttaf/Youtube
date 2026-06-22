@@ -56,6 +56,7 @@ from ums_smart_revenue.connectors.credentials import (
     SqlAlchemyConnectorCredentialRepository,
     derive_credential_health_state,
     is_external_secret_ref,
+    live_credential_rejection_detail,
 )
 from ums_smart_revenue.connectors.google.errors import (
     CredentialNotFoundError,
@@ -518,6 +519,17 @@ def _connector_job_credential_rejection(
             rejection="credential_inactive",
             detail="Connector credential is not active",
         )
+    if not payload.dry_run:
+        rejection_detail = live_credential_rejection_detail(credential)
+        if rejection_detail is not None:
+            return _reject_connector_job(
+                audit_sink=audit_sink,
+                user=user,
+                payload=payload,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                rejection="credential_smoke_required",
+                detail=rejection_detail,
+            )
     return None
 
 

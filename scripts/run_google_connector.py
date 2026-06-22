@@ -79,8 +79,14 @@ if _BACKEND_PATH not in sys.path:
     sys.path.insert(0, _BACKEND_PATH)
 
 from ums_smart_revenue.config.settings import load_app_settings  # noqa: E402
+from ums_smart_revenue.connectors.credentials import (  # noqa: E402
+    SqlAlchemyConnectorCredentialRepository,
+    live_credential_rejection_detail,
+)
 from ums_smart_revenue.connectors.google import registry  # noqa: E402
 from ums_smart_revenue.connectors.google.errors import (  # noqa: E402
+    CredentialNotFoundError,
+    CredentialSmokeRequiredError,
     GoogleConnectorError,
 )
 
@@ -93,7 +99,10 @@ from ums_smart_revenue.connectors.google.errors import (  # noqa: E402
 # ``orchestrator`` does not matter for correctness -- both run at module
 # load, before ``_parse_args`` is first called -- so this file lets ruff's
 # I001 import sorter do its alphabetical thing.
-from ums_smart_revenue.connectors.runs.orchestrator import run_one  # noqa: E402
+from ums_smart_revenue.connectors.runs.orchestrator import (  # noqa: E402
+    _credential_key_candidates,
+    run_one,
+)
 from ums_smart_revenue.connectors.runs.tenant_context import (  # noqa: E402
     connector_tenant_context,
 )
@@ -146,6 +155,31 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         # runbook readability.
         parser.error(f"--month must be YYYY-MM, got {args.month!r}")
     return args
+
+
+def _enforce_live_credential_smoke(
+    session,
+    *,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+) -> None:
+    repository = SqlAlchemyConnectorCredentialRepository(session, tenant_id=tenant_id)
+    credential = None
+    for candidate_key in _credential_key_candidates(connector_key):
+        credential = repository.get_credential(
+            session,
+            tenant_id=tenant_id,
+            connector_key=candidate_key,
+            account_id=account_id,
+        )
+        if credential is not None:
+            break
+    if credential is None:
+        raise CredentialNotFoundError(connector_key=connector_key, account_id=account_id)
+    rejection_detail = live_credential_rejection_detail(credential)
+    if rejection_detail is not None:
+        raise CredentialSmokeRequiredError(detail=rejection_detail)
 
 
 # ============================================================================
@@ -209,6 +243,13 @@ def main(argv: list[str] | None = None) -> int:
     with session_factory() as session:
         try:
             with connector_tenant_context(args.tenant, session=session):
+                if not args.dry_run:
+                    _enforce_live_credential_smoke(
+                        session,
+                        tenant_id=args.tenant,
+                        connector_key=args.connector,
+                        account_id=args.account,
+                    )
                 outcome = run_one(
                     session,
                     tenant_id=args.tenant,

@@ -196,6 +196,12 @@ class CredentialNotFoundError(GoogleConnectorError):
         self.account_id = account_id
 
 
+class CredentialSmokeRequiredError(GoogleConnectorError):
+    def __init__(self, *, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
 class TenantLifecycleError(GoogleConnectorError):
     """Raised when a connector run targets a tenant in a non-ACTIVE lifecycle.
 
