@@ -80,7 +80,7 @@ jobs:
       - name: Run Claude Code
         id: claude
         # anthropics/claude-code-action@v1 — pinned to immutable commit SHA
-        uses: anthropics/claude-code-action@d5726de019ec4498aa667642bc3a80fca83aa102
+        uses: anthropics/claude-code-action@af0559ee4f514d1ef21826982bed13f7edc3c35e
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
