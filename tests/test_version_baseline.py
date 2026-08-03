@@ -19,7 +19,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "fastapi==0.137.1",
         "pydantic==2.13.4",
         "uvicorn[standard]==0.49.0",
-        "SQLAlchemy==2.0.50",
+        "sqlalchemy==2.0.50",
         "alembic==1.18.4",
         "psycopg[binary]==3.3.4",
         "httpx==0.28.1",

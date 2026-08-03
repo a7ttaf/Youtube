@@ -44,14 +44,14 @@ COPY uv.lock ./uv.lock
 
 # Install runtime deps into /opt/venv (no project source yet).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --locked --no-dev --no-install-project
 
 # Copy the source tree and install the project itself.
 COPY backend ./backend
 COPY alembic.ini ./alembic.ini
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --locked --no-dev
 
 ############################
 # Stage 2 — runtime

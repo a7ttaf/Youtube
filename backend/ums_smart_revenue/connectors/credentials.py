@@ -357,7 +357,7 @@ def is_external_secret_ref(value: str) -> bool:
     if not normalized:
         return False
     return any(
-        normalized.startswith(prefix) and bool(normalized[len(prefix):].strip())
+        normalized.startswith(prefix) and bool(normalized[len(prefix) :].strip())
         for prefix in SECRET_REF_PREFIXES
     )
 
