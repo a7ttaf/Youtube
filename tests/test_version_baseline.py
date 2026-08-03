@@ -16,15 +16,15 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
     dependencies = set(pyproject["project"]["dependencies"])
     test_dependencies = set(pyproject["project"]["optional-dependencies"]["test"])
     expected_dependencies = {
-        "fastapi==0.140.3",
+        "fastapi==0.141.1",
         "pydantic==2.13.4",
-        "uvicorn[standard]==0.51.0",
+        "uvicorn[standard]==0.52.0",
         "sqlalchemy==2.0.51",
         "alembic==1.18.5",
         "psycopg[binary]==3.3.4",
         "httpx==0.28.1",
         "celery==5.6.3",
-        "redis==8.0.1",
+        "redis==8.1.0",
         "openpyxl==3.1.5",
         "reportlab==5.0.0",
         "python-pptx==1.0.2",
@@ -45,7 +45,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
 def test_stack_version_baseline_records_runtime_and_frontend_targets():
     assert STACK_VERSION_BASELINE["runtime"]["python"] == "3.14.5"
     assert STACK_VERSION_BASELINE["runtime"]["node_lts"] == "24.15.0"
-    assert STACK_VERSION_BASELINE["backend"]["fastapi"] == "0.140.3"
+    assert STACK_VERSION_BASELINE["backend"]["fastapi"] == "0.141.1"
     assert STACK_VERSION_BASELINE["backend"]["pydantic"] == "2.13.4"
     assert STACK_VERSION_BASELINE["backend"]["sqlalchemy"] == "2.0.51"
     assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.18.5"
