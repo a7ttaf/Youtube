@@ -1,0 +1,431 @@
+"""Postgres-tier proof for POST /channels/import: RLS isolation + rollback.
+
+The SQLite tier (``tests/api/test_channels_import_api.py``) cannot settle two
+questions, because on SQLite the request session and the audit/platform session
+are the SAME session (``_sqlite_platform_session_from_request``) and RLS does
+not exist at all:
+
+1. **Tenant isolation.** ``youtube_channels`` carries ``FORCE ROW LEVEL
+   SECURITY``; an imported roster must be invisible to another tenant's lane.
+   The bare ``SELECT`` here has no ``WHERE tenant_id`` on purpose, mirroring
+   ``tests/tenancy/test_isolation.py`` — RLS is the only filter under test.
+2. **All-or-nothing across TWO sessions.** On Postgres the tenant lane
+   (``app_tenant``, channel writes) and the audit lane (``app_platform``,
+   ``audit_logs`` writes) are distinct sessions on distinct pooled connections
+   with independent transactions. A mid-apply failure must roll BOTH back, or
+   the import leaves orphan audit rows describing channels that do not exist.
+
+``require_postgres_url()`` raises (never skips) when ``UMS_TEST_DATABASE_URL``
+is unset, preserving the repository's no-skip policy.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from typing import Annotated
+from unittest.mock import patch
+from uuid import UUID
+
+import pytest
+import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
+from fastapi import Depends
+from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from tests.db._postgres_helpers import require_postgres_url
+from ums_smart_revenue.api.dependencies import current_db_session
+from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
+from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.audit_service import AuditRecord
+from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.db.session import build_session_factory
+from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
+from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
+
+CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
+SECOND_ID = "UC3Dci3BzZXDo4jw4dU8KqWg"
+CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
+MALFORMED_ID = "not-a-channel-id"
+GROUP_ID = "pg-import-group-1"
+SECOND_GROUP_ID = "pg-import-group-2"
+
+# Tenant A is the bootstrap UMS tenant every trusted-header request binds to.
+# Tenant B is the isolation counterpart, seeded exactly as in tests/tenancy.
+TENANT_A = UMS_TENANT_ID
+TENANT_B = "00000000-0000-0000-0000-000000000002"
+
+DEFAULT_HEADER = "youtube_channel_id,channel_name,view_revenue"
+GROUP_HEADER = "youtube_channel_id,channel_name,group_id,view_revenue"
+
+_UPGRADED_URLS: set[str] = set()
+
+
+def _alembic_config(url: str) -> Config:
+    """Build an Alembic config bound to ``url`` without an ini file.
+
+    Mirrors the no-ini pattern in ``tests/tenancy/test_force_rls.py``: env.py
+    only touches the logging tree when ``config_file_name`` is set, so
+    configuring ``script_location`` + ``sqlalchemy.url`` directly avoids
+    silencing other tests' ``caplog`` for the rest of the session.
+    """
+    cfg = Config()
+    cfg.set_main_option("sqlalchemy.url", url)
+    cfg.set_main_option("script_location", "backend/ums_smart_revenue/db/alembic")
+    return cfg
+
+
+def _ensure_upgraded(url: str) -> None:
+    """Migrate the disposable Postgres database to head once per session."""
+    if url in _UPGRADED_URLS:
+        return
+    command.upgrade(_alembic_config(url), "head")
+    _UPGRADED_URLS.add(url)
+
+
+def _tenant(tenant_id: str, slug: str) -> Tenant:
+    """Build an ACTIVE tenant object for lane-scoped reads and requests."""
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    return Tenant(
+        id=UUID(tenant_id),
+        slug=slug,
+        display_name=slug.upper(),
+        primary_currency="USD",
+        status=TenantStatus.ACTIVE,
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _seed_isolation_tenant(engine: sa.Engine) -> None:
+    """Seed tenant B as the schema owner so its lane has a valid context."""
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO tenants (id, slug, display_name, primary_currency) "
+                "VALUES (:id, 'rotana', 'Rotana', 'USD') ON CONFLICT DO NOTHING"
+            ),
+            {"id": TENANT_B},
+        )
+
+
+def _purge_test_rows(engine: sa.Engine) -> None:
+    """Remove this module's channel/group rows for every tenant.
+
+    Runs as the ``postgres`` superuser connection, which bypasses RLS, so the
+    purge reaches rows written under either tenant lane and reruns stay
+    idempotent on the shared clean-room container.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "DELETE FROM channel_group_members WHERE channel_id IN "
+                "(SELECT id FROM youtube_channels WHERE youtube_channel_id = ANY(:ids))"
+            ),
+            {"ids": [CHANNEL_ID, SECOND_ID]},
+        )
+        conn.execute(
+            sa.text("DELETE FROM channel_groups WHERE cms_group_id = ANY(:groups)"),
+            {"groups": [GROUP_ID, SECOND_GROUP_ID]},
+        )
+        conn.execute(
+            sa.text("DELETE FROM youtube_channels WHERE youtube_channel_id = ANY(:ids)"),
+            {"ids": [CHANNEL_ID, SECOND_ID]},
+        )
+
+
+@pytest.fixture(scope="module")
+def pg_url() -> str:
+    """Resolve the disposable Postgres URL, migrated to head with tenant B."""
+    url = require_postgres_url()
+    _ensure_upgraded(url)
+    engine = sa.create_engine(url)
+    try:
+        _seed_isolation_tenant(engine)
+    finally:
+        engine.dispose()
+    return url
+
+
+@pytest.fixture
+def owner_engine(pg_url: str) -> Iterator[sa.Engine]:
+    """Yield an RLS-bypassing owner engine, purging test rows either side."""
+    engine = sa.create_engine(pg_url)
+    try:
+        _purge_test_rows(engine)
+        yield engine
+        _purge_test_rows(engine)
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def client(pg_url: str) -> TestClient:
+    """Build a Postgres-backed trusted-header client for tenant A."""
+    return TestClient(create_app(database_url=pg_url, authz_source="headers"))
+
+
+def auth_headers() -> dict[str, str]:
+    """Build global super-owner headers accepted by the trusted gateway."""
+    return {
+        "x-user-id": "user-1",
+        "x-user-email": "user@example.com",
+        "x-role": "super_owner",
+        "x-scope-type": "global",
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
+    }
+
+
+def import_csv(*rows: str, header: str = DEFAULT_HEADER) -> str:
+    """Assemble a CSV body from a header line and its data rows."""
+    return "\n".join([header, *rows]) + "\n"
+
+
+def post_import(client: TestClient, csv_text: str, **overrides: object):
+    """POST one roster CSV to /channels/import as a global admin."""
+    form: dict[str, object] = {
+        "content_owner_id": CONTENT_OWNER,
+        "cms_status": "INSIDE_CMS",
+        "dry_run": "false",
+        "reason": "Postgres-tier roster load",
+    }
+    form.update(overrides)
+    return client.post(
+        "/channels/import",
+        headers=auth_headers(),
+        files={"file": ("roster.csv", csv_text, "text/csv")},
+        data=form,
+    )
+
+
+def _audit_log_count(engine: sa.Engine) -> int:
+    """Count every audit_logs row through the RLS-bypassing owner engine."""
+    with engine.connect() as conn:
+        return conn.execute(sa.text("SELECT COUNT(*) FROM audit_logs")).scalar_one()
+
+
+def _tenant_audit_log_count(engine: sa.Engine, tenant_id: str) -> int:
+    """Count one tenant's audit_logs rows through the owner engine."""
+    with engine.connect() as conn:
+        return conn.execute(
+            sa.text("SELECT COUNT(*) FROM audit_logs WHERE tenant_id = :tenant"),
+            {"tenant": tenant_id},
+        ).scalar_one()
+
+
+def _channel_ids_visible_to_tenant(url: str, tenant_id: str, slug: str) -> set[str]:
+    """Return the channel ids one tenant lane can see with NO tenant filter.
+
+    The ``SELECT`` deliberately omits ``WHERE tenant_id`` so the only thing
+    that can hide a row is the ``youtube_channels`` RLS policy, not the
+    application-level filter in ``SqlAlchemyChannelRegistry``.
+    """
+    factory = build_session_factory(url)
+    token = TENANT_CTX.set(_tenant(tenant_id, slug))
+    try:
+        with factory() as session:
+            rows = session.execute(sa.text("SELECT youtube_channel_id FROM youtube_channels"))
+            return set(rows.scalars())
+    finally:
+        TENANT_CTX.reset(token)
+
+
+def _channel_row(engine: sa.Engine, channel_id: str) -> sa.Row | None:
+    """Return the stored inventory columns for one channel, or None."""
+    with engine.connect() as conn:
+        return conn.execute(
+            sa.text(
+                "SELECT tenant_id, channel_name, cms_status, content_owner_id, "
+                "revenue_required FROM youtube_channels WHERE youtube_channel_id = :id"
+            ),
+            {"id": channel_id},
+        ).first()
+
+
+class _FailingGroupStore:
+    """Group store that delegates until the Nth ``get_group_by_cms_id`` call.
+
+    Used to force a failure AFTER the import has already written channel rows
+    on the tenant session and audit rows on the platform session, which is the
+    only way to exercise the two-session rollback path (the 422 all-or-nothing
+    check happens during planning, before any write).
+    """
+
+    def __init__(self, inner: SqlAlchemyChannelGroupRegistry, *, fail_on_call: int) -> None:
+        """Wrap the real store and arm the failure for one lookup call."""
+        self._inner = inner
+        self._fail_on_call = fail_on_call
+        self.calls = 0
+
+    def get_group_by_cms_id(self, cms_group_id: str) -> ChannelGroupEntry | None:
+        """Delegate the lookup until the armed call, then raise."""
+        self.calls += 1
+        if self.calls >= self._fail_on_call:
+            raise RuntimeError("channel group store unavailable mid-apply")
+        return self._inner.get_group_by_cms_id(cms_group_id)
+
+    def create_group(self, **kwargs: object) -> ChannelGroupEntry:
+        """Delegate group creation to the real store."""
+        return self._inner.create_group(**kwargs)
+
+    def add_members(self, **kwargs: object) -> ChannelGroupEntry:
+        """Delegate membership attachment to the real store."""
+        return self._inner.add_members(**kwargs)
+
+
+def test_import_persists_channels_on_postgres(client: TestClient, owner_engine: sa.Engine) -> None:
+    """A two-row apply persists both channels with the imported inventory."""
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,Yes",
+            f"{SECOND_ID},Beta News,No",
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["CREATE"] == 2
+
+    listing = client.get("/channels", headers=auth_headers())
+    assert listing.status_code == 200, listing.text
+    by_id = {entry["youtube_channel_id"]: entry for entry in listing.json()}
+    assert by_id[CHANNEL_ID]["channel_name"] == "Alpha News"
+    assert by_id[CHANNEL_ID]["cms_status"] == "INSIDE_CMS"
+    assert by_id[CHANNEL_ID]["content_owner_id"] == CONTENT_OWNER
+    assert by_id[CHANNEL_ID]["revenue_required"] is True
+    assert by_id[SECOND_ID]["cms_status"] == "INSIDE_CMS"
+    assert by_id[SECOND_ID]["content_owner_id"] == CONTENT_OWNER
+    assert by_id[SECOND_ID]["revenue_required"] is False
+
+    stored = _channel_row(owner_engine, CHANNEL_ID)
+    assert stored is not None
+    assert str(stored.tenant_id) == TENANT_A
+    assert stored.cms_status == "INSIDE_CMS"
+    assert stored.content_owner_id == CONTENT_OWNER
+
+
+def test_imported_channels_are_tenant_isolated(
+    client: TestClient, owner_engine: sa.Engine, pg_url: str
+) -> None:
+    """A roster imported by tenant A is invisible to tenant B's lane and API."""
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+    assert response.status_code == 200, response.text
+
+    # Database boundary: bare SELECT, no WHERE tenant_id — RLS is the filter.
+    assert CHANNEL_ID in _channel_ids_visible_to_tenant(pg_url, TENANT_A, "ums")
+    assert CHANNEL_ID not in _channel_ids_visible_to_tenant(pg_url, TENANT_B, "rotana")
+
+    # API boundary: the same app serving tenant B must not list the channel.
+    with patch("ums_smart_revenue.app._bootstrap_tenant", lambda: _tenant(TENANT_B, "rotana")):
+        other_tenant_listing = client.get("/channels", headers=auth_headers())
+    assert other_tenant_listing.status_code == 200, other_tenant_listing.text
+    assert all(entry["youtube_channel_id"] != CHANNEL_ID for entry in other_tenant_listing.json())
+
+    # Control: the row really is there for tenant A (the absence above is real).
+    own_listing = client.get("/channels", headers=auth_headers())
+    assert own_listing.status_code == 200, own_listing.text
+    assert any(entry["youtube_channel_id"] == CHANNEL_ID for entry in own_listing.json())
+
+
+def test_failed_apply_rolls_back_every_row_on_postgres(
+    client: TestClient, owner_engine: sa.Engine
+) -> None:
+    """One malformed row rejects the file and leaves the valid row unwritten."""
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,Yes",
+            f"{MALFORMED_ID},Beta News,Yes",
+        ),
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["counts"]["ERROR"] == 1
+    assert _channel_row(owner_engine, CHANNEL_ID) is None
+
+
+def test_failed_apply_leaves_no_audit_rows_on_postgres(
+    client: TestClient, owner_engine: sa.Engine
+) -> None:
+    """A rejected import writes nothing on the separate platform audit session."""
+    before = _audit_log_count(owner_engine)
+
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,Yes",
+            f"{MALFORMED_ID},Beta News,Yes",
+        ),
+    )
+
+    assert response.status_code == 422, response.text
+    assert _audit_log_count(owner_engine) == before
+
+
+def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """A failure after the first row rolls back BOTH sessions, audit included.
+
+    The armed store raises on the SECOND group lookup, so by the time the
+    request fails the tenant session already holds two channel INSERTs and the
+    platform session already holds two CHANNEL_CREATED audit INSERTs. Both
+    lanes must roll back: no channel row, and no audit row.
+
+    ``audit_counts_in_flight`` is the anti-vacuity guard. It records what the
+    PLATFORM session itself sees right after each flushed audit INSERT (a
+    transaction always sees its own uncommitted rows), so the test proves the
+    audit rows physically existed on the second session before the failure —
+    otherwise "no audit rows afterwards" would be trivially true.
+    """
+    app = create_app(database_url=pg_url, authz_source="headers")
+    stores: list[_FailingGroupStore] = []
+    audit_counts_in_flight: list[int] = []
+    original_append = SqlAlchemyAuditSink.append
+
+    def recording_append(sink: SqlAlchemyAuditSink, record: AuditRecord) -> None:
+        """Append through the real sink, then read the in-transaction count."""
+        original_append(sink, record)
+        audit_counts_in_flight.append(
+            sink._session.execute(  # noqa: SLF001 — test probe of the audit lane
+                sa.text("SELECT COUNT(*) FROM audit_logs")
+            ).scalar_one()
+        )
+
+    def failing_group_store(
+        session: Annotated[Session, Depends(current_db_session)],
+    ) -> _FailingGroupStore:
+        """Provide a group store armed to fail on the second lookup."""
+        store = _FailingGroupStore(SqlAlchemyChannelGroupRegistry(session), fail_on_call=2)
+        stores.append(store)
+        return store
+
+    app.dependency_overrides[sql_group_registry_from_session] = failing_group_store
+    failing_client = TestClient(app, raise_server_exceptions=False)
+    before = _audit_log_count(owner_engine)
+    before_tenant = _tenant_audit_log_count(owner_engine, TENANT_A)
+
+    with patch.object(SqlAlchemyAuditSink, "append", recording_append):
+        response = post_import(
+            failing_client,
+            import_csv(
+                f"{CHANNEL_ID},Alpha News,{GROUP_ID},Yes",
+                f"{SECOND_ID},Beta News,{SECOND_GROUP_ID},Yes",
+                header=GROUP_HEADER,
+            ),
+        )
+
+    assert response.status_code == 500, response.text
+    assert stores and stores[0].calls == 2, "the store must have failed mid-apply, not before it"
+    # Both CHANNEL_CREATED rows were really INSERTed on the platform session
+    # before the failure; the request did not fail ahead of the audit writes.
+    assert audit_counts_in_flight == [before_tenant + 1, before_tenant + 2]
+    assert _channel_row(owner_engine, CHANNEL_ID) is None
+    assert _channel_row(owner_engine, SECOND_ID) is None
+    assert _audit_log_count(owner_engine) == before
