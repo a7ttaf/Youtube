@@ -28,14 +28,14 @@ test = [
 ]
 lint = [
     "mypy==2.3.0",
-    "ruff==0.16.0",
+    "ruff==0.16.1",
 ]
 dev = [
     "httpx==0.28.1",
     "mypy==2.3.0",
     "pypdf==6.14.2",
     "pytest==9.1.1",
-    "ruff==0.16.0",
+    "ruff==0.16.1",
 ]
 
 [tool.pytest.ini_options]
