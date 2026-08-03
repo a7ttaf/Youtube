@@ -724,7 +724,7 @@ single P-tier above.
   CLOSED by PR #98 — `PATCH /channels/{id}/mapping` rejects (409) a re-parenting
   that would rewrite a LOCKED month's attribution. Remaining (definition-blocked):
   bulk inventory import format; "Scoped changes" tile.
-- ⏳ Google source-reported revenue ingestion foundation: `currencies`
+- ✅ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-
   fixture parsers for YouTube Reporting / YouTube Analytics / AdSense
@@ -735,10 +735,14 @@ single P-tier above.
   raw_payload) + provenance-preserving upsert (COALESCE), AdSense fail-closed
   accountId / empty-report handling, and strict YYYY-MM-DD parsing — see
   `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-report.md`.
-  Remaining: live Google connector credential setup
-  (B2), FX/conversion (B3). Marked ⏳ (not ✅) per the scaffolding-only honesty
-  rule above — no real ingestion path yet.
-- ⏳ Google source-rows -> revenue facts normalization bridge: pure
+  **B2 live credentials CLOSED (2026-08-03 reconciliation).** The 2026-06-22
+  operator smoke ran `run_google_connector.py --month 2026-04` against content
+  owner `PlZrS5Fh56RMd9dmSL6XSA` and produced 25 real
+  `monthly_channel_revenue_facts` totalling $79,057.76, reconciling to the cent
+  against the source rows (PRs #132 credential contract, #134 smoke CLI, #135
+  live-run gate). Lifted to ✅ — a real ingestion path has now produced facts.
+  Remaining: FX/conversion (B3).
+- ✅ Google source-rows -> revenue facts normalization bridge: pure
   `select_canonical_row()` rule per `source_system`, USD-only writes,
   upfront locked-month gate via `get_or_create_month_close_row(..., for_update=True)`,
   read-before-write CREATED/UPDATED/UNCHANGED classification — PR #44.
@@ -751,9 +755,11 @@ single P-tier above.
   a production caller: `run_one` runs `GoogleSourceNormalizer.normalize_month`
   as a post-run step (PR #90, refactored into
   `connectors/runs/normalization.py` by PR #93), so a connector run projects
-  source rows to `MonthlyChannelRevenueFactORM`. Remaining: live Google
-  connector credentials (B2), FX/conversion (B3). Marked ⏳ (not ✅) — the wiring is
-  done but no live data source has produced facts yet. See
+  source rows to `MonthlyChannelRevenueFactORM`. **B2 live credentials CLOSED
+  (2026-08-03 reconciliation)** — the 2026-06-22 live smoke drove this exact
+  bridge end to end, projecting 25 channels of real CMS revenue into
+  `MonthlyChannelRevenueFactORM`. Lifted to ✅: a live data source has now
+  produced facts. Remaining: FX/conversion (B3). See
   `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`
   and `Docs/superpowers/plans/2026-05-25-spec-c1-google-source-normalizer.md`.
 - ✅ Track E (2026-06-08) — **Postgres RLS enforcement DONE** (S3 storage-layer
