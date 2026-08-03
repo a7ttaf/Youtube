@@ -274,6 +274,73 @@ def test_sql_channel_registry_update_content_owner_missing_channel_raises():
         )
 
 
+def test_sql_channel_registry_update_inventory_persists_all_four_fields():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    updated = registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id="owner-cms",
+        revenue_required=True,
+    )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
+        )
+    ).one()
+    assert updated.channel_name == "TV A Renamed"
+    assert updated.cms_status == "INSIDE_CMS"
+    assert updated.content_owner_id == "owner-cms"
+    assert updated.revenue_required is True
+    assert persisted.channel_name == "TV A Renamed"
+    assert persisted.cms_status == "INSIDE_CMS"
+    assert persisted.content_owner_id == "owner-cms"
+    assert persisted.revenue_required is True
+
+
+def test_sql_channel_registry_update_inventory_flips_revenue_source_status():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    updated = registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=False,
+    )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
+        )
+    ).one()
+    assert updated.revenue_source_status == "PERFORMANCE_ONLY"
+    assert persisted.revenue_source_status == "PERFORMANCE_ONLY"
+
+
+def test_sql_channel_registry_update_inventory_missing_channel_raises():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(ChannelRegistryValidationError, match="Unknown channel"):
+        registry.update_inventory(
+            youtube_channel_id="missing-channel",
+            channel_name="Nope",
+            cms_status="INSIDE_CMS",
+            content_owner_id=None,
+            revenue_required=True,
+        )
+
+
 def test_setting_content_owner_makes_channel_targetable_for_ingestion():
     """Closed-loop regression for the silent-zero gap: a channel becomes an
     Analytics ingestion target only once its content_owner_id matches the CMS

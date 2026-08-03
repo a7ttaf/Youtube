@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
 
@@ -88,6 +88,17 @@ class ChannelRegistryStore(Protocol):
 
     def update_content_owner(
         self, *, youtube_channel_id: str, content_owner_id: str | None
+    ) -> ChannelRegistryEntry:
+        pass
+
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
     ) -> ChannelRegistryEntry:
         pass
 
@@ -184,6 +195,32 @@ class ChannelRegistry:
             content_owner_id=normalize_optional_content_owner(content_owner_id),
             revenue_source_status=existing.revenue_source_status,
             active=existing.active,
+        )
+        self._channels[youtube_channel_id] = updated
+        return updated
+
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+    ) -> ChannelRegistryEntry:
+        """Replace a channel's inventory fields from an authoritative import row."""
+        current = self._channels.get(youtube_channel_id)
+        if current is None:
+            raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
+        updated = replace(
+            current,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+            revenue_source_status=(
+                "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
+            ),
         )
         self._channels[youtube_channel_id] = updated
         return updated

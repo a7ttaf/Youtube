@@ -207,6 +207,56 @@ class SqlAlchemyChannelRegistry:
             raise _channel_registry_validation_error_from_integrity_error(exc) from exc
         return self._to_entry(row)
 
+    # ========================================================================
+    # Purpose: Replace a channel's inventory fields (name, CMS status, content
+    #   owner, revenue-required) from an authoritative CMS roster import row.
+    #   This is the upsert "update" half of the bulk channel inventory import
+    #   (file-wins): when the import finds a channel that already exists, it
+    #   calls this instead of update_mapping / update_content_owner because
+    #   neither of those covers channel_name, cms_status, and revenue_required
+    #   together.
+    # Database/ORM: YouTubeChannelORM (write), tenant-scoped.
+    # Standards: No locked-month guard (unlike update_mapping) -- this method
+    #   never touches primary_org_unit_id, so it cannot rewrite a closed
+    #   month's company/sector attribution. Mirrors create_channel's
+    #   revenue_source_status derivation so the registry never ends up with a
+    #   revenue_required/revenue_source_status pair that disagrees with each
+    #   other. A missing row raises ChannelRegistryValidationError (not
+    #   KeyError, unlike update_mapping/update_content_owner) so the bulk
+    #   import can report a clean per-row validation failure instead of an
+    #   untyped exception. No IntegrityError handling is needed here (unlike
+    #   create_channel/update_mapping): none of the columns this method writes
+    #   carry a foreign key or uniqueness constraint.
+    # Blast Radius: Channel inventory fields only (name/status/owner/revenue
+    #   flag). No finance attribution rewrite, no month locks, no Neo4j, no
+    #   exports.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/channels.py -> bulk import route
+    #     (POST /channels/import) upsert-update path.
+    # ========================================================================
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+    ) -> ChannelRegistryEntry:
+        """Replace a channel's inventory fields from an authoritative import row."""
+        row = self._get_row(youtube_channel_id)
+        if row is None:
+            raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
+        row.channel_name = channel_name
+        row.cms_status = cms_status
+        row.content_owner_id = normalize_optional_content_owner(content_owner_id)
+        row.revenue_required = revenue_required
+        row.revenue_source_status = (
+            "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
+        )
+        self._session.flush()
+        return self._to_entry(row)
+
     def _get_row(self, youtube_channel_id: str) -> YouTubeChannelORM | None:
         """Look up the ORM row filtered by tenant_id + external channel id."""
         return self._session.scalars(
