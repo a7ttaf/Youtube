@@ -70,12 +70,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Minimal runtime deps. psycopg pulls its client bindings from the Python wheel,
 # so the runtime does not need libpq or the psql client.
 #
-# skipcq: DOK-DL3008 -- apt versions are deliberately unpinned. Reproducibility
-# here comes from PYTHON_BASE_DIGEST, which pins the base image by sha256; the
-# three packages below (ca-certificates, curl, tini) receive Debian security
-# updates, and pinning exact versions breaks the build the moment an older
-# version is dropped from the archive. Pre-existing on main and unchanged by
-# this PR, which only touches the `uv sync` flags in the builder stage.
+# apt versions are deliberately unpinned. Reproducibility here comes from
+# PYTHON_BASE_DIGEST, which pins the base image by sha256; the three packages
+# below (ca-certificates, curl, tini) receive Debian security updates, and
+# pinning exact versions breaks the build the moment an older version is dropped
+# from the archive. DL3008 is suppressed for both analyzers that lint this file:
+# skipcq for DeepSource (DOK-DL3008) and the hadolint ignore directive directly
+# below, because the repo's Dockerfile lane (ci/checks/lint.sh ->
+# lint::run_docker, tool=hadolint per ci/config/checks.yml) does not recognize
+# the DeepSource skipcq comment and would otherwise still report DL3008.
+# skipcq: DOK-DL3008
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
