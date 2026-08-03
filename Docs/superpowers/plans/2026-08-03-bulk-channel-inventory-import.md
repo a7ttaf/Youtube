@@ -16,8 +16,18 @@
 
 ## Conventions for every task
 
+- **All Python commands must run through `uv run`.** A bare `python -m pytest`
+  fails — alembic and the app deps live in the uv-managed environment. So:
+  `uv run python -m pytest ...`, `uv run python -m ruff check ...`,
+  `uv run python -m alembic -c alembic.ini ...`. Every `python -m` command in
+  the tasks below is shorthand for `uv run python -m`.
+- Resolved before execution, do not re-derive:
+  - The global scope constructor is `AccessScope.global_scope()`.
+  - The channel-group dependency is `sql_group_registry_from_session`, and it is
+    **already imported** in `backend/ums_smart_revenue/api/channels.py:200`.
+  - The current Alembic head is `20260620_0001`.
 - Keep every touched Python line ≤ 100 characters.
-- Run `python -m ruff check backend tests` before each commit.
+- Run `uv run python -m ruff check backend tests` before each commit.
 - Commit messages are trailer-free. Do not add `Co-Authored-By` or any Claude attribution — this repo's validation scans for it.
 - Postgres-tier tests require `UMS_TEST_DATABASE_URL` pointing at a `test_*`-named database. `require_postgres_url` raises rather than skipping.
 
@@ -97,7 +107,7 @@ Create `backend/ums_smart_revenue/db/alembic/versions/20260803_0001_channel_grou
 """Add channel_groups.cms_group_id.
 
 Revision ID: 20260803_0001
-Revises: 20260612_0002
+Revises: 20260620_0001
 Create Date: 2026-08-03
 """
 
@@ -107,7 +117,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260803_0001"
-down_revision = "20260612_0002"
+down_revision = "20260620_0001"
 branch_labels = None
 depends_on = None
 
@@ -133,10 +143,11 @@ def downgrade() -> None:
     op.drop_column("channel_groups", "cms_group_id")
 ```
 
-**Before writing `down_revision`,** confirm the current head:
+The head was confirmed as `20260620_0001` before execution, so `down_revision`
+above is correct as written. Verify it is still the only head:
 
-Run: `python -m alembic -c alembic.ini heads`
-If the reported head is not `20260612_0002`, set `down_revision` to whatever it reports.
+Run: `uv run python -m alembic -c alembic.ini heads`
+Expected: `20260620_0001 (head)`
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -1477,7 +1488,9 @@ def _attach_group_membership(
         groups.add_members(group_id=group.id, channel_ids=[channel_id])
 ```
 
-Confirm the exact spelling of the global scope constructor (`AccessScope.global_scope()` vs `AccessScope.global_()`) by grepping `backend/ums_smart_revenue/auth/` before running, and confirm the channel-group dependency provider name in `backend/ums_smart_revenue/api/dependencies.py`.
+Both previously-open names are resolved: `AccessScope.global_scope()` is correct
+as written, and the group dependency is `sql_group_registry_from_session`, which
+`channels.py` already imports (see its use at line 200). Do not re-derive either.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
