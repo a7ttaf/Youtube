@@ -44,14 +44,14 @@ COPY uv.lock ./uv.lock
 
 # Install runtime deps into /opt/venv (no project source yet).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --locked --no-dev --no-install-project
 
 # Copy the source tree and install the project itself.
 COPY backend ./backend
 COPY alembic.ini ./alembic.ini
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --locked --no-dev
 
 ############################
 # Stage 2 — runtime
@@ -69,6 +69,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Minimal runtime deps. psycopg pulls its client bindings from the Python wheel,
 # so the runtime does not need libpq or the psql client.
+#
+# apt versions are deliberately unpinned. Reproducibility here comes from
+# PYTHON_BASE_DIGEST, which pins the base image by sha256; the three packages
+# below (ca-certificates, curl, tini) receive Debian security updates, and
+# pinning exact versions breaks the build the moment an older version is dropped
+# from the archive. DL3008 is suppressed for both analyzers that lint this file:
+# skipcq for DeepSource (DOK-DL3008) and the hadolint ignore directive directly
+# below, because the repo's Dockerfile lane (ci/checks/lint.sh ->
+# lint::run_docker, tool=hadolint per ci/config/checks.yml) does not recognize
+# the DeepSource skipcq comment and would otherwise still report DL3008.
+# skipcq: DOK-DL3008
+# hadolint ignore=DL3008
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \

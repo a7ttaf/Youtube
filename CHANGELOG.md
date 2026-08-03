@@ -44,12 +44,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade would otherwise newly fail 32 historical planning documents under
   `Docs/superpowers/`. Those are dated point-in-time records; the exclusion
   restores exactly the pre-0.16 file set.
+- `Dockerfile` installs with `uv sync --locked` instead of `--frozen` (both the
+  dependency layer and the project layer). `--frozen` installs from `uv.lock`
+  without ever checking it against `pyproject.toml`, so lockfile drift was
+  silent: the build exited 0 while installing versions the manifest no longer
+  declared. `--locked` fails the build instead.
+- Dependabot's Python ecosystem is now `uv` rather than `pip`. This project is
+  uv-managed and carries a `uv.lock`; the `pip` ecosystem only edits
+  `pyproject.toml`, which is why every dependency PR left the lockfile stale.
+- `sqlalchemy` is now spelled lowercase in `pyproject.toml` (and its
+  version-baseline assertion) to match the name in `uv.lock`. A case mismatch
+  between the two files trips a known Dependabot `uv` failure
+  (dependabot-core#14119), so this is a prerequisite for the ecosystem switch.
 - `SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many(...)` now returns
   `SourceRowUpsertResult` instead of a bare list of rows. Callers that need the
   persisted rows should read `.entries`; connector-run accounting should use
   `.created`, `.updated`, and `.unchanged` for source-row classification.
 
 ### Fixed
+- Regenerated the stale `uv.lock`. It still resolved `fastapi==0.136.3` and
+  `pytest==9.0.3` while `pyproject.toml` declared `0.137.1` and `9.1.0`, so
+  container images silently ran the older packages. `uv lock --check` now
+  exits 0.
+- `connectors/credentials.py` reformatted to satisfy `ruff format`. The
+  blocker-severity `format-python` gate had been failing on this one file, so
+  `ruff format --check .` now reports the whole tree clean.
 - `ConnectorJobExecutor._audit_failed_before_start` now sets `TENANT_CTX` to a
   minimal `Tenant` (id-only) before opening the audit session, so the
   `after_begin` hook in `db/session.py` writes the trusted tenant-context row
