@@ -30,6 +30,10 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "python-pptx==1.0.2",
         "google-cloud-secret-manager==2.30.0",
         "google-cloud-storage==3.13.0",
+        # Required by FastAPI to accept multipart/form-data. POST /channels/import
+        # takes the channel roster as a CSV upload, and FastAPI raises at
+        # route-registration time (not request time) without this installed.
+        "python-multipart==0.0.20",
     }
     expected_test_dependencies = {
         "pytest==9.1.1",
