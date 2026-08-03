@@ -147,6 +147,7 @@ class ChannelGroupORM(OrgBase):
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     group_type: Mapped[str] = mapped_column(Text, nullable=False)
+    cms_group_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -176,6 +177,11 @@ class ChannelGroupORM(OrgBase):
             "tenant_id",
             "id",
             name="uq_channel_groups_tenant_id_id",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "cms_group_id",
+            name="uq_channel_groups_tenant_id_cms_group_id",
         ),
         Index("ix_channel_groups_tenant_id", "tenant_id"),
     )
