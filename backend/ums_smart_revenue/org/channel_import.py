@@ -19,7 +19,12 @@
 import csv
 import io
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
+from types import MappingProxyType
+
+from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
 
 CHANNEL_ID_PATTERN = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 
@@ -177,3 +182,110 @@ def _flag_duplicates(
         else:
             kept.append(row)
     return kept, errors
+
+
+class ChannelImportOutcome(StrEnum):
+    """What the import will do with a single CSV row."""
+
+    CREATE = "CREATE"
+    UPDATE = "UPDATE"
+    UNCHANGED = "UNCHANGED"
+    ERROR = "ERROR"
+
+
+@dataclass(frozen=True)
+class ChannelImportPlanEntry:
+    """The planned outcome for one CSV row, with its field-level diff."""
+
+    row_number: int
+    youtube_channel_id: str | None
+    outcome: ChannelImportOutcome
+    channel_name: str | None = None
+    group_id: str | None = None
+    revenue_required: bool | None = None
+    changes: Mapping[str, tuple[object, object]] = MappingProxyType({})
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ChannelImportPlan:
+    """Every row's planned outcome plus counts by outcome."""
+
+    entries: tuple[ChannelImportPlanEntry, ...]
+    counts: Mapping[str, int]
+
+    @property
+    def has_errors(self) -> bool:
+        """Return True when any row failed validation, which blocks the apply."""
+        return self.counts.get(ChannelImportOutcome.ERROR.value, 0) > 0
+
+
+def plan_channel_import(
+    *,
+    rows: tuple[ChannelImportRow, ...],
+    errors: tuple[ChannelImportRowError, ...],
+    existing: Mapping[str, ChannelRegistryEntry],
+    content_owner_id: str,
+    cms_status: str,
+) -> ChannelImportPlan:
+    """Diff parsed rows against the registry into a per-row execution plan."""
+    entries: list[ChannelImportPlanEntry] = [
+        ChannelImportPlanEntry(
+            row_number=error.row_number,
+            youtube_channel_id=None,
+            outcome=ChannelImportOutcome.ERROR,
+            reason=error.reason,
+        )
+        for error in errors
+    ]
+
+    for row in rows:
+        revenue_required = True if row.view_revenue is None else row.view_revenue
+        current = existing.get(row.youtube_channel_id)
+        if current is None:
+            outcome = ChannelImportOutcome.CREATE
+            changes: dict[str, tuple[object, object]] = {}
+        else:
+            changes = _inventory_changes(
+                current,
+                channel_name=row.channel_name,
+                cms_status=cms_status,
+                content_owner_id=content_owner_id,
+                revenue_required=revenue_required,
+            )
+            outcome = ChannelImportOutcome.UPDATE if changes else ChannelImportOutcome.UNCHANGED
+        entries.append(
+            ChannelImportPlanEntry(
+                row_number=row.row_number,
+                youtube_channel_id=row.youtube_channel_id,
+                outcome=outcome,
+                channel_name=row.channel_name,
+                group_id=row.group_id,
+                revenue_required=revenue_required,
+                changes=MappingProxyType(dict(changes)),
+            )
+        )
+
+    entries.sort(key=lambda entry: entry.row_number)
+    counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
+    for entry in entries:
+        counts[entry.outcome.value] += 1
+    return ChannelImportPlan(entries=tuple(entries), counts=MappingProxyType(counts))
+
+
+def _inventory_changes(
+    current: ChannelRegistryEntry,
+    *,
+    channel_name: str,
+    cms_status: str,
+    content_owner_id: str,
+    revenue_required: bool,
+) -> dict[str, tuple[object, object]]:
+    """Return only the inventory fields whose value the import would change."""
+    candidates = {
+        "channel_name": (current.channel_name, channel_name),
+        "cms_status": (current.cms_status, cms_status),
+        "content_owner_id": (current.content_owner_id, content_owner_id),
+        "revenue_required": (current.revenue_required, revenue_required),
+    }
+    return {name: pair for name, pair in candidates.items() if pair[0] != pair[1]}
