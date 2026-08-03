@@ -348,6 +348,65 @@ def test_create_group_allows_empty_channel_id_list_without_member_rows() -> None
     assert member_rows == []
 
 
+def test_create_group_records_cms_group_id() -> None:
+    """A group created with a cms_group_id round-trips it through create_group."""
+    session = build_session()
+    seed_org(session)
+
+    group = SqlAlchemyChannelGroupRegistry(session).create_group(
+        name="TV Sector",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL],
+        cms_group_id="cms-tv",
+    )
+
+    assert group.cms_group_id == "cms-tv"
+
+
+# ---------------------------------------------------------------------------
+# get_group_by_cms_id
+# ---------------------------------------------------------------------------
+
+
+def test_get_group_by_cms_id_finds_the_group() -> None:
+    """get_group_by_cms_id resolves a group by its stamped CMS key."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    created = registry.create_group(
+        name="TV Sector",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL],
+        cms_group_id="cms-tv",
+    )
+
+    assert registry.get_group_by_cms_id("cms-tv") == created
+
+
+def test_get_group_by_cms_id_returns_none_when_absent() -> None:
+    """An unknown CMS key resolves to None rather than raising."""
+    session = build_session()
+    seed_org(session)
+
+    assert SqlAlchemyChannelGroupRegistry(session).get_group_by_cms_id("cms-missing") is None
+
+
+def test_get_group_by_cms_id_filters_to_bound_tenant_only() -> None:
+    """get_group_by_cms_id never resolves another tenant's group."""
+    session = build_session()
+    seed_org(session)
+
+    SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID).create_group(
+        name="Other Group",
+        group_type="CUSTOM_GROUP",
+        channel_ids=[CHANNEL_OTHER_EXTERNAL],
+        cms_group_id="cms-shared",
+    )
+
+    default_registry = SqlAlchemyChannelGroupRegistry(session)
+    assert default_registry.get_group_by_cms_id("cms-shared") is None
+
+
 # ---------------------------------------------------------------------------
 # list_groups / reads
 # ---------------------------------------------------------------------------

@@ -77,6 +77,18 @@ class SqlAlchemyChannelGroupRegistry:
             return None
         return self._to_entry(row)
 
+    def get_group_by_cms_id(self, cms_group_id: str) -> ChannelGroupEntry | None:
+        """Return the tenant-scoped group carrying this CMS key, or None."""
+        row = self._session.scalars(
+            select(ChannelGroupORM).where(
+                ChannelGroupORM.tenant_id == self._tenant_id,
+                ChannelGroupORM.cms_group_id == cms_group_id,
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return self._to_entry(row)
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.
 
@@ -106,7 +118,12 @@ class SqlAlchemyChannelGroupRegistry:
         return tuple(row.youtube_channel_id for row in rows)
 
     def create_group(
-        self, *, name: str, group_type: str, channel_ids: list[str]
+        self,
+        *,
+        name: str,
+        group_type: str,
+        channel_ids: list[str],
+        cms_group_id: str | None = None,
     ) -> ChannelGroupEntry:
         channel_rows = self._channel_rows_by_external_ids(channel_ids)
         row = ChannelGroupORM(
@@ -115,6 +132,7 @@ class SqlAlchemyChannelGroupRegistry:
             name=name,
             group_type=group_type,
             active=True,
+            cms_group_id=cms_group_id,
         )
         self._session.add(row)
         self._session.flush()
@@ -335,6 +353,7 @@ class SqlAlchemyChannelGroupRegistry:
             group_type=row.group_type,
             active=row.active,
             channel_ids=resolved_channel_ids,
+            cms_group_id=row.cms_group_id,
         )
 
 
