@@ -1119,6 +1119,20 @@ Follow the existing patterns in this file: `current_principal_from_headers`, `cu
 
 Size and row caps: 2 MiB, 5000 data rows.
 
+**MANDATORY — a required `reason`.** `AUDIT_EVENT_DEFINITIONS` marks
+`CHANNEL_UPDATED` as `reason_required=True`, and
+`audit_service.py::_normalize_audit_reason` **raises**
+`ValueError(f"Audit event {event_type.value} requires a reason")` when one is
+missing. Calling `record_audit_event` for an UPDATE row without a reason
+therefore 500s. The endpoint takes a required `reason` form field and threads it
+into every `record_audit_event` call. This is not optional polish — without it
+every upsert-update row crashes the request.
+
+(`AuditEventDefinition.permission` is classification metadata used by
+`_is_sensitive_audit_record`, not an authorization check, so the
+`CHANNEL_UPDATED` marker naming `MANAGE_ORG_MAPPING` does not conflict with this
+route's `MANAGE_CHANNELS` gate.)
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/api/test_channels_import_api.py`. Model client/principal setup on the existing `tests/api/test_channels_api.py` — read it first and reuse its fixtures rather than inventing new ones.
@@ -1141,7 +1155,21 @@ def _form(dry_run: bool) -> dict[str, str]:
         "content_owner_id": CONTENT_OWNER,
         "cms_status": "INSIDE_CMS",
         "dry_run": "true" if dry_run else "false",
+        "reason": "August CMS roster load",
     }
+
+
+def test_missing_reason_is_rejected(admin_client) -> None:
+    response = admin_client.post(
+        "/channels/import",
+        files=_csv(f"youtube_channel_id,channel_name\n{CHANNEL_ID},CBC\n"),
+        data={
+            "content_owner_id": CONTENT_OWNER,
+            "cms_status": "INSIDE_CMS",
+            "dry_run": "false",
+        },
+    )
+    assert response.status_code == 422
 
 
 def test_import_requires_global_manage_channels(client_without_manage_channels) -> None:
@@ -1305,6 +1333,7 @@ def import_channels(
     file: Annotated[UploadFile, File()],
     content_owner_id: Annotated[str, Form()],
     dry_run: Annotated[bool, Form()],
+    reason: Annotated[str, Form()],
     cms_status: Annotated[str, Form()] = "INSIDE_CMS",
 ) -> dict[str, object]:
     target_scope = AccessScope.global_scope()
@@ -1323,6 +1352,11 @@ def import_channels(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="content_owner_id is required",
+        )
+    if not reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="reason is required",
         )
 
     raw = file.file.read(MAX_IMPORT_BYTES + 1)
@@ -1381,6 +1415,7 @@ def import_channels(
         scope=target_scope,
         content_owner_id=content_owner_id,
         cms_status=cms_status,
+        reason=reason,
     )
     record_audit_event(
         sink=audit_sink,
@@ -1389,6 +1424,7 @@ def import_channels(
         entity_type="youtube_channel_import",
         entity_id=content_owner_id,
         scope=target_scope,
+        reason=reason,
         details={
             "filename": file.filename,
             "content_owner_id": content_owner_id,
@@ -1429,6 +1465,7 @@ def _apply_channel_import(
     scope: AccessScope,
     content_owner_id: str,
     cms_status: str,
+    reason: str,
 ) -> None:
     for entry in plan.entries:
         if entry.outcome is ChannelImportOutcome.CREATE:
@@ -1459,6 +1496,7 @@ def _apply_channel_import(
             entity_type="youtube_channel",
             entity_id=entry.youtube_channel_id,
             scope=scope,
+            reason=reason,
             details={
                 "content_owner_id": content_owner_id,
                 "cms_status": cms_status,
