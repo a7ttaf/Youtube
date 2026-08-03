@@ -658,14 +658,11 @@ def _normalize_header(name: str) -> str:
 
 
 def _parse_view_revenue(raw: str | None) -> bool | None:
-    if raw is None:
-        return None
-    token = raw.strip().lower()
-    if token in _TRUE_TOKENS:
-        return True
-    if token in _FALSE_TOKENS:
-        return False
-    raise ValueError(f"unrecognised view_revenue value: {raw.strip()!r}")
+    # Returns None when the column is absent; otherwise normalises the cell and
+    # matches it against _TRUE_TOKENS / _FALSE_TOKENS, raising ValueError on an
+    # unrecognised value. See the shipped implementation in
+    # backend/ums_smart_revenue/org/channel_import.py.
+    ...
 
 
 def parse_channel_import_csv(text: str) -> ParsedChannelImport:
