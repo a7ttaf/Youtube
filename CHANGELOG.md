@@ -19,6 +19,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root governance: `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `.gitignore`.
 
 ### Changed
+- Dependency batch, consolidating Dependabot #140, #153 and #154. Runtime:
+  `fastapi` 0.137.1 -> 0.140.3, `uvicorn[standard]` 0.49.0 -> 0.51.0,
+  `sqlalchemy` 2.0.50 -> 2.0.51, `alembic` 1.18.4 -> 1.18.5, `redis`
+  8.0.0 -> 8.0.1, `reportlab` 4.5.1 -> 5.0.0, `google-cloud-secret-manager`
+  2.29.0 -> 2.30.0, `google-cloud-storage` 3.12.0 -> 3.13.0. Tooling:
+  `pytest` 9.1.0 -> 9.1.1, `pypdf` 6.13.2 -> 6.14.2, `mypy` 2.1.0 -> 2.3.0,
+  `ruff` 0.15.17 -> 0.16.0. `uv.lock` regenerated with the bumps (86 packages
+  before and after, none added or removed) and the version baseline plus its
+  guard test re-pointed at the new pins.
+  - `reportlab` 5.0.0 is a major bump. Its two breaking changes — remote-image
+    trusted-host defaults and the removal of the pyRXP parser — do not touch
+    this codebase, which imports only `reportlab.lib.colors`,
+    `reportlab.lib.pagesizes`, `reportlab.lib.styles` and `reportlab.platypus`
+    and fetches no remote images. PDFs rendered under 4.5.1 and 5.0.0 were
+    compared and are identical in page count, mediabox, metadata, font
+    resources and extracted text.
+  - `pytest` 9.1.1 fixes a 9.1.0 regression where `conftest.py` under
+    `<invocation dir>/test*` was not loaded as an initial conftest — this
+    repo's exact layout (`testpaths = ["tests"]` with `tests/conftest.py`).
+- Ruff is now configured with `extend-exclude = ["*.md"]`. Ruff 0.16 formats
+  Python code blocks inside Markdown by default, and the blocker-severity
+  `format-python` gate runs `ruff format --check .` from the repo root, so the
+  upgrade would otherwise newly fail 32 historical planning documents under
+  `Docs/superpowers/`. Those are dated point-in-time records; the exclusion
+  restores exactly the pre-0.16 file set.
 - `SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many(...)` now returns
   `SourceRowUpsertResult` instead of a bare list of rows. Callers that need the
   persisted rows should read `.entries`; connector-run accounting should use
