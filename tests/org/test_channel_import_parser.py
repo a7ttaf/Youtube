@@ -25,8 +25,7 @@ def test_parses_required_columns() -> None:
 
 def test_parses_optional_columns_in_any_order_and_case() -> None:
     csv_text = (
-        f"View_Revenue,Group_ID,CHANNEL_NAME,youtube_channel_id\n"
-        f"Yes,cms-tv,CBC,{CHANNEL_ID}\n"
+        f"View_Revenue,Group_ID,CHANNEL_NAME,youtube_channel_id\nYes,cms-tv,CBC,{CHANNEL_ID}\n"
     )
     parsed = parse_channel_import_csv(csv_text)
     row = parsed.rows[0]
@@ -94,11 +93,15 @@ def test_flags_unrecognised_view_revenue_token() -> None:
 
 
 def test_accepts_all_view_revenue_token_forms() -> None:
-    for token, expected in (("yes", True), ("TRUE", True), ("1", True),
-                            ("no", False), ("False", False), ("0", False)):
-        csv_text = (
-            f"youtube_channel_id,channel_name,view_revenue\n{CHANNEL_ID},CBC,{token}\n"
-        )
+    for token, expected in (
+        ("yes", True),
+        ("TRUE", True),
+        ("1", True),
+        ("no", False),
+        ("False", False),
+        ("0", False),
+    ):
+        csv_text = f"youtube_channel_id,channel_name,view_revenue\n{CHANNEL_ID},CBC,{token}\n"
         parsed = parse_channel_import_csv(csv_text)
         assert parsed.errors == (), token
         assert parsed.rows[0].view_revenue is expected, token
@@ -113,8 +116,6 @@ def test_skips_fully_blank_lines() -> None:
 
 def test_row_numbers_are_one_based_and_exclude_the_header() -> None:
     second = "UC3Dci3BzZXDo4jw4dU8KqWg"
-    csv_text = (
-        f"youtube_channel_id,channel_name\n{CHANNEL_ID},CBC\n{second},CBC Drama\n"
-    )
+    csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},CBC\n{second},CBC Drama\n"
     parsed = parse_channel_import_csv(csv_text)
     assert [row.row_number for row in parsed.rows] == [1, 2]
