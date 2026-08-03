@@ -421,7 +421,10 @@ def create_channel(
 #   including no audit event, so previewing is never mistaken for applying.
 #   Every write is audited per channel plus one CHANNEL_IMPORTED summary, and
 #   because CHANNEL_UPDATED declares reason_required the route takes a
-#   mandatory reason rather than letting an upsert 500 mid-apply.
+#   mandatory reason rather than letting an upsert 500 mid-apply. Group
+#   membership is reconciled for CREATE, UPDATE, and UNCHANGED rows alike:
+#   the outcome is computed only from inventory fields, so treating UNCHANGED
+#   as a no-op would silently drop a newly added Group_ID on re-import.
 # Blast Radius: Connector ingest targeting. list_target_channels only pulls
 #   revenue for cms_status='INSIDE_CMS' channels, so importing a roster with
 #   the wrong cms_status silently removes channels from ingest and their
@@ -574,11 +577,20 @@ def _apply_channel_import(
     cms_status: str,
     reason: str,
 ) -> None:
-    """Execute every CREATE and UPDATE row, auditing each one."""
+    """Execute every CREATE/UPDATE row and reconcile group membership.
+
+    CREATE and UPDATE rows perform a registry write and an audit event.
+    UNCHANGED rows perform neither, but still reach group-membership
+    reconciliation below: the plan's outcome is computed only from inventory
+    fields (channel_name, cms_status, content_owner_id, revenue_required), so
+    treating UNCHANGED as a full no-op would silently drop a Group_ID column
+    added on re-import. ERROR rows are skipped entirely.
+    """
     for entry in plan.entries:
         channel_id = entry.youtube_channel_id
         if channel_id is None or entry.channel_name is None:
             continue
+        event_type: AuditEventType | None = None
         if entry.outcome is ChannelImportOutcome.CREATE:
             registry.create_channel(
                 youtube_channel_id=channel_id,
@@ -598,23 +610,22 @@ def _apply_channel_import(
                 revenue_required=bool(entry.revenue_required),
             )
             event_type = AuditEventType.CHANNEL_UPDATED
-        else:
-            continue
-        record_audit_event(
-            sink=audit_sink,
-            actor=actor,
-            event_type=event_type,
-            entity_type="youtube_channel",
-            entity_id=channel_id,
-            scope=scope,
-            reason=reason,
-            details={
-                "content_owner_id": content_owner_id,
-                "cms_status": cms_status,
-                "revenue_required": entry.revenue_required,
-                "source": "bulk_import",
-            },
-        )
+        if event_type is not None:
+            record_audit_event(
+                sink=audit_sink,
+                actor=actor,
+                event_type=event_type,
+                entity_type="youtube_channel",
+                entity_id=channel_id,
+                scope=scope,
+                reason=reason,
+                details={
+                    "content_owner_id": content_owner_id,
+                    "cms_status": cms_status,
+                    "revenue_required": entry.revenue_required,
+                    "source": "bulk_import",
+                },
+            )
         if entry.group_id:
             _attach_group_membership(groups, cms_group_id=entry.group_id, channel_id=channel_id)
 

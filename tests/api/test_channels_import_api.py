@@ -217,6 +217,40 @@ def test_group_id_creates_group_and_membership():
     assert matches[0]["channel_ids"] == [CHANNEL_ID]
 
 
+def test_group_membership_attaches_on_rerun_of_unchanged_rows():
+    """A group_id added on re-import still attaches even when inventory is UNCHANGED."""
+    client, registry, _groups, _sink = create_import_app()
+
+    first = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News",
+            header="youtube_channel_id,channel_name",
+        ),
+    )
+
+    assert first.status_code == 200
+    assert first.json()["counts"]["CREATE"] == 1
+    assert registry.get_channel(CHANNEL_ID) is not None
+
+    second = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv",
+            header="youtube_channel_id,channel_name,group_id",
+        ),
+    )
+
+    assert second.status_code == 200
+    assert second.json()["counts"]["UNCHANGED"] == 1
+
+    listing = client.get("/groups", headers=auth_headers("super_owner", "global"))
+    assert listing.status_code == 200
+    matches = [group for group in listing.json() if group["cms_group_id"] == "cms-tv"]
+    assert len(matches) == 1
+    assert matches[0]["channel_ids"] == [CHANNEL_ID]
+
+
 def test_apply_writes_summary_and_per_channel_audit():
     """An applied import records both the file summary and each channel write."""
     client, _registry, _groups, audit_sink = create_import_app()
