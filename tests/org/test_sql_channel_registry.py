@@ -489,14 +489,16 @@ def test_update_inventory_returns_the_write_boundary_previous_entry():
     assert updated.content_owner_id == "owner-cms"
 
 
-def test_update_inventory_required_write_takes_guard_before_the_row_lock(monkeypatch):
-    """Every requested-True write acquires the shared key BEFORE the row lock.
+def test_update_inventory_takes_guard_before_the_row_lock(monkeypatch):
+    """EVERY inventory write acquires the shared key BEFORE the row lock.
 
     The lock-time readiness recheck holds the guard and then FOR-UPDATEs
-    required channel rows; taking the row first and the guard second is the
-    opposite order and deadlocks against a concurrent close (review #159
-    r3713841225). Whether the write is a flip is only knowable after the
-    locked re-read, so the already-required write acquires the guard too.
+    required channel rows, so row-then-guard is the opposite order and
+    deadlocks against a concurrent close (review #159 r3713841225). Guarding
+    only requested-True writes left the same inversion ACROSS rows of a batch
+    — a performance-only row's lock preceding a later row's guard — so two
+    imports ordering those rows differently deadlocked each other (review
+    #159 r3714401827). Unconditional makes guard-then-rows a total order.
     """
     import ums_smart_revenue.org.sql_channel_registry as registry_module
     from ums_smart_revenue.finance.month_close_locks import (
@@ -545,19 +547,24 @@ def test_update_inventory_required_write_takes_guard_before_the_row_lock(monkeyp
         channel_name="TV A",
         cms_status="INSIDE_CMS",
         content_owner_id=None,
-        revenue_required=False,  # not requesting required: no guard
+        revenue_required=False,  # performance-only: STILL guarded, pre-lock
     )
 
-    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH] * 2
-    assert call_order == ["guard", "row-lock", "guard", "row-lock", "row-lock"]
+    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH] * 3
+    assert call_order == ["guard", "row-lock"] * 3
 
 
-def test_create_channel_revenue_required_acquires_revenue_requirement_guard(monkeypatch):
-    """A revenue-required CREATE serializes with month locking like a flip does.
+def test_every_create_acquires_the_revenue_requirement_guard(monkeypatch):
+    """EVERY create serializes with month locking, performance-only included.
 
-    Without the guard, a create committing inside a lock's readiness/commit
-    window would carry created_at <= locked_at and retroactively fail the
-    LOCKED month's effective-dated readiness (review #159 r3712948674).
+    A revenue-required create committing inside a lock's readiness/commit
+    window would otherwise carry created_at <= locked_at and retroactively
+    fail the LOCKED month's effective-dated readiness (review #159
+    r3712948674). A performance-only create that flushes before a lock but
+    commits after it is invisible to that close yet keeps a pre-lock
+    created_at, so a later OFF->ON flip would demand a fact for a month whose
+    readiness never saw the channel — the guard makes COMMIT ORDER decide
+    which side of the lock it falls on (review #159 r3714401797).
     """
     import ums_smart_revenue.org.sql_channel_registry as registry_module
     from ums_smart_revenue.finance.month_close_locks import (
@@ -586,10 +593,10 @@ def test_create_channel_revenue_required_acquires_revenue_requirement_guard(monk
         channel_name="Performance Create",
         primary_company_id=None,
         cms_status="INSIDE_CMS",
-        revenue_required=False,  # performance-only: no readiness impact, no guard
+        revenue_required=False,  # performance-only: guarded all the same
     )
 
-    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH]
+    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH] * 2
 
 
 def test_update_inventory_allows_flip_when_lock_predates_the_channel():
@@ -625,12 +632,13 @@ def test_update_inventory_allows_flip_when_lock_predates_the_channel():
     assert updated.revenue_source_status == "MISSING_REVENUE_SOURCE"
 
 
-def test_create_channel_revenue_required_stamps_created_at_after_the_guard(monkeypatch):
-    """The guarded create's created_at is the post-guard app wall clock.
+def test_create_channel_stamps_created_at_after_the_guard(monkeypatch):
+    """Every create's created_at is the post-guard app wall clock.
 
     The column's server default now() is the transaction START time, which
     predates any month lock the create waited on and would defeat the
-    created_at <= locked_at readiness cutoff (review #159 r3713449080).
+    created_at <= locked_at readiness cutoff (review #159 r3713449080,
+    r3713841258).
     """
     import ums_smart_revenue.org.sql_channel_registry as registry_module
 
@@ -670,11 +678,11 @@ def test_create_channel_revenue_required_stamps_created_at_after_the_guard(monke
     ).one()
     assert persisted.created_at.replace(tzinfo=None) == sentinel.replace(tzinfo=None)
 
-    # A performance-only create stamps at the insertion point too (no guard):
-    # leaving the server default would record the transaction START time,
-    # and a later OFF->ON flip would then demand a fact for a month that
-    # locked mid-transaction, before the channel really existed (review
-    # #159 r3713841258).
+    # A performance-only create takes the guard and stamps at the insertion
+    # point too: leaving the server default would record the transaction
+    # START time, and a later OFF->ON flip would then demand a fact for a
+    # month that locked mid-transaction, before the channel really existed
+    # (review #159 r3713841258, r3714401797).
     registry.create_channel(
         youtube_channel_id="channel-created-perf-stamp",
         channel_name="Perf Stamp",
@@ -682,7 +690,7 @@ def test_create_channel_revenue_required_stamps_created_at_after_the_guard(monke
         cms_status="INSIDE_CMS",
         revenue_required=False,
     )
-    assert call_order == ["guard", "stamp", "stamp"]
+    assert call_order == ["guard", "stamp", "guard", "stamp"]
     perf_row = session.scalars(
         select(YouTubeChannelORM).where(
             YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,

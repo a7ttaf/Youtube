@@ -118,21 +118,25 @@ class SqlAlchemyChannelRegistry:
         # the create either commits before the readiness recheck (and is
         # counted) or waits until the month locks. Same acyclic order as the
         # flip path: this key only, never month-then-this. No-op off Postgres.
-        if revenue_required:
-            acquire_finance_month_advisory_lock(
-                self._session,
-                REVENUE_REQUIREMENT_GUARD_MONTH,
-                tenant_id=self._tenant_id,
-            )
-        # Stamp created_at at the actual insertion point (AFTER any guard
+        # EVERY create takes the guard, not just revenue-required ones. A
+        # performance-only channel that flushes before a concurrent lock but
+        # commits after it is invisible to that close's readiness check, yet
+        # keeps a pre-lock created_at — so a later OFF->ON flip would treat it
+        # as present at that close and demand a fact for a month whose
+        # readiness never saw it. Holding the guard makes COMMIT ORDER, not an
+        # uncommitted timestamp, decide which side of the lock a channel falls
+        # on (review #159 r3714401797).
+        acquire_finance_month_advisory_lock(
+            self._session,
+            REVENUE_REQUIREMENT_GUARD_MONTH,
+            tenant_id=self._tenant_id,
+        )
+        # Stamp created_at at the actual insertion point (AFTER the guard
         # wait) with the same app wall clock that stamps
         # FinanceMonthCloseORM.locked_at. The column's server default now() is
-        # the transaction START time: for a guarded create it predates any
-        # lock this transaction waited on (defeating the created_at <=
-        # locked_at cutoff, review #159 r3713449080), and for a
-        # performance-only create it can predate a month that locked mid-
-        # transaction, making a later OFF->ON flip demand a fact for a month
-        # the channel never really existed in (review #159 r3713841258).
+        # the transaction START time, which predates any lock this transaction
+        # waited on and would defeat the created_at <= locked_at cutoff
+        # (review #159 r3713449080, r3713841258).
         created_at = datetime.now(UTC)
 
         row = YouTubeChannelORM(
@@ -315,23 +319,24 @@ class SqlAlchemyChannelRegistry:
         if row is None:
             raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
         # DEADLOCK ORDER: the tenant-wide guard MUST precede the channel row
-        # lock. The lock-time readiness recheck acquires this guard and then
-        # FOR-UPDATEs required channel rows (with_for_update(of=
-        # YouTubeChannelORM) in month_close_readiness); taking the row first
-        # and the guard second is the opposite order and deadlocks against a
-        # concurrent close (review #159 r3713841225). Whether this write
-        # actually flips the flag is only knowable after the locked re-read
-        # below, so EVERY requested-True write takes the guard — the extra
-        # serialization only affects imports carrying required rows, which
-        # already serialize with closes by design. Serializes flip and lock
-        # (review #159 r3712948682): whichever commits first is visible to the
-        # other's check. No-op off Postgres.
-        if revenue_required:
-            acquire_finance_month_advisory_lock(
-                self._session,
-                REVENUE_REQUIREMENT_GUARD_MONTH,
-                tenant_id=self._tenant_id,
-            )
+        # lock, on EVERY inventory write. The lock-time readiness recheck
+        # acquires this guard and then FOR-UPDATEs required channel rows
+        # (with_for_update(of=YouTubeChannelORM) in month_close_readiness), so
+        # row-then-guard is the opposite order and deadlocks against a
+        # concurrent close (review #159 r3713841225). Guarding only the
+        # requested-True writes left the same inversion ACROSS rows of one
+        # batch: a performance-only row's lock could precede a later row's
+        # guard acquisition, and two imports ordering those rows differently
+        # deadlock each other (review #159 r3714401827). Unconditional here
+        # makes guard-then-rows a total order for every writer. Also
+        # serializes the flip against a concurrent lock (r3712948682):
+        # whichever commits first is visible to the other's check. No-op off
+        # Postgres.
+        acquire_finance_month_advisory_lock(
+            self._session,
+            REVENUE_REQUIREMENT_GUARD_MONTH,
+            tenant_id=self._tenant_id,
+        )
         # Row-lock and re-read at the write boundary: a concurrent committed
         # update between the caller's planning read and this write must not be
         # silently hidden — the returned `previous` reflects what this write
