@@ -156,7 +156,10 @@ def apply_channel_import(
     of the authoritative roster's (the file wins). The registry's locked
     re-read returns what was actually replaced; an UNCHANGED row audits a
     CHANNEL_UPDATED event ONLY when that real diff is non-empty, so a truly
-    unchanged re-import stays audit-quiet. All three outcomes still reach
+    unchanged re-import stays audit-quiet — and so does a planned UPDATE whose
+    target values a concurrent writer already committed (the write replaced
+    nothing, so recording it would claim a mutation that did not occur). All
+    three outcomes still reach
     group-membership reconciliation below — outcomes are computed only from
     inventory fields, so treating UNCHANGED as a no-op would also drop a
     Group_ID column added on re-import. ERROR rows are skipped entirely. One
@@ -193,7 +196,12 @@ def apply_channel_import(
                 revenue_required=bool(entry.revenue_required),
             )
             applied_changes = _entry_changes(previous, updated)
-            if entry.outcome is ChannelImportOutcome.UPDATE or applied_changes:
+            # The audit rule is the same for planned UPDATE and UNCHANGED:
+            # record CHANNEL_UPDATED only when the write-boundary diff is
+            # non-empty. A planned UPDATE whose target values a concurrent
+            # writer already committed replaces nothing — auditing it would
+            # claim a mutation that did not occur (review #159 r3713966806).
+            if applied_changes:
                 event_type = AuditEventType.CHANNEL_UPDATED
         if event_type is not None:
             record_audit_event(
