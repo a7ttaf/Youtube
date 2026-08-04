@@ -565,6 +565,89 @@ def test_create_channel_revenue_required_acquires_revenue_requirement_guard(monk
     assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH]
 
 
+def test_update_inventory_allows_flip_when_lock_predates_the_channel():
+    """A month locked BEFORE the channel existed never blocks the flip.
+
+    Readiness effective-dates LOCKED months (created_at <= locked_at), so a
+    pre-creation close can never evaluate this channel; demanding a fact for
+    it would make a channel created after historical closes permanently
+    un-flippable (review #159 r3713449090).
+    """
+    from datetime import UTC, datetime
+
+    session = build_finance_session()
+    seed_org(session)
+    _seed_not_required_channel(session)
+    session.add(
+        FinanceMonthCloseORM(
+            month="2020-01",
+            status="LOCKED",
+            locked_at=datetime(2020, 2, 1, tzinfo=UTC),  # long before the channel
+        )
+    )
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    _previous, updated = registry.update_inventory(
+        youtube_channel_id="channel-perf-only",
+        channel_name="Perf Only",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=True,
+    )
+
+    assert updated.revenue_required is True
+    assert updated.revenue_source_status == "MISSING_REVENUE_SOURCE"
+
+
+def test_create_channel_revenue_required_stamps_created_at_after_the_guard(monkeypatch):
+    """The guarded create's created_at is the post-guard app wall clock.
+
+    The column's server default now() is the transaction START time, which
+    predates any month lock the create waited on and would defeat the
+    created_at <= locked_at readiness cutoff (review #159 r3713449080).
+    """
+    from datetime import UTC, datetime
+
+    import ums_smart_revenue.org.sql_channel_registry as registry_module
+
+    sentinel = datetime(2031, 5, 6, 12, 0, tzinfo=UTC)
+    call_order: list[str] = []
+
+    class _FixedDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            call_order.append("stamp")
+            return sentinel
+
+    session = build_finance_session()
+    seed_org(session)
+    monkeypatch.setattr(
+        registry_module,
+        "acquire_finance_month_advisory_lock",
+        lambda _session, month, *, tenant_id=None: call_order.append("guard"),
+    )
+    monkeypatch.setattr(registry_module, "datetime", _FixedDatetime)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    registry.create_channel(
+        youtube_channel_id="channel-created-required",
+        channel_name="Required Create",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+
+    assert call_order == ["guard", "stamp"]
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-created-required",
+        )
+    ).one()
+    assert persisted.created_at.replace(tzinfo=None) == sentinel.replace(tzinfo=None)
+
+
 def test_update_inventory_allows_unchanged_flag_despite_locked_month():
     """A locked month without facts only blocks the FLIP, not other updates."""
     session = build_finance_session()

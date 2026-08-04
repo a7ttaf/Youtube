@@ -16,9 +16,10 @@
 # ============================================================================
 """SQL-backed tenant-scoped channel registry."""
 
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -115,15 +116,21 @@ class SqlAlchemyChannelRegistry:
         # would carry created_at <= locked_at and retroactively fail the LOCKED
         # month's effective-dated readiness. Holding the tenant-wide guard means
         # the create either commits before the readiness recheck (and is
-        # counted) or after the month locks (and is excluded by the
-        # created_at <= locked_at cutoff). Same acyclic order as the flip path:
-        # this key only, never month-then-this. No-op off Postgres.
+        # counted) or waits until the month locks. Same acyclic order as the
+        # flip path: this key only, never month-then-this. No-op off Postgres.
+        created_at: datetime | None = None
         if revenue_required:
             acquire_finance_month_advisory_lock(
                 self._session,
                 REVENUE_REQUIREMENT_GUARD_MONTH,
                 tenant_id=self._tenant_id,
             )
+            # Stamp created_at AFTER the guard wait, with the same app wall
+            # clock that stamps FinanceMonthCloseORM.locked_at. The column's
+            # server default now() is the transaction START time, which
+            # predates any lock this transaction waited on and would defeat
+            # the created_at <= locked_at cutoff (review #159 r3713449080).
+            created_at = datetime.now(UTC)
 
         row = YouTubeChannelORM(
             id=uuid4(),
@@ -139,6 +146,8 @@ class SqlAlchemyChannelRegistry:
             ),
             active=True,
         )
+        if created_at is not None:
+            row.created_at = created_at
         self._session.add(row)
         try:
             self._session.flush()
@@ -328,7 +337,9 @@ class SqlAlchemyChannelRegistry:
                 REVENUE_REQUIREMENT_GUARD_MONTH,
                 tenant_id=self._tenant_id,
             )
-            locked_missing = self._locked_months_missing_fact(youtube_channel_id)
+            locked_missing = self._locked_months_missing_fact(
+                youtube_channel_id, created_at=row.created_at
+            )
             if locked_missing:
                 raise ChannelRevenueRequirementLockedMonthError(
                     "revenue_required cannot be enabled: locked finance month(s) "
@@ -360,13 +371,22 @@ class SqlAlchemyChannelRegistry:
             )
         ).one_or_none()
 
-    def _locked_months_missing_fact(self, youtube_channel_id: str) -> list[str]:
-        """Return sorted LOCKED months that have NO revenue fact for this channel.
+    def _locked_months_missing_fact(
+        self, youtube_channel_id: str, *, created_at: datetime
+    ) -> list[str]:
+        """Return sorted LOCKED months missing a fact that INCLUDE this channel.
 
         Read-only, tenant-scoped. These are the months whose close readiness
         would retroactively break if the channel became revenue-required now:
         the readiness query counts active revenue-required channels missing a
-        fact, evaluated against the CURRENT registry flag.
+        fact, evaluated against the CURRENT registry flag. Mirrors readiness's
+        effective dating exactly — a month locked BEFORE the channel existed
+        (``locked_at < created_at``) never evaluates the channel, so it must
+        not block the flip either; without this symmetry a channel created
+        after historical closes could never become revenue-required
+        (review #159 r3713449090). A LOCKED month with no ``locked_at`` has no
+        provable cutoff and stays blocking (fail closed), matching readiness,
+        which applies no cutoff in that case.
         """
         fact_exists = (
             select(MonthlyChannelRevenueFactORM.id)
@@ -381,6 +401,10 @@ class SqlAlchemyChannelRegistry:
             select(FinanceMonthCloseORM.month).where(
                 FinanceMonthCloseORM.tenant_id == self._tenant_id,
                 FinanceMonthCloseORM.status == "LOCKED",
+                or_(
+                    FinanceMonthCloseORM.locked_at.is_(None),
+                    FinanceMonthCloseORM.locked_at >= created_at,
+                ),
                 ~fact_exists,
             )
         ).all()
