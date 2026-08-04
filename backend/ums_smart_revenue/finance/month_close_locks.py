@@ -1,9 +1,10 @@
 """Transaction-scoped finance month advisory lock helpers."""
 
+from datetime import UTC, datetime
 from hashlib import blake2b
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -49,6 +50,34 @@ def acquire_finance_month_advisory_lock(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
         {"lock_key": finance_month_advisory_lock_key(month, resolved_tenant_id)},
     )
+
+
+# ============================================================================
+# Purpose: Produce the single timestamp source that orders a channel's
+#   creation against a finance month's lock — the comparison the LOCKED-month
+#   effective-dating cutoff (created_at <= locked_at) depends on.
+# Database/ORM: PostgreSQL clock_timestamp() via a scalar SELECT. No ORM rows.
+# Standards: BOTH sides of the comparison must call this. Independent
+#   application-host wall clocks are not comparable — skew (or a host clock
+#   stepping backward) can place a post-lock create before locked_at and
+#   recreate the exact race the advisory guard prevents. clock_timestamp() is
+#   the database's CURRENT time and, unlike now()/transaction_timestamp(),
+#   advances within a transaction, so a value read after the guard wait
+#   genuinely reflects post-guard ordering. Falls back to the app clock off
+#   Postgres (SQLite is single-writer and single-host in this codebase).
+# Blast Radius: Month-close effective dating and the revenue_required flip
+#   guard. No revenue math, no allocation, no audit.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/month_close.py -> stamps
+#     locked_at/unlocked_at with this.
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> stamps
+#     created_at with this, after acquiring the guard.
+# ============================================================================
+def serialization_timestamp(session: Session) -> datetime:
+    """Return the shared database clock used to order creates against locks."""
+    if session.get_bind().dialect.name != "postgresql":
+        return datetime.now(UTC)
+    return session.scalar(select(func.clock_timestamp()))
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None, *, use_context: bool = True) -> UUID:

@@ -10,6 +10,7 @@ from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
 from ums_smart_revenue.finance.month_close_locks import (
     acquire_finance_month_advisory_lock,
     finance_month_advisory_lock_key,
+    serialization_timestamp,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -89,7 +90,11 @@ class SqlAlchemyFinanceMonthCloseRepository:
             raise FinanceMonthCloseReadinessError(readiness)
         row.status = "LOCKED"
         row.locked_by = _parse_uuid(actor_user_id)
-        row.locked_at = datetime.now(UTC)
+        # Database clock, not this host's: the LOCKED-month effective-dating
+        # cutoff compares this against YouTubeChannelORM.created_at, and two
+        # application hosts' wall clocks are not comparable (review #159
+        # r3715073210). Both sides call serialization_timestamp.
+        row.locked_at = serialization_timestamp(self._session)
         row.updated_at = row.locked_at
         self._session.flush()
         return self._to_entry(row)

@@ -16,7 +16,7 @@
 # ============================================================================
 """SQL-backed tenant-scoped channel registry."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import or_, select
@@ -31,6 +31,7 @@ from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.month_close_locks import (
     REVENUE_REQUIREMENT_GUARD_MONTH,
     acquire_finance_month_advisory_lock,
+    serialization_timestamp,
 )
 from ums_smart_revenue.org.channel_registry import (
     ChannelMappingLockedMonthError,
@@ -148,12 +149,14 @@ class SqlAlchemyChannelRegistry:
         # on (review #159 r3714401797).
         self._acquire_revenue_requirement_guard()
         # Stamp created_at at the actual insertion point (AFTER the guard
-        # wait) with the same app wall clock that stamps
-        # FinanceMonthCloseORM.locked_at. The column's server default now() is
-        # the transaction START time, which predates any lock this transaction
-        # waited on and would defeat the created_at <= locked_at cutoff
-        # (review #159 r3713449080, r3713841258).
-        created_at = datetime.now(UTC)
+        # wait) from the SAME database clock that stamps
+        # FinanceMonthCloseORM.locked_at. Two things this avoids: the column's
+        # server default now() is the transaction START time, which predates
+        # any lock this transaction waited on (r3713449080, r3713841258); and
+        # an application-host wall clock is not comparable with the lock's
+        # timestamp across hosts, so skew could place a post-lock create
+        # before locked_at and recreate the race (r3715073210).
+        created_at = serialization_timestamp(self._session)
 
         row = YouTubeChannelORM(
             id=uuid4(),

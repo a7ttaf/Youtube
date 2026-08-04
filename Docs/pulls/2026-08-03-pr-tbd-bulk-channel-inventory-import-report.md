@@ -127,14 +127,14 @@ All run locally against Postgres 18 (`ums-mig-pg-test`, port 55432).
 | `ruff check backend tests scripts` | All checks passed |
 | `ruff format --check` (19 touched files) | All formatted |
 | 100-char guard on touched `.py` | No violations |
-| Full suite (`pytest -q`, PG set) | 2535 passed, 0 failed (post-review rounds) |
+| Full suite (`pytest -q`, PG set) | 2537 passed, 0 failed (post-review rounds) |
 | Migration upgrade→downgrade→upgrade | Passed, single head `20260803_0001` |
 | `git diff --check` | Clean |
 
 Test counts by tier, collected from the final tree (`grep -c '^def test_'`):
 28 parser, 17 planner, 6 apply-domain, 36 API (SQLite), 9 API (Postgres),
 5 in-memory inventory-update, 35 SQL registry, 24 SQL groups, 5 in-memory
-group lookup, 3 readiness effective-dating. The counts grew through the
+group lookup, 5 readiness effective-dating. The counts grew through the
 review rounds — each hardening fix landed with its own regression test.
 
 ## Two defects found and fixed during implementation

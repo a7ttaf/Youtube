@@ -356,6 +356,34 @@ class ChannelImportPlan:
         return self.counts.get(ChannelImportOutcome.ERROR.value, 0) > 0
 
 
+# ============================================================================
+# Purpose: Decide every row's outcome for a bulk channel import — CREATE,
+#   UPDATE (with its field diff), UNCHANGED, or ERROR — by diffing the parsed
+#   roster against the registry snapshot the caller supplies.
+# Database/ORM: NONE. Pure function over caller-supplied data; the store reads
+#   happen in channel_import_apply.plan_channel_import_with_stores. Keeping
+#   this I/O-free is what makes the outcome rules unit-testable.
+# Standards: Fail closed per row, never per file — every invalid row is
+#   reported so an operator fixes one file rather than one row at a time, and
+#   the route rejects the whole apply if any ERROR remains. Archived registry
+#   rows and archived CMS groups are ERRORs, never silent creates or
+#   reactivations. `revenue_required` is finance-sensitive: an absent
+#   view_revenue column defaults to required, and turning it ON is separately
+#   guarded against LOCKED months at the registry write boundary. A repeated
+#   channel id is an ADDITIONAL group membership (many-to-many) when its
+#   copies agree on inventory fields — the first copy owns the inventory
+#   outcome, later copies plan UNCHANGED to carry their group; an archived
+#   channel fails every copy.
+# Blast Radius: Every apply-time write decision, and therefore connector
+#   ingest targeting via cms_status/content_owner_id. No writes of its own,
+#   no audit, no finance totals.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     plan_channel_import_with_stores supplies the store state; the apply
+#     executes these entries.
+#   - File: backend/ums_smart_revenue/api/channels.py -> renders the plan as
+#     the dry-run/apply response payload.
+# ============================================================================
 def plan_channel_import(
     *,
     rows: tuple[ChannelImportRow, ...],

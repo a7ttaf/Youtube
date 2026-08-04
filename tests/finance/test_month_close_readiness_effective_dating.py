@@ -85,3 +85,40 @@ def test_open_month_readiness_evaluates_every_current_channel() -> None:
 
     blocker_types = [blocker.blocker_type for blocker in readiness.blockers]
     assert "MISSING_REVENUE_FACTS" in blocker_types
+
+
+def test_lock_and_create_share_one_database_clock_source() -> None:
+    """created_at and locked_at must come from the SAME clock, not two hosts.
+
+    The LOCKED-month cutoff compares them directly, so independent
+    application-host wall clocks (or a host clock stepping backward) could
+    place a post-lock create before locked_at and recreate the race the
+    advisory guard prevents (review #159 r3715073210). Both sides call
+    ``serialization_timestamp``; on PostgreSQL that is clock_timestamp(),
+    which — unlike now() — advances within a transaction, so a value read
+    after the guard wait genuinely reflects post-guard ordering.
+    """
+    import inspect
+
+    from ums_smart_revenue.finance import month_close, month_close_locks
+    from ums_smart_revenue.org import sql_channel_registry
+
+    assert "serialization_timestamp(self._session)" in inspect.getsource(
+        month_close.SqlAlchemyFinanceMonthCloseRepository.lock_month
+    )
+    assert "serialization_timestamp(self._session)" in inspect.getsource(
+        sql_channel_registry.SqlAlchemyChannelRegistry.create_channel
+    )
+    # The Postgres branch reads the database clock, never the app clock.
+    source = inspect.getsource(month_close_locks.serialization_timestamp)
+    assert "clock_timestamp" in source
+
+
+def test_serialization_timestamp_falls_back_to_the_app_clock_off_postgres() -> None:
+    """SQLite has no clock_timestamp(); the helper still returns a timestamp."""
+    from ums_smart_revenue.finance.month_close_locks import serialization_timestamp
+
+    session = _session()
+    stamped = serialization_timestamp(session)
+
+    assert stamped.tzinfo is not None

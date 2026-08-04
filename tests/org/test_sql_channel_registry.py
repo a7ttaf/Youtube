@@ -639,23 +639,18 @@ def test_update_inventory_allows_flip_when_lock_predates_the_channel():
 
 
 def test_create_channel_stamps_created_at_after_the_guard(monkeypatch):
-    """Every create's created_at is the post-guard app wall clock.
+    """Every create's created_at is the post-guard SHARED database clock.
 
-    The column's server default now() is the transaction START time, which
-    predates any month lock the create waited on and would defeat the
-    created_at <= locked_at readiness cutoff (review #159 r3713449080,
-    r3713841258).
+    Two failure modes this pins: the column's server default now() is the
+    transaction START time, which predates any month lock the create waited
+    on (review #159 r3713449080, r3713841258); and an application-host wall
+    clock is not comparable with locked_at across hosts, so both sides must
+    read the same `serialization_timestamp` source (r3715073210).
     """
     import ums_smart_revenue.org.sql_channel_registry as registry_module
 
     sentinel = datetime(2031, 5, 6, 12, 0, tzinfo=UTC)
     call_order: list[str] = []
-
-    class _FixedDatetime:
-        @classmethod
-        def now(cls, tz=None):
-            call_order.append("stamp")
-            return sentinel
 
     session = build_finance_session()
     seed_org(session)
@@ -664,7 +659,11 @@ def test_create_channel_stamps_created_at_after_the_guard(monkeypatch):
         "acquire_finance_month_advisory_lock",
         lambda _session, month, *, tenant_id=None: call_order.append("guard"),
     )
-    monkeypatch.setattr(registry_module, "datetime", _FixedDatetime)
+    monkeypatch.setattr(
+        registry_module,
+        "serialization_timestamp",
+        lambda _session: (call_order.append("stamp"), sentinel)[1],
+    )
     registry = SqlAlchemyChannelRegistry(session)
 
     registry.create_channel(
