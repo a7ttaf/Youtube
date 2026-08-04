@@ -573,8 +573,6 @@ def test_update_inventory_allows_flip_when_lock_predates_the_channel():
     it would make a channel created after historical closes permanently
     un-flippable (review #159 r3713449090).
     """
-    from datetime import UTC, datetime
-
     session = build_finance_session()
     seed_org(session)
     _seed_not_required_channel(session)
@@ -607,8 +605,6 @@ def test_create_channel_revenue_required_stamps_created_at_after_the_guard(monke
     predates any month lock the create waited on and would defeat the
     created_at <= locked_at readiness cutoff (review #159 r3713449080).
     """
-    from datetime import UTC, datetime
-
     import ums_smart_revenue.org.sql_channel_registry as registry_module
 
     sentinel = datetime(2031, 5, 6, 12, 0, tzinfo=UTC)
