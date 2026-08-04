@@ -31,6 +31,15 @@ enforced in `20260608_0001`/`20260612_0002` (no `platform_audit_logs`, no `20260
 payment_name)`; the `audit_logs` DDL has 13 columns; the explain confidence wire shape is
 `{label, score}`; and the audit-event (38) and role (16) catalogs are complete.
 
+**Repo-visibility note (2026-08-04, branch `chore/public-repo-hygiene`):** the
+repository is public as of 2026-08. Hygiene pass: `.gitignore` now blocks the
+workstation-only agent/session artifacts (`.tmp*`, `.worktrees/`, `.cursor/`,
+`.omo/`, `.agents/`, stray session scripts) from ever being committed, and the
+2026-05-21 runlogs no longer carry the operator's personal email. Convention
+going forward: docs and fixtures must not embed operator-real identifiers
+(CMS content-owner ids, live revenue figures, personal emails) — use
+placeholders and mark redactions.
+
 **Coverage + tracker note (2026-06-17, branch `docs/coverage-tracker-reconciliation`):**
 broader coverage and tracker reconciliation sweep: AGENTS.md Neo4j references removed;
 README/Docs/02 stack fiction (Next.js, Celery, asyncpg, RLS-planned) corrected to shipped
