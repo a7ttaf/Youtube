@@ -103,6 +103,10 @@ def parse_channel_import_csv(text: str, *, max_rows: int | None = None) -> Parse
     from consuming the whole byte budget as wasted scan work while "never
     exceeding" the row limit — and to keep the cap meaningful for any future
     caller that passes ``max_rows`` without a byte cap in front of it.
+
+    A file whose header is valid but carries NO non-blank data row is rejected
+    as a format error: an empty roster is an incomplete export, and reporting
+    it as a successful zero-channel import would hide that.
     """
     # strict=True makes csv.reader raise csv.Error on malformed quoting (e.g.
     # an unterminated quoted channel_name) instead of silently folding every
@@ -140,6 +144,13 @@ def parse_channel_import_csv(text: str, *, max_rows: int | None = None) -> Parse
                 rows.append(parsed)
     except csv.Error as exc:
         raise ChannelImportFormatError(f"malformed CSV: {exc}") from exc
+
+    # A header-only or blank-only export is an incomplete roster, not a
+    # successful zero-channel import: without this the apply would return 200
+    # and record a CHANNEL_IMPORTED summary for a file that processed nothing
+    # (review #159 r3714884517).
+    if data_rows == 0:
+        raise ChannelImportFormatError("CSV contains no data rows")
 
     kept, duplicate_errors = _flag_duplicates(rows)
     errors.extend(duplicate_errors)

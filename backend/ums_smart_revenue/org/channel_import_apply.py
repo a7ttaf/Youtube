@@ -367,6 +367,29 @@ def _entry_changes(
     }
 
 
+# ============================================================================
+# Purpose: Reconcile one import row's CMS group membership — resolve the group
+#   by its CMS key, create it when absent, and attach the channel — returning
+#   the mutation performed so the caller can audit it.
+# Database/ORM: ChannelGroupORM (row-locked read via get_group_by_cms_id
+#   for_update=True; INSERT via create_group) and ChannelGroupMemberORM
+#   (INSERT via add_members). No channel or finance writes.
+# Standards: Write-boundary recheck over plan trust — the locked read
+#   re-examines `active` and raises ChannelImportArchivedGroupError (route:
+#   409) when a group was archived in the plan-to-apply window, so the race
+#   fails the whole transaction closed rather than mutating a retired group.
+#   The parent group row is the membership serialization point every writer
+#   shares (FOR NO KEY UPDATE, compatible with membership FK key-share locks).
+#   Returns None when membership already existed so a no-op is never audited.
+# Blast Radius: Channel-group membership and therefore finance group-scope
+#   selection and rollups; the GROUP_UPDATED audit trail. No revenue totals,
+#   no allocation, no month-close.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the locked
+#     lookup, typed uniqueness conflict, and membership writers.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps the archived and
+#     conflict errors to 409.
+# ============================================================================
 def _attach_group_membership(
     groups: ChannelGroupRegistryStore, *, cms_group_id: str, channel_id: str
 ) -> tuple[str, ChannelGroupEntry] | None:

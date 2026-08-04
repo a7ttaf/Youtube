@@ -245,3 +245,19 @@ def test_row_numbers_are_one_based_and_exclude_the_header() -> None:
     csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},CBC\n{second},CBC Drama\n"
     parsed = parse_channel_import_csv(csv_text)
     assert [row.row_number for row in parsed.rows] == [1, 2]
+
+
+def test_rejects_a_header_only_file() -> None:
+    """An empty roster is an incomplete export, not a successful import.
+
+    Without this the apply would return 200 and audit a CHANNEL_IMPORTED
+    summary for a file that processed nothing (review #159 r3714884517).
+    """
+    with pytest.raises(ChannelImportFormatError, match="no data rows"):
+        parse_channel_import_csv("youtube_channel_id,channel_name\n")
+
+
+def test_rejects_a_blank_only_file() -> None:
+    """Blank records alone do not make a roster either."""
+    with pytest.raises(ChannelImportFormatError, match="no data rows"):
+        parse_channel_import_csv("youtube_channel_id,channel_name\n\n\n")

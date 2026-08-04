@@ -75,9 +75,10 @@ registry at the apply boundary so a concurrent change committed after
 planning cannot survive the roster (the file wins); CHANNEL_UPDATED is
 recorded exactly when the write-boundary diff is non-empty, so healed drift
 is audited and a no-op write (truly unchanged, or a concurrent writer that
-already landed the roster values) stays audit-quiet. Malformed CSV structure (unterminated quotes,
-duplicate or unknown header columns, more blank records than the row cap)
-rejects the whole file as 422; oversize payloads return 413. Flipping
+already landed the roster values) stays audit-quiet. Malformed CSV structure
+(unterminated quotes, duplicate or unknown header columns, a header wider than
+16 columns, more blank records than the row cap, or a valid header carrying no
+data rows at all) rejects the whole file as 422; oversize payloads return 413. Flipping
 `view_revenue` on for a channel that lacks facts in a LOCKED finance month is
 rejected 409 (close-readiness guard), rolling the whole import back; a CMS
 group archived concurrently between planning and the apply write is re-checked
