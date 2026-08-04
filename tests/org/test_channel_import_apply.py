@@ -223,7 +223,9 @@ def test_nul_in_upload_filename_does_not_reach_audit_details() -> None:
         filename="roster\x00.csv",
     )
 
-    summary = next(r for r in sink.records if r.event_type == "CHANNEL_IMPORTED")
+    summaries = [r for r in sink.records if r.event_type == "CHANNEL_IMPORTED"]
+    assert len(summaries) == 1
+    summary = summaries[0]
     assert summary.details["filename"] == "roster.csv"
     assert "\x00" not in summary.details["filename"]
 
