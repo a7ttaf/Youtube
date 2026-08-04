@@ -7,7 +7,7 @@ Reconciled through the bulk channel inventory import branch
 the Google ingestion foundation and the source-rows→facts normalization bridge
 are lifted from ⏳ to ✅ in `15_DELIVERY_BACKLOG.md`, because the 2026-06-22
 operator smoke produced 25 real `monthly_channel_revenue_facts` totalling
-$79,057.76 (PRs #132/#134/#135) — the "no live data source has produced facts
+a redacted USD amount (PRs #132/#134/#135) — the "no live data source has produced facts
 yet" note was stale. The Phase 0/1 bulk-inventory items are updated for
 `POST /channels/import`.
 

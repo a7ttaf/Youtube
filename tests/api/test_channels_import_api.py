@@ -29,7 +29,7 @@ from ums_smart_revenue.org.channel_registry import (
 )
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
-CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
+CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 DEFAULT_HEADER = "youtube_channel_id,channel_name,view_revenue"
 
 

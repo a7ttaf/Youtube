@@ -358,12 +358,12 @@ def test_update_inventory_replaces_all_four_fields() -> None:
         youtube_channel_id=CHANNEL_ID,
         channel_name="CBC Egypt",
         cms_status="INSIDE_CMS",
-        content_owner_id="PlZrS5Fh56RMd9dmSL6XSA",
+        content_owner_id="TestOwnerAAAAAAAAAAAAA",
         revenue_required=True,
     )
     assert updated.channel_name == "CBC Egypt"
     assert updated.cms_status == "INSIDE_CMS"
-    assert updated.content_owner_id == "PlZrS5Fh56RMd9dmSL6XSA"
+    assert updated.content_owner_id == "TestOwnerAAAAAAAAAAAAA"
     assert updated.revenue_required is True
 
 
@@ -372,7 +372,7 @@ def test_update_inventory_keeps_revenue_source_status_consistent() -> None:
         youtube_channel_id=CHANNEL_ID,
         channel_name="CBC Egypt",
         cms_status="INSIDE_CMS",
-        content_owner_id="PlZrS5Fh56RMd9dmSL6XSA",
+        content_owner_id="TestOwnerAAAAAAAAAAAAA",
         revenue_required=True,
     )
     assert updated.revenue_source_status == "MISSING_REVENUE_SOURCE"
@@ -873,7 +873,7 @@ from ums_smart_revenue.org.channel_import import (
 from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
-CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
+CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 
 
 def _row(**overrides: object) -> ChannelImportRow:
@@ -1140,7 +1140,7 @@ Create `tests/api/test_channels_import_api.py`. Model client/principal setup on 
 from ums_smart_revenue.auth.audit import AuditEventType
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
-CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
+CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 
 
 def _csv(body: str) -> dict[str, tuple[str, bytes, str]]:
@@ -1562,7 +1562,7 @@ Create `tests/api/test_channels_import_postgres.py`:
 """Postgres-tier guarantees for the bulk channel import."""
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
-CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
+CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 
 
 def test_imported_channels_are_tenant_isolated(pg_admin_client, pg_other_tenant_client) -> None:
@@ -1631,8 +1631,8 @@ In `Docs/15_DELIVERY_BACKLOG.md`, both currently-⏳ items ("Google source-repor
 ```markdown
   B2 live credentials CLOSED — the 2026-06-22 operator smoke ran
   `run_google_connector.py --month 2026-04` against content owner
-  `PlZrS5Fh56RMd9dmSL6XSA` and produced 25 `monthly_channel_revenue_facts`
-  totalling $79,057.76, reconciling to the cent against the source rows
+  (content-owner id redacted) and produced 25 `monthly_channel_revenue_facts`
+  totalling a redacted USD amount, reconciling to the cent against the source rows
   (PRs #132, #134, #135). Remaining: FX/conversion (B3).
 ```
 

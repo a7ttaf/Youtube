@@ -43,7 +43,7 @@ Date: 2026-08-03
   source-rows→facts normalization bridge lifted from ⏳ to ✅. Their remaining
   notes claimed "live Google connector credential setup (B2)" and "no live data
   source has produced facts yet"; both were satisfied by the 2026-06-22
-  operator smoke (25 facts, $79,057.76, PRs #132/#134/#135). Remaining on both:
+  operator smoke (25 facts, a redacted USD amount, PRs #132/#134/#135). Remaining on both:
   FX/conversion (B3).
 - `Docs/01_IMPLEMENTATION_PLAN.md` — "Channel inventory file format" marked ✅
   with the CSV contract; the three Phase 0/1 bulk-inventory items updated to

@@ -7,8 +7,8 @@ Status: approved for planning
 
 The Google CMS connector is proven end-to-end. The 2026-06-22 live smoke ran
 `run_google_connector.py --month 2026-04` against content owner
-`PlZrS5Fh56RMd9dmSL6XSA` and produced 25 `monthly_channel_revenue_facts`
-totalling $79,057.76, reconciling to the cent against the source rows.
+(content-owner id redacted) and produced 25 `monthly_channel_revenue_facts`
+totalling a redacted USD amount, reconciling to the cent against the source rows.
 
 It has never run at real scale. The blocker is not the connector — it is that
 there is no way to get the channel roster into the registry.

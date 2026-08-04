@@ -737,8 +737,8 @@ single P-tier above.
   `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-report.md`.
   **B2 live credentials CLOSED (2026-08-03 reconciliation).** The 2026-06-22
   operator smoke ran `run_google_connector.py --month 2026-04` against content
-  owner `PlZrS5Fh56RMd9dmSL6XSA` and produced 25 real
-  `monthly_channel_revenue_facts` totalling $79,057.76, reconciling to the cent
+  owner (content-owner id redacted) and produced 25 real
+  `monthly_channel_revenue_facts` totalling a redacted USD amount, reconciling to the cent
   against the source rows (PRs #132 credential contract, #134 smoke CLI, #135
   live-run gate). Lifted to ✅ — a real ingestion path has now produced facts.
   Remaining: FX/conversion (B3).

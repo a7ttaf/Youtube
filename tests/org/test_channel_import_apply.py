@@ -26,7 +26,7 @@ from ums_smart_revenue.org.channel_import_apply import (
 from ums_smart_revenue.org.channel_registry import ChannelRegistry, ChannelRegistryEntry
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
-CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
+CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 ACTOR = UserPrincipal(user_id="user-1", email="user@example.com")
 
 

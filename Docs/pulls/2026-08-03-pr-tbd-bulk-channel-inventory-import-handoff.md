@@ -7,7 +7,7 @@ Date: 2026-08-03
 ## What this unblocks
 
 The Google CMS connector is proven — the 2026-06-22 operator smoke produced 25
-real `monthly_channel_revenue_facts` totalling $79,057.76, reconciling to the
+real `monthly_channel_revenue_facts` totalling a redacted USD amount, reconciling to the
 cent. It had never run at scale because there was no way to get the roster into
 the registry; the smoke hand-seeded its 25 channels with raw SQL.
 
@@ -23,7 +23,7 @@ El Masrya) are the same call with a different `content_owner_id`.
 curl -X POST "$UMS_BASE/channels/import" \
   -H "$AUTH_HEADERS" \
   -F "file=@ums-roster.csv" \
-  -F "content_owner_id=PlZrS5Fh56RMd9dmSL6XSA" \
+  -F "content_owner_id=<your-content-owner-id>" \
   -F "cms_status=INSIDE_CMS" \
   -F "dry_run=true" \
   -F "reason=August 2026 UMS roster load"

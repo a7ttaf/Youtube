@@ -57,7 +57,7 @@ from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
 SECOND_ID = "UC3Dci3BzZXDo4jw4dU8KqWg"
-CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
+CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 MALFORMED_ID = "not-a-channel-id"
 GROUP_ID = "pg-import-group-1"
 SECOND_GROUP_ID = "pg-import-group-2"

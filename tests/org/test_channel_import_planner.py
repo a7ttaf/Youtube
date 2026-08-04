@@ -9,7 +9,7 @@ from ums_smart_revenue.org.channel_import import (
 from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
-CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
+CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 
 
 def _row(**overrides: object) -> ChannelImportRow:

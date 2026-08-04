@@ -31,12 +31,12 @@ def test_update_inventory_replaces_all_four_fields() -> None:
         youtube_channel_id=CHANNEL_ID,
         channel_name="CBC Egypt",
         cms_status="INSIDE_CMS",
-        content_owner_id="PlZrS5Fh56RMd9dmSL6XSA",
+        content_owner_id="TestOwnerAAAAAAAAAAAAA",
         revenue_required=True,
     )
     assert updated.channel_name == "CBC Egypt"
     assert updated.cms_status == "INSIDE_CMS"
-    assert updated.content_owner_id == "PlZrS5Fh56RMd9dmSL6XSA"
+    assert updated.content_owner_id == "TestOwnerAAAAAAAAAAAAA"
     assert updated.revenue_required is True
 
 
@@ -45,7 +45,7 @@ def test_update_inventory_keeps_revenue_source_status_consistent() -> None:
         youtube_channel_id=CHANNEL_ID,
         channel_name="CBC Egypt",
         cms_status="INSIDE_CMS",
-        content_owner_id="PlZrS5Fh56RMd9dmSL6XSA",
+        content_owner_id="TestOwnerAAAAAAAAAAAAA",
         revenue_required=True,
     )
     assert updated.revenue_source_status == "MISSING_REVENUE_SOURCE"
@@ -73,7 +73,7 @@ def test_update_inventory_preserves_official_status_when_flag_unchanged() -> Non
         youtube_channel_id=CHANNEL_ID,
         channel_name="New Name",
         cms_status="INSIDE_CMS",
-        content_owner_id="PlZrS5Fh56RMd9dmSL6XSA",
+        content_owner_id="TestOwnerAAAAAAAAAAAAA",
         revenue_required=True,
     )
     assert updated.revenue_source_status == "OFFICIAL_CMS_REVENUE"
