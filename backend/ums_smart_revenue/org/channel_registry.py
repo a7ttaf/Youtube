@@ -143,7 +143,13 @@ class ChannelRegistryStore(Protocol):
         content_owner_id: str | None,
         revenue_required: bool,
     ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
-        pass
+        """Replace a channel's inventory fields from an authoritative import row.
+
+        Returns ``(previous, updated)`` where ``previous`` is the row's state
+        observed at the write boundary (re-read under a row lock where the
+        backend supports it), NOT the caller's possibly-stale planning
+        snapshot — audit trails must record the values actually replaced.
+        """
 
 
 class ChannelRegistry:

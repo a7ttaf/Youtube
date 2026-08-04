@@ -36,10 +36,20 @@ class ChannelGroupRegistryStore(Protocol):
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
     ) -> ChannelGroupEntry | None:
-        pass
+        """Return the tenant-scoped group carrying this CMS key, or None.
+
+        Archived groups ARE returned so callers (import planning) can fail
+        rows targeting them closed. ``for_update`` row-locks the group so a
+        write-boundary active-state check cannot race a concurrent archive.
+        """
 
     def list_archived_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
-        pass
+        """Return the subset of CMS keys whose existing group is archived.
+
+        One bulk lookup (no per-key round trips) so import planning can vet a
+        full roster's group keys without a lookup-per-group query storm.
+        Unknown keys are simply absent from the result.
+        """
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         pass
