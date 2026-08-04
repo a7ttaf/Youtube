@@ -27,6 +27,10 @@ from types import MappingProxyType
 from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
 
 CHANNEL_ID_PATTERN = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
+# Generous bound for CMS group keys; real ids are short, and the value lands
+# in the unique B-tree index on (tenant_id, cms_group_id) whose per-entry
+# size PostgreSQL enforces at ~2.7KB.
+MAX_GROUP_ID_CHARS = 255
 
 REQUIRED_COLUMNS = frozenset({"youtube_channel_id", "channel_name"})
 OPTIONAL_COLUMNS = frozenset({"group_id", "view_revenue"})
@@ -197,6 +201,15 @@ def _parse_text_fields(
     if group_id is not None and "\x00" in group_id:
         return ChannelImportRowError(
             row_number=row_number, reason="group_id contains a NUL character"
+        )
+    # The key lands in the unique B-tree index on (tenant_id, cms_group_id);
+    # PostgreSQL rejects index entries past its per-entry size limit, so an
+    # unbounded key would pass dry-run and then 500 at apply. Real CMS group
+    # ids are short; the cap is generous.
+    if group_id is not None and len(group_id) > MAX_GROUP_ID_CHARS:
+        return ChannelImportRowError(
+            row_number=row_number,
+            reason=f"group_id exceeds {MAX_GROUP_ID_CHARS} characters",
         )
     return channel_name, group_id
 

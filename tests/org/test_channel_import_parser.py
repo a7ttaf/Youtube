@@ -169,6 +169,19 @@ def test_rejects_nul_in_group_id() -> None:
     assert "NUL" in parsed.errors[0].reason
 
 
+def test_rejects_oversized_group_id() -> None:
+    """A multi-KB group key fails the row: it would exceed the unique B-tree
+    index's per-entry limit at apply and 500 after a clean dry run."""
+    long_key = "g" * 256
+    csv_text = f"youtube_channel_id,channel_name,group_id\n{CHANNEL_ID},Alpha News,{long_key}\n"
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.rows == ()
+    assert "group_id exceeds 255 characters" in parsed.errors[0].reason
+    # The boundary itself is legal.
+    ok = f"youtube_channel_id,channel_name,group_id\n{CHANNEL_ID},Alpha News,{'g' * 255}\n"
+    assert parse_channel_import_csv(ok).errors == ()
+
+
 def test_rejects_malformed_quoted_csv() -> None:
     """An unterminated quote rejects the file instead of folding rows into one name."""
     second = "UC3Dci3BzZXDo4jw4dU8KqWg"
