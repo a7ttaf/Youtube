@@ -64,12 +64,14 @@ group API's checks. The response (`dry_run` and apply alike) is the declared
 `ERROR`), the planned `channel_name`/`group_id`/`revenue_required`, the
 field-level `changes` diff, and a `reason` for ERROR rows. A dry run writes
 nothing (no audit event). The apply is all-or-nothing: any ERROR row —
-malformed id/name/token, duplicate id, row wider than the header, archived
-channel, or archived CMS group — rejects the file as 422 before any write.
-Malformed CSV structure (unterminated quotes, duplicate or unknown header
-columns) rejects the whole file as 422; oversize payloads return 413. Flipping
-`view_revenue` on for a channel that lacks facts in a LOCKED finance month is
-rejected 409 (close-readiness guard), rolling the whole import back. Audit:
+malformed id/name/token, a value containing a NUL character, duplicate id, row
+wider than the header, archived channel, or archived CMS group — rejects the
+file as 422 before any write. Malformed CSV structure (unterminated quotes,
+duplicate or unknown header columns) rejects the whole file as 422; oversize
+payloads return 413. Flipping `view_revenue` on for a channel that lacks facts
+in a LOCKED finance month is rejected 409 (close-readiness guard), rolling the
+whole import back; a CMS group archived concurrently between planning and the
+apply write is re-checked under a row lock and rejected 409 the same way. Audit:
 per-channel `CHANNEL_CREATED`/`CHANNEL_UPDATED` events (tagged
 `permission=registry.manage_channels` via override, carrying the field diff
 and the raw `view_revenue` token), one `GROUP_UPDATED` per group
