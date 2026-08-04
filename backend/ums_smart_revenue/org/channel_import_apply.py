@@ -42,6 +42,10 @@ from ums_smart_revenue.org.channel_import import (
 from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry, ChannelRegistryStore
 
 _INVENTORY_FIELDS = ("channel_name", "cms_status", "content_owner_id", "revenue_required")
+# Provenance marker on every audit record this module writes: it is how an
+# auditor separates bulk-import changes from single-channel API edits, so both
+# call sites must emit the identical value.
+AUDIT_SOURCE_BULK_IMPORT = "bulk_import"
 
 
 class ChannelImportArchivedGroupError(ChannelImportError):
@@ -122,9 +126,12 @@ def plan_channel_import_with_stores(
 # Standards: All-or-nothing — the caller wires every store and the sink to
 #   ONE transaction, so any raised error rolls the whole import back with its
 #   audit rows. Write-boundary rechecks over plan trust: audit diffs are
-#   rebuilt from what update_inventory actually replaced, and group state is
-#   re-read under a row lock. Typed domain errors propagate for the route to
-#   translate (locked-month flip, archived group, uniqueness races -> 409).
+#   rebuilt from what update_inventory actually replaced, group state is
+#   re-read under a row lock, and the CHANNEL_IMPORTED summary counts what was
+#   APPLIED, not what was planned — a planning tally would let the summary
+#   claim an UPDATE the per-row events never recorded. Typed domain errors
+#   propagate for the route to translate (locked-month flip, archived group,
+#   uniqueness races -> 409).
 # Blast Radius: Channel registry inventory, channel-group membership, audit
 #   trail, connector ingest targeting via cms_status/content_owner_id. No
 #   finance totals, no allocation, no month-close writes.
@@ -163,7 +170,10 @@ def apply_channel_import(
     group-membership reconciliation below — outcomes are computed only from
     inventory fields, so treating UNCHANGED as a no-op would also drop a
     Group_ID column added on re-import. ERROR rows are skipped entirely. One
-    CHANNEL_IMPORTED summary event closes the trail.
+    CHANNEL_IMPORTED summary event closes the trail, and its counts are
+    accumulated from those same write-boundary outcomes rather than copied
+    from ``plan.counts``, so the summary can never report an UPDATE that no
+    per-row CHANNEL_UPDATED event backs.
 
     Rows are EXECUTED in a deterministic (channel id, group id) order rather
     than CSV order: every row write takes a channel row lock (and every group
@@ -172,6 +182,15 @@ def apply_channel_import(
     other waits for and PostgreSQL would abort one as a deadlock. The response
     payload and per-row numbering still follow the operator's file.
     """
+    # Counted at the WRITE BOUNDARY, never from plan.counts. The plan's
+    # outcome came from a possibly-stale snapshot: a row planned UPDATE whose
+    # values a concurrent writer already committed replaces nothing, and a row
+    # planned UNCHANGED can heal real drift. Persisting the planning tally
+    # would make the durable CHANNEL_IMPORTED summary claim UPDATE=1 for an
+    # import that recorded no channel update at all — the summary and the
+    # per-row CHANNEL_UPDATED events would disagree in the same trail (review
+    # #159 r3715617737). Same rule the per-row audit already follows.
+    applied_counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
     for entry in _channel_write_order(plan.entries):
         channel_id = entry.youtube_channel_id
         if channel_id is None or entry.channel_name is None:
@@ -188,6 +207,7 @@ def apply_channel_import(
                 content_owner_id=content_owner_id,
             )
             event_type = AuditEventType.CHANNEL_CREATED
+            applied_counts[ChannelImportOutcome.CREATE.value] += 1
         elif entry.outcome in (ChannelImportOutcome.UPDATE, ChannelImportOutcome.UNCHANGED):
             # The registry re-reads the row under a lock at the write boundary
             # and returns what it actually replaced; the durable diff below is
@@ -210,6 +230,9 @@ def apply_channel_import(
             # claim a mutation that did not occur (review #159 r3713966806).
             if applied_changes:
                 event_type = AuditEventType.CHANNEL_UPDATED
+                applied_counts[ChannelImportOutcome.UPDATE.value] += 1
+            else:
+                applied_counts[ChannelImportOutcome.UNCHANGED.value] += 1
         if event_type is not None:
             record_audit_event(
                 sink=audit_sink,
@@ -263,7 +286,7 @@ def apply_channel_import(
                     "cms_group_id": entry.group_id,
                     "group_type": group.group_type,
                     "channel_id": channel_id,
-                    "source": "bulk_import",
+                    "source": AUDIT_SOURCE_BULK_IMPORT,
                 },
             )
     record_audit_event(
@@ -282,7 +305,7 @@ def apply_channel_import(
             "filename": _safe_audit_filename(filename),
             "content_owner_id": content_owner_id,
             "cms_status": cms_status,
-            "counts": dict(plan.counts),
+            "counts": applied_counts,
         },
     )
 
@@ -352,7 +375,7 @@ def _channel_audit_details(
         "changes": {
             name: {"from": pair[0], "to": pair[1]} for name, pair in applied_changes.items()
         },
-        "source": "bulk_import",
+        "source": AUDIT_SOURCE_BULK_IMPORT,
     }
 
 

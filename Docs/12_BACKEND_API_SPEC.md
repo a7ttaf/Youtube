@@ -53,7 +53,8 @@ GET /channels/outside-cms
 upload. Form fields: `file` (CSV, UTF-8, max 2 MiB / 5000 data rows; columns
 `youtube_channel_id`, `channel_name`, optional `group_id`, `view_revenue`),
 `content_owner_id` (required, stripped at the boundary, ≤255 chars — it
-becomes the audit summary's indexed entity id), `dry_run` (bool),
+becomes the audit summary's indexed entity id), `dry_run` (bool, **required** —
+the handler declares no default, so omitting it is a 422; send it explicitly),
 `reason` (required audit reason), and `cms_status` (default `INSIDE_CMS`,
 limited to `INSIDE_CMS`/`OUTSIDE_CMS`/`UNKNOWN`). Authorization is
 `registry.manage_channels` at GLOBAL scope (a roster is not scoped to one

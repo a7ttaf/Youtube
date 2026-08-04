@@ -82,6 +82,17 @@ make this load-bearing), case-insensitive and order-independent headers.
 **Outcomes.** Each row resolves to `CREATE`, `UPDATE` (with a field-level diff),
 `UNCHANGED`, or `ERROR`. Upsert is file-wins.
 
+**Planned vs applied.** The plan comes from a snapshot, so a concurrent writer
+can settle a row before the apply locks it. Two surfaces, deliberately
+different: the HTTP **response** is the plan echo and is identical in shape and
+content for a dry run and an apply — that equivalence is what makes the dry run
+a truthful preview. The **audit trail** is the record of what actually
+happened: a per-row `CHANNEL_UPDATED` is emitted only when the write-boundary
+locked re-read produced a real diff, and the `CHANNEL_IMPORTED` summary counts
+are accumulated from those same outcomes rather than copied from the plan, so
+the summary can never claim an update no per-row event backs (review round 20,
+`r3715617737`).
+
 **Error handling.** Reporting is batch — every invalid row is returned in one
 pass, so the operator never fixes one error at a time. Applying is
 all-or-nothing — if any row is in `ERROR`, nothing is written.
@@ -110,6 +121,14 @@ Postgres treats NULLs as distinct, so pre-existing groups do not collide.
 Migration `20260803_0001`, `down_revision = 20260620_0001`. Verified upgrade →
 downgrade → upgrade against Postgres 18.
 
+Both directions run through `op.batch_alter_table`. SQLite cannot ALTER a
+constraint — a direct `create_unique_constraint` raises `NotImplementedError`
+there — so the un-batched form reached head only on Postgres and aborted on
+every local/disposable SQLite database. On Postgres batch mode emits the same
+direct ALTERs, so production DDL is unchanged.
+`tests/db/test_channel_group_cms_id_migration.py` now executes both directions
+against SQLite (review round 19, `r3715427823`).
+
 ## New dependency
 
 `python-multipart==0.0.20` (exact-pinned, hashed in `uv.lock`, declared in
@@ -127,7 +146,7 @@ All run locally against Postgres 18 (`ums-mig-pg-test`, port 55432).
 | `ruff check backend tests scripts` | All checks passed |
 | `ruff format --check` (19 touched files) | All formatted |
 | 100-char guard on touched `.py` | No violations |
-| Full suite (`pytest -q`, PG set) | 2537 passed, 0 failed (post-review rounds) |
+| Full suite (`pytest -q`, PG set) | 2543 passed, 0 failed (post-review rounds) |
 | Migration upgrade→downgrade→upgrade | Passed, single head `20260803_0001` |
 | `git diff --check` | Clean |
 

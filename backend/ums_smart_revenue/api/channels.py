@@ -502,7 +502,10 @@ def create_channel(
 #   dry run that shows the exact diff before anything is written.
 # Database/ORM: YouTubeChannelORM via ChannelRegistryStore (create_channel /
 #   update_inventory) and ChannelGroupORM + membership via
-#   ChannelGroupRegistryStore. No finance tables are touched.
+#   ChannelGroupRegistryStore. Finance tables are READ, never written: the
+#   registry's revenue_required guard reads FinanceMonthCloseORM x
+#   MonthlyChannelRevenueFactORM to reject an OFF->ON flip that a LOCKED month
+#   has no fact for.
 # Standards: Fail closed on global MANAGE_CHANNELS — a roster file is not
 #   scoped to one company, so a company-scoped manager must not run it. A
 #   roster carrying Group_ID values additionally requires global MANAGE_GROUPS:
@@ -522,17 +525,33 @@ def create_channel(
 #   reason rather than letting an upsert 500 mid-apply. Group membership is
 #   reconciled for CREATE, UPDATE, and UNCHANGED rows alike: the outcome is
 #   computed only from inventory fields, so treating UNCHANGED as a no-op
-#   would silently drop a newly added Group_ID on re-import.
+#   would silently drop a newly added Group_ID on re-import. The RESPONSE is
+#   the plan echo and is deliberately identical in shape and content for a dry
+#   run and an apply — that equivalence is what makes the dry run a truthful
+#   preview. The durable record of what a concurrent writer actually left this
+#   apply to do is the AUDIT trail, whose CHANNEL_IMPORTED counts are
+#   accumulated at the write boundary, not copied from the plan.
 # Blast Radius: Connector ingest targeting. list_target_channels only pulls
 #   revenue for cms_status='INSIDE_CMS' channels, so importing a roster with
 #   the wrong cms_status silently removes channels from ingest and their
 #   revenue simply stops arriving with no error — the dry-run diff is the
-#   operator's guard against that. No month locks, no allocation, no exports.
+#   operator's guard against that. ALSO month-close: an apply runs inside the
+#   month-close protocol. Every registry write takes the tenant-wide
+#   REVENUE_REQUIREMENT_GUARD_MONTH advisory lock before any row lock, so an
+#   import and a concurrent month close serialize against each other (an
+#   import can block on a close, and vice versa), and a revenue_required
+#   OFF->ON flip is rejected with 409 when a LOCKED month has no fact for the
+#   channel. Roster imports are therefore INSIDE month-close validation, not
+#   outside it. No allocation, no exports, no finance WRITES.
 # Connections:
 #   - File: backend/ums_smart_revenue/org/channel_import.py -> pure parse/plan
 #     core this route executes.
 #   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> domain
 #     apply+audit execution this route delegates to.
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> holds the
+#     close guard and runs the LOCKED-month revenue_required flip check.
+#   - File: backend/ums_smart_revenue/finance/month_close_locks.py -> the
+#     advisory guard and shared database clock the apply serializes on.
 #   - File: backend/ums_smart_revenue/connectors/google/
 #     youtube_analytics_client.py -> list_target_channels reads cms_status and
 #     content_owner_id to choose which channels a revenue pull targets.

@@ -163,6 +163,7 @@ Membership is idempotent by the composite primary key.
 | `content_owner_id` | yes | Applied to every row |
 | `cms_status` | no | Default `INSIDE_CMS`; validated against the `youtube_channels` CHECK values |
 | `dry_run` | yes | **No default.** Nothing is applied by accident. |
+| `reason` | yes | Audit reason. `CHANNEL_UPDATED` declares `reason_required`, so the route takes it up front rather than letting an upsert fail mid-apply; missing or blank is a 422. |
 
 Returns `200` in both modes — a batch with mixed per-row outcomes is not a
 `201`-shaped result.
@@ -170,6 +171,12 @@ Returns `200` in both modes — a batch with mixed per-row outcomes is not a
 ### Permission
 
 `MANAGE_CHANNELS` at **global** scope, fail-closed.
+
+A roster carrying any `Group_ID` value additionally requires `MANAGE_GROUPS` at
+**global** scope, checked before planning and returning 403 without it. The two
+permissions are independently grantable, and an import that creates groups and
+attaches members performs exactly the mutations the group API guards — so
+importing must not be a way around that check.
 
 The existing `POST /channels` checks `MANAGE_CHANNELS` at
 `AccessScope.company(payload.primary_company_id)`. That per-company model does

@@ -157,6 +157,100 @@ def test_truly_unchanged_row_stays_audit_quiet() -> None:
     assert [r.event_type for r in sink.records] == ["CHANNEL_IMPORTED"]
 
 
+def test_summary_counts_come_from_the_write_boundary_not_the_plan() -> None:
+    """A planned UPDATE that replaced nothing must not be summarized as UPDATE.
+
+    The plan's outcome came from a possibly-stale snapshot. When a concurrent
+    writer commits the roster's own values before the apply locks the row, the
+    write replaces nothing and no CHANNEL_UPDATED event is recorded — so a
+    summary copied from ``plan.counts`` would claim an update the rest of the
+    trail cannot substantiate (review #159 r3715617737).
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Roster Name",  # a concurrent writer already applied it
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    sink = InMemoryAuditSink()
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.UPDATE,  # planned against the stale snapshot
+        channel_name="Roster Name",
+        group_id=None,
+        revenue_required=True,
+    )
+
+    _apply(_plan(entry), registry, ChannelGroupRegistry(), sink)
+
+    assert [r.event_type for r in sink.records] == ["CHANNEL_IMPORTED"]
+    summaries = [r for r in sink.records if r.event_type == "CHANNEL_IMPORTED"]
+    assert len(summaries) == 1
+    counts = summaries[0].details["counts"]
+    assert counts[ChannelImportOutcome.UPDATE.value] == 0
+    assert counts[ChannelImportOutcome.UNCHANGED.value] == 1
+
+
+def test_summary_counts_record_a_real_update_and_create() -> None:
+    """The applied tally still reports writes that genuinely happened."""
+    second_id = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Stale Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    sink = InMemoryAuditSink()
+    entries = (
+        ChannelImportPlanEntry(
+            row_number=1,
+            youtube_channel_id=CHANNEL_ID,
+            outcome=ChannelImportOutcome.UPDATE,
+            channel_name="Roster Name",
+            group_id=None,
+            revenue_required=True,
+        ),
+        ChannelImportPlanEntry(
+            row_number=2,
+            youtube_channel_id=second_id,
+            outcome=ChannelImportOutcome.CREATE,
+            channel_name="Brand New",
+            group_id=None,
+            revenue_required=True,
+        ),
+    )
+    counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
+    counts[ChannelImportOutcome.UPDATE.value] = 1
+    counts[ChannelImportOutcome.CREATE.value] = 1
+
+    _apply(
+        ChannelImportPlan(entries=entries, counts=counts),
+        registry,
+        ChannelGroupRegistry(),
+        sink,
+    )
+
+    summaries = [r for r in sink.records if r.event_type == "CHANNEL_IMPORTED"]
+    assert len(summaries) == 1
+    applied = summaries[0].details["counts"]
+    assert applied[ChannelImportOutcome.UPDATE.value] == 1
+    assert applied[ChannelImportOutcome.CREATE.value] == 1
+    assert applied[ChannelImportOutcome.UNCHANGED.value] == 0
+
+
 def test_rows_apply_in_deterministic_channel_order() -> None:
     """Execution order is (channel id, group id), not CSV order.
 
