@@ -81,6 +81,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         reason_required=True,
         permission=Permission.MANAGE_ORG_MAPPING,
     ),
+    AuditEventType.CHANNEL_IMPORTED: AuditEventDefinition(
+        AuditEventType.CHANNEL_IMPORTED,
+        reason_required=True,
+        permission=Permission.MANAGE_CHANNELS,
+    ),
     AuditEventType.GROUP_UPDATED: AuditEventDefinition(
         AuditEventType.GROUP_UPDATED,
         reason_required=True,

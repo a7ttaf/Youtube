@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit_service import AuditRecord
+from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.security_models import AuditLogORM, UserORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -60,6 +61,45 @@ class SqlAlchemyAuditSink:
         """Rollback and detach pending objects after fail-closed audit errors."""
         self._session.rollback()
         self._session.expunge_all()
+
+
+# ============================================================================
+# Purpose: Audit sink that writes audit_logs through the CALLER'S tenant-lane
+#   session, elevating to app_platform per append via db/lane.py:platform_lane.
+#   Because the audit INSERT joins the caller's transaction, audit rows and the
+#   domain writes they describe commit or roll back TOGETHER — closing the
+#   two-session commit-order race where a separately committed platform audit
+#   session records success for a tenant transaction that then fails to commit.
+# Database/ORM: AuditLogORM (audit_logs is TENANT_PLATFORM_ONLY_WRITE, hence
+#   the per-append elevation), UserORM (actor-existence read).
+# Standards: Same append contract as SqlAlchemyAuditSink (flush inside the
+#   elevated block so the INSERT executes as app_platform); platform_lane is a
+#   no-op off Postgres, so SQLite behaves exactly as the shared-session wiring
+#   already does. platform_lane is not nest-safe — appends are sequential and
+#   never nested here.
+# Blast Radius: Audit atomicity for routes that opt in (the bulk channel
+#   import). No RLS policy, grant, or audit semantics change.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/lane.py -> sanctioned single-session
+#     elevation precedent this sink builds on.
+#   - File: backend/ums_smart_revenue/api/channels.py -> import route wiring.
+# ============================================================================
+class PlatformLaneAuditSink:
+    """Persist audit records on the caller's session via platform-lane elevation."""
+
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind audit writes to the caller's (tenant-lane) session."""
+        self._session = session
+        self._inner = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+
+    def append(self, record: AuditRecord) -> None:
+        """Append one audit row inside the caller's transaction, elevated."""
+        with platform_lane(self._session):
+            self._inner.append(record)
+
+    def rollback(self) -> None:
+        """Rollback and detach pending objects after fail-closed audit errors."""
+        self._inner.rollback()
 
 
 def _parse_uuid_or_none(value: str) -> UUID | None:
