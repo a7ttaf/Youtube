@@ -142,7 +142,7 @@ class ChannelRegistryStore(Protocol):
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
-    ) -> ChannelRegistryEntry:
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         pass
 
 
@@ -252,8 +252,13 @@ class ChannelRegistry:
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
-    ) -> ChannelRegistryEntry:
-        """Replace a channel's inventory fields from an authoritative import row."""
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
+        """Replace a channel's inventory fields from an authoritative import row.
+
+        Returns ``(previous, updated)`` so audit trails record the values this
+        write actually replaced (mirrors the SQL registry's write-boundary
+        re-read; in memory the current entry IS the write-boundary state).
+        """
         current = self._channels.get(youtube_channel_id)
         if current is None:
             raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
@@ -274,7 +279,7 @@ class ChannelRegistry:
             ),
         )
         self._channels[youtube_channel_id] = updated
-        return updated
+        return current, updated
 
 
 def bootstrap_channel_registry() -> ChannelRegistry:

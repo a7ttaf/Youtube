@@ -777,3 +777,36 @@ def test_channel_ids_by_group_dual_filter_excludes_cross_tenant_member_rows() ->
     ).one()
     other_view_from_default = default_registry._channel_ids_by_group([other_group_uuid])
     assert other_view_from_default == {}
+
+
+def test_list_archived_cms_group_ids_is_tenant_scoped_and_bulk() -> None:
+    """One SELECT classifies archived CMS keys, filtered to the bound tenant."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    other_registry = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID)
+
+    active = registry.create_group(
+        name="Active", group_type="SECTOR", channel_ids=[], cms_group_id="cms-active"
+    )
+    archived = registry.create_group(
+        name="Archived", group_type="SECTOR", channel_ids=[], cms_group_id="cms-archived"
+    )
+    registry.update_group(group_id=archived.id, name=None, active=False)
+    # Same CMS key archived in ANOTHER tenant must not leak into this tenant.
+    other_archived = other_registry.create_group(
+        name="Other Archived",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-other-archived",
+    )
+    other_registry.update_group(group_id=other_archived.id, name=None, active=False)
+
+    result = registry.list_archived_cms_group_ids(
+        {"cms-active", "cms-archived", "cms-other-archived", "cms-missing"}
+    )
+
+    assert result == {"cms-archived"}
+    assert registry.get_group_by_cms_id("cms-active") is not None
+    assert active.cms_group_id == "cms-active"
+    assert registry.list_archived_cms_group_ids(set()) == set()

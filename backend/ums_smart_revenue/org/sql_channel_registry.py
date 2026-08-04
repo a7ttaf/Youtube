@@ -27,6 +27,10 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
 )
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
+from ums_smart_revenue.finance.month_close_locks import (
+    REVENUE_REQUIREMENT_GUARD_MONTH,
+    acquire_finance_month_advisory_lock,
+)
 from ums_smart_revenue.org.channel_registry import (
     ChannelMappingLockedMonthError,
     ChannelRegistryConflictError,
@@ -104,6 +108,22 @@ class SqlAlchemyChannelRegistry:
         """Create a channel row, raising on tenant-scoped duplicate or FK violation."""
         if self._get_row(youtube_channel_id) is not None:
             raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
+
+        # A revenue-required create serializes with the month-close protocol the
+        # same way an OFF->ON flip does (review #159 r3712948674): without this,
+        # a create committing between a lock's readiness recheck and its commit
+        # would carry created_at <= locked_at and retroactively fail the LOCKED
+        # month's effective-dated readiness. Holding the tenant-wide guard means
+        # the create either commits before the readiness recheck (and is
+        # counted) or after the month locks (and is excluded by the
+        # created_at <= locked_at cutoff). Same acyclic order as the flip path:
+        # this key only, never month-then-this. No-op off Postgres.
+        if revenue_required:
+            acquire_finance_month_advisory_lock(
+                self._session,
+                REVENUE_REQUIREMENT_GUARD_MONTH,
+                tenant_id=self._tenant_id,
+            )
 
         row = YouTubeChannelORM(
             id=uuid4(),
@@ -272,11 +292,24 @@ class SqlAlchemyChannelRegistry:
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
-    ) -> ChannelRegistryEntry:
-        """Replace a channel's inventory fields from an authoritative import row."""
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
+        """Replace a channel's inventory fields from an authoritative import row.
+
+        Returns ``(previous, updated)`` where ``previous`` is the row's state
+        observed at the write boundary — re-read under a row lock, not the
+        caller's possibly-stale planning snapshot — so audit trails can record
+        the values actually replaced.
+        """
         row = self._get_row(youtube_channel_id)
         if row is None:
             raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
+        # Row-lock and re-read at the write boundary: a concurrent committed
+        # update between the caller's planning read and this write must not be
+        # silently hidden — the returned `previous` reflects what this write
+        # actually replaced. SQLite's dialect ignores FOR UPDATE (single-writer
+        # anyway); Postgres serializes with any concurrent row writer.
+        self._session.refresh(row, with_for_update=True)
+        previous = self._to_entry(row)
         # Flipping revenue_required ON is guarded against LOCKED months: month-
         # close readiness evaluates the CURRENT flag, so enabling it while a
         # locked month has no fact for this channel would retroactively make
@@ -284,6 +317,17 @@ class SqlAlchemyChannelRegistry:
         # update_mapping's locked-month guard; the flip stays possible after
         # the affected months are unlocked (or once facts exist for them).
         if revenue_required and not row.revenue_required:
+            # Serialize with the month-close protocol: lock-time readiness
+            # rechecks acquire this same tenant-wide advisory key, so the flip
+            # and a concurrent POST .../lock can never both commit around each
+            # other's checks (the race review #159 r3712948682 names). The
+            # flip takes ONLY this key; readiness takes month-then-this — an
+            # acyclic order, so no deadlock. No-op off Postgres.
+            acquire_finance_month_advisory_lock(
+                self._session,
+                REVENUE_REQUIREMENT_GUARD_MONTH,
+                tenant_id=self._tenant_id,
+            )
             locked_missing = self._locked_months_missing_fact(youtube_channel_id)
             if locked_missing:
                 raise ChannelRevenueRequirementLockedMonthError(
@@ -305,7 +349,7 @@ class SqlAlchemyChannelRegistry:
         row.content_owner_id = normalize_optional_content_owner(content_owner_id)
         row.revenue_required = revenue_required
         self._session.flush()
-        return self._to_entry(row)
+        return previous, self._to_entry(row)
 
     def _get_row(self, youtube_channel_id: str) -> YouTubeChannelORM | None:
         """Look up the ORM row filtered by tenant_id + external channel id."""

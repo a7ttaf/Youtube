@@ -94,17 +94,42 @@ class SqlAlchemyChannelGroupRegistry:
     #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
     #     membership attachment for non-archived groups.
     # ========================================================================
-    def get_group_by_cms_id(self, cms_group_id: str) -> ChannelGroupEntry | None:
-        """Return the tenant-scoped group carrying this CMS key, or None."""
-        row = self._session.scalars(
-            select(ChannelGroupORM).where(
-                ChannelGroupORM.tenant_id == self._tenant_id,
-                ChannelGroupORM.cms_group_id == cms_group_id,
-            )
-        ).one_or_none()
+    def get_group_by_cms_id(
+        self, cms_group_id: str, *, for_update: bool = False
+    ) -> ChannelGroupEntry | None:
+        """Return the tenant-scoped group carrying this CMS key, or None.
+
+        ``for_update`` row-locks the group so a write-boundary active-state
+        check cannot race a concurrent archive (SQLite ignores FOR UPDATE).
+        """
+        statement = select(ChannelGroupORM).where(
+            ChannelGroupORM.tenant_id == self._tenant_id,
+            ChannelGroupORM.cms_group_id == cms_group_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalars(statement).one_or_none()
         if row is None:
             return None
         return self._to_entry(row)
+
+    def list_archived_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Return the subset of CMS keys whose existing group is archived.
+
+        One bounded SELECT (no per-key round trips, no membership loading) so
+        import planning can vet a full 5000-row roster's group keys without a
+        lookup-per-group query storm.
+        """
+        if not cms_group_ids:
+            return set()
+        rows = self._session.scalars(
+            select(ChannelGroupORM.cms_group_id).where(
+                ChannelGroupORM.tenant_id == self._tenant_id,
+                ChannelGroupORM.cms_group_id.in_(cms_group_ids),
+                ChannelGroupORM.active.is_(False),
+            )
+        ).all()
+        return set(rows)
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.

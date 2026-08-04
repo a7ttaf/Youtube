@@ -1,5 +1,7 @@
 """API tests for the bulk channel inventory import (POST /channels/import)."""
 
+import dataclasses
+
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.api.channels import (
@@ -544,6 +546,47 @@ def test_archived_group_is_a_row_error_not_a_write():
     assert audit_sink.records == []
     archived = groups.get_group_by_cms_id("cms-tv")
     assert archived is not None and archived.channel_ids == (CHANNEL_ID,)
+
+
+class _ArchivingDuringApplyGroups(ChannelGroupRegistry):
+    """Simulate a concurrent archive landing between planning and apply.
+
+    Planning's bulk archived-key lookup sees the group ACTIVE; the apply's
+    locked write-boundary lookup (for_update=True) observes it archived.
+    """
+
+    def get_group_by_cms_id(self, cms_group_id, *, for_update=False):
+        group = super().get_group_by_cms_id(cms_group_id, for_update=for_update)
+        if group is not None and for_update:
+            return dataclasses.replace(group, active=False)
+        return group
+
+
+def test_group_archived_between_plan_and_apply_returns_409():
+    """The write-boundary recheck turns the race into 409, not a silent write."""
+    app = create_app()
+    registry = bootstrap_channel_registry()
+    groups = _ArchivingDuringApplyGroups()
+    groups.create_group(name="cms-tv", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv")
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_channel_registry] = lambda: registry
+    app.dependency_overrides[sql_group_registry_from_session] = lambda: groups
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    app.dependency_overrides[current_org_access_index] = lambda: BOOTSTRAP_ORG_INDEX
+    client = TestClient(app)
+
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+            header="youtube_channel_id,channel_name,group_id,view_revenue",
+        ),
+    )
+
+    assert response.status_code == 409
+    assert "archived during the import" in response.json()["detail"]
+    stored = groups.get_group_by_cms_id("cms-tv")
+    assert stored is not None and stored.channel_ids == ()
 
 
 def test_channel_audit_details_carry_name_and_field_diff():

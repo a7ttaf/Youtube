@@ -51,7 +51,10 @@ from ums_smart_revenue.org.channel_import import (
     parse_channel_import_csv,
     plan_channel_import,
 )
-from ums_smart_revenue.org.channel_import_apply import apply_channel_import
+from ums_smart_revenue.org.channel_import_apply import (
+    ChannelImportArchivedGroupError,
+    apply_channel_import,
+)
 from ums_smart_revenue.org.channel_issues import (
     build_channel_registry_issues,
     summarize_channel_registry_issues,
@@ -607,10 +610,14 @@ def import_channels(
             reason=reason,
             filename=file.filename,
         )
-    # A revenue_required flip rejected by the locked-month guard aborts the
-    # whole request; the import's single-transaction wiring rolls every prior
-    # row back, so 409 (not a partial apply) is the honest outcome.
-    except ChannelRevenueRequirementLockedMonthError as exc:
+    # A revenue_required flip rejected by the locked-month guard — or a group
+    # archived in the plan-to-apply window — aborts the whole request; the
+    # import's single-transaction wiring rolls every prior row back, so 409
+    # (not a partial apply) is the honest outcome.
+    except (
+        ChannelImportArchivedGroupError,
+        ChannelRevenueRequirementLockedMonthError,
+    ) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return ChannelImportResult.model_validate(payload)
 
@@ -673,13 +680,14 @@ def _parse_import_upload(file: UploadFile) -> ParsedChannelImport:
 def _archived_group_ids(
     groups: ChannelGroupRegistryStore, parsed: ParsedChannelImport
 ) -> frozenset[str]:
-    """Return the roster's CMS group keys whose existing group is archived."""
+    """Return the roster's CMS group keys whose existing group is archived.
+
+    One bulk store query — never a lookup per group — so a full 5000-row
+    roster's planning does not turn into thousands of sequential round trips
+    inside the request transaction.
+    """
     group_ids = {row.group_id for row in parsed.rows if row.group_id}
-    return frozenset(
-        group_id
-        for group_id in group_ids
-        if (group := groups.get_group_by_cms_id(group_id)) is not None and not group.active
-    )
+    return frozenset(groups.list_archived_cms_group_ids(group_ids))
 
 
 def _import_plan_to_api(

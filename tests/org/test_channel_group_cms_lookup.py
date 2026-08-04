@@ -28,3 +28,20 @@ def test_get_group_by_cms_id_finds_the_group() -> None:
 def test_get_group_by_cms_id_returns_none_when_absent() -> None:
     registry = ChannelGroupRegistry()
     assert registry.get_group_by_cms_id("cms-missing") is None
+
+
+def test_list_archived_cms_group_ids_returns_only_archived_keys() -> None:
+    """One bulk call classifies a roster's CMS keys by archived state."""
+    registry = ChannelGroupRegistry()
+    active = registry.create_group(
+        name="Active", group_type="SECTOR", channel_ids=[], cms_group_id="cms-active"
+    )
+    archived = registry.create_group(
+        name="Archived", group_type="SECTOR", channel_ids=[], cms_group_id="cms-archived"
+    )
+    registry.update_group(group_id=archived.id, name=None, active=False)
+
+    result = registry.list_archived_cms_group_ids({"cms-active", "cms-archived", "cms-missing"})
+
+    assert result == {"cms-archived"}
+    assert registry.get_group_by_cms_id("cms-active") == active

@@ -27,7 +27,7 @@ def _registry() -> ChannelRegistry:
 
 
 def test_update_inventory_replaces_all_four_fields() -> None:
-    updated = _registry().update_inventory(
+    _previous, updated = _registry().update_inventory(
         youtube_channel_id=CHANNEL_ID,
         channel_name="CBC Egypt",
         cms_status="INSIDE_CMS",
@@ -41,7 +41,7 @@ def test_update_inventory_replaces_all_four_fields() -> None:
 
 
 def test_update_inventory_keeps_revenue_source_status_consistent() -> None:
-    updated = _registry().update_inventory(
+    _previous, updated = _registry().update_inventory(
         youtube_channel_id=CHANNEL_ID,
         channel_name="CBC Egypt",
         cms_status="INSIDE_CMS",
@@ -69,7 +69,7 @@ def _registry_with_official_status(status: str) -> ChannelRegistry:
 
 def test_update_inventory_preserves_official_status_when_flag_unchanged() -> None:
     """A name/owner refresh must not clobber a proven official revenue source."""
-    updated = _registry_with_official_status("OFFICIAL_CMS_REVENUE").update_inventory(
+    _previous, updated = _registry_with_official_status("OFFICIAL_CMS_REVENUE").update_inventory(
         youtube_channel_id=CHANNEL_ID,
         channel_name="New Name",
         cms_status="INSIDE_CMS",
@@ -81,7 +81,7 @@ def test_update_inventory_preserves_official_status_when_flag_unchanged() -> Non
 
 def test_update_inventory_rederives_status_when_flag_flips() -> None:
     """Flipping revenue_required off parks even an official channel."""
-    updated = _registry_with_official_status("OFFICIAL_MANUAL_IMPORT").update_inventory(
+    _previous, updated = _registry_with_official_status("OFFICIAL_MANUAL_IMPORT").update_inventory(
         youtube_channel_id=CHANNEL_ID,
         channel_name="Old Name",
         cms_status="INSIDE_CMS",

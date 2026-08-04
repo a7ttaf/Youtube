@@ -33,7 +33,12 @@ class ChannelGroupRegistryStore(Protocol):
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         pass
 
-    def get_group_by_cms_id(self, cms_group_id: str) -> ChannelGroupEntry | None:
+    def get_group_by_cms_id(
+        self, cms_group_id: str, *, for_update: bool = False
+    ) -> ChannelGroupEntry | None:
+        pass
+
+    def list_archived_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
         pass
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
@@ -77,12 +82,27 @@ class ChannelGroupRegistry:
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         return self._groups.get(group_id)
 
-    def get_group_by_cms_id(self, cms_group_id: str) -> ChannelGroupEntry | None:
-        """Return the group carrying this CMS key, or None."""
+    def get_group_by_cms_id(
+        self, cms_group_id: str, *, for_update: bool = False
+    ) -> ChannelGroupEntry | None:
+        """Return the group carrying this CMS key, or None.
+
+        ``for_update`` is a no-op in memory (single-threaded test registry);
+        the SQL implementation row-locks the group so an archived-state check
+        at the write boundary cannot race a concurrent archive.
+        """
         for group in self._groups.values():
             if group.cms_group_id == cms_group_id:
                 return group
         return None
+
+    def list_archived_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Return the subset of CMS keys whose existing group is archived."""
+        return {
+            group.cms_group_id
+            for group in self._groups.values()
+            if group.cms_group_id in cms_group_ids and not group.active
+        }
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.

@@ -270,12 +270,18 @@ class _FailingGroupStore:
         self._fail_on_call = fail_on_call
         self.calls = 0
 
-    def get_group_by_cms_id(self, cms_group_id: str) -> ChannelGroupEntry | None:
+    def get_group_by_cms_id(
+        self, cms_group_id: str, *, for_update: bool = False
+    ) -> ChannelGroupEntry | None:
         """Delegate the lookup until the armed call, then raise."""
         self.calls += 1
         if self.calls >= self._fail_on_call:
             raise RuntimeError("channel group store unavailable mid-apply")
-        return self._inner.get_group_by_cms_id(cms_group_id)
+        return self._inner.get_group_by_cms_id(cms_group_id, for_update=for_update)
+
+    def list_archived_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Delegate the bulk archived-key lookup to the real store."""
+        return self._inner.list_archived_cms_group_ids(cms_group_ids)
 
     def create_group(self, **kwargs: object) -> ChannelGroupEntry:
         """Delegate group creation to the real store."""
@@ -414,13 +420,13 @@ def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
     ) -> _FailingGroupStore:
         """Provide a group store armed to fail on row 2's APPLY lookup.
 
-        The route performs one archived-group planning lookup per distinct
-        group id (calls 1-2) BEFORE any write; the apply then looks each row's
-        group up again (row 1 = call 3, row 2 = call 4). Arming call 4 forces
-        the failure after row 1's channel+group writes and row 2's channel
-        write have already been flushed.
+        Planning vets group keys via the bulk list_archived_cms_group_ids
+        (uncounted); the apply looks each row's group up per row (row 1 =
+        call 1, row 2 = call 2). Arming call 2 forces the failure after row
+        1's channel+group writes and row 2's channel write have already been
+        flushed.
         """
-        store = _FailingGroupStore(SqlAlchemyChannelGroupRegistry(session), fail_on_call=4)
+        store = _FailingGroupStore(SqlAlchemyChannelGroupRegistry(session), fail_on_call=2)
         stores.append(store)
         return store
 
@@ -440,7 +446,7 @@ def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
         )
 
     assert response.status_code == 500, response.text
-    assert stores and stores[0].calls == 4, "the store must have failed mid-apply, not before it"
+    assert stores and stores[0].calls == 2, "the store must have failed mid-apply, not before it"
     # Three audit rows were really INSERTed (platform-lane elevated, same
     # transaction) before the failure: row 1's CHANNEL_CREATED, row 1's
     # GROUP_UPDATED (its group was created before the armed second lookup),

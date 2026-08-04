@@ -280,7 +280,7 @@ def test_sql_channel_registry_update_inventory_persists_all_four_fields():
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
 
-    updated = registry.update_inventory(
+    _previous, updated = registry.update_inventory(
         youtube_channel_id="channel-tv-a",
         channel_name="TV A Renamed",
         cms_status="INSIDE_CMS",
@@ -309,7 +309,7 @@ def test_sql_channel_registry_update_inventory_flips_revenue_source_status():
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
 
-    updated = registry.update_inventory(
+    _previous, updated = registry.update_inventory(
         youtube_channel_id="channel-tv-a",
         channel_name="TV A",
         cms_status="INSIDE_CMS",
@@ -346,7 +346,7 @@ def test_sql_channel_registry_update_inventory_preserves_official_status():
     session.commit()
     registry = SqlAlchemyChannelRegistry(session)
 
-    updated = registry.update_inventory(
+    _previous, updated = registry.update_inventory(
         youtube_channel_id="channel-official-cms",
         channel_name="Official CMS Renamed",
         cms_status="INSIDE_CMS",
@@ -457,7 +457,7 @@ def test_update_inventory_allows_required_flip_when_locked_month_has_fact():
     session.commit()
     registry = SqlAlchemyChannelRegistry(session)
 
-    updated = registry.update_inventory(
+    _previous, updated = registry.update_inventory(
         youtube_channel_id="channel-perf-flip",
         channel_name="Perf Flip",
         cms_status="INSIDE_CMS",
@@ -469,6 +469,102 @@ def test_update_inventory_allows_required_flip_when_locked_month_has_fact():
     assert updated.revenue_source_status == "MISSING_REVENUE_SOURCE"
 
 
+def test_update_inventory_returns_the_write_boundary_previous_entry():
+    """The previous entry reflects what the write replaced, for audit diffs."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    previous, updated = registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id="owner-cms",
+        revenue_required=True,
+    )
+
+    assert previous.channel_name == "TV A"
+    assert previous.content_owner_id is None
+    assert updated.channel_name == "TV A Renamed"
+    assert updated.content_owner_id == "owner-cms"
+
+
+def test_update_inventory_flip_acquires_revenue_requirement_guard(monkeypatch):
+    """The OFF->ON flip serializes with lock-time readiness via the shared key."""
+    import ums_smart_revenue.org.sql_channel_registry as registry_module
+    from ums_smart_revenue.finance.month_close_locks import (
+        REVENUE_REQUIREMENT_GUARD_MONTH,
+    )
+
+    session = build_finance_session()
+    seed_org(session)
+    _seed_not_required_channel(session)
+    guard_calls: list[str] = []
+    monkeypatch.setattr(
+        registry_module,
+        "acquire_finance_month_advisory_lock",
+        lambda _session, month, *, tenant_id=None: guard_calls.append(month),
+    )
+    registry = SqlAlchemyChannelRegistry(session)
+
+    registry.update_inventory(
+        youtube_channel_id="channel-perf-only",
+        channel_name="Perf Only",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=True,
+    )
+    registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=True,  # already required: no flip, no guard
+    )
+
+    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH]
+
+
+def test_create_channel_revenue_required_acquires_revenue_requirement_guard(monkeypatch):
+    """A revenue-required CREATE serializes with month locking like a flip does.
+
+    Without the guard, a create committing inside a lock's readiness/commit
+    window would carry created_at <= locked_at and retroactively fail the
+    LOCKED month's effective-dated readiness (review #159 r3712948674).
+    """
+    import ums_smart_revenue.org.sql_channel_registry as registry_module
+    from ums_smart_revenue.finance.month_close_locks import (
+        REVENUE_REQUIREMENT_GUARD_MONTH,
+    )
+
+    session = build_finance_session()
+    seed_org(session)
+    guard_calls: list[str] = []
+    monkeypatch.setattr(
+        registry_module,
+        "acquire_finance_month_advisory_lock",
+        lambda _session, month, *, tenant_id=None: guard_calls.append(month),
+    )
+    registry = SqlAlchemyChannelRegistry(session)
+
+    registry.create_channel(
+        youtube_channel_id="channel-created-required",
+        channel_name="Required Create",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+    registry.create_channel(
+        youtube_channel_id="channel-created-perf",
+        channel_name="Performance Create",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=False,  # performance-only: no readiness impact, no guard
+    )
+
+    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH]
+
+
 def test_update_inventory_allows_unchanged_flag_despite_locked_month():
     """A locked month without facts only blocks the FLIP, not other updates."""
     session = build_finance_session()
@@ -478,7 +574,7 @@ def test_update_inventory_allows_unchanged_flag_despite_locked_month():
     session.commit()
     registry = SqlAlchemyChannelRegistry(session)
 
-    updated = registry.update_inventory(
+    _previous, updated = registry.update_inventory(
         youtube_channel_id="channel-perf-only",
         channel_name="Perf Only Renamed",
         cms_status="INSIDE_CMS",
