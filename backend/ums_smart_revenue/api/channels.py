@@ -82,6 +82,9 @@ _OFFICIAL_REVENUE_SOURCE_STATUSES = frozenset({"OFFICIAL_CMS_REVENUE", "OFFICIAL
 
 MAX_IMPORT_BYTES = 2 * 1024 * 1024
 MAX_IMPORT_ROWS = 5000
+# Generous bound for CMS content-owner ids (~22 chars in practice); the value
+# becomes audit_logs.entity_id inside the ix_audit_logs_entity B-tree index.
+MAX_CONTENT_OWNER_CHARS = 255
 # Mirrors the youtube_channels cms_status CHECK in 20260510_0002_org_registry.
 IMPORTABLE_CMS_STATUSES = frozenset({"INSIDE_CMS", "OUTSIDE_CMS", "UNKNOWN"})
 
@@ -652,6 +655,15 @@ def _validated_import_form(*, content_owner_id: str, cms_status: str, reason: st
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"{field_name} contains a NUL character",
             )
+    # The owner id becomes audit_logs.entity_id, which sits in the
+    # ix_audit_logs_entity B-tree; PostgreSQL rejects index entries past its
+    # per-entry size limit, so an unbounded value would pass dry-run and 500
+    # on the final summary append. Real CMS owner ids are ~22 characters.
+    if len(content_owner_id) > MAX_CONTENT_OWNER_CHARS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"content_owner_id exceeds {MAX_CONTENT_OWNER_CHARS} characters",
+        )
     return content_owner_id
 
 
