@@ -59,6 +59,28 @@ class SqlAlchemyChannelRegistry:
         self._tenant_id = _resolve_tenant_id(tenant_id)
         self._guard_held = False
 
+    # ========================================================================
+    # Purpose: Take the tenant-wide REVENUE_REQUIREMENT_GUARD_MONTH advisory
+    #   lock that serializes registry writes against the finance month-close
+    #   protocol, at most once per request transaction.
+    # Database/ORM: PostgreSQL advisory lock only (pg_advisory_xact_lock via
+    #   month_close_locks). Touches no ORM row. No-op off PostgreSQL.
+    # Standards: This is the FIRST half of a TOTAL lock order — guard BEFORE
+    #   any row lock, on EVERY write path, unconditionally. Lock-time readiness
+    #   takes the month key THEN this sentinel and then FOR-UPDATEs channel
+    #   rows, so any caller that locks a row before calling this deadlocks
+    #   against a concurrent month close. Memoized on _guard_held because the
+    #   registry is request-scoped and the lock is transaction-scoped: one
+    #   acquisition covers every write in the request (a 5000-row import would
+    #   otherwise pay one round trip per row for a re-entrant no-op).
+    # Blast Radius: Concurrency only — the ordering between channel writes and
+    #   month locks. No data, audit, or authorization behavior.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/month_close_locks.py ->
+    #     defines the sentinel key and the acquire helper.
+    #   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
+    #     the other side of the guard; takes month-then-sentinel.
+    # ========================================================================
     def _acquire_revenue_requirement_guard(self) -> None:
         """Take the tenant-wide close guard once per request transaction.
 
@@ -117,6 +139,37 @@ class SqlAlchemyChannelRegistry:
             return None
         return self._to_entry(row)
 
+    # ========================================================================
+    # Purpose: Insert a new channel into the tenant's registry with its
+    #   inventory fields and derived revenue-source status, serialized against
+    #   concurrent finance month closes.
+    # Database/ORM: YouTubeChannelORM INSERT, preceded by an existence SELECT
+    #   and followed by flush(); the unique (tenant_id, youtube_channel_id)
+    #   constraint is the authoritative duplicate guard (the pre-check only
+    #   turns the common case into a clean 409).
+    # Standards: Guard-then-rows — the advisory guard is taken UNCONDITIONALLY
+    #   before the insert, not only for revenue_required rows, so COMMIT ORDER
+    #   rather than an uncommitted timestamp decides which side of a month lock
+    #   a channel falls on. created_at AND updated_at are stamped in
+    #   application code from serialization_timestamp AFTER that wait: the
+    #   columns' server default now() is transaction-START time, which would
+    #   predate the lock this transaction waited on (defeating the
+    #   LOCKED-month effective-dating cutoff) and would leave updated_at
+    #   earlier than created_at on the row it just created. A duplicate
+    #   IntegrityError is rolled back and re-raised as
+    #   ChannelRegistryConflictError (409); anything else becomes a validation
+    #   error, never a 500.
+    # Blast Radius: Channel registry rows, connector ingest targeting via
+    #   cms_status/content_owner_id, and month-close readiness (a
+    #   revenue_required channel demands a revenue fact). No revenue math.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> bulk
+    #     import CREATE path.
+    #   - File: backend/ums_smart_revenue/api/channels.py -> single-channel
+    #     create route.
+    #   - File: backend/ums_smart_revenue/finance/month_close_locks.py ->
+    #     the shared guard and database clock.
+    # ========================================================================
     def create_channel(
         self,
         *,
@@ -173,6 +226,14 @@ class SqlAlchemyChannelRegistry:
             active=True,
         )
         row.created_at = created_at
+        # updated_at must move with it. Its server default is the same now()
+        # (transaction START), so leaving it defaulted persists
+        # updated_at < created_at on EVERY create — guaranteed once the guard
+        # above makes the transaction wait, and true by milliseconds even when
+        # it does not (review #159 r3715427808). A row whose "last modified"
+        # predates its own creation is an impossible lifecycle for any
+        # consumer that orders by it.
+        row.updated_at = created_at
         self._session.add(row)
         try:
             self._session.flush()
@@ -399,8 +460,25 @@ class SqlAlchemyChannelRegistry:
         row.cms_status = cms_status
         row.content_owner_id = normalize_optional_content_owner(content_owner_id)
         row.revenue_required = revenue_required
+        updated = self._to_entry(row)
+        # Stamp ONLY a real change, and from the same clock as create_channel
+        # (r3715427808). Two rules in one line:
+        #
+        # - Why stamp at all: the column's onupdate=now() is this transaction's
+        #   START time, and this transaction may have started BEFORE the create
+        #   it is now updating committed — READ COMMITTED lets a later
+        #   statement see that row — so the default could persist
+        #   updated_at < created_at here too.
+        # - Why only on a change: an unmodified row has no dirty attribute, so
+        #   today it emits no UPDATE at all. Stamping unconditionally would
+        #   make every UNCHANGED row of a 5000-row re-import write a row and
+        #   pay a clock round trip, and would move a "last modified" time that
+        #   nothing modified. The entry comparison is exact — the frozen entry
+        #   carries every column this method assigns.
+        if updated != previous:
+            row.updated_at = serialization_timestamp(self._session)
         self._session.flush()
-        return previous, self._to_entry(row)
+        return previous, updated
 
     def _get_row(self, youtube_channel_id: str) -> YouTubeChannelORM | None:
         """Look up the ORM row filtered by tenant_id + external channel id."""

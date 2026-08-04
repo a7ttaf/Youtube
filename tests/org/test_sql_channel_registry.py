@@ -55,6 +55,17 @@ def _tenant(tenant_id: UUID, *, slug: str) -> Tenant:
     )
 
 
+def _naive(value: datetime) -> datetime:
+    """Drop tzinfo so a freshly-assigned value compares with a persisted one.
+
+    SQLite returns DateTime(timezone=True) columns naive, so a row holding one
+    column straight from Python and another read back from the database cannot
+    be compared directly — the ordering, not the tzinfo, is what these
+    assertions are about.
+    """
+    return value.replace(tzinfo=None)
+
+
 def build_session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
@@ -704,6 +715,75 @@ def test_create_channel_stamps_created_at_after_the_guard(monkeypatch):
         )
     ).one()
     assert perf_row.created_at.replace(tzinfo=None) == sentinel.replace(tzinfo=None)
+
+
+def test_registry_writes_never_persist_updated_at_before_created_at(monkeypatch):
+    """updated_at moves with the post-guard clock, on create and on update.
+
+    Both columns default to the same server-side now(), which is transaction
+    START time. Once created_at is stamped at the real insertion point — after
+    a guard wait that can be arbitrarily long — a defaulted updated_at is
+    strictly earlier, so every created row would claim it was last modified
+    before it existed (review #159 r3715427808). The same holds for an
+    inventory update whose transaction started before the create it updates
+    committed, which READ COMMITTED permits.
+    """
+    import ums_smart_revenue.org.sql_channel_registry as registry_module
+
+    created_stamp = datetime(2031, 5, 6, 12, 0, tzinfo=UTC)
+    updated_stamp = datetime(2031, 5, 7, 12, 0, tzinfo=UTC)
+    stamps = iter((created_stamp, updated_stamp))
+
+    session = build_finance_session()
+    seed_org(session)
+    monkeypatch.setattr(
+        registry_module,
+        "acquire_finance_month_advisory_lock",
+        lambda _session, month, *, tenant_id=None: None,
+    )
+    monkeypatch.setattr(registry_module, "serialization_timestamp", lambda _session: next(stamps))
+    registry = SqlAlchemyChannelRegistry(session)
+
+    registry.create_channel(
+        youtube_channel_id="channel-timestamps",
+        channel_name="Timestamps",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=False,
+    )
+    created_row = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-timestamps",
+        )
+    ).one()
+    assert created_row.updated_at.replace(tzinfo=None) == created_stamp.replace(tzinfo=None)
+    assert _naive(created_row.updated_at) >= _naive(created_row.created_at)
+
+    registry.update_inventory(
+        youtube_channel_id="channel-timestamps",
+        channel_name="Timestamps Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=False,
+    )
+    session.flush()
+    assert created_row.updated_at.replace(tzinfo=None) == updated_stamp.replace(tzinfo=None)
+    assert _naive(created_row.updated_at) >= _naive(created_row.created_at)
+
+    # A re-import that changes nothing stays write-quiet: no clock read, no
+    # UPDATE, and a "last modified" time that nothing modified stays put. The
+    # stamp iterator is exhausted here, so any further read would raise
+    # StopIteration rather than silently pass.
+    registry.update_inventory(
+        youtube_channel_id="channel-timestamps",
+        channel_name="Timestamps Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=False,
+    )
+    session.flush()
+    assert created_row.updated_at.replace(tzinfo=None) == updated_stamp.replace(tzinfo=None)
 
 
 def test_update_inventory_allows_unchanged_flag_despite_locked_month():
