@@ -10,12 +10,14 @@ r3715427823).
 
 import importlib.util
 from pathlib import Path
+from types import ModuleType
 from uuid import uuid4
 
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from ums_smart_revenue.db.org_models import ChannelGroupORM
@@ -28,15 +30,18 @@ MIGRATION_PATH = (
 )
 UNIQUE_CONSTRAINT = "uq_channel_groups_tenant_id_cms_group_id"
 # channel_groups as 20260510_0002 created it and 20260517_0001 re-keyed it:
-# the pre-state this migration has to alter.
+# the pre-state this migration has to alter. The timestamp columns are
+# TIMESTAMPTZ to match the real schema (DateTime(timezone=True)) — SQLite does
+# not enforce column types, but writing the naive form here would model a
+# schema this project does not have and could mask a timezone bug.
 PRIOR_CHANNEL_GROUPS_DDL = """
 CREATE TABLE channel_groups (
     id TEXT NOT NULL,
     name TEXT NOT NULL,
     group_type TEXT NOT NULL,
     active BOOLEAN NOT NULL DEFAULT 1,
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
     tenant_id TEXT NOT NULL,
     CONSTRAINT pk_channel_groups PRIMARY KEY (id)
 )
@@ -57,7 +62,7 @@ def test_channel_group_cms_id_is_unique_per_tenant() -> None:
     assert ("tenant_id", "cms_group_id") in constraints
 
 
-def _migration_module():
+def _migration_module() -> ModuleType:
     """Load the migration module by path (it is not importable by name)."""
     spec = importlib.util.spec_from_file_location("m_20260803_0001", MIGRATION_PATH)
     assert spec is not None and spec.loader is not None
@@ -66,7 +71,13 @@ def _migration_module():
     return module
 
 
-def _insert_group(connection, *, cms_group_id: str) -> None:
+def _bind_operations(module: ModuleType, connection: Connection) -> None:
+    """Point the migration module's ``op`` at this connection's Operations."""
+    module.op = Operations(MigrationContext.configure(connection))
+
+
+def _insert_group(connection: Connection, *, cms_group_id: str) -> None:
+    """Insert one channel_groups row carrying the given CMS key."""
     connection.execute(
         text(
             "INSERT INTO channel_groups"
@@ -90,7 +101,7 @@ def test_migration_upgrade_runs_on_sqlite_and_enforces_the_unique_key() -> None:
 
     with engine.begin() as connection:
         connection.execute(text(PRIOR_CHANNEL_GROUPS_DDL))
-        module.op = Operations(MigrationContext.configure(connection))
+        _bind_operations(module, connection)
         module.upgrade()
 
         columns = {column["name"] for column in inspect(connection).get_columns("channel_groups")}
@@ -113,7 +124,7 @@ def test_migration_downgrade_runs_on_sqlite() -> None:
 
     with engine.begin() as connection:
         connection.execute(text(PRIOR_CHANNEL_GROUPS_DDL))
-        module.op = Operations(MigrationContext.configure(connection))
+        _bind_operations(module, connection)
         module.upgrade()
         module.downgrade()
 

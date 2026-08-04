@@ -732,7 +732,13 @@ def test_registry_writes_never_persist_updated_at_before_created_at(monkeypatch)
 
     created_stamp = datetime(2031, 5, 6, 12, 0, tzinfo=UTC)
     updated_stamp = datetime(2031, 5, 7, 12, 0, tzinfo=UTC)
-    stamps = iter((created_stamp, updated_stamp))
+    scripted = [created_stamp, updated_stamp]
+    reads: list[datetime] = []
+
+    def _stamp(_session: Session) -> datetime:
+        """Return the next scripted clock value and record that it was read."""
+        reads.append(scripted[len(reads)])
+        return reads[-1]
 
     session = build_finance_session()
     seed_org(session)
@@ -741,7 +747,7 @@ def test_registry_writes_never_persist_updated_at_before_created_at(monkeypatch)
         "acquire_finance_month_advisory_lock",
         lambda _session, month, *, tenant_id=None: None,
     )
-    monkeypatch.setattr(registry_module, "serialization_timestamp", lambda _session: next(stamps))
+    monkeypatch.setattr(registry_module, "serialization_timestamp", _stamp)
     registry = SqlAlchemyChannelRegistry(session)
 
     registry.create_channel(
@@ -759,6 +765,7 @@ def test_registry_writes_never_persist_updated_at_before_created_at(monkeypatch)
     ).one()
     assert created_row.updated_at.replace(tzinfo=None) == created_stamp.replace(tzinfo=None)
     assert _naive(created_row.updated_at) >= _naive(created_row.created_at)
+    assert len(reads) == 1
 
     registry.update_inventory(
         youtube_channel_id="channel-timestamps",
@@ -770,11 +777,12 @@ def test_registry_writes_never_persist_updated_at_before_created_at(monkeypatch)
     session.flush()
     assert created_row.updated_at.replace(tzinfo=None) == updated_stamp.replace(tzinfo=None)
     assert _naive(created_row.updated_at) >= _naive(created_row.created_at)
+    assert len(reads) == 2
 
-    # A re-import that changes nothing stays write-quiet: no clock read, no
-    # UPDATE, and a "last modified" time that nothing modified stays put. The
-    # stamp iterator is exhausted here, so any further read would raise
-    # StopIteration rather than silently pass.
+    # A re-import that changes nothing stays write-quiet: the clock is not
+    # read, no UPDATE is emitted, and a "last modified" time that nothing
+    # modified stays put. The read counter is what pins the first half —
+    # `scripted` has no third entry, so a stray read would raise IndexError.
     registry.update_inventory(
         youtube_channel_id="channel-timestamps",
         channel_name="Timestamps Renamed",
@@ -783,6 +791,7 @@ def test_registry_writes_never_persist_updated_at_before_created_at(monkeypatch)
         revenue_required=False,
     )
     session.flush()
+    assert len(reads) == 2
     assert created_row.updated_at.replace(tzinfo=None) == updated_stamp.replace(tzinfo=None)
 
 
