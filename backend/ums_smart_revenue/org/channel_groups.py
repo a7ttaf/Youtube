@@ -1,3 +1,31 @@
+# ============================================================================
+# Purpose: The channel-group domain contract — the immutable ChannelGroupEntry
+#   value, the typed conflict error, the ChannelGroupRegistryStore Protocol
+#   every backend must satisfy, and an in-memory registry used as the test
+#   double for that Protocol.
+# Database/ORM: NONE. This module is deliberately persistence-free; the SQL
+#   implementation (ChannelGroupORM / ChannelGroupMemberORM) lives in
+#   sql_channel_groups.py. The in-memory registry is a dict, never a database.
+# Standards: The in-memory registry must keep BEHAVIOURAL parity with the SQL
+#   store on everything a test could assert — notably the per-tenant unique
+#   cms_group_id, which raises ChannelGroupConflictError here exactly as the
+#   unique constraint does there, so a duplicate can never pass in tests and
+#   fail in production. Where parity is impossible the divergence is documented
+#   at the method (for_update is a no-op in memory; every member counts as
+#   active). Uniqueness races surface as a typed 409, never a bare
+#   IntegrityError 500. Member ordering is insertion order, de-duplicated.
+# Blast Radius: Channel-group membership and the finance scope selection built
+#   on it. No revenue math, no allocation, no audit of its own (callers audit).
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the SQL
+#     implementation of this Protocol.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> bulk
+#     import consumer (get_group_by_cms_id / create_group / add_members).
+#   - File: backend/ums_smart_revenue/api/groups.py -> HTTP routes that
+#     translate ChannelGroupConflictError to 409.
+# ============================================================================
+"""Channel-group domain contract, typed errors, and in-memory registry."""
+
 from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import uuid4

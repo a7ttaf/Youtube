@@ -160,14 +160,14 @@ def parse_channel_import_csv(text: str, *, max_rows: int | None = None) -> Parse
 
 def _header_index(raw_header: list[str]) -> dict[str, int]:
     """Validate the header row and map known column names to positions."""
-    header = [name.strip().lstrip("﻿").lower() for name in raw_header]
-    # Reject an absurdly wide header before any per-cell scanning: only four
-    # columns are ever valid, and a 2 MiB single-line header could otherwise
-    # monopolize a worker just to be rejected.
-    if len(header) > MAX_HEADER_COLUMNS:
+    # Width check FIRST, on the raw cells: only four columns are ever valid, so
+    # a 2 MiB single-line header must not even pay per-cell strip/lower/BOM
+    # normalization on its way to being rejected.
+    if len(raw_header) > MAX_HEADER_COLUMNS:
         raise ChannelImportFormatError(
-            f"header has {len(header)} columns; at most {MAX_HEADER_COLUMNS} are valid"
+            f"header has {len(raw_header)} columns; at most {MAX_HEADER_COLUMNS} are valid"
         )
+    header = [name.strip().lstrip("﻿").lower() for name in raw_header]
     missing = sorted(REQUIRED_COLUMNS - set(header))
     if missing:
         raise ChannelImportFormatError(f"missing required column(s): {', '.join(missing)}")

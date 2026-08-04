@@ -11,7 +11,7 @@ OPEN, so the cutoff never weakens the lock gate itself.
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
@@ -31,6 +31,17 @@ def _session() -> Session:
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     return Session(engine)
+
+
+def _instant(value: datetime | None) -> datetime:
+    """Normalize a persisted timestamp to aware UTC for comparison.
+
+    SQLite drops tzinfo on round-trip, so comparing a stored column against an
+    aware sentinel would fail on tzinfo alone rather than on the instant, which
+    is the only thing the clock-source assertions care about.
+    """
+    assert value is not None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _add_channel(session: Session, channel_id: str, *, created_at: datetime) -> None:
@@ -122,3 +133,36 @@ def test_serialization_timestamp_falls_back_to_the_app_clock_off_postgres() -> N
     stamped = serialization_timestamp(session)
 
     assert stamped.tzinfo is not None
+
+
+def test_every_close_lifecycle_timestamp_uses_the_shared_clock(monkeypatch) -> None:
+    """unlock_month and record_allocation_rule share lock_month's clock source.
+
+    A month's lifecycle timestamps are compared against each other (and
+    locked_at against channel created_at), so stamping one from the database
+    clock and the others from this host's wall clock lets skew persist an
+    unlock that appears to precede its own lock. Patching the shared helper
+    must therefore move EVERY lifecycle timestamp, not just locked_at.
+    """
+    from ums_smart_revenue.finance import month_close
+
+    sentinel = datetime(2031, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(month_close, "serialization_timestamp", lambda _session: sentinel)
+
+    session = _session()
+    repository = month_close.SqlAlchemyFinanceMonthCloseRepository(session)
+    actor = str(uuid4())
+    repository.lock_month(month=MONTH, actor_user_id=actor)
+    row = session.scalars(
+        select(FinanceMonthCloseORM).where(FinanceMonthCloseORM.month == MONTH)
+    ).one()
+    assert _instant(row.locked_at) == sentinel
+
+    repository.unlock_month(month=MONTH, actor_user_id=actor)
+    assert _instant(row.unlocked_at) == sentinel
+    assert _instant(row.updated_at) == sentinel
+
+    repository.record_allocation_rule(
+        month=MONTH, allocation_method="gross_revenue_proportional", rule_payload={}
+    )
+    assert _instant(row.updated_at) == sentinel

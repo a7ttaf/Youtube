@@ -1,5 +1,33 @@
+# ============================================================================
+# Purpose: Persist and mutate the finance month-close control row — the
+#   OPEN/LOCKED state that gates every month-scoped revenue write, plus the
+#   allocation-rule metadata recorded while a month is still open.
+# Database/ORM: FinanceMonthCloseORM (SELECT / INSERT / UPDATE), tenant-scoped
+#   on (tenant_id, month), read under the month advisory lock + FOR UPDATE on
+#   every mutating path.
+# Standards: Lock order is month advisory key THEN the close row (see
+#   month_close_locks); a month only flips to LOCKED after a guarded, CURRENT
+#   readiness recheck, never a stale one. All lifecycle timestamps
+#   (locked_at / unlocked_at / updated_at) come from serialization_timestamp —
+#   the shared DATABASE clock — because they are compared against each other
+#   and against YouTubeChannelORM.created_at, and application-host wall clocks
+#   are not comparable. Row creation is IntegrityError-tolerant (savepoint +
+#   re-SELECT) so concurrent first-touch requests converge instead of failing.
+# Blast Radius: Month lock state, therefore every LOCKED-month write guard
+#   (revenue facts, deductions, allocation commits, the channel
+#   revenue_required flip). No revenue math and no allocation of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
+#     supplies the lock-time readiness recheck this calls.
+#   - File: backend/ums_smart_revenue/finance/month_close_locks.py -> advisory
+#     guard + serialization_timestamp shared with the channel registry.
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> stamps
+#     created_at from the same clock so effective dating is comparable.
+# ============================================================================
+"""Finance month-close control-row persistence and lifecycle transitions."""
+
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -106,7 +134,11 @@ class SqlAlchemyFinanceMonthCloseRepository:
             raise ValueError(f"Finance month is not locked: {month}")
         row.status = "OPEN"
         row.unlocked_by = _parse_uuid(actor_user_id)
-        row.unlocked_at = datetime.now(UTC)
+        # Same database clock lock_month stamps with: a month's lifecycle
+        # timestamps are compared against each other (and against channel
+        # created_at), so mixing an app-host clock in here could persist an
+        # unlock that appears to precede its own lock.
+        row.unlocked_at = serialization_timestamp(self._session)
         row.updated_at = row.unlocked_at
         self._session.flush()
         return self._to_entry(row)
@@ -124,7 +156,7 @@ class SqlAlchemyFinanceMonthCloseRepository:
             raise ValueError(f"Finance month is locked: {month}")
         row.allocation_method = allocation_method
         row.allocation_rule_payload = rule_payload
-        row.updated_at = datetime.now(UTC)
+        row.updated_at = serialization_timestamp(self._session)
         self._session.flush()
         return self._to_entry(row)
 

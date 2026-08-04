@@ -1,4 +1,32 @@
-"""Transaction-scoped finance month advisory lock helpers."""
+# ============================================================================
+# Purpose: The serialization primitives every month-scoped writer shares — the
+#   transaction-scoped PostgreSQL advisory locks that order month-close
+#   transitions against concurrent writers, and the single database clock that
+#   makes their timestamps comparable.
+# Database/ORM: PostgreSQL advisory locks (pg_advisory_xact_lock) and
+#   clock_timestamp() only. This module never reads or mutates an ORM row.
+# Standards: Lock keys are derived, never hand-picked — blake2b over
+#   tenant+month, so two callers for the same month always collide and two
+#   different months never do. LOCK ORDER IS A TOTAL ORDER and changing it
+#   deadlocks: the revenue_required registry flip takes ONLY
+#   REVENUE_REQUIREMENT_GUARD_MONTH; lock-time readiness takes the month key
+#   THEN that sentinel; no path takes sentinel-then-month. Locks are
+#   transaction-scoped (released at COMMIT/ROLLBACK, re-entrant within one
+#   transaction) so no caller unlocks explicitly. Off PostgreSQL every helper
+#   degrades to a no-op / app clock — SQLite is single-writer and single-host
+#   in this codebase, so there is nothing to serialize.
+# Blast Radius: Finance month locks, lock-time readiness, and the channel
+#   revenue_required flip guard. No authorization, audit, revenue math,
+#   allocation, or export behavior.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/month_close.py -> guards close-row
+#     FOR UPDATE writes and stamps lifecycle timestamps.
+#   - File: backend/ums_smart_revenue/finance/month_close_readiness.py -> guards
+#     lock-time readiness rechecks.
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> holds the
+#     sentinel guard across registry writes and stamps created_at.
+# ============================================================================
+"""Transaction-scoped finance month advisory locks and the shared DB clock."""
 
 from datetime import UTC, datetime
 from hashlib import blake2b
