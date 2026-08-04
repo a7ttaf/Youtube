@@ -110,7 +110,12 @@ class SqlAlchemyChannelGroupRegistry:
             ChannelGroupORM.cms_group_id == cms_group_id,
         )
         if for_update:
-            statement = statement.with_for_update()
+            # FOR NO KEY UPDATE: excludes other membership WRITERS (they take
+            # the same mode) without conflicting with the FOR KEY SHARE lock a
+            # channel_group_members INSERT takes on its referenced group row,
+            # which is what keeps import and group-API orderings from
+            # deadlocking (review #159 r3714644431).
+            statement = statement.with_for_update(key_share=True)
         row = self._session.scalars(statement).one_or_none()
         if row is None:
             return None
@@ -337,7 +342,12 @@ class SqlAlchemyChannelGroupRegistry:
             ChannelGroupORM.id == group_uuid,
         )
         if for_update:
-            statement = statement.with_for_update()
+            # FOR NO KEY UPDATE: excludes other membership WRITERS (they take
+            # the same mode) without conflicting with the FOR KEY SHARE lock a
+            # channel_group_members INSERT takes on its referenced group row,
+            # which is what keeps import and group-API orderings from
+            # deadlocking (review #159 r3714644431).
+            statement = statement.with_for_update(key_share=True)
         return self._session.scalars(statement).one_or_none()
 
     def _require_group_row(self, group_id: str, *, for_update: bool = False) -> ChannelGroupORM:

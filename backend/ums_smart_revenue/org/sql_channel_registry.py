@@ -56,6 +56,26 @@ class SqlAlchemyChannelRegistry:
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
+        self._guard_held = False
+
+    def _acquire_revenue_requirement_guard(self) -> None:
+        """Take the tenant-wide close guard once per request transaction.
+
+        The lock itself is a transaction-scoped advisory lock and re-entrant,
+        but re-issuing it per row costs one round trip per row on a 5000-row
+        import. This registry is request-scoped, and the lock lives until the
+        request's transaction ends, so a single acquisition covers every write
+        it performs while keeping the invariant every caller relies on:
+        guard BEFORE any row lock.
+        """
+        if self._guard_held:
+            return
+        acquire_finance_month_advisory_lock(
+            self._session,
+            REVENUE_REQUIREMENT_GUARD_MONTH,
+            tenant_id=self._tenant_id,
+        )
+        self._guard_held = True
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
         """Return active channels in the bound tenant."""
@@ -126,11 +146,7 @@ class SqlAlchemyChannelRegistry:
         # readiness never saw it. Holding the guard makes COMMIT ORDER, not an
         # uncommitted timestamp, decide which side of the lock a channel falls
         # on (review #159 r3714401797).
-        acquire_finance_month_advisory_lock(
-            self._session,
-            REVENUE_REQUIREMENT_GUARD_MONTH,
-            tenant_id=self._tenant_id,
-        )
+        self._acquire_revenue_requirement_guard()
         # Stamp created_at at the actual insertion point (AFTER the guard
         # wait) with the same app wall clock that stamps
         # FinanceMonthCloseORM.locked_at. The column's server default now() is
@@ -331,18 +347,25 @@ class SqlAlchemyChannelRegistry:
         # makes guard-then-rows a total order for every writer. Also
         # serializes the flip against a concurrent lock (r3712948682):
         # whichever commits first is visible to the other's check. No-op off
-        # Postgres.
-        acquire_finance_month_advisory_lock(
-            self._session,
-            REVENUE_REQUIREMENT_GUARD_MONTH,
-            tenant_id=self._tenant_id,
-        )
+        # Postgres. Acquired once per request transaction (the lock outlives
+        # the call), so a 5000-row import pays one round trip, not 5000.
+        self._acquire_revenue_requirement_guard()
         # Row-lock and re-read at the write boundary: a concurrent committed
         # update between the caller's planning read and this write must not be
         # silently hidden — the returned `previous` reflects what this write
-        # actually replaced. SQLite's dialect ignores FOR UPDATE (single-writer
+        # actually replaced. SQLite's dialect ignores row locks (single-writer
         # anyway); Postgres serializes with any concurrent row writer.
-        self._session.refresh(row, with_for_update=True)
+        #
+        # key_share=True emits FOR NO KEY UPDATE, not FOR UPDATE: this write
+        # never touches the row's key columns, and plain FOR UPDATE conflicts
+        # with the FOR KEY SHARE lock that a channel_group_members INSERT
+        # takes on its referenced channel. With FOR UPDATE, an import holding
+        # a channel and waiting on a group could deadlock a concurrent
+        # POST /groups/{id}/members holding that group and needing the
+        # channel's FK lock (review #159 r3714644431). FOR NO KEY UPDATE still
+        # excludes every other row WRITER, so the write-boundary guarantee is
+        # unchanged.
+        self._session.refresh(row, with_for_update={"key_share": True})
         previous = self._to_entry(row)
         # Flipping revenue_required ON is guarded against LOCKED months: month-
         # close readiness evaluates the CURRENT flag, so enabling it while a

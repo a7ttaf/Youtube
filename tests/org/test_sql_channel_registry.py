@@ -547,11 +547,16 @@ def test_update_inventory_takes_guard_before_the_row_lock(monkeypatch):
         channel_name="TV A",
         cms_status="INSIDE_CMS",
         content_owner_id=None,
-        revenue_required=False,  # performance-only: STILL guarded, pre-lock
+        revenue_required=False,  # performance-only: still guard-then-lock
     )
 
-    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH] * 3
-    assert call_order == ["guard", "row-lock"] * 3
+    # The guard is transaction-scoped and re-entrant, so one acquisition
+    # covers the whole request — a 5000-row import pays one round trip, not
+    # 5000 (review #159 r3714644444). What must hold is that it precedes the
+    # FIRST row lock; later rows are already covered.
+    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH]
+    assert call_order == ["guard", "row-lock", "row-lock", "row-lock"]
+    assert call_order.index("guard") < call_order.index("row-lock")
 
 
 def test_every_create_acquires_the_revenue_requirement_guard(monkeypatch):
@@ -593,10 +598,11 @@ def test_every_create_acquires_the_revenue_requirement_guard(monkeypatch):
         channel_name="Performance Create",
         primary_company_id=None,
         cms_status="INSIDE_CMS",
-        revenue_required=False,  # performance-only: guarded all the same
+        revenue_required=False,  # performance-only: covered by the same guard
     )
 
-    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH] * 2
+    # One acquisition per request transaction covers both creates.
+    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH]
 
 
 def test_update_inventory_allows_flip_when_lock_predates_the_channel():
@@ -678,11 +684,12 @@ def test_create_channel_stamps_created_at_after_the_guard(monkeypatch):
     ).one()
     assert persisted.created_at.replace(tzinfo=None) == sentinel.replace(tzinfo=None)
 
-    # A performance-only create takes the guard and stamps at the insertion
-    # point too: leaving the server default would record the transaction
-    # START time, and a later OFF->ON flip would then demand a fact for a
-    # month that locked mid-transaction, before the channel really existed
-    # (review #159 r3713841258, r3714401797).
+    # A performance-only create stamps at the insertion point too: leaving
+    # the server default would record the transaction START time, and a later
+    # OFF->ON flip would then demand a fact for a month that locked
+    # mid-transaction, before the channel really existed (review #159
+    # r3713841258, r3714401797). It is covered by the same transaction-scoped
+    # guard acquisition, which is why no second "guard" appears.
     registry.create_channel(
         youtube_channel_id="channel-created-perf-stamp",
         channel_name="Perf Stamp",
@@ -690,7 +697,7 @@ def test_create_channel_stamps_created_at_after_the_guard(monkeypatch):
         cms_status="INSIDE_CMS",
         revenue_required=False,
     )
-    assert call_order == ["guard", "stamp", "guard", "stamp"]
+    assert call_order == ["guard", "stamp", "stamp"]
     perf_row = session.scalars(
         select(YouTubeChannelORM).where(
             YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
