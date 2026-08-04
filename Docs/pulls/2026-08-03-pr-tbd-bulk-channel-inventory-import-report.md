@@ -127,7 +127,7 @@ All run locally against Postgres 18 (`ums-mig-pg-test`, port 55432).
 | `ruff check backend tests scripts` | All checks passed |
 | `ruff format --check` (19 touched files) | All formatted |
 | 100-char guard on touched `.py` | No violations |
-| Full suite (`pytest -q`, PG set) | 2520 passed, 0 failed (post-review rounds) |
+| Full suite (`pytest -q`, PG set) | 2524 passed, 0 failed (post-review rounds) |
 | Migration upgrade→downgrade→upgrade | Passed, single head `20260803_0001` |
 | `git diff --check` | Clean |
 
@@ -153,9 +153,12 @@ error. Fixed in `424d4daa`: membership is reconciled for `CREATE`, `UPDATE`, and
 
 ## Risks and limitations
 
-- **Mid-apply failures return an opaque 500, not a typed 4xx.** A concurrent
-  create between the plan read and the apply would conflict. Data stays
-  consistent (rollback verified), but the operator sees a 500. Follow-up.
+- **Expected mid-apply conflicts are typed 409s, not 500s** (closed during
+  review hardening): a channel or CMS group created by a concurrent writer, a
+  group archived in the plan-to-apply window, and the locked-month flip guard
+  all roll the whole import back as retryable conflicts. Truly unexpected
+  failures still surface as 500 with data consistency intact (rollback
+  verified).
 - **Dry-run does not preview group membership changes.** The diff covers
   inventory fields only, so a row that would only gain group membership shows as
   `UNCHANGED`. The write is correct; the preview is imprecise.

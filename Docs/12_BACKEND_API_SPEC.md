@@ -64,9 +64,13 @@ group API's checks. The response (`dry_run` and apply alike) is the declared
 `ERROR`), the planned `channel_name`/`group_id`/`revenue_required`, the
 field-level `changes` diff, and a `reason` for ERROR rows. A dry run writes
 nothing (no audit event). The apply is all-or-nothing: any ERROR row —
-malformed id/name/token, a value containing a NUL character, duplicate id, row
-wider than the header, archived channel, or archived CMS group — rejects the
-file as 422 before any write. Malformed CSV structure (unterminated quotes,
+malformed id/name/token, a value containing a NUL character, a group_id over
+255 characters, duplicate id, row wider than the header, archived channel, or
+archived CMS group — rejects the file as 422 before any write. UNCHANGED rows
+still write through the registry at the apply boundary so a concurrent change
+committed after planning cannot survive the roster (the file wins); such
+healed drift is audited as CHANNEL_UPDATED while a truly unchanged re-import
+stays audit-quiet. Malformed CSV structure (unterminated quotes,
 duplicate or unknown header columns, more blank records than the row cap)
 rejects the whole file as 422; oversize payloads return 413. Flipping
 `view_revenue` on for a channel that lacks facts in a LOCKED finance month is

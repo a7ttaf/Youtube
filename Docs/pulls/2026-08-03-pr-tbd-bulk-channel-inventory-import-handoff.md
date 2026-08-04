@@ -94,7 +94,7 @@ rounds included; the earlier `2463 passed` snapshot predated them).
 - `ruff check backend tests` — passed
 - `ruff format --check` on touched files — passed
 - 100-char guard on touched `.py` — no violations
-- Full suite `pytest -q` with Postgres — 2520 passed, 0 failed
+- Full suite `pytest -q` with Postgres — 2524 passed, 0 failed
 - Migration upgrade → downgrade → upgrade — passed, single head `20260803_0001`
 - `git diff --check` — clean
 
@@ -111,8 +111,10 @@ pass trivially.
 
 ## Known limitations
 
-- Mid-apply failures surface as an opaque 500 rather than a typed 4xx. Data
-  stays consistent; the operator experience is poor. Follow-up.
+- Expected mid-apply conflicts (concurrent channel/group creation, a group
+  archived after planning, the locked-month flip guard) return typed,
+  retryable 409s. Only truly unexpected failures surface as 500; data stays
+  consistent either way.
 - Dry-run previews inventory changes only, not group membership. A row that
   would only gain a group shows as `UNCHANGED`. The write is correct.
 - File-wins means a stale file can flip a deliberate `OUTSIDE_CMS` back to
