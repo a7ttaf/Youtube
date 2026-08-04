@@ -36,6 +36,8 @@ from ums_smart_revenue.org.channel_import import (
     ChannelImportOutcome,
     ChannelImportPlan,
     ChannelImportPlanEntry,
+    ParsedChannelImport,
+    plan_channel_import,
 )
 from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry, ChannelRegistryStore
 
@@ -52,6 +54,64 @@ class ChannelImportArchivedGroupError(ChannelImportError):
     """
 
 
+def plan_channel_import_with_stores(
+    parsed: ParsedChannelImport,
+    *,
+    registry: ChannelRegistryStore,
+    groups: ChannelGroupRegistryStore,
+    content_owner_id: str,
+    cms_status: str,
+) -> ChannelImportPlan:
+    """Gather store state and build the import plan for a parsed roster.
+
+    Domain-side planning entry point: performs the registry and group-store
+    reads (one bulk query each — never per-row lookups) and delegates the
+    pure diffing to ``plan_channel_import``, keeping the HTTP route free of
+    data access. ``include_inactive`` matters: an archived registry row must
+    surface as a per-row planning error, not be mistaken for absent and
+    planned as a CREATE that the duplicate guard turns into a conflict
+    mid-apply. Archived CMS groups likewise fail their rows closed at
+    planning; attaching members to a retired group would audit a change that
+    active listings and finance scope selection never surface.
+    """
+    wanted = {row.youtube_channel_id for row in parsed.rows}
+    existing = {
+        entry.youtube_channel_id: entry
+        for entry in registry.list_channels_by_ids(wanted, include_inactive=True)
+    }
+    group_ids = {row.group_id for row in parsed.rows if row.group_id}
+    return plan_channel_import(
+        rows=parsed.rows,
+        errors=parsed.errors,
+        existing=existing,
+        content_owner_id=content_owner_id,
+        cms_status=cms_status,
+        archived_group_ids=frozenset(groups.list_archived_cms_group_ids(group_ids)),
+    )
+
+
+# ============================================================================
+# Purpose: Execute a bulk channel import plan — per-row registry writes
+#   (create_channel / update_inventory), group-membership reconciliation, and
+#   the full audit trail (per-channel, per-group-mutation, one summary).
+# Database/ORM: YouTubeChannelORM writes via ChannelRegistryStore,
+#   ChannelGroupORM + ChannelGroupMemberORM via ChannelGroupRegistryStore,
+#   AuditLogORM rows via the supplied AuditSink.
+# Standards: All-or-nothing — the caller wires every store and the sink to
+#   ONE transaction, so any raised error rolls the whole import back with its
+#   audit rows. Write-boundary rechecks over plan trust: audit diffs are
+#   rebuilt from what update_inventory actually replaced, and group state is
+#   re-read under a row lock. Typed domain errors propagate for the route to
+#   translate (locked-month flip, archived group, uniqueness races -> 409).
+# Blast Radius: Channel registry inventory, channel-group membership, audit
+#   trail, connector ingest targeting via cms_status/content_owner_id. No
+#   finance totals, no allocation, no month-close writes.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> POST /channels/import
+#     route boundary that authorizes, plans, and calls this.
+#   - File: backend/ums_smart_revenue/org/channel_import.py -> pure plan core
+#     whose entries this executes.
+# ============================================================================
 def apply_channel_import(
     plan: ChannelImportPlan,
     *,

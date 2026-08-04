@@ -547,3 +547,33 @@ def test_tenant_commit_failure_persists_no_audit_rows_on_postgres(
     assert response.status_code == 200, response.text
     assert _channel_row(owner_engine, CHANNEL_ID) is None
     assert _audit_log_count(owner_engine) == before
+
+
+def test_duplicate_cms_group_key_is_a_typed_conflict_on_postgres(
+    owner_engine: sa.Engine,
+) -> None:
+    """The real PG unique constraint surfaces as the typed conflict, not a 500.
+
+    Exercises the psycopg ``diag.constraint_name`` branch of
+    ``_is_duplicate_cms_group_integrity_error`` — the SQLite-tier test only
+    covers the message-text fallback, so a renamed constraint would otherwise
+    turn the documented retryable 409 back into a raw IntegrityError.
+    Nothing commits: the rollback discards both inserts.
+    """
+    from ums_smart_revenue.org.channel_groups import ChannelGroupConflictError
+
+    with Session(owner_engine) as session:
+        store = SqlAlchemyChannelGroupRegistry(session)
+        store.create_group(
+            name="PG TV", group_type="SECTOR", channel_ids=[], cms_group_id="pg-cms-dup"
+        )
+
+        with pytest.raises(ChannelGroupConflictError, match="pg-cms-dup"):
+            store.create_group(
+                name="PG TV Again",
+                group_type="SECTOR",
+                channel_ids=[],
+                cms_group_id="pg-cms-dup",
+            )
+
+        session.rollback()

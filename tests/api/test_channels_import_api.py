@@ -20,9 +20,10 @@ from ums_smart_revenue.org.bootstrap_registry import (
     BOOTSTRAP_COMPANY_TV_ID,
     BOOTSTRAP_ORG_INDEX,
 )
-from ums_smart_revenue.org.channel_groups import ChannelGroupRegistry
+from ums_smart_revenue.org.channel_groups import ChannelGroupConflictError, ChannelGroupRegistry
 from ums_smart_revenue.org.channel_registry import (
     ChannelRegistry,
+    ChannelRegistryConflictError,
     ChannelRegistryEntry,
     bootstrap_channel_registry,
 )
@@ -430,6 +431,26 @@ def test_dry_run_shows_planned_create_values():
     assert row["revenue_required"] is False
 
 
+def test_nul_in_scalar_form_fields_is_rejected_422():
+    """NUL-bearing content_owner_id / reason fail the 422 contract, never 500.
+
+    Both values reach PostgreSQL text columns (youtube_channels.
+    content_owner_id, audit_logs.reason) that cannot store U+0000; the
+    boundary must reject them like the CSV parser rejects per-row NULs
+    (review #159 r3713449085).
+    """
+    client, _registry, _groups, _audit_sink = create_import_app()
+    csv_text = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    owner = post_import(client, csv_text, content_owner_id="own\x00er")
+    assert owner.status_code == 422
+    assert "content_owner_id contains a NUL character" in owner.json()["detail"]
+
+    reason = post_import(client, csv_text, reason="Roster\x00load")
+    assert reason.status_code == 422
+    assert "reason contains a NUL character" in reason.json()["detail"]
+
+
 def test_content_owner_is_normalized_at_the_boundary():
     """A padded owner value is stripped once and used for writes, plan, and audit."""
     client, registry, _groups, audit_sink = create_import_app()
@@ -587,6 +608,59 @@ def test_group_archived_between_plan_and_apply_returns_409():
     assert "archived during the import" in response.json()["detail"]
     stored = groups.get_group_by_cms_id("cms-tv")
     assert stored is not None and stored.channel_ids == ()
+
+
+class _ConcurrentlyCreatedRegistry(ChannelRegistry):
+    """Simulate a channel created by another writer between plan and apply."""
+
+    def create_channel(self, **kwargs):
+        raise ChannelRegistryConflictError(
+            f"Channel already exists: {kwargs['youtube_channel_id']}"
+        )
+
+
+def test_channel_created_concurrently_between_plan_and_apply_returns_409():
+    """A CREATE losing the uniqueness race is a retryable 409, not a 500."""
+    client, _registry, _groups, audit_sink = create_import_app(_ConcurrentlyCreatedRegistry([]))
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+    assert audit_sink.records == []
+
+
+class _GroupRaceLosingGroups(ChannelGroupRegistry):
+    """Simulate losing the cms_group_id INSERT race to a concurrent import."""
+
+    def create_group(self, **kwargs):
+        raise ChannelGroupConflictError(
+            f"channel group already exists for cms_group_id: {kwargs['cms_group_id']}"
+        )
+
+
+def test_group_created_concurrently_during_apply_returns_409():
+    """Two imports racing the same missing CMS key: the loser gets 409."""
+    app = create_app()
+    registry = bootstrap_channel_registry()
+    groups = _GroupRaceLosingGroups()
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_channel_registry] = lambda: registry
+    app.dependency_overrides[sql_group_registry_from_session] = lambda: groups
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    app.dependency_overrides[current_org_access_index] = lambda: BOOTSTRAP_ORG_INDEX
+    client = TestClient(app)
+
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+            header="youtube_channel_id,channel_name,group_id,view_revenue",
+        ),
+    )
+
+    assert response.status_code == 409
+    assert "already exists for cms_group_id" in response.json()["detail"]
 
 
 def test_channel_audit_details_carry_name_and_field_diff():

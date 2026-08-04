@@ -43,17 +43,20 @@ from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink, SqlAlchemyAuditSink
-from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupConflictError,
+    ChannelGroupRegistryStore,
+)
 from ums_smart_revenue.org.channel_import import (
     ChannelImportFormatError,
     ChannelImportPlan,
     ParsedChannelImport,
     parse_channel_import_csv,
-    plan_channel_import,
 )
 from ums_smart_revenue.org.channel_import_apply import (
     ChannelImportArchivedGroupError,
     apply_channel_import,
+    plan_channel_import_with_stores,
 )
 from ums_smart_revenue.org.channel_issues import (
     build_channel_registry_issues,
@@ -569,24 +572,12 @@ def import_channels(
             detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
         )
 
-    wanted = {row.youtube_channel_id for row in parsed.rows}
-    # include_inactive: an archived registry row must surface as a per-row
-    # error in planning, not be mistaken for absent and planned as a CREATE
-    # that create_channel's duplicate guard turns into a 500 mid-apply.
-    existing = {
-        entry.youtube_channel_id: entry
-        for entry in registry.list_channels_by_ids(wanted, include_inactive=True)
-    }
-    plan = plan_channel_import(
-        rows=parsed.rows,
-        errors=parsed.errors,
-        existing=existing,
+    plan = plan_channel_import_with_stores(
+        parsed,
+        registry=registry,
+        groups=groups,
         content_owner_id=content_owner_id,
         cms_status=cms_status,
-        # A row targeting an archived CMS group fails closed at planning:
-        # attaching members to a retired group would audit a change that
-        # active listings and finance scope selection never surface.
-        archived_group_ids=_archived_group_ids(groups, parsed),
     )
     payload = _import_plan_to_api(
         plan, dry_run=dry_run, content_owner_id=content_owner_id, cms_status=cms_status
@@ -610,12 +601,17 @@ def import_channels(
             reason=reason,
             filename=file.filename,
         )
-    # A revenue_required flip rejected by the locked-month guard — or a group
-    # archived in the plan-to-apply window — aborts the whole request; the
-    # import's single-transaction wiring rolls every prior row back, so 409
-    # (not a partial apply) is the honest outcome.
+    # Expected apply-time domain failures abort the whole request as 409, not
+    # 500: a revenue_required flip rejected by the locked-month guard, a group
+    # archived in the plan-to-apply window, or a uniqueness race lost to a
+    # concurrent writer (channel planned as CREATE that now exists; two
+    # imports both creating the same CMS group). The import's
+    # single-transaction wiring rolls every prior row back, so 409 (a
+    # client-retryable conflict, not a partial apply) is the honest outcome.
     except (
+        ChannelGroupConflictError,
         ChannelImportArchivedGroupError,
+        ChannelRegistryConflictError,
         ChannelRevenueRequirementLockedMonthError,
     ) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -646,6 +642,16 @@ def _validated_import_form(*, content_owner_id: str, cms_status: str, reason: st
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="reason is required",
         )
+    # PostgreSQL cannot store NUL in a text column (youtube_channels.
+    # content_owner_id, audit_logs.reason); rejecting it here keeps the
+    # promised 422 contract instead of an unhandled encoding 500 at apply —
+    # the same rule the CSV parser applies to per-row text fields.
+    for field_name, value in (("content_owner_id", content_owner_id), ("reason", reason)):
+        if "\x00" in value:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{field_name} contains a NUL character",
+            )
     return content_owner_id
 
 
@@ -675,19 +681,6 @@ def _parse_import_upload(file: UploadFile) -> ParsedChannelImport:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
-
-
-def _archived_group_ids(
-    groups: ChannelGroupRegistryStore, parsed: ParsedChannelImport
-) -> frozenset[str]:
-    """Return the roster's CMS group keys whose existing group is archived.
-
-    One bulk store query — never a lookup per group — so a full 5000-row
-    roster's planning does not turn into thousands of sequential round trips
-    inside the request transaction.
-    """
-    group_ids = {row.group_id for row in parsed.rows if row.group_id}
-    return frozenset(groups.list_archived_cms_group_ids(group_ids))
 
 
 def _import_plan_to_api(
