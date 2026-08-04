@@ -169,6 +169,30 @@ def _parse_view_revenue(raw: str | None) -> bool | None:
     raise ValueError(f"unrecognised view_revenue value: {raw.strip()!r}")
 
 
+def _parse_text_fields(
+    row_number: int, raw_row: list[str], index: dict[str, int]
+) -> tuple[str, str | None] | ChannelImportRowError:
+    """Extract (channel_name, group_id), rejecting empty or NUL-bearing values.
+
+    PostgreSQL cannot store NUL in a text column; letting it through would
+    turn the promised row-level 422 into an uncaught 500 at persistence.
+    """
+    channel_name = (_cell(raw_row, index, "channel_name") or "").strip()
+    if not channel_name:
+        return ChannelImportRowError(row_number=row_number, reason="channel_name is empty")
+    if "\x00" in channel_name:
+        return ChannelImportRowError(
+            row_number=row_number, reason="channel_name contains a NUL character"
+        )
+    group_raw = _cell(raw_row, index, "group_id")
+    group_id = group_raw.strip() if group_raw and group_raw.strip() else None
+    if group_id is not None and "\x00" in group_id:
+        return ChannelImportRowError(
+            row_number=row_number, reason="group_id contains a NUL character"
+        )
+    return channel_name, group_id
+
+
 def _parse_row(
     row_number: int, raw_row: list[str], index: dict[str, int], *, header_width: int
 ) -> ChannelImportRow | ChannelImportRowError:
@@ -189,22 +213,10 @@ def _parse_row(
             row_number=row_number,
             reason=f"invalid youtube_channel_id: {channel_id!r}",
         )
-    channel_name = (_cell(raw_row, index, "channel_name") or "").strip()
-    if not channel_name:
-        return ChannelImportRowError(row_number=row_number, reason="channel_name is empty")
-    # PostgreSQL cannot store NUL in a text column; letting it through would
-    # turn the promised row-level 422 into an uncaught 500 at persistence.
-    if "\x00" in channel_name:
-        return ChannelImportRowError(
-            row_number=row_number, reason="channel_name contains a NUL character"
-        )
-
-    group_raw = _cell(raw_row, index, "group_id")
-    group_id = group_raw.strip() if group_raw and group_raw.strip() else None
-    if group_id is not None and "\x00" in group_id:
-        return ChannelImportRowError(
-            row_number=row_number, reason="group_id contains a NUL character"
-        )
+    text_fields = _parse_text_fields(row_number, raw_row, index)
+    if isinstance(text_fields, ChannelImportRowError):
+        return text_fields
+    channel_name, group_id = text_fields
 
     view_revenue_raw = _cell(raw_row, index, "view_revenue")
     if "view_revenue" in index and (view_revenue_raw is None or not view_revenue_raw.strip()):

@@ -129,7 +129,9 @@ class SqlAlchemyChannelGroupRegistry:
                 ChannelGroupORM.active.is_(False),
             )
         ).all()
-        return set(rows)
+        # The IN clause already excludes NULL keys; the comprehension narrows
+        # the column's Optional type for the checker without a cast.
+        return {key for key in rows if key is not None}
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.

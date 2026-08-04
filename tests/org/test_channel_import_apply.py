@@ -79,7 +79,9 @@ def test_audit_diff_reflects_write_boundary_not_the_stale_plan() -> None:
 
     _apply(_plan(stale_entry), registry, ChannelGroupRegistry(), sink)
 
-    updated = next(r for r in sink.records if r.event_type == "CHANNEL_UPDATED")
+    updated_events = [r for r in sink.records if r.event_type == "CHANNEL_UPDATED"]
+    assert len(updated_events) == 1
+    updated = updated_events[0]
     assert updated.details["changes"] == {
         "channel_name": {"from": "Concurrently Renamed", "to": "New Name"}
     }
