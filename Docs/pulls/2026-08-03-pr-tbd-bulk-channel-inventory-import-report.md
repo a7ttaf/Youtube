@@ -170,6 +170,17 @@ error. Fixed in `424d4daa`: membership is reconciled for `CREATE`, `UPDATE`, and
   the dry-run diff surfaces it before it happens.
 - The in-memory `ChannelRegistry` has no transaction, so all-or-nothing holds
   only on the SQL path. Production wires the SQL registry.
+- **The apply writes row by row, not in batches** (open review item
+  r3714644444, left for the owner). Per row it does a lookup, a locked
+  re-read, a flush, and an audit insert; the redundant per-row advisory-lock
+  acquisition and the per-row group lookups were both collapsed to one
+  statement each, but a 5,000-row apply still costs thousands of sequential
+  round trips inside one transaction. Batching the UPDATEs and audit INSERTs
+  would have to preserve the write-boundary locked re-read (truthful audit
+  diffs), the per-append platform-lane elevation (audit atomicity), and the
+  per-row typed-error 409 boundaries — a follow-up PR with its own load test,
+  not a late change here. The real target roster is ~169 channels per content
+  owner, well under the 5,000-row cap where this would bite.
 
 ## Rollback
 
