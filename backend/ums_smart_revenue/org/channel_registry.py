@@ -250,6 +250,26 @@ class ChannelRegistry:
         self._channels[youtube_channel_id] = updated
         return updated
 
+    # ========================================================================
+    # Purpose: In-memory twin of the SQL registry's bulk-import inventory
+    #   write — replaces a channel's name, CMS status, content owner, and
+    #   revenue_required from an authoritative roster row.
+    # Database/ORM: None (in-memory dict store); the SQL implementation in
+    #   sql_channel_registry.py owns the ORM write, row lock, and month-close
+    #   guard for the same protocol method.
+    # Standards: Returns (previous, updated) so audit trails record the
+    #   values actually replaced; revenue_source_status re-derives ONLY on a
+    #   revenue_required flip via derive_revenue_source_status, never on an
+    #   unrelated refresh. No locked-month guard here — the in-memory store
+    #   backs tests and bootstrap flows with no finance close rows.
+    # Blast Radius: Channel inventory + revenue-source classification in
+    #   in-memory-backed tests and bootstrap. No finance totals, no audit.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     apply_channel_import consumes the (previous, updated) contract.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     production implementation of the same protocol method.
+    # ========================================================================
     def update_inventory(
         self,
         *,
