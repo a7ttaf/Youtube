@@ -387,27 +387,33 @@ def plan_channel_import(
                 )
             )
             continue
-        if row.youtube_channel_id in seen_channels:
-            # A repeated channel id carries an ADDITIONAL group membership
-            # (many-to-many; one association per row — the parser already
-            # rejected copies that disagree on inventory fields). The first
-            # copy owns the inventory outcome; membership rows plan as
-            # UNCHANGED so the apply attaches their group without a second
-            # inventory decision.
-            entries.append(
-                ChannelImportPlanEntry(
-                    row_number=row.row_number,
-                    youtube_channel_id=row.youtube_channel_id,
-                    outcome=ChannelImportOutcome.UNCHANGED,
-                    channel_name=row.channel_name,
-                    group_id=row.group_id,
-                    revenue_required=revenue_required,
-                    view_revenue_raw=row.view_revenue_raw,
-                )
-            )
-            continue
-        seen_channels.add(row.youtube_channel_id)
         current = existing.get(row.youtube_channel_id)
+        # The archived check runs BEFORE the repeated-membership shortcut: a
+        # repeated archived channel must report EVERY copy as an ERROR with
+        # the actionable reactivation reason, not mark the later copies as
+        # writable membership rows the apply would never reach (review #159
+        # r3714401817).
+        if current is None or current.active:
+            if row.youtube_channel_id in seen_channels:
+                # A repeated channel id carries an ADDITIONAL group membership
+                # (many-to-many; one association per row — the parser already
+                # rejected copies that disagree on inventory fields). The first
+                # copy owns the inventory outcome; membership rows plan as
+                # UNCHANGED so the apply attaches their group without a second
+                # inventory decision.
+                entries.append(
+                    ChannelImportPlanEntry(
+                        row_number=row.row_number,
+                        youtube_channel_id=row.youtube_channel_id,
+                        outcome=ChannelImportOutcome.UNCHANGED,
+                        channel_name=row.channel_name,
+                        group_id=row.group_id,
+                        revenue_required=revenue_required,
+                        view_revenue_raw=row.view_revenue_raw,
+                    )
+                )
+                continue
+            seen_channels.add(row.youtube_channel_id)
         if current is not None and not current.active:
             # An archived (active=false) registry row must fail closed: planning
             # it as CREATE would 500 on the create_channel duplicate guard, and

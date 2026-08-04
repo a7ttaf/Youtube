@@ -181,3 +181,27 @@ def test_duplicate_rows_plan_one_inventory_outcome_plus_membership_rows() -> Non
     assert [entry.group_id for entry in plan.entries] == ["cms-tv", "cms-news"]
     assert plan.counts["CREATE"] == 1
     assert plan.counts["UNCHANGED"] == 1
+
+
+def test_every_repeated_row_for_an_archived_channel_is_an_error() -> None:
+    """A repeated ARCHIVED channel fails every copy, not just the first.
+
+    The archived check must precede the repeated-membership shortcut, or the
+    later copies would be reported as writable UNCHANGED membership rows the
+    apply never reaches (review #159 r3714401817).
+    """
+    plan = _plan(
+        rows=(
+            _row(row_number=1, group_id="cms-tv"),
+            _row(row_number=2, group_id="cms-news"),
+        ),
+        existing={CHANNEL_ID: _existing(active=False)},
+    )
+
+    assert [entry.outcome for entry in plan.entries] == [
+        ChannelImportOutcome.ERROR,
+        ChannelImportOutcome.ERROR,
+    ]
+    assert plan.counts["ERROR"] == 2
+    assert all("archived" in (entry.reason or "") for entry in plan.entries)
+    assert all("reactivate" in (entry.reason or "") for entry in plan.entries)
