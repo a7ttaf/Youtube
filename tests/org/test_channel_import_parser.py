@@ -135,6 +135,22 @@ def test_max_rows_aborts_the_parse_early() -> None:
     assert len(parsed.rows) == 1
 
 
+def test_rejects_nul_in_channel_name() -> None:
+    """PostgreSQL cannot store NUL in text; the row must fail at parse time."""
+    csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},Alpha\x00News\n"
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.rows == ()
+    assert "NUL" in parsed.errors[0].reason
+
+
+def test_rejects_nul_in_group_id() -> None:
+    """A NUL-bearing group key fails the row instead of 500ing at persistence."""
+    csv_text = f"youtube_channel_id,channel_name,group_id\n{CHANNEL_ID},Alpha News,cms\x00tv\n"
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.rows == ()
+    assert "NUL" in parsed.errors[0].reason
+
+
 def test_rejects_malformed_quoted_csv() -> None:
     """An unterminated quote rejects the file instead of folding rows into one name."""
     second = "UC3Dci3BzZXDo4jw4dU8KqWg"

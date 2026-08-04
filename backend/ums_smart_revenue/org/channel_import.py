@@ -192,9 +192,19 @@ def _parse_row(
     channel_name = (_cell(raw_row, index, "channel_name") or "").strip()
     if not channel_name:
         return ChannelImportRowError(row_number=row_number, reason="channel_name is empty")
+    # PostgreSQL cannot store NUL in a text column; letting it through would
+    # turn the promised row-level 422 into an uncaught 500 at persistence.
+    if "\x00" in channel_name:
+        return ChannelImportRowError(
+            row_number=row_number, reason="channel_name contains a NUL character"
+        )
 
     group_raw = _cell(raw_row, index, "group_id")
     group_id = group_raw.strip() if group_raw and group_raw.strip() else None
+    if group_id is not None and "\x00" in group_id:
+        return ChannelImportRowError(
+            row_number=row_number, reason="group_id contains a NUL character"
+        )
 
     view_revenue_raw = _cell(raw_row, index, "view_revenue")
     if "view_revenue" in index and (view_revenue_raw is None or not view_revenue_raw.strip()):
