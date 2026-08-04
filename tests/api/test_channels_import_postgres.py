@@ -577,3 +577,55 @@ def test_duplicate_cms_group_key_is_a_typed_conflict_on_postgres(
             )
 
         session.rollback()
+
+
+def test_membership_writers_serialize_on_the_group_row_on_postgres(
+    owner_engine: sa.Engine,
+) -> None:
+    """remove_member blocks on the parent-group row lock the import holds.
+
+    The import's skip-the-add decision reads membership under
+    ``get_group_by_cms_id(for_update=True)``; every membership writer must
+    take the SAME parent-row lock or a concurrent ``remove_member`` could
+    commit mid-import and silently void the roster's requested membership.
+    Proven by lock wait: session 2's remove times out while session 1 holds
+    the row (review #159 r3713841264).
+    """
+    from sqlalchemy.exc import OperationalError
+
+    with Session(owner_engine) as seed_session:
+        seed_store = SqlAlchemyChannelGroupRegistry(seed_session)
+        seed_session.execute(
+            sa.text(
+                "INSERT INTO youtube_channels "
+                "(id, tenant_id, youtube_channel_id, channel_name, cms_status, "
+                " revenue_required, revenue_source_status, active) "
+                "VALUES (gen_random_uuid(), :tenant, :cid, 'Lock Test', 'INSIDE_CMS', "
+                " FALSE, 'PERFORMANCE_ONLY', TRUE)"
+            ),
+            {"tenant": "00000000-0000-0000-0000-000000000001", "cid": CHANNEL_ID},
+        )
+        seed_store.create_group(
+            name="Lock Group",
+            group_type="SECTOR",
+            channel_ids=[CHANNEL_ID],
+            cms_group_id=GROUP_ID,
+        )
+        seed_session.commit()
+
+    holder = Session(owner_engine)
+    waiter = Session(owner_engine)
+    try:
+        holder_store = SqlAlchemyChannelGroupRegistry(holder)
+        locked = holder_store.get_group_by_cms_id(GROUP_ID, for_update=True)
+        assert locked is not None and CHANNEL_ID in locked.channel_ids
+
+        waiter.execute(sa.text("SET LOCAL lock_timeout = '500ms'"))
+        waiter_store = SqlAlchemyChannelGroupRegistry(waiter)
+        with pytest.raises(OperationalError):
+            waiter_store.remove_member(group_id=locked.id, channel_id=CHANNEL_ID)
+    finally:
+        waiter.rollback()
+        waiter.close()
+        holder.rollback()
+        holder.close()

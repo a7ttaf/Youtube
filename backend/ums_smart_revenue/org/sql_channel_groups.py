@@ -234,7 +234,13 @@ class SqlAlchemyChannelGroupRegistry:
         return self._to_entry(row)
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
-        row = self._require_group_row(group_id)
+        # The parent group row is the membership serialization point: every
+        # membership writer locks it, so a reader that checked membership
+        # under the same lock (the import's get_group_by_cms_id
+        # for_update=True) cannot have its skip-decision invalidated by a
+        # concurrent add/remove committing mid-request (review #159
+        # r3713841264). SQLite ignores FOR UPDATE (single-writer anyway).
+        row = self._require_group_row(group_id, for_update=True)
         channel_rows = self._channel_rows_by_external_ids(channel_ids)
         existing_ids = set(
             self._session.scalars(
@@ -289,7 +295,11 @@ class SqlAlchemyChannelGroupRegistry:
         return self._to_entry(row)
 
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
-        row = self._require_group_row(group_id)
+        # Same membership serialization point as add_members: without the
+        # parent-row lock a concurrent import could read the channel as a
+        # member (under ITS lock), skip the add, and then let this delete
+        # commit — a successful import whose requested membership is absent.
+        row = self._require_group_row(group_id, for_update=True)
         channel = self._channel_rows_by_external_ids([channel_id])[0]
         self._session.execute(
             delete(ChannelGroupMemberORM).where(
@@ -317,20 +327,21 @@ class SqlAlchemyChannelGroupRegistry:
                 )
             )
 
-    def _get_group_row(self, group_id: str) -> ChannelGroupORM | None:
+    def _get_group_row(self, group_id: str, *, for_update: bool = False) -> ChannelGroupORM | None:
         try:
             group_uuid = UUID(group_id)
         except (TypeError, ValueError) as _:
             return None
-        return self._session.scalars(
-            select(ChannelGroupORM).where(
-                ChannelGroupORM.tenant_id == self._tenant_id,
-                ChannelGroupORM.id == group_uuid,
-            )
-        ).one_or_none()
+        statement = select(ChannelGroupORM).where(
+            ChannelGroupORM.tenant_id == self._tenant_id,
+            ChannelGroupORM.id == group_uuid,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return self._session.scalars(statement).one_or_none()
 
-    def _require_group_row(self, group_id: str) -> ChannelGroupORM:
-        row = self._get_group_row(group_id)
+    def _require_group_row(self, group_id: str, *, for_update: bool = False) -> ChannelGroupORM:
+        row = self._get_group_row(group_id, for_update=for_update)
         if row is None:
             raise KeyError(f"Group not found: {group_id}")
         return row
