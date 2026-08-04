@@ -54,6 +54,28 @@ class ChannelImportArchivedGroupError(ChannelImportError):
     """
 
 
+# ============================================================================
+# Purpose: Domain-side planning entry point for the bulk import — gathers the
+#   store state a roster diffs against and delegates to the pure planner,
+#   deciding per row whether channel and finance-scope group mutations may
+#   proceed at apply time.
+# Database/ORM: YouTubeChannelORM via ChannelRegistryStore
+#   (list_channels_by_ids, include_inactive=True) and ChannelGroupORM via
+#   ChannelGroupRegistryStore (list_archived_cms_group_ids). Read-only — one
+#   bulk query per store, never per-row lookups.
+# Standards: Layer ownership — data access lives HERE, not in the HTTP route,
+#   which keeps only authz/form/upload/rendering. Archived registry rows and
+#   archived CMS groups fail their rows closed at planning (per-row ERROR ->
+#   422 before any write); the apply re-checks groups under a row lock for
+#   the plan-to-apply window.
+# Blast Radius: Import planning outcomes (CREATE/UPDATE/UNCHANGED/ERROR) and
+#   therefore every apply-time write decision. No writes of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> import_channels calls
+#     this and renders the plan.
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     plan_channel_import pure diffing core.
+# ============================================================================
 def plan_channel_import_with_stores(
     parsed: ParsedChannelImport,
     *,
@@ -127,13 +149,18 @@ def apply_channel_import(
 ) -> None:
     """Execute every CREATE/UPDATE row, reconcile groups, and audit everything.
 
-    CREATE and UPDATE rows perform a registry write and an audit event.
-    UNCHANGED rows perform neither, but still reach group-membership
-    reconciliation below: the plan's outcome is computed only from inventory
-    fields (channel_name, cms_status, content_owner_id, revenue_required), so
-    treating UNCHANGED as a full no-op would silently drop a Group_ID column
-    added on re-import. ERROR rows are skipped entirely. One CHANNEL_IMPORTED
-    summary event closes the trail.
+    CREATE rows perform a registry create and an audit event. UPDATE and
+    UNCHANGED rows BOTH write through the registry at the write boundary: the
+    plan's outcome came from a possibly-stale snapshot, so an UNCHANGED row
+    skipped entirely would silently keep a concurrent writer's value instead
+    of the authoritative roster's (the file wins). The registry's locked
+    re-read returns what was actually replaced; an UNCHANGED row audits a
+    CHANNEL_UPDATED event ONLY when that real diff is non-empty, so a truly
+    unchanged re-import stays audit-quiet. All three outcomes still reach
+    group-membership reconciliation below — outcomes are computed only from
+    inventory fields, so treating UNCHANGED as a no-op would also drop a
+    Group_ID column added on re-import. ERROR rows are skipped entirely. One
+    CHANNEL_IMPORTED summary event closes the trail.
     """
     for entry in plan.entries:
         channel_id = entry.youtube_channel_id
@@ -151,11 +178,13 @@ def apply_channel_import(
                 content_owner_id=content_owner_id,
             )
             event_type = AuditEventType.CHANNEL_CREATED
-        elif entry.outcome is ChannelImportOutcome.UPDATE:
+        elif entry.outcome in (ChannelImportOutcome.UPDATE, ChannelImportOutcome.UNCHANGED):
             # The registry re-reads the row under a lock at the write boundary
             # and returns what it actually replaced; the durable diff below is
             # built from THAT, not the plan's possibly-stale snapshot, so a
-            # concurrent committed change cannot be hidden from the trail.
+            # concurrent committed change cannot be hidden from the trail —
+            # and an UNCHANGED classification cannot preserve a concurrent
+            # writer's value over the roster's (review #159 r3713841231).
             previous, updated = registry.update_inventory(
                 youtube_channel_id=channel_id,
                 channel_name=entry.channel_name,
@@ -164,7 +193,8 @@ def apply_channel_import(
                 revenue_required=bool(entry.revenue_required),
             )
             applied_changes = _entry_changes(previous, updated)
-            event_type = AuditEventType.CHANNEL_UPDATED
+            if entry.outcome is ChannelImportOutcome.UPDATE or applied_changes:
+                event_type = AuditEventType.CHANNEL_UPDATED
         if event_type is not None:
             record_audit_event(
                 sink=audit_sink,

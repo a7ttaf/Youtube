@@ -87,6 +87,76 @@ def test_audit_diff_reflects_write_boundary_not_the_stale_plan() -> None:
     }
 
 
+def test_unchanged_row_writes_through_and_audits_the_healed_drift() -> None:
+    """An UNCHANGED row must not preserve a concurrent writer's value.
+
+    Planning classified the row as UNCHANGED from a stale snapshot; a
+    concurrent update landed before apply. The file wins: the write-boundary
+    write restores the roster value and audits the real diff (review #159
+    r3713841231).
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Drifted By Concurrent Patch",  # changed AFTER planning
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    sink = InMemoryAuditSink()
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.UNCHANGED,
+        channel_name="Roster Name",
+        group_id=None,
+        revenue_required=True,
+    )
+
+    _apply(_plan(entry), registry, ChannelGroupRegistry(), sink)
+
+    stored = registry.get_channel(CHANNEL_ID)
+    assert stored is not None and stored.channel_name == "Roster Name"
+    updated_events = [r for r in sink.records if r.event_type == "CHANNEL_UPDATED"]
+    assert len(updated_events) == 1
+    assert updated_events[0].details["changes"] == {
+        "channel_name": {"from": "Drifted By Concurrent Patch", "to": "Roster Name"}
+    }
+
+
+def test_truly_unchanged_row_stays_audit_quiet() -> None:
+    """A re-import whose values already match writes no CHANNEL_UPDATED event."""
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Roster Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    sink = InMemoryAuditSink()
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.UNCHANGED,
+        channel_name="Roster Name",
+        group_id=None,
+        revenue_required=True,
+    )
+
+    _apply(_plan(entry), registry, ChannelGroupRegistry(), sink)
+
+    assert [r.event_type for r in sink.records] == ["CHANNEL_IMPORTED"]
+
+
 class _ArchivedAtApplyGroups(ChannelGroupRegistry):
     """Simulate a group archived between planning and the apply lookup."""
 
