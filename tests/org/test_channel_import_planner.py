@@ -118,6 +118,23 @@ def test_view_revenue_raw_is_carried_onto_the_entry() -> None:
     assert plan.entries[0].view_revenue_raw == "Yes"
 
 
+def test_archived_group_is_a_row_error() -> None:
+    """A row targeting an archived CMS group fails closed at planning."""
+    plan = plan_channel_import(
+        rows=(_row(group_id="cms-retired"),),
+        errors=(),
+        existing={},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        archived_group_ids=frozenset({"cms-retired"}),
+    )
+    entry = plan.entries[0]
+    assert entry.outcome is ChannelImportOutcome.ERROR
+    assert entry.reason is not None and "archived" in entry.reason
+    assert "cms-retired" in entry.reason
+    assert plan.has_errors is True
+
+
 def test_row_errors_surface_and_block() -> None:
     plan = _plan(errors=(ChannelImportRowError(row_number=2, reason="bad id"),))
     assert plan.has_errors is True

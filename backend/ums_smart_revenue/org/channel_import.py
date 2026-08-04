@@ -36,8 +36,17 @@ _TRUE_TOKENS = frozenset({"yes", "true", "1"})
 _FALSE_TOKENS = frozenset({"no", "false", "0"})
 
 
-class ChannelImportFormatError(ValueError):
-    """The file as a whole is unusable (bad or missing header row)."""
+class ChannelImportError(ValueError):
+    """Base for typed bulk-channel-import domain errors.
+
+    Mirrors ChannelRegistryError in channel_registry.py: domain layers raise
+    named subclasses of this base (never bare ValueError) so route boundaries
+    can translate them precisely.
+    """
+
+
+class ChannelImportFormatError(ChannelImportError):
+    """The file as a whole is unusable (bad header, malformed CSV, or too large)."""
 
 
 @dataclass(frozen=True)
@@ -74,8 +83,15 @@ class ParsedChannelImport:
     errors: tuple[ChannelImportRowError, ...] = ()
 
 
-def parse_channel_import_csv(text: str) -> ParsedChannelImport:
-    """Parse operator CSV text into validated rows plus per-row errors."""
+def parse_channel_import_csv(text: str, *, max_rows: int | None = None) -> ParsedChannelImport:
+    """Parse operator CSV text into validated rows plus per-row errors.
+
+    ``max_rows`` caps the number of NON-BLANK data rows and aborts the parse
+    the moment the cap is exceeded, so an oversized file fails fast instead of
+    paying full per-row validation cost before a post-parse count rejects it.
+    Blank lines are still skipped (not counted); scanning them is a cheap
+    per-line check already bounded by the route's byte cap.
+    """
     # strict=True makes csv.reader raise csv.Error on malformed quoting (e.g.
     # an unterminated quoted channel_name) instead of silently folding every
     # following physical row into one field. A damaged roster must reject the
@@ -89,14 +105,19 @@ def parse_channel_import_csv(text: str) -> ParsedChannelImport:
         raise ChannelImportFormatError(f"malformed CSV: {exc}") from exc
 
     index = _header_index(raw_header)
+    header_width = len(raw_header)
     rows: list[ChannelImportRow] = []
     errors: list[ChannelImportRowError] = []
+    data_rows = 0
 
     try:
         for row_number, raw_row in enumerate(reader, start=1):
             if not any(cell.strip() for cell in raw_row):
                 continue
-            parsed = _parse_row(row_number, raw_row, index)
+            data_rows += 1
+            if max_rows is not None and data_rows > max_rows:
+                raise ChannelImportFormatError(f"CSV exceeds {max_rows} rows")
+            parsed = _parse_row(row_number, raw_row, index, header_width=header_width)
             if isinstance(parsed, ChannelImportRowError):
                 errors.append(parsed)
             else:
@@ -116,6 +137,12 @@ def _header_index(raw_header: list[str]) -> dict[str, int]:
     missing = sorted(REQUIRED_COLUMNS - set(header))
     if missing:
         raise ChannelImportFormatError(f"missing required column(s): {', '.join(missing)}")
+    # A duplicated header is an ambiguous schema: the position map below would
+    # silently keep the LAST copy's column, importing whichever value happens
+    # to sit there. Reject the whole file instead of guessing.
+    duplicates = sorted({name for name in header if header.count(name) > 1})
+    if duplicates:
+        raise ChannelImportFormatError(f"duplicate column(s): {', '.join(duplicates)}")
     unknown = sorted(set(header) - KNOWN_COLUMNS)
     if unknown:
         raise ChannelImportFormatError(f"unknown column(s): {', '.join(unknown)}")
@@ -143,9 +170,19 @@ def _parse_view_revenue(raw: str | None) -> bool | None:
 
 
 def _parse_row(
-    row_number: int, raw_row: list[str], index: dict[str, int]
+    row_number: int, raw_row: list[str], index: dict[str, int], *, header_width: int
 ) -> ChannelImportRow | ChannelImportRowError:
     """Validate one data row into a typed row or a typed row error."""
+    # A row wider than the header usually means an unescaped comma inside a
+    # value; reading only the indexed cells would silently persist the
+    # truncated prefix (e.g. "Alpha,News" imported as "Alpha"). Fail the row.
+    if len(raw_row) > header_width:
+        return ChannelImportRowError(
+            row_number=row_number,
+            reason=(
+                f"row has {len(raw_row)} cell(s) but the header defines {header_width} column(s)"
+            ),
+        )
     channel_id = (_cell(raw_row, index, "youtube_channel_id") or "").strip()
     if not CHANNEL_ID_PATTERN.match(channel_id):
         return ChannelImportRowError(
@@ -245,8 +282,15 @@ def plan_channel_import(
     existing: Mapping[str, ChannelRegistryEntry],
     content_owner_id: str,
     cms_status: str,
+    archived_group_ids: frozenset[str] = frozenset(),
 ) -> ChannelImportPlan:
-    """Diff parsed rows against the registry into a per-row execution plan."""
+    """Diff parsed rows against the registry into a per-row execution plan.
+
+    ``archived_group_ids`` carries the CMS group keys whose existing group is
+    archived (active=false); a row targeting one fails closed. Attaching a
+    channel to a retired group would audit a membership change that active
+    group listings and finance scope selection never surface.
+    """
     entries: list[ChannelImportPlanEntry] = [
         ChannelImportPlanEntry(
             row_number=error.row_number,
@@ -259,6 +303,19 @@ def plan_channel_import(
 
     for row in rows:
         revenue_required = True if row.view_revenue is None else row.view_revenue
+        if row.group_id and row.group_id in archived_group_ids:
+            entries.append(
+                ChannelImportPlanEntry(
+                    row_number=row.row_number,
+                    youtube_channel_id=row.youtube_channel_id,
+                    outcome=ChannelImportOutcome.ERROR,
+                    reason=(
+                        "channel group is archived (active=false): "
+                        f"{row.group_id}; reactivate it before importing"
+                    ),
+                )
+            )
+            continue
         current = existing.get(row.youtube_channel_id)
         if current is not None and not current.active:
             # An archived (active=false) registry row must fail closed: planning

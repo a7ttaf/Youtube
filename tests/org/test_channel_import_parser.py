@@ -107,6 +107,34 @@ def test_accepts_all_view_revenue_token_forms() -> None:
         assert parsed.rows[0].view_revenue is expected, token
 
 
+def test_rejects_row_wider_than_header() -> None:
+    """An unescaped comma must fail the row, not silently truncate the name."""
+    csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},Alpha,News\n"
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.rows == ()
+    assert "3 cell(s)" in parsed.errors[0].reason
+    assert "2 column(s)" in parsed.errors[0].reason
+
+
+def test_rejects_duplicate_header_columns() -> None:
+    """A duplicated header is an ambiguous schema and fails the whole file."""
+    csv_text = f"youtube_channel_id,channel_name,channel_name\n{CHANNEL_ID},First,Second\n"
+    with pytest.raises(ChannelImportFormatError, match="duplicate column"):
+        parse_channel_import_csv(csv_text)
+
+
+def test_max_rows_aborts_the_parse_early() -> None:
+    """The row cap fires during parsing, counting only non-blank data rows."""
+    rows = "\n".join(f"UC{index:022d},Channel {index}" for index in range(3))
+    csv_text = f"youtube_channel_id,channel_name\n{rows}\n"
+    with pytest.raises(ChannelImportFormatError, match="exceeds 2 rows"):
+        parse_channel_import_csv(csv_text, max_rows=2)
+    # Blank lines are skipped, not counted against the cap.
+    spaced = f"youtube_channel_id,channel_name\n\n{CHANNEL_ID},CBC\n\n"
+    parsed = parse_channel_import_csv(spaced, max_rows=1)
+    assert len(parsed.rows) == 1
+
+
 def test_rejects_malformed_quoted_csv() -> None:
     """An unterminated quote rejects the file instead of folding rows into one name."""
     second = "UC3Dci3BzZXDo4jw4dU8KqWg"
