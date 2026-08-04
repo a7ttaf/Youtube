@@ -489,8 +489,15 @@ def test_update_inventory_returns_the_write_boundary_previous_entry():
     assert updated.content_owner_id == "owner-cms"
 
 
-def test_update_inventory_flip_acquires_revenue_requirement_guard(monkeypatch):
-    """The OFF->ON flip serializes with lock-time readiness via the shared key."""
+def test_update_inventory_required_write_takes_guard_before_the_row_lock(monkeypatch):
+    """Every requested-True write acquires the shared key BEFORE the row lock.
+
+    The lock-time readiness recheck holds the guard and then FOR-UPDATEs
+    required channel rows; taking the row first and the guard second is the
+    opposite order and deadlocks against a concurrent close (review #159
+    r3713841225). Whether the write is a flip is only knowable after the
+    locked re-read, so the already-required write acquires the guard too.
+    """
     import ums_smart_revenue.org.sql_channel_registry as registry_module
     from ums_smart_revenue.finance.month_close_locks import (
         REVENUE_REQUIREMENT_GUARD_MONTH,
@@ -499,12 +506,24 @@ def test_update_inventory_flip_acquires_revenue_requirement_guard(monkeypatch):
     session = build_finance_session()
     seed_org(session)
     _seed_not_required_channel(session)
+    call_order: list[str] = []
     guard_calls: list[str] = []
     monkeypatch.setattr(
         registry_module,
         "acquire_finance_month_advisory_lock",
-        lambda _session, month, *, tenant_id=None: guard_calls.append(month),
+        lambda _session, month, *, tenant_id=None: (
+            call_order.append("guard"),
+            guard_calls.append(month),
+        ),
     )
+    original_refresh = session.refresh
+
+    def recording_refresh(instance, *args, **kwargs):
+        if kwargs.get("with_for_update"):
+            call_order.append("row-lock")
+        return original_refresh(instance, *args, **kwargs)
+
+    monkeypatch.setattr(session, "refresh", recording_refresh)
     registry = SqlAlchemyChannelRegistry(session)
 
     registry.update_inventory(
@@ -512,17 +531,25 @@ def test_update_inventory_flip_acquires_revenue_requirement_guard(monkeypatch):
         channel_name="Perf Only",
         cms_status="INSIDE_CMS",
         content_owner_id=None,
-        revenue_required=True,
+        revenue_required=True,  # the actual flip
     )
     registry.update_inventory(
         youtube_channel_id="channel-tv-a",
         channel_name="TV A",
         cms_status="INSIDE_CMS",
         content_owner_id=None,
-        revenue_required=True,  # already required: no flip, no guard
+        revenue_required=True,  # already required: still guarded, pre-lock
+    )
+    registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=False,  # not requesting required: no guard
     )
 
-    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH]
+    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH] * 2
+    assert call_order == ["guard", "row-lock", "guard", "row-lock", "row-lock"]
 
 
 def test_create_channel_revenue_required_acquires_revenue_requirement_guard(monkeypatch):
@@ -642,6 +669,27 @@ def test_create_channel_revenue_required_stamps_created_at_after_the_guard(monke
         )
     ).one()
     assert persisted.created_at.replace(tzinfo=None) == sentinel.replace(tzinfo=None)
+
+    # A performance-only create stamps at the insertion point too (no guard):
+    # leaving the server default would record the transaction START time,
+    # and a later OFF->ON flip would then demand a fact for a month that
+    # locked mid-transaction, before the channel really existed (review
+    # #159 r3713841258).
+    registry.create_channel(
+        youtube_channel_id="channel-created-perf-stamp",
+        channel_name="Perf Stamp",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=False,
+    )
+    assert call_order == ["guard", "stamp", "stamp"]
+    perf_row = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-created-perf-stamp",
+        )
+    ).one()
+    assert perf_row.created_at.replace(tzinfo=None) == sentinel.replace(tzinfo=None)
 
 
 def test_update_inventory_allows_unchanged_flag_despite_locked_month():
