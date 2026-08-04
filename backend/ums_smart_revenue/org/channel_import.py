@@ -42,13 +42,20 @@ class ChannelImportFormatError(ValueError):
 
 @dataclass(frozen=True)
 class ChannelImportRow:
-    """One validated CSV data row."""
+    """One validated CSV data row.
+
+    ``view_revenue_raw`` preserves the operator's original token ("Yes",
+    "TRUE", "0", ...) so the audit trail can show the source value the
+    finance-sensitive ``revenue_required`` flag was derived from; ``None``
+    means the column was absent and the default applied.
+    """
 
     row_number: int
     youtube_channel_id: str
     channel_name: str
     group_id: str | None
     view_revenue: bool | None
+    view_revenue_raw: str | None = None
 
 
 @dataclass(frozen=True)
@@ -69,24 +76,33 @@ class ParsedChannelImport:
 
 def parse_channel_import_csv(text: str) -> ParsedChannelImport:
     """Parse operator CSV text into validated rows plus per-row errors."""
-    reader = csv.reader(io.StringIO(text.lstrip("﻿")))
+    # strict=True makes csv.reader raise csv.Error on malformed quoting (e.g.
+    # an unterminated quoted channel_name) instead of silently folding every
+    # following physical row into one field. A damaged roster must reject the
+    # whole file, never import one malformed channel and drop the rest.
+    reader = csv.reader(io.StringIO(text.lstrip("﻿")), strict=True)
     try:
         raw_header = next(reader)
     except StopIteration as exc:
         raise ChannelImportFormatError("CSV is empty") from exc
+    except csv.Error as exc:
+        raise ChannelImportFormatError(f"malformed CSV: {exc}") from exc
 
     index = _header_index(raw_header)
     rows: list[ChannelImportRow] = []
     errors: list[ChannelImportRowError] = []
 
-    for row_number, raw_row in enumerate(reader, start=1):
-        if not any(cell.strip() for cell in raw_row):
-            continue
-        parsed = _parse_row(row_number, raw_row, index)
-        if isinstance(parsed, ChannelImportRowError):
-            errors.append(parsed)
-        else:
-            rows.append(parsed)
+    try:
+        for row_number, raw_row in enumerate(reader, start=1):
+            if not any(cell.strip() for cell in raw_row):
+                continue
+            parsed = _parse_row(row_number, raw_row, index)
+            if isinstance(parsed, ChannelImportRowError):
+                errors.append(parsed)
+            else:
+                rows.append(parsed)
+    except csv.Error as exc:
+        raise ChannelImportFormatError(f"malformed CSV: {exc}") from exc
 
     kept, duplicate_errors = _flag_duplicates(rows)
     errors.extend(duplicate_errors)
@@ -159,6 +175,7 @@ def _parse_row(
         channel_name=channel_name,
         group_id=group_id,
         view_revenue=view_revenue,
+        view_revenue_raw=view_revenue_raw.strip() if view_revenue_raw is not None else None,
     )
 
 
@@ -203,6 +220,7 @@ class ChannelImportPlanEntry:
     channel_name: str | None = None
     group_id: str | None = None
     revenue_required: bool | None = None
+    view_revenue_raw: str | None = None
     changes: Mapping[str, tuple[object, object]] = MappingProxyType({})
     reason: str | None = None
 
@@ -242,6 +260,24 @@ def plan_channel_import(
     for row in rows:
         revenue_required = True if row.view_revenue is None else row.view_revenue
         current = existing.get(row.youtube_channel_id)
+        if current is not None and not current.active:
+            # An archived (active=false) registry row must fail closed: planning
+            # it as CREATE would 500 on the create_channel duplicate guard, and
+            # silently reactivating it would resurrect a channel an operator
+            # deliberately retired. Reactivation is an explicit registry action,
+            # not an import side effect.
+            entries.append(
+                ChannelImportPlanEntry(
+                    row_number=row.row_number,
+                    youtube_channel_id=row.youtube_channel_id,
+                    outcome=ChannelImportOutcome.ERROR,
+                    reason=(
+                        "channel exists but is archived (active=false): "
+                        f"{row.youtube_channel_id}; reactivate it before importing"
+                    ),
+                )
+            )
+            continue
         if current is None:
             outcome = ChannelImportOutcome.CREATE
             changes: dict[str, tuple[object, object]] = {}
@@ -262,6 +298,7 @@ def plan_channel_import(
                 channel_name=row.channel_name,
                 group_id=row.group_id,
                 revenue_required=revenue_required,
+                view_revenue_raw=row.view_revenue_raw,
                 changes=MappingProxyType(dict(changes)),
             )
         )

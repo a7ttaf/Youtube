@@ -101,6 +101,23 @@ def test_group_id_is_carried_onto_the_entry() -> None:
     assert plan.entries[0].group_id == "cms-tv"
 
 
+def test_archived_existing_channel_is_a_row_error() -> None:
+    """An archived registry row fails the row instead of planning a doomed CREATE."""
+    plan = _plan(rows=(_row(),), existing={CHANNEL_ID: _existing(active=False)})
+    entry = plan.entries[0]
+    assert entry.outcome is ChannelImportOutcome.ERROR
+    assert entry.youtube_channel_id == CHANNEL_ID
+    assert entry.reason is not None and "archived" in entry.reason
+    assert plan.has_errors is True
+    assert plan.counts["ERROR"] == 1
+
+
+def test_view_revenue_raw_is_carried_onto_the_entry() -> None:
+    """The raw CSV token rides the plan entry so the apply can audit it."""
+    plan = _plan(rows=(_row(view_revenue=True, view_revenue_raw="Yes"),))
+    assert plan.entries[0].view_revenue_raw == "Yes"
+
+
 def test_row_errors_surface_and_block() -> None:
     plan = _plan(errors=(ChannelImportRowError(row_number=2, reason="bad id"),))
     assert plan.has_errors is True

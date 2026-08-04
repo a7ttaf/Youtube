@@ -107,6 +107,31 @@ def test_accepts_all_view_revenue_token_forms() -> None:
         assert parsed.rows[0].view_revenue is expected, token
 
 
+def test_rejects_malformed_quoted_csv() -> None:
+    """An unterminated quote rejects the file instead of folding rows into one name."""
+    second = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    csv_text = f'youtube_channel_id,channel_name\n{CHANNEL_ID},"Alpha News\n{second},Beta\n'
+    with pytest.raises(ChannelImportFormatError, match="malformed CSV"):
+        parse_channel_import_csv(csv_text)
+
+
+def test_preserves_raw_view_revenue_token() -> None:
+    """The operator's original token survives parsing for audit provenance."""
+    csv_text = f"youtube_channel_id,channel_name,view_revenue\n{CHANNEL_ID},CBC, TRUE \n"
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.errors == ()
+    assert parsed.rows[0].view_revenue is True
+    assert parsed.rows[0].view_revenue_raw == "TRUE"
+
+
+def test_raw_view_revenue_is_none_when_column_absent() -> None:
+    """An absent column leaves no raw token, distinguishing default from explicit."""
+    csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},CBC\n"
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.rows[0].view_revenue is None
+    assert parsed.rows[0].view_revenue_raw is None
+
+
 def test_skips_fully_blank_lines() -> None:
     csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},CBC\n\n"
     parsed = parse_channel_import_csv(csv_text)
