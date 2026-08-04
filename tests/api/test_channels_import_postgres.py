@@ -1,19 +1,21 @@
-"""Postgres-tier proof for POST /channels/import: RLS isolation + rollback.
+"""Postgres-tier proof for POST /channels/import: RLS isolation + atomicity.
 
 The SQLite tier (``tests/api/test_channels_import_api.py``) cannot settle two
-questions, because on SQLite the request session and the audit/platform session
-are the SAME session (``_sqlite_platform_session_from_request``) and RLS does
-not exist at all:
+questions, because on SQLite every lane shares one session
+(``_sqlite_platform_session_from_request``) and RLS does not exist at all:
 
 1. **Tenant isolation.** ``youtube_channels`` carries ``FORCE ROW LEVEL
    SECURITY``; an imported roster must be invisible to another tenant's lane.
    The bare ``SELECT`` here has no ``WHERE tenant_id`` on purpose, mirroring
    ``tests/tenancy/test_isolation.py`` — RLS is the only filter under test.
-2. **All-or-nothing across TWO sessions.** On Postgres the tenant lane
-   (``app_tenant``, channel writes) and the audit lane (``app_platform``,
-   ``audit_logs`` writes) are distinct sessions on distinct pooled connections
-   with independent transactions. A mid-apply failure must roll BOTH back, or
-   the import leaves orphan audit rows describing channels that do not exist.
+2. **All-or-nothing including audit.** The import's audit sink
+   (``PlatformLaneAuditSink``) writes ``audit_logs`` through the SAME tenant
+   session as the channel writes, elevating to ``app_platform`` per append
+   because ``audit_logs`` is platform-only writable. Channel rows and audit
+   rows therefore share ONE transaction: a mid-apply failure rolls everything
+   back, and a tenant commit that fails to persist takes its audit rows with
+   it instead of leaving an independently committed platform session claiming
+   an import that never happened.
 
 ``require_postgres_url()`` raises (never skips) when ``UMS_TEST_DATABASE_URL``
 is unset, preserving the repository's no-skip policy.
@@ -252,9 +254,9 @@ class _FailingGroupStore:
     """Group store that delegates until the Nth ``get_group_by_cms_id`` call.
 
     Used to force a failure AFTER the import has already written channel rows
-    on the tenant session and audit rows on the platform session, which is the
-    only way to exercise the two-session rollback path (the 422 all-or-nothing
-    check happens during planning, before any write).
+    and (platform-lane elevated) audit rows on the tenant session, which is
+    the only way to exercise the mid-apply rollback path (the 422
+    all-or-nothing check happens during planning, before any write).
     """
 
     def __init__(self, inner: SqlAlchemyChannelGroupRegistry, *, fail_on_call: int) -> None:
@@ -281,6 +283,7 @@ class _FailingGroupStore:
 
 def test_import_persists_channels_on_postgres(client: TestClient, owner_engine: sa.Engine) -> None:
     """A two-row apply persists both channels with the imported inventory."""
+    before_tenant = _tenant_audit_log_count(owner_engine, TENANT_A)
     response = post_import(
         client,
         import_csv(
@@ -291,6 +294,9 @@ def test_import_persists_channels_on_postgres(client: TestClient, owner_engine: 
 
     assert response.status_code == 200, response.text
     assert response.json()["counts"]["CREATE"] == 2
+    # The single-transaction audit path COMMITS on success: two CHANNEL_CREATED
+    # rows plus the CHANNEL_IMPORTED summary must be durably visible.
+    assert _tenant_audit_log_count(owner_engine, TENANT_A) == before_tenant + 3
 
     listing = client.get("/channels", headers=auth_headers())
     assert listing.status_code == 200, listing.text
@@ -371,18 +377,18 @@ def test_failed_apply_leaves_no_audit_rows_on_postgres(
 def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
     pg_url: str, owner_engine: sa.Engine
 ) -> None:
-    """A failure after the first row rolls back BOTH sessions, audit included.
+    """A failure after the first row rolls back channels AND audit rows.
 
     The armed store raises on the SECOND group lookup, so by the time the
-    request fails the tenant session already holds two channel INSERTs and the
-    platform session already holds two CHANNEL_CREATED audit INSERTs. Both
-    lanes must roll back: no channel row, and no audit row.
+    request fails the tenant session already holds two channel INSERTs and
+    two platform-lane-elevated CHANNEL_CREATED audit INSERTs. The shared
+    transaction must roll back: no channel row, and no audit row.
 
     ``audit_counts_in_flight`` is the anti-vacuity guard. It records what the
-    PLATFORM session itself sees right after each flushed audit INSERT (a
-    transaction always sees its own uncommitted rows), so the test proves the
-    audit rows physically existed on the second session before the failure —
-    otherwise "no audit rows afterwards" would be trivially true.
+    session itself sees right after each flushed audit INSERT (a transaction
+    always sees its own uncommitted rows), so the test proves the audit rows
+    physically existed before the failure — otherwise "no audit rows
+    afterwards" would be trivially true.
     """
     app = create_app(database_url=pg_url, authz_source="headers")
     stores: list[_FailingGroupStore] = []
@@ -423,9 +429,53 @@ def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
 
     assert response.status_code == 500, response.text
     assert stores and stores[0].calls == 2, "the store must have failed mid-apply, not before it"
-    # Both CHANNEL_CREATED rows were really INSERTed on the platform session
-    # before the failure; the request did not fail ahead of the audit writes.
-    assert audit_counts_in_flight == [before_tenant + 1, before_tenant + 2]
+    # Three audit rows were really INSERTed (platform-lane elevated, same
+    # transaction) before the failure: row 1's CHANNEL_CREATED, row 1's
+    # GROUP_UPDATED (its group was created before the armed second lookup),
+    # and row 2's CHANNEL_CREATED. The request did not fail ahead of the
+    # audit writes.
+    assert audit_counts_in_flight == [
+        before_tenant + 1,
+        before_tenant + 2,
+        before_tenant + 3,
+    ]
     assert _channel_row(owner_engine, CHANNEL_ID) is None
     assert _channel_row(owner_engine, SECOND_ID) is None
+    assert _audit_log_count(owner_engine) == before
+
+
+def test_tenant_commit_failure_persists_no_audit_rows_on_postgres(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """Audit rows share the tenant transaction's fate: no commit, no audit.
+
+    This is the commit-order race the review flagged: the handler succeeds,
+    then the tenant transaction fails to persist (e.g. a serialization or
+    connection error at commit time — simulated here by a dependency that
+    rolls back where the wired dependency would commit). Because the import's
+    audit rows join the SAME transaction as the channel writes, they must
+    vanish with them. Before the single-session fix, the independently
+    committed platform audit session had already durably recorded
+    CHANNEL_CREATED + CHANNEL_IMPORTED rows for an import that never happened.
+    """
+    app = create_app(database_url=pg_url, authz_source="headers")
+    factory = build_session_factory(pg_url)
+
+    def rollback_instead_of_commit() -> Iterator[Session]:
+        """Yield a real tenant-lane session but never let it commit."""
+        with factory() as session:
+            try:
+                yield session
+            finally:
+                session.rollback()
+
+    app.dependency_overrides[current_db_session] = rollback_instead_of_commit
+    client = TestClient(app)
+    before = _audit_log_count(owner_engine)
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+    # The handler itself succeeded — only the commit was lost.
+    assert response.status_code == 200, response.text
+    assert _channel_row(owner_engine, CHANNEL_ID) is None
     assert _audit_log_count(owner_engine) == before

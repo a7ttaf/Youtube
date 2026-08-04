@@ -23,8 +23,8 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
-from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
-from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
+from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink, SqlAlchemyAuditSink
+from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistryStore
 from ums_smart_revenue.org.channel_import import (
     ChannelImportFormatError,
     ChannelImportOutcome,
@@ -145,6 +145,34 @@ def sql_audit_sink_from_session(
     session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyAuditSink:
     return SqlAlchemyAuditSink(session)
+
+
+def current_import_audit_sink(
+    sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> AuditSink:
+    """Audit sink for the bulk import; passes through until SQL wiring overrides it.
+
+    create_app overrides this with sql_import_audit_sink_from_session so import
+    audit rows join the tenant transaction (all-or-nothing with the channel
+    writes) instead of committing on the independent platform session.
+    """
+    return sink
+
+
+def sql_import_audit_sink_from_session(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> PlatformLaneAuditSink:
+    """Bind the import's audit writes to the request's tenant session.
+
+    The import promises all-or-nothing semantics. The app-wide audit sink runs
+    on the independently committed platform session, which FastAPI tears down
+    (and commits) BEFORE the tenant session; a tenant commit failure would then
+    leave audit rows permanently claiming an import that never happened.
+    PlatformLaneAuditSink writes audit_logs inside the SAME transaction as the
+    channel writes, elevating per append because audit_logs is platform-only
+    writable.
+    """
+    return PlatformLaneAuditSink(session)
 
 
 def audit_record_to_api(record: AuditRecord) -> dict[str, object]:
@@ -414,17 +442,25 @@ def create_channel(
 #   update_inventory) and ChannelGroupORM + membership via
 #   ChannelGroupRegistryStore. No finance tables are touched.
 # Standards: Fail closed on global MANAGE_CHANNELS — a roster file is not
-#   scoped to one company, so a company-scoped manager must not run it. Errors
-#   are reported per row for the whole file (an operator fixes one file, not
-#   one row at a time), but the apply is all-or-nothing: a single ERROR row
-#   rejects the request before any write. A dry run writes nothing at all,
-#   including no audit event, so previewing is never mistaken for applying.
-#   Every write is audited per channel plus one CHANNEL_IMPORTED summary, and
-#   because CHANNEL_UPDATED declares reason_required the route takes a
-#   mandatory reason rather than letting an upsert 500 mid-apply. Group
-#   membership is reconciled for CREATE, UPDATE, and UNCHANGED rows alike:
-#   the outcome is computed only from inventory fields, so treating UNCHANGED
-#   as a no-op would silently drop a newly added Group_ID on re-import.
+#   scoped to one company, so a company-scoped manager must not run it. A
+#   roster carrying Group_ID values additionally requires global MANAGE_GROUPS:
+#   the two permissions are independently grantable and group mutations must
+#   not bypass the group API's checks. Errors are reported per row for the
+#   whole file (an operator fixes one file, not one row at a time), but the
+#   apply is all-or-nothing: a single ERROR row rejects the request before any
+#   write, and audit rows are written through the SAME tenant transaction as
+#   the channel writes (platform-lane elevation per append), so a failed
+#   commit can never leave audit rows describing an import that did not
+#   happen. A dry run writes nothing at all, including no audit event, so
+#   previewing is never mistaken for applying. Every write is audited per
+#   channel (permission_override=MANAGE_CHANNELS — the permission that
+#   actually authorized it), every group creation/membership addition gets its
+#   own GROUP_UPDATED record, plus one CHANNEL_IMPORTED summary; because
+#   CHANNEL_UPDATED declares reason_required the route takes a mandatory
+#   reason rather than letting an upsert 500 mid-apply. Group membership is
+#   reconciled for CREATE, UPDATE, and UNCHANGED rows alike: the outcome is
+#   computed only from inventory fields, so treating UNCHANGED as a no-op
+#   would silently drop a newly added Group_ID on re-import.
 # Blast Radius: Connector ingest targeting. list_target_channels only pulls
 #   revenue for cms_status='INSIDE_CMS' channels, so importing a roster with
 #   the wrong cms_status silently removes channels from ingest and their
@@ -443,7 +479,7 @@ def import_channels(
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     groups: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    audit_sink: Annotated[AuditSink, Depends(current_import_audit_sink)],
     file: Annotated[UploadFile, File()],
     content_owner_id: Annotated[str, Form()],
     dry_run: Annotated[bool, Form()],
@@ -462,7 +498,11 @@ def import_channels(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid cms_status: {cms_status!r}",
         )
-    if not content_owner_id.strip():
+    # Normalize once at the boundary so the plan, the registry writes, and the
+    # audit records all carry the exact value the SQL layer persists; a padded
+    # " owner-1 " must not diff against a stored "owner-1" as an UPDATE forever.
+    content_owner_id = content_owner_id.strip()
+    if not content_owner_id:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="content_owner_id is required",
@@ -500,8 +540,27 @@ def import_channels(
             detail=f"CSV exceeds {MAX_IMPORT_ROWS} rows",
         )
 
+    # Group creation/membership is MANAGE_GROUPS territory. MANAGE_CHANNELS and
+    # MANAGE_GROUPS are independently grantable, so a roster carrying Group_ID
+    # values must also hold the group permission at the import's global scope —
+    # otherwise the import would let a channels-only principal bypass the group
+    # API's _require_manage_group_channels checks.
+    if any(row.group_id for row in parsed.rows) and not has_permission(
+        user, Permission.MANAGE_GROUPS, target_scope, org_index
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
+        )
+
     wanted = {row.youtube_channel_id for row in parsed.rows}
-    existing = {entry.youtube_channel_id: entry for entry in registry.list_channels_by_ids(wanted)}
+    # include_inactive: an archived registry row must surface as a per-row
+    # error in planning, not be mistaken for absent and planned as a CREATE
+    # that create_channel's duplicate guard turns into a 500 mid-apply.
+    existing = {
+        entry.youtube_channel_id: entry
+        for entry in registry.list_channels_by_ids(wanted, include_inactive=True)
+    }
     plan = plan_channel_import(
         rows=parsed.rows,
         errors=parsed.errors,
@@ -509,7 +568,9 @@ def import_channels(
         content_owner_id=content_owner_id,
         cms_status=cms_status,
     )
-    payload = _import_plan_to_api(plan, dry_run=dry_run)
+    payload = _import_plan_to_api(
+        plan, dry_run=dry_run, content_owner_id=content_owner_id, cms_status=cms_status
+    )
 
     if plan.has_errors and not dry_run:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=payload)
@@ -545,16 +606,30 @@ def import_channels(
     return payload
 
 
-def _import_plan_to_api(plan: ChannelImportPlan, *, dry_run: bool) -> dict[str, object]:
-    """Render an import plan as the API response body."""
+def _import_plan_to_api(
+    plan: ChannelImportPlan, *, dry_run: bool, content_owner_id: str, cms_status: str
+) -> dict[str, object]:
+    """Render an import plan as the API response body.
+
+    Every row echoes the planned inventory values (name, group, revenue flag),
+    not just the field diff: a CREATE entry has an empty ``changes`` mapping by
+    design, and the dry run's whole purpose is letting the operator verify the
+    exact values a full-roster apply would write. The request-level owner and
+    CMS status are echoed at the top level for the same reason.
+    """
     return {
         "dry_run": dry_run,
+        "content_owner_id": content_owner_id,
+        "cms_status": cms_status,
         "counts": dict(plan.counts),
         "rows": [
             {
                 "row_number": entry.row_number,
                 "youtube_channel_id": entry.youtube_channel_id,
                 "outcome": entry.outcome.value,
+                "channel_name": entry.channel_name,
+                "group_id": entry.group_id,
+                "revenue_required": entry.revenue_required,
                 "changes": {
                     name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
                 },
@@ -619,32 +694,77 @@ def _apply_channel_import(
                 entity_id=channel_id,
                 scope=scope,
                 reason=reason,
+                # The import authorizes on MANAGE_CHANNELS; without the override
+                # CHANNEL_UPDATED would be recorded under its definition default
+                # (registry.manage_org_mapping) and an auditor filtering by
+                # MANAGE_CHANNELS would miss every bulk inventory change. This
+                # mirrors the content-owner route below. CHANNEL_CREATED's
+                # definition already carries MANAGE_CHANNELS, so the override is
+                # a no-op there.
+                permission_override=Permission.MANAGE_CHANNELS,
                 details={
                     "content_owner_id": content_owner_id,
                     "cms_status": cms_status,
                     "revenue_required": entry.revenue_required,
+                    # Provenance for the finance-sensitive flag: the operator's
+                    # original CSV token ("Yes"/"TRUE"/"0"/...), or None when
+                    # the column was absent and the required-by-default rule
+                    # applied. The derived boolean alone cannot distinguish an
+                    # explicit permission from the default.
+                    "view_revenue_raw": entry.view_revenue_raw,
                     "source": "bulk_import",
                 },
             )
         if entry.group_id:
-            _attach_group_membership(groups, cms_group_id=entry.group_id, channel_id=channel_id)
+            group_change = _attach_group_membership(
+                groups, cms_group_id=entry.group_id, channel_id=channel_id
+            )
+            # A group creation or membership addition is a finance-scope
+            # mutation; without its own GROUP_UPDATED record an inventory-
+            # UNCHANGED row's group change would be invisible in the audit
+            # trail (the summary event carries only counts).
+            if group_change is not None:
+                group_action, group = group_change
+                record_audit_event(
+                    sink=audit_sink,
+                    actor=actor,
+                    event_type=AuditEventType.GROUP_UPDATED,
+                    entity_type="channel_group",
+                    entity_id=group.id,
+                    scope=scope,
+                    reason=reason,
+                    details={
+                        "action": group_action,
+                        "cms_group_id": entry.group_id,
+                        "group_type": group.group_type,
+                        "channel_id": channel_id,
+                        "source": "bulk_import",
+                    },
+                )
 
 
 def _attach_group_membership(
     groups: ChannelGroupRegistryStore, *, cms_group_id: str, channel_id: str
-) -> None:
-    """Ensure the channel belongs to the group carrying this CMS key."""
+) -> tuple[str, ChannelGroupEntry] | None:
+    """Ensure the channel belongs to the group carrying this CMS key.
+
+    Returns the (action, group) pair for the mutation performed — group
+    creation or membership addition — so the caller can audit it, or None when
+    the membership already existed and nothing changed.
+    """
     group = groups.get_group_by_cms_id(cms_group_id)
     if group is None:
-        groups.create_group(
+        created = groups.create_group(
             name=cms_group_id,
             group_type="SECTOR",
             channel_ids=[channel_id],
             cms_group_id=cms_group_id,
         )
-        return
+        return ("group_created", created)
     if channel_id not in group.channel_ids:
-        groups.add_members(group_id=group.id, channel_ids=[channel_id])
+        updated = groups.add_members(group_id=group.id, channel_ids=[channel_id])
+        return ("member_added", updated)
+    return None
 
 
 @router.patch("/{youtube_channel_id}/mapping")

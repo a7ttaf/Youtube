@@ -6,16 +6,24 @@ from ums_smart_revenue.api.channels import (
     current_audit_sink,
     current_channel_registry,
 )
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.org.bootstrap_registry import (
     BOOTSTRAP_COMPANY_TV_ID,
     BOOTSTRAP_ORG_INDEX,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistry
-from ums_smart_revenue.org.channel_registry import bootstrap_channel_registry
+from ums_smart_revenue.org.channel_registry import (
+    ChannelRegistry,
+    ChannelRegistryEntry,
+    bootstrap_channel_registry,
+)
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
 CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
@@ -36,10 +44,12 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
     return headers
 
 
-def create_import_app() -> tuple[TestClient, object, ChannelGroupRegistry, InMemoryAuditSink]:
+def create_import_app(
+    registry: ChannelRegistry | None = None,
+) -> tuple[TestClient, object, ChannelGroupRegistry, InMemoryAuditSink]:
     """Build an import-ready client plus the registries and sink it writes to."""
     app = create_app()
-    registry = bootstrap_channel_registry()
+    registry = registry if registry is not None else bootstrap_channel_registry()
     groups = ChannelGroupRegistry()
     audit_sink = InMemoryAuditSink()
     app.dependency_overrides[current_channel_registry] = lambda: registry
@@ -318,3 +328,184 @@ def test_row_cap_is_enforced():
     assert response.status_code == 422
     assert "5000" in response.json()["detail"]
     assert registry.get_channel("UC" + "0" * 22) is None
+
+
+def test_malformed_quoted_csv_is_rejected():
+    """An unterminated quote rejects the whole file instead of folding rows."""
+    client, registry, _groups, _sink = create_import_app()
+    second = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    csv_text = f'{DEFAULT_HEADER}\n{CHANNEL_ID},"Alpha News,Yes\n{second},Beta,Yes\n'
+
+    response = post_import(client, csv_text)
+
+    assert response.status_code == 422
+    assert "malformed CSV" in response.json()["detail"]
+    assert registry.get_channel(CHANNEL_ID) is None
+
+
+def test_archived_channel_is_a_row_error_not_a_500():
+    """A roster row matching an archived channel is rejected per row, not crashed."""
+    archived = ChannelRegistryEntry(
+        youtube_channel_id=CHANNEL_ID,
+        channel_name="Alpha News",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+        content_owner_id=CONTENT_OWNER,
+        active=False,
+    )
+    client, registry, _groups, audit_sink = create_import_app(ChannelRegistry([archived]))
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["counts"]["ERROR"] == 1
+    assert "archived" in detail["rows"][0]["reason"]
+    assert audit_sink.records == []
+    stored = registry.get_channel(CHANNEL_ID)
+    assert stored is not None and stored.active is False
+
+
+def test_group_rows_require_manage_groups_permission():
+    """A channels-only principal cannot mutate groups through the import."""
+    client, registry, _groups, audit_sink = create_import_app()
+    channels_only = UserPrincipal(
+        user_id="user-1",
+        email="user@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                permission=Permission.MANAGE_CHANNELS,
+                scope=AccessScope.global_scope(),
+            ),
+        ),
+    )
+    client.app.dependency_overrides[current_principal_from_headers] = lambda: channels_only
+
+    with_groups = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+            header="youtube_channel_id,channel_name,group_id,view_revenue",
+        ),
+    )
+    without_groups = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+    assert with_groups.status_code == 403
+    assert with_groups.json()["detail"] == "Missing permission: registry.manage_groups"
+    assert without_groups.status_code == 200, without_groups.text
+    assert registry.get_channel(CHANNEL_ID) is not None
+
+
+def test_dry_run_shows_planned_create_values():
+    """The dry run echoes the exact inventory values a CREATE would write."""
+    client, _registry, _groups, _sink = create_import_app()
+
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv,No",
+            header="youtube_channel_id,channel_name,group_id,view_revenue",
+        ),
+        dry_run="true",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["content_owner_id"] == CONTENT_OWNER
+    assert payload["cms_status"] == "INSIDE_CMS"
+    row = payload["rows"][0]
+    assert row["outcome"] == "CREATE"
+    assert row["channel_name"] == "Alpha News"
+    assert row["group_id"] == "cms-tv"
+    assert row["revenue_required"] is False
+
+
+def test_content_owner_is_normalized_at_the_boundary():
+    """A padded owner value is stripped once and used for writes, plan, and audit."""
+    client, registry, _groups, audit_sink = create_import_app()
+    csv_text = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    first = post_import(client, csv_text, content_owner_id=f"  {CONTENT_OWNER}  ")
+    rerun = post_import(client, csv_text, content_owner_id=f"  {CONTENT_OWNER}  ")
+
+    assert first.status_code == 200
+    created = registry.get_channel(CHANNEL_ID)
+    assert created is not None and created.content_owner_id == CONTENT_OWNER
+    # The rerun diffs the stripped value against the stored one: UNCHANGED,
+    # not a phantom UPDATE on every run.
+    assert rerun.status_code == 200
+    assert rerun.json()["counts"]["UNCHANGED"] == 1
+    summary = next(r for r in audit_sink.records if r.event_type == "CHANNEL_IMPORTED")
+    assert summary.entity_id == CONTENT_OWNER
+    assert summary.details["content_owner_id"] == CONTENT_OWNER
+
+
+def test_per_channel_audit_carries_raw_token_and_authorizing_permission():
+    """Audit rows keep the operator's raw view_revenue token and MANAGE_CHANNELS."""
+    client, _registry, _groups, audit_sink = create_import_app()
+
+    post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+    post_import(client, import_csv(f"{CHANNEL_ID},Alpha News HD,TRUE"))
+
+    created = next(r for r in audit_sink.records if r.event_type == "CHANNEL_CREATED")
+    assert created.details["view_revenue_raw"] == "Yes"
+    assert created.permission == Permission.MANAGE_CHANNELS.value
+    updated = next(r for r in audit_sink.records if r.event_type == "CHANNEL_UPDATED")
+    assert updated.details["view_revenue_raw"] == "TRUE"
+    # The import authorizes on MANAGE_CHANNELS; the CHANNEL_UPDATED definition
+    # default (manage_org_mapping) must be overridden in the record.
+    assert updated.permission == Permission.MANAGE_CHANNELS.value
+
+
+def test_absent_view_revenue_column_audits_raw_token_as_none():
+    """Defaulted revenue_required is distinguishable from an explicit token."""
+    client, _registry, _groups, audit_sink = create_import_app()
+
+    post_import(
+        client,
+        import_csv(f"{CHANNEL_ID},Alpha News", header="youtube_channel_id,channel_name"),
+    )
+
+    created = next(r for r in audit_sink.records if r.event_type == "CHANNEL_CREATED")
+    assert created.details["revenue_required"] is True
+    assert created.details["view_revenue_raw"] is None
+
+
+def test_group_mutations_performed_by_import_are_audited():
+    """Group creation and membership additions each get a GROUP_UPDATED record."""
+    client, _registry, _groups, audit_sink = create_import_app()
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    second = "UC3Dci3BzZXDo4jw4dU8KqWg"
+
+    post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header))
+    post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+            f"{second},Beta News,cms-tv,Yes",
+            header=header,
+        ),
+    )
+
+    group_records = [r for r in audit_sink.records if r.event_type == "GROUP_UPDATED"]
+    actions = [(r.details["action"], r.details["channel_id"]) for r in group_records]
+    assert actions == [("group_created", CHANNEL_ID), ("member_added", second)]
+    for record in group_records:
+        assert record.entity_type == "channel_group"
+        assert record.details["cms_group_id"] == "cms-tv"
+        assert record.details["source"] == "bulk_import"
+        assert record.reason == "Quarterly CMS roster load"
+
+
+def test_unchanged_rows_do_not_emit_duplicate_group_audit():
+    """Re-importing an unchanged membership adds no phantom GROUP_UPDATED rows."""
+    client, _registry, _groups, audit_sink = create_import_app()
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    csv_text = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    post_import(client, csv_text)
+    post_import(client, csv_text)
+
+    group_records = [r for r in audit_sink.records if r.event_type == "GROUP_UPDATED"]
+    assert [r.details["action"] for r in group_records] == ["group_created"]
