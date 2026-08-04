@@ -326,6 +326,66 @@ def test_sql_channel_registry_update_inventory_flips_revenue_source_status():
     assert persisted.revenue_source_status == "PERFORMANCE_ONLY"
 
 
+def test_sql_channel_registry_update_inventory_preserves_official_status():
+    """A name/owner refresh must not clobber a proven official revenue source."""
+    session = build_session()
+    seed_org(session)
+    session.add(
+        YouTubeChannelORM(
+            id=UUID("00000000-0000-0000-0000-000000000304"),
+            youtube_channel_id="channel-official-cms",
+            channel_name="Official CMS",
+            primary_org_unit_id=COMPANY_TV_ID,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+            revenue_source_status="OFFICIAL_CMS_REVENUE",
+            active=True,
+        )
+    )
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    updated = registry.update_inventory(
+        youtube_channel_id="channel-official-cms",
+        channel_name="Official CMS Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id="owner-cms",
+        revenue_required=True,
+    )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-official-cms",
+        )
+    ).one()
+    assert updated.revenue_source_status == "OFFICIAL_CMS_REVENUE"
+    assert persisted.revenue_source_status == "OFFICIAL_CMS_REVENUE"
+    assert persisted.channel_name == "Official CMS Renamed"
+
+
+def test_sql_channel_registry_lists_inactive_channels_when_asked():
+    """include_inactive surfaces archived rows for import planning."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    default_lookup = registry.list_channels_by_ids({"channel-tv-a", "channel-inactive"})
+    inclusive_lookup = registry.list_channels_by_ids(
+        {"channel-tv-a", "channel-inactive"}, include_inactive=True
+    )
+
+    assert {channel.youtube_channel_id for channel in default_lookup} == {"channel-tv-a"}
+    assert {channel.youtube_channel_id for channel in inclusive_lookup} == {
+        "channel-tv-a",
+        "channel-inactive",
+    }
+    inactive = next(
+        channel for channel in inclusive_lookup if channel.youtube_channel_id == "channel-inactive"
+    )
+    assert inactive.active is False
+
+
 def test_sql_channel_registry_update_inventory_missing_channel_raises():
     session = build_session()
     seed_org(session)

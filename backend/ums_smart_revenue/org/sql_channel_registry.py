@@ -14,6 +14,7 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelRegistryConflictError,
     ChannelRegistryEntry,
     ChannelRegistryValidationError,
+    derive_revenue_source_status,
     normalize_optional_content_owner,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -44,19 +45,24 @@ class SqlAlchemyChannelRegistry:
         ).all()
         return [self._to_entry(row) for row in rows]
 
-    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
-        """Return active channels matching a set of external channel ids."""
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str], *, include_inactive: bool = False
+    ) -> list[ChannelRegistryEntry]:
+        """Return channels matching a set of external ids (active-only by default).
+
+        ``include_inactive=True`` is the import-planning lookup: an archived row
+        must be seen as EXISTING so the planner reports a per-row error instead
+        of planning a CREATE that create_channel's duplicate guard rejects.
+        """
         if not youtube_channel_ids:
             return []
-        rows = self._session.scalars(
-            select(YouTubeChannelORM)
-            .where(
-                YouTubeChannelORM.tenant_id == self._tenant_id,
-                YouTubeChannelORM.active.is_(True),
-                YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids),
-            )
-            .order_by(YouTubeChannelORM.youtube_channel_id)
-        ).all()
+        statement = select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == self._tenant_id,
+            YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids),
+        )
+        if not include_inactive:
+            statement = statement.where(YouTubeChannelORM.active.is_(True))
+        rows = self._session.scalars(statement.order_by(YouTubeChannelORM.youtube_channel_id)).all()
         return [self._to_entry(row) for row in rows]
 
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
@@ -247,13 +253,19 @@ class SqlAlchemyChannelRegistry:
         row = self._get_row(youtube_channel_id)
         if row is None:
             raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
+        # Re-derive the source status only when revenue_required actually flips;
+        # an unrelated inventory refresh must not clobber a proven
+        # OFFICIAL_CMS_REVENUE / OFFICIAL_MANUAL_IMPORT classification back to
+        # MISSING_REVENUE_SOURCE (see derive_revenue_source_status).
+        row.revenue_source_status = derive_revenue_source_status(
+            current_status=row.revenue_source_status,
+            current_revenue_required=row.revenue_required,
+            revenue_required=revenue_required,
+        )
         row.channel_name = channel_name
         row.cms_status = cms_status
         row.content_owner_id = normalize_optional_content_owner(content_owner_id)
         row.revenue_required = revenue_required
-        row.revenue_source_status = (
-            "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
-        )
         self._session.flush()
         return self._to_entry(row)
 

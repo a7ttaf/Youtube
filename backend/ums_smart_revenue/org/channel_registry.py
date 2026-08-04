@@ -63,7 +63,9 @@ class ChannelRegistryStore(Protocol):
     def list_channels(self) -> list[ChannelRegistryEntry]:
         pass
 
-    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str], *, include_inactive: bool = False
+    ) -> list[ChannelRegistryEntry]:
         pass
 
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
@@ -119,12 +121,14 @@ class ChannelRegistry:
             key=lambda channel: channel.youtube_channel_id,
         )
 
-    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str], *, include_inactive: bool = False
+    ) -> list[ChannelRegistryEntry]:
         return sorted(
             [
                 channel
                 for channel_id, channel in self._channels.items()
-                if channel_id in youtube_channel_ids and channel.active
+                if channel_id in youtube_channel_ids and (channel.active or include_inactive)
             ],
             key=lambda channel: channel.youtube_channel_id,
         )
@@ -218,8 +222,14 @@ class ChannelRegistry:
             cms_status=cms_status,
             content_owner_id=content_owner_id,
             revenue_required=revenue_required,
-            revenue_source_status=(
-                "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
+            # Re-derive the source status only when revenue_required actually
+            # flips; an unrelated inventory refresh must not clobber a proven
+            # OFFICIAL_CMS_REVENUE / OFFICIAL_MANUAL_IMPORT classification back
+            # to MISSING_REVENUE_SOURCE.
+            revenue_source_status=derive_revenue_source_status(
+                current_status=current.revenue_source_status,
+                current_revenue_required=current.revenue_required,
+                revenue_required=revenue_required,
             ),
         )
         self._channels[youtube_channel_id] = updated
@@ -252,6 +262,26 @@ def _parse_optional_uuid(value: str | None, field_name: str) -> str | None:
         return str(UUID(value))
     except ValueError as exc:
         raise ChannelRegistryValidationError(f"{field_name} must be a valid UUID") from exc
+
+
+def derive_revenue_source_status(
+    *,
+    current_status: str,
+    current_revenue_required: bool,
+    revenue_required: bool,
+) -> str:
+    """Return the revenue_source_status an inventory update should persist.
+
+    The status is re-derived ONLY when ``revenue_required`` changes: flipping
+    to required starts the channel at MISSING_REVENUE_SOURCE, flipping to
+    not-required parks it at PERFORMANCE_ONLY. When the flag is unchanged the
+    existing status is preserved, so an import that merely refreshes the name,
+    CMS status, or content owner cannot downgrade an established
+    OFFICIAL_CMS_REVENUE / OFFICIAL_MANUAL_IMPORT classification.
+    """
+    if revenue_required == current_revenue_required:
+        return current_status
+    return "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
 
 
 def normalize_optional_content_owner(value: str | None) -> str | None:
