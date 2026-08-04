@@ -262,18 +262,33 @@ def _parse_row(
 def _flag_duplicates(
     rows: list[ChannelImportRow],
 ) -> tuple[list[ChannelImportRow], list[ChannelImportRowError]]:
-    """Reject every copy of a channel id that appears more than once."""
-    counts: dict[str, int] = {}
+    """Reject only CONFLICTING copies of a repeated channel id.
+
+    CMS group membership is many-to-many, so a roster legitimately repeats a
+    ``youtube_channel_id`` once per group (the singular ``group_id`` column
+    carries one association per row). Copies must agree on the inventory
+    fields (``channel_name``, ``view_revenue``): a conflicting duplicate is
+    ambiguous about what to persist and fails every copy closed, but
+    agreeing copies all survive so the planner can attach each row's group.
+    """
+    first_signature: dict[str, tuple[str, bool | None]] = {}
+    conflicted: set[str] = set()
     for row in rows:
-        counts[row.youtube_channel_id] = counts.get(row.youtube_channel_id, 0) + 1
+        signature = (row.channel_name, row.view_revenue)
+        if first_signature.setdefault(row.youtube_channel_id, signature) != signature:
+            conflicted.add(row.youtube_channel_id)
     kept: list[ChannelImportRow] = []
     errors: list[ChannelImportRowError] = []
     for row in rows:
-        if counts[row.youtube_channel_id] > 1:
+        if row.youtube_channel_id in conflicted:
             errors.append(
                 ChannelImportRowError(
                     row_number=row.row_number,
-                    reason=f"duplicate youtube_channel_id in file: {row.youtube_channel_id}",
+                    reason=(
+                        "conflicting duplicate youtube_channel_id in file: "
+                        f"{row.youtube_channel_id} (copies disagree on "
+                        "channel_name/view_revenue)"
+                    ),
                 )
             )
         else:
@@ -344,6 +359,7 @@ def plan_channel_import(
         for error in errors
     ]
 
+    seen_channels: set[str] = set()
     for row in rows:
         revenue_required = True if row.view_revenue is None else row.view_revenue
         if row.group_id and row.group_id in archived_group_ids:
@@ -359,6 +375,26 @@ def plan_channel_import(
                 )
             )
             continue
+        if row.youtube_channel_id in seen_channels:
+            # A repeated channel id carries an ADDITIONAL group membership
+            # (many-to-many; one association per row — the parser already
+            # rejected copies that disagree on inventory fields). The first
+            # copy owns the inventory outcome; membership rows plan as
+            # UNCHANGED so the apply attaches their group without a second
+            # inventory decision.
+            entries.append(
+                ChannelImportPlanEntry(
+                    row_number=row.row_number,
+                    youtube_channel_id=row.youtube_channel_id,
+                    outcome=ChannelImportOutcome.UNCHANGED,
+                    channel_name=row.channel_name,
+                    group_id=row.group_id,
+                    revenue_required=revenue_required,
+                    view_revenue_raw=row.view_revenue_raw,
+                )
+            )
+            continue
+        seen_channels.add(row.youtube_channel_id)
         current = existing.get(row.youtube_channel_id)
         if current is not None and not current.active:
             # An archived (active=false) registry row must fail closed: planning

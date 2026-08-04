@@ -57,11 +57,25 @@ def test_rejects_empty_file() -> None:
         parse_channel_import_csv("")
 
 
-def test_flags_every_copy_of_a_duplicate_id() -> None:
+def test_flags_every_copy_of_a_conflicting_duplicate_id() -> None:
+    """Copies that disagree on inventory fields are ambiguous and all fail."""
     csv_text = f"youtube_channel_id,channel_name\n{CHANNEL_ID},First\n{CHANNEL_ID},Second\n"
     parsed = parse_channel_import_csv(csv_text)
     assert parsed.rows == ()
     assert [error.row_number for error in parsed.errors] == [1, 2]
+    assert "conflicting duplicate" in parsed.errors[0].reason
+
+
+def test_keeps_agreeing_duplicates_for_multi_group_membership() -> None:
+    """CMS membership is many-to-many: one row per group is a legal roster."""
+    csv_text = (
+        "youtube_channel_id,channel_name,group_id\n"
+        f"{CHANNEL_ID},Alpha News,cms-tv\n"
+        f"{CHANNEL_ID},Alpha News,cms-news\n"
+    )
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.errors == ()
+    assert [row.group_id for row in parsed.rows] == ["cms-tv", "cms-news"]
 
 
 def test_flags_malformed_channel_id() -> None:

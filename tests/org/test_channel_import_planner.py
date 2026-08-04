@@ -156,3 +156,28 @@ def test_counts_cover_every_outcome_key() -> None:
     plan = _plan(rows=(_row(),))
     assert set(plan.counts) == {"CREATE", "UPDATE", "UNCHANGED", "ERROR"}
     assert plan.counts["UPDATE"] == 0
+
+
+def test_duplicate_rows_plan_one_inventory_outcome_plus_membership_rows() -> None:
+    """The first copy owns the inventory decision; extra copies attach groups.
+
+    CMS membership is many-to-many, so a roster repeats a channel once per
+    group (review #159 r3713966796). The second copy must not re-decide
+    inventory (a second CREATE would 500 on the duplicate guard) — it plans
+    as UNCHANGED carrying its own group_id for the apply to attach.
+    """
+    plan = _plan(
+        rows=(
+            _row(row_number=1, group_id="cms-tv"),
+            _row(row_number=2, group_id="cms-news"),
+        )
+    )
+
+    assert plan.has_errors is False
+    assert [entry.outcome for entry in plan.entries] == [
+        ChannelImportOutcome.CREATE,
+        ChannelImportOutcome.UNCHANGED,
+    ]
+    assert [entry.group_id for entry in plan.entries] == ["cms-tv", "cms-news"]
+    assert plan.counts["CREATE"] == 1
+    assert plan.counts["UNCHANGED"] == 1

@@ -431,6 +431,82 @@ def test_dry_run_shows_planned_create_values():
     assert row["revenue_required"] is False
 
 
+def test_multi_group_roster_attaches_every_membership():
+    """One row per group: a repeated channel id attaches ALL its groups."""
+    client, registry, groups, _sink = create_import_app()
+
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+            f"{CHANNEL_ID},Alpha News,cms-news,Yes",
+            header="youtube_channel_id,channel_name,group_id,view_revenue",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["counts"]["CREATE"] == 1
+    assert registry.get_channel(CHANNEL_ID) is not None
+    for cms_key in ("cms-tv", "cms-news"):
+        group = groups.get_group_by_cms_id(cms_key)
+        assert group is not None and CHANNEL_ID in group.channel_ids
+
+
+def test_planned_update_that_became_a_noop_is_not_audited():
+    """A concurrent writer landing the same values first leaves no false audit.
+
+    Planning saw the old name and classified UPDATE; by apply time the store
+    already holds the roster values, so the write replaces nothing and must
+    not record a CHANNEL_UPDATED claiming a mutation that did not occur.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                # Already the roster values: the concurrent writer won the race.
+                channel_name="Alpha News",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+
+    class _StaleSnapshotRegistry(ChannelRegistry):
+        """Planning sees the OLD name; the write boundary sees current state."""
+
+        def list_channels_by_ids(self, wanted, *, include_inactive=False):
+            return [
+                dataclasses.replace(entry, channel_name="Old Name")
+                for entry in super().list_channels_by_ids(wanted, include_inactive=include_inactive)
+            ]
+
+    stale = _StaleSnapshotRegistry(list(registry.list_channels_by_ids({CHANNEL_ID})))
+    client, _registry, _groups, audit_sink = create_import_app(stale)
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+    assert response.status_code == 200
+    assert response.json()["counts"]["UPDATE"] == 1  # the PLAN said update
+    updated_events = [r for r in audit_sink.records if r.event_type == "CHANNEL_UPDATED"]
+    assert updated_events == []
+
+
+def test_oversized_content_owner_id_is_rejected_422():
+    """The owner id lands in the audit entity B-tree index; bound it."""
+    client, _registry, _groups, _sink = create_import_app()
+
+    response = post_import(
+        client,
+        import_csv(f"{CHANNEL_ID},Alpha News,Yes"),
+        content_owner_id="x" * 256,
+    )
+
+    assert response.status_code == 422
+    assert "content_owner_id exceeds 255 characters" in response.json()["detail"]
+
+
 def test_nul_in_scalar_form_fields_is_rejected_422():
     """NUL-bearing content_owner_id / reason fail the 422 contract, never 500.
 
