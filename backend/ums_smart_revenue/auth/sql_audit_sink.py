@@ -47,9 +47,12 @@ class SqlAlchemyAuditSink:
         # permission (including any permission_override, e.g. the import's
         # MANAGE_CHANNELS on CHANNEL_UPDATED) would exist only on the transient
         # in-memory record. Persist it in the durable details so permission-
-        # based audit filtering works against the database rows too.
+        # based audit filtering works against the database rows too. This is
+        # an unconditional overwrite, not setdefault: the durable key must be
+        # the CANONICAL permission record_audit_event derived — a
+        # caller-supplied details["permission"] must never shadow it.
         if record.permission is not None:
-            details.setdefault("permission", record.permission)
+            details["permission"] = record.permission
         actor_exists = (
             user_id is not None
             and self._session.scalar(

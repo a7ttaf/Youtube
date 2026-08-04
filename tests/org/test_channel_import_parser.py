@@ -129,9 +129,27 @@ def test_max_rows_aborts_the_parse_early() -> None:
     csv_text = f"youtube_channel_id,channel_name\n{rows}\n"
     with pytest.raises(ChannelImportFormatError, match="exceeds 2 rows"):
         parse_channel_import_csv(csv_text, max_rows=2)
-    # Blank lines are skipped, not counted against the cap.
-    spaced = f"youtube_channel_id,channel_name\n\n{CHANNEL_ID},CBC\n\n"
+    # A blank line is skipped, not counted against the data-row cap (blanks
+    # carry their own equal bound — see test_blank_rows_are_bounded_by_the_same_cap).
+    spaced = f"youtube_channel_id,channel_name\n\n{CHANNEL_ID},CBC\n"
     parsed = parse_channel_import_csv(spaced, max_rows=1)
+    assert len(parsed.rows) == 1
+
+
+def test_blank_rows_are_bounded_by_the_same_cap() -> None:
+    """A file packed with blank records aborts instead of consuming free scans.
+
+    Blank rows never count toward the data-row cap, so without their own bound
+    a small byte-capped file of blank lines would be scanned end-to-end while
+    'never exceeding' the row limit (PR #159 review).
+    """
+    blanks = "\n" * 4
+    csv_text = f"youtube_channel_id,channel_name\n{blanks}{CHANNEL_ID},CBC\n"
+    with pytest.raises(ChannelImportFormatError, match="exceeds 2 blank rows"):
+        parse_channel_import_csv(csv_text, max_rows=2)
+    # A legitimate export's few blank records stay tolerated under the bound.
+    tolerated = f"youtube_channel_id,channel_name\n\n{CHANNEL_ID},CBC\n\n"
+    parsed = parse_channel_import_csv(tolerated, max_rows=2)
     assert len(parsed.rows) == 1
 
 

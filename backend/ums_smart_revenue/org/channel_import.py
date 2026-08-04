@@ -89,8 +89,12 @@ def parse_channel_import_csv(text: str, *, max_rows: int | None = None) -> Parse
     ``max_rows`` caps the number of NON-BLANK data rows and aborts the parse
     the moment the cap is exceeded, so an oversized file fails fast instead of
     paying full per-row validation cost before a post-parse count rejects it.
-    Blank lines are still skipped (not counted); scanning them is a cheap
-    per-line check already bounded by the route's byte cap.
+    Blank records are tolerated (a legitimate export may carry a few trailing
+    blank rows) but bounded by the SAME cap: the route's byte cap already
+    bounds total scanning, so this bound exists to stop a blank-packed file
+    from consuming the whole byte budget as wasted scan work while "never
+    exceeding" the row limit — and to keep the cap meaningful for any future
+    caller that passes ``max_rows`` without a byte cap in front of it.
     """
     # strict=True makes csv.reader raise csv.Error on malformed quoting (e.g.
     # an unterminated quoted channel_name) instead of silently folding every
@@ -109,10 +113,14 @@ def parse_channel_import_csv(text: str, *, max_rows: int | None = None) -> Parse
     rows: list[ChannelImportRow] = []
     errors: list[ChannelImportRowError] = []
     data_rows = 0
+    blank_rows = 0
 
     try:
         for row_number, raw_row in enumerate(reader, start=1):
             if not any(cell.strip() for cell in raw_row):
+                blank_rows += 1
+                if max_rows is not None and blank_rows > max_rows:
+                    raise ChannelImportFormatError(f"CSV exceeds {max_rows} blank rows")
                 continue
             data_rows += 1
             if max_rows is not None and data_rows > max_rows:
