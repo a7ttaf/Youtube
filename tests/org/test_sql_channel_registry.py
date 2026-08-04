@@ -18,6 +18,7 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelMappingLockedMonthError,
     ChannelRegistryConflictError,
     ChannelRegistryValidationError,
+    ChannelRevenueRequirementLockedMonthError,
 )
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
@@ -379,6 +380,114 @@ def test_sql_channel_registry_lists_inactive_channels_when_asked():
     inclusive_by_id = {channel.youtube_channel_id: channel for channel in inclusive_lookup}
     assert set(inclusive_by_id) == {"channel-tv-a", "channel-inactive"}
     assert inclusive_by_id["channel-inactive"].active is False
+
+
+def _seed_not_required_channel(session: Session) -> None:
+    """Persist a performance-only channel the flip-guard tests mutate."""
+    session.add(
+        YouTubeChannelORM(
+            id=UUID("00000000-0000-0000-0000-000000000305"),
+            youtube_channel_id="channel-perf-only",
+            channel_name="Perf Only",
+            primary_org_unit_id=COMPANY_TV_ID,
+            cms_status="INSIDE_CMS",
+            revenue_required=False,
+            revenue_source_status="PERFORMANCE_ONLY",
+            active=True,
+        )
+    )
+    session.commit()
+
+
+def test_update_inventory_rejects_required_flip_when_locked_month_lacks_fact():
+    """Enabling revenue_required must not retroactively break a LOCKED close."""
+    session = build_finance_session()
+    seed_org(session)
+    _seed_not_required_channel(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(ChannelRevenueRequirementLockedMonthError, match="2026-09"):
+        registry.update_inventory(
+            youtube_channel_id="channel-perf-only",
+            channel_name="Perf Only",
+            cms_status="INSIDE_CMS",
+            content_owner_id=None,
+            revenue_required=True,
+        )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-perf-only",
+        )
+    ).one()
+    assert persisted.revenue_required is False
+    assert persisted.revenue_source_status == "PERFORMANCE_ONLY"
+
+
+def test_update_inventory_allows_required_flip_when_locked_month_has_fact():
+    """A locked month with a fact for the channel does not block the flip."""
+    session = build_finance_session()
+    seed_org(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+    session.add(
+        YouTubeChannelORM(
+            id=UUID("00000000-0000-0000-0000-000000000306"),
+            youtube_channel_id="channel-perf-flip",
+            channel_name="Perf Flip",
+            primary_org_unit_id=COMPANY_TV_ID,
+            cms_status="INSIDE_CMS",
+            revenue_required=False,
+            revenue_source_status="PERFORMANCE_ONLY",
+            active=True,
+        )
+    )
+    session.commit()
+    session.add(
+        MonthlyChannelRevenueFactORM(
+            id=uuid4(),
+            month="2026-09",
+            youtube_channel_id="channel-perf-flip",
+            source_kind="YOUTUBE_CMS",
+            gross_revenue_usd=100,
+        )
+    )
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    updated = registry.update_inventory(
+        youtube_channel_id="channel-perf-flip",
+        channel_name="Perf Flip",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=True,
+    )
+
+    assert updated.revenue_required is True
+    assert updated.revenue_source_status == "MISSING_REVENUE_SOURCE"
+
+
+def test_update_inventory_allows_unchanged_flag_despite_locked_month():
+    """A locked month without facts only blocks the FLIP, not other updates."""
+    session = build_finance_session()
+    seed_org(session)
+    _seed_not_required_channel(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    updated = registry.update_inventory(
+        youtube_channel_id="channel-perf-only",
+        channel_name="Perf Only Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id="owner-cms",
+        revenue_required=False,
+    )
+
+    assert updated.channel_name == "Perf Only Renamed"
+    assert updated.revenue_required is False
 
 
 def test_sql_channel_registry_update_inventory_missing_channel_raises():

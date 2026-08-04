@@ -77,6 +77,23 @@ class SqlAlchemyChannelGroupRegistry:
             return None
         return self._to_entry(row)
 
+    # ========================================================================
+    # Purpose: Resolve the channel group carrying one YouTube CMS group key —
+    #   the lookup the bulk channel import reconciles Group_ID columns against
+    #   (create the group when absent, attach membership when present).
+    # Database/ORM: ChannelGroupORM (read-only), tenant-scoped; uniqueness is
+    #   enforced by unique (tenant_id, cms_group_id) from 20260803_0001.
+    # Standards: Returns archived groups too (no active filter) so the import
+    #   PLANNER can fail rows targeting a retired group closed instead of
+    #   mutating it; callers must check .active before writing membership.
+    # Blast Radius: Channel-group membership and therefore finance group-scope
+    #   selection. No finance totals, no allocation.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/channels.py -> archived-group
+    #     planning gate (_archived_group_ids).
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     membership attachment for non-archived groups.
+    # ========================================================================
     def get_group_by_cms_id(self, cms_group_id: str) -> ChannelGroupEntry | None:
         """Return the tenant-scoped group carrying this CMS key, or None."""
         row = self._session.scalars(

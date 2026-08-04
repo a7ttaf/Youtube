@@ -1,3 +1,21 @@
+# ============================================================================
+# Purpose: SQL-backed channel registry scoped to one tenant — reads and writes
+#   YouTubeChannelORM rows for the channel APIs and the bulk inventory import.
+# Database/ORM: YouTubeChannelORM (read/write); MonthlyChannelRevenueFactORM +
+#   FinanceMonthCloseORM (read-only locked-month guards).
+# Standards: Typed domain errors at every boundary; tenant-scoped queries;
+#   locked-month guards fail closed (update_mapping re-parenting and the
+#   update_inventory revenue_required flip both refuse to rewrite the
+#   conditions a LOCKED finance month was finalized under).
+# Blast Radius: Channel registry inventory/mapping, finance close integrity
+#   via the guards. No allocation math, no exports, no Neo4j.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> route boundary.
+#   - File: backend/ums_smart_revenue/org/channel_registry.py -> entry
+#     dataclass, protocol, and shared derivation/normalization helpers.
+# ============================================================================
+"""SQL-backed tenant-scoped channel registry."""
+
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -14,6 +32,7 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelRegistryConflictError,
     ChannelRegistryEntry,
     ChannelRegistryValidationError,
+    ChannelRevenueRequirementLockedMonthError,
     derive_revenue_source_status,
     normalize_optional_content_owner,
 )
@@ -221,16 +240,21 @@ class SqlAlchemyChannelRegistry:
     #   calls this instead of update_mapping / update_content_owner because
     #   neither of those covers channel_name, cms_status, and revenue_required
     #   together.
-    # Database/ORM: YouTubeChannelORM (write), tenant-scoped.
-    # Standards: No locked-month guard (unlike update_mapping) -- this method
-    #   never touches primary_org_unit_id, so it cannot rewrite a closed
-    #   month's company/sector attribution. Mirrors create_channel's
-    #   revenue_source_status derivation so the registry never ends up with a
-    #   revenue_required/revenue_source_status pair that disagrees with each
-    #   other. A missing row raises ChannelRegistryValidationError (not
-    #   KeyError, unlike update_mapping/update_content_owner) so the bulk
-    #   import can report a clean per-row validation failure instead of an
-    #   untyped exception. No IntegrityError handling is needed here (unlike
+    # Database/ORM: YouTubeChannelORM (write), tenant-scoped;
+    #   FinanceMonthCloseORM x MonthlyChannelRevenueFactORM (read-only guard).
+    # Standards: No org-attribution locked-month guard (this method never
+    #   touches primary_org_unit_id), but flipping revenue_required OFF->ON is
+    #   guarded: readiness evaluates the CURRENT flag, so enabling it while a
+    #   LOCKED month lacks a fact for this channel would retroactively break
+    #   that month's finalized readiness
+    #   (ChannelRevenueRequirementLockedMonthError -> route 409). Preserves
+    #   revenue_source_status unless revenue_required flips (see
+    #   derive_revenue_source_status) so an inventory refresh cannot downgrade
+    #   an established official classification. A missing row raises
+    #   ChannelRegistryValidationError (not KeyError, unlike
+    #   update_mapping/update_content_owner) so the bulk import can report a
+    #   clean per-row validation failure instead of an untyped exception. No
+    #   IntegrityError handling is needed here (unlike
     #   create_channel/update_mapping): none of the columns this method writes
     #   carry a foreign key or uniqueness constraint.
     # Blast Radius: Channel inventory fields only (name/status/owner/revenue
@@ -253,6 +277,20 @@ class SqlAlchemyChannelRegistry:
         row = self._get_row(youtube_channel_id)
         if row is None:
             raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
+        # Flipping revenue_required ON is guarded against LOCKED months: month-
+        # close readiness evaluates the CURRENT flag, so enabling it while a
+        # locked month has no fact for this channel would retroactively make
+        # that already-finalized month report a missing required fact. Mirrors
+        # update_mapping's locked-month guard; the flip stays possible after
+        # the affected months are unlocked (or once facts exist for them).
+        if revenue_required and not row.revenue_required:
+            locked_missing = self._locked_months_missing_fact(youtube_channel_id)
+            if locked_missing:
+                raise ChannelRevenueRequirementLockedMonthError(
+                    "revenue_required cannot be enabled: locked finance month(s) "
+                    f"have no revenue fact for {youtube_channel_id}: "
+                    f"{', '.join(locked_missing)}"
+                )
         # Re-derive the source status only when revenue_required actually flips;
         # an unrelated inventory refresh must not clobber a proven
         # OFFICIAL_CMS_REVENUE / OFFICIAL_MANUAL_IMPORT classification back to
@@ -277,6 +315,32 @@ class SqlAlchemyChannelRegistry:
                 YouTubeChannelORM.youtube_channel_id == youtube_channel_id,
             )
         ).one_or_none()
+
+    def _locked_months_missing_fact(self, youtube_channel_id: str) -> list[str]:
+        """Return sorted LOCKED months that have NO revenue fact for this channel.
+
+        Read-only, tenant-scoped. These are the months whose close readiness
+        would retroactively break if the channel became revenue-required now:
+        the readiness query counts active revenue-required channels missing a
+        fact, evaluated against the CURRENT registry flag.
+        """
+        fact_exists = (
+            select(MonthlyChannelRevenueFactORM.id)
+            .where(
+                MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
+                MonthlyChannelRevenueFactORM.youtube_channel_id == youtube_channel_id,
+                MonthlyChannelRevenueFactORM.month == FinanceMonthCloseORM.month,
+            )
+            .exists()
+        )
+        rows = self._session.scalars(
+            select(FinanceMonthCloseORM.month).where(
+                FinanceMonthCloseORM.tenant_id == self._tenant_id,
+                FinanceMonthCloseORM.status == "LOCKED",
+                ~fact_exists,
+            )
+        ).all()
+        return sorted(rows)
 
     def _locked_months_for_channel(self, youtube_channel_id: str) -> list[str]:
         """Return the sorted LOCKED finance months this channel has facts in.

@@ -1,3 +1,21 @@
+# ============================================================================
+# Purpose: Channel registry domain contract — the ChannelRegistryEntry value
+#   object, the ChannelRegistryStore protocol, typed registry errors, the
+#   in-memory reference implementation, and the shared derivation/
+#   normalization helpers both implementations use.
+# Database/ORM: None here; backend/ums_smart_revenue/org/sql_channel_registry.py
+#   is the SQL implementation of the same protocol.
+# Standards: Typed domain errors (ChannelRegistryError subclasses); frozen
+#   dataclass entries; derivation logic shared via helpers so the in-memory
+#   and SQL registries cannot drift.
+# Blast Radius: Channel inventory/mapping semantics everywhere the registry
+#   protocol is consumed (channel APIs, bulk import, connectors targeting).
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> SQL impl.
+#   - File: backend/ums_smart_revenue/api/channels.py -> route consumers.
+# ============================================================================
+"""Channel registry domain contract, errors, and in-memory implementation."""
+
 from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
@@ -55,6 +73,29 @@ class ChannelMappingLockedMonthError(ChannelRegistryError):
     #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
     #       raised by SqlAlchemyChannelRegistry.update_mapping.
     #   - File: backend/ums_smart_revenue/api/channels.py -> translated to 409.
+    # ========================================================================
+    pass
+
+
+class ChannelRevenueRequirementLockedMonthError(ChannelRegistryError):
+    # ========================================================================
+    # Purpose: Signal that flipping a channel's revenue_required flag ON is
+    #   blocked because a LOCKED finance month has no revenue fact for it.
+    #   Month-close readiness evaluates the CURRENT flag, so the flip would
+    #   retroactively make an already-finalized month report a missing
+    #   required fact and no longer satisfy the conditions it was locked
+    #   under.
+    # Database/ORM: None (raised by the SQL registry after a read-only check
+    #   on FinanceMonthCloseORM x MonthlyChannelRevenueFactORM).
+    # Standards: Typed domain error; the import route maps it to HTTP 409.
+    #   Mirrors ChannelMappingLockedMonthError above.
+    # Blast Radius: Finance close integrity, audit (a rejected flip must not
+    #   be audited). No Neo4j, no exports.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #       raised by SqlAlchemyChannelRegistry.update_inventory.
+    #   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
+    #       the readiness query this guard keeps stable for LOCKED months.
     # ========================================================================
     pass
 
@@ -264,6 +305,23 @@ def _parse_optional_uuid(value: str | None, field_name: str) -> str | None:
         raise ChannelRegistryValidationError(f"{field_name} must be a valid UUID") from exc
 
 
+# ============================================================================
+# Purpose: Single source of truth for how an inventory update derives the
+#   channel's revenue_source_status — the finance-facing classification that
+#   marks a channel's revenue evidence as official, missing, or not required.
+# Database/ORM: None (pure function); both registry implementations call it.
+# Standards: Re-derive ONLY on a revenue_required flip; preserve otherwise, so
+#   a roster refresh can never downgrade OFFICIAL_CMS_REVENUE /
+#   OFFICIAL_MANUAL_IMPORT back to MISSING_REVENUE_SOURCE (review #159
+#   r3706996021).
+# Blast Radius: Channel revenue-source classification feeding missing-source
+#   monitors and registry issue feeds. No finance totals, no allocation.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+#     update_inventory caller.
+#   - File: backend/ums_smart_revenue/org/channel_registry.py ->
+#     ChannelRegistry.update_inventory caller (same module, above).
+# ============================================================================
 def derive_revenue_source_status(
     *,
     current_status: str,
