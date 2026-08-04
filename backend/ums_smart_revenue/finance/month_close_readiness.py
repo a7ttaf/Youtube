@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import (
@@ -150,6 +150,28 @@ class SqlAlchemyFinanceCloseReadinessService:
             return self._count_locked_rows(pending_overrides_statement.with_for_update())
         return self._count_statement_rows(pending_overrides_statement)
 
+    # ========================================================================
+    # Purpose: Count the active revenue-required channels missing a revenue
+    #   fact for one month — the MISSING_REVENUE_FACTS readiness blocker,
+    #   effective-dated for LOCKED months so post-lock channels cannot
+    #   retroactively invalidate a finalized close.
+    # Database/ORM: YouTubeChannelORM (read; FOR-UPDATE-locked during
+    #   lock-time rechecks), MonthlyChannelRevenueFactORM (anti-join),
+    #   FinanceMonthCloseORM (correlated locked_at scalar subquery).
+    # Standards: The LOCKED-month cutoff (created_at <= locked_at) is read in
+    #   the SAME statement as the count via a scalar subquery — one snapshot,
+    #   so a concurrent lock/unlock cannot desynchronize the close state from
+    #   the cutoff under READ COMMITTED. No cutoff while the month is OPEN or
+    #   when a LOCKED row has no locked_at (fail closed). Mirrored by the
+    #   registry flip guard's _locked_months_missing_fact — change them
+    #   together.
+    # Blast Radius: Month-close readiness/lock gating. No writes, no audit.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     _locked_months_missing_fact mirrors this cutoff for the flip guard.
+    #   - File: backend/ums_smart_revenue/finance/month_close.py -> lock path
+    #     consuming check_month(for_update=True).
+    # ========================================================================
     def _missing_required_revenue_fact_count(self, month: str, *, for_update: bool) -> int:
         """Count active revenue-required channels missing facts for the month.
 
@@ -159,8 +181,20 @@ class SqlAlchemyFinanceCloseReadinessService:
         retroactively invalidate the readiness conditions the month was
         finalized under — its requirement applies going forward. The lock-time
         recheck itself runs while the month is still OPEN, so the cutoff never
-        weakens the lock gate.
+        weakens the lock gate. The cutoff rides INSIDE the count statement as
+        a correlated scalar subquery: a separate read could observe LOCKED,
+        then race an unlock and apply a stale cutoff to the next statement's
+        snapshot (review #159 r3713966821).
         """
+        locked_cutoff = (
+            select(FinanceMonthCloseORM.locked_at)
+            .where(
+                FinanceMonthCloseORM.tenant_id == self._tenant_id,
+                FinanceMonthCloseORM.month == month,
+                FinanceMonthCloseORM.status == "LOCKED",
+            )
+            .scalar_subquery()
+        )
         missing_channels_statement = (
             select(YouTubeChannelORM.youtube_channel_id)
             .select_from(YouTubeChannelORM)
@@ -179,19 +213,14 @@ class SqlAlchemyFinanceCloseReadinessService:
                 YouTubeChannelORM.active.is_(True),
                 YouTubeChannelORM.revenue_required.is_(True),
                 MonthlyChannelRevenueFactORM.id.is_(None),
+                # NULL subquery = month not LOCKED (or LOCKED without a
+                # provable locked_at): no cutoff, every channel counts.
+                or_(
+                    locked_cutoff.is_(None),
+                    YouTubeChannelORM.created_at <= locked_cutoff,
+                ),
             )
         )
-        locked_at = self._session.scalar(
-            select(FinanceMonthCloseORM.locked_at).where(
-                FinanceMonthCloseORM.tenant_id == self._tenant_id,
-                FinanceMonthCloseORM.month == month,
-                FinanceMonthCloseORM.status == "LOCKED",
-            )
-        )
-        if locked_at is not None:
-            missing_channels_statement = missing_channels_statement.where(
-                YouTubeChannelORM.created_at <= locked_at
-            )
         if for_update:
             return self._count_locked_rows(
                 missing_channels_statement.with_for_update(of=YouTubeChannelORM)
