@@ -77,7 +77,12 @@ def serialization_timestamp(session: Session) -> datetime:
     """Return the shared database clock used to order creates against locks."""
     if session.get_bind().dialect.name != "postgresql":
         return datetime.now(UTC)
-    return session.scalar(select(func.clock_timestamp()))
+    stamped = session.scalar(select(func.clock_timestamp()))
+    if stamped is None:
+        # clock_timestamp() cannot return NULL; this narrows Session.scalar's
+        # Optional type without a cast and fails safe if it ever did.
+        raise RuntimeError("clock_timestamp() returned no value")
+    return stamped
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None, *, use_context: bool = True) -> UUID:
