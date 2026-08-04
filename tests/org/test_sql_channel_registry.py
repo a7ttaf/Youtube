@@ -376,14 +376,9 @@ def test_sql_channel_registry_lists_inactive_channels_when_asked():
     )
 
     assert {channel.youtube_channel_id for channel in default_lookup} == {"channel-tv-a"}
-    assert {channel.youtube_channel_id for channel in inclusive_lookup} == {
-        "channel-tv-a",
-        "channel-inactive",
-    }
-    inactive = next(
-        channel for channel in inclusive_lookup if channel.youtube_channel_id == "channel-inactive"
-    )
-    assert inactive.active is False
+    inclusive_by_id = {channel.youtube_channel_id: channel for channel in inclusive_lookup}
+    assert set(inclusive_by_id) == {"channel-tv-a", "channel-inactive"}
+    assert inclusive_by_id["channel-inactive"].active is False
 
 
 def test_sql_channel_registry_update_inventory_missing_channel_raises():

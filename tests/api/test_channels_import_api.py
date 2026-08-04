@@ -367,9 +367,16 @@ def test_archived_channel_is_a_row_error_not_a_500():
     assert stored is not None and stored.active is False
 
 
+def _sole_record(audit_sink: InMemoryAuditSink, event_type: str):
+    """Return the exactly-one audit record of this type, failing loudly otherwise."""
+    matches = [r for r in audit_sink.records if r.event_type == event_type]
+    assert len(matches) == 1, f"expected exactly one {event_type}, got {len(matches)}"
+    return matches[0]
+
+
 def test_group_rows_require_manage_groups_permission():
     """A channels-only principal cannot mutate groups through the import."""
-    client, registry, _groups, audit_sink = create_import_app()
+    client, registry, _groups, _sink = create_import_app()
     channels_only = UserPrincipal(
         user_id="user-1",
         email="user@example.com",
@@ -436,9 +443,10 @@ def test_content_owner_is_normalized_at_the_boundary():
     # not a phantom UPDATE on every run.
     assert rerun.status_code == 200
     assert rerun.json()["counts"]["UNCHANGED"] == 1
-    summary = next(r for r in audit_sink.records if r.event_type == "CHANNEL_IMPORTED")
-    assert summary.entity_id == CONTENT_OWNER
-    assert summary.details["content_owner_id"] == CONTENT_OWNER
+    summaries = [r for r in audit_sink.records if r.event_type == "CHANNEL_IMPORTED"]
+    assert len(summaries) == 2, "each apply records one summary event"
+    assert all(s.entity_id == CONTENT_OWNER for s in summaries)
+    assert all(s.details["content_owner_id"] == CONTENT_OWNER for s in summaries)
 
 
 def test_per_channel_audit_carries_raw_token_and_authorizing_permission():
@@ -448,10 +456,10 @@ def test_per_channel_audit_carries_raw_token_and_authorizing_permission():
     post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
     post_import(client, import_csv(f"{CHANNEL_ID},Alpha News HD,TRUE"))
 
-    created = next(r for r in audit_sink.records if r.event_type == "CHANNEL_CREATED")
+    created = _sole_record(audit_sink, "CHANNEL_CREATED")
     assert created.details["view_revenue_raw"] == "Yes"
     assert created.permission == Permission.MANAGE_CHANNELS.value
-    updated = next(r for r in audit_sink.records if r.event_type == "CHANNEL_UPDATED")
+    updated = _sole_record(audit_sink, "CHANNEL_UPDATED")
     assert updated.details["view_revenue_raw"] == "TRUE"
     # The import authorizes on MANAGE_CHANNELS; the CHANNEL_UPDATED definition
     # default (manage_org_mapping) must be overridden in the record.
@@ -467,7 +475,7 @@ def test_absent_view_revenue_column_audits_raw_token_as_none():
         import_csv(f"{CHANNEL_ID},Alpha News", header="youtube_channel_id,channel_name"),
     )
 
-    created = next(r for r in audit_sink.records if r.event_type == "CHANNEL_CREATED")
+    created = _sole_record(audit_sink, "CHANNEL_CREATED")
     assert created.details["revenue_required"] is True
     assert created.details["view_revenue_raw"] is None
 

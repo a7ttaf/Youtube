@@ -29,6 +29,7 @@ from ums_smart_revenue.org.channel_import import (
     ChannelImportFormatError,
     ChannelImportOutcome,
     ChannelImportPlan,
+    ParsedChannelImport,
     parse_channel_import_csv,
     plan_channel_import,
 )
@@ -493,52 +494,10 @@ def import_channels(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {Permission.MANAGE_CHANNELS.value}",
         )
-    if cms_status not in IMPORTABLE_CMS_STATUSES:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Invalid cms_status: {cms_status!r}",
-        )
-    # Normalize once at the boundary so the plan, the registry writes, and the
-    # audit records all carry the exact value the SQL layer persists; a padded
-    # " owner-1 " must not diff against a stored "owner-1" as an UPDATE forever.
-    content_owner_id = content_owner_id.strip()
-    if not content_owner_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="content_owner_id is required",
-        )
-    if not reason.strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="reason is required",
-        )
-
-    raw = file.file.read(MAX_IMPORT_BYTES + 1)
-    if len(raw) > MAX_IMPORT_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"CSV exceeds {MAX_IMPORT_BYTES} bytes",
-        )
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="CSV must be UTF-8 encoded",
-        ) from exc
-
-    try:
-        parsed = parse_channel_import_csv(text)
-    except ChannelImportFormatError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
-        ) from exc
-
-    if len(parsed.rows) + len(parsed.errors) > MAX_IMPORT_ROWS:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"CSV exceeds {MAX_IMPORT_ROWS} rows",
-        )
+    content_owner_id = _validated_import_form(
+        content_owner_id=content_owner_id, cms_status=cms_status, reason=reason
+    )
+    parsed = _parse_import_upload(file)
 
     # Group creation/membership is MANAGE_GROUPS territory. MANAGE_CHANNELS and
     # MANAGE_GROUPS are independently grantable, so a roster carrying Group_ID
@@ -604,6 +563,62 @@ def import_channels(
         },
     )
     return payload
+
+
+def _validated_import_form(*, content_owner_id: str, cms_status: str, reason: str) -> str:
+    """Validate the import's scalar form fields; return the normalized owner.
+
+    The owner is stripped once at this boundary so the plan, the registry
+    writes, and the audit records all carry the exact value the SQL layer
+    persists; a padded " owner-1 " must not diff against a stored "owner-1"
+    as an UPDATE forever.
+    """
+    if cms_status not in IMPORTABLE_CMS_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid cms_status: {cms_status!r}",
+        )
+    content_owner_id = content_owner_id.strip()
+    if not content_owner_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="content_owner_id is required",
+        )
+    if not reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="reason is required",
+        )
+    return content_owner_id
+
+
+def _parse_import_upload(file: UploadFile) -> ParsedChannelImport:
+    """Read, decode, parse, and size-cap the uploaded roster CSV."""
+    raw = file.file.read(MAX_IMPORT_BYTES + 1)
+    if len(raw) > MAX_IMPORT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"CSV exceeds {MAX_IMPORT_BYTES} bytes",
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="CSV must be UTF-8 encoded",
+        ) from exc
+    try:
+        parsed = parse_channel_import_csv(text)
+    except ChannelImportFormatError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    if len(parsed.rows) + len(parsed.errors) > MAX_IMPORT_ROWS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"CSV exceeds {MAX_IMPORT_ROWS} rows",
+        )
+    return parsed
 
 
 def _import_plan_to_api(
