@@ -94,7 +94,7 @@ rounds included; the earlier `2463 passed` snapshot predated them).
 - `ruff check backend tests` — passed
 - `ruff format --check` on touched files — passed
 - 100-char guard on touched `.py` — no violations
-- Full suite `pytest -q` with Postgres — 2529 passed, 0 failed
+- Full suite `pytest -q` with Postgres — 2532 passed, 0 failed
 - Migration upgrade → downgrade → upgrade — passed, single head `20260803_0001`
 - `git diff --check` — clean
 
@@ -124,8 +124,21 @@ pass trivially.
 ## Rollback
 
 Revert the branch. `downgrade()` drops the additive `cms_group_id` column and
-its constraint. No data migration; no change to revenue, allocation,
-reconciliation, or connector behaviour.
+its constraint. No change to revenue, allocation, reconciliation, or connector
+behaviour.
+
+**The downgrade is DATA-DESTRUCTIVE once imports have run.** Dropping
+`channel_groups.cms_group_id` discards the CMS keys while leaving the groups
+and their memberships in place. On a later re-upgrade, a re-import cannot
+match the now-keyless groups and creates a SECOND group per CMS key — silently
+splitting finance group-scope rollups. Before downgrading such a database:
+
+```bash
+psql "$UMS_DATABASE_URL" -c "\copy (SELECT id, cms_group_id FROM channel_groups WHERE cms_group_id IS NOT NULL) TO 'cms_group_keys.csv' CSV HEADER"
+```
+
+On re-upgrade, backfill that file into the recreated column BEFORE any
+re-import (or merge/retire the duplicate groups a re-import would create).
 
 ## Next PR
 
