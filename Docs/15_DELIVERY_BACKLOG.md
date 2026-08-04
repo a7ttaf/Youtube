@@ -33,8 +33,8 @@ payment_name)`; the `audit_logs` DDL has 13 columns; the explain confidence wire
 
 **Repo-visibility note (2026-08-04, branch `chore/public-repo-hygiene`):** the
 repository is public as of 2026-08. Hygiene pass: `.gitignore` now blocks the
-workstation-only agent/session artifacts (`.tmp*`, `.worktrees/`, `.cursor/`,
-`.omo/`, `.agents/`, stray session scripts) from ever being committed, and the
+workstation-only session artifacts (`.tmp*`, `.worktrees/`, `.cursor/`,
+`.omo/`, stray session scripts) from ever being committed, and the
 2026-05-21 runlogs no longer carry the operator's personal email. Convention
 going forward: docs and fixtures must not embed operator-real identifiers
 (CMS content-owner ids, live revenue figures, personal emails) — use
