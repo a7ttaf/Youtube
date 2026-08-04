@@ -94,7 +94,7 @@ rounds included; the earlier `2463 passed` snapshot predated them).
 - `ruff check backend tests` — passed
 - `ruff format --check` on touched files — passed
 - 100-char guard on touched `.py` — no violations
-- Full suite `pytest -q` with Postgres — 2532 passed, 0 failed
+- Full suite `pytest -q` with Postgres — 2533 passed, 0 failed
 - Migration upgrade → downgrade → upgrade — passed, single head `20260803_0001`
 - `git diff --check` — clean
 

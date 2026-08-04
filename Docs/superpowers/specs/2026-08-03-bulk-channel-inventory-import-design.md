@@ -79,8 +79,16 @@ parse:
 - Blank or malformed `youtube_channel_id`.
 - Blank `channel_name`.
 - `view_revenue` present but blank, or an unrecognised token.
-- Duplicate `youtube_channel_id` within the file — **every** copy is flagged,
-  not silently last-wins.
+- **Conflicting** duplicate `youtube_channel_id` within the file — copies whose
+  inventory fields (`channel_name`, `view_revenue`) disagree are ambiguous
+  about what to persist, so **every** copy is flagged, not silently last-wins.
+  Copies that AGREE are legal and expected: CMS group membership is
+  many-to-many and the singular `group_id` column carries one association per
+  row, so a channel in two groups appears twice. The first copy owns the
+  CREATE/UPDATE/UNCHANGED inventory decision and each later copy plans as
+  `UNCHANGED` carrying its own `group_id` for membership attachment. (A
+  repeated ARCHIVED channel is the exception: every copy is an ERROR with the
+  reactivation reason, since no copy is writable.)
 
 ## Field mapping
 
@@ -256,7 +264,8 @@ an error.
 ## Testing
 
 **Pure core (no DB):** header casing and ordering, BOM handling, Arabic names,
-unknown header rejection, duplicate IDs flagged on every copy, channel-ID shape
+unknown header rejection, conflicting duplicate IDs flagged on every copy while
+agreeing duplicates survive as multi-group membership rows, channel-ID shape
 validation, all `view_revenue` token forms plus blank-when-present, absent
 column defaulting; planner outcomes for create/update/unchanged/error and
 field-diff correctness.
