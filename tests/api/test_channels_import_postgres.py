@@ -43,7 +43,12 @@ from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import AuditRecord
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
-from ums_smart_revenue.db.session import build_session_factory
+from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
+from ums_smart_revenue.db.org_models import YouTubeChannelORM
+from ums_smart_revenue.db.session import (
+    build_platform_session_factory,
+    build_session_factory,
+)
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -407,8 +412,15 @@ def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
     def failing_group_store(
         session: Annotated[Session, Depends(current_db_session)],
     ) -> _FailingGroupStore:
-        """Provide a group store armed to fail on the second lookup."""
-        store = _FailingGroupStore(SqlAlchemyChannelGroupRegistry(session), fail_on_call=2)
+        """Provide a group store armed to fail on row 2's APPLY lookup.
+
+        The route performs one archived-group planning lookup per distinct
+        group id (calls 1-2) BEFORE any write; the apply then looks each row's
+        group up again (row 1 = call 3, row 2 = call 4). Arming call 4 forces
+        the failure after row 1's channel+group writes and row 2's channel
+        write have already been flushed.
+        """
+        store = _FailingGroupStore(SqlAlchemyChannelGroupRegistry(session), fail_on_call=4)
         stores.append(store)
         return store
 
@@ -428,7 +440,7 @@ def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
         )
 
     assert response.status_code == 500, response.text
-    assert stores and stores[0].calls == 2, "the store must have failed mid-apply, not before it"
+    assert stores and stores[0].calls == 4, "the store must have failed mid-apply, not before it"
     # Three audit rows were really INSERTed (platform-lane elevated, same
     # transaction) before the failure: row 1's CHANNEL_CREATED, row 1's
     # GROUP_UPDATED (its group was created before the armed second lookup),
@@ -442,6 +454,56 @@ def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
     assert _channel_row(owner_engine, CHANNEL_ID) is None
     assert _channel_row(owner_engine, SECOND_ID) is None
     assert _audit_log_count(owner_engine) == before
+
+
+def test_locked_month_revenue_flip_is_rejected_409_on_postgres(
+    client: TestClient, owner_engine: sa.Engine, pg_url: str
+) -> None:
+    """Enabling view_revenue while a LOCKED month lacks facts is 409, not applied.
+
+    The registry guard (ChannelRevenueRequirementLockedMonthError) fires
+    mid-apply; the route translates it to 409 and the single-transaction
+    wiring rolls the whole import back — flag unchanged, zero audit rows.
+    """
+    lock_month = "2099-09"
+    with owner_engine.begin() as conn:
+        conn.execute(sa.text("DELETE FROM finance_month_close WHERE month = :m"), {"m": lock_month})
+    factory = build_platform_session_factory(pg_url)
+    token = TENANT_CTX.set(_tenant(TENANT_A, "ums"))
+    try:
+        with factory() as session:
+            session.add(FinanceMonthCloseORM(month=lock_month, status="LOCKED"))
+            session.add(
+                YouTubeChannelORM(
+                    id=UUID("00000000-0000-0000-0000-00000000e159"),
+                    youtube_channel_id=CHANNEL_ID,
+                    channel_name="Alpha News",
+                    cms_status="INSIDE_CMS",
+                    content_owner_id=CONTENT_OWNER,
+                    revenue_required=False,
+                    revenue_source_status="PERFORMANCE_ONLY",
+                    active=True,
+                )
+            )
+            session.commit()
+    finally:
+        TENANT_CTX.reset(token)
+    before = _audit_log_count(owner_engine)
+
+    try:
+        response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+        assert response.status_code == 409, response.text
+        assert "revenue_required cannot be enabled" in response.json()["detail"]
+        assert lock_month in response.json()["detail"]
+        stored = _channel_row(owner_engine, CHANNEL_ID)
+        assert stored is not None and stored.revenue_required is False
+        assert _audit_log_count(owner_engine) == before
+    finally:
+        with owner_engine.begin() as conn:
+            conn.execute(
+                sa.text("DELETE FROM finance_month_close WHERE month = :m"), {"m": lock_month}
+            )
 
 
 def test_tenant_commit_failure_persists_no_audit_rows_on_postgres(

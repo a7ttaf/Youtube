@@ -10,7 +10,7 @@ from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
+from ums_smart_revenue.auth.audit_service import AuditRecord, InMemoryAuditSink
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
@@ -367,7 +367,7 @@ def test_archived_channel_is_a_row_error_not_a_500():
     assert stored is not None and stored.active is False
 
 
-def _sole_record(audit_sink: InMemoryAuditSink, event_type: str):
+def _sole_record(audit_sink: InMemoryAuditSink, event_type: str) -> AuditRecord:
     """Return the exactly-one audit record of this type, failing loudly otherwise."""
     matches = [r for r in audit_sink.records if r.event_type == event_type]
     assert len(matches) == 1, f"expected exactly one {event_type}, got {len(matches)}"
@@ -517,3 +517,97 @@ def test_unchanged_rows_do_not_emit_duplicate_group_audit():
 
     group_records = [r for r in audit_sink.records if r.event_type == "GROUP_UPDATED"]
     assert [r.details["action"] for r in group_records] == ["group_created"]
+
+
+def test_archived_group_is_a_row_error_not_a_write():
+    """A roster row targeting an archived CMS group fails the file closed."""
+    client, registry, groups, audit_sink = create_import_app()
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    # Create the group through one import, then archive it.
+    first = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header))
+    assert first.status_code == 200
+    group = groups.get_group_by_cms_id("cms-tv")
+    assert group is not None
+    groups.update_group(group_id=group.id, name=None, active=False)
+    audit_sink.records.clear()
+    second_channel = "UC3Dci3BzZXDo4jw4dU8KqWg"
+
+    response = post_import(
+        client, import_csv(f"{second_channel},Beta News,cms-tv,Yes", header=header)
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["counts"]["ERROR"] == 1
+    assert "archived" in detail["rows"][0]["reason"]
+    assert registry.get_channel(second_channel) is None
+    assert audit_sink.records == []
+    archived = groups.get_group_by_cms_id("cms-tv")
+    assert archived is not None and archived.channel_ids == (CHANNEL_ID,)
+
+
+def test_channel_audit_details_carry_name_and_field_diff():
+    """The durable audit trail records what changed with old and new values."""
+    client, _registry, _groups, audit_sink = create_import_app()
+
+    post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+    post_import(client, import_csv(f"{CHANNEL_ID},Alpha News HD,Yes"))
+
+    created = _sole_record(audit_sink, "CHANNEL_CREATED")
+    assert created.details["channel_name"] == "Alpha News"
+    assert created.details["changes"] == {}
+    updated = _sole_record(audit_sink, "CHANNEL_UPDATED")
+    assert updated.details["channel_name"] == "Alpha News HD"
+    assert updated.details["changes"] == {
+        "channel_name": {"from": "Alpha News", "to": "Alpha News HD"}
+    }
+
+
+def test_import_rejects_missing_auth_headers():
+    """No trusted-gateway identity means 401 before any parsing or writes."""
+    client, registry, _groups, audit_sink = create_import_app()
+
+    response = client.post(
+        "/channels/import",
+        files={"file": ("roster.csv", import_csv(f"{CHANNEL_ID},Alpha News,Yes"), "text/csv")},
+        data={
+            "content_owner_id": CONTENT_OWNER,
+            "cms_status": "INSIDE_CMS",
+            "dry_run": "false",
+            "reason": "Quarterly CMS roster load",
+        },
+    )
+
+    assert response.status_code == 401
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert audit_sink.records == []
+
+
+def test_import_rejects_unknown_role_header():
+    """An unknown role fails closed as 400 before any parsing or writes."""
+    client, registry, _groups, _sink = create_import_app()
+
+    response = post_import(
+        client,
+        import_csv(f"{CHANNEL_ID},Alpha News,Yes"),
+        headers=auth_headers("not_a_role", "global"),
+    )
+
+    assert response.status_code == 400
+    assert registry.get_channel(CHANNEL_ID) is None
+
+
+def test_import_rejects_global_role_without_manage_channels():
+    """A global finance viewer holds no MANAGE_CHANNELS and gets 403."""
+    client, registry, _groups, audit_sink = create_import_app()
+
+    response = post_import(
+        client,
+        import_csv(f"{CHANNEL_ID},Alpha News,Yes"),
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: registry.manage_channels"
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert audit_sink.records == []
