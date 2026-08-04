@@ -127,7 +127,7 @@ All run locally against Postgres 18 (`ums-mig-pg-test`, port 55432).
 | `ruff check backend tests scripts` | All checks passed |
 | `ruff format --check` (19 touched files) | All formatted |
 | 100-char guard on touched `.py` | No violations |
-| Full suite (`pytest -q`, PG set) | 2510 passed, 0 failed (post-review rounds) |
+| Full suite (`pytest -q`, PG set) | 2520 passed, 0 failed (post-review rounds) |
 | Migration upgrade→downgrade→upgrade | Passed, single head `20260803_0001` |
 | `git diff --check` | Clean |
 

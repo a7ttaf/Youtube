@@ -65,7 +65,31 @@ Date: 2026-08-03
   `reason_required=True` and the audit service raises without one, so every
   upsert-update row would otherwise have returned a 500.
 
+## Month-close behavior (changed during review hardening)
+
+Review rounds added three coordinated finance-close changes so bulk imports
+cannot invalidate finalized months:
+
+- Close readiness is now EFFECTIVE-DATED for LOCKED months: the missing-fact
+  count only evaluates channels with `created_at <= locked_at`, so a channel
+  imported after a month was finalized no longer retroactively flips that
+  month to `MISSING_REVENUE_FACTS`. OPEN-month evaluation (including the
+  lock-time recheck) is unchanged, so the lock gate itself is not weakened.
+- A new tenant-wide advisory guard key (`REVENUE_REQUIREMENT_GUARD_MONTH`)
+  serializes registry writes that turn `revenue_required` on — both the
+  OFF→ON inventory flip and a revenue-required CREATE (which stamps
+  `created_at` post-guard with the same clock as `locked_at`) — against the
+  lock-time readiness recheck, which acquires the same key after its
+  per-month key (acyclic order, deadlock-free, no-op off Postgres).
+- The OFF→ON flip guard mirrors readiness's effective dating: months locked
+  BEFORE the channel existed never block the flip; months locked after it
+  that lack a fact still do. Risk/rollback note: reverting only one side of
+  this pair (readiness cutoff vs flip guard) reintroduces the asymmetry —
+  revert them together.
+
 ## Not changed
 
-No change to revenue calculation, allocation, reconciliation, month-close,
-exports, connector behaviour, or existing permission semantics.
+No change to revenue calculation, allocation, reconciliation, exports,
+connector behaviour, or existing permission semantics. Month-close LOCK/UNLOCK
+endpoints, statuses, and authorization are untouched — only the readiness
+count's effective dating and the guard-key serialization described above.
