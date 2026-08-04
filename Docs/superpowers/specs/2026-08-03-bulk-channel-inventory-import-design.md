@@ -202,8 +202,19 @@ exists to prevent.
 preview is a read, matching the no-audit precedent of `GET /revenue/scopes` and
 `GET /org-units`.
 
-`dry_run=false` executes all `CREATE` and `UPDATE` outcomes in a single
-transaction. `UNCHANGED` rows are skipped.
+`dry_run=false` executes the plan in a single transaction. `CREATE` rows
+create; `UPDATE` **and `UNCHANGED`** rows BOTH write through
+`update_inventory` at the write boundary — an UNCHANGED classification came
+from a possibly-stale planning snapshot, so skipping the write would let a
+change committed after planning survive instead of the authoritative roster
+(the file wins). The registry's locked re-read reports what was actually
+replaced, and `CHANNEL_UPDATED` is audited exactly when that real diff is
+non-empty, so a genuinely unchanged re-import stays audit-quiet. All three
+outcomes also reach group-membership reconciliation: outcomes are computed
+only from inventory fields, so treating UNCHANGED as a no-op would silently
+drop a `Group_ID` column added on re-import. Rows execute in a deterministic
+order — inventory writes by channel id, then membership by (group key,
+channel id) — so overlapping imports queue instead of deadlocking.
 
 ## Architecture
 
