@@ -234,3 +234,18 @@ Docs/Youtube Project/
 
 # Vite dev cache
 .vite/
+
+# Local operator/session artifacts (workstation-only; never commit)
+.tmp/
+.tmp*
+.worktrees/
+.cursor/
+.omo/
+.agents/
+user_info.json
+branch_info.json
+check_git.py
+final_state.py
+post_t13.py
+rate_limit.cmd
+nul
