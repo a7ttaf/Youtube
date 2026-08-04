@@ -164,8 +164,15 @@ def apply_channel_import(
     inventory fields, so treating UNCHANGED as a no-op would also drop a
     Group_ID column added on re-import. ERROR rows are skipped entirely. One
     CHANNEL_IMPORTED summary event closes the trail.
+
+    Rows are EXECUTED in a deterministic (channel id, group id) order rather
+    than CSV order: every row write takes a channel row lock (and every group
+    mutation a group row lock) held until commit, so two imports listing the
+    same channels in opposite file order would otherwise each hold what the
+    other waits for and PostgreSQL would abort one as a deadlock. The response
+    payload and per-row numbering still follow the operator's file.
     """
-    for entry in plan.entries:
+    for entry in _channel_write_order(plan.entries):
         channel_id = entry.youtube_channel_id
         if channel_id is None or entry.channel_name is None:
             continue
@@ -226,32 +233,39 @@ def apply_channel_import(
                     applied_changes=applied_changes,
                 ),
             )
-        if entry.group_id:
-            group_change = _attach_group_membership(
-                groups, cms_group_id=entry.group_id, channel_id=channel_id
+    # Group membership runs as a SECOND pass, ordered by (group key, channel
+    # id): every channel row lock is taken before any group row lock, and both
+    # resource classes are visited in a stable order, so overlapping imports
+    # can never hold one class while waiting on the other's.
+    for entry in _group_write_order(plan.entries):
+        channel_id = entry.youtube_channel_id
+        if channel_id is None or entry.channel_name is None or not entry.group_id:
+            continue
+        group_change = _attach_group_membership(
+            groups, cms_group_id=entry.group_id, channel_id=channel_id
+        )
+        # A group creation or membership addition is a finance-scope
+        # mutation; without its own GROUP_UPDATED record an inventory-
+        # UNCHANGED row's group change would be invisible in the audit
+        # trail (the summary event carries only counts).
+        if group_change is not None:
+            group_action, group = group_change
+            record_audit_event(
+                sink=audit_sink,
+                actor=actor,
+                event_type=AuditEventType.GROUP_UPDATED,
+                entity_type="channel_group",
+                entity_id=group.id,
+                scope=scope,
+                reason=reason,
+                details={
+                    "action": group_action,
+                    "cms_group_id": entry.group_id,
+                    "group_type": group.group_type,
+                    "channel_id": channel_id,
+                    "source": "bulk_import",
+                },
             )
-            # A group creation or membership addition is a finance-scope
-            # mutation; without its own GROUP_UPDATED record an inventory-
-            # UNCHANGED row's group change would be invisible in the audit
-            # trail (the summary event carries only counts).
-            if group_change is not None:
-                group_action, group = group_change
-                record_audit_event(
-                    sink=audit_sink,
-                    actor=actor,
-                    event_type=AuditEventType.GROUP_UPDATED,
-                    entity_type="channel_group",
-                    entity_id=group.id,
-                    scope=scope,
-                    reason=reason,
-                    details={
-                        "action": group_action,
-                        "cms_group_id": entry.group_id,
-                        "group_type": group.group_type,
-                        "channel_id": channel_id,
-                        "source": "bulk_import",
-                    },
-                )
     record_audit_event(
         sink=audit_sink,
         actor=actor,
@@ -261,11 +275,54 @@ def apply_channel_import(
         scope=scope,
         reason=reason,
         details={
-            "filename": filename,
+            # The multipart filename is attacker-controlled and lands in
+            # audit_logs.details (JSONB); PostgreSQL rejects U+0000 inside a
+            # JSON string, so an unsanitized name would roll an otherwise
+            # valid import back as an unhandled 500 on this final append.
+            "filename": _safe_audit_filename(filename),
             "content_owner_id": content_owner_id,
             "cms_status": cms_status,
             "counts": dict(plan.counts),
         },
+    )
+
+
+def _safe_audit_filename(filename: str | None) -> str | None:
+    """Strip NULs from an upload filename so it can persist in JSONB details."""
+    if filename is None:
+        return None
+    return filename.replace("\x00", "")
+
+
+def _channel_write_order(
+    entries: tuple[ChannelImportPlanEntry, ...],
+) -> list[ChannelImportPlanEntry]:
+    """Order inventory writes by channel id, file order within a channel.
+
+    Channel id first gives overlapping imports a consistent lock order (the
+    deadlock this closes); ``row_number`` second keeps a repeated channel's
+    first copy — the one owning the CREATE/UPDATE decision — ahead of its
+    membership-only copies, which the registry would otherwise reject as an
+    update to a channel this import has not created yet.
+    """
+    return sorted(
+        entries,
+        key=lambda entry: (entry.youtube_channel_id or "", entry.row_number),
+    )
+
+
+def _group_write_order(
+    entries: tuple[ChannelImportPlanEntry, ...],
+) -> list[ChannelImportPlanEntry]:
+    """Order membership writes by (CMS group key, channel id).
+
+    A stable order over the group rows, taken in a pass that runs strictly
+    after every channel write, so two imports never hold a lock of one
+    resource class while waiting on the other's.
+    """
+    return sorted(
+        entries,
+        key=lambda entry: (entry.group_id or "", entry.youtube_channel_id or ""),
     )
 
 

@@ -157,6 +157,77 @@ def test_truly_unchanged_row_stays_audit_quiet() -> None:
     assert [r.event_type for r in sink.records] == ["CHANNEL_IMPORTED"]
 
 
+def test_rows_apply_in_deterministic_channel_order() -> None:
+    """Execution order is (channel id, group id), not CSV order.
+
+    Every row write takes a row lock held to commit, so two imports listing
+    the same channels in opposite file order would deadlock without a total
+    order (review #159 r3714142167).
+    """
+    second_id = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    registry = ChannelRegistry([])
+    sink = InMemoryAuditSink()
+    entries = (
+        # CSV order is reversed relative to channel-id order.
+        ChannelImportPlanEntry(
+            row_number=1,
+            youtube_channel_id=second_id,
+            outcome=ChannelImportOutcome.CREATE,
+            channel_name="Second",
+            group_id=None,
+            revenue_required=True,
+        ),
+        ChannelImportPlanEntry(
+            row_number=2,
+            youtube_channel_id=CHANNEL_ID,
+            outcome=ChannelImportOutcome.CREATE,
+            channel_name="First",
+            group_id=None,
+            revenue_required=True,
+        ),
+    )
+    counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
+    counts[ChannelImportOutcome.CREATE.value] = 2
+
+    _apply(
+        ChannelImportPlan(entries=entries, counts=counts), registry, ChannelGroupRegistry(), sink
+    )
+
+    created = [r.entity_id for r in sink.records if r.event_type == "CHANNEL_CREATED"]
+    assert created == sorted([CHANNEL_ID, second_id])
+
+
+def test_nul_in_upload_filename_does_not_reach_audit_details() -> None:
+    """A NUL-bearing filename is sanitized, not persisted into JSONB details."""
+    registry = ChannelRegistry([])
+    sink = InMemoryAuditSink()
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id=None,
+        revenue_required=True,
+    )
+
+    apply_channel_import(
+        _plan(entry),
+        registry=registry,
+        groups=ChannelGroupRegistry(),
+        audit_sink=sink,
+        actor=ACTOR,
+        scope=AccessScope.global_scope(),
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        reason="Quarterly CMS roster load",
+        filename="roster\x00.csv",
+    )
+
+    summary = next(r for r in sink.records if r.event_type == "CHANNEL_IMPORTED")
+    assert summary.details["filename"] == "roster.csv"
+    assert "\x00" not in summary.details["filename"]
+
+
 class _ArchivedAtApplyGroups(ChannelGroupRegistry):
     """Simulate a group archived between planning and the apply lookup."""
 
