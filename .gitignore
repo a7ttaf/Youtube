@@ -236,15 +236,15 @@ Docs/Youtube Project/
 .vite/
 
 # Local operator/session artifacts (workstation-only; never commit)
-.tmp/
-.tmp*
-.worktrees/
-.cursor/
-.omo/
-user_info.json
-branch_info.json
-check_git.py
-final_state.py
-post_t13.py
-rate_limit.cmd
-nul
+/.tmp/
+/.tmp*
+/.worktrees/
+/.cursor/
+/.omo/
+/user_info.json
+/branch_info.json
+/check_git.py
+/final_state.py
+/post_t13.py
+/rate_limit.cmd
+/nul
