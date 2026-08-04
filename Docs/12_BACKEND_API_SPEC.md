@@ -42,11 +42,40 @@ Database authorization rejects unknown users and disabled users before route cod
 ```http
 GET /channels
 POST /channels
+POST /channels/import
 PATCH /channels/{youtube_channel_id}/mapping
 PATCH /channels/{youtube_channel_id}/content-owner
 GET /channels/issues
 GET /channels/outside-cms
 ```
+
+`POST /channels/import` bulk-loads a CMS channel roster from a multipart CSV
+upload. Form fields: `file` (CSV, UTF-8, max 2 MiB / 5000 data rows; columns
+`youtube_channel_id`, `channel_name`, optional `group_id`, `view_revenue`),
+`content_owner_id` (required, stripped at the boundary), `dry_run` (bool),
+`reason` (required audit reason), and `cms_status` (default `INSIDE_CMS`,
+limited to `INSIDE_CMS`/`OUTSIDE_CMS`/`UNKNOWN`). Authorization is
+`registry.manage_channels` at GLOBAL scope (a roster is not scoped to one
+company); a roster carrying any `group_id` additionally requires
+`registry.manage_groups` at global scope because imports must not bypass the
+group API's checks. The response (`dry_run` and apply alike) is the declared
+`ChannelImportResult` model: `counts` by outcome plus per-row entries carrying
+`row_number`, `youtube_channel_id`, `outcome` (`CREATE`/`UPDATE`/`UNCHANGED`/
+`ERROR`), the planned `channel_name`/`group_id`/`revenue_required`, the
+field-level `changes` diff, and a `reason` for ERROR rows. A dry run writes
+nothing (no audit event). The apply is all-or-nothing: any ERROR row —
+malformed id/name/token, duplicate id, row wider than the header, archived
+channel, or archived CMS group — rejects the file as 422 before any write.
+Malformed CSV structure (unterminated quotes, duplicate or unknown header
+columns) rejects the whole file as 422; oversize payloads return 413. Flipping
+`view_revenue` on for a channel that lacks facts in a LOCKED finance month is
+rejected 409 (close-readiness guard), rolling the whole import back. Audit:
+per-channel `CHANNEL_CREATED`/`CHANNEL_UPDATED` events (tagged
+`permission=registry.manage_channels` via override, carrying the field diff
+and the raw `view_revenue` token), one `GROUP_UPDATED` per group
+creation/membership addition, and one `CHANNEL_IMPORTED` summary — all
+committed in the SAME transaction as the channel writes, so a failed apply
+leaves no audit rows.
 
 `PATCH /channels/{youtube_channel_id}/content-owner` sets or clears a channel's
 CMS `content_owner_id` — the value `list_target_channels` matches against the

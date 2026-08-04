@@ -68,7 +68,11 @@ by accident), `reason` (required — see Audit below).
 `POST /channels` scopes to `AccessScope.company(...)`, which does not extend
 here: this import deliberately leaves `primary_org_unit_id` unset, so there is
 no company to scope against, and the known unmapped-channel global-grant
-dead-zone applies.
+dead-zone applies. A roster carrying any nonblank `group_id` additionally
+requires `MANAGE_GROUPS` at global scope: the two permissions are
+independently grantable, and group creation/membership must not bypass the
+group API's authorization. Provision operators who import grouped rosters
+with BOTH grants, or their grouped imports return 403.
 
 **CSV contract.** Required `youtube_channel_id` (validated
 `^UC[A-Za-z0-9_-]{22}$`) and `channel_name`. Optional `group_id` and
@@ -164,8 +168,20 @@ error. Fixed in `424d4daa`: membership is reconciled for `CREATE`, `UPDATE`, and
 ## Rollback
 
 Revert the branch. The only schema change is the additive nullable column and
-its constraint; `downgrade()` drops both. No data migration, and no change to
-existing revenue, allocation, reconciliation, or connector behaviour.
+its constraint; `downgrade()` drops both. No change to existing revenue,
+allocation, reconciliation, or connector behaviour.
+
+**Downgrade is data-destructive once imports have run.** Dropping
+`channel_groups.cms_group_id` discards the CMS group keys while leaving the
+groups and memberships in place; if the schema is later re-upgraded and a
+roster re-imported, `get_group_by_cms_id` cannot find the now-keyless legacy
+groups and creates a SECOND group per CMS key. Before downgrading a database
+where imports have populated the column, export a backup of
+`(channel_groups.id, cms_group_id)` — e.g.
+`COPY (SELECT id, cms_group_id FROM channel_groups WHERE cms_group_id IS NOT
+NULL) TO ...` — and on re-upgrade backfill it into the recreated column BEFORE
+any re-import (or merge/retire the duplicate groups it would otherwise
+create).
 
 ## Next PR recommendation
 

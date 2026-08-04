@@ -45,11 +45,16 @@ UCB6sc84dcg6VQGB_d89sx2g,CBC Egypt,cms-tv,Yes
 UC3Dci3BzZXDo4jw4dU8KqWg,CBC Drama,cms-tv,Yes
 ```
 
-`youtube_channel_id` and `channel_name` are required; `group_id` and
-`view_revenue` are optional and may be present on some rows only. Headers are
-case-insensitive and order-independent. **An unrecognised header is rejected** —
-that is deliberate, because a silently ignored column would import channels with
-the wrong `cms_status`, and the connector then skips them with no error.
+`youtube_channel_id` and `channel_name` are required. The optional columns
+behave differently per row: `group_id` may be blank on some rows (those rows
+simply skip group attachment), but **`view_revenue` must be populated on every
+data row once its header is present** — a blank cell is rejected as
+`view_revenue is present but blank` and blocks the whole apply. To use the
+required-by-default rule instead, omit the `view_revenue` header entirely.
+Headers are case-insensitive and order-independent. **An unrecognised header
+is rejected** — that is deliberate, because a silently ignored column would
+import channels with the wrong `cms_status`, and the connector then skips them
+with no error.
 
 Export as UTF-8. A BOM is fine (Excel adds one). Arabic channel names are fine.
 
@@ -83,21 +88,26 @@ Two things cost time this session; both are now pinned in the plan.
 
 ## Validation performed
 
-All local, against Postgres 18. Current to the final commit.
+All local, against Postgres 18. Current to the final commit (review-fix
+rounds included; the earlier `2463 passed` snapshot predated them).
 
-- `ruff check backend tests scripts` — passed
-- `ruff format --check` on all 19 touched files — passed
+- `ruff check backend tests` — passed
+- `ruff format --check` on touched files — passed
 - 100-char guard on touched `.py` — no violations
-- Full suite `pytest -q` with Postgres — 2463 passed, 0 failed
+- Full suite `pytest -q` with Postgres — 2497 passed, 0 failed
 - Migration upgrade → downgrade → upgrade — passed, single head `20260803_0001`
 - `git diff --check` — clean
 
 The Postgres tier proves two things by measurement rather than argument: tenant
 isolation under RLS (a bare `SELECT` with no `WHERE tenant_id` under tenant B's
-lane returns nothing), and that a mid-apply failure rolls back **both** the
-tenant session's channel rows and the separate platform session's audit rows.
-The rollback test carries an anti-vacuity guard asserting the audit rows
-physically existed in-flight before the failure, so it cannot pass trivially.
+lane returns nothing), and audit atomicity: the import's audit sink
+(`PlatformLaneAuditSink`) writes `audit_logs` through the SAME tenant
+transaction as the channel writes, elevating to `app_platform` per append, so
+a mid-apply failure rolls channel rows and audit rows back together and a
+tenant commit that fails to persist takes its audit rows with it (both proven
+by dedicated tests). The rollback test carries an anti-vacuity guard asserting
+the audit rows physically existed in-flight before the failure, so it cannot
+pass trivially.
 
 ## Known limitations
 

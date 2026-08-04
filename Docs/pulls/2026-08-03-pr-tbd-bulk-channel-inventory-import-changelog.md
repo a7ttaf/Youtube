@@ -9,7 +9,10 @@ Date: 2026-08-03
 - **`POST /channels/import`** — bulk channel roster load from operator CSV.
   `multipart/form-data` with `file`, `content_owner_id`, `cms_status`
   (default `INSIDE_CMS`), `dry_run`, and `reason`. Gated on `MANAGE_CHANNELS`
-  at global scope, fail-closed. Returns a per-row plan
+  at global scope, fail-closed; a roster carrying any `group_id` value
+  additionally requires `MANAGE_GROUPS` at global scope (the permissions are
+  independently grantable, and imports must not bypass the group API's
+  checks). Returns a per-row plan
   (`CREATE`/`UPDATE`/`UNCHANGED`/`ERROR`) with counts and field-level diffs.
 - **`backend/ums_smart_revenue/org/channel_import.py`** — pure, DB-free core:
   - `parse_channel_import_csv(text)` — UTF-8/BOM-tolerant CSV parsing,
