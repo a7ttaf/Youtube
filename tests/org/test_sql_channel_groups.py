@@ -810,3 +810,29 @@ def test_list_archived_cms_group_ids_is_tenant_scoped_and_bulk() -> None:
     assert registry.get_group_by_cms_id("cms-active") is not None
     assert active.cms_group_id == "cms-active"
     assert registry.list_archived_cms_group_ids(set()) == set()
+
+
+def test_create_group_duplicate_cms_key_raises_typed_conflict() -> None:
+    """Losing the per-tenant cms_group_id uniqueness race is a typed conflict.
+
+    Two concurrent imports can both see a CMS key as missing and race the
+    INSERT; the loser's IntegrityError must surface as
+    ``ChannelGroupConflictError`` (route: retryable 409), never a raw 500.
+    The key is unique PER TENANT, so another tenant reusing it stays legal.
+    """
+    from ums_smart_revenue.org.channel_groups import ChannelGroupConflictError
+
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    other_registry = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID)
+
+    registry.create_group(name="TV", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv")
+    other_registry.create_group(
+        name="Other TV", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv"
+    )
+
+    with pytest.raises(ChannelGroupConflictError, match="cms-tv"):
+        registry.create_group(
+            name="TV Again", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv"
+        )

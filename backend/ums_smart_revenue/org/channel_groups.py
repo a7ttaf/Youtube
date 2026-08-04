@@ -3,6 +3,16 @@ from typing import Protocol
 from uuid import uuid4
 
 
+class ChannelGroupConflictError(ValueError):
+    """A group write lost a uniqueness race (duplicate per-tenant cms_group_id).
+
+    Raised instead of letting the database IntegrityError escape as a 500:
+    two concurrent imports (or an import racing a group create) can both see
+    a CMS key as missing and try to create it. The API layer maps this to a
+    retryable 409.
+    """
+
+
 @dataclass(frozen=True)
 class ChannelGroupEntry:
     id: str
@@ -133,6 +143,12 @@ class ChannelGroupRegistry:
         channel_ids: list[str],
         cms_group_id: str | None = None,
     ) -> ChannelGroupEntry:
+        # Parity with the SQL store's per-tenant unique key: a duplicate CMS
+        # key must fail typed here too, not silently create a second group.
+        if cms_group_id is not None and self.get_group_by_cms_id(cms_group_id) is not None:
+            raise ChannelGroupConflictError(
+                f"channel group already exists for cms_group_id: {cms_group_id}"
+            )
         group = ChannelGroupEntry(
             id=str(uuid4()),
             name=name,

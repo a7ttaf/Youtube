@@ -9,13 +9,16 @@ from ums_smart_revenue.db.org_models import (
     ChannelGroupORM,
     YouTubeChannelORM,
 )
-from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
+from ums_smart_revenue.org.channel_groups import ChannelGroupConflictError, ChannelGroupEntry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _SQLITE_DUPLICATE_GROUP_MEMBER_ERROR = (
     "unique constraint failed: channel_group_members.group_id, channel_group_members.channel_id"
+)
+_SQLITE_DUPLICATE_CMS_GROUP_ERROR = (
+    "unique constraint failed: channel_groups.tenant_id, channel_groups.cms_group_id"
 )
 
 
@@ -89,10 +92,10 @@ class SqlAlchemyChannelGroupRegistry:
     # Blast Radius: Channel-group membership and therefore finance group-scope
     #   selection. No finance totals, no allocation.
     # Connections:
-    #   - File: backend/ums_smart_revenue/api/channels.py -> archived-group
-    #     planning gate (_archived_group_ids).
     #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
-    #     membership attachment for non-archived groups.
+    #     plan_channel_import_with_stores (archived-group planning gate via
+    #     list_archived_cms_group_ids) and membership attachment for
+    #     non-archived groups (write-boundary for_update recheck here).
     # ========================================================================
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
@@ -113,6 +116,23 @@ class SqlAlchemyChannelGroupRegistry:
             return None
         return self._to_entry(row)
 
+    # ========================================================================
+    # Purpose: Bulk-classify a roster's CMS group keys by archived state so
+    #   import planning can fail rows targeting archived groups closed without
+    #   a lookup-per-group query storm.
+    # Database/ORM: ChannelGroupORM (read-only; cms_group_id column under the
+    #   per-tenant unique key). No membership loading, no writes.
+    # Standards: One bounded SELECT for the whole key set; tenant-scoped;
+    #   unknown keys are simply absent from the result (planning treats them
+    #   as creatable). Read-only -> RLS-safe, no platform lane.
+    # Blast Radius: Import planning's archived-group per-row errors, which
+    #   gate finance-scope group mutations. No group writes, no audit.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     plan_channel_import_with_stores feeds the result to the planner.
+    #   - File: backend/ums_smart_revenue/org/channel_import.py ->
+    #     plan_channel_import fails rows whose key lands in this set.
+    # ========================================================================
     def list_archived_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
         """Return the subset of CMS keys whose existing group is archived.
 
@@ -169,6 +189,13 @@ class SqlAlchemyChannelGroupRegistry:
         channel_ids: list[str],
         cms_group_id: str | None = None,
     ) -> ChannelGroupEntry:
+        """Create a group row plus membership, raising typed on a CMS-key race.
+
+        On ``ChannelGroupConflictError`` the underlying IntegrityError has
+        already aborted the Postgres transaction: the session is unusable
+        until rolled back, so callers must fail the request (as the import
+        and groups routes do), never catch-and-retry on the same session.
+        """
         channel_rows = self._channel_rows_by_external_ids(channel_ids)
         row = ChannelGroupORM(
             id=uuid4(),
@@ -179,7 +206,18 @@ class SqlAlchemyChannelGroupRegistry:
             cms_group_id=cms_group_id,
         )
         self._session.add(row)
-        self._session.flush()
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            # Two concurrent imports can both see a CMS key as missing and race
+            # this INSERT; the per-tenant unique key makes the loser fail here.
+            # Translate to the typed conflict (route: 409, retryable) instead
+            # of letting the IntegrityError escape as a 500.
+            if not _is_duplicate_cms_group_integrity_error(exc):
+                raise
+            raise ChannelGroupConflictError(
+                f"channel group already exists for cms_group_id: {cms_group_id}"
+            ) from exc
         self._replace_member_rows(row.id, channel_rows)
         self._session.flush()
         return self._to_entry(row)
@@ -426,4 +464,15 @@ def _is_duplicate_group_member_integrity_error(exc: IntegrityError) -> bool:
     return (
         "channel_group_members_pkey" in constraint_name
         or _SQLITE_DUPLICATE_GROUP_MEMBER_ERROR in error_text
+    )
+
+
+def _is_duplicate_cms_group_integrity_error(exc: IntegrityError) -> bool:
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    constraint_name = str(getattr(diag, "constraint_name", "") or "").lower()
+    error_text = f"{exc.orig!s} {exc!s}".lower()
+    return (
+        "uq_channel_groups_tenant_id_cms_group_id" in constraint_name
+        or "uq_channel_groups_tenant_id_cms_group_id" in error_text
+        or _SQLITE_DUPLICATE_CMS_GROUP_ERROR in error_text
     )

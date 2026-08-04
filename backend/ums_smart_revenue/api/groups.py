@@ -16,6 +16,7 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupConflictError,
     ChannelGroupEntry,
     ChannelGroupRegistryStore,
 )
@@ -132,6 +133,12 @@ def create_group(
         )
     except KeyError as exc:
         raise _registry_not_found(exc) from exc
+    # Unreachable while this route never passes cms_group_id (NULL keys are
+    # distinct under the per-tenant unique constraint), but the store's typed
+    # uniqueness conflict must map to 409 the day the request model grows the
+    # field — not resurface as the 500 the import route already closed.
+    except ChannelGroupConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     record = _audit_group_change(
         audit_sink=audit_sink,
         user=user,

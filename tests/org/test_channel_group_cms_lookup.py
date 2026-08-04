@@ -1,6 +1,8 @@
 """In-memory channel-group store: CMS key round-trip."""
 
-from ums_smart_revenue.org.channel_groups import ChannelGroupRegistry
+import pytest
+
+from ums_smart_revenue.org.channel_groups import ChannelGroupConflictError, ChannelGroupRegistry
 
 
 def test_create_group_records_cms_group_id() -> None:
@@ -45,3 +47,14 @@ def test_list_archived_cms_group_ids_returns_only_archived_keys() -> None:
 
     assert result == {"cms-archived"}
     assert registry.get_group_by_cms_id("cms-active") == active
+
+
+def test_create_group_duplicate_cms_key_raises_typed_conflict() -> None:
+    """Parity with the SQL store's per-tenant unique key on cms_group_id."""
+    registry = ChannelGroupRegistry()
+    registry.create_group(name="TV", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv")
+
+    with pytest.raises(ChannelGroupConflictError, match="cms-tv"):
+        registry.create_group(
+            name="TV Again", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv"
+        )
