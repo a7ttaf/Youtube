@@ -27,6 +27,7 @@ from ums_smart_revenue.finance.month_close import (
     acquire_finance_month_advisory_lock,
     get_or_create_month_close_row,
 )
+from ums_smart_revenue.finance.month_close_locks import REVENUE_REQUIREMENT_GUARD_MONTH
 from ums_smart_revenue.finance.month_close_readiness import (
     SqlAlchemyFinanceCloseReadinessService,
 )
@@ -282,8 +283,12 @@ def test_for_update_readiness_acquires_guard_before_blocker_queries(
     )
 
     assert readiness.ready is True
+    # The second guard entry is the tenant-wide revenue-requirement key that
+    # serializes lock-time readiness against registry revenue_required flips
+    # (the import's OFF->ON guard acquires the same key).
     assert calls == [
         ("guard", ("2026-03", DEFAULT_TENANT_ID)),
+        ("guard", (REVENUE_REQUIREMENT_GUARD_MONTH, DEFAULT_TENANT_ID)),
         ("pending", True),
         ("missing", True),
         ("facts", True),

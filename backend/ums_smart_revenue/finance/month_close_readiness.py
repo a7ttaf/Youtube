@@ -6,11 +6,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import (
+    FinanceMonthCloseORM,
     MonthlyChannelRevenueFactORM,
     RevenueManualOverrideORM,
 )
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
-from ums_smart_revenue.finance.month_close_locks import acquire_finance_month_advisory_lock
+from ums_smart_revenue.finance.month_close_locks import (
+    REVENUE_REQUIREMENT_GUARD_MONTH,
+    acquire_finance_month_advisory_lock,
+)
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
 )
@@ -85,6 +89,17 @@ class SqlAlchemyFinanceCloseReadinessService:
                 month,
                 tenant_id=self._tenant_id,
             )
+            # Serialize the lock-time recheck against registry revenue_required
+            # flips: the import's OFF->ON guard holds this same tenant-wide key
+            # while it checks locked months and writes the flag, so a flip and
+            # a month lock can never both commit around each other's checks.
+            # Acquired AFTER the per-month key; the flip takes only this key,
+            # so the ordering is acyclic (no deadlock).
+            acquire_finance_month_advisory_lock(
+                self._session,
+                REVENUE_REQUIREMENT_GUARD_MONTH,
+                tenant_id=self._tenant_id,
+            )
         blockers: list[FinanceCloseBlocker] = []
         pending_override_count = self._pending_manual_override_count(month, for_update=for_update)
         if pending_override_count:
@@ -136,7 +151,16 @@ class SqlAlchemyFinanceCloseReadinessService:
         return self._count_statement_rows(pending_overrides_statement)
 
     def _missing_required_revenue_fact_count(self, month: str, *, for_update: bool) -> int:
-        """Count active revenue-required channels missing facts for the month."""
+        """Count active revenue-required channels missing facts for the month.
+
+        For a month that is already LOCKED, the count is effective-dated: only
+        channels that existed when the month was locked (``created_at <=
+        locked_at``) are evaluated. A channel created AFTER the lock cannot
+        retroactively invalidate the readiness conditions the month was
+        finalized under — its requirement applies going forward. The lock-time
+        recheck itself runs while the month is still OPEN, so the cutoff never
+        weakens the lock gate.
+        """
         missing_channels_statement = (
             select(YouTubeChannelORM.youtube_channel_id)
             .select_from(YouTubeChannelORM)
@@ -157,6 +181,17 @@ class SqlAlchemyFinanceCloseReadinessService:
                 MonthlyChannelRevenueFactORM.id.is_(None),
             )
         )
+        locked_at = self._session.scalar(
+            select(FinanceMonthCloseORM.locked_at).where(
+                FinanceMonthCloseORM.tenant_id == self._tenant_id,
+                FinanceMonthCloseORM.month == month,
+                FinanceMonthCloseORM.status == "LOCKED",
+            )
+        )
+        if locked_at is not None:
+            missing_channels_statement = missing_channels_statement.where(
+                YouTubeChannelORM.created_at <= locked_at
+            )
         if for_update:
             return self._count_locked_rows(
                 missing_channels_statement.with_for_update(of=YouTubeChannelORM)

@@ -12,6 +12,15 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 _FINANCE_MONTH_LOCK_KEY_PREFIX = "finance-month-close:"
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
+# Sentinel "month" for the tenant-wide guard serializing revenue_required
+# registry flips against lock-time readiness rechecks. Both sides acquire the
+# advisory lock for this key (the registry flip alone; readiness AFTER its
+# per-month key), so a flip and a month lock can never interleave their
+# check/write pairs: whichever commits first is visible to the other's check.
+# Deadlock-free: the flip takes ONLY this key; readiness takes month-then-this,
+# and no path takes this-then-month.
+REVENUE_REQUIREMENT_GUARD_MONTH = "registry-revenue-required-guard"
+
 
 # ============================================================================
 # Purpose: Acquire the PostgreSQL transaction-scoped guard shared by finance
