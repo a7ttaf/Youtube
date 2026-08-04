@@ -19,6 +19,7 @@
 import csv
 import io
 import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -31,6 +32,9 @@ CHANNEL_ID_PATTERN = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 # in the unique B-tree index on (tenant_id, cms_group_id) whose per-entry
 # size PostgreSQL enforces at ~2.7KB.
 MAX_GROUP_ID_CHARS = 255
+# Only four columns are ever valid; a wider header is malformed by definition
+# and is rejected before any per-cell scanning.
+MAX_HEADER_COLUMNS = 16
 
 REQUIRED_COLUMNS = frozenset({"youtube_channel_id", "channel_name"})
 OPTIONAL_COLUMNS = frozenset({"group_id", "view_revenue"})
@@ -146,13 +150,21 @@ def parse_channel_import_csv(text: str, *, max_rows: int | None = None) -> Parse
 def _header_index(raw_header: list[str]) -> dict[str, int]:
     """Validate the header row and map known column names to positions."""
     header = [name.strip().lstrip("﻿").lower() for name in raw_header]
+    # Reject an absurdly wide header before any per-cell scanning: only four
+    # columns are ever valid, and a 2 MiB single-line header could otherwise
+    # monopolize a worker just to be rejected.
+    if len(header) > MAX_HEADER_COLUMNS:
+        raise ChannelImportFormatError(
+            f"header has {len(header)} columns; at most {MAX_HEADER_COLUMNS} are valid"
+        )
     missing = sorted(REQUIRED_COLUMNS - set(header))
     if missing:
         raise ChannelImportFormatError(f"missing required column(s): {', '.join(missing)}")
     # A duplicated header is an ambiguous schema: the position map below would
     # silently keep the LAST copy's column, importing whichever value happens
-    # to sit there. Reject the whole file instead of guessing.
-    duplicates = sorted({name for name in header if header.count(name) > 1})
+    # to sit there. Reject the whole file instead of guessing. Counter keeps
+    # this linear — a per-name header.count() scan is quadratic.
+    duplicates = sorted({name for name, count in Counter(header).items() if count > 1})
     if duplicates:
         raise ChannelImportFormatError(f"duplicate column(s): {', '.join(duplicates)}")
     unknown = sorted(set(header) - KNOWN_COLUMNS)

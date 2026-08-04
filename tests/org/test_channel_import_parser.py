@@ -137,6 +137,18 @@ def test_rejects_duplicate_header_columns() -> None:
         parse_channel_import_csv(csv_text)
 
 
+def test_rejects_an_absurdly_wide_header_before_scanning_it() -> None:
+    """A pathological header is rejected on width, not scanned per cell.
+
+    Duplicate detection is linear (Counter), and the width gate stops a
+    multi-hundred-thousand-cell header from being examined at all — only four
+    columns are ever valid (review #159 r3714142163).
+    """
+    wide = "youtube_channel_id,channel_name" + ",filler" * 50_000
+    with pytest.raises(ChannelImportFormatError, match="at most 16 are valid"):
+        parse_channel_import_csv(f"{wide}\n")
+
+
 def test_max_rows_aborts_the_parse_early() -> None:
     """The row cap fires during parsing, counting only non-blank data rows."""
     rows = "\n".join(f"UC{index:022d},Channel {index}" for index in range(3))
