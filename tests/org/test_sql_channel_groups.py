@@ -485,6 +485,72 @@ def test_list_groups_uses_request_tenant_context_by_default() -> None:
 
 
 # ---------------------------------------------------------------------------
+# list_synced_groups
+# ---------------------------------------------------------------------------
+
+
+def test_list_synced_groups_returns_only_cms_keyed_groups() -> None:
+    """Groups without a cms_group_id never appear in list_synced_groups."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    registry.create_group(
+        name="Manual",
+        group_type="CUSTOM_GROUP",
+        channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL],
+    )
+    synced = registry.create_group(
+        name="TV Sector",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_DEFAULT_B_EXTERNAL],
+        cms_group_id="cms-tv",
+    )
+
+    result = registry.list_synced_groups()
+
+    assert [entry.id for entry in result] == [synced.id]
+    assert result[0].channel_ids == (CHANNEL_DEFAULT_B_EXTERNAL,)
+
+
+def test_list_synced_groups_includes_inactive_group_with_full_membership() -> None:
+    """A deactivated synced group is still returned, with its full member set."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    synced = registry.create_group(
+        name="News Sector",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL, CHANNEL_INACTIVE_EXTERNAL],
+        cms_group_id="cms-news",
+    )
+    registry.update_group(group_id=synced.id, name=None, active=False)
+
+    result = registry.list_synced_groups()
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry.id == synced.id
+    assert entry.active is False
+    assert set(entry.channel_ids) == {CHANNEL_DEFAULT_A_EXTERNAL, CHANNEL_INACTIVE_EXTERNAL}
+
+
+def test_list_synced_groups_filters_to_bound_tenant_only() -> None:
+    """list_synced_groups never surfaces another tenant's synced groups."""
+    session = build_session()
+    seed_org(session)
+    SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID).create_group(
+        name="Other Synced Group",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_OTHER_EXTERNAL],
+        cms_group_id="cms-other",
+    )
+
+    default_registry = SqlAlchemyChannelGroupRegistry(session)
+
+    assert default_registry.list_synced_groups() == []
+
+
+# ---------------------------------------------------------------------------
 # get_group / IDOR
 # ---------------------------------------------------------------------------
 

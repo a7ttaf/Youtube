@@ -110,6 +110,27 @@ class SqlAlchemyChannelGroupRegistry:
             self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
         ]
 
+    def list_synced_groups(self) -> list[ChannelGroupEntry]:
+        """Return every CMS-keyed group (active or not) with full membership.
+
+        Sync planning must see deactivated synced groups so a CMS key that
+        reappears upstream can REACTIVATE its original local group instead of
+        creating a duplicate.
+        """
+        rows = self._session.scalars(
+            select(ChannelGroupORM)
+            .where(
+                ChannelGroupORM.tenant_id == self._tenant_id,
+                ChannelGroupORM.cms_group_id.is_not(None),
+            )
+            .order_by(ChannelGroupORM.name)
+        ).all()
+        group_ids = [row.id for row in rows]
+        channel_ids_by_group = self._channel_ids_by_group(group_ids)
+        return [
+            self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
+        ]
+
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         row = self._get_group_row(group_id)
         if row is None:

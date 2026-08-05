@@ -68,6 +68,9 @@ class ChannelGroupRegistryStore(Protocol):
     def list_groups_full(self) -> list[ChannelGroupEntry]:
         pass
 
+    def list_synced_groups(self) -> list[ChannelGroupEntry]:
+        pass
+
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         pass
 
@@ -126,6 +129,10 @@ class ChannelGroupRegistry:
 
     def list_groups_full(self) -> list[ChannelGroupEntry]:
         return sorted(self._groups.values(), key=lambda group: group.name)
+
+    def list_synced_groups(self) -> list[ChannelGroupEntry]:
+        """Return every CMS-keyed group, active or not, for sync planning."""
+        return [group for group in self._groups.values() if group.cms_group_id is not None]
 
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         return self._groups.get(group_id)
