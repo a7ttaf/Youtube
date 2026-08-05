@@ -1,8 +1,11 @@
 """Pure planning for CMS group sync."""
 
+from collections.abc import Sequence
+
 from ums_smart_revenue.org.channel_group_sync import (
     CmsGroupSnapshot,
     GroupSyncOutcome,
+    GroupSyncPlan,
     plan_group_sync,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
@@ -39,12 +42,12 @@ def _local(**overrides: object) -> ChannelGroupEntry:
 
 
 def _plan(
-    snapshot=(),
-    local=(),
-    known=KNOWN,
-    content_owner_id="owner-a",
-    foreign_owner_group_ids=frozenset(),
-):
+    snapshot: Sequence[CmsGroupSnapshot] = (),
+    local: Sequence[ChannelGroupEntry] = (),
+    known: frozenset[str] = KNOWN,
+    content_owner_id: str | None = "owner-a",
+    foreign_owner_group_ids: frozenset[str] = frozenset(),
+) -> GroupSyncPlan:
     return plan_group_sync(
         snapshot=tuple(snapshot),
         local_groups=tuple(local),

@@ -314,12 +314,12 @@ class _RenamedMidFlightGroupRegistry(ChannelGroupRegistry):
     write boundary — the plan says RENAME, the store has nothing left to do.
     """
 
-    def __init__(self, groups, *, planned_name: str) -> None:
+    def __init__(self, groups: list[ChannelGroupEntry], *, planned_name: str) -> None:
         """Seed the store and remember the stale name the planner should see."""
         super().__init__(groups)
         self._planned_name = planned_name
 
-    def list_synced_groups(self, *, content_owner_id: str | None = None):
+    def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
         """Report the PRE-race name, so the planner still diffs a rename."""
         return [
             replace(group, name=self._planned_name)
