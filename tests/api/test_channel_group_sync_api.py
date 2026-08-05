@@ -31,6 +31,7 @@ from ums_smart_revenue.connectors.google.errors import (
     GoogleApiResponseError,
     InactiveCredentialError,
     OAuthRefreshError,
+    SecretFetchError,
 )
 from ums_smart_revenue.connectors.google.youtube_groups_client import (
     CmsGroup,
@@ -477,6 +478,69 @@ def test_oauth_refresh_failure_returns_503_with_canned_detail(fake_credentials):
     assert "LeakyTokenError" not in detail
     assert "oauth refresh failed" not in detail
     assert groups.list_synced_groups() == []
+
+
+def test_other_credential_layer_error_returns_503_with_canned_detail(fake_credentials):
+    """A GoogleConnectorError subclass outside the three handled ones still fails closed.
+
+    resolve_connector_credentials can raise other GoogleConnectorError subclasses
+    (e.g. SecretFetchError from the secret backend); before this fix only
+    CredentialNotFoundError/InactiveCredentialError/OAuthRefreshError were caught,
+    so this escaped as an unhandled 500.
+    """
+
+    class LeakySecretBackendError(Exception):
+        """Distinctive inner error whose class name must not reach the client."""
+
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake)
+    fake_credentials.side_effect = SecretFetchError(
+        ref="gcp-secret://projects/leaky-project/secrets/leaky-secret",
+        inner=LeakySecretBackendError("boom"),
+    )
+
+    response = post_sync(client)
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail == (
+        "Credential resolution failed; check connector configuration and secret references."
+    )
+    assert "LeakySecretBackendError" not in detail
+    assert "leaky-project" not in detail
+    assert "leaky-secret" not in detail
+    assert "secret fetch failed" not in detail
+    assert groups.list_synced_groups() == []
+    assert audit_sink.records == []
+    assert fake.item_calls == []
+
+
+def test_content_owner_id_with_nul_byte_is_rejected_422():
+    """A NUL byte in content_owner_id fails 422, matching the import route's contract."""
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake)
+
+    response = post_sync(client, content_owner_id="own\x00er")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "content_owner_id contains a NUL character"
+    assert groups.list_synced_groups() == []
+    assert audit_sink.records == []
+    assert fake.item_calls == []
+
+
+def test_oversized_content_owner_id_is_rejected_422():
+    """The owner id lands in the audit entity B-tree index; bound it like the import route."""
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake)
+
+    response = post_sync(client, content_owner_id="x" * 256)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "content_owner_id exceeds 255 characters"
+    assert groups.list_synced_groups() == []
+    assert audit_sink.records == []
+    assert fake.item_calls == []
 
 
 def test_google_fetch_failure_returns_502_with_canned_detail():

@@ -659,6 +659,41 @@ def import_channels(
     return ChannelImportResult.model_validate(payload)
 
 
+def _validated_content_owner_id(raw: str) -> str:
+    """Validate one content_owner_id value; return the normalized (stripped) id.
+
+    Shared by the CSV import route and the CMS group sync route so both
+    boundaries enforce the identical non-blank / NUL / length contract before
+    the value reaches a registry write, a Google credential lookup, or
+    becomes audit_logs.entity_id.
+    """
+    content_owner_id = raw.strip()
+    if not content_owner_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="content_owner_id is required",
+        )
+    # PostgreSQL cannot store NUL in a text column (youtube_channels.
+    # content_owner_id); rejecting it here keeps the promised 422 contract
+    # instead of an unhandled encoding 500 at the write boundary — the same
+    # rule the CSV parser applies to per-row text fields.
+    if "\x00" in content_owner_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="content_owner_id contains a NUL character",
+        )
+    # The owner id becomes audit_logs.entity_id, which sits in the
+    # ix_audit_logs_entity B-tree; PostgreSQL rejects index entries past its
+    # per-entry size limit, so an unbounded value would pass earlier checks
+    # and 500 at the final audit append. Real CMS owner ids are ~22 characters.
+    if len(content_owner_id) > MAX_CONTENT_OWNER_CHARS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"content_owner_id exceeds {MAX_CONTENT_OWNER_CHARS} characters",
+        )
+    return content_owner_id
+
+
 def _validated_import_form(*, content_owner_id: str, cms_status: str, reason: str) -> str:
     """Validate the import's scalar form fields; return the normalized owner.
 
@@ -672,35 +707,20 @@ def _validated_import_form(*, content_owner_id: str, cms_status: str, reason: st
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid cms_status: {cms_status!r}",
         )
-    content_owner_id = content_owner_id.strip()
-    if not content_owner_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="content_owner_id is required",
-        )
+    content_owner_id = _validated_content_owner_id(content_owner_id)
     if not reason.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="reason is required",
         )
-    # PostgreSQL cannot store NUL in a text column (youtube_channels.
-    # content_owner_id, audit_logs.reason); rejecting it here keeps the
-    # promised 422 contract instead of an unhandled encoding 500 at apply —
-    # the same rule the CSV parser applies to per-row text fields.
-    for field_name, value in (("content_owner_id", content_owner_id), ("reason", reason)):
-        if "\x00" in value:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"{field_name} contains a NUL character",
-            )
-    # The owner id becomes audit_logs.entity_id, which sits in the
-    # ix_audit_logs_entity B-tree; PostgreSQL rejects index entries past its
-    # per-entry size limit, so an unbounded value would pass dry-run and 500
-    # on the final summary append. Real CMS owner ids are ~22 characters.
-    if len(content_owner_id) > MAX_CONTENT_OWNER_CHARS:
+    # PostgreSQL cannot store NUL in a text column (audit_logs.reason);
+    # rejecting it here keeps the promised 422 contract instead of an
+    # unhandled encoding 500 at apply — the same rule the CSV parser applies
+    # to per-row text fields.
+    if "\x00" in reason:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"content_owner_id exceeds {MAX_CONTENT_OWNER_CHARS} characters",
+            detail="reason contains a NUL character",
         )
     return content_owner_id
 
@@ -838,13 +858,8 @@ def sync_channel_groups(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
         )
-    content_owner_id = payload.content_owner_id.strip()
+    content_owner_id = _validated_content_owner_id(payload.content_owner_id)
     reason = payload.reason.strip()
-    if not content_owner_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="content_owner_id is required",
-        )
     if not reason:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -872,6 +887,17 @@ def sync_channel_groups(
             detail=(
                 "Google credential token refresh failed; "
                 "check that the credential secret is current."
+            ),
+        ) from exc
+    # FIX: A different GoogleConnectorError subclass (e.g. SecretFetchError) raised
+    # inside resolve_connector_credentials previously escaped as a raw 500; mirror
+    # the connector-test route's broad catch so any credential-layer failure fails
+    # closed as 503 with a canned detail (str(exc) can embed secret locators).
+    except GoogleConnectorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Credential resolution failed; check connector configuration and secret references."
             ),
         ) from exc
 
