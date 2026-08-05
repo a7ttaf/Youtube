@@ -97,18 +97,51 @@ def apply_group_sync(
                 group_type="SECTOR",
                 channel_ids=list(entry.members_added),
                 cms_group_id=entry.cms_group_id,
+                content_owner_id=content_owner_id,
             )
             group_id = created.id
+            name_change = entry.name_change
+            active_change = entry.active_change
+            members_added = entry.members_added
+            members_removed = entry.members_removed
         else:
             group_id = _require_local_group_id(entry)
-            name = entry.name_change[1] if entry.name_change else None
-            active = entry.active_change[1] if entry.active_change else None
+            # Re-read the group's CURRENT state rather than trusting the plan
+            # (a snapshot from before this apply): a concurrent writer (another
+            # sync, or the bulk import) can race this same group between
+            # planning and here, and store writes are individually idempotent
+            # no-ops in that case (add_members skips present members,
+            # remove_member deletes zero rows). Diffing against what is
+            # actually true right now keeps the audit trail and the returned
+            # counts a record of what THIS request executed, never a stale
+            # plan's intent.
+            current = groups.get_group(group_id)
+            if current is None:
+                raise ValueError(f"sync plan entry's local group vanished before apply: {group_id}")
+            planned_name = entry.name_change[1] if entry.name_change else None
+            planned_active = entry.active_change[1] if entry.active_change else None
+            name = (
+                planned_name if planned_name is not None and planned_name != current.name else None
+            )
+            active = (
+                planned_active
+                if planned_active is not None and planned_active != current.active
+                else None
+            )
+            current_members = set(current.channel_ids)
+            members_added = tuple(cid for cid in entry.members_added if cid not in current_members)
+            members_removed = tuple(cid for cid in entry.members_removed if cid in current_members)
+            if name is None and active is None and not members_added and not members_removed:
+                executed[GroupSyncOutcome.UNCHANGED.value] += 1
+                continue
             if name is not None or active is not None:
                 groups.update_group(group_id=group_id, name=name, active=active)
-            if entry.members_added:
-                groups.add_members(group_id=group_id, channel_ids=list(entry.members_added))
-            for channel_id in entry.members_removed:
+            if members_added:
+                groups.add_members(group_id=group_id, channel_ids=list(members_added))
+            for channel_id in members_removed:
                 groups.remove_member(group_id=group_id, channel_id=channel_id)
+            name_change = (current.name, name) if name is not None else None
+            active_change = (current.active, active) if active is not None else None
         executed[entry.outcome.value] += 1
         record_audit_event(
             sink=audit_sink,
@@ -123,10 +156,10 @@ def apply_group_sync(
                 "content_owner_id": content_owner_id,
                 "cms_group_id": entry.cms_group_id,
                 "outcome": entry.outcome.value,
-                "name_change": list(entry.name_change) if entry.name_change else None,
-                "active_change": list(entry.active_change) if entry.active_change else None,
-                "members_added": len(entry.members_added),
-                "members_removed": len(entry.members_removed),
+                "name_change": list(name_change) if name_change else None,
+                "active_change": list(active_change) if active_change else None,
+                "members_added": len(members_added),
+                "members_removed": len(members_removed),
             },
         )
     return executed

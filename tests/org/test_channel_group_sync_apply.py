@@ -216,6 +216,39 @@ def test_members_changed_adds_and_removes_through_the_store() -> None:
     assert sink.records[0].details["outcome"] == "MEMBERS_CHANGED"
 
 
+def test_stale_members_changed_entry_already_applied_is_recounted_unchanged() -> None:
+    """A concurrent writer beating this apply to the same change is a no-op.
+
+    The plan is a snapshot from before this apply; if another writer (a
+    racing sync, or the bulk import) already added CH_B to this group between
+    planning and now, re-checking the group's CURRENT membership must treat
+    the entry as UNCHANGED — no store write, no audit event claiming a
+    membership change this request did not make.
+    """
+    groups = _seeded(channel_ids=(CH_A, CH_B))
+    sink = InMemoryAuditSink()
+
+    executed = _apply(
+        _plan(
+            _entry(
+                outcome=GroupSyncOutcome.MEMBERS_CHANGED,
+                local_group_id="local-1",
+                members_added=(CH_B,),
+            )
+        ),
+        groups,
+        sink,
+    )
+
+    stored = groups.get_group("local-1")
+    assert stored is not None
+    assert stored.channel_ids == (CH_A, CH_B)
+    assert groups.writes == []
+    assert sink.records == []
+    assert executed["MEMBERS_CHANGED"] == 0
+    assert executed["UNCHANGED"] == 1
+
+
 def test_deactivate_flips_active_and_leaves_membership_untouched() -> None:
     """A vanished CMS group deactivates locally; its members stay attached."""
     groups = _seeded(channel_ids=(CH_A, CH_B))
