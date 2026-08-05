@@ -127,6 +127,27 @@ def seed_database(database_url: str) -> None:
         session.commit()
 
 
+def seed_synced_group(
+    database_url: str,
+    *,
+    name: str = "CMS Synced Group",
+    channel_ids: list[str] | None = None,
+    cms_group_id: str = "cms-x",
+) -> str:
+    """Create a CMS-synced group (cms_group_id set) via the store, committed."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        registry = SqlAlchemyChannelGroupRegistry(session)
+        group = registry.create_group(
+            name=name,
+            group_type="CUSTOM_GROUP",
+            channel_ids=channel_ids or [],
+            cms_group_id=cms_group_id,
+        )
+        session.commit()
+        return group.id
+
+
 def test_company_manager_lists_only_groups_fully_inside_scope(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -602,3 +623,102 @@ def test_group_member_integrity_error_classifier_matches_composite_primary_key()
 
     assert _is_duplicate_group_member_integrity_error(duplicate_error)
     assert not _is_duplicate_group_member_integrity_error(foreign_key_error)
+
+
+def test_update_group_rejects_name_change_on_synced_group(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    synced_group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        cms_group_id="cms-x",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.patch(
+        f"/groups/{synced_group_id}",
+        headers=auth_headers("corporate_admin", "global"),
+        json={"name": "Renamed Synced Group", "reason": "Attempt manual rename"},
+    )
+
+    assert response.status_code == 409
+    assert "managed by CMS sync" in response.json()["detail"]
+
+
+def test_update_group_active_only_succeeds_on_synced_group(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    synced_group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        cms_group_id="cms-x",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.patch(
+        f"/groups/{synced_group_id}",
+        headers=auth_headers("corporate_admin", "global"),
+        json={"active": False, "reason": "Deactivate synced group"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["active"] is False
+
+
+def test_add_group_members_rejects_edit_on_synced_group(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    synced_group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        cms_group_id="cms-x",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/groups/{synced_group_id}/members",
+        headers=auth_headers("corporate_admin", "global"),
+        json={
+            "channel_ids": ["group-channel-news"],
+            "reason": "Attempt manual membership edit",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "managed by CMS sync" in response.json()["detail"]
+
+
+def test_remove_group_member_rejects_edit_on_synced_group(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    synced_group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        cms_group_id="cms-x",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.delete(
+        f"/groups/{synced_group_id}/members/group-channel-tv",
+        headers=auth_headers("corporate_admin", "global"),
+        params={"reason": "Attempt manual membership edit"},
+    )
+
+    assert response.status_code == 409
+    assert "managed by CMS sync" in response.json()["detail"]
+
+
+def test_update_group_name_succeeds_on_manual_group(tmp_path):
+    """Guard against over-blocking: manual groups (no cms_group_id) are unaffected."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.patch(
+        f"/groups/{GROUP_TV_ID}",
+        headers=auth_headers("corporate_admin", "global"),
+        json={"name": "Renamed TV Group", "reason": "Manual rename allowed"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Renamed TV Group"

@@ -160,12 +160,14 @@ def update_group(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    _require_manageable_group(
+    group = _require_manageable_group(
         registry=registry,
         group_id=group_id,
         user=user,
         org_index=org_index,
     )
+    if payload.name is not None:
+        _reject_synced_group_edit(group)
     try:
         updated = registry.update_group(
             group_id=group_id,
@@ -202,6 +204,7 @@ def add_group_members(
         org_index=org_index,
         prospective_channel_ids=payload.channel_ids,
     )
+    _reject_synced_group_edit(group)
     channel_ids = list(dict.fromkeys([*group.channel_ids, *payload.channel_ids]))
     _require_manage_group_channels(
         user=user,
@@ -237,12 +240,13 @@ def remove_group_member(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    _require_manageable_group(
+    group = _require_manageable_group(
         registry=registry,
         group_id=group_id,
         user=user,
         org_index=org_index,
     )
+    _reject_synced_group_edit(group)
     normalized_reason = _normalize_query_reason(reason)
     try:
         updated = registry.remove_member(group_id=group_id, channel_id=channel_id)
@@ -394,6 +398,18 @@ def _require_manageable_group(
             detail="Group not found",
         )
     return group
+
+
+def _reject_synced_group_edit(group: ChannelGroupEntry) -> None:
+    """409 any rename/membership edit on a CMS-synced group (sync would revert it)."""
+    if group.cms_group_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"synced group {group.id} is managed by CMS sync; "
+                "edit it in YouTube Content Manager"
+            ),
+        )
 
 
 def _audit_group_change(
