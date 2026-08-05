@@ -169,6 +169,28 @@ def _plan_entries_for_vanished_groups(
     return entries
 
 
+# ============================================================================
+# Purpose: The CMS group-sync planner — diff one content owner's YouTube CMS
+#   snapshot against the local synced groups into a per-group plan the apply
+#   layer executes. Full mirror, YouTube wins.
+# Database/ORM: None. Pure function, no I/O, no session; the caller supplies
+#   both sides and executes the result.
+# Standards: Deterministic ordering by cms_group_id; one dominant outcome per
+#   group (activation > rename > membership); unknown channel members are
+#   surfaced, never invented (channel creation belongs to POST
+#   /channels/import). DEACTIVATE is gated on a definitive content_owner_id
+#   match, so an owner-NULL legacy row stays matchable — required, because
+#   (tenant_id, cms_group_id) is unique tenant-wide and hiding it would make
+#   an existing key plan as CREATE — without being retired by an owner that
+#   cannot claim it. A manual (cms_group_id=None) group is a caller bug and
+#   raises rather than being silently mirrored.
+# Blast Radius: Channel-group naming/membership/active state only. No finance
+#   totals; group-scope rollups change composition only as the CMS does.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> sync route caller.
+#   - File: backend/ums_smart_revenue/org/channel_group_sync_apply.py ->
+#     apply_group_sync executes every entry and audits what it wrote.
+# ============================================================================
 def plan_group_sync(
     *,
     snapshot: tuple[CmsGroupSnapshot, ...],

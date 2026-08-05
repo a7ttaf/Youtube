@@ -111,6 +111,25 @@ class SqlAlchemyChannelGroupRegistry:
             self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
         ]
 
+    # ========================================================================
+    # Purpose: Enumerate the CMS-keyed groups a sync must reconcile — every
+    #   group carrying a cms_group_id, active or not, optionally narrowed to
+    #   one content owner.
+    # Database/ORM: ChannelGroupORM (read-only), tenant-scoped, plus
+    #   ChannelGroupMemberORM x YouTubeChannelORM for FULL membership (not the
+    #   active-only member set the finance scope selector uses).
+    # Standards: Owner scoping is OR-NULL by design. (tenant_id, cms_group_id)
+    #   is unique tenant-wide, so an owner-NULL row hidden from a scoped read
+    #   would be planned as CREATE and collide on that key, making the group
+    #   permanently unsyncable. Those rows are therefore returned for matching;
+    #   refusing to DEACTIVATE them is the planner's job, not this read's.
+    # Blast Radius: CMS group-sync planning only — group naming, membership,
+    #   and active state as the mirror resolves them. No finance totals.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/channels.py -> sync route caller.
+    #   - File: backend/ums_smart_revenue/org/channel_group_sync.py ->
+    #     plan_group_sync consumes the result and owns the deactivation gate.
+    # ========================================================================
     def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
         """Return every CMS-keyed group (active or not) with full membership.
 
@@ -148,6 +167,24 @@ class SqlAlchemyChannelGroupRegistry:
             self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
         ]
 
+    # ========================================================================
+    # Purpose: Resolve one group by id, optionally under the membership
+    #   serialization lock so a caller can diff membership and write without a
+    #   racing writer invalidating the diff in between.
+    # Database/ORM: ChannelGroupORM (SELECT, tenant-scoped), plus
+    #   ChannelGroupMemberORM x YouTubeChannelORM for the member ids;
+    #   with_for_update(key_share=True) when for_update is set.
+    # Standards: The lock is FOR NO KEY UPDATE, never plain FOR UPDATE — plain
+    #   FOR UPDATE conflicts with the FOR KEY SHARE lock a member INSERT takes
+    #   on its referenced group row and deadlocks import against the groups
+    #   API. SQLite ignores FOR UPDATE (single-writer), so this is a
+    #   PostgreSQL-only concern.
+    # Blast Radius: Read-only here; the lock it takes serializes the CALLER's
+    #   subsequent membership/name/active writes and their audit rows.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_group_sync_apply.py ->
+    #     _execute_update diffs under this lock before writing.
+    # ========================================================================
     def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
         """Return the group by id, or None.
 
