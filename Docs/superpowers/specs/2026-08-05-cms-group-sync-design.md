@@ -12,9 +12,8 @@ manual `group_id` CSV column that attaches imported channels to CMS-keyed
 groups. Its spec named this PR as the follow-up: make YouTube the source of
 truth for grouping instead of an operator-maintained spreadsheet column.
 
-The API surfaces are verified available with the existing stored credential
-(no new access, no consent, no scope change — `yt-analytics.readonly` is
-already granted):
+The API surfaces (see the scope note after the list — `groupItems.list` needs
+more than the already-granted `yt-analytics.readonly`):
 
 - `GET https://youtubeanalytics.googleapis.com/v2/groups?onBehalfOfContentOwner=<CO>&mine=true`
   returns every group the content owner owns. Each group resource carries
@@ -23,6 +22,15 @@ already granted):
 - `GET https://youtubeanalytics.googleapis.com/v2/groupItems?groupId=<ID>&onBehalfOfContentOwner=<CO>`
   returns the group's members; channel members have
   `resource.kind == "youtube#channel"` and `resource.id` = the channel id.
+
+**Scopes.** `groups.list` is covered by the already-granted
+`yt-analytics.readonly`. `groupItems.list` is not: per Google's
+[GroupItems: list authorization notes](https://developers.google.com/youtube/analytics/reference/groupItems/list)
+it requires either `https://www.googleapis.com/auth/youtube` alone, or
+`youtube.readonly` together with `yt-analytics.readonly`. Grouping is
+homogeneous per group (`contentDetails.itemType` is one of `youtube#channel`,
+`youtube#playlist`, `youtube#video`, `youtubePartner#asset`), and only
+channel-type groups are mirrored.
 
 ## Goal
 

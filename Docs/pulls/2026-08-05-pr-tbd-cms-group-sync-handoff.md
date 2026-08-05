@@ -69,7 +69,11 @@ use the same wiring. The regression tests are in
 
 - Full suite with Postgres: **2613 passed, 0 failed**
 - ruff check + format, 100-char guard: clean
-- Single Alembic head `20260803_0001` (no migration in this PR)
+- Single Alembic head `20260805_0001` — this PR adds ONE migration,
+  `20260805_0001_channel_group_content_owner` (additive nullable
+  `channel_groups.content_owner_id`, revises `20260803_0001`). Run
+  `alembic upgrade head` BEFORE deploying the app code, which reads that
+  column.
 - Postgres tier proves: persistence, RLS tenant isolation (bare un-filtered
   SELECT under tenant B returns nothing), mid-apply rollback of groups AND
   audit together (with an in-flight anti-vacuity guard), and the lost-commit
