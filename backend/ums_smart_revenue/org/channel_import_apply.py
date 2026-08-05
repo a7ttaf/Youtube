@@ -265,7 +265,10 @@ def apply_channel_import(
         if channel_id is None or entry.channel_name is None or not entry.group_id:
             continue
         group_change = _attach_group_membership(
-            groups, cms_group_id=entry.group_id, channel_id=channel_id
+            groups,
+            cms_group_id=entry.group_id,
+            channel_id=channel_id,
+            content_owner_id=content_owner_id,
         )
         # A group creation or membership addition is a finance-scope
         # mutation; without its own GROUP_UPDATED record an inventory-
@@ -414,7 +417,11 @@ def _entry_changes(
 #     conflict errors to 409.
 # ============================================================================
 def _attach_group_membership(
-    groups: ChannelGroupRegistryStore, *, cms_group_id: str, channel_id: str
+    groups: ChannelGroupRegistryStore,
+    *,
+    cms_group_id: str,
+    channel_id: str,
+    content_owner_id: str,
 ) -> tuple[str, ChannelGroupEntry] | None:
     """Ensure the channel belongs to the group carrying this CMS key.
 
@@ -425,6 +432,12 @@ def _attach_group_membership(
     row lock: a group archived in the plan-to-apply window raises
     ChannelImportArchivedGroupError so the race fails the transaction closed
     instead of silently mutating a retired group.
+
+    The import's ``content_owner_id`` is stamped on any group created here so
+    CMS group sync — which scopes ``list_synced_groups`` to one owner — can
+    match this group later. Without the stamp the row stays owner-NULL, sync
+    cannot see it, plans it as CREATE, and then collides with the per-tenant
+    unique ``cms_group_id`` key.
     """
     group = groups.get_group_by_cms_id(cms_group_id, for_update=True)
     if group is None:
@@ -433,6 +446,7 @@ def _attach_group_membership(
             group_type="SECTOR",
             channel_ids=[channel_id],
             cms_group_id=cms_group_id,
+            content_owner_id=content_owner_id,
         )
         return ("group_created", created)
     if not group.active:

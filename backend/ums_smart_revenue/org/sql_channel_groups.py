@@ -37,6 +37,7 @@
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select
+from sqlalchemy import or_ as sa_or
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -117,16 +118,27 @@ class SqlAlchemyChannelGroupRegistry:
         reappears upstream can REACTIVATE its original local group instead of
         creating a duplicate. ``content_owner_id`` scopes the result to one
         owner's groups (see the Protocol docstring for why CMS group sync must
-        always pass it); a group whose content_owner_id predates this column
-        (bulk-import-created, still NULL) never matches a scoped call and is
-        left alone by CMS sync until it is stamped with an owner.
+        always pass it).
+
+        A scoped call ALSO returns owner-NULL rows — groups created before
+        ``content_owner_id`` existed, or by an older import that did not stamp
+        it. They must stay visible: ``(tenant_id, cms_group_id)`` is unique
+        tenant-wide, so hiding them would make the planner emit CREATE for a
+        key that already exists and the apply would collide on that key,
+        leaving those groups permanently unsyncable. Surfacing them instead
+        lets sync reconcile (and thereby adopt) them.
         """
         conditions = [
             ChannelGroupORM.tenant_id == self._tenant_id,
             ChannelGroupORM.cms_group_id.is_not(None),
         ]
         if content_owner_id is not None:
-            conditions.append(ChannelGroupORM.content_owner_id == content_owner_id)
+            conditions.append(
+                sa_or(
+                    ChannelGroupORM.content_owner_id == content_owner_id,
+                    ChannelGroupORM.content_owner_id.is_(None),
+                )
+            )
         rows = self._session.scalars(
             select(ChannelGroupORM).where(*conditions).order_by(ChannelGroupORM.name)
         ).all()
@@ -136,8 +148,16 @@ class SqlAlchemyChannelGroupRegistry:
             self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
         ]
 
-    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
-        row = self._get_group_row(group_id)
+    def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
+        """Return the group by id, or None.
+
+        ``for_update`` takes the parent row's FOR NO KEY UPDATE lock — the
+        membership serialization point every membership writer also takes — so
+        a caller that diffs membership under it (CMS group sync's apply) cannot
+        have that diff invalidated by a concurrent add/remove committing before
+        its own write lands.
+        """
+        row = self._get_group_row(group_id, for_update=for_update)
         if row is None:
             return None
         return self._to_entry(row)

@@ -673,6 +673,69 @@ def test_sync_does_not_deactivate_a_different_owners_group():
     }
 
 
+def test_legacy_owner_null_group_is_reconciled_not_recreated():
+    """A pre-migration / import-created group (owner NULL) must stay syncable.
+
+    ``(tenant_id, cms_group_id)`` is unique tenant-wide. If the owner filter
+    hid owner-NULL rows, sync would plan CREATE for a key that already exists
+    and the apply would collide, making those groups permanently unsyncable.
+    """
+    seeded = ChannelGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id="grp-legacy",
+                name="cms-a",
+                group_type="SECTOR",
+                active=True,
+                channel_ids=(CHANNEL_ONE,),
+                cms_group_id="cms-a",
+                content_owner_id=None,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "News HD", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, _audit_sink = create_sync_app(fake, groups=seeded)
+
+    response = post_sync(client, content_owner_id=CONTENT_OWNER)
+
+    assert response.status_code == 200, response.text
+    counts = response.json()["counts"]
+    assert counts["CREATE"] == 0
+    assert counts["RENAME"] == 1
+    # Reconciled in place — same row, renamed from the CMS title.
+    assert group_by_cms_id(groups, "cms-a").id == "grp-legacy"
+    assert group_by_cms_id(groups, "cms-a").name == "News HD"
+
+
+def test_legacy_owner_null_group_absent_upstream_is_not_deactivated():
+    """An unowned legacy group must not be retired by an owner that may not own it.
+
+    Owner-NULL rows are visible for key matching, but this sync cannot prove
+    it owns them, so DEACTIVATE is gated on a definitive owner match.
+    """
+    seeded = ChannelGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id="grp-legacy",
+                name="Legacy Bundle",
+                group_type="SECTOR",
+                active=True,
+                channel_ids=(CHANNEL_TWO,),
+                cms_group_id="cms-legacy",
+                content_owner_id=None,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, _audit_sink = create_sync_app(fake, groups=seeded)
+
+    response = post_sync(client, content_owner_id=CONTENT_OWNER)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["DEACTIVATE"] == 0
+    assert groups.get_group("grp-legacy").active is True
+
+
 def test_create_conflict_on_concurrent_cms_key_returns_409():
     """A tenant-unique cms_group_id race on CREATE is a 409, never a 500.
 

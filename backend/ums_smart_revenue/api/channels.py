@@ -944,12 +944,14 @@ def sync_channel_groups(
     finally:
         client.close()
 
-    # Scoped to THIS content owner: channel_groups carries no owner column of
-    # its own, so ownership is derived from create-time content_owner_id
-    # (SqlAlchemyChannelGroupRegistry.create_group stamps it from this same
-    # field). Without the filter, syncing owner A would see every OTHER
-    # owner's synced groups too; none of them can be upstream in owner A's
-    # snapshot, so the planner would deactivate them as "vanished".
+    # Scoped to THIS content owner: ownership comes from the create-time
+    # content_owner_id stamp. Without the filter, syncing owner A would see
+    # every OTHER owner's synced groups too; none of them can be upstream in
+    # owner A's snapshot, so the planner would deactivate them as "vanished".
+    # The scoped read deliberately still includes owner-NULL legacy rows so an
+    # already-existing cms_group_id cannot be planned as CREATE and collide on
+    # the tenant-wide unique key; the planner's content_owner_id gate is what
+    # keeps those unowned rows from being deactivated.
     local_groups = tuple(groups.list_synced_groups(content_owner_id=content_owner_id))
     member_ids = {cid for item in snapshot for cid in item.member_channel_ids}
     # include_inactive=True: an archived-but-still-existing channel must count
@@ -961,7 +963,12 @@ def sync_channel_groups(
         entry.youtube_channel_id
         for entry in registry.list_channels_by_ids(member_ids, include_inactive=True)
     )
-    plan = plan_group_sync(snapshot=snapshot, local_groups=local_groups, known_channel_ids=known)
+    plan = plan_group_sync(
+        snapshot=snapshot,
+        local_groups=local_groups,
+        known_channel_ids=known,
+        content_owner_id=content_owner_id,
+    )
     payload_out = _group_sync_plan_to_api(
         plan, dry_run=payload.dry_run, content_owner_id=content_owner_id
     )

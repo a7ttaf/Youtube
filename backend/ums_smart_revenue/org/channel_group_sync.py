@@ -136,11 +136,21 @@ def _plan_entries_for_vanished_groups(
     local_groups: tuple[ChannelGroupEntry, ...],
     *,
     upstream_keys: set[str],
+    content_owner_id: str | None,
 ) -> list[GroupSyncPlanEntry]:
-    """Plan DEACTIVATE/UNCHANGED entries for local groups no longer upstream."""
+    """Plan DEACTIVATE/UNCHANGED entries for local groups no longer upstream.
+
+    Only groups this owner DEFINITIVELY owns are retired. An owner-NULL group
+    (created before content_owner_id existed, or by an older import) is still
+    passed in for key matching — the tenant-wide unique cms_group_id means
+    hiding it would make an existing key plan as CREATE and collide — but it
+    must not be deactivated here, because this sync cannot prove it owns it.
+    """
     entries: list[GroupSyncPlanEntry] = []
     for group in sorted(local_groups, key=lambda entry: str(entry.cms_group_id)):
         if group.cms_group_id in upstream_keys:
+            continue
+        if content_owner_id is not None and group.content_owner_id != content_owner_id:
             continue
         outcome = GroupSyncOutcome.DEACTIVATE if group.active else GroupSyncOutcome.UNCHANGED
         entries.append(
@@ -164,8 +174,15 @@ def plan_group_sync(
     snapshot: tuple[CmsGroupSnapshot, ...],
     local_groups: tuple[ChannelGroupEntry, ...],
     known_channel_ids: frozenset[str],
+    content_owner_id: str | None = None,
 ) -> GroupSyncPlan:
-    """Diff the CMS snapshot against local synced groups into a plan."""
+    """Diff the CMS snapshot against local synced groups into a plan.
+
+    ``content_owner_id`` gates DEACTIVATE only: every supplied group is matched
+    against upstream keys, but a group this owner cannot be proven to own (an
+    owner-NULL legacy row) is never retired. See
+    ``_plan_entries_for_vanished_groups``.
+    """
     # skipcq: SCT-A000 -- dict-comprehension target, not a credential value.
     local_by_key: dict[str, ChannelGroupEntry] = {}
     for group in local_groups:
@@ -186,7 +203,13 @@ def plan_group_sync(
         unknown_total += unknown_count
         entries.append(entry)
 
-    entries.extend(_plan_entries_for_vanished_groups(local_groups, upstream_keys=upstream_keys))
+    entries.extend(
+        _plan_entries_for_vanished_groups(
+            local_groups,
+            upstream_keys=upstream_keys,
+            content_owner_id=content_owner_id,
+        )
+    )
 
     entries.sort(key=lambda entry: entry.cms_group_id)
     counts = {outcome.value: 0 for outcome in GroupSyncOutcome}

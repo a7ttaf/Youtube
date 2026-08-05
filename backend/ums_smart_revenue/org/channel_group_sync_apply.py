@@ -217,9 +217,16 @@ def _execute_update(
     individually idempotent no-ops in that case (``add_members`` skips present
     members, ``remove_member`` deletes zero rows). Reporting only what this
     call actually changed keeps the audit trail and the returned counts honest.
+
+    The re-read takes ``for_update`` — the parent group row is the membership
+    serialization point every membership writer locks. Without it the diff is
+    computed against a snapshot a racing writer can still invalidate before
+    these writes land, so a loser could perform zero inserts/deletes and STILL
+    report members_added/members_removed. Holding the lock across diff-then-
+    write makes the reported change the change that actually happened.
     """
     group_id = _require_local_group_id(entry)
-    current = groups.get_group(group_id)
+    current = groups.get_group(group_id, for_update=True)
     if current is None:
         raise ValueError(f"sync plan entry's local group vanished before apply: {group_id}")
     pending = _resolve_pending_change(entry, current)

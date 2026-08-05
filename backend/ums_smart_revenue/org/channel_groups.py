@@ -81,8 +81,14 @@ class ChannelGroupRegistryStore(Protocol):
         """
         pass
 
-    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
-        pass
+    def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
+        """Return the group by id, or None.
+
+        ``for_update`` row-locks the parent group — the membership
+        serialization point — so a caller that diffs membership under the lock
+        cannot have that diff invalidated by a concurrent add/remove before it
+        writes. CMS group sync's apply uses it for exactly that.
+        """
 
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
@@ -142,15 +148,30 @@ class ChannelGroupRegistry:
         return sorted(self._groups.values(), key=lambda group: group.name)
 
     def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
-        """Return every CMS-keyed group, active or not, for sync planning."""
+        """Return every CMS-keyed group, active or not, for sync planning.
+
+        Parity with the SQL store: a scoped call also returns owner-NULL rows
+        so legacy/unstamped groups stay reconcilable instead of colliding on
+        the tenant-wide unique cms_group_id.
+        """
         return [
             group
             for group in self._groups.values()
             if group.cms_group_id is not None
-            and (content_owner_id is None or group.content_owner_id == content_owner_id)
+            and (
+                content_owner_id is None
+                or group.content_owner_id is None
+                or group.content_owner_id == content_owner_id
+            )
         ]
 
-    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
+    def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
+        """Return the group by id, or None.
+
+        ``for_update`` is a no-op in memory (single-threaded test registry),
+        matching get_group_by_cms_id's documented divergence; the SQL
+        implementation takes the real FOR NO KEY UPDATE row lock.
+        """
         return self._groups.get(group_id)
 
     def get_group_by_cms_id(
