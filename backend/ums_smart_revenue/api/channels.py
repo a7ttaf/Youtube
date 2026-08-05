@@ -228,30 +228,32 @@ def sql_audit_sink_from_session(
     return SqlAlchemyAuditSink(session)
 
 
-def current_import_audit_sink(
+def current_atomic_audit_sink(
     sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> AuditSink:
-    """Audit sink for the bulk import; passes through until SQL wiring overrides it.
+    """Audit sink for all-or-nothing routes; passes through until SQL wiring overrides it.
 
-    create_app overrides this with sql_import_audit_sink_from_session so import
-    audit rows join the tenant transaction (all-or-nothing with the channel
-    writes) instead of committing on the independent platform session.
+    create_app overrides this with sql_atomic_audit_sink_from_session so the
+    route's audit rows join the tenant transaction (all-or-nothing with the
+    domain writes) instead of committing on the independent platform session.
+    Depending on current_audit_sink keeps the in-memory test wiring working:
+    an override of that dependency still reaches every route wired here.
     """
     return sink
 
 
-def sql_import_audit_sink_from_session(
+def sql_atomic_audit_sink_from_session(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> PlatformLaneAuditSink:
-    """Bind the import's audit writes to the request's tenant session.
+    """Bind an all-or-nothing route's audit writes to the request's tenant session.
 
-    The import promises all-or-nothing semantics. The app-wide audit sink runs
-    on the independently committed platform session, which FastAPI tears down
-    (and commits) BEFORE the tenant session; a tenant commit failure would then
-    leave audit rows permanently claiming an import that never happened.
-    PlatformLaneAuditSink writes audit_logs inside the SAME transaction as the
-    channel writes, elevating per append because audit_logs is platform-only
-    writable.
+    The bulk import and the CMS group sync both promise all-or-nothing
+    semantics. The app-wide audit sink runs on the independently committed
+    platform session, which FastAPI tears down (and commits) BEFORE the tenant
+    session; a tenant commit failure would then leave audit rows permanently
+    claiming work that never happened. PlatformLaneAuditSink writes audit_logs
+    inside the SAME transaction as the domain writes, elevating per append
+    because audit_logs is platform-only writable.
     """
     return PlatformLaneAuditSink(session)
 
@@ -581,7 +583,7 @@ def import_channels(
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     groups: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    audit_sink: Annotated[AuditSink, Depends(current_import_audit_sink)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
     file: Annotated[UploadFile, File()],
     content_owner_id: Annotated[str, Form()],
     dry_run: Annotated[bool, Form()],
@@ -826,10 +828,13 @@ def _resolve_tenant_uuid(user: UserPrincipal) -> UUID:
 # Database/ORM: ChannelGroupORM/ChannelGroupMemberORM via the group store;
 #   ApiConnectorCredentialORM read via resolve_connector_credentials.
 # Standards: Global MANAGE_GROUPS fail-closed (group writes must not bypass
-#   the group API's authorization); fetch completes before any write; single
-#   tenant transaction so a mid-apply failure rolls groups + audit together;
-#   GROUPS_SYNCED summary uses ACTUAL apply counts, never the plan's; canned
-#   error details only — Google/credential exception text never reaches HTTP.
+#   the group API's authorization); fetch completes before any write; audit
+#   runs on a PlatformLaneAuditSink bound to the request's TENANT session
+#   (current_atomic_audit_sink), so GROUP_UPDATED/GROUPS_SYNCED rows share one
+#   transaction with the group writes and a mid-apply failure OR a lost commit
+#   rolls both back together; GROUPS_SYNCED summary uses ACTUAL apply counts,
+#   never the plan's; canned error details only — Google/credential exception
+#   text never reaches HTTP.
 # Blast Radius: Group naming/membership/active state, audit. Finance
 #   group-scope rollups change composition only as the CMS does. No channel
 #   rows are ever created here (unknown members surface in the response).
@@ -846,7 +851,7 @@ def sync_channel_groups(
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     groups: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
     client_factory: Annotated[
         Callable[[Credentials], YouTubeGroupsClient], Depends(current_groups_client_factory)
     ],

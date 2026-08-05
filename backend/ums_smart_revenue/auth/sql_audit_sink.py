@@ -12,7 +12,7 @@
 # Connections:
 #   - File: backend/ums_smart_revenue/auth/audit_service.py -> record shape.
 #   - File: backend/ums_smart_revenue/db/lane.py -> platform_lane elevation.
-#   - File: backend/ums_smart_revenue/api/channels.py -> import sink wiring.
+#   - File: backend/ums_smart_revenue/api/channels.py -> atomic sink wiring.
 # ============================================================================
 """SQL audit sinks: platform-session default and same-transaction platform-lane."""
 
@@ -106,11 +106,13 @@ class SqlAlchemyAuditSink:
 #   already does. platform_lane is not nest-safe — appends are sequential and
 #   never nested here.
 # Blast Radius: Audit atomicity for routes that opt in (the bulk channel
-#   import). No RLS policy, grant, or audit semantics change.
+#   import, the CMS group sync). No RLS policy, grant, or audit semantics
+#   change.
 # Connections:
 #   - File: backend/ums_smart_revenue/db/lane.py -> sanctioned single-session
 #     elevation precedent this sink builds on.
-#   - File: backend/ums_smart_revenue/api/channels.py -> import route wiring.
+#   - File: backend/ums_smart_revenue/api/channels.py -> current_atomic_audit_sink
+#     wiring for the import and group-sync routes.
 # ============================================================================
 class PlatformLaneAuditSink:
     """Persist audit records on the caller's session via platform-lane elevation."""

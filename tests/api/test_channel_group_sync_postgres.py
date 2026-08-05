@@ -503,3 +503,49 @@ def test_mid_apply_failure_rolls_back_groups_and_audit_on_postgres(
     assert _group_row(owner_engine, GROUP_ID) is None
     assert _group_row(owner_engine, SECOND_GROUP_ID) is None
     assert _audit_log_count(owner_engine) == before
+
+
+def test_tenant_commit_failure_persists_no_audit_rows_on_postgres(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """Audit rows share the tenant transaction's fate: no commit, no audit.
+
+    The mid-apply test above only covers the EXCEPTION path, where FastAPI
+    throws into both yield-dependencies and both sessions roll back. This is
+    the commit-order path the bulk import already closes (see
+    ``tests/api/test_channels_import_postgres.py``): the handler returns
+    success and only then does the tenant transaction fail to persist — a
+    serialization or connection error at commit time, simulated here by a
+    dependency that rolls back where the wired dependency would commit.
+
+    Because the sync's audit rows must join the SAME transaction as the group
+    writes, they have to vanish with them. On the app-wide sink they did not:
+    that sink runs on the independently committed platform session, which
+    FastAPI tears down BEFORE the tenant session, leaving durable
+    GROUP_UPDATED + GROUPS_SYNCED rows describing a mirror that never happened.
+    """
+    _seed_channel(owner_engine, CHANNEL_ID, "Alpha News")
+    fake = FakeGroupsClient([(GROUP_ID, GROUP_TITLE, (CHANNEL_ID,))])
+    app = build_sync_app(pg_url, fake)
+    factory = build_session_factory(pg_url)
+
+    def rollback_instead_of_commit() -> Iterator[Session]:
+        """Yield a real tenant-lane session but never let it commit."""
+        with factory() as session:
+            try:
+                yield session
+            finally:
+                session.rollback()
+
+    app.dependency_overrides[current_db_session] = rollback_instead_of_commit
+    client = TestClient(app)
+    before_tenant = _tenant_audit_log_count(owner_engine, TENANT_A)
+
+    response = post_sync(client)
+
+    # Anti-vacuity: the handler itself succeeded and really applied a CREATE,
+    # so both audit events were emitted. Only the commit was lost.
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["CREATE"] == 1
+    assert _group_row(owner_engine, GROUP_ID) is None
+    assert _tenant_audit_log_count(owner_engine, TENANT_A) == before_tenant
