@@ -6,7 +6,7 @@
 
 **Architecture:** A thin `YouTubeGroupsClient` fetches the CMS snapshot (`groups.list` + `groupItems.list`) through the existing `GoogleHttpClient`; a pure planner (`org/channel_group_sync.py`) diffs it against local synced groups; an apply-domain module (`org/channel_group_sync_apply.py`, mirroring `channel_import_apply.py`) executes through `ChannelGroupRegistryStore` in the single tenant transaction and audits from write-boundary outcomes. `api/groups.py` gains a synced-group lockdown so manual edits can't fight the mirror.
 
-**Tech Stack:** Python 3.14, FastAPI, SQLAlchemy 2.x, pytest, ruff (100-char). **No migration** — `channel_groups.cms_group_id` shipped in PR #159.
+**Tech Stack:** Python 3.14, FastAPI, SQLAlchemy 2.x, pytest, ruff (100-char). **ONE migration — `20260805_0001_channel_group_content_owner`** (additive nullable `channel_groups.content_owner_id`, added by the review round to scope a synced group to its content owner). Run `alembic upgrade head` BEFORE deploying the app code, which reads that column. `channel_groups.cms_group_id` itself shipped earlier, in PR #159's `20260803_0001`.
 
 **Spec:** `Docs/superpowers/specs/2026-08-05-cms-group-sync-design.md`
 **Branch:** `feat/cms-group-sync` off `557ec1f0` (spec committed `eab868ed`)

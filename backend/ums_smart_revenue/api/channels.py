@@ -193,6 +193,51 @@ class ChannelImportResult(BaseModel):
     rows: list[ChannelImportRowResult]
 
 
+class GroupSyncGroupResult(BaseModel):
+    """One CMS group's planned or applied result.
+
+    Identical in shape for both modes; only the SOURCE differs. A dry run
+    renders these from the plan ("what would happen"), an apply from the write
+    boundary ("what did") — which is why every field is nullable/empty-able
+    rather than carrying mode-specific variants.
+    """
+
+    cms_group_id: str
+    outcome: str
+    title: str | None
+    local_group_id: str | None
+    # [from, to] pairs rather than objects, matching what the route has always
+    # emitted; a two-element list is the contract, not a tuple type.
+    name_change: list[str] | None
+    active_change: list[bool] | None
+    members_added: list[str]
+    members_removed: list[str]
+    # Capped at 50 ids; the count is the untruncated total.
+    unknown_channel_ids: list[str]
+    unknown_channel_count: int
+    # "will adopt" on a preview, "did adopt" on an apply — the same
+    # mode-dependence `counts` carries.
+    will_adopt_content_owner: bool
+
+
+class GroupSyncResult(BaseModel):
+    """Declared response contract for POST /channels/groups/sync.
+
+    Exists so the API boundary is validated rather than hand-assembled: this
+    surface shipped two defects in review where the response disagreed with
+    the audit trail (plan counts vs executed counts, then plan per-group diffs
+    vs executed ones), and an unstructured dict cannot catch that class of
+    drift at the boundary or in the generated OpenAPI contract.
+    """
+
+    dry_run: bool
+    content_owner_id: str
+    counts: dict[str, int]
+    unknown_channel_total: int
+    non_channel_member_count: int
+    groups: list[GroupSyncGroupResult]
+
+
 def _strip_required_string(value):
     if isinstance(value, str):
         stripped = value.strip()
@@ -851,7 +896,7 @@ def _resolve_tenant_uuid(user: UserPrincipal) -> UUID:
 #   - File: backend/ums_smart_revenue/org/channel_group_sync_apply.py -> apply.
 #   - File: backend/ums_smart_revenue/connectors/google/youtube_groups_client.py.
 # ============================================================================
-@router.post("/groups/sync")
+@router.post("/groups/sync", response_model=GroupSyncResult)
 def sync_channel_groups(
     payload: GroupSyncRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -863,7 +908,7 @@ def sync_channel_groups(
     client_factory: Annotated[
         Callable[[Credentials], YouTubeGroupsClient], Depends(current_groups_client_factory)
     ],
-) -> dict[str, object]:
+) -> GroupSyncResult:
     """Mirror the content owner's CMS groups locally, previewing or applying."""
     target_scope = AccessScope.global_scope()
     if not has_permission(user, Permission.MANAGE_GROUPS, target_scope, org_index):
@@ -923,6 +968,16 @@ def sync_channel_groups(
             ),
         ) from exc
 
+    # End the credential transaction BEFORE the external fetch. Resolution
+    # touched the session (credential SELECT + refresh-telemetry stamp), and
+    # the fetch below is one groups.list plus a groupItems.list PER GROUP — for
+    # a large content owner that is a long stretch of network I/O with a
+    # Postgres transaction sitting idle behind it, which
+    # idle_in_transaction_session_timeout will eventually kill after the Google
+    # work is already paid for.
+    #
+    _end_credential_transaction(session, dry_run=payload.dry_run)
+
     client = client_factory(credentials)
     try:
         try:
@@ -961,14 +1016,8 @@ def sync_channel_groups(
     # keeps those unowned rows from being deactivated.
     local_groups = tuple(groups.list_synced_groups(content_owner_id=content_owner_id))
     member_ids = {cid for item in snapshot for cid in item.member_channel_ids}
-    # include_inactive=True: an archived-but-still-existing channel must count
-    # as known, not unknown. The groups API's own authorization intentionally
-    # considers the full member set (active + inactive) when deciding scope
-    # access, so a sync must not silently strip an inactive channel's group
-    # membership just because it looks "unknown" under an active-only filter.
-    known = frozenset(
-        entry.youtube_channel_id
-        for entry in registry.list_channels_by_ids(member_ids, include_inactive=True)
+    known = _known_member_channel_ids(
+        registry, member_ids=member_ids, content_owner_id=content_owner_id
     )
     # The scoped read above is owner-OR-NULL, so a key another owner already
     # holds is INVISIBLE to it and would plan as CREATE — then collide on the
@@ -989,16 +1038,14 @@ def sync_channel_groups(
         plan, dry_run=payload.dry_run, content_owner_id=content_owner_id
     )
     if payload.dry_run:
-        # Dry runs must persist nothing. resolve_connector_credentials() above
-        # already mutated the credential row's refresh telemetry in-session —
-        # it deliberately leaves that write uncommitted so a caller that never
-        # commits (CLI/dry-run session) never persists it, but THIS route's
-        # session dependency auto-commits on a successful response regardless
-        # of dry_run. Nothing else has been written yet at this point, so
-        # rolling back here is exactly the "persisted nothing" contract the
-        # credential helper's own dry-run semantics assume.
+        # Second rollback, deliberately. The one before the fetch discarded the
+        # credential telemetry; this one covers the window since, because the
+        # route's session dependency auto-commits on a successful response
+        # regardless of dry_run. Nothing is written between the two today, so
+        # this is belt-and-braces against a future read that dirties the
+        # session — cheap, and the alternative is a dry run that persists.
         session.rollback()
-        return payload_out
+        return GroupSyncResult.model_validate(payload_out)
 
     _reject_foreign_owner_conflicts(plan, session=session)
 
@@ -1051,7 +1098,67 @@ def sync_channel_groups(
             "non_channel_member_count": plan.non_channel_member_count,
         },
     )
-    return payload_out
+    return GroupSyncResult.model_validate(payload_out)
+
+
+def _known_member_channel_ids(
+    registry: ChannelRegistryStore,
+    *,
+    member_ids: set[str],
+    content_owner_id: str,
+) -> frozenset[str]:
+    """CMS members this sync may attach: registered, and not another owner's.
+
+    ``include_inactive=True`` because an archived-but-still-existing channel is
+    known, not unknown. The groups API's own authorization deliberately counts
+    the full member set (active + inactive) when deciding scope access, so a
+    sync must not silently strip an inactive channel's membership just because
+    an active-only filter made it look absent.
+
+    The owner filter is OR-NULL, mirroring ``list_synced_groups``: a channel
+    stamped to a DIFFERENT content owner is excluded, an unstamped legacy row
+    is not. Without the exclusion, a channel still registered to owner B that
+    appears in owner A's CMS snapshot would be attached to A's synced group,
+    bypassing the import route's content_owner_id contract and pulling B's
+    channel into A's group-scope finance reads. Excluded ids are not dropped
+    silently — they fall through to the plan's ``unknown_channel_ids``, which
+    is the same "surface it, never invent it" contract unregistered members
+    already get, and the operator fixes the registry with
+    ``PATCH /channels/{id}/content-owner``.
+
+    Keeping NULL attachable matters as much as excluding the mismatch: every
+    channel predating the content-owner stamp is NULL, and a strict equality
+    filter would make a whole tenant's roster look unknown and strip its
+    memberships on the first sync.
+    """
+    return frozenset(
+        entry.youtube_channel_id
+        for entry in registry.list_channels_by_ids(member_ids, include_inactive=True)
+        if entry.content_owner_id in (None, content_owner_id)
+    )
+
+
+def _end_credential_transaction(session: Session, *, dry_run: bool) -> None:
+    """Close the credential transaction before the external fetch begins.
+
+    Mode-dependent on purpose. ``resolve_connector_credentials`` returns a
+    Credentials object built from the resolved secret, not an ORM-bound row, so
+    it survives either call; what differs is the refresh-telemetry stamp that
+    resolution leaves pending:
+
+    - dry run -> roll back, because "a dry run persists nothing" includes that
+      stamp (the credential helper's own documented dry-run contract).
+    - apply   -> commit it, which is where that stamp was always meant to land.
+
+    Safe at exactly this point for the same reason the helper's own failure
+    path commits here: nothing else is pending yet. The group writes and their
+    audit rows still share ONE later transaction, so the audit-atomicity
+    invariant this route already proved on Postgres is untouched.
+    """
+    if dry_run:
+        session.rollback()
+    else:
+        session.commit()
 
 
 def _foreign_owner_group_ids(

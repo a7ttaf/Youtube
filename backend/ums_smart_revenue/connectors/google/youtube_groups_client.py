@@ -58,6 +58,15 @@ class CmsGroupMembers:
 def _non_empty_str(value: object, *, url: str, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise GoogleApiResponseError(url=url, reason=f"{field!r} must be a non-empty string")
+    # Every id and title this client returns is destined for a Postgres text
+    # column or an audit JSONB payload, and Postgres rejects NUL in both. A NUL
+    # arriving from upstream would otherwise pass every shape check here and
+    # blow up as a 500 mid-apply, AFTER the whole fetch was paid for. Rejecting
+    # it at the fetch boundary routes it through the same typed
+    # GoogleApiResponseError -> 502 path as every other malformed response, and
+    # matches the NUL guards the route already applies to operator input.
+    if "\x00" in value:
+        raise GoogleApiResponseError(url=url, reason=f"{field!r} contains a NUL character")
     return value
 
 

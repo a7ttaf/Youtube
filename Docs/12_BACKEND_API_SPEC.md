@@ -43,6 +43,7 @@ Database authorization rejects unknown users and disabled users before route cod
 GET /channels
 POST /channels
 POST /channels/import
+POST /channels/groups/sync
 PATCH /channels/{youtube_channel_id}/mapping
 PATCH /channels/{youtube_channel_id}/content-owner
 GET /channels/issues
@@ -93,6 +94,49 @@ and the raw `view_revenue` token), one `GROUP_UPDATED` per group
 creation/membership addition, and one `CHANNEL_IMPORTED` summary — all
 committed in the SAME transaction as the channel writes, so a failed apply
 leaves no audit rows.
+
+`POST /channels/groups/sync` mirrors one YouTube CMS content owner's groups
+onto local channel groups — YouTube is the source of truth for grouping. JSON
+body: `content_owner_id` (required, stripped, ≤255 chars, NUL rejected — it
+becomes the audit summary's indexed entity id), `dry_run` (bool, **required**,
+no default, so omitting it is a 422), and `reason` (required audit reason, NUL
+rejected). Authorization is `registry.manage_groups` at GLOBAL scope,
+fail-closed: a sync spans groups regardless of company mapping and must not
+bypass the group API's own checks.
+
+The response is the declared `GroupSyncResult` model in BOTH modes:
+`{dry_run, content_owner_id, counts, unknown_channel_total,
+non_channel_member_count, groups[]}`, each group carrying `cms_group_id`,
+`outcome`, `title`, `local_group_id`, `name_change`/`active_change` as
+`[from, to]` pairs, `members_added`/`members_removed`, `unknown_channel_ids`
+(capped at 50) with the untruncated `unknown_channel_count`, and
+`will_adopt_content_owner`. The SHAPE is identical across modes; only the
+SOURCE differs — a dry run renders the plan ("what would happen"), an apply
+renders the write boundary ("what did"), which is the same tally its
+`GROUPS_SYNCED` audit row persists, so body and trail cannot disagree.
+
+Outcomes per CMS key: `CREATE`, `RENAME`, `MEMBERS_CHANGED`, `DEACTIVATE`
+(absent upstream → `active=false`, never deleted), `REACTIVATE`, `UNCHANGED`,
+and `CONFLICT` — the last meaning the key already exists locally under a
+DIFFERENT content owner. A `CONFLICT` entry executes nothing and makes the
+apply return 409 before any write, because the owner-scoped read cannot see
+the rival's row and creating the key would collide with the tenant-unique
+`cms_group_id`. Membership never invents channels: unknown CMS members are
+surfaced and skipped, `POST /channels/import` remains the only channel-creation
+path. Non-channel group members (playlists/videos/assets) are filtered and
+counted, never stored.
+
+A dry run persists nothing at all, including audit rows and the credential
+refresh telemetry that credential resolution stamps. Errors: missing/inactive
+credential, OAuth refresh failure, or any other credential-layer failure → 503
+with a canned message; the Google fetch failing → 502; a lost uniqueness or
+ownership race at the write boundary → 409. Exception text never reaches the
+response body. Audit: one `GROUP_UPDATED` per group actually changed (source
+`cms_group_sync`, carrying the field diff, membership counts, and
+`adopted_content_owner`) plus one `GROUPS_SYNCED` summary, all in the SAME
+transaction as the group writes. Manual rename and membership edits on a
+synced group are rejected 409 by the groups API; an `active`-only PATCH stays
+allowed, but any sync that still sees the group upstream re-activates it.
 
 `PATCH /channels/{youtube_channel_id}/content-owner` sets or clears a channel's
 CMS `content_owner_id` — the value `list_target_channels` matches against the

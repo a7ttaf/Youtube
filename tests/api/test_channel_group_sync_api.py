@@ -963,6 +963,119 @@ def test_key_held_by_another_owner_is_previewed_as_conflict_and_refused():
     assert audit_sink.records == []
 
 
+def test_response_shape_is_a_declared_contract_not_a_bare_dict():
+    """The boundary is typed, so shape drift fails here instead of downstream.
+
+    This surface shipped two review defects where the response disagreed with
+    the audit trail. A declared model is what makes the next such divergence a
+    validation error at the boundary and a real OpenAPI contract for clients,
+    rather than an unstructured object nobody can check against.
+    """
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE, UNKNOWN_CHANNEL), 2)])
+    client, _registry, _groups, _audit_sink = create_sync_app(fake)
+
+    schema = client.app.openapi()
+    operation = schema["paths"][SYNC_URL]["post"]
+    ref = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+    assert ref.endswith("/GroupSyncResult")
+    group_ref = schema["components"]["schemas"]["GroupSyncResult"]["properties"]["groups"]["items"]
+    assert group_ref["$ref"].endswith("/GroupSyncGroupResult")
+
+    response = post_sync(client, dry_run=True)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # Every declared field is present and typed as the contract says.
+    assert set(body) == {
+        "dry_run",
+        "content_owner_id",
+        "counts",
+        "unknown_channel_total",
+        "non_channel_member_count",
+        "groups",
+    }
+    entry = body["groups"][0]
+    assert entry["unknown_channel_ids"] == [UNKNOWN_CHANNEL]
+    assert entry["unknown_channel_count"] == 1
+    assert body["non_channel_member_count"] == 2
+    assert isinstance(entry["will_adopt_content_owner"], bool)
+
+
+def test_member_registered_to_another_owner_is_surfaced_not_attached():
+    """A CMS member still registered to owner B must not join owner A's group.
+
+    The channel lookup filters by tenant and id, so without an owner filter
+    this channel counts as "known" and gets attached — bypassing the import
+    route's content_owner_id contract and pulling B's channel into A's
+    group-scope finance reads. It is surfaced as an unknown member instead,
+    the same treatment an unregistered id gets, so the operator can fix the
+    registry with PATCH /channels/{id}/content-owner.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ONE,
+                channel_name="Alpha News",
+                primary_company_id="company-tv",
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            ),
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_TWO,
+                channel_name="Beta Sports",
+                primary_company_id="company-tv",
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                # Still registered to a DIFFERENT content owner.
+                content_owner_id=OTHER_OWNER,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE, CHANNEL_TWO), 0)])
+    client, _registry, groups, _audit_sink = create_sync_app(fake, registry=registry)
+
+    response = post_sync(client)
+
+    assert response.status_code == 200, response.text
+    entry = response.json()["groups"][0]
+    assert entry["members_added"] == [CHANNEL_ONE]
+    assert entry["unknown_channel_ids"] == [CHANNEL_TWO]
+    assert entry["unknown_channel_count"] == 1
+    assert group_by_cms_id(groups, "cms-a").channel_ids == (CHANNEL_ONE,)
+
+
+def test_member_with_no_content_owner_stamp_is_still_attachable():
+    """Owner-NULL is legacy, not foreign — a strict filter would strip rosters.
+
+    Every channel predating the content-owner stamp is NULL. If the owner
+    filter were equality rather than OR-NULL, a whole tenant's roster would
+    read as unknown and the first sync would strip its group memberships.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ONE,
+                channel_name="Legacy Channel",
+                primary_company_id="company-tv",
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=None,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, _audit_sink = create_sync_app(fake, registry=registry)
+
+    response = post_sync(client)
+
+    assert response.status_code == 200, response.text
+    entry = response.json()["groups"][0]
+    assert entry["members_added"] == [CHANNEL_ONE]
+    assert entry["unknown_channel_ids"] == []
+    assert group_by_cms_id(groups, "cms-a").channel_ids == (CHANNEL_ONE,)
+
+
 def test_reason_with_nul_byte_is_rejected():
     """A NUL byte in reason is a 422, not an unhandled encoding failure later.
 

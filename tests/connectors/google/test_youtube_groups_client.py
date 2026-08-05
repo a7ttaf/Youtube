@@ -120,6 +120,48 @@ def test_list_groups_rejects_item_missing_title(mock_credentials) -> None:
         client.list_groups(account_id="acct")
 
 
+def test_list_groups_rejects_nul_in_title(mock_credentials) -> None:
+    """A NUL from upstream fails at the fetch boundary, not inside Postgres.
+
+    Group ids and titles land in text columns and audit JSONB, both of which
+    Postgres rejects for NUL. Without this guard the value passes every shape
+    check, the whole fetch completes, and the request dies as a 500 mid-apply
+    instead of the typed 502 every other malformed response gets.
+    """
+    payload = {"items": [{"id": "g1", "snippet": {"title": "TV\x00Sector"}}]}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(payload).encode())
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeGroupsClient(http=http)
+
+    with pytest.raises(GoogleApiResponseError, match="NUL"):
+        client.list_groups(account_id="acct")
+
+
+def test_list_group_items_rejects_nul_in_channel_id(mock_credentials) -> None:
+    """The same guard covers member ids, which become group membership rows."""
+    payload = {
+        "items": [{"resource": {"kind": "youtube#channel", "id": "UC\x00bad"}}],
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(payload).encode())
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeGroupsClient(http=http)
+
+    with pytest.raises(GoogleApiResponseError, match="NUL"):
+        client.list_group_items(group_id="g1", account_id="acct")
+
+
 def test_list_groups_rejects_item_missing_id(mock_credentials) -> None:
     payload = {"items": [{"snippet": {"title": "TV"}}]}
 

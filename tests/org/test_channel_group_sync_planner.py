@@ -1,3 +1,21 @@
+# ============================================================================
+# Purpose: Pin the pure CMS group-sync planning contract — the diff of one
+#   content owner's upstream snapshot against local synced groups, and the
+#   dominant outcome chosen per CMS key.
+# Database/ORM: None. The planner performs no I/O, so these tests construct
+#   both sides in memory and never touch a session.
+# Standards: One behaviour per test, asserted through the public
+#   plan_group_sync entry point rather than its private helpers. Fixtures
+#   default to the OWNED, in-sync case so a test that exercises adoption,
+#   deactivation, or a cross-owner conflict has to say so explicitly — an
+#   earlier version of this suite defaulted to owner-NULL and silently made
+#   every case an adoption case.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_group_sync.py -> subject.
+#   - File: tests/org/test_channel_group_sync_apply.py -> the write-boundary
+#     half of the same contract; outcomes planned here are executed there.
+# ============================================================================
 """Pure planning for CMS group sync."""
 
 from collections.abc import Sequence
