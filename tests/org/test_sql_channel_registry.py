@@ -18,6 +18,7 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelMappingLockedMonthError,
     ChannelRegistryConflictError,
     ChannelRegistryValidationError,
+    ChannelRevenueRequirementLockedMonthError,
 )
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
@@ -52,6 +53,17 @@ def _tenant(tenant_id: UUID, *, slug: str) -> Tenant:
         created_at=now,
         updated_at=now,
     )
+
+
+def _naive(value: datetime) -> datetime:
+    """Drop tzinfo so a freshly-assigned value compares with a persisted one.
+
+    SQLite returns DateTime(timezone=True) columns naive, so a row holding one
+    column straight from Python and another read back from the database cannot
+    be compared directly — the ordering, not the tzinfo, is what these
+    assertions are about.
+    """
+    return value.replace(tzinfo=None)
 
 
 def build_session() -> Session:
@@ -271,6 +283,551 @@ def test_sql_channel_registry_update_content_owner_missing_channel_raises():
     with pytest.raises(KeyError):
         registry.update_content_owner(
             youtube_channel_id="missing-channel", content_owner_id="owner-x"
+        )
+
+
+def test_sql_channel_registry_update_inventory_persists_all_four_fields():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    _previous, updated = registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id="owner-cms",
+        revenue_required=True,
+    )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
+        )
+    ).one()
+    assert updated.channel_name == "TV A Renamed"
+    assert updated.cms_status == "INSIDE_CMS"
+    assert updated.content_owner_id == "owner-cms"
+    assert updated.revenue_required is True
+    assert persisted.channel_name == "TV A Renamed"
+    assert persisted.cms_status == "INSIDE_CMS"
+    assert persisted.content_owner_id == "owner-cms"
+    assert persisted.revenue_required is True
+
+
+def test_sql_channel_registry_update_inventory_flips_revenue_source_status():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    _previous, updated = registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=False,
+    )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
+        )
+    ).one()
+    assert updated.revenue_source_status == "PERFORMANCE_ONLY"
+    assert persisted.revenue_source_status == "PERFORMANCE_ONLY"
+
+
+def test_sql_channel_registry_update_inventory_preserves_official_status():
+    """A name/owner refresh must not clobber a proven official revenue source."""
+    session = build_session()
+    seed_org(session)
+    session.add(
+        YouTubeChannelORM(
+            id=UUID("00000000-0000-0000-0000-000000000304"),
+            youtube_channel_id="channel-official-cms",
+            channel_name="Official CMS",
+            primary_org_unit_id=COMPANY_TV_ID,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+            revenue_source_status="OFFICIAL_CMS_REVENUE",
+            active=True,
+        )
+    )
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    _previous, updated = registry.update_inventory(
+        youtube_channel_id="channel-official-cms",
+        channel_name="Official CMS Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id="owner-cms",
+        revenue_required=True,
+    )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-official-cms",
+        )
+    ).one()
+    assert updated.revenue_source_status == "OFFICIAL_CMS_REVENUE"
+    assert persisted.revenue_source_status == "OFFICIAL_CMS_REVENUE"
+    assert persisted.channel_name == "Official CMS Renamed"
+
+
+def test_sql_channel_registry_lists_inactive_channels_when_asked():
+    """include_inactive surfaces archived rows for import planning."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    default_lookup = registry.list_channels_by_ids({"channel-tv-a", "channel-inactive"})
+    inclusive_lookup = registry.list_channels_by_ids(
+        {"channel-tv-a", "channel-inactive"}, include_inactive=True
+    )
+
+    assert {channel.youtube_channel_id for channel in default_lookup} == {"channel-tv-a"}
+    inclusive_by_id = {channel.youtube_channel_id: channel for channel in inclusive_lookup}
+    assert set(inclusive_by_id) == {"channel-tv-a", "channel-inactive"}
+    assert inclusive_by_id["channel-inactive"].active is False
+
+
+def _seed_not_required_channel(session: Session) -> None:
+    """Persist a performance-only channel the flip-guard tests mutate."""
+    session.add(
+        YouTubeChannelORM(
+            id=UUID("00000000-0000-0000-0000-000000000305"),
+            youtube_channel_id="channel-perf-only",
+            channel_name="Perf Only",
+            primary_org_unit_id=COMPANY_TV_ID,
+            cms_status="INSIDE_CMS",
+            revenue_required=False,
+            revenue_source_status="PERFORMANCE_ONLY",
+            active=True,
+        )
+    )
+    session.commit()
+
+
+def test_update_inventory_rejects_required_flip_when_locked_month_lacks_fact():
+    """Enabling revenue_required must not retroactively break a LOCKED close."""
+    session = build_finance_session()
+    seed_org(session)
+    _seed_not_required_channel(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(ChannelRevenueRequirementLockedMonthError, match="2026-09"):
+        registry.update_inventory(
+            youtube_channel_id="channel-perf-only",
+            channel_name="Perf Only",
+            cms_status="INSIDE_CMS",
+            content_owner_id=None,
+            revenue_required=True,
+        )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-perf-only",
+        )
+    ).one()
+    assert persisted.revenue_required is False
+    assert persisted.revenue_source_status == "PERFORMANCE_ONLY"
+
+
+def test_update_inventory_allows_required_flip_when_locked_month_has_fact():
+    """A locked month with a fact for the channel does not block the flip."""
+    session = build_finance_session()
+    seed_org(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+    session.add(
+        YouTubeChannelORM(
+            id=UUID("00000000-0000-0000-0000-000000000306"),
+            youtube_channel_id="channel-perf-flip",
+            channel_name="Perf Flip",
+            primary_org_unit_id=COMPANY_TV_ID,
+            cms_status="INSIDE_CMS",
+            revenue_required=False,
+            revenue_source_status="PERFORMANCE_ONLY",
+            active=True,
+        )
+    )
+    session.commit()
+    session.add(
+        MonthlyChannelRevenueFactORM(
+            id=uuid4(),
+            month="2026-09",
+            youtube_channel_id="channel-perf-flip",
+            source_kind="YOUTUBE_CMS",
+            gross_revenue_usd=100,
+        )
+    )
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    _previous, updated = registry.update_inventory(
+        youtube_channel_id="channel-perf-flip",
+        channel_name="Perf Flip",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=True,
+    )
+
+    assert updated.revenue_required is True
+    assert updated.revenue_source_status == "MISSING_REVENUE_SOURCE"
+
+
+def test_update_inventory_returns_the_write_boundary_previous_entry():
+    """The previous entry reflects what the write replaced, for audit diffs."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    previous, updated = registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id="owner-cms",
+        revenue_required=True,
+    )
+
+    assert previous.channel_name == "TV A"
+    assert previous.content_owner_id is None
+    assert updated.channel_name == "TV A Renamed"
+    assert updated.content_owner_id == "owner-cms"
+
+
+def test_update_inventory_takes_guard_before_the_row_lock(monkeypatch):
+    """EVERY inventory write acquires the shared key BEFORE the row lock.
+
+    The lock-time readiness recheck holds the guard and then FOR-UPDATEs
+    required channel rows, so row-then-guard is the opposite order and
+    deadlocks against a concurrent close (review #159 r3713841225). Guarding
+    only requested-True writes left the same inversion ACROSS rows of a batch
+    — a performance-only row's lock preceding a later row's guard — so two
+    imports ordering those rows differently deadlocked each other (review
+    #159 r3714401827). Unconditional makes guard-then-rows a total order.
+    """
+    import ums_smart_revenue.org.sql_channel_registry as registry_module
+    from ums_smart_revenue.finance.month_close_locks import (
+        REVENUE_REQUIREMENT_GUARD_MONTH,
+    )
+
+    session = build_finance_session()
+    seed_org(session)
+    _seed_not_required_channel(session)
+    call_order: list[str] = []
+    guard_calls: list[str] = []
+    monkeypatch.setattr(
+        registry_module,
+        "acquire_finance_month_advisory_lock",
+        lambda _session, month, *, tenant_id=None: (
+            call_order.append("guard"),
+            guard_calls.append(month),
+        ),
+    )
+    original_refresh = session.refresh
+
+    def recording_refresh(instance, *args, **kwargs):
+        if kwargs.get("with_for_update"):
+            call_order.append("row-lock")
+        return original_refresh(instance, *args, **kwargs)
+
+    monkeypatch.setattr(session, "refresh", recording_refresh)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    registry.update_inventory(
+        youtube_channel_id="channel-perf-only",
+        channel_name="Perf Only",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=True,  # the actual flip
+    )
+    registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=True,  # already required: still guarded, pre-lock
+    )
+    registry.update_inventory(
+        youtube_channel_id="channel-tv-a",
+        channel_name="TV A",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=False,  # performance-only: still guard-then-lock
+    )
+
+    # The guard is transaction-scoped and re-entrant, so one acquisition
+    # covers the whole request — a 5000-row import pays one round trip, not
+    # 5000 (review #159 r3714644444). What must hold is that it precedes the
+    # FIRST row lock; later rows are already covered.
+    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH]
+    assert call_order == ["guard", "row-lock", "row-lock", "row-lock"]
+    assert call_order.index("guard") < call_order.index("row-lock")
+
+
+def test_every_create_acquires_the_revenue_requirement_guard(monkeypatch):
+    """EVERY create serializes with month locking, performance-only included.
+
+    A revenue-required create committing inside a lock's readiness/commit
+    window would otherwise carry created_at <= locked_at and retroactively
+    fail the LOCKED month's effective-dated readiness (review #159
+    r3712948674). A performance-only create that flushes before a lock but
+    commits after it is invisible to that close yet keeps a pre-lock
+    created_at, so a later OFF->ON flip would demand a fact for a month whose
+    readiness never saw the channel — the guard makes COMMIT ORDER decide
+    which side of the lock it falls on (review #159 r3714401797).
+    """
+    import ums_smart_revenue.org.sql_channel_registry as registry_module
+    from ums_smart_revenue.finance.month_close_locks import (
+        REVENUE_REQUIREMENT_GUARD_MONTH,
+    )
+
+    session = build_finance_session()
+    seed_org(session)
+    guard_calls: list[str] = []
+    monkeypatch.setattr(
+        registry_module,
+        "acquire_finance_month_advisory_lock",
+        lambda _session, month, *, tenant_id=None: guard_calls.append(month),
+    )
+    registry = SqlAlchemyChannelRegistry(session)
+
+    registry.create_channel(
+        youtube_channel_id="channel-created-required",
+        channel_name="Required Create",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+    registry.create_channel(
+        youtube_channel_id="channel-created-perf",
+        channel_name="Performance Create",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=False,  # performance-only: covered by the same guard
+    )
+
+    # One acquisition per request transaction covers both creates.
+    assert guard_calls == [REVENUE_REQUIREMENT_GUARD_MONTH]
+
+
+def test_update_inventory_allows_flip_when_lock_predates_the_channel():
+    """A month locked BEFORE the channel existed never blocks the flip.
+
+    Readiness effective-dates LOCKED months (created_at <= locked_at), so a
+    pre-creation close can never evaluate this channel; demanding a fact for
+    it would make a channel created after historical closes permanently
+    un-flippable (review #159 r3713449090).
+    """
+    session = build_finance_session()
+    seed_org(session)
+    _seed_not_required_channel(session)
+    session.add(
+        FinanceMonthCloseORM(
+            month="2020-01",
+            status="LOCKED",
+            locked_at=datetime(2020, 2, 1, tzinfo=UTC),  # long before the channel
+        )
+    )
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    _previous, updated = registry.update_inventory(
+        youtube_channel_id="channel-perf-only",
+        channel_name="Perf Only",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=True,
+    )
+
+    assert updated.revenue_required is True
+    assert updated.revenue_source_status == "MISSING_REVENUE_SOURCE"
+
+
+def test_create_channel_stamps_created_at_after_the_guard(monkeypatch):
+    """Every create's created_at is the post-guard SHARED database clock.
+
+    Two failure modes this pins: the column's server default now() is the
+    transaction START time, which predates any month lock the create waited
+    on (review #159 r3713449080, r3713841258); and an application-host wall
+    clock is not comparable with locked_at across hosts, so both sides must
+    read the same `serialization_timestamp` source (r3715073210).
+    """
+    import ums_smart_revenue.org.sql_channel_registry as registry_module
+
+    sentinel = datetime(2031, 5, 6, 12, 0, tzinfo=UTC)
+    call_order: list[str] = []
+
+    session = build_finance_session()
+    seed_org(session)
+    monkeypatch.setattr(
+        registry_module,
+        "acquire_finance_month_advisory_lock",
+        lambda _session, month, *, tenant_id=None: call_order.append("guard"),
+    )
+    monkeypatch.setattr(
+        registry_module,
+        "serialization_timestamp",
+        lambda _session: (call_order.append("stamp"), sentinel)[1],
+    )
+    registry = SqlAlchemyChannelRegistry(session)
+
+    registry.create_channel(
+        youtube_channel_id="channel-created-required",
+        channel_name="Required Create",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+
+    assert call_order == ["guard", "stamp"]
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-created-required",
+        )
+    ).one()
+    assert persisted.created_at.replace(tzinfo=None) == sentinel.replace(tzinfo=None)
+
+    # A performance-only create stamps at the insertion point too: leaving
+    # the server default would record the transaction START time, and a later
+    # OFF->ON flip would then demand a fact for a month that locked
+    # mid-transaction, before the channel really existed (review #159
+    # r3713841258, r3714401797). It is covered by the same transaction-scoped
+    # guard acquisition, which is why no second "guard" appears.
+    registry.create_channel(
+        youtube_channel_id="channel-created-perf-stamp",
+        channel_name="Perf Stamp",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=False,
+    )
+    assert call_order == ["guard", "stamp", "stamp"]
+    perf_row = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-created-perf-stamp",
+        )
+    ).one()
+    assert perf_row.created_at.replace(tzinfo=None) == sentinel.replace(tzinfo=None)
+
+
+def test_registry_writes_never_persist_updated_at_before_created_at(monkeypatch):
+    """updated_at moves with the post-guard clock, on create and on update.
+
+    Both columns default to the same server-side now(), which is transaction
+    START time. Once created_at is stamped at the real insertion point — after
+    a guard wait that can be arbitrarily long — a defaulted updated_at is
+    strictly earlier, so every created row would claim it was last modified
+    before it existed (review #159 r3715427808). The same holds for an
+    inventory update whose transaction started before the create it updates
+    committed, which READ COMMITTED permits.
+    """
+    import ums_smart_revenue.org.sql_channel_registry as registry_module
+
+    created_stamp = datetime(2031, 5, 6, 12, 0, tzinfo=UTC)
+    updated_stamp = datetime(2031, 5, 7, 12, 0, tzinfo=UTC)
+    scripted = [created_stamp, updated_stamp]
+    reads: list[datetime] = []
+
+    def _stamp(_session: Session) -> datetime:
+        """Return the next scripted clock value and record that it was read."""
+        reads.append(scripted[len(reads)])
+        return reads[-1]
+
+    session = build_finance_session()
+    seed_org(session)
+    monkeypatch.setattr(
+        registry_module,
+        "acquire_finance_month_advisory_lock",
+        lambda _session, month, *, tenant_id=None: None,
+    )
+    monkeypatch.setattr(registry_module, "serialization_timestamp", _stamp)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    registry.create_channel(
+        youtube_channel_id="channel-timestamps",
+        channel_name="Timestamps",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=False,
+    )
+    created_row = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-timestamps",
+        )
+    ).one()
+    assert created_row.updated_at.replace(tzinfo=None) == created_stamp.replace(tzinfo=None)
+    assert _naive(created_row.updated_at) >= _naive(created_row.created_at)
+    assert len(reads) == 1
+
+    registry.update_inventory(
+        youtube_channel_id="channel-timestamps",
+        channel_name="Timestamps Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=False,
+    )
+    session.flush()
+    assert created_row.updated_at.replace(tzinfo=None) == updated_stamp.replace(tzinfo=None)
+    assert _naive(created_row.updated_at) >= _naive(created_row.created_at)
+    assert len(reads) == 2
+
+    # A re-import that changes nothing stays write-quiet: the clock is not
+    # read, no UPDATE is emitted, and a "last modified" time that nothing
+    # modified stays put. The read counter is what pins the first half —
+    # `scripted` has no third entry, so a stray read would raise IndexError.
+    registry.update_inventory(
+        youtube_channel_id="channel-timestamps",
+        channel_name="Timestamps Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id=None,
+        revenue_required=False,
+    )
+    session.flush()
+    assert len(reads) == 2
+    assert created_row.updated_at.replace(tzinfo=None) == updated_stamp.replace(tzinfo=None)
+
+
+def test_update_inventory_allows_unchanged_flag_despite_locked_month():
+    """A locked month without facts only blocks the FLIP, not other updates."""
+    session = build_finance_session()
+    seed_org(session)
+    _seed_not_required_channel(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    _previous, updated = registry.update_inventory(
+        youtube_channel_id="channel-perf-only",
+        channel_name="Perf Only Renamed",
+        cms_status="INSIDE_CMS",
+        content_owner_id="owner-cms",
+        revenue_required=False,
+    )
+
+    assert updated.channel_name == "Perf Only Renamed"
+    assert updated.revenue_required is False
+
+
+def test_sql_channel_registry_update_inventory_missing_channel_raises():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(ChannelRegistryValidationError, match="Unknown channel"):
+        registry.update_inventory(
+            youtube_channel_id="missing-channel",
+            channel_name="Nope",
+            cms_status="INSIDE_CMS",
+            content_owner_id=None,
+            revenue_required=True,
         )
 
 

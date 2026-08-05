@@ -1,9 +1,28 @@
+# ============================================================================
+# Purpose: SQL persistence for audit records — the platform-session sink used
+#   app-wide, plus the platform-lane sink that lets a route commit audit rows
+#   atomically with its tenant-session domain writes.
+# Database/ORM: AuditLogORM (write; audit_logs is platform-only writable),
+#   UserORM (actor-existence read).
+# Standards: Flush-on-append so failures surface before commit; tenant scoping
+#   resolved from context; the elevated sink pre-flushes tenant work under the
+#   tenant role so nothing but the audit write executes as app_platform.
+# Blast Radius: Audit trail persistence and atomicity. No RLS policy, grant,
+#   or audit semantics change.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> record shape.
+#   - File: backend/ums_smart_revenue/db/lane.py -> platform_lane elevation.
+#   - File: backend/ums_smart_revenue/api/channels.py -> import sink wiring.
+# ============================================================================
+"""SQL audit sinks: platform-session default and same-transaction platform-lane."""
+
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit_service import AuditRecord
+from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.security_models import AuditLogORM, UserORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -24,6 +43,16 @@ class SqlAlchemyAuditSink:
         raw_actor_user_id = record.user_id
         user_id = _parse_uuid_or_none(raw_actor_user_id)
         details = dict(record.details or {})
+        # audit_logs has no permission column, so without this the effective
+        # permission (including any permission_override, e.g. the import's
+        # MANAGE_CHANNELS on CHANNEL_UPDATED) would exist only on the transient
+        # in-memory record. Persist it in the durable details so permission-
+        # based audit filtering works against the database rows too. This is
+        # an unconditional overwrite, not setdefault: the durable key must be
+        # the CANONICAL permission record_audit_event derived — a
+        # caller-supplied details["permission"] must never shadow it.
+        if record.permission is not None:
+            details["permission"] = record.permission
         actor_exists = (
             user_id is not None
             and self._session.scalar(
@@ -60,6 +89,55 @@ class SqlAlchemyAuditSink:
         """Rollback and detach pending objects after fail-closed audit errors."""
         self._session.rollback()
         self._session.expunge_all()
+
+
+# ============================================================================
+# Purpose: Audit sink that writes audit_logs through the CALLER'S tenant-lane
+#   session, elevating to app_platform per append via db/lane.py:platform_lane.
+#   Because the audit INSERT joins the caller's transaction, audit rows and the
+#   domain writes they describe commit or roll back TOGETHER — closing the
+#   two-session commit-order race where a separately committed platform audit
+#   session records success for a tenant transaction that then fails to commit.
+# Database/ORM: AuditLogORM (audit_logs is TENANT_PLATFORM_ONLY_WRITE, hence
+#   the per-append elevation), UserORM (actor-existence read).
+# Standards: Same append contract as SqlAlchemyAuditSink (flush inside the
+#   elevated block so the INSERT executes as app_platform); platform_lane is a
+#   no-op off Postgres, so SQLite behaves exactly as the shared-session wiring
+#   already does. platform_lane is not nest-safe — appends are sequential and
+#   never nested here.
+# Blast Radius: Audit atomicity for routes that opt in (the bulk channel
+#   import). No RLS policy, grant, or audit semantics change.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/lane.py -> sanctioned single-session
+#     elevation precedent this sink builds on.
+#   - File: backend/ums_smart_revenue/api/channels.py -> import route wiring.
+# ============================================================================
+class PlatformLaneAuditSink:
+    """Persist audit records on the caller's session via platform-lane elevation."""
+
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind audit writes to the caller's (tenant-lane) session."""
+        self._session = session
+        self._inner = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+
+    def append(self, record: AuditRecord) -> None:
+        """Append one audit row inside the caller's transaction, elevated.
+
+        Pending tenant-lane work is flushed FIRST, under the tenant role: the
+        inner append issues a SELECT (which can autoflush) and then flushes,
+        so without this pre-flush any pending domain writes on the shared
+        session would execute while app_platform is active — widening the
+        privilege surface those statements run under. After the pre-flush the
+        elevated window executes only the actor-existence read and the audit
+        INSERT itself.
+        """
+        self._session.flush()
+        with platform_lane(self._session):
+            self._inner.append(record)
+
+    def rollback(self) -> None:
+        """Rollback and detach pending objects after fail-closed audit errors."""
+        self._inner.rollback()
 
 
 def _parse_uuid_or_none(value: str) -> UUID | None:

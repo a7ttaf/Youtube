@@ -111,6 +111,34 @@ def test_sql_audit_sink_tolerates_unknown_valid_actor_id():
     assert audit_log.details["actor_user_id"] == str(USER_ID)
 
 
+def test_sql_audit_sink_overwrites_caller_supplied_permission_key():
+    """The durable permission key is canonical, never a caller-provided value.
+
+    ``details["permission"]`` must always be the effective permission
+    record_audit_event derived; a caller (or spoofed) details entry shadowing
+    it would make permission-based audit filtering lie (PR #159 review).
+    """
+    session = build_session()
+    sink = SqlAlchemyAuditSink(session)
+
+    record = record_audit_event(
+        sink=sink,
+        actor=principal(),
+        event_type=AuditEventType.CHANNEL_UPDATED,
+        entity_type="youtube_channel",
+        entity_id="channel-tv-a",
+        scope=AccessScope.company("company-tv-a"),
+        reason="Spoofed permission key must not persist",
+        details={"permission": "spoofed.permission"},
+    )
+    session.commit()
+
+    audit_log = session.scalars(select(AuditLogORM)).one()
+    assert record.permission is not None
+    assert audit_log.details["permission"] == record.permission
+    assert audit_log.details["permission"] != "spoofed.permission"
+
+
 def test_sql_audit_sink_treats_other_tenant_actor_as_metadata():
     session = build_session()
     session.add(

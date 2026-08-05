@@ -639,6 +639,10 @@ def test_audit_summary_writes_excluded_audit_log_viewed_row(tmp_path):
         "total_events": 2,
         "sensitive_events": 1,
         "recent_count": 2,
+        # The SQL sink persists the effective permission in details because
+        # audit_logs has no permission column (PR #159 review: permission-
+        # based filtering must work against the durable rows too).
+        "permission": "audit.view",
     }
 
 

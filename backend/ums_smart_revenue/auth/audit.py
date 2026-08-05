@@ -22,6 +22,7 @@ class AuditEventType(StrEnum):
     LOGOUT = "LOGOUT"
     CHANNEL_CREATED = "CHANNEL_CREATED"
     CHANNEL_UPDATED = "CHANNEL_UPDATED"
+    CHANNEL_IMPORTED = "CHANNEL_IMPORTED"
     GROUP_UPDATED = "GROUP_UPDATED"
     REPORT_IMPORTED = "REPORT_IMPORTED"
     ADSENSE_PAYMENT_SYNCED = "ADSENSE_PAYMENT_SYNCED"
@@ -79,6 +80,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         AuditEventType.CHANNEL_UPDATED,
         reason_required=True,
         permission=Permission.MANAGE_ORG_MAPPING,
+    ),
+    AuditEventType.CHANNEL_IMPORTED: AuditEventDefinition(
+        AuditEventType.CHANNEL_IMPORTED,
+        reason_required=True,
+        permission=Permission.MANAGE_CHANNELS,
     ),
     AuditEventType.GROUP_UPDATED: AuditEventDefinition(
         AuditEventType.GROUP_UPDATED,

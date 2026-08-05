@@ -1,8 +1,17 @@
 # Implementation Plan
 
-## Status (2026-06-17)
+## Status (2026-08-03)
 
-Mainline merge status is reconciled through PR #113 (finance/security
+Reconciled through the bulk channel inventory import branch
+(`feat/bulk-channel-inventory-import`). Two corrections landed in this pass:
+the Google ingestion foundation and the source-rows→facts normalization bridge
+are lifted from ⏳ to ✅ in `15_DELIVERY_BACKLOG.md`, because the 2026-06-22
+operator smoke produced 25 real `monthly_channel_revenue_facts` totalling
+a redacted USD amount (PRs #132/#134/#135) — the "no live data source has produced facts
+yet" note was stale. The Phase 0/1 bulk-inventory items are updated for
+`POST /channels/import`.
+
+Earlier mainline merge status was reconciled through PR #113 (finance/security
 doc-correctness sweep). Phase 5 analytics & monitoring (PR #98), Command Center
 scope rollup (PR #102), FORCE RLS (PR #106), skipped-row observability (PR #111),
 and security catalog gating (PR #112) are all merged and inline-marked below.
@@ -363,16 +372,23 @@ running on the operator's workstation.
       source_system still allowed (the guard keys on the full tuple);
       error-message cap formatting; guard runs before the FK/currency
       existence pre-checks.
-- ⏳ Channel inventory file format — remaining: tenant-scoped channel
-  registry exists (PR #25); bulk inventory load format not yet defined.
+- ✅ Channel inventory file format — DEFINED and SHIPPED (2026-08-03). CSV
+  contract: required `youtube_channel_id` (validated `^UC[A-Za-z0-9_-]{22}$`)
+  and `channel_name`; optional `group_id` (YouTube CMS group key) and
+  `view_revenue`. UTF-8, BOM-tolerant, case-insensitive and order-independent
+  headers; unknown headers are rejected rather than ignored. Loaded by
+  `POST /channels/import`. See
+  `Docs/superpowers/specs/2026-08-03-bulk-channel-inventory-import-design.md`.
 - ⏳ Finance month-close input format — remaining: close-gate enforced
   server-side (PR #8); manual close UI and bank-input form not yet defined.
 
 ### Acceptance gate
 
-- ⏳ At least 300+ channels listed/classified/grouped — remaining:
-  registry and group registry exist; bulk inventory ingestion not yet
-  driven.
+- ⏳ At least 300+ channels listed/classified/grouped — remaining: the bulk
+  load mechanism SHIPPED 2026-08-03 (`POST /channels/import`, upsert with
+  dry-run preview and all-or-nothing apply, plus CMS group membership), so
+  this is now an operator data step rather than a build gap. Still ⏳ until a
+  real roster is actually loaded.
 
 ### Status (2026-05-22)
 
@@ -403,8 +419,9 @@ on real ingestion (Phase 2) and the inventory load workflow.
 
 ### Outputs
 
-- ⏳ Channel master table — remaining: schema exists; bulk inventory load
-  not yet driven.
+- ⏳ Channel master table — remaining: schema exists and the bulk inventory
+  load SHIPPED 2026-08-03 (`POST /channels/import`). Still ⏳ only until a real
+  roster is loaded — no build work remains.
 - ⏳ Company/sector/group mapping — remaining: registries exist and the
   Registry page now drives live re-parenting via `PATCH /channels/{id}/mapping`
   (Registry Phase 2, PR #78), now month-lock-guarded (PR #98 rejects a mapping
@@ -418,8 +435,10 @@ on real ingestion (Phase 2) and the inventory load workflow.
 
 ### Acceptance gate
 
-- ⏳ Every active channel assigned or in unmapped list — remaining: bulk
-  load + unmapped report not implemented.
+- ⏳ Every active channel assigned or in unmapped list — bulk load SHIPPED
+  2026-08-03 (`POST /channels/import`); imported channels land with
+  `primary_org_unit_id` unset and are assigned through the existing Registry
+  Map UI. Remaining: the unmapped report.
 
 ### Status (2026-05-22)
 

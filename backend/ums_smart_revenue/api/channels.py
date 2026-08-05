@@ -1,7 +1,26 @@
+# ============================================================================
+# Purpose: Channel HTTP routes — registry listing/creation, mapping and
+#   content-owner updates, registry health feeds, and the bulk channel
+#   inventory import (POST /channels/import).
+# Database/ORM: YouTubeChannelORM via ChannelRegistryStore dependencies;
+#   ChannelGroupORM via the group registry; AuditLogORM via audit sinks.
+# Standards: Thin routes — authorize, validate, translate typed domain errors
+#   to HTTP, and delegate business logic to org/ domain modules
+#   (channel_import parse/plan, channel_import_apply execution). Fail closed
+#   on permissions; audit every applied write.
+# Blast Radius: Channel registry surface, connector ingest targeting (via
+#   cms_status/content_owner_id), audit trail. No finance totals.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py -> parse/plan core.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> apply+audit.
+#   - File: backend/ums_smart_revenue/app.py -> dependency wiring.
+# ============================================================================
+"""Channel registry and bulk-import HTTP routes."""
+
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
@@ -23,8 +42,22 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
-from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
-from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
+from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink, SqlAlchemyAuditSink
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupConflictError,
+    ChannelGroupRegistryStore,
+)
+from ums_smart_revenue.org.channel_import import (
+    ChannelImportFormatError,
+    ChannelImportPlan,
+    ParsedChannelImport,
+    parse_channel_import_csv,
+)
+from ums_smart_revenue.org.channel_import_apply import (
+    ChannelImportArchivedGroupError,
+    apply_channel_import,
+    plan_channel_import_with_stores,
+)
 from ums_smart_revenue.org.channel_issues import (
     build_channel_registry_issues,
     summarize_channel_registry_issues,
@@ -36,6 +69,7 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelRegistryEntry,
     ChannelRegistryStore,
     ChannelRegistryValidationError,
+    ChannelRevenueRequirementLockedMonthError,
     bootstrap_channel_registry,
 )
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
@@ -45,6 +79,14 @@ router = APIRouter(prefix="/channels", tags=["channels"])
 _CHANNEL_REGISTRY = bootstrap_channel_registry()
 _AUDIT_SINK = InMemoryAuditSink()
 _OFFICIAL_REVENUE_SOURCE_STATUSES = frozenset({"OFFICIAL_CMS_REVENUE", "OFFICIAL_MANUAL_IMPORT"})
+
+MAX_IMPORT_BYTES = 2 * 1024 * 1024
+MAX_IMPORT_ROWS = 5000
+# Generous bound for CMS content-owner ids (~22 chars in practice); the value
+# becomes audit_logs.entity_id inside the ix_audit_logs_entity B-tree index.
+MAX_CONTENT_OWNER_CHARS = 255
+# Mirrors the youtube_channels cms_status CHECK in 20260510_0002_org_registry.
+IMPORTABLE_CMS_STATUSES = frozenset({"INSIDE_CMS", "OUTSIDE_CMS", "UNKNOWN"})
 
 
 class ChannelCreateRequest(BaseModel):
@@ -93,6 +135,38 @@ class ContentOwnerUpdateRequest(BaseModel):
         return _strip_required_string(value)
 
 
+class ChannelImportFieldChange(BaseModel):
+    """One field's before/after pair in an import row's diff."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_value: str | bool | None = Field(alias="from")
+    to_value: str | bool | None = Field(alias="to")
+
+
+class ChannelImportRowResult(BaseModel):
+    """One CSV row's planned or applied outcome."""
+
+    row_number: int
+    youtube_channel_id: str | None
+    outcome: str
+    channel_name: str | None
+    group_id: str | None
+    revenue_required: bool | None
+    changes: dict[str, ChannelImportFieldChange]
+    reason: str | None
+
+
+class ChannelImportResult(BaseModel):
+    """Declared response contract for POST /channels/import (dry run and apply)."""
+
+    dry_run: bool
+    content_owner_id: str
+    cms_status: str
+    counts: dict[str, int]
+    rows: list[ChannelImportRowResult]
+
+
 def _strip_required_string(value):
     if isinstance(value, str):
         stripped = value.strip()
@@ -133,6 +207,34 @@ def sql_audit_sink_from_session(
     session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyAuditSink:
     return SqlAlchemyAuditSink(session)
+
+
+def current_import_audit_sink(
+    sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> AuditSink:
+    """Audit sink for the bulk import; passes through until SQL wiring overrides it.
+
+    create_app overrides this with sql_import_audit_sink_from_session so import
+    audit rows join the tenant transaction (all-or-nothing with the channel
+    writes) instead of committing on the independent platform session.
+    """
+    return sink
+
+
+def sql_import_audit_sink_from_session(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> PlatformLaneAuditSink:
+    """Bind the import's audit writes to the request's tenant session.
+
+    The import promises all-or-nothing semantics. The app-wide audit sink runs
+    on the independently committed platform session, which FastAPI tears down
+    (and commits) BEFORE the tenant session; a tenant commit failure would then
+    leave audit rows permanently claiming an import that never happened.
+    PlatformLaneAuditSink writes audit_logs inside the SAME transaction as the
+    channel writes, elevating per append because audit_logs is platform-only
+    writable.
+    """
+    return PlatformLaneAuditSink(session)
 
 
 def audit_record_to_api(record: AuditRecord) -> dict[str, object]:
@@ -391,6 +493,259 @@ def create_channel(
     response = channel.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
+
+
+# ============================================================================
+# Purpose: Load an operator's CMS channel roster in bulk. One CSV upload
+#   creates missing channels and refreshes the inventory fields (name,
+#   cms_status, content_owner_id, revenue_required) of existing ones, with a
+#   dry run that shows the exact diff before anything is written.
+# Database/ORM: YouTubeChannelORM via ChannelRegistryStore (create_channel /
+#   update_inventory) and ChannelGroupORM + membership via
+#   ChannelGroupRegistryStore. Finance tables are READ, never written: the
+#   registry's revenue_required guard reads FinanceMonthCloseORM x
+#   MonthlyChannelRevenueFactORM to reject an OFF->ON flip that a LOCKED month
+#   has no fact for.
+# Standards: Fail closed on global MANAGE_CHANNELS — a roster file is not
+#   scoped to one company, so a company-scoped manager must not run it. A
+#   roster carrying Group_ID values additionally requires global MANAGE_GROUPS:
+#   the two permissions are independently grantable and group mutations must
+#   not bypass the group API's checks. Errors are reported per row for the
+#   whole file (an operator fixes one file, not one row at a time), but the
+#   apply is all-or-nothing: a single ERROR row rejects the request before any
+#   write, and audit rows are written through the SAME tenant transaction as
+#   the channel writes (platform-lane elevation per append), so a failed
+#   commit can never leave audit rows describing an import that did not
+#   happen. A dry run writes nothing at all, including no audit event, so
+#   previewing is never mistaken for applying. Every write is audited per
+#   channel (permission_override=MANAGE_CHANNELS — the permission that
+#   actually authorized it), every group creation/membership addition gets its
+#   own GROUP_UPDATED record, plus one CHANNEL_IMPORTED summary; because
+#   CHANNEL_UPDATED declares reason_required the route takes a mandatory
+#   reason rather than letting an upsert 500 mid-apply. Group membership is
+#   reconciled for CREATE, UPDATE, and UNCHANGED rows alike: the outcome is
+#   computed only from inventory fields, so treating UNCHANGED as a no-op
+#   would silently drop a newly added Group_ID on re-import. The RESPONSE is
+#   the plan echo and is deliberately identical in shape and content for a dry
+#   run and an apply — that equivalence is what makes the dry run a truthful
+#   preview. The durable record of what a concurrent writer actually left this
+#   apply to do is the AUDIT trail, whose CHANNEL_IMPORTED counts are
+#   accumulated at the write boundary, not copied from the plan.
+# Blast Radius: Connector ingest targeting. list_target_channels only pulls
+#   revenue for cms_status='INSIDE_CMS' channels, so importing a roster with
+#   the wrong cms_status silently removes channels from ingest and their
+#   revenue simply stops arriving with no error — the dry-run diff is the
+#   operator's guard against that. ALSO month-close: an apply runs inside the
+#   month-close protocol. Every registry write takes the tenant-wide
+#   REVENUE_REQUIREMENT_GUARD_MONTH advisory lock before any row lock, so an
+#   import and a concurrent month close serialize against each other (an
+#   import can block on a close, and vice versa), and a revenue_required
+#   OFF->ON flip is rejected with 409 when a LOCKED month has no fact for the
+#   channel. Roster imports are therefore INSIDE month-close validation, not
+#   outside it. No allocation, no exports, no finance WRITES.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py -> pure parse/plan
+#     core this route executes.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> domain
+#     apply+audit execution this route delegates to.
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> holds the
+#     close guard and runs the LOCKED-month revenue_required flip check.
+#   - File: backend/ums_smart_revenue/finance/month_close_locks.py -> the
+#     advisory guard and shared database clock the apply serializes on.
+#   - File: backend/ums_smart_revenue/connectors/google/
+#     youtube_analytics_client.py -> list_target_channels reads cms_status and
+#     content_owner_id to choose which channels a revenue pull targets.
+# ============================================================================
+@router.post("/import")
+def import_channels(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
+    groups: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    audit_sink: Annotated[AuditSink, Depends(current_import_audit_sink)],
+    file: Annotated[UploadFile, File()],
+    content_owner_id: Annotated[str, Form()],
+    dry_run: Annotated[bool, Form()],
+    reason: Annotated[str, Form()],
+    cms_status: Annotated[str, Form()] = "INSIDE_CMS",
+) -> ChannelImportResult:
+    """Import a CMS channel roster CSV, previewing or applying every row."""
+    target_scope = AccessScope.global_scope()
+    if not has_permission(user, Permission.MANAGE_CHANNELS, target_scope, org_index):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.MANAGE_CHANNELS.value}",
+        )
+    content_owner_id = _validated_import_form(
+        content_owner_id=content_owner_id, cms_status=cms_status, reason=reason
+    )
+    parsed = _parse_import_upload(file)
+
+    # Group creation/membership is MANAGE_GROUPS territory. MANAGE_CHANNELS and
+    # MANAGE_GROUPS are independently grantable, so a roster carrying Group_ID
+    # values must also hold the group permission at the import's global scope —
+    # otherwise the import would let a channels-only principal bypass the group
+    # API's _require_manage_group_channels checks.
+    if any(row.group_id for row in parsed.rows) and not has_permission(
+        user, Permission.MANAGE_GROUPS, target_scope, org_index
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
+        )
+
+    plan = plan_channel_import_with_stores(
+        parsed,
+        registry=registry,
+        groups=groups,
+        content_owner_id=content_owner_id,
+        cms_status=cms_status,
+    )
+    payload = _import_plan_to_api(
+        plan, dry_run=dry_run, content_owner_id=content_owner_id, cms_status=cms_status
+    )
+
+    if plan.has_errors and not dry_run:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=payload)
+    if dry_run:
+        return ChannelImportResult.model_validate(payload)
+
+    try:
+        apply_channel_import(
+            plan,
+            registry=registry,
+            groups=groups,
+            audit_sink=audit_sink,
+            actor=user,
+            scope=target_scope,
+            content_owner_id=content_owner_id,
+            cms_status=cms_status,
+            reason=reason,
+            filename=file.filename,
+        )
+    # Expected apply-time domain failures abort the whole request as 409, not
+    # 500: a revenue_required flip rejected by the locked-month guard, a group
+    # archived in the plan-to-apply window, or a uniqueness race lost to a
+    # concurrent writer (channel planned as CREATE that now exists; two
+    # imports both creating the same CMS group). The import's
+    # single-transaction wiring rolls every prior row back, so 409 (a
+    # client-retryable conflict, not a partial apply) is the honest outcome.
+    except (
+        ChannelGroupConflictError,
+        ChannelImportArchivedGroupError,
+        ChannelRegistryConflictError,
+        ChannelRevenueRequirementLockedMonthError,
+    ) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return ChannelImportResult.model_validate(payload)
+
+
+def _validated_import_form(*, content_owner_id: str, cms_status: str, reason: str) -> str:
+    """Validate the import's scalar form fields; return the normalized owner.
+
+    The owner is stripped once at this boundary so the plan, the registry
+    writes, and the audit records all carry the exact value the SQL layer
+    persists; a padded " owner-1 " must not diff against a stored "owner-1"
+    as an UPDATE forever.
+    """
+    if cms_status not in IMPORTABLE_CMS_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid cms_status: {cms_status!r}",
+        )
+    content_owner_id = content_owner_id.strip()
+    if not content_owner_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="content_owner_id is required",
+        )
+    if not reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="reason is required",
+        )
+    # PostgreSQL cannot store NUL in a text column (youtube_channels.
+    # content_owner_id, audit_logs.reason); rejecting it here keeps the
+    # promised 422 contract instead of an unhandled encoding 500 at apply —
+    # the same rule the CSV parser applies to per-row text fields.
+    for field_name, value in (("content_owner_id", content_owner_id), ("reason", reason)):
+        if "\x00" in value:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"{field_name} contains a NUL character",
+            )
+    # The owner id becomes audit_logs.entity_id, which sits in the
+    # ix_audit_logs_entity B-tree; PostgreSQL rejects index entries past its
+    # per-entry size limit, so an unbounded value would pass dry-run and 500
+    # on the final summary append. Real CMS owner ids are ~22 characters.
+    if len(content_owner_id) > MAX_CONTENT_OWNER_CHARS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"content_owner_id exceeds {MAX_CONTENT_OWNER_CHARS} characters",
+        )
+    return content_owner_id
+
+
+def _parse_import_upload(file: UploadFile) -> ParsedChannelImport:
+    """Read, decode, parse, and size-cap the uploaded roster CSV.
+
+    The row cap is enforced INSIDE the parser (max_rows), which aborts the
+    moment the cap is exceeded instead of paying full per-row validation for
+    an oversized file and only then counting.
+    """
+    raw = file.file.read(MAX_IMPORT_BYTES + 1)
+    if len(raw) > MAX_IMPORT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"CSV exceeds {MAX_IMPORT_BYTES} bytes",
+        )
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="CSV must be UTF-8 encoded",
+        ) from exc
+    try:
+        return parse_channel_import_csv(text, max_rows=MAX_IMPORT_ROWS)
+    except ChannelImportFormatError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+
+def _import_plan_to_api(
+    plan: ChannelImportPlan, *, dry_run: bool, content_owner_id: str, cms_status: str
+) -> dict[str, object]:
+    """Render an import plan as the API response body.
+
+    Every row echoes the planned inventory values (name, group, revenue flag),
+    not just the field diff: a CREATE entry has an empty ``changes`` mapping by
+    design, and the dry run's whole purpose is letting the operator verify the
+    exact values a full-roster apply would write. The request-level owner and
+    CMS status are echoed at the top level for the same reason.
+    """
+    return {
+        "dry_run": dry_run,
+        "content_owner_id": content_owner_id,
+        "cms_status": cms_status,
+        "counts": dict(plan.counts),
+        "rows": [
+            {
+                "row_number": entry.row_number,
+                "youtube_channel_id": entry.youtube_channel_id,
+                "outcome": entry.outcome.value,
+                "channel_name": entry.channel_name,
+                "group_id": entry.group_id,
+                "revenue_required": entry.revenue_required,
+                "changes": {
+                    name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
+                },
+                "reason": entry.reason,
+            }
+            for entry in plan.entries
+        ],
+    }
 
 
 @router.patch("/{youtube_channel_id}/mapping")

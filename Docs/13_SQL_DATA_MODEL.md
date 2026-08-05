@@ -52,7 +52,9 @@ channel_groups (
   group_type text,
   active boolean,
   created_at timestamp,
-  unique (tenant_id, id)
+  cms_group_id text null,
+  unique (tenant_id, id),
+  unique (tenant_id, cms_group_id)
 );
 
 channel_group_members (
@@ -71,6 +73,12 @@ unique primary keys. Tenant isolation is enforced by the `tenant_id` column,
 composite foreign keys, and tenant-scoped query predicates. The
 `ix_channel_group_members_tenant_id` index only supports tenant-bound read
 performance; it is not an enforcement boundary.
+
+`channel_groups.cms_group_id` (migration `20260803_0001`) is the nullable
+YouTube CMS group key the bulk channel inventory import reconciles membership
+against. `unique (tenant_id, cms_group_id)` keeps one group per CMS key per
+tenant; NULLs compare distinct under PostgreSQL unique constraints, so groups
+without a CMS key are unaffected.
 
 User table constraints:
 
