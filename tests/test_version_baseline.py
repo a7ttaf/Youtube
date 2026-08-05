@@ -33,7 +33,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         # Required by FastAPI to accept multipart/form-data. POST /channels/import
         # takes the channel roster as a CSV upload, and FastAPI raises at
         # route-registration time (not request time) without this installed.
-        "python-multipart==0.0.20",
+        "python-multipart==0.0.31",
     }
     expected_test_dependencies = {
         "pytest==9.1.1",

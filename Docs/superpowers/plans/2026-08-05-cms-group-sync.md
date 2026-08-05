@@ -665,10 +665,12 @@ def plan_group_sync(
     known_channel_ids: frozenset[str],
 ) -> GroupSyncPlan:
     """Diff the CMS snapshot against local synced groups into a plan."""
+    # skipcq: SCT-A000 -- dict-comprehension target, not a credential value.
+    local_by_key: dict[str, ChannelGroupEntry] = {}
     for group in local_groups:
         if group.cms_group_id is None:
             raise ValueError(f"manual group passed to sync planner: {group.id}")
-    local_by_key = {group.cms_group_id: group for group in local_groups}
+        local_by_key[group.cms_group_id] = group
     upstream_keys = {item.cms_group_id for item in snapshot}
 
     entries: list[GroupSyncPlanEntry] = []
@@ -1022,6 +1024,7 @@ def sync_channel_groups(
         credentials = resolve_connector_credentials(
             session=session,
             tenant_id=_resolve_tenant_uuid(user),
+            # skipcq: SCT-A000 -- connector registry key, not a credential value.
             connector_key="youtube-analytics",
             account_id=content_owner_id,
         )
