@@ -16,6 +16,8 @@
 # ============================================================================
 """Apply a CMS group-sync plan and audit each changed group."""
 
+from dataclasses import dataclass
+
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -25,7 +27,7 @@ from ums_smart_revenue.org.channel_group_sync import (
     GroupSyncPlan,
     GroupSyncPlanEntry,
 )
-from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
+from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistryStore
 
 # Provenance marker on every audit record this module writes: it is how an
 # auditor separates CMS-mirror changes from manual group API edits and from the
@@ -89,66 +91,25 @@ def apply_group_sync(
         if entry.outcome is GroupSyncOutcome.UNCHANGED:
             executed[entry.outcome.value] += 1
             continue
+        applied: _AppliedChange | None
         if entry.outcome is GroupSyncOutcome.CREATE:
-            # Falling back to the CMS key keeps the group identifiable when
-            # YouTube reports an empty title; the next sync renames it.
-            created = groups.create_group(
-                name=entry.title or entry.cms_group_id,
-                group_type="SECTOR",
-                channel_ids=list(entry.members_added),
-                cms_group_id=entry.cms_group_id,
-                content_owner_id=content_owner_id,
-            )
-            group_id = created.id
-            name_change = entry.name_change
-            active_change = entry.active_change
-            members_added = entry.members_added
-            members_removed = entry.members_removed
+            applied = _execute_create(entry, groups=groups, content_owner_id=content_owner_id)
         else:
-            group_id = _require_local_group_id(entry)
-            # Re-read the group's CURRENT state rather than trusting the plan
-            # (a snapshot from before this apply): a concurrent writer (another
-            # sync, or the bulk import) can race this same group between
-            # planning and here, and store writes are individually idempotent
-            # no-ops in that case (add_members skips present members,
-            # remove_member deletes zero rows). Diffing against what is
-            # actually true right now keeps the audit trail and the returned
-            # counts a record of what THIS request executed, never a stale
-            # plan's intent.
-            current = groups.get_group(group_id)
-            if current is None:
-                raise ValueError(f"sync plan entry's local group vanished before apply: {group_id}")
-            planned_name = entry.name_change[1] if entry.name_change else None
-            planned_active = entry.active_change[1] if entry.active_change else None
-            name = (
-                planned_name if planned_name is not None and planned_name != current.name else None
-            )
-            active = (
-                planned_active
-                if planned_active is not None and planned_active != current.active
-                else None
-            )
-            current_members = set(current.channel_ids)
-            members_added = tuple(cid for cid in entry.members_added if cid not in current_members)
-            members_removed = tuple(cid for cid in entry.members_removed if cid in current_members)
-            if name is None and active is None and not members_added and not members_removed:
-                executed[GroupSyncOutcome.UNCHANGED.value] += 1
-                continue
-            if name is not None or active is not None:
-                groups.update_group(group_id=group_id, name=name, active=active)
-            if members_added:
-                groups.add_members(group_id=group_id, channel_ids=list(members_added))
-            for channel_id in members_removed:
-                groups.remove_member(group_id=group_id, channel_id=channel_id)
-            name_change = (current.name, name) if name is not None else None
-            active_change = (current.active, active) if active is not None else None
+            applied = _execute_update(entry, groups=groups)
+        if applied is None:
+            # The plan's change was already true at the write boundary — a
+            # concurrent writer got there first. Count it as UNCHANGED and
+            # emit no audit event rather than claiming a mutation this
+            # request did not make.
+            executed[GroupSyncOutcome.UNCHANGED.value] += 1
+            continue
         executed[entry.outcome.value] += 1
         record_audit_event(
             sink=audit_sink,
             actor=actor,
             event_type=AuditEventType.GROUP_UPDATED,
             entity_type="channel_group",
-            entity_id=group_id,
+            entity_id=applied.group_id,
             scope=scope,
             reason=reason,
             details={
@@ -156,13 +117,127 @@ def apply_group_sync(
                 "content_owner_id": content_owner_id,
                 "cms_group_id": entry.cms_group_id,
                 "outcome": entry.outcome.value,
-                "name_change": list(name_change) if name_change else None,
-                "active_change": list(active_change) if active_change else None,
-                "members_added": len(members_added),
-                "members_removed": len(members_removed),
+                "name_change": list(applied.name_change) if applied.name_change else None,
+                "active_change": list(applied.active_change) if applied.active_change else None,
+                "members_added": len(applied.members_added),
+                "members_removed": len(applied.members_removed),
             },
         )
     return executed
+
+
+@dataclass(frozen=True)
+class _AppliedChange:
+    """What one entry's store writes ACTUALLY changed, for the audit record."""
+
+    group_id: str
+    name_change: tuple[str, str] | None
+    active_change: tuple[bool, bool] | None
+    members_added: tuple[str, ...]
+    members_removed: tuple[str, ...]
+
+
+def _execute_create(
+    entry: GroupSyncPlanEntry,
+    *,
+    groups: ChannelGroupRegistryStore,
+    content_owner_id: str,
+) -> _AppliedChange:
+    """Create the group carrying this CMS key and report what it wrote."""
+    # Falling back to the CMS key keeps the group identifiable when YouTube
+    # reports an empty title; the next sync renames it.
+    created = groups.create_group(
+        name=entry.title or entry.cms_group_id,
+        group_type="SECTOR",
+        channel_ids=list(entry.members_added),
+        cms_group_id=entry.cms_group_id,
+        content_owner_id=content_owner_id,
+    )
+    return _AppliedChange(
+        group_id=created.id,
+        name_change=entry.name_change,
+        active_change=entry.active_change,
+        members_added=entry.members_added,
+        members_removed=entry.members_removed,
+    )
+
+
+@dataclass(frozen=True)
+class _PendingChange:
+    """The part of a planned entry that is still not true in the store."""
+
+    name: str | None
+    active: bool | None
+    members_added: tuple[str, ...]
+    members_removed: tuple[str, ...]
+
+
+def _still_pending[T](planned: T | None, current: T) -> T | None:
+    """Return the planned value only when it differs from what is stored."""
+    if planned is None or planned == current:
+        return None
+    return planned
+
+
+def _resolve_pending_change(
+    entry: GroupSyncPlanEntry, current: ChannelGroupEntry
+) -> _PendingChange | None:
+    """Narrow a planned entry to what is STILL undone, or None if all is done."""
+    name = _still_pending(
+        entry.name_change[1] if entry.name_change else None,
+        current.name,
+    )
+    active = _still_pending(
+        entry.active_change[1] if entry.active_change else None,
+        current.active,
+    )
+    current_members = set(current.channel_ids)
+    members_added = tuple(cid for cid in entry.members_added if cid not in current_members)
+    members_removed = tuple(cid for cid in entry.members_removed if cid in current_members)
+    if name is None and active is None and not members_added and not members_removed:
+        return None
+    return _PendingChange(
+        name=name,
+        active=active,
+        members_added=members_added,
+        members_removed=members_removed,
+    )
+
+
+def _execute_update(
+    entry: GroupSyncPlanEntry,
+    *,
+    groups: ChannelGroupRegistryStore,
+) -> _AppliedChange | None:
+    """Apply a non-CREATE entry, or return None when nothing was left to do.
+
+    Diffs the plan against the group's CURRENT state rather than the pre-apply
+    snapshot: a concurrent writer (another sync, or the bulk import) can race
+    this group between planning and here, and the store's writes are
+    individually idempotent no-ops in that case (``add_members`` skips present
+    members, ``remove_member`` deletes zero rows). Reporting only what this
+    call actually changed keeps the audit trail and the returned counts honest.
+    """
+    group_id = _require_local_group_id(entry)
+    current = groups.get_group(group_id)
+    if current is None:
+        raise ValueError(f"sync plan entry's local group vanished before apply: {group_id}")
+    pending = _resolve_pending_change(entry, current)
+    if pending is None:
+        return None
+    if pending.name is not None or pending.active is not None:
+        groups.update_group(group_id=group_id, name=pending.name, active=pending.active)
+    if pending.members_added:
+        groups.add_members(group_id=group_id, channel_ids=list(pending.members_added))
+    for channel_id in pending.members_removed:
+        groups.remove_member(group_id=group_id, channel_id=channel_id)
+    return _AppliedChange(
+        group_id=group_id,
+        name_change=(current.name, pending.name) if pending.name is not None else None,
+        active_change=(current.active, pending.active) if pending.active is not None else None,
+        members_added=pending.members_added,
+        members_removed=pending.members_removed,
+    )
 
 
 def _require_local_group_id(entry: GroupSyncPlanEntry) -> str:

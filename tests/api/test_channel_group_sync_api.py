@@ -747,7 +747,7 @@ def test_inactive_channel_still_counts_as_known():
         ]
     )
     fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
-    client, _registry, groups, _audit_sink = create_sync_app(fake, registry=registry)
+    client, _registry, _groups, _audit_sink = create_sync_app(fake, registry=registry)
 
     response = post_sync(client, dry_run=True)
 
