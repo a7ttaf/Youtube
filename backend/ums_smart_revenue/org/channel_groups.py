@@ -3,7 +3,7 @@
 #   value, the typed conflict error, the ChannelGroupRegistryStore Protocol
 #   every backend must satisfy, and an in-memory registry used as the test
 #   double for that Protocol.
-# Database/ORM: NONE. This module is deliberately persistence-free; the SQL
+# Database/ORM: None. This module is deliberately persistence-free; the SQL
 #   implementation (ChannelGroupORM / ChannelGroupMemberORM) lives in
 #   sql_channel_groups.py. The in-memory registry is a dict, never a database.
 # Standards: The in-memory registry must keep BEHAVIOURAL parity with the SQL

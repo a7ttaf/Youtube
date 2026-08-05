@@ -360,7 +360,7 @@ class ChannelImportPlan:
 # Purpose: Decide every row's outcome for a bulk channel import — CREATE,
 #   UPDATE (with its field diff), UNCHANGED, or ERROR — by diffing the parsed
 #   roster against the registry snapshot the caller supplies.
-# Database/ORM: NONE. Pure function over caller-supplied data; the store reads
+# Database/ORM: None. Pure function over caller-supplied data; the store reads
 #   happen in channel_import_apply.plan_channel_import_with_stores. Keeping
 #   this I/O-free is what makes the outcome rules unit-testable.
 # Standards: Fail closed per row, never per file — every invalid row is
