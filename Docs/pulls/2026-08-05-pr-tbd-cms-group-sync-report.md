@@ -66,9 +66,13 @@ reconcile in the same pass), `UNCHANGED`. An entry carries its full field
 diff; the outcome is the dominant label.
 
 **Dry-run is a truthful preview.** The response payload is identical in shape
-and content for dry-run and apply — per-group outcome, name/active changes,
-member add/remove lists, unknown-channel ids (capped at 50 with a full count),
-non-channel-member total. Dry-run writes nothing, including no audit rows.
+for dry-run and apply — per-group outcome, name/active changes, member
+add/remove lists, unknown-channel ids (capped at 50 with a full count),
+non-channel-member total, and `will_adopt_content_owner` (the one write the
+mirror diff cannot express). Dry-run writes nothing, including no audit rows.
+`counts` is the only field whose SOURCE differs: the plan's tally for a dry
+run, the write boundary's for an apply — the same tally `GROUPS_SYNCED`
+persists, so body and audit row can never disagree.
 
 **Group API lockdown.** `PATCH /groups/{id}` with `name`, `POST
 /groups/{id}/members`, and `DELETE /groups/{id}/members/{channel_id}` now
@@ -76,6 +80,14 @@ return a typed 409 (`managed by CMS sync; edit it in YouTube Content
 Manager`) when the group carries a `cms_group_id`. An `active`-only PATCH
 stays allowed (reversible; sync re-asserts state). Manual groups are
 untouched — proven by tests on all four operations.
+
+Because that archive is allowed, the apply takes its target active state from
+UPSTREAM PRESENCE (`upstream_present` on the plan entry), not from the plan's
+`active_change` diff. The diff is `None` whenever the group was already active,
+so a group archived in the plan-to-apply window would otherwise stay inactive
+while present upstream, and the sync would report success on a mirror it had
+not restored. `active_change` remains the operator-facing "what will visibly
+flip".
 
 **Error taxonomy.** Canned messages only; exception text never reaches HTTP.
 Credential missing/inactive → 503; OAuth refresh failure → 503; any other
@@ -86,7 +98,10 @@ failure → 502. The fetch completes fully before any store write.
 field diff, member counts) + one `GROUPS_SYNCED` summary per applied sync.
 Summary counts are accumulated from actual write-boundary outcomes, never
 copied from the plan — enforced by a test that feeds a deliberately poisoned
-plan-counts mapping and asserts the executed tally is reported instead.
+plan-counts mapping and asserts the executed tally is reported instead. An
+apply's HTTP response reports that same executed tally, so the body and the
+audit row can never disagree; a dry run still reports the plan's counts,
+because "what would happen" is the whole point of that mode.
 
 ## Architecture
 
@@ -110,6 +125,38 @@ another owner's groups). It revises `20260803_0001`, so the head moves
 **Deploy order matters:** run `alembic upgrade head` BEFORE the app code, which
 reads and writes `channel_groups.content_owner_id`. Deploying the code first
 would query a column the database does not have.
+
+**Existing groups are adopted, never reassigned.** Every group predating the
+migration is owner-NULL. Matching an owner's upstream CMS key is what proves
+ownership, so the first sync (or a grouped import) under that owner backfills
+the stamp; the write is audited (`adopted_content_owner`) and the dry run
+previews it per group (`will_adopt_content_owner`). Adoption is one-way — the
+store raises `ChannelGroupOwnerReassignmentError` on any attempt to move an
+already-stamped group to a different owner, and the import route returns 409
+rather than attaching a channel into another owner's group. Until a group is
+adopted it stays matchable (so its `cms_group_id` cannot be re-planned as
+CREATE and collide on the tenant-unique key) but is never deactivated by an
+owner that cannot claim it.
+
+Because owner-NULL rows are visible to *every* owner's plan, two owners can
+race the same adoption. The apply's locked re-read therefore re-verifies the
+entry's SCOPING PREMISE, not only its mirrored fields: a group claimed by
+someone else in the plan-to-apply window raises
+`ChannelGroupOwnerReassignmentError` → 409 for the whole sync. Declining only
+the stamp would not be enough — the rename and membership writes would still
+land on the rival's group, and the `GROUP_UPDATED` row would carry the losing
+owner's `content_owner_id` on it, so the trail would misattribute the change.
+Since the stamp is monotonic (no route clears one, reassignment is refused),
+divergence from the dry run is one-directional: a previewed adoption may be
+refused, a non-previewed one can never occur.
+
+The import's cross-owner conflict is classified at PLANNING as well, via one
+bulk `list_foreign_owner_cms_group_ids` lookup alongside the existing archived-
+key query. It was previously only enforced at the write boundary, so a
+`dry_run=true` roster referencing another owner's group returned a clean plan
+and the real run then 409'd. Owner-NULL keys are excluded from that set — they
+are adoptable, not conflicting — and the write-boundary recheck stays for the
+plan-to-apply race.
 
 ## Two defects found and fixed during implementation
 
@@ -148,11 +195,16 @@ All local against Postgres 18 (`ums-mig-pg-test`).
 | Single Alembic head (one migration in PR) | `20260805_0001` |
 | `git diff --check` | Clean |
 
-Test tiers added: 12 client, 15 planner, 8 apply (incl. write-sequence
-recording and the poisoned-plan-counts guard), 19 route (SQLite, incl. the
-hardening cases), 6 lockdown, 4 Postgres (persist, RLS isolation via bare
-un-filtered SELECT under tenant B, mid-apply rollback with the in-flight
-anti-vacuity guard, lost-commit audit atomicity).
+Test tiers added: 15 client, 19 planner, 17 apply (incl. write-sequence
+recording, the poisoned-plan-counts guard, the cross-owner mid-flight claim,
+and the mid-flight archive), 28 route (SQLite, incl. the hardening cases, the
+dry-run adoption preview, and the 409 for a group claimed mid-apply), 4
+lockdown, 6 Postgres (persist, RLS isolation via bare un-filtered SELECT under
+tenant B, mid-apply rollback with the in-flight anti-vacuity guard,
+lost-commit audit atomicity, owner stamping, cross-owner scoping), 3 migration.
+Plus the import-side additions: the cross-owner planning classification at
+planner, store (in-memory and SQL, the latter pinning that an owner-NULL row
+is NOT a conflict), and route-preview tiers.
 
 ## Known limitations
 
@@ -165,6 +217,19 @@ anti-vacuity guard, lost-commit audit atomicity).
   CSVs that used labels rather than real YouTube group ids will see those
   label-keyed groups DEACTIVATED on first sync, with new groups created under
   the real ids. The dry run shows this before anything happens.
+- **A wrong owner stamp has no API-level recovery path.** Adoption is
+  adopt-only-forever by design, so any route into a wrong stamp — losing the
+  adoption race above, or an import CSV that CREATEs a group under a
+  `cms_group_id` that is really another owner's upstream key — leaves a row
+  only hand-run SQL can repair, and the affected owner's sync 409s on every
+  subsequent cycle. Single-content-owner deployments cannot reach this state.
+  The companion fix is a guarded, audited, `MANAGE_GROUPS`-global *clear-stamp*
+  admin action (reset to NULL, reassignment still forbidden): clearing asserts
+  nothing false, returns the row to the unclaimed pool, and the rightful
+  owner's next sync re-claims it with upstream proof through planner logic that
+  already exists. Deliberately NOT in this PR — it is a new write surface, and
+  it belongs with the open question of whether the import should adopt at all
+  (see below).
 
 ## Rollback
 
@@ -176,6 +241,42 @@ disappear cleanly. Groups already mirrored keep their synced names/membership
 — correct data, no cleanup required; only the owner stamp is lost, and a
 re-upgrade leaves it NULL, which sync tolerates (owner-NULL rows stay
 matchable and are never deactivated by an owner that cannot claim them).
+
+## Open decision for the owner: import adoption, Path A or Path B
+
+Not an open-ended question — two paths, both cheap now, and the status quo is
+the one position neither defends.
+
+The principle this PR establishes is that anything knowable from stored state
+belongs to PLANNING, because a preview that reports a clean plan for work the
+apply will reject is a preview that lies. That is why the import's cross-owner
+conflict moved to planning above. **Adoption is equally knowable at planning
+time** — group exists, key matches, `content_owner_id IS NULL` — so as things
+stand the import's preview surfaces the *retryable* outcome (conflict) and
+hides the *permanent* one (a stamp minted on CSV evidence and never revocable).
+
+The evidence asymmetry is the crux. Owner-NULL does not mean *unclaimed by
+anyone*; it means *claim unknown* — the row predates the column and somebody's
+CMS probably does own it upstream. Sync has proof an import cannot get: an
+authenticated `groups.list(onBehalfOfContentOwner=X)` returning that key is
+Google co-signing the claim. A CSV cell is not that.
+
+- **Path A — the import stops adopting.** Owner-NULL becomes a third branch of
+  `_blocked_group_reason`: "legacy group unclaimed: run POST
+  /channels/groups/sync for owner X to claim it, then retry". One predicate in
+  a pass that now exists. It also closes the pre-stamp membership-injection
+  window and makes the adoption race unreachable — a CMS key is upstream in at
+  most one owner's CMS, so syncs alone can never race each other. Cost: a
+  one-time sync-before-import ordering for legacy rows, per owner. (This
+  deployment has one content owner, so the friction is ~zero.)
+- **Path B — the import keeps adopting.** Then it must at minimum surface a
+  per-row adoption flag in its preview, mirroring the sync's
+  `will_adopt_content_owner`, and the clear-stamp action below stops being a
+  nice-to-have: a wrong stamp still bricks the rightful owner's next sync
+  through the CREATE-collision path, which this PR's guard does not change.
+
+Neither is decided here — both alter import semantics or add surface, and that
+is not a review-cleanup call.
 
 ## Next PR candidates
 

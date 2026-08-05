@@ -436,7 +436,8 @@ on real ingestion (Phase 2) and the inventory load workflow.
   real titles, membership with adds AND removals, deactivate on upstream
   disappearance, reactivate on return — with a mandatory dry-run, and the
   groups API 409s manual rename/membership edits on synced groups (YouTube
-  Content Manager is the source of truth; `active`-only PATCH stays allowed).
+  Content Manager is the source of truth; `active`-only PATCH stays allowed,
+  but any sync that still sees the group upstream re-activates it).
   Company/sector (org-unit) mapping remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to

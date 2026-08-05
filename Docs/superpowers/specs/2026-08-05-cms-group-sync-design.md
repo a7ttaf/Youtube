@@ -78,7 +78,12 @@ group API's own authorization (the PR #159 review round that added the
 Returns `200` in both modes with the same payload shape:
 `{dry_run, content_owner_id, counts, groups: [...], unknown_channel_ids,
 non_channel_member_count}` — the dry-run/apply equivalence is what makes the
-dry run a truthful preview.
+dry run a truthful preview. Each group entry also carries
+`will_adopt_content_owner`, so the one write the mirror diff cannot express —
+backfilling `content_owner_id` on an owner-NULL legacy row — is previewed too.
+`counts` is the only field whose SOURCE differs by mode: a dry run reports the
+plan's tally (what would happen), an apply reports the write boundary's (what
+did), which is the same tally `GROUPS_SYNCED` persists.
 
 ## Data flow
 
@@ -178,6 +183,17 @@ via the existing API, so no rule is needed for it.
 - Concurrent sync of the same tenant: last-writer-wins at row level inside
   one transaction; both runs mirror the same upstream, so convergence is
   identical. No advisory lock in this PR.
+- A synced group archived through the (still-permitted) `active`-only PATCH
+  between planning and the apply is REACTIVATED in that same run when it is
+  present upstream. The write boundary derives active from upstream presence,
+  never from the plan's `active_change` diff, which is `None` for a group that
+  was already active and therefore cannot express "should be active".
+- Losing a race on a group's `content_owner_id` — the row was owner-NULL when
+  this sync planned it and someone else claimed it before the apply took the
+  row lock — is a typed `409`, not a partial mirror. The locked re-read
+  re-verifies the entry's scoping premise, not only its mirrored fields;
+  writing anyway would mutate the rival's group and misattribute the audit
+  row. Same treatment as a CREATE that loses the tenant-unique key race.
 
 ## Testing
 

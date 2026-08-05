@@ -89,8 +89,62 @@ use the same wiring. The regression tests are in
   audit together (with an in-flight anti-vacuity guard), and the lost-commit
   audit-atomicity path.
 
+## The ownership invariant (do not regress)
+
+`channel_groups.content_owner_id` is **adopt-only and monotonic**: NULL → an
+owner is allowed (that is adoption), owner → different owner is refused by the
+store, and no route clears a stamp. Two consequences that are easy to break:
+
+1. The planner's scoped read deliberately returns owner-NULL rows so an
+   existing `cms_group_id` cannot be re-planned as CREATE and collide on the
+   tenant-unique key — but the DEACTIVATE gate must keep skipping them, or one
+   owner retires another's groups.
+2. The apply's locked re-read must re-verify **ownership**, not only the
+   mirrored fields. A row that was owner-NULL at plan time can be claimed
+   before the lock; mirroring it anyway writes the rival's group and stamps
+   this owner's id on the audit row describing it. That path is a typed 409
+   (`ChannelGroupOwnerReassignmentError`), covered by
+   `test_apply_refuses_a_group_another_owner_claimed_mid_flight` and
+   `test_group_claimed_by_another_owner_mid_apply_returns_409`.
+
+Corollary for whoever picks this up: a wrong stamp is currently unrecoverable
+through the API. See the report's known-limitations entry on the proposed
+clear-stamp admin action before adding any new writer of this column.
+
+## The write-boundary rule behind all of it
+
+Everything above is one rule wearing three hats: **a plan is a snapshot; the
+locked re-read is the record.** Anything the apply can re-derive from current
+state it must, and anything it cannot must ride the plan explicitly rather than
+be inferred from a diff:
+
+- `active` comes from `upstream_present`, not `active_change` — a diff against
+  the plan-time snapshot is `None` for a group that was already active and so
+  cannot express "should be active" after a mid-flight archive.
+- Ownership is re-verified, not assumed (above).
+- `counts` in an apply's response come from what executed, never from
+  `plan.counts`, so the body and the `GROUPS_SYNCED` row agree.
+- Conversely, a write the diff cannot express — the owner backfill — rides the
+  plan as `will_adopt_content_owner` so the dry run still previews it.
+
+**Membership is the one field still delta-based, and that is deliberate.**
+`members_added`/`members_removed` are plan-time deltas filtered against current
+state at the write boundary, not a set reconciled against the upstream roster.
+So the analogous race exists: a same-owner import that adds a channel absent
+upstream to a synced group between plan and apply leaves that channel in place
+for this run — it is in neither delta set — and only the next sync removes it.
+Manual edits cannot reach it (the group API 409s membership edits on synced
+groups), so the only writer is a racing same-owner import: one interval, one
+run, self-healing. Converging it would mean carrying the full upstream member
+set on every entry and set-reconciling under the lock — a real change, not a
+cleanup. If you do it, do it there, not by widening the deltas.
+
 ## Open threads beyond this PR
 
+- **Owner decision needed:** should the bulk import adopt owner-NULL groups at
+  all, or 409 with "sync first"? See the report's open-design-question section.
+- **Clear-stamp admin action** — the recovery path a wrong stamp has no route
+  to today.
 - Scheduled sync (connector-jobs executor) — the route is the reusable core.
 - Frontend surface for sync results.
 - The standing outside-CMS reality: Digisay-held channels remain unreadable;

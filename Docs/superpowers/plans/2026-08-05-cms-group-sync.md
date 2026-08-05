@@ -1094,6 +1094,10 @@ def sync_channel_groups(
         content_owner_id=content_owner_id,
         reason=reason,
     )
+    # An apply's response must agree with its audit row: `counts` was rendered
+    # from the plan (right for a dry run, stale for an apply once a concurrent
+    # writer diverges the executed tally), so overwrite it with what ran.
+    payload_out["counts"] = dict(executed)
     record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -1134,6 +1138,9 @@ def _group_sync_plan_to_api(
                 "members_removed": list(entry.members_removed),
                 "unknown_channel_ids": list(entry.unknown_channel_ids[:50]),
                 "unknown_channel_count": len(entry.unknown_channel_ids),
+                # Previews the owner-NULL backfill so the mandatory dry run
+                # shows that write like every other one.
+                "will_adopt_content_owner": entry.will_adopt_content_owner,
             }
             for entry in plan.entries
         ],
