@@ -125,7 +125,7 @@ def _purge_test_rows(engine: sa.Engine) -> None:
     purge reaches rows written under either tenant lane and reruns stay
     idempotent on the shared clean-room container.
     """
-    groups = [GROUP_ID, SECOND_GROUP_ID]
+    groups = [GROUP_ID, SECOND_GROUP_ID, OTHER_GROUP_ID]
     channels = [CHANNEL_ID, SECOND_ID]
     with engine.begin() as conn:
         conn.execute(
@@ -236,6 +236,9 @@ class FakeGroupsClient:
                 return CmsGroupMembers(channel_ids=channel_ids, non_channel_count=0)
         raise AssertionError(f"unexpected group_id: {group_id}")
 
+    def close(self) -> None:
+        """No-op: this double never opens a real HTTP client."""
+
 
 def auth_headers() -> dict[str, str]:
     """Build global super-owner headers accepted by the trusted gateway."""
@@ -344,9 +347,15 @@ class _FailingGroupStore:
         self._fail_on_call = fail_on_call
         self.create_calls = 0
 
-    def list_synced_groups(self) -> list[ChannelGroupEntry]:
+    def list_synced_groups(
+        self, *, content_owner_id: str | None = None
+    ) -> list[ChannelGroupEntry]:
         """Delegate the CMS-keyed group listing to the real store."""
-        return self._inner.list_synced_groups()
+        return self._inner.list_synced_groups(content_owner_id=content_owner_id)
+
+    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
+        """Delegate the group lookup to the real store."""
+        return self._inner.get_group(group_id)
 
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
@@ -376,6 +385,73 @@ class _FailingGroupStore:
     def remove_member(self, **kwargs: object) -> ChannelGroupEntry:
         """Delegate membership detachment to the real store."""
         return self._inner.remove_member(**kwargs)
+
+
+OTHER_CONTENT_OWNER = "OtherOwnerBBBBBBBBBBBB"
+OTHER_GROUP_ID = "cms-owner-b"
+
+
+def _seed_other_owner_group(engine: sa.Engine, *, cms_group_id: str, content_owner_id: str) -> None:
+    """Insert one CMS-keyed group for a DIFFERENT owner, active, no membership.
+
+    Models a group a prior sync already created for another content owner —
+    the real-SQL counterpart of the in-memory P1 regression in
+    ``test_channel_group_sync_api.py``.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "INSERT INTO channel_groups"
+                " (tenant_id, name, group_type, cms_group_id, content_owner_id)"
+                " VALUES (:tenant, 'Owner B Sector', 'SECTOR', :cms_group_id, :owner)"
+            ),
+            {"tenant": TENANT_A, "cms_group_id": cms_group_id, "owner": content_owner_id},
+        )
+
+
+def test_create_stamps_content_owner_id_on_postgres(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """An applied CREATE stamps the group's content_owner_id in SQL."""
+    _seed_channel(owner_engine, CHANNEL_ID, "Alpha News")
+    fake = FakeGroupsClient([(GROUP_ID, GROUP_TITLE, (CHANNEL_ID,))])
+    client = TestClient(build_sync_app(pg_url, fake))
+
+    response = post_sync(client)
+
+    assert response.status_code == 200, response.text
+    with owner_engine.connect() as conn:
+        stored = conn.execute(
+            sa.text("SELECT content_owner_id FROM channel_groups WHERE cms_group_id = :key"),
+            {"key": GROUP_ID},
+        ).one()
+    assert stored.content_owner_id == CONTENT_OWNER
+
+
+def test_sync_does_not_deactivate_a_different_owners_group_on_postgres(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """Syncing owner A's real SQL groups must not touch owner B's group.
+
+    list_synced_groups() must be scoped to the requesting content owner in
+    the SQL implementation too, not only the in-memory fake: without the
+    WHERE content_owner_id filter, owner B's group is simply missing from
+    owner A's upstream snapshot and gets planned as DEACTIVATE.
+    """
+    _seed_channel(owner_engine, CHANNEL_ID, "Alpha News")
+    _seed_other_owner_group(
+        owner_engine, cms_group_id=OTHER_GROUP_ID, content_owner_id=OTHER_CONTENT_OWNER
+    )
+    fake = FakeGroupsClient([(GROUP_ID, GROUP_TITLE, (CHANNEL_ID,))])
+    client = TestClient(build_sync_app(pg_url, fake))
+
+    response = post_sync(client)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["DEACTIVATE"] == 0
+    other_owner_group = _group_row(owner_engine, OTHER_GROUP_ID)
+    assert other_owner_group is not None
+    assert other_owner_group.active is True
 
 
 def test_sync_persists_groups_on_postgres(pg_url: str, owner_engine: sa.Engine) -> None:

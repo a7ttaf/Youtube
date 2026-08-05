@@ -89,6 +89,9 @@ class FakeGroupsClient:
                 return CmsGroupMembers(channel_ids=channel_ids, non_channel_count=non_channel)
         raise AssertionError(f"unexpected group_id: {group_id}")
 
+    def close(self) -> None:
+        """No-op: this double never opens a real HTTP client."""
+
 
 @pytest.fixture(autouse=True)
 def fake_credentials():
@@ -333,6 +336,7 @@ def test_full_mirror_round_renames_churns_members_and_deactivates():
                 active=True,
                 channel_ids=(CHANNEL_ONE,),
                 cms_group_id="cms-a",
+                content_owner_id=CONTENT_OWNER,
             ),
             ChannelGroupEntry(
                 id="grp-b",
@@ -341,6 +345,7 @@ def test_full_mirror_round_renames_churns_members_and_deactivates():
                 active=True,
                 channel_ids=(CHANNEL_TWO,),
                 cms_group_id="cms-b",
+                content_owner_id=CONTENT_OWNER,
             ),
         ]
     )
@@ -377,6 +382,7 @@ def test_resyncing_a_mirrored_content_owner_is_all_unchanged():
                 active=True,
                 channel_ids=(CHANNEL_ONE,),
                 cms_group_id="cms-a",
+                content_owner_id=CONTENT_OWNER,
             ),
             ChannelGroupEntry(
                 id="grp-b",
@@ -385,6 +391,7 @@ def test_resyncing_a_mirrored_content_owner_is_all_unchanged():
                 active=True,
                 channel_ids=(CHANNEL_TWO,),
                 cms_group_id="cms-b",
+                content_owner_id=CONTENT_OWNER,
             ),
         ]
     )
@@ -606,6 +613,7 @@ def test_manual_group_survives_a_sync_that_deactivates_a_synced_sibling():
                 active=True,
                 channel_ids=(CHANNEL_TWO,),
                 cms_group_id="cms-gone",
+                content_owner_id=CONTENT_OWNER,
             ),
         ]
     )
@@ -623,3 +631,129 @@ def test_manual_group_survives_a_sync_that_deactivates_a_synced_sibling():
     assert manual.channel_ids == (CHANNEL_ONE,)
     assert groups.get_group("grp-synced").active is False
     assert sole_record(audit_sink, "GROUP_UPDATED").entity_id == "grp-synced"
+
+
+OTHER_OWNER = "OtherOwnerBBBBBBBBBBBB"
+
+
+def test_sync_does_not_deactivate_a_different_owners_group():
+    """Syncing owner A must not touch a group synced by a different owner B.
+
+    channel_groups carries no owner column of its own beyond the
+    content_owner_id stamped at create time; without scoping
+    list_synced_groups() to the requesting owner, B's group is simply missing
+    from A's upstream snapshot and the planner deactivates it as "vanished".
+    """
+    seeded = ChannelGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id="grp-other-owner",
+                name="Owner B's Sector",
+                group_type="SECTOR",
+                active=True,
+                channel_ids=(CHANNEL_TWO,),
+                cms_group_id="cms-owner-b",
+                content_owner_id=OTHER_OWNER,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake, groups=seeded)
+
+    response = post_sync(client, content_owner_id=CONTENT_OWNER)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["DEACTIVATE"] == 0
+    other_owner_group = groups.get_group("grp-other-owner")
+    assert other_owner_group is not None
+    assert other_owner_group.active is True
+    assert other_owner_group.channel_ids == (CHANNEL_TWO,)
+    assert "grp-other-owner" not in {
+        record.entity_id for record in records_of(audit_sink, "GROUP_UPDATED")
+    }
+
+
+def test_create_conflict_on_concurrent_cms_key_returns_409():
+    """A tenant-unique cms_group_id race on CREATE is a 409, never a 500.
+
+    The planner only sees THIS owner's local groups (list_synced_groups is
+    owner-scoped), so a key already claimed under a different owner still
+    looks like CREATE to the plan; the store's per-tenant unique key is the
+    authoritative guard, and the route must translate its typed conflict to a
+    retryable 409 rather than letting it escape as a server error.
+    """
+    seeded = ChannelGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id="grp-raced",
+                name="Raced In First",
+                group_type="SECTOR",
+                active=True,
+                channel_ids=(CHANNEL_TWO,),
+                cms_group_id="cms-a",
+                content_owner_id=OTHER_OWNER,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake, groups=seeded)
+
+    response = post_sync(client, content_owner_id=CONTENT_OWNER)
+
+    assert response.status_code == 409, response.text
+    assert "cms-a" in response.json()["detail"]
+    # No partial write: the raced-in group is untouched, no audit emitted.
+    assert groups.get_group("grp-raced").content_owner_id == OTHER_OWNER
+    assert audit_sink.records == []
+
+
+def test_reason_with_nul_byte_is_rejected():
+    """A NUL byte in reason is a 422, not an unhandled encoding failure later.
+
+    audit_logs.reason is a PostgreSQL text column; a NUL byte reaching the
+    apply/audit boundary would fail with an unhandled encoding error instead
+    of the promised validation contract.
+    """
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake)
+
+    response = post_sync(client, reason="valid until \x00 here")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "reason contains a NUL character"
+    assert groups.list_synced_groups() == []
+    assert audit_sink.records == []
+
+
+def test_inactive_channel_still_counts_as_known():
+    """An archived-but-existing channel must not be treated as unknown.
+
+    known_channel_ids feeds membership reconciliation: an active-only lookup
+    would make an inactive channel look "unknown" and plan its removal from
+    group membership, even though the groups API itself authorizes over the
+    full (active + inactive) member set.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ONE,
+                channel_name="Alpha News",
+                primary_company_id="company-tv",
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+                active=False,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, _audit_sink = create_sync_app(fake, registry=registry)
+
+    response = post_sync(client, dry_run=True)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["unknown_channel_total"] == 0
+    entry = payload["groups"][0]
+    assert entry["members_added"] == [CHANNEL_ONE]
+    assert entry["unknown_channel_ids"] == []

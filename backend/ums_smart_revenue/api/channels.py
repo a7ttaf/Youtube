@@ -870,11 +870,21 @@ def sync_channel_groups(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="reason is required",
         )
+    # PostgreSQL cannot store NUL in a text column (audit_logs.reason);
+    # rejecting it here keeps the promised 422 contract instead of an
+    # unhandled encoding 500 at the apply/audit boundary — the same rule
+    # _validated_import_form applies to the bulk import's reason field.
+    if "\x00" in reason:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="reason contains a NUL character",
+        )
 
     try:
         credentials = resolve_connector_credentials(
             session=session,
             tenant_id=_resolve_tenant_uuid(user),
+            # skipcq: SCT-A000 -- connector registry key, not a credential value.
             connector_key="youtube-analytics",
             account_id=content_owner_id,
         )
@@ -908,48 +918,82 @@ def sync_channel_groups(
 
     client = client_factory(credentials)
     try:
-        cms_groups = client.list_groups(account_id=content_owner_id)
-        snapshot = tuple(
-            CmsGroupSnapshot(
-                cms_group_id=group.cms_group_id,
-                title=group.title,
-                member_channel_ids=members.channel_ids,
-                non_channel_member_count=members.non_channel_count,
+        try:
+            cms_groups = client.list_groups(account_id=content_owner_id)
+            snapshot = tuple(
+                CmsGroupSnapshot(
+                    cms_group_id=group.cms_group_id,
+                    title=group.title,
+                    member_channel_ids=members.channel_ids,
+                    non_channel_member_count=members.non_channel_count,
+                )
+                for group in cms_groups
+                for members in (
+                    client.list_group_items(
+                        group_id=group.cms_group_id, account_id=content_owner_id
+                    ),
+                )
             )
-            for group in cms_groups
-            for members in (
-                client.list_group_items(group_id=group.cms_group_id, account_id=content_owner_id),
-            )
-        )
-    except GoogleConnectorError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=(
-                "YouTube groups fetch failed; check connector configuration and account access."
-            ),
-        ) from exc
+        except GoogleConnectorError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    "YouTube groups fetch failed; check connector configuration and account access."
+                ),
+            ) from exc
+    finally:
+        client.close()
 
-    local_groups = tuple(groups.list_synced_groups())
+    # Scoped to THIS content owner: channel_groups carries no owner column of
+    # its own, so ownership is derived from create-time content_owner_id
+    # (SqlAlchemyChannelGroupRegistry.create_group stamps it from this same
+    # field). Without the filter, syncing owner A would see every OTHER
+    # owner's synced groups too; none of them can be upstream in owner A's
+    # snapshot, so the planner would deactivate them as "vanished".
+    local_groups = tuple(groups.list_synced_groups(content_owner_id=content_owner_id))
     member_ids = {cid for item in snapshot for cid in item.member_channel_ids}
+    # include_inactive=True: an archived-but-still-existing channel must count
+    # as known, not unknown. The groups API's own authorization intentionally
+    # considers the full member set (active + inactive) when deciding scope
+    # access, so a sync must not silently strip an inactive channel's group
+    # membership just because it looks "unknown" under an active-only filter.
     known = frozenset(
-        entry.youtube_channel_id for entry in registry.list_channels_by_ids(member_ids)
+        entry.youtube_channel_id
+        for entry in registry.list_channels_by_ids(member_ids, include_inactive=True)
     )
     plan = plan_group_sync(snapshot=snapshot, local_groups=local_groups, known_channel_ids=known)
     payload_out = _group_sync_plan_to_api(
         plan, dry_run=payload.dry_run, content_owner_id=content_owner_id
     )
     if payload.dry_run:
+        # Dry runs must persist nothing. resolve_connector_credentials() above
+        # already mutated the credential row's refresh telemetry in-session —
+        # it deliberately leaves that write uncommitted so a caller that never
+        # commits (CLI/dry-run session) never persists it, but THIS route's
+        # session dependency auto-commits on a successful response regardless
+        # of dry_run. Nothing else has been written yet at this point, so
+        # rolling back here is exactly the "persisted nothing" contract the
+        # credential helper's own dry-run semantics assume.
+        session.rollback()
         return payload_out
 
-    executed = apply_group_sync(
-        plan,
-        groups=groups,
-        audit_sink=audit_sink,
-        actor=user,
-        scope=target_scope,
-        content_owner_id=content_owner_id,
-        reason=reason,
-    )
+    try:
+        executed = apply_group_sync(
+            plan,
+            groups=groups,
+            audit_sink=audit_sink,
+            actor=user,
+            scope=target_scope,
+            content_owner_id=content_owner_id,
+            reason=reason,
+        )
+    # A concurrent writer (another sync, or the bulk import) can win a
+    # uniqueness race on the same CMS key between planning and this apply;
+    # the store translates that into the typed conflict instead of letting an
+    # IntegrityError-aborted session escape as a 500. Mirrors import_channels'
+    # identical translation earlier in this file.
+    except ChannelGroupConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     record_audit_event(
         sink=audit_sink,
         actor=user,
