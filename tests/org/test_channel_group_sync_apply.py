@@ -21,7 +21,11 @@ from ums_smart_revenue.org.channel_group_sync_apply import (
     AUDIT_SOURCE_CMS_SYNC,
     apply_group_sync,
 )
-from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistry
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupEntry,
+    ChannelGroupOwnerReassignmentError,
+    ChannelGroupRegistry,
+)
 
 CH_A = "UCB6sc84dcg6VQGB_d89sx2g"
 CH_B = "UC3Dci3BzZXDo4jw4dU8KqWg"
@@ -292,12 +296,18 @@ def test_in_sync_legacy_group_is_still_adopted_and_audited() -> None:
     This is the one documented exception to "UNCHANGED writes nothing": the
     owner stamp is a real write, so it happens AND is audited rather than
     being applied silently.
+
+    The entry carries outcome=UNCHANGED deliberately — that is exactly what
+    ``plan_group_sync`` emits for a legacy group whose name and membership
+    already match upstream, and an earlier version of this fix short-circuited
+    UNCHANGED before the adoption path could run, leaving those rows
+    permanently unclaimable.
     """
     groups = _seeded(content_owner_id=None)
     sink = InMemoryAuditSink()
 
     executed = _apply(
-        _plan(_entry(outcome=GroupSyncOutcome.RENAME, local_group_id="local-1")),
+        _plan(_entry(outcome=GroupSyncOutcome.UNCHANGED, local_group_id="local-1")),
         groups,
         sink,
     )
@@ -311,6 +321,26 @@ def test_in_sync_legacy_group_is_still_adopted_and_audited() -> None:
     assert len(sink.records) == 1
     assert sink.records[0].details["adopted_content_owner"] is True
     assert sink.records[0].details["outcome"] == "UNCHANGED"
+
+
+def test_unchanged_owned_group_still_writes_and_audits_nothing() -> None:
+    """Routing UNCHANGED through the apply path must not start writing.
+
+    Adoption is the ONLY reason an UNCHANGED entry may touch the store; an
+    already-owned, already-in-sync group must still be a pure no-op.
+    """
+    groups = _seeded()
+    sink = InMemoryAuditSink()
+
+    executed = _apply(
+        _plan(_entry(outcome=GroupSyncOutcome.UNCHANGED, local_group_id="local-1")),
+        groups,
+        sink,
+    )
+
+    assert groups.writes == []
+    assert sink.records == []
+    assert executed["UNCHANGED"] == 1
 
 
 def test_already_owned_group_is_not_restamped() -> None:
@@ -327,6 +357,36 @@ def test_already_owned_group_is_not_restamped() -> None:
     assert groups.get_group("local-1").content_owner_id == "SomeOtherOwner"
     assert groups.writes == []
     assert sink.records == []
+
+
+def test_store_refuses_to_reassign_an_owned_group() -> None:
+    """The store enforces adopt-only itself, not just the sync call site.
+
+    content_owner_id is what scopes sync, so a future call-site bug that
+    reassigned a group between owners would corrupt both owners' plans. The
+    guard is in the store so it fails loudly instead of writing.
+    """
+    groups = ChannelGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id="local-1",
+                name="TV Sector",
+                group_type="SECTOR",
+                active=True,
+                channel_ids=(),
+                cms_group_id="g1",
+                content_owner_id="OwnerA",
+            )
+        ]
+    )
+
+    # Re-stamping the SAME owner is a harmless no-op.
+    groups.update_group(group_id="local-1", name=None, active=None, content_owner_id="OwnerA")
+    assert groups.get_group("local-1").content_owner_id == "OwnerA"
+
+    with pytest.raises(ChannelGroupOwnerReassignmentError):
+        groups.update_group(group_id="local-1", name=None, active=None, content_owner_id="OwnerB")
+    assert groups.get_group("local-1").content_owner_id == "OwnerA"
 
 
 def test_partial_race_reports_the_outcome_that_actually_happened() -> None:
@@ -473,6 +533,7 @@ def test_returned_counts_are_the_executed_tally_not_the_plan_counts() -> None:
                 active=True,
                 channel_ids=(CH_A,),
                 cms_group_id="g1",
+                content_owner_id=CONTENT_OWNER,
             ),
             ChannelGroupEntry(
                 id="local-2",
@@ -481,6 +542,7 @@ def test_returned_counts_are_the_executed_tally_not_the_plan_counts() -> None:
                 active=True,
                 channel_ids=(),
                 cms_group_id="g2",
+                content_owner_id=CONTENT_OWNER,
             ),
             ChannelGroupEntry(
                 id="local-3",
@@ -489,6 +551,7 @@ def test_returned_counts_are_the_executed_tally_not_the_plan_counts() -> None:
                 active=True,
                 channel_ids=(),
                 cms_group_id="g3",
+                content_owner_id=CONTENT_OWNER,
             ),
         ]
     )

@@ -31,6 +31,27 @@ from typing import Protocol
 from uuid import uuid4
 
 
+class ChannelGroupOwnerReassignmentError(ValueError):
+    """A write tried to move an already-owned group to a different owner.
+
+    ``content_owner_id`` is what scopes CMS group sync: it decides which
+    groups a sync may reconcile and which it may deactivate. Filling the
+    column on an owner-NULL legacy row is adoption and is allowed; changing a
+    row that already names an owner is not, because it would silently move the
+    group between content owners and corrupt both sides' subsequent plans.
+    Raised by the store so a call-site bug fails loudly instead of writing.
+    """
+
+
+def require_adoptable_owner(current: str | None, incoming: str, *, group_id: str) -> None:
+    """Allow filling an owner-NULL row (or a no-op re-stamp); reject a move."""
+    if current is not None and current != incoming:
+        raise ChannelGroupOwnerReassignmentError(
+            f"channel group {group_id} already belongs to content owner {current!r}; "
+            f"refusing to reassign it to {incoming!r}"
+        )
+
+
 class ChannelGroupConflictError(ValueError):
     """A group write lost a uniqueness race (duplicate per-tenant cms_group_id).
 
@@ -254,6 +275,9 @@ class ChannelGroupRegistry:
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
         group = self._require_group(group_id)
+        # Parity with the SQL store: adopt-only, reassignment raises.
+        if content_owner_id is not None:
+            require_adoptable_owner(group.content_owner_id, content_owner_id, group_id=group_id)
         updated = replace(
             group,
             name=name if name is not None else group.name,

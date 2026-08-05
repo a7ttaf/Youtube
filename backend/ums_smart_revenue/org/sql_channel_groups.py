@@ -46,7 +46,11 @@ from ums_smart_revenue.db.org_models import (
     ChannelGroupORM,
     YouTubeChannelORM,
 )
-from ums_smart_revenue.org.channel_groups import ChannelGroupConflictError, ChannelGroupEntry
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupConflictError,
+    ChannelGroupEntry,
+    require_adoptable_owner,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -379,13 +383,22 @@ class SqlAlchemyChannelGroupRegistry:
         active: bool | None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        """Update name / active / content owner; None means leave unchanged."""
+        """Update name / active / content owner; None means leave unchanged.
+
+        ``content_owner_id`` is ADOPT-ONLY and enforced here, not just by the
+        caller: it may fill an owner-NULL row, and re-passing the owner a row
+        already has is a no-op, but reassigning an owned group to a different
+        owner raises. Ownership is what scopes CMS group sync, so a call-site
+        bug that silently moved a group between content owners would corrupt
+        every later sync's plan on both sides.
+        """
         row = self._require_group_row(group_id)
         if name is not None:
             row.name = name
         if active is not None:
             row.active = active
         if content_owner_id is not None:
+            require_adoptable_owner(row.content_owner_id, content_owner_id, group_id=group_id)
             row.content_owner_id = content_owner_id
         self._session.flush()
         return self._to_entry(row)

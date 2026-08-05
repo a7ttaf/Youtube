@@ -95,9 +95,13 @@ def apply_group_sync(
     # the fetch, this dict is the record of what the store actually executed.
     executed = {outcome.value: 0 for outcome in GroupSyncOutcome}
     for entry in plan.entries:
-        if entry.outcome is GroupSyncOutcome.UNCHANGED:
-            executed[entry.outcome.value] += 1
-            continue
+        # UNCHANGED is NOT short-circuited here. An owner-NULL legacy group
+        # that already mirrors its CMS group plans as UNCHANGED, and that is
+        # precisely the case whose owner stamp is still owed — skipping it
+        # would leave the row unclaimable forever, so the deactivation gate
+        # could never retire it once it vanishes upstream. _execute_update
+        # returns None for a genuinely untouched group, which still counts as
+        # UNCHANGED with no write and no audit.
         applied: _AppliedChange | None
         if entry.outcome is GroupSyncOutcome.CREATE:
             applied = _execute_create(entry, groups=groups, content_owner_id=content_owner_id)
