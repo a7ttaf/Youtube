@@ -24,6 +24,7 @@ class AuditEventType(StrEnum):
     CHANNEL_UPDATED = "CHANNEL_UPDATED"
     CHANNEL_IMPORTED = "CHANNEL_IMPORTED"
     GROUP_UPDATED = "GROUP_UPDATED"
+    GROUPS_SYNCED = "GROUPS_SYNCED"
     REPORT_IMPORTED = "REPORT_IMPORTED"
     ADSENSE_PAYMENT_SYNCED = "ADSENSE_PAYMENT_SYNCED"
     DEDUCTION_COMPONENTS_INGESTED = "DEDUCTION_COMPONENTS_INGESTED"
@@ -88,6 +89,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.GROUP_UPDATED: AuditEventDefinition(
         AuditEventType.GROUP_UPDATED,
+        reason_required=True,
+        permission=Permission.MANAGE_GROUPS,
+    ),
+    AuditEventType.GROUPS_SYNCED: AuditEventDefinition(
+        AuditEventType.GROUPS_SYNCED,
         reason_required=True,
         permission=Permission.MANAGE_GROUPS,
     ),
