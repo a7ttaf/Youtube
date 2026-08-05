@@ -20,6 +20,7 @@ from ums_smart_revenue.org.channel_group_sync import (
 from ums_smart_revenue.org.channel_group_sync_apply import (
     AUDIT_SOURCE_CMS_SYNC,
     GroupSyncExecution,
+    _known_member_channel_ids,
     apply_group_sync,
 )
 from ums_smart_revenue.org.channel_groups import (
@@ -27,6 +28,7 @@ from ums_smart_revenue.org.channel_groups import (
     ChannelGroupOwnerReassignmentError,
     ChannelGroupRegistry,
 )
+from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
 
 CH_A = "UCB6sc84dcg6VQGB_d89sx2g"
 CH_B = "UC3Dci3BzZXDo4jw4dU8KqWg"
@@ -759,3 +761,53 @@ def test_non_create_entry_without_a_local_group_id_fails_closed() -> None:
 
     assert groups.writes == []
     assert sink.records == []
+
+
+class _RecordingChannelRegistry:
+    """Channel store double that records the size of each id lookup."""
+
+    def __init__(self, known: set[str], *, content_owner_id: str) -> None:
+        """Hold the ids that exist and the owner every one of them carries."""
+        self._known = known
+        self._content_owner_id = content_owner_id
+        self.lookup_sizes: list[int] = []
+
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str], *, include_inactive: bool = False
+    ) -> list[ChannelRegistryEntry]:
+        """Record the batch size, then return the matching entries."""
+        self.lookup_sizes.append(len(youtube_channel_ids))
+        return [
+            ChannelRegistryEntry(
+                youtube_channel_id=channel_id,
+                channel_name=channel_id,
+                primary_company_id="company-tv",
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=self._content_owner_id,
+            )
+            for channel_id in sorted(youtube_channel_ids & self._known)
+        ]
+
+
+def test_member_lookup_is_chunked_under_the_bind_parameter_cap() -> None:
+    """A huge CMS snapshot must not become one oversized IN (...) predicate.
+
+    SQLAlchemy expands IN to one bind parameter per element and Postgres caps a
+    statement at 65535 of them. These lookups run AFTER the whole Google fetch,
+    so blowing the cap would fail the sync having already paid for the upstream
+    work. The import path is capped at 5000 rows; a sync's id set is bounded
+    only by what the CMS returns.
+    """
+    member_ids = {f"UC{index:022d}" for index in range(12_000)}
+    registry = _RecordingChannelRegistry(member_ids, content_owner_id=CONTENT_OWNER)
+
+    known = _known_member_channel_ids(
+        registry,  # type: ignore[arg-type]
+        member_ids=member_ids,
+        content_owner_id=CONTENT_OWNER,
+    )
+
+    assert known == member_ids
+    assert len(registry.lookup_sizes) == 3
+    assert max(registry.lookup_sizes) <= 5000

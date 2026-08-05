@@ -16,7 +16,7 @@
 # ============================================================================
 """Apply a CMS group-sync plan and audit each changed group."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
 from ums_smart_revenue.auth.audit import AuditEventType
@@ -41,6 +41,22 @@ from ums_smart_revenue.org.channel_registry import ChannelRegistryStore
 # auditor separates CMS-mirror changes from manual group API edits and from the
 # bulk import's own group mutations (AUDIT_SOURCE_BULK_IMPORT).
 AUDIT_SOURCE_CMS_SYNC = "cms_group_sync"
+
+
+# One IN (...) predicate expands to one bind parameter per element, and
+# PostgreSQL's extended query protocol caps a statement at 65535 of them. The
+# import route never approaches that (its roster is capped at 5000 rows), but a
+# sync's id sets are bounded only by what the CMS returns, and the lookups run
+# AFTER the whole Google fetch — so an oversized snapshot would fail having
+# already paid for the upstream work. Chunking well under the cap keeps the
+# reads bulk (a handful of statements, never per-row) while removing the cliff.
+_ID_LOOKUP_CHUNK = 5000
+
+
+def _chunked(values: list[str]) -> Iterator[list[str]]:
+    """Yield ``values`` in bind-parameter-safe slices."""
+    for start in range(0, len(values), _ID_LOOKUP_CHUNK):
+        yield values[start : start + _ID_LOOKUP_CHUNK]
 
 
 def _known_member_channel_ids(
@@ -74,7 +90,8 @@ def _known_member_channel_ids(
     """
     return frozenset(
         entry.youtube_channel_id
-        for entry in registry.list_channels_by_ids(member_ids, include_inactive=True)
+        for chunk in _chunked(sorted(member_ids))
+        for entry in registry.list_channels_by_ids(set(chunk), include_inactive=True)
         if entry.content_owner_id in (None, content_owner_id)
     )
 
@@ -128,12 +145,26 @@ def plan_group_sync_with_stores(
             registry, member_ids=member_ids, content_owner_id=content_owner_id
         ),
         content_owner_id=content_owner_id,
-        foreign_owner_group_ids=frozenset(
-            groups.list_foreign_owner_cms_group_ids(
-                {item.cms_group_id for item in snapshot},
-                content_owner_id=content_owner_id,
-            )
+        foreign_owner_group_ids=_foreign_owner_group_ids(
+            groups, snapshot=snapshot, content_owner_id=content_owner_id
         ),
+    )
+
+
+def _foreign_owner_group_ids(
+    groups: ChannelGroupRegistryStore,
+    *,
+    snapshot: tuple[CmsGroupSnapshot, ...],
+    content_owner_id: str,
+) -> frozenset[str]:
+    """Upstream keys already held by a DIFFERENT owner, chunked like the rest."""
+    keys = sorted({item.cms_group_id for item in snapshot})
+    return frozenset(
+        key
+        for chunk in _chunked(keys)
+        for key in groups.list_foreign_owner_cms_group_ids(
+            set(chunk), content_owner_id=content_owner_id
+        )
     )
 
 
