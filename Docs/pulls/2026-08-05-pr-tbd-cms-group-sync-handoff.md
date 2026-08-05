@@ -40,8 +40,18 @@ groups API return 409 pointing at YouTube Content Manager. `active`-only
 PATCH still works. Manual groups (no CMS key) are unaffected.
 
 Permission needed: `MANAGE_GROUPS` at **global** scope. Credential needed: an
-active `youtube-analytics` credential row for the content owner (same one the
-revenue connector uses — no new access).
+active `youtube-analytics` credential row for the content owner (the same row
+the revenue connector uses).
+
+**Scope check before the first live sync — the credential may need
+re-consent.** `groups.list` is covered by the already-granted
+`yt-analytics.readonly`, but `groupItems.list` is not: per Google's
+[GroupItems: list authorization notes](https://developers.google.com/youtube/analytics/reference/groupItems/list)
+it needs either `https://www.googleapis.com/auth/youtube` alone, or
+`youtube.readonly` **together with** `yt-analytics.readonly`. A credential
+holding only `yt-analytics.readonly` lists the groups and then fails every
+live sync at member fetch (canned 502). Verify the stored credential's
+`scopes` cover one of those combinations, and re-consent if not.
 
 ## Environment notes for the next agent
 
