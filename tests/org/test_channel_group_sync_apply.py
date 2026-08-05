@@ -1,3 +1,20 @@
+# ============================================================================
+# Purpose: Pin the CMS group-sync WRITE boundary — which plan entries reach the
+#   store, what each one audits, and what the caller is told actually happened.
+# Database/ORM: None directly. The store and audit sink are in-memory doubles
+#   that implement the same Protocols the SQL versions do, so a Protocol method
+#   added without a double here fails loudly instead of silently no-op'ing.
+# Standards: Every assertion is on the EXECUTED write, never on the plan that
+#   proposed it — a plan is a snapshot, the locked write boundary is the record.
+#   Mid-flight cases (rename, archive, cross-owner claim) are exercised through
+#   registry doubles that mutate between plan and apply, because that race is
+#   the only thing the locked re-read exists to catch.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_group_sync_apply.py -> subject.
+#   - File: tests/org/test_channel_group_sync_planner.py -> the planning half of
+#     the same contract; outcomes planned there are executed here.
+# ============================================================================
 """Domain-side apply execution for CMS group sync.
 
 Covers the write-boundary contract: every non-UNCHANGED entry executes through
