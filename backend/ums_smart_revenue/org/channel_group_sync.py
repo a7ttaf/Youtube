@@ -70,78 +70,75 @@ class GroupSyncPlan:
     non_channel_member_count: int
 
 
-def plan_group_sync(
+def _plan_entry_for_upstream_item(
+    item: CmsGroupSnapshot,
     *,
-    snapshot: tuple[CmsGroupSnapshot, ...],
-    local_groups: tuple[ChannelGroupEntry, ...],
+    local_by_key: Mapping[str, ChannelGroupEntry],
     known_channel_ids: frozenset[str],
-) -> GroupSyncPlan:
-    """Diff the CMS snapshot against local synced groups into a plan."""
-    for group in local_groups:
-        if group.cms_group_id is None:
-            raise ValueError(f"manual group passed to sync planner: {group.id}")
-    local_by_key = {group.cms_group_id: group for group in local_groups}
-    upstream_keys = {item.cms_group_id for item in snapshot}
+) -> tuple[GroupSyncPlanEntry, int]:
+    """Plan one upstream CMS group against its local match, if any.
 
-    entries: list[GroupSyncPlanEntry] = []
-    unknown_total = 0
-    non_channel_total = 0
-
-    for item in sorted(snapshot, key=lambda entry: entry.cms_group_id):
-        non_channel_total += item.non_channel_member_count
-        wanted_known = tuple(
-            channel_id for channel_id in item.member_channel_ids if channel_id in known_channel_ids
-        )
-        unknown = tuple(
-            channel_id
-            for channel_id in item.member_channel_ids
-            if channel_id not in known_channel_ids
-        )
-        unknown_total += len(unknown)
-        local = local_by_key.get(item.cms_group_id)
-        if local is None:
-            entries.append(
-                GroupSyncPlanEntry(
-                    cms_group_id=item.cms_group_id,
-                    outcome=GroupSyncOutcome.CREATE,
-                    title=item.title,
-                    local_group_id=None,
-                    name_change=None,
-                    active_change=None,
-                    members_added=wanted_known,
-                    members_removed=(),
-                    unknown_channel_ids=unknown,
-                )
-            )
-            continue
-        name_change = (local.name, item.title) if local.name != item.title else None
-        active_change = (False, True) if not local.active else None
-        current = set(local.channel_ids)
-        wanted = set(wanted_known)
-        added = tuple(sorted(wanted - current))
-        removed = tuple(sorted(current - wanted))
-        if active_change:
-            outcome = GroupSyncOutcome.REACTIVATE
-        elif name_change:
-            outcome = GroupSyncOutcome.RENAME
-        elif added or removed:
-            outcome = GroupSyncOutcome.MEMBERS_CHANGED
-        else:
-            outcome = GroupSyncOutcome.UNCHANGED
-        entries.append(
+    Returns the planned entry plus the count of unknown-channel members skipped.
+    """
+    wanted_known = tuple(
+        channel_id for channel_id in item.member_channel_ids if channel_id in known_channel_ids
+    )
+    unknown = tuple(
+        channel_id for channel_id in item.member_channel_ids if channel_id not in known_channel_ids
+    )
+    local = local_by_key.get(item.cms_group_id)
+    if local is None:
+        return (
             GroupSyncPlanEntry(
                 cms_group_id=item.cms_group_id,
-                outcome=outcome,
+                outcome=GroupSyncOutcome.CREATE,
                 title=item.title,
-                local_group_id=local.id,
-                name_change=name_change,
-                active_change=active_change,
-                members_added=added,
-                members_removed=removed,
+                local_group_id=None,
+                name_change=None,
+                active_change=None,
+                members_added=wanted_known,
+                members_removed=(),
                 unknown_channel_ids=unknown,
-            )
+            ),
+            len(unknown),
         )
+    name_change = (local.name, item.title) if local.name != item.title else None
+    active_change = (False, True) if not local.active else None
+    current = set(local.channel_ids)
+    wanted = set(wanted_known)
+    added = tuple(sorted(wanted - current))
+    removed = tuple(sorted(current - wanted))
+    if active_change:
+        outcome = GroupSyncOutcome.REACTIVATE
+    elif name_change:
+        outcome = GroupSyncOutcome.RENAME
+    elif added or removed:
+        outcome = GroupSyncOutcome.MEMBERS_CHANGED
+    else:
+        outcome = GroupSyncOutcome.UNCHANGED
+    return (
+        GroupSyncPlanEntry(
+            cms_group_id=item.cms_group_id,
+            outcome=outcome,
+            title=item.title,
+            local_group_id=local.id,
+            name_change=name_change,
+            active_change=active_change,
+            members_added=added,
+            members_removed=removed,
+            unknown_channel_ids=unknown,
+        ),
+        len(unknown),
+    )
 
+
+def _plan_entries_for_vanished_groups(
+    local_groups: tuple[ChannelGroupEntry, ...],
+    *,
+    upstream_keys: set[str],
+) -> list[GroupSyncPlanEntry]:
+    """Plan DEACTIVATE/UNCHANGED entries for local groups no longer upstream."""
+    entries: list[GroupSyncPlanEntry] = []
     for group in sorted(local_groups, key=lambda entry: str(entry.cms_group_id)):
         if group.cms_group_id in upstream_keys:
             continue
@@ -159,6 +156,37 @@ def plan_group_sync(
                 unknown_channel_ids=(),
             )
         )
+    return entries
+
+
+def plan_group_sync(
+    *,
+    snapshot: tuple[CmsGroupSnapshot, ...],
+    local_groups: tuple[ChannelGroupEntry, ...],
+    known_channel_ids: frozenset[str],
+) -> GroupSyncPlan:
+    """Diff the CMS snapshot against local synced groups into a plan."""
+    # skipcq: SCT-A000 -- dict-comprehension target, not a credential value.
+    local_by_key: dict[str, ChannelGroupEntry] = {}
+    for group in local_groups:
+        if group.cms_group_id is None:
+            raise ValueError(f"manual group passed to sync planner: {group.id}")
+        local_by_key[group.cms_group_id] = group
+    upstream_keys = {item.cms_group_id for item in snapshot}
+
+    entries: list[GroupSyncPlanEntry] = []
+    unknown_total = 0
+    non_channel_total = 0
+
+    for item in sorted(snapshot, key=lambda entry: entry.cms_group_id):
+        non_channel_total += item.non_channel_member_count
+        entry, unknown_count = _plan_entry_for_upstream_item(
+            item, local_by_key=local_by_key, known_channel_ids=known_channel_ids
+        )
+        unknown_total += unknown_count
+        entries.append(entry)
+
+    entries.extend(_plan_entries_for_vanished_groups(local_groups, upstream_keys=upstream_keys))
 
     entries.sort(key=lambda entry: entry.cms_group_id)
     counts = {outcome.value: 0 for outcome in GroupSyncOutcome}
