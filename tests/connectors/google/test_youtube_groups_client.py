@@ -26,8 +26,17 @@ def _next_json_response(pages: Iterator[dict[str, object]]) -> httpx.Response:
     return httpx.Response(200, content=json.dumps(payload).encode())
 
 
+def _group_item(group_id: str, title: str, *, item_type: str = "youtube#channel") -> dict:
+    """Build one raw groups.list item, defaulting to a channel-type group."""
+    return {
+        "id": group_id,
+        "snippet": {"title": title},
+        "contentDetails": {"itemType": item_type},
+    }
+
+
 def test_list_groups_single_page(mock_credentials) -> None:
-    payload = {"items": [{"id": "g1", "snippet": {"title": "TV"}}]}
+    payload = {"items": [_group_item("g1", "TV")]}
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=json.dumps(payload).encode())
@@ -46,10 +55,10 @@ def test_list_groups_paginates_and_carries_token(mock_credentials) -> None:
     pages = iter(
         [
             {
-                "items": [{"id": "g1", "snippet": {"title": "TV"}}],
+                "items": [_group_item("g1", "TV")],
                 "nextPageToken": "tok-2",
             },
-            {"items": [{"id": "g2", "snippet": {"title": "Movies"}}]},
+            {"items": [_group_item("g2", "Movies")]},
         ]
     )
 
@@ -79,7 +88,7 @@ def test_list_groups_endless_next_page_token_raises_cap_error(
         nonlocal call_count
         call_count += 1
         payload = {
-            "items": [{"id": f"g{call_count}", "snippet": {"title": "T"}}],
+            "items": [_group_item(f"g{call_count}", "T")],
             "nextPageToken": f"tok-{call_count + 1}",
         }
         return httpx.Response(200, content=json.dumps(payload).encode())
@@ -125,6 +134,65 @@ def test_list_groups_rejects_item_missing_id(mock_credentials) -> None:
 
     with pytest.raises(GoogleApiResponseError):
         client.list_groups(account_id="acct")
+
+
+def test_list_groups_rejects_item_missing_content_details(mock_credentials) -> None:
+    payload = {"items": [{"id": "g1", "snippet": {"title": "TV"}}]}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(payload).encode())
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeGroupsClient(http=http)
+
+    with pytest.raises(GoogleApiResponseError):
+        client.list_groups(account_id="acct")
+
+
+def test_list_groups_rejects_item_missing_item_type(mock_credentials) -> None:
+    payload = {"items": [{"id": "g1", "snippet": {"title": "TV"}, "contentDetails": {}}]}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(payload).encode())
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeGroupsClient(http=http)
+
+    with pytest.raises(GoogleApiResponseError):
+        client.list_groups(account_id="acct")
+
+
+def test_list_groups_skips_non_channel_item_types(mock_credentials) -> None:
+    """A group's itemType is homogeneous (channel/playlist/video/asset).
+
+    Only channel-type groups map onto channel_groups membership; the others
+    would otherwise create a local group with zero channel members.
+    """
+    payload = {
+        "items": [
+            _group_item("g1", "TV"),
+            _group_item("g2", "Asset Bundle", item_type="youtubePartner#asset"),
+            _group_item("g3", "Highlights Playlist", item_type="youtube#playlist"),
+            _group_item("g4", "Explainer Videos", item_type="youtube#video"),
+        ]
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=json.dumps(payload).encode())
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeGroupsClient(http=http)
+    groups = client.list_groups(account_id="acct")
+    assert groups == [CmsGroup("g1", "TV")]
 
 
 def test_list_groups_sends_mine_and_on_behalf_of_content_owner(mock_credentials) -> None:

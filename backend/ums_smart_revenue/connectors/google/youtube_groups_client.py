@@ -83,12 +83,32 @@ def _next_page_token(body: dict[str, object], *, url: str) -> str | None:
     return value
 
 
-def _parse_group(item: dict[str, object], *, url: str) -> CmsGroup:
+_CHANNEL_ITEM_TYPE = "youtube#channel"
+
+
+def _parse_group(item: dict[str, object], *, url: str) -> CmsGroup | None:
+    """Parse one CMS group, or return None to skip a non-channel-type group.
+
+    A group's contentDetails.itemType is homogeneous across its members —
+    youtube#channel, youtube#playlist, youtube#video, or youtubePartner#asset
+    (all items in a group share one type). Only channel-type groups map onto
+    this sync's channel_groups membership; surfacing the others would create
+    a local SECTOR group with zero channel membership that every future sync
+    would keep seeing and never populate.
+    """
     group_id = _non_empty_str(item.get("id"), url=url, field="id")
     snippet = item.get("snippet")
     if not isinstance(snippet, dict):
         raise GoogleApiResponseError(url=url, reason="'snippet' must be an object")
     title = _non_empty_str(snippet.get("title"), url=url, field="snippet.title")
+    content_details = item.get("contentDetails")
+    if not isinstance(content_details, dict):
+        raise GoogleApiResponseError(url=url, reason="'contentDetails' must be an object")
+    item_type = _non_empty_str(
+        content_details.get("itemType"), url=url, field="contentDetails.itemType"
+    )
+    if item_type != _CHANNEL_ITEM_TYPE:
+        return None
     return CmsGroup(cms_group_id=group_id, title=title)
 
 
@@ -113,6 +133,10 @@ class YouTubeGroupsClient:
     def __init__(self, *, http: GoogleHttpClient) -> None:
         """Bind the shared HTTP client (auth + retry + JSON decode)."""
         self._http = http
+
+    def close(self) -> None:
+        """Release the underlying HTTP client's connection pool."""
+        self._http.close()
 
     # ========================================================================
     # Purpose: List the CMS groups a content owner has, paginated via
@@ -141,7 +165,9 @@ class YouTubeGroupsClient:
                 params["pageToken"] = token
             body = self._http.request(method="GET", url=url, params=params)
             for item in _response_object_list(body, "items", url=url):
-                out.append(_parse_group(item, url=url))
+                parsed = _parse_group(item, url=url)
+                if parsed is not None:
+                    out.append(parsed)
             token = _next_page_token(body, url=url)
             if not token:
                 return out
