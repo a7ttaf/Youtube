@@ -19,6 +19,7 @@ from ums_smart_revenue.org.channel_group_sync import (
 )
 from ums_smart_revenue.org.channel_group_sync_apply import (
     AUDIT_SOURCE_CMS_SYNC,
+    GroupSyncExecution,
     apply_group_sync,
 )
 from ums_smart_revenue.org.channel_groups import (
@@ -102,7 +103,7 @@ def _plan(*entries: GroupSyncPlanEntry, counts: dict[str, int] | None = None) ->
 
 def _apply(
     plan: GroupSyncPlan, groups: ChannelGroupRegistry, sink: InMemoryAuditSink
-) -> dict[str, int]:
+) -> GroupSyncExecution:
     return apply_group_sync(
         plan,
         groups=groups,
@@ -149,7 +150,7 @@ def test_create_entry_creates_the_group_and_audits_the_sync_provenance() -> None
     assert created.group_type == "SECTOR"
     assert created.active is True
     assert created.channel_ids == (CH_A,)
-    assert executed["CREATE"] == 1
+    assert executed.counts["CREATE"] == 1
     assert len(sink.records) == 1
     record = sink.records[0]
     assert record.event_type == "GROUP_UPDATED"
@@ -260,8 +261,8 @@ def test_stale_members_changed_entry_already_applied_is_recounted_unchanged() ->
     assert stored.channel_ids == (CH_A, CH_B)
     assert groups.writes == []
     assert sink.records == []
-    assert executed["MEMBERS_CHANGED"] == 0
-    assert executed["UNCHANGED"] == 1
+    assert executed.counts["MEMBERS_CHANGED"] == 0
+    assert executed.counts["UNCHANGED"] == 1
 
 
 def test_matching_a_legacy_owner_null_group_adopts_it() -> None:
@@ -319,8 +320,8 @@ def test_in_sync_legacy_group_is_still_adopted_and_audited() -> None:
     assert groups.get_group("local-1").content_owner_id == CONTENT_OWNER
     assert groups.writes == ["update_group"]
     # No mirror change happened, so the label is UNCHANGED ...
-    assert executed["UNCHANGED"] == 1
-    assert executed["RENAME"] == 0
+    assert executed.counts["UNCHANGED"] == 1
+    assert executed.counts["RENAME"] == 0
     # ... but the write is still on the record.
     assert len(sink.records) == 1
     assert sink.records[0].details["adopted_content_owner"] is True
@@ -344,7 +345,7 @@ def test_unchanged_owned_group_still_writes_and_audits_nothing() -> None:
 
     assert groups.writes == []
     assert sink.records == []
-    assert executed["UNCHANGED"] == 1
+    assert executed.counts["UNCHANGED"] == 1
 
 
 def test_already_owned_group_is_mirrored_without_being_restamped() -> None:
@@ -401,8 +402,43 @@ def test_group_deactivated_mid_flight_is_reactivated_because_it_is_upstream() ->
     )
 
     assert groups.get_group("local-1").active is True
-    assert executed["REACTIVATE"] == 1
+    assert executed.counts["REACTIVATE"] == 1
     assert sink.records[0].details["active_change"] == [False, True]
+
+
+def test_per_group_results_report_the_write_not_the_plan() -> None:
+    """A raced-away entry must not be reported back as a change that happened.
+
+    The route renders an apply's per-group response from these results. If it
+    rendered from the plan instead, this entry would come back as RENAME with
+    a full name_change diff, while the audit trail correctly recorded nothing
+    — telling the operator this request renamed a group it never touched.
+    """
+    # The rename the plan wants is ALREADY the stored name: a concurrent writer
+    # landed it between planning and this apply.
+    groups = _seeded(name="TV")
+    sink = InMemoryAuditSink()
+
+    executed = _apply(
+        _plan(
+            _entry(
+                outcome=GroupSyncOutcome.RENAME,
+                title="TV",
+                local_group_id="local-1",
+                name_change=("TV Sector", "TV"),
+            )
+        ),
+        groups,
+        sink,
+    )
+
+    assert groups.writes == []
+    assert sink.records == []
+    (result,) = executed.entries
+    assert result.outcome is GroupSyncOutcome.UNCHANGED
+    assert result.name_change is None
+    assert result.members_added == ()
+    assert executed.counts["RENAME"] == 0
 
 
 def test_apply_refuses_a_group_another_owner_claimed_mid_flight() -> None:
@@ -502,8 +538,8 @@ def test_partial_race_reports_the_outcome_that_actually_happened() -> None:
         sink,
     )
 
-    assert executed["REACTIVATE"] == 0
-    assert executed["MEMBERS_CHANGED"] == 1
+    assert executed.counts["REACTIVATE"] == 0
+    assert executed.counts["MEMBERS_CHANGED"] == 1
     assert groups.writes == ["add_members"]
     assert len(sink.records) == 1
     record = sink.records[0]
@@ -606,7 +642,7 @@ def test_unchanged_entry_writes_nothing_and_audits_nothing() -> None:
         cms_group_id="g1",
         content_owner_id=CONTENT_OWNER,
     )
-    assert executed["UNCHANGED"] == 1
+    assert executed.counts["UNCHANGED"] == 1
 
 
 def test_returned_counts_are_the_executed_tally_not_the_plan_counts() -> None:
@@ -677,14 +713,19 @@ def test_returned_counts_are_the_executed_tally_not_the_plan_counts() -> None:
         sink,
     )
 
-    assert executed == {
+    assert executed.counts == {
         "CREATE": 1,
+        "CONFLICT": 0,
         "RENAME": 1,
         "MEMBERS_CHANGED": 0,
         "DEACTIVATE": 1,
         "REACTIVATE": 0,
         "UNCHANGED": 1,
     }
+    # One result per plan entry, including the one that wrote nothing — the
+    # route renders the apply response from these, so a missing entry would
+    # silently drop a group from the operator's view.
+    assert [result.cms_group_id for result in executed.entries] == ["g0", "g1", "g2", "g3"]
     # Three changed groups, three audit events; UNCHANGED contributes none.
     assert len(sink.records) == 3
     assert [record.details["outcome"] for record in sink.records] == [

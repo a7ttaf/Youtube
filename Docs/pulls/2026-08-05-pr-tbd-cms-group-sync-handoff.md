@@ -122,8 +122,11 @@ be inferred from a diff:
   the plan-time snapshot is `None` for a group that was already active and so
   cannot express "should be active" after a mid-flight archive.
 - Ownership is re-verified, not assumed (above).
-- `counts` in an apply's response come from what executed, never from
-  `plan.counts`, so the body and the `GROUPS_SYNCED` row agree.
+- An apply's response — `counts` AND the per-group entries — comes from what
+  executed, never from the plan, so the body and the `GROUPS_SYNCED` row agree
+  group by group. `apply_group_sync` returns a `GroupSyncExecution` (tally plus
+  one `GroupSyncAppliedEntry` per plan entry, including the ones that wrote
+  nothing) precisely so the route has something truthful to render.
 - Conversely, a write the diff cannot express — the owner backfill — rides the
   plan as `will_adopt_content_owner` so the dry run still previews it.
 

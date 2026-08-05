@@ -16,6 +16,7 @@
 # ============================================================================
 """Apply a CMS group-sync plan and audit each changed group."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ums_smart_revenue.auth.audit import AuditEventType
@@ -37,6 +38,38 @@ from ums_smart_revenue.org.channel_groups import (
 # auditor separates CMS-mirror changes from manual group API edits and from the
 # bulk import's own group mutations (AUDIT_SOURCE_BULK_IMPORT).
 AUDIT_SOURCE_CMS_SYNC = "cms_group_sync"
+
+
+@dataclass(frozen=True)
+class GroupSyncAppliedEntry:
+    """One group's ACTUAL result at the write boundary.
+
+    The route renders an apply's per-group response from these rather than
+    from the plan. Both must say the same thing: a plan-rendered response can
+    show RENAME with a full diff for a group whose rename a concurrent writer
+    already landed, while the audit trail correctly recorded UNCHANGED and no
+    GROUP_UPDATED — the operator would be told this request changed something
+    it never touched.
+    """
+
+    cms_group_id: str
+    outcome: GroupSyncOutcome
+    title: str | None
+    local_group_id: str | None
+    name_change: tuple[str, str] | None
+    active_change: tuple[bool, bool] | None
+    members_added: tuple[str, ...]
+    members_removed: tuple[str, ...]
+    unknown_channel_ids: tuple[str, ...]
+    adopted_content_owner: bool
+
+
+@dataclass(frozen=True)
+class GroupSyncExecution:
+    """The write boundary's record: per-group results plus their tally."""
+
+    counts: Mapping[str, int]
+    entries: tuple[GroupSyncAppliedEntry, ...]
 
 
 # ============================================================================
@@ -71,8 +104,8 @@ def apply_group_sync(
     scope: AccessScope,
     content_owner_id: str,
     reason: str,
-) -> dict[str, int]:
-    """Execute every non-UNCHANGED entry; return actual counts by outcome.
+) -> GroupSyncExecution:
+    """Execute every non-UNCHANGED entry; return what actually happened.
 
     CREATE lands a new SECTOR group carrying the CMS key. Every other changed
     outcome updates the matched local group: name and active state go through a
@@ -102,6 +135,7 @@ def apply_group_sync(
     # bulk import's CHANNEL_IMPORTED summary follows): the plan is a snapshot of
     # the fetch, this dict is the record of what the store actually executed.
     executed = {outcome.value: 0 for outcome in GroupSyncOutcome}
+    results: list[GroupSyncAppliedEntry] = []
     for entry in plan.entries:
         # UNCHANGED is NOT short-circuited here. An owner-NULL legacy group
         # that already mirrors its CMS group plans as UNCHANGED, and that is
@@ -121,6 +155,7 @@ def apply_group_sync(
             # emit no audit event rather than claiming a mutation this
             # request did not make.
             executed[GroupSyncOutcome.UNCHANGED.value] += 1
+            results.append(_unchanged_result(entry))
             continue
         # Label from what was WRITTEN, not what was planned. A partial race —
         # another writer already flipped active or the name, leaving only
@@ -129,6 +164,21 @@ def apply_group_sync(
         # moved members.
         outcome = _effective_outcome(entry, applied)
         executed[outcome.value] += 1
+        results.append(
+            GroupSyncAppliedEntry(
+                cms_group_id=entry.cms_group_id,
+                outcome=outcome,
+                title=entry.title,
+                local_group_id=applied.group_id,
+                name_change=applied.name_change,
+                active_change=applied.active_change,
+                members_added=applied.members_added,
+                members_removed=applied.members_removed,
+                # Fetch telemetry, not a write: still true whatever the store did.
+                unknown_channel_ids=entry.unknown_channel_ids,
+                adopted_content_owner=applied.adopted_content_owner,
+            )
+        )
         record_audit_event(
             sink=audit_sink,
             actor=actor,
@@ -149,7 +199,23 @@ def apply_group_sync(
                 "adopted_content_owner": applied.adopted_content_owner,
             },
         )
-    return executed
+    return GroupSyncExecution(counts=executed, entries=tuple(results))
+
+
+def _unchanged_result(entry: GroupSyncPlanEntry) -> GroupSyncAppliedEntry:
+    """Render an entry that wrote nothing: no diffs, whatever the plan said."""
+    return GroupSyncAppliedEntry(
+        cms_group_id=entry.cms_group_id,
+        outcome=GroupSyncOutcome.UNCHANGED,
+        title=entry.title,
+        local_group_id=entry.local_group_id,
+        name_change=None,
+        active_change=None,
+        members_added=(),
+        members_removed=(),
+        unknown_channel_ids=entry.unknown_channel_ids,
+        adopted_content_owner=False,
+    )
 
 
 @dataclass(frozen=True)

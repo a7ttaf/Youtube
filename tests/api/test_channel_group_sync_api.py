@@ -5,6 +5,7 @@ dependency and credential resolution is patched at the route module, so no
 test in this file touches the network or a real credential row.
 """
 
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -306,32 +307,67 @@ def test_apply_creates_the_group_with_members_and_audits():
     assert summary.details["counts"]["UNCHANGED"] == 0
 
 
-def test_apply_response_and_summary_both_report_executed_counts():
-    """An apply's response must agree with its own audit row.
+class _RenamedMidFlightGroupRegistry(ChannelGroupRegistry):
+    """Old name when the planner lists it, new name when the apply locks it.
 
-    Both now come from the write boundary. The earlier contract returned the
-    PLAN's counts in the response while persisting the EXECUTED counts in
-    GROUPS_SYNCED; once the apply layer started re-diffing against current
-    state, those could genuinely diverge under a concurrent writer and the
-    operator would be told RENAME where the durable trail said UNCHANGED.
+    Models a concurrent writer landing the rename between planning and the
+    write boundary — the plan says RENAME, the store has nothing left to do.
     """
-    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
-    client, _registry, _groups, audit_sink = create_sync_app(fake)
-    executed = {"CREATE": 0, "RENAME": 3, "UNCHANGED": 0}
 
-    with patch(
-        "ums_smart_revenue.api.channels.apply_group_sync",
-        return_value=executed,
-    ):
-        response = post_sync(client)
+    def __init__(self, groups, *, planned_name: str) -> None:
+        """Seed the store and remember the stale name the planner should see."""
+        super().__init__(groups)
+        self._planned_name = planned_name
+
+    def list_synced_groups(self, *, content_owner_id: str | None = None):
+        """Report the PRE-race name, so the planner still diffs a rename."""
+        return [
+            replace(group, name=self._planned_name)
+            for group in super().list_synced_groups(content_owner_id=content_owner_id)
+        ]
+
+
+def test_apply_response_and_summary_both_report_executed_counts():
+    """An apply's response must agree with its own audit rows, per group.
+
+    The plan says RENAME; a racer already landed that rename, so the write
+    boundary writes nothing and records nothing. Rendering the response from
+    the plan would hand the operator a RENAME with a full name_change diff for
+    a request that touched nothing — counts AND per-group entries have to come
+    from what executed.
+    """
+    seeded = _RenamedMidFlightGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id="grp-1",
+                # Already the upstream title: the race is finished.
+                name="News",
+                group_type="SECTOR",
+                active=True,
+                channel_ids=(CHANNEL_ONE,),
+                cms_group_id="cms-a",
+                content_owner_id=CONTENT_OWNER,
+            ),
+        ],
+        planned_name="Old News",
+    )
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake, groups=seeded)
+
+    response = post_sync(client)
 
     assert response.status_code == 200, response.text
-    summary_counts = sole_record(audit_sink, "GROUPS_SYNCED").details["counts"]
-    assert summary_counts == executed
-    # The response reports the same thing the audit row persisted — the plan
-    # said CREATE=1, but nothing executed a CREATE.
-    assert response.json()["counts"] == executed
-    assert response.json()["counts"]["CREATE"] == 0
+    body = response.json()
+    # Nothing was written, so nothing is claimed — in the body or the trail.
+    assert body["counts"]["RENAME"] == 0
+    assert body["counts"]["UNCHANGED"] == 1
+    assert records_of(audit_sink, "GROUP_UPDATED") == []
+    (group_entry,) = body["groups"]
+    assert group_entry["outcome"] == "UNCHANGED"
+    assert group_entry["name_change"] is None
+    # And the durable summary says exactly what the body says.
+    assert sole_record(audit_sink, "GROUPS_SYNCED").details["counts"] == body["counts"]
+    assert groups.get_group("grp-1").name == "News"
 
 
 def test_dry_run_counts_still_report_the_plan():
@@ -881,6 +917,49 @@ def test_group_claimed_by_another_owner_mid_apply_returns_409():
     survivor = groups.get_group("grp-legacy")
     assert survivor.name == "Old Name"
     assert survivor.content_owner_id == OTHER_OWNER
+    assert audit_sink.records == []
+
+
+def test_key_held_by_another_owner_is_previewed_as_conflict_and_refused():
+    """The preview must not call an unappliable sync safe.
+
+    The scoped read is owner-OR-NULL, so a key the rival holds is invisible to
+    it and would plan as CREATE. The apply then hits the tenant-wide unique
+    cms_group_id and 409s — after the operator trusted a clean preview. Both
+    ends now agree: CONFLICT in the dry run, a 409 naming the key on apply,
+    and nothing written either way.
+    """
+    seeded = ChannelGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id="grp-theirs",
+                name="Theirs",
+                group_type="SECTOR",
+                active=True,
+                channel_ids=(),
+                cms_group_id="cms-a",
+                content_owner_id=OTHER_OWNER,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake, groups=seeded)
+
+    preview = post_sync(client, dry_run=True)
+
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()
+    assert plan["counts"]["CONFLICT"] == 1
+    assert plan["counts"]["CREATE"] == 0
+    assert plan["groups"][0]["outcome"] == "CONFLICT"
+
+    applied = post_sync(client)
+
+    assert applied.status_code == 409, applied.text
+    assert "cms-a" in applied.json()["detail"]
+    # Fail-closed BEFORE any write: the rival's group is untouched, no audit.
+    assert groups.get_group("grp-theirs").name == "Theirs"
+    assert groups.get_group("grp-theirs").channel_ids == ()
     assert audit_sink.records == []
 
 

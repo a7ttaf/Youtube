@@ -70,9 +70,22 @@ for dry-run and apply — per-group outcome, name/active changes, member
 add/remove lists, unknown-channel ids (capped at 50 with a full count),
 non-channel-member total, and `will_adopt_content_owner` (the one write the
 mirror diff cannot express). Dry-run writes nothing, including no audit rows.
-`counts` is the only field whose SOURCE differs: the plan's tally for a dry
-run, the write boundary's for an apply — the same tally `GROUPS_SYNCED`
-persists, so body and audit row can never disagree.
+The SOURCE differs by mode and nothing else: a dry run renders from the plan
+("what would happen"), an apply renders from the write boundary ("what did") —
+`counts` AND the per-group entries. Rendering an apply's groups from the plan
+was a real defect: a concurrent writer landing a rename before the locked
+re-read left the response claiming RENAME with a full diff while
+`GROUPS_SYNCED` recorded UNCHANGED and no `GROUP_UPDATED` existed. The apply
+now reports exactly what it wrote, so the body and the trail cannot diverge.
+
+**`CONFLICT` — the seventh outcome.** A CMS key that already exists locally
+under a *different* content owner is invisible to the owner-OR-NULL scoped
+read, so it used to plan as `CREATE` and then collide with the tenant-wide
+unique `cms_group_id` at apply — a 409 after the mandatory preview had called
+the sync safe. One bulk `list_foreign_owner_cms_group_ids` lookup (the same one
+the import route uses) classifies it at planning instead. The dry run shows
+`CONFLICT`, the apply refuses the whole plan with a 409 naming the keys BEFORE
+any write, and nothing is executed for such an entry.
 
 **Group API lockdown.** `PATCH /groups/{id}` with `name`, `POST
 /groups/{id}/members`, and `DELETE /groups/{id}/members/{channel_id}` now

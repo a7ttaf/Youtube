@@ -28,6 +28,14 @@ CONNECTOR_SOURCE_SYSTEM_BY_KEY = MappingProxyType(
     }
 )
 
+# Canonical connector name for the YouTube Analytics surface, named here so
+# call sites pass an identifier instead of a literal. `connector_key="..."` is
+# a string assigned to a `key`-named parameter, which trips DeepSource's
+# hardcoded-secret heuristic (SCT-A000) even though a registry name is not a
+# credential — and the honest fix is to stop writing that shape, not to
+# suppress the finding.
+YOUTUBE_ANALYTICS_CONNECTOR = "youtube-analytics"
+
 _CREDENTIAL_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "youtube-reporting": ("youtube_reporting",),
     "youtube_reporting": ("youtube-reporting",),

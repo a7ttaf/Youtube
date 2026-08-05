@@ -28,6 +28,12 @@ class GroupSyncOutcome(StrEnum):
     """Dominant label for what sync will do with one CMS group key."""
 
     CREATE = "CREATE"
+    # The CMS key exists locally under a DIFFERENT content owner. The scoped
+    # read cannot return that row (it is owner-OR-NULL), so without this the
+    # key looks absent and plans as CREATE — and the apply then collides with
+    # the tenant-wide unique cms_group_id and 409s on a preview that said the
+    # sync was safe. Nothing is executed for a CONFLICT entry.
+    CONFLICT = "CONFLICT"
     RENAME = "RENAME"
     MEMBERS_CHANGED = "MEMBERS_CHANGED"
     DEACTIVATE = "DEACTIVATE"
@@ -95,9 +101,10 @@ class GroupSyncPlan:
 def _plan_entry_for_upstream_item(
     item: CmsGroupSnapshot,
     *,
-    local_by_key: Mapping[str, ChannelGroupEntry],
+    local_by_cms_group_id: Mapping[str, ChannelGroupEntry],
     known_channel_ids: frozenset[str],
     content_owner_id: str | None,
+    foreign_owner_group_ids: frozenset[str],
 ) -> tuple[GroupSyncPlanEntry, int]:
     """Plan one upstream CMS group against its local match, if any.
 
@@ -109,7 +116,26 @@ def _plan_entry_for_upstream_item(
     unknown = tuple(
         channel_id for channel_id in item.member_channel_ids if channel_id not in known_channel_ids
     )
-    local = local_by_key.get(item.cms_group_id)
+    if item.cms_group_id in foreign_owner_group_ids:
+        # Held by another owner, so it is absent from the local map and would
+        # otherwise plan as CREATE. Surfacing it as CONFLICT is what keeps the
+        # mandatory preview honest: the apply cannot create this key.
+        return (
+            GroupSyncPlanEntry(
+                cms_group_id=item.cms_group_id,
+                outcome=GroupSyncOutcome.CONFLICT,
+                title=item.title,
+                local_group_id=None,
+                name_change=None,
+                active_change=None,
+                members_added=(),
+                members_removed=(),
+                unknown_channel_ids=unknown,
+                upstream_present=True,
+            ),
+            len(unknown),
+        )
+    local = local_by_cms_group_id.get(item.cms_group_id)
     if local is None:
         return (
             GroupSyncPlanEntry(
@@ -228,6 +254,7 @@ def plan_group_sync(
     local_groups: tuple[ChannelGroupEntry, ...],
     known_channel_ids: frozenset[str],
     content_owner_id: str | None = None,
+    foreign_owner_group_ids: frozenset[str] = frozenset(),
 ) -> GroupSyncPlan:
     """Diff the CMS snapshot against local synced groups into a plan.
 
@@ -235,13 +262,19 @@ def plan_group_sync(
     against upstream keys, but a group this owner cannot be proven to own (an
     owner-NULL legacy row) is never retired. See
     ``_plan_entries_for_vanished_groups``.
+
+    ``foreign_owner_group_ids`` carries the upstream keys that already exist
+    locally under a DIFFERENT owner. ``local_groups`` cannot contain them (the
+    caller's read is owner-OR-NULL), so they would otherwise plan as CREATE and
+    then collide on the tenant-wide unique key at apply. They plan as CONFLICT
+    instead, which is what stops the mandatory dry run from calling an
+    unappliable sync safe.
     """
-    # skipcq: SCT-A000 -- dict-comprehension target, not a credential value.
-    local_by_key: dict[str, ChannelGroupEntry] = {}
+    local_by_cms_group_id: dict[str, ChannelGroupEntry] = {}
     for group in local_groups:
         if group.cms_group_id is None:
             raise ValueError(f"manual group passed to sync planner: {group.id}")
-        local_by_key[group.cms_group_id] = group
+        local_by_cms_group_id[group.cms_group_id] = group
     upstream_keys = {item.cms_group_id for item in snapshot}
 
     entries: list[GroupSyncPlanEntry] = []
@@ -252,9 +285,10 @@ def plan_group_sync(
         non_channel_total += item.non_channel_member_count
         entry, unknown_count = _plan_entry_for_upstream_item(
             item,
-            local_by_key=local_by_key,
+            local_by_cms_group_id=local_by_cms_group_id,
             known_channel_ids=known_channel_ids,
             content_owner_id=content_owner_id,
+            foreign_owner_group_ids=foreign_owner_group_ids,
         )
         unknown_total += unknown_count
         entries.append(entry)

@@ -38,12 +38,19 @@ def _local(**overrides: object) -> ChannelGroupEntry:
     return ChannelGroupEntry(**defaults)  # type: ignore[arg-type]
 
 
-def _plan(snapshot=(), local=(), known=KNOWN, content_owner_id="owner-a"):
+def _plan(
+    snapshot=(),
+    local=(),
+    known=KNOWN,
+    content_owner_id="owner-a",
+    foreign_owner_group_ids=frozenset(),
+):
     return plan_group_sync(
         snapshot=tuple(snapshot),
         local_groups=tuple(local),
         known_channel_ids=known,
         content_owner_id=content_owner_id,
+        foreign_owner_group_ids=foreign_owner_group_ids,
     )
 
 
@@ -183,12 +190,35 @@ def test_counts_cover_every_outcome_key() -> None:
     plan = _plan(snapshot=[_snapshot()])
     assert set(plan.counts) == {
         "CREATE",
+        "CONFLICT",
         "RENAME",
         "MEMBERS_CHANGED",
         "DEACTIVATE",
         "REACTIVATE",
         "UNCHANGED",
     }
+
+
+def test_key_held_by_another_owner_plans_conflict_not_create() -> None:
+    """A foreign-owned key must not look like a safe CREATE in the preview.
+
+    The caller's scoped read is owner-OR-NULL, so the rival's row is absent
+    from ``local_groups`` and the key looks new. Planning it as CREATE makes
+    the dry run promise a sync the apply cannot perform: the tenant-wide
+    unique cms_group_id rejects the insert and the route 409s.
+    """
+    plan = _plan(
+        snapshot=[_snapshot(cms_group_id="g1")],
+        local=[],
+        foreign_owner_group_ids=frozenset({"g1"}),
+    )
+
+    entry = plan.entries[0]
+    assert entry.outcome is GroupSyncOutcome.CONFLICT
+    assert entry.local_group_id is None
+    assert entry.members_added == ()
+    assert plan.counts["CONFLICT"] == 1
+    assert plan.counts["CREATE"] == 0
 
 
 def test_owner_null_local_match_is_planned_as_an_adoption() -> None:

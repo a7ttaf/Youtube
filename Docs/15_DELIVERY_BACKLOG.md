@@ -720,8 +720,14 @@ single P-tier above.
   stays the only channel-creation path. The groups API now 409s manual
   rename/membership edits on synced groups (`active`-only PATCH allowed);
   manual groups are untouched. New read surface
-  `YouTubeGroupsClient` (`groups.list`/`groupItems.list`,
-  `yt-analytics.readonly` — no new access). The import's `group_id` CSV column
+  `YouTubeGroupsClient` (`groups.list`/`groupItems.list`). **Scope caveat:**
+  `groups.list` runs on the already-granted `yt-analytics.readonly`, but
+  `groupItems.list` does NOT — per Google's GroupItems: list authorization
+  notes it needs `.../auth/youtube` alone, or `youtube.readonly` together with
+  `yt-analytics.readonly`. A credential holding only `yt-analytics.readonly`
+  lists the groups and then fails every member fetch (canned 502). Confirm the
+  stored credential's scopes and re-consent before the first live sync. The
+  import's `group_id` CSV column
   is legacy-but-working: sync converges whatever it created. Spec:
   `Docs/superpowers/specs/2026-08-05-cms-group-sync-design.md`.
 - ✅ Channel Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the

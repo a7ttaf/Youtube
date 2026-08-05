@@ -188,6 +188,11 @@ via the existing API, so no rule is needed for it.
   present upstream. The write boundary derives active from upstream presence,
   never from the plan's `active_change` diff, which is `None` for a group that
   was already active and therefore cannot express "should be active".
+- A CMS key already held locally by a DIFFERENT content owner plans as
+  `CONFLICT`, never `CREATE`. The scoped read cannot see the rival's row, so
+  the key looks new; creating it collides with the tenant-wide unique
+  `cms_group_id`. Classified at planning from stored state (one bulk lookup),
+  shown in the dry run, and refused with a typed `409` before any write.
 - Losing a race on a group's `content_owner_id` — the row was owner-NULL when
   this sync planned it and someone else claimed it before the apply took the
   row lock — is a typed `409`, not a partial mirror. The locked re-read
@@ -222,6 +227,12 @@ via the existing API, so no rule is needed for it.
 
 ## Rollback
 
-Revert the branch. No migration in this PR (the column shipped in #159); the
-lockdown and route disappear cleanly. Groups already mirrored keep their
-synced names/membership — correct data, no cleanup needed.
+Revert the app code FIRST, then `alembic downgrade 20260803_0001`. This PR
+adds one migration — `20260805_0001_channel_group_content_owner`, the additive
+nullable `channel_groups.content_owner_id` the review round introduced to scope
+a synced group to its content owner — and the running code reads that column,
+so dropping it before the code is reverted breaks the route. (`cms_group_id`
+itself shipped earlier, in #159's `20260803_0001`.) The lockdown, route,
+client, planner, and apply module disappear cleanly. Groups already mirrored
+keep their synced names and membership — correct data, no cleanup needed; only
+the owner stamp is lost, and a re-upgrade leaves it NULL, which sync tolerates.

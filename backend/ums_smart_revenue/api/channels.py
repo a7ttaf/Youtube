@@ -54,13 +54,18 @@ from ums_smart_revenue.connectors.google.errors import (
 )
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 from ums_smart_revenue.connectors.google.youtube_groups_client import YouTubeGroupsClient
+from ums_smart_revenue.connectors.keys import YOUTUBE_ANALYTICS_CONNECTOR
 from ums_smart_revenue.connectors.runs.orchestrator import resolve_connector_credentials
 from ums_smart_revenue.org.channel_group_sync import (
     CmsGroupSnapshot,
+    GroupSyncOutcome,
     GroupSyncPlan,
     plan_group_sync,
 )
-from ums_smart_revenue.org.channel_group_sync_apply import apply_group_sync
+from ums_smart_revenue.org.channel_group_sync_apply import (
+    GroupSyncAppliedEntry,
+    apply_group_sync,
+)
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
     ChannelGroupOwnerReassignmentError,
@@ -887,8 +892,7 @@ def sync_channel_groups(
         credentials = resolve_connector_credentials(
             session=session,
             tenant_id=_resolve_tenant_uuid(user),
-            # skipcq: SCT-A000 -- connector registry key, not a credential value.
-            connector_key="youtube-analytics",
+            connector_key=YOUTUBE_ANALYTICS_CONNECTOR,
             account_id=content_owner_id,
         )
     except (CredentialNotFoundError, InactiveCredentialError) as exc:
@@ -966,11 +970,20 @@ def sync_channel_groups(
         entry.youtube_channel_id
         for entry in registry.list_channels_by_ids(member_ids, include_inactive=True)
     )
+    # The scoped read above is owner-OR-NULL, so a key another owner already
+    # holds is INVISIBLE to it and would plan as CREATE — then collide on the
+    # tenant-wide unique cms_group_id at apply, 409ing a sync the mandatory
+    # preview had called safe. It is knowable from stored state, so it is
+    # classified here, exactly as the import route classifies the same
+    # condition before writing.
     plan = plan_group_sync(
         snapshot=snapshot,
         local_groups=local_groups,
         known_channel_ids=known,
         content_owner_id=content_owner_id,
+        foreign_owner_group_ids=_foreign_owner_group_ids(
+            groups, snapshot=snapshot, content_owner_id=content_owner_id
+        ),
     )
     payload_out = _group_sync_plan_to_api(
         plan, dry_run=payload.dry_run, content_owner_id=content_owner_id
@@ -986,6 +999,8 @@ def sync_channel_groups(
         # credential helper's own dry-run semantics assume.
         session.rollback()
         return payload_out
+
+    _reject_foreign_owner_conflicts(plan, session=session)
 
     try:
         executed = apply_group_sync(
@@ -1011,13 +1026,16 @@ def sync_channel_groups(
     # import route's identical cross-owner rejection.
     except (ChannelGroupConflictError, ChannelGroupOwnerReassignmentError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    # An apply's response must agree with its audit row. `counts` is rendered
-    # from the PLAN above, which is right for a dry run ("what will happen")
-    # but stale for an apply: a concurrent writer can make the executed tally
-    # diverge, and returning the plan's numbers while GROUPS_SYNCED persists
-    # the executed ones would tell the operator RENAME where the trail says
-    # UNCHANGED. Both now report the same thing.
-    payload_out["counts"] = dict(executed)
+    # An apply's response must agree with its audit rows, per group and in
+    # aggregate. `payload_out` was rendered from the PLAN, which is right for a
+    # dry run ("what will happen") but stale for an apply: a concurrent writer
+    # can land the rename before the locked re-read, leaving the plan claiming
+    # RENAME with a full diff while GROUPS_SYNCED recorded UNCHANGED and no
+    # GROUP_UPDATED was written. Both surfaces now come from the write
+    # boundary. Only the CONFLICT entries stay plan-rendered — nothing executes
+    # for them, and the route 409s above before reaching here if any exist.
+    payload_out["counts"] = dict(executed.counts)
+    payload_out["groups"] = _applied_entries_to_api(executed.entries)
     record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -1028,12 +1046,84 @@ def sync_channel_groups(
         reason=reason,
         details={
             "content_owner_id": content_owner_id,
-            "counts": executed,
+            "counts": dict(executed.counts),
             "unknown_channel_total": plan.unknown_channel_total,
             "non_channel_member_count": plan.non_channel_member_count,
         },
     )
     return payload_out
+
+
+def _foreign_owner_group_ids(
+    groups: ChannelGroupRegistryStore,
+    *,
+    snapshot: tuple[CmsGroupSnapshot, ...],
+    content_owner_id: str,
+) -> frozenset[str]:
+    """CMS keys in this snapshot that already belong to a different owner.
+
+    One bulk lookup, mirroring the import route's identical classification.
+    Without it the owner-OR-NULL scoped read hides the rival's row, the key
+    plans as CREATE, and the apply collides on the tenant-wide unique
+    cms_group_id — 409ing a sync the mandatory preview called safe.
+    """
+    return frozenset(
+        groups.list_foreign_owner_cms_group_ids(
+            {item.cms_group_id for item in snapshot},
+            content_owner_id=content_owner_id,
+        )
+    )
+
+
+def _reject_foreign_owner_conflicts(plan: GroupSyncPlan, *, session: Session) -> None:
+    """Fail a conflicted plan closed BEFORE any write lands.
+
+    The dry run already showed these entries as CONFLICT; this is the apply
+    refusing exactly what the preview declined to promise, rather than getting
+    part-way through the mirror and hitting the unique key.
+    """
+    conflicts = sorted(
+        entry.cms_group_id for entry in plan.entries if entry.outcome is GroupSyncOutcome.CONFLICT
+    )
+    if not conflicts:
+        return
+    session.rollback()
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            "CMS group keys already belong to another content owner: "
+            f"{', '.join(conflicts)}; import or sync them under their own content owner"
+        ),
+    )
+
+
+def _applied_entries_to_api(entries: tuple[GroupSyncAppliedEntry, ...]) -> list[dict[str, object]]:
+    """Render every applied result in the plan's group-object shape."""
+    return [_applied_entry_to_api(entry) for entry in entries]
+
+
+def _applied_entry_to_api(entry: GroupSyncAppliedEntry) -> dict[str, object]:
+    """Render one group's ACTUAL result in the same shape the plan renders.
+
+    Key-for-key identical to ``_group_sync_plan_to_api``'s group objects so the
+    dry-run and apply payloads stay one shape; only the SOURCE differs, which
+    is the whole point — a dry run reports what would happen, an apply reports
+    what did. ``will_adopt_content_owner`` carries the same mode-dependence as
+    ``counts``: "will" on a preview, "did" on an apply.
+    """
+    return {
+        "cms_group_id": entry.cms_group_id,
+        "outcome": entry.outcome.value,
+        "title": entry.title,
+        "local_group_id": entry.local_group_id,
+        "name_change": list(entry.name_change) if entry.name_change else None,
+        "active_change": list(entry.active_change) if entry.active_change else None,
+        "members_added": list(entry.members_added),
+        "members_removed": list(entry.members_removed),
+        "unknown_channel_ids": list(entry.unknown_channel_ids[:50]),
+        "unknown_channel_count": len(entry.unknown_channel_ids),
+        "will_adopt_content_owner": entry.adopted_content_owner,
+    }
 
 
 def _group_sync_plan_to_api(
