@@ -18,6 +18,7 @@ from ums_smart_revenue.org.channel_group_sync import (
     GroupSyncPlanEntry,
 )
 from ums_smart_revenue.org.channel_group_sync_apply import (
+    _ID_LOOKUP_CHUNK,
     AUDIT_SOURCE_CMS_SYNC,
     GroupSyncExecution,
     _known_member_channel_ids,
@@ -790,16 +791,43 @@ class _RecordingChannelRegistry:
         ]
 
 
-def test_member_lookup_is_chunked_under_the_bind_parameter_cap() -> None:
-    """A huge CMS snapshot must not become one oversized IN (...) predicate.
+def test_realistic_member_lookup_is_one_atomic_read() -> None:
+    """Splitting a read costs consistency, so realistic syncs must not split.
 
-    SQLAlchemy expands IN to one bind parameter per element and Postgres caps a
-    statement at 65535 of them. These lookups run AFTER the whole Google fetch,
-    so blowing the cap would fail the sync having already paid for the upstream
-    work. The import path is capped at 5000 rows; a sync's id set is bounded
-    only by what the CMS returns.
+    Each statement takes its own snapshot under READ COMMITTED, so N chunks can
+    observe N different committed states. The chunk size is set so that any
+    plausible content owner — the production one has roughly 300 channels —
+    resolves in ONE statement, i.e. exactly as atomic as before chunking
+    existed. The cap only exists to remove the bind-parameter cliff.
     """
-    member_ids = {f"UC{index:022d}" for index in range(12_000)}
+    member_ids = {f"UC{index:022d}" for index in range(5_000)}
+    registry = _RecordingChannelRegistry(member_ids, content_owner_id=CONTENT_OWNER)
+
+    known = _known_member_channel_ids(
+        registry,  # type: ignore[arg-type]
+        member_ids=member_ids,
+        content_owner_id=CONTENT_OWNER,
+    )
+
+    assert known == member_ids
+    assert registry.lookup_sizes == [5_000]
+
+
+def test_member_lookup_is_chunked_under_the_bind_parameter_cap() -> None:
+    """A pathological CMS snapshot must not become one oversized IN (...).
+
+    SQLAlchemy expands IN to one bind parameter per element and PostgreSQL caps
+    a statement at 65535 of them. These lookups run AFTER the whole Google
+    fetch, so blowing the cap would fail the sync having already paid for the
+    upstream work. The import path is capped at 5000 rows; a sync's id set is
+    bounded only by what the CMS returns.
+
+    Sized off the constant so the guarantee is "always chunked above the
+    threshold", not a number that silently stops meaning anything if the
+    threshold moves.
+    """
+    count = _ID_LOOKUP_CHUNK * 2 + 1
+    member_ids = {f"UC{index:022d}" for index in range(count)}
     registry = _RecordingChannelRegistry(member_ids, content_owner_id=CONTENT_OWNER)
 
     known = _known_member_channel_ids(
@@ -810,4 +838,4 @@ def test_member_lookup_is_chunked_under_the_bind_parameter_cap() -> None:
 
     assert known == member_ids
     assert len(registry.lookup_sizes) == 3
-    assert max(registry.lookup_sizes) <= 5000
+    assert max(registry.lookup_sizes) <= _ID_LOOKUP_CHUNK

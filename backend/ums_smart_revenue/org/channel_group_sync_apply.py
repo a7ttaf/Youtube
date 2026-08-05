@@ -46,15 +46,29 @@ AUDIT_SOURCE_CMS_SYNC = "cms_group_sync"
 # One IN (...) predicate expands to one bind parameter per element, and
 # PostgreSQL's extended query protocol caps a statement at 65535 of them. The
 # import route never approaches that (its roster is capped at 5000 rows), but a
-# sync's id sets are bounded only by what the CMS returns, and the lookups run
+# sync's id sets are bounded only by what the CMS returns, and these lookups run
 # AFTER the whole Google fetch — so an oversized snapshot would fail having
-# already paid for the upstream work. Chunking well under the cap keeps the
-# reads bulk (a handful of statements, never per-row) while removing the cliff.
-_ID_LOOKUP_CHUNK = 5000
+# already paid for the upstream work.
+#
+# The size is a deliberate trade in BOTH directions, because splitting a read
+# costs consistency: under READ COMMITTED each statement takes its own
+# snapshot, so N chunks can observe N different committed states and a plan
+# could classify one member against a registry the next chunk no longer sees.
+#   - Too small and every realistic sync splits, buying that inconsistency for
+#     no reason. A content owner with tens of thousands of channels does not
+#     exist in practice (the production owner has ~300), so at this size the
+#     reads collapse to ONE statement and ONE snapshot — exactly as atomic as
+#     before chunking existed.
+#   - Too large and the cliff returns. This leaves ample headroom under 65535
+#     for the handful of other bind parameters in the same statement.
+# Above this size a mixed snapshot IS possible, and that is acceptable there
+# for the same reason the whole plan is advisory: a plan is a snapshot, the
+# locked write boundary is the record, and it re-verifies every entry.
+_ID_LOOKUP_CHUNK = 30_000
 
 
 def _chunked(values: list[str]) -> Iterator[list[str]]:
-    """Yield ``values`` in bind-parameter-safe slices."""
+    """Yield ``values`` in bind-parameter-safe slices (usually exactly one)."""
     for start in range(0, len(values), _ID_LOOKUP_CHUNK):
         yield values[start : start + _ID_LOOKUP_CHUNK]
 
@@ -151,13 +165,36 @@ def plan_group_sync_with_stores(
     )
 
 
+# ============================================================================
+# Purpose: Classify the upstream CMS keys that already belong to a DIFFERENT
+#   content owner, so sync planning can mark them CONFLICT instead of CREATE.
+# Database/ORM: ChannelGroupORM via
+#   ChannelGroupRegistryStore.list_foreign_owner_cms_group_ids. Read-only, one
+#   bulk statement per chunk (normally exactly one), never per-key lookups.
+# Standards: Owner-NULL keys are deliberately NOT returned — they are
+#   adoptable, not conflicting, and excluding them is what keeps legacy rows
+#   syncable. Chunked on the same bind-parameter bound as the member lookup.
+# Blast Radius: Sync planning outcomes only; classifying a key here turns it
+#   into a CONFLICT entry the apply refuses with a 409 before any write.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the bulk
+#     query, whose IS NOT NULL is explicit for this exact reason.
+#   - File: backend/ums_smart_revenue/org/channel_group_sync.py -> consumes
+#     this as foreign_owner_group_ids.
+# ============================================================================
 def _foreign_owner_group_ids(
     groups: ChannelGroupRegistryStore,
     *,
     snapshot: tuple[CmsGroupSnapshot, ...],
     content_owner_id: str,
 ) -> frozenset[str]:
-    """Upstream keys already held by a DIFFERENT owner, chunked like the rest."""
+    """Upstream keys already held by a DIFFERENT owner, chunked like the rest.
+
+    The scoped group read is owner-OR-NULL, so a key a rival holds is invisible
+    to it and would otherwise plan as CREATE and then collide on the
+    tenant-wide unique cms_group_id at apply — 409ing a sync the mandatory
+    preview had called safe.
+    """
     keys = sorted({item.cms_group_id for item in snapshot})
     return frozenset(
         key
