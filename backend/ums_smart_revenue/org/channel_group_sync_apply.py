@@ -24,20 +24,117 @@ from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.org.channel_group_sync import (
+    CmsGroupSnapshot,
     GroupSyncOutcome,
     GroupSyncPlan,
     GroupSyncPlanEntry,
+    plan_group_sync,
 )
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupEntry,
     ChannelGroupOwnerReassignmentError,
     ChannelGroupRegistryStore,
 )
+from ums_smart_revenue.org.channel_registry import ChannelRegistryStore
 
 # Provenance marker on every audit record this module writes: it is how an
 # auditor separates CMS-mirror changes from manual group API edits and from the
 # bulk import's own group mutations (AUDIT_SOURCE_BULK_IMPORT).
 AUDIT_SOURCE_CMS_SYNC = "cms_group_sync"
+
+
+def _known_member_channel_ids(
+    registry: ChannelRegistryStore,
+    *,
+    member_ids: set[str],
+    content_owner_id: str,
+) -> frozenset[str]:
+    """CMS members this sync may attach: registered, and not another owner's.
+
+    ``include_inactive=True`` because an archived-but-still-existing channel is
+    known, not unknown. The groups API's own authorization deliberately counts
+    the full member set (active + inactive) when deciding scope access, so a
+    sync must not silently strip an inactive channel's membership just because
+    an active-only filter made it look absent.
+
+    The owner filter is OR-NULL, mirroring ``list_synced_groups``: a channel
+    stamped to a DIFFERENT content owner is excluded, an unstamped legacy row
+    is not. Without the exclusion, a channel still registered to owner B that
+    appears in owner A's CMS snapshot would be attached to A's synced group,
+    bypassing the import's content_owner_id contract and pulling B's channel
+    into A's group-scope finance reads. Excluded ids are not dropped silently —
+    they fall through to the plan's ``unknown_channel_ids``, the same "surface
+    it, never invent it" contract unregistered members already get, and the
+    operator repairs the registry with ``PATCH /channels/{id}/content-owner``.
+
+    Keeping NULL attachable matters as much as excluding the mismatch: every
+    channel predating the content-owner stamp is NULL, and a strict equality
+    filter would make a whole tenant's roster look unknown and strip its
+    memberships on the first sync.
+    """
+    return frozenset(
+        entry.youtube_channel_id
+        for entry in registry.list_channels_by_ids(member_ids, include_inactive=True)
+        if entry.content_owner_id in (None, content_owner_id)
+    )
+
+
+# ============================================================================
+# Purpose: Domain-side planning entry point for CMS group sync — gather the
+#   store state one content owner's snapshot diffs against, and delegate the
+#   pure diffing to plan_group_sync.
+# Database/ORM: ChannelGroupORM via ChannelGroupRegistryStore
+#   (list_synced_groups, list_foreign_owner_cms_group_ids) and
+#   YouTubeChannelORM via ChannelRegistryStore (list_channels_by_ids).
+#   Read-only, one bulk query per store, never per-row lookups.
+# Standards: Layer ownership — data access lives HERE, not in the HTTP route,
+#   which keeps only authz, validation, and error translation. Mirrors
+#   plan_channel_import_with_stores exactly.
+# Blast Radius: Sync planning outcomes, and therefore every apply-time write
+#   decision. No writes of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> sync route calls this.
+#   - File: backend/ums_smart_revenue/org/channel_group_sync.py -> pure core.
+# ============================================================================
+def plan_group_sync_with_stores(
+    snapshot: tuple[CmsGroupSnapshot, ...],
+    *,
+    registry: ChannelRegistryStore,
+    groups: ChannelGroupRegistryStore,
+    content_owner_id: str,
+) -> GroupSyncPlan:
+    """Gather store state and build the sync plan for one CMS snapshot.
+
+    The group read is scoped to THIS content owner: ownership comes from the
+    create-time stamp, and without the filter syncing owner A would see every
+    OTHER owner's synced groups — none of which can be upstream in A's
+    snapshot, so the planner would retire them as vanished. It deliberately
+    still returns owner-NULL legacy rows, because (tenant_id, cms_group_id) is
+    unique tenant-wide and hiding an existing key would make it plan as CREATE
+    and collide; the planner's own gate is what keeps those unowned rows from
+    being deactivated.
+
+    That same OR-NULL scoping is why the foreign-owner lookup exists: a key
+    another owner holds is INVISIBLE to the scoped read, so it would plan as
+    CREATE and then collide at apply, 409ing a sync the mandatory preview had
+    called safe. Classified here instead, from stored state.
+    """
+    local_groups = tuple(groups.list_synced_groups(content_owner_id=content_owner_id))
+    member_ids = {cid for item in snapshot for cid in item.member_channel_ids}
+    return plan_group_sync(
+        snapshot=snapshot,
+        local_groups=local_groups,
+        known_channel_ids=_known_member_channel_ids(
+            registry, member_ids=member_ids, content_owner_id=content_owner_id
+        ),
+        content_owner_id=content_owner_id,
+        foreign_owner_group_ids=frozenset(
+            groups.list_foreign_owner_cms_group_ids(
+                {item.cms_group_id for item in snapshot},
+                content_owner_id=content_owner_id,
+            )
+        ),
+    )
 
 
 @dataclass(frozen=True)

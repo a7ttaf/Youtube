@@ -60,11 +60,11 @@ from ums_smart_revenue.org.channel_group_sync import (
     CmsGroupSnapshot,
     GroupSyncOutcome,
     GroupSyncPlan,
-    plan_group_sync,
 )
 from ums_smart_revenue.org.channel_group_sync_apply import (
     GroupSyncAppliedEntry,
     apply_group_sync,
+    plan_group_sync_with_stores,
 )
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
@@ -206,10 +206,13 @@ class GroupSyncGroupResult(BaseModel):
     outcome: str
     title: str | None
     local_group_id: str | None
-    # [from, to] pairs rather than objects, matching what the route has always
-    # emitted; a two-element list is the contract, not a tuple type.
-    name_change: list[str] | None
-    active_change: list[bool] | None
+    # Exactly [from, to]. Typed as a 2-tuple rather than a bare list so the
+    # arity is part of the contract and not just a convention: Pydantic
+    # validates the length here and still serializes a JSON array, so the wire
+    # format is unchanged while a 1- or 3-element pair becomes a boundary
+    # error instead of something a client has to guess about.
+    name_change: tuple[str, str] | None
+    active_change: tuple[bool, bool] | None
     members_added: list[str]
     members_removed: list[str]
     # Capped at 50 ids; the count is the untruncated total.
@@ -1006,33 +1009,11 @@ def sync_channel_groups(
     finally:
         client.close()
 
-    # Scoped to THIS content owner: ownership comes from the create-time
-    # content_owner_id stamp. Without the filter, syncing owner A would see
-    # every OTHER owner's synced groups too; none of them can be upstream in
-    # owner A's snapshot, so the planner would deactivate them as "vanished".
-    # The scoped read deliberately still includes owner-NULL legacy rows so an
-    # already-existing cms_group_id cannot be planned as CREATE and collide on
-    # the tenant-wide unique key; the planner's content_owner_id gate is what
-    # keeps those unowned rows from being deactivated.
-    local_groups = tuple(groups.list_synced_groups(content_owner_id=content_owner_id))
-    member_ids = {cid for item in snapshot for cid in item.member_channel_ids}
-    known = _known_member_channel_ids(
-        registry, member_ids=member_ids, content_owner_id=content_owner_id
-    )
-    # The scoped read above is owner-OR-NULL, so a key another owner already
-    # holds is INVISIBLE to it and would plan as CREATE — then collide on the
-    # tenant-wide unique cms_group_id at apply, 409ing a sync the mandatory
-    # preview had called safe. It is knowable from stored state, so it is
-    # classified here, exactly as the import route classifies the same
-    # condition before writing.
-    plan = plan_group_sync(
-        snapshot=snapshot,
-        local_groups=local_groups,
-        known_channel_ids=known,
+    plan = plan_group_sync_with_stores(
+        snapshot,
+        registry=registry,
+        groups=groups,
         content_owner_id=content_owner_id,
-        foreign_owner_group_ids=_foreign_owner_group_ids(
-            groups, snapshot=snapshot, content_owner_id=content_owner_id
-        ),
     )
     payload_out = _group_sync_plan_to_api(
         plan, dry_run=payload.dry_run, content_owner_id=content_owner_id
@@ -1101,43 +1082,6 @@ def sync_channel_groups(
     return GroupSyncResult.model_validate(payload_out)
 
 
-def _known_member_channel_ids(
-    registry: ChannelRegistryStore,
-    *,
-    member_ids: set[str],
-    content_owner_id: str,
-) -> frozenset[str]:
-    """CMS members this sync may attach: registered, and not another owner's.
-
-    ``include_inactive=True`` because an archived-but-still-existing channel is
-    known, not unknown. The groups API's own authorization deliberately counts
-    the full member set (active + inactive) when deciding scope access, so a
-    sync must not silently strip an inactive channel's membership just because
-    an active-only filter made it look absent.
-
-    The owner filter is OR-NULL, mirroring ``list_synced_groups``: a channel
-    stamped to a DIFFERENT content owner is excluded, an unstamped legacy row
-    is not. Without the exclusion, a channel still registered to owner B that
-    appears in owner A's CMS snapshot would be attached to A's synced group,
-    bypassing the import route's content_owner_id contract and pulling B's
-    channel into A's group-scope finance reads. Excluded ids are not dropped
-    silently — they fall through to the plan's ``unknown_channel_ids``, which
-    is the same "surface it, never invent it" contract unregistered members
-    already get, and the operator fixes the registry with
-    ``PATCH /channels/{id}/content-owner``.
-
-    Keeping NULL attachable matters as much as excluding the mismatch: every
-    channel predating the content-owner stamp is NULL, and a strict equality
-    filter would make a whole tenant's roster look unknown and strip its
-    memberships on the first sync.
-    """
-    return frozenset(
-        entry.youtube_channel_id
-        for entry in registry.list_channels_by_ids(member_ids, include_inactive=True)
-        if entry.content_owner_id in (None, content_owner_id)
-    )
-
-
 def _end_credential_transaction(session: Session, *, dry_run: bool) -> None:
     """Close the credential transaction before the external fetch begins.
 
@@ -1154,32 +1098,22 @@ def _end_credential_transaction(session: Session, *, dry_run: bool) -> None:
     path commits here: nothing else is pending yet. The group writes and their
     audit rows still share ONE later transaction, so the audit-atomicity
     invariant this route already proved on Postgres is untouched.
+
+    The non-obvious part is RLS. Tenant isolation is applied by an
+    ``after_begin`` Session hook (db/session.py) using SET LOCAL, which a
+    COMMIT resets — but because the hook fires on EVERY transaction begin, the
+    next statement starts a fresh transaction that re-enters the app_tenant
+    role and re-writes the trusted tenant-context row. Ending the transaction
+    here therefore cannot strand the rest of the request outside RLS. Proven,
+    not assumed: ``test_sync_persists_groups_on_postgres`` and
+    ``test_create_stamps_content_owner_id_on_postgres`` drive the full apply
+    through this route and assert durable rows, and every write they make now
+    happens after this commit.
     """
     if dry_run:
         session.rollback()
     else:
         session.commit()
-
-
-def _foreign_owner_group_ids(
-    groups: ChannelGroupRegistryStore,
-    *,
-    snapshot: tuple[CmsGroupSnapshot, ...],
-    content_owner_id: str,
-) -> frozenset[str]:
-    """CMS keys in this snapshot that already belong to a different owner.
-
-    One bulk lookup, mirroring the import route's identical classification.
-    Without it the owner-OR-NULL scoped read hides the rival's row, the key
-    plans as CREATE, and the apply collides on the tenant-wide unique
-    cms_group_id — 409ing a sync the mandatory preview called safe.
-    """
-    return frozenset(
-        groups.list_foreign_owner_cms_group_ids(
-            {item.cms_group_id for item in snapshot},
-            content_owner_id=content_owner_id,
-        )
-    )
 
 
 def _reject_foreign_owner_conflicts(plan: GroupSyncPlan, *, session: Session) -> None:
