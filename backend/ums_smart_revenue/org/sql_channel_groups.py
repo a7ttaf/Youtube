@@ -372,13 +372,21 @@ class SqlAlchemyChannelGroupRegistry:
         return self._to_entry(row)
 
     def update_group(
-        self, *, group_id: str, name: str | None, active: bool | None
+        self,
+        *,
+        group_id: str,
+        name: str | None,
+        active: bool | None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
+        """Update name / active / content owner; None means leave unchanged."""
         row = self._require_group_row(group_id)
         if name is not None:
             row.name = name
         if active is not None:
             row.active = active
+        if content_owner_id is not None:
+            row.content_owner_id = content_owner_id
         self._session.flush()
         return self._to_entry(row)
 

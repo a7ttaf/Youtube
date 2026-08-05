@@ -123,9 +123,20 @@ class ChannelGroupRegistryStore(Protocol):
         pass
 
     def update_group(
-        self, *, group_id: str, name: str | None, active: bool | None
+        self,
+        *,
+        group_id: str,
+        name: str | None,
+        active: bool | None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        pass
+        """Update a group's name, active state, and/or content owner.
+
+        Every field is None-means-unchanged. ``content_owner_id`` exists so CMS
+        group sync can ADOPT an owner-NULL legacy group once the upstream key
+        proves ownership; it never reassigns a group that already carries an
+        owner.
+        """
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
         pass
@@ -235,13 +246,21 @@ class ChannelGroupRegistry:
         return group
 
     def update_group(
-        self, *, group_id: str, name: str | None, active: bool | None
+        self,
+        *,
+        group_id: str,
+        name: str | None,
+        active: bool | None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
         group = self._require_group(group_id)
         updated = replace(
             group,
             name=name if name is not None else group.name,
             active=active if active is not None else group.active,
+            content_owner_id=(
+                content_owner_id if content_owner_id is not None else group.content_owner_id
+            ),
         )
         self._groups[group_id] = updated
         return updated

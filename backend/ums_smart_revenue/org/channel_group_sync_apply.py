@@ -82,6 +82,13 @@ def apply_group_sync(
     an audit row for a group nothing touched would make the trail claim a
     mutation that did not occur. They are still counted — the route's
     GROUPS_SYNCED summary reports the whole mirror, not just its deltas.
+
+    ONE exception to "UNCHANGED writes nothing": adopting an owner-NULL legacy
+    group. Matching this owner's upstream key proves ownership, so the stamp is
+    backfilled even when the mirror itself is already in sync. That IS a real
+    write, so it IS audited (``adopted_content_owner``) rather than being
+    silently applied — the outcome label still reflects the mirror change,
+    which for an otherwise-in-sync group is UNCHANGED.
     """
     # Counted at the WRITE BOUNDARY, never from plan.counts (the same rule the
     # bulk import's CHANNEL_IMPORTED summary follows): the plan is a snapshot of
@@ -95,7 +102,7 @@ def apply_group_sync(
         if entry.outcome is GroupSyncOutcome.CREATE:
             applied = _execute_create(entry, groups=groups, content_owner_id=content_owner_id)
         else:
-            applied = _execute_update(entry, groups=groups)
+            applied = _execute_update(entry, groups=groups, content_owner_id=content_owner_id)
         if applied is None:
             # The plan's change was already true at the write boundary — a
             # concurrent writer got there first. Count it as UNCHANGED and
@@ -127,6 +134,7 @@ def apply_group_sync(
                 "active_change": list(applied.active_change) if applied.active_change else None,
                 "members_added": len(applied.members_added),
                 "members_removed": len(applied.members_removed),
+                "adopted_content_owner": applied.adopted_content_owner,
             },
         )
     return executed
@@ -141,6 +149,7 @@ class _AppliedChange:
     active_change: tuple[bool, bool] | None
     members_added: tuple[str, ...]
     members_removed: tuple[str, ...]
+    adopted_content_owner: bool = False
 
 
 def _execute_create(
@@ -234,6 +243,7 @@ def _execute_update(
     entry: GroupSyncPlanEntry,
     *,
     groups: ChannelGroupRegistryStore,
+    content_owner_id: str,
 ) -> _AppliedChange | None:
     """Apply a non-CREATE entry, or return None when nothing was left to do.
 
@@ -255,22 +265,53 @@ def _execute_update(
     current = groups.get_group(group_id, for_update=True)
     if current is None:
         raise ValueError(f"sync plan entry's local group vanished before apply: {group_id}")
+    # Matching this owner's upstream key IS the proof of ownership, so an
+    # owner-NULL legacy row is adopted here. Without the stamp it stays
+    # unclaimable forever: _plan_entries_for_vanished_groups skips owner-NULL
+    # rows, so a group that later disappears upstream would never be
+    # deactivated and the mirror would silently stop reflecting deletions.
+    adopt = current.content_owner_id is None
     pending = _resolve_pending_change(entry, current)
     if pending is None:
-        return None
-    if pending.name is not None or pending.active is not None:
-        groups.update_group(group_id=group_id, name=pending.name, active=pending.active)
-    if pending.members_added:
-        groups.add_members(group_id=group_id, channel_ids=list(pending.members_added))
-    for channel_id in pending.members_removed:
-        groups.remove_member(group_id=group_id, channel_id=channel_id)
+        if not adopt:
+            return None
+        # Nothing to mirror, but the owner stamp is still owed.
+        pending = _PendingChange(name=None, active=None, members_added=(), members_removed=())
+    _write_pending_change(
+        groups,
+        group_id=group_id,
+        pending=pending,
+        adopt_owner=content_owner_id if adopt else None,
+    )
     return _AppliedChange(
         group_id=group_id,
         name_change=(current.name, pending.name) if pending.name is not None else None,
         active_change=(current.active, pending.active) if pending.active is not None else None,
         members_added=pending.members_added,
         members_removed=pending.members_removed,
+        adopted_content_owner=adopt,
     )
+
+
+def _write_pending_change(
+    groups: ChannelGroupRegistryStore,
+    *,
+    group_id: str,
+    pending: _PendingChange,
+    adopt_owner: str | None,
+) -> None:
+    """Execute one group's pending writes: name/active/owner, then membership."""
+    if pending.name is not None or pending.active is not None or adopt_owner is not None:
+        groups.update_group(
+            group_id=group_id,
+            name=pending.name,
+            active=pending.active,
+            content_owner_id=adopt_owner,
+        )
+    if pending.members_added:
+        groups.add_members(group_id=group_id, channel_ids=list(pending.members_added))
+    for channel_id in pending.members_removed:
+        groups.remove_member(group_id=group_id, channel_id=channel_id)
 
 
 def _require_local_group_id(entry: GroupSyncPlanEntry) -> str:

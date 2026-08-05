@@ -114,6 +114,10 @@ def _seeded(**overrides: object) -> _RecordingGroupRegistry:
         "active": True,
         "channel_ids": (CH_A,),
         "cms_group_id": "g1",
+        # Already owned by the syncing content owner — the normal case. Tests
+        # covering legacy/unstamped rows pass content_owner_id=None explicitly,
+        # which triggers the adoption path.
+        "content_owner_id": CONTENT_OWNER,
     }
     defaults.update(overrides)
     registry = _RecordingGroupRegistry([ChannelGroupEntry(**defaults)])  # type: ignore[arg-type]
@@ -153,6 +157,9 @@ def test_create_entry_creates_the_group_and_audits_the_sync_provenance() -> None
         "active_change": None,
         "members_added": 1,
         "members_removed": 0,
+        # A freshly created group is stamped with its owner at creation, so
+        # there is no legacy row to adopt.
+        "adopted_content_owner": False,
     }
 
 
@@ -247,6 +254,79 @@ def test_stale_members_changed_entry_already_applied_is_recounted_unchanged() ->
     assert sink.records == []
     assert executed["MEMBERS_CHANGED"] == 0
     assert executed["UNCHANGED"] == 1
+
+
+def test_matching_a_legacy_owner_null_group_adopts_it() -> None:
+    """Matching this owner's upstream key stamps an owner-NULL legacy group.
+
+    Without the stamp the row stays unclaimable forever: the planner skips
+    owner-NULL groups when deciding DEACTIVATE, so a group that later vanishes
+    upstream would never be retired and the mirror would silently stop
+    reflecting deletions.
+    """
+    groups = _seeded(content_owner_id=None, name="Old Name")
+    sink = InMemoryAuditSink()
+
+    _apply(
+        _plan(
+            _entry(
+                outcome=GroupSyncOutcome.RENAME,
+                local_group_id="local-1",
+                name_change=("Old Name", "TV Sector"),
+            )
+        ),
+        groups,
+        sink,
+    )
+
+    stored = groups.get_group("local-1")
+    assert stored is not None
+    assert stored.content_owner_id == CONTENT_OWNER
+    assert stored.name == "TV Sector"
+    assert sink.records[0].details["adopted_content_owner"] is True
+
+
+def test_in_sync_legacy_group_is_still_adopted_and_audited() -> None:
+    """Adoption is owed even when the mirror itself has nothing to change.
+
+    This is the one documented exception to "UNCHANGED writes nothing": the
+    owner stamp is a real write, so it happens AND is audited rather than
+    being applied silently.
+    """
+    groups = _seeded(content_owner_id=None)
+    sink = InMemoryAuditSink()
+
+    executed = _apply(
+        _plan(_entry(outcome=GroupSyncOutcome.RENAME, local_group_id="local-1")),
+        groups,
+        sink,
+    )
+
+    assert groups.get_group("local-1").content_owner_id == CONTENT_OWNER
+    assert groups.writes == ["update_group"]
+    # No mirror change happened, so the label is UNCHANGED ...
+    assert executed["UNCHANGED"] == 1
+    assert executed["RENAME"] == 0
+    # ... but the write is still on the record.
+    assert len(sink.records) == 1
+    assert sink.records[0].details["adopted_content_owner"] is True
+    assert sink.records[0].details["outcome"] == "UNCHANGED"
+
+
+def test_already_owned_group_is_not_restamped() -> None:
+    """A group that already carries an owner is never reassigned."""
+    groups = _seeded(content_owner_id="SomeOtherOwner")
+    sink = InMemoryAuditSink()
+
+    _apply(
+        _plan(_entry(outcome=GroupSyncOutcome.RENAME, local_group_id="local-1")),
+        groups,
+        sink,
+    )
+
+    assert groups.get_group("local-1").content_owner_id == "SomeOtherOwner"
+    assert groups.writes == []
+    assert sink.records == []
 
 
 def test_partial_race_reports_the_outcome_that_actually_happened() -> None:
@@ -377,6 +457,7 @@ def test_unchanged_entry_writes_nothing_and_audits_nothing() -> None:
         active=True,
         channel_ids=(CH_A,),
         cms_group_id="g1",
+        content_owner_id=CONTENT_OWNER,
     )
     assert executed["UNCHANGED"] == 1
 
