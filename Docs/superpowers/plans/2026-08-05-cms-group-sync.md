@@ -1293,4 +1293,9 @@ git commit -m "docs(plan): mark CMS group sync shipped"
 - [ ] `UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/test_ums uv run python -m pytest -q` — 0 failed (baseline was 2543 on main; expect ~2600+)
 - [ ] `git diff --check` — clean
 
-No migration in this PR — no alembic round-trip step; verify `uv run python -m alembic -c alembic.ini heads` still reports the single head `20260803_0001`.
+ONE migration in this PR: `20260805_0001_channel_group_content_owner` (additive
+nullable `channel_groups.content_owner_id`, revises `20260803_0001`). Run
+`uv run python -m alembic -c alembic.ini upgrade head` BEFORE exercising the app
+— the sync and import paths both read and write that column — and verify
+`uv run python -m alembic -c alembic.ini heads` reports the single head
+`20260805_0001`. Rollback is `downgrade 20260803_0001` after reverting the code.
