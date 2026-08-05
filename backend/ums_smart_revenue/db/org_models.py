@@ -148,6 +148,7 @@ class ChannelGroupORM(OrgBase):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     group_type: Mapped[str] = mapped_column(Text, nullable=False)
     cms_group_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_owner_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

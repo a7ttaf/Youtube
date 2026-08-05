@@ -110,20 +110,25 @@ class SqlAlchemyChannelGroupRegistry:
             self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
         ]
 
-    def list_synced_groups(self) -> list[ChannelGroupEntry]:
+    def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
         """Return every CMS-keyed group (active or not) with full membership.
 
         Sync planning must see deactivated synced groups so a CMS key that
         reappears upstream can REACTIVATE its original local group instead of
-        creating a duplicate.
+        creating a duplicate. ``content_owner_id`` scopes the result to one
+        owner's groups (see the Protocol docstring for why CMS group sync must
+        always pass it); a group whose content_owner_id predates this column
+        (bulk-import-created, still NULL) never matches a scoped call and is
+        left alone by CMS sync until it is stamped with an owner.
         """
+        conditions = [
+            ChannelGroupORM.tenant_id == self._tenant_id,
+            ChannelGroupORM.cms_group_id.is_not(None),
+        ]
+        if content_owner_id is not None:
+            conditions.append(ChannelGroupORM.content_owner_id == content_owner_id)
         rows = self._session.scalars(
-            select(ChannelGroupORM)
-            .where(
-                ChannelGroupORM.tenant_id == self._tenant_id,
-                ChannelGroupORM.cms_group_id.is_not(None),
-            )
-            .order_by(ChannelGroupORM.name)
+            select(ChannelGroupORM).where(*conditions).order_by(ChannelGroupORM.name)
         ).all()
         group_ids = [row.id for row in rows]
         channel_ids_by_group = self._channel_ids_by_group(group_ids)
@@ -273,6 +278,7 @@ class SqlAlchemyChannelGroupRegistry:
         group_type: str,
         channel_ids: list[str],
         cms_group_id: str | None = None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
         """Create a group row plus membership, raising typed on a CMS-key race.
 
@@ -289,6 +295,7 @@ class SqlAlchemyChannelGroupRegistry:
             group_type=group_type,
             active=True,
             cms_group_id=cms_group_id,
+            content_owner_id=content_owner_id,
         )
         self._session.add(row)
         try:
@@ -578,6 +585,7 @@ class SqlAlchemyChannelGroupRegistry:
             active=row.active,
             channel_ids=resolved_channel_ids,
             cms_group_id=row.cms_group_id,
+            content_owner_id=row.content_owner_id,
         )
 
 

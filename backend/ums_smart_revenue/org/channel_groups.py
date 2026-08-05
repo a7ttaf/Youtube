@@ -49,6 +49,7 @@ class ChannelGroupEntry:
     active: bool
     channel_ids: tuple[str, ...]
     cms_group_id: str | None = None
+    content_owner_id: str | None = None
 
     def to_api(self) -> dict[str, object]:
         return {
@@ -68,7 +69,16 @@ class ChannelGroupRegistryStore(Protocol):
     def list_groups_full(self) -> list[ChannelGroupEntry]:
         pass
 
-    def list_synced_groups(self) -> list[ChannelGroupEntry]:
+    def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
+        """Return every CMS-keyed group, optionally scoped to one owner.
+
+        ``content_owner_id=None`` (the default) returns every synced group
+        tenant-wide. CMS group sync MUST pass its content owner: groups carry
+        no owner column of their own beyond content_owner_id stamped at
+        create time, so an unscoped call would hand sync planning every OTHER
+        owner's groups too, and any group missing from the CURRENT owner's
+        upstream snapshot looks "vanished" and gets deactivated.
+        """
         pass
 
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
@@ -102,6 +112,7 @@ class ChannelGroupRegistryStore(Protocol):
         group_type: str,
         channel_ids: list[str],
         cms_group_id: str | None = None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
         pass
 
@@ -130,9 +141,14 @@ class ChannelGroupRegistry:
     def list_groups_full(self) -> list[ChannelGroupEntry]:
         return sorted(self._groups.values(), key=lambda group: group.name)
 
-    def list_synced_groups(self) -> list[ChannelGroupEntry]:
+    def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
         """Return every CMS-keyed group, active or not, for sync planning."""
-        return [group for group in self._groups.values() if group.cms_group_id is not None]
+        return [
+            group
+            for group in self._groups.values()
+            if group.cms_group_id is not None
+            and (content_owner_id is None or group.content_owner_id == content_owner_id)
+        ]
 
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         return self._groups.get(group_id)
@@ -177,6 +193,7 @@ class ChannelGroupRegistry:
         group_type: str,
         channel_ids: list[str],
         cms_group_id: str | None = None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
         # Parity with the SQL store's per-tenant unique key: a duplicate CMS
         # key must fail typed here too, not silently create a second group.
@@ -191,6 +208,7 @@ class ChannelGroupRegistry:
             active=True,
             channel_ids=tuple(dict.fromkeys(channel_ids)),
             cms_group_id=cms_group_id,
+            content_owner_id=content_owner_id,
         )
         self._groups[group.id] = group
         return group
