@@ -21,6 +21,7 @@ from ums_smart_revenue.org.channel_import import (
 )
 from ums_smart_revenue.org.channel_import_apply import (
     ChannelImportArchivedGroupError,
+    ChannelImportGroupOwnerMismatchError,
     apply_channel_import,
 )
 from ums_smart_revenue.org.channel_registry import ChannelRegistry, ChannelRegistryEntry
@@ -356,3 +357,63 @@ def test_group_archived_between_plan_and_apply_fails_closed() -> None:
 
     stored = groups.get_group_by_cms_id("cms-tv")
     assert stored is not None and stored.channel_ids == ()
+
+
+def test_import_into_another_owners_group_fails_closed() -> None:
+    """A CMS key owned by a DIFFERENT content owner is rejected, not attached.
+
+    ``cms_group_id`` is unique per TENANT, so this import's lookup can resolve
+    a group another owner's CMS sync owns. Attaching here would inject a
+    foreign channel into that owner's mirrored group, which their next sync
+    would then manage — and remove — as if YouTube had said so.
+    """
+    registry = ChannelRegistry([])
+    groups = ChannelGroupRegistry()
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id="SomeOtherOwner",
+    )
+    sink = InMemoryAuditSink()
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id="cms-tv",
+        revenue_required=True,
+    )
+
+    with pytest.raises(ChannelImportGroupOwnerMismatchError, match="SomeOtherOwner"):
+        _apply(_plan(entry), registry, groups, sink)
+
+    # Nothing was attached to the other owner's group.
+    stored = groups.get_group_by_cms_id("cms-tv")
+    assert stored is not None
+    assert stored.channel_ids == ()
+    assert stored.content_owner_id == "SomeOtherOwner"
+
+
+def test_import_adopts_an_owner_null_group_before_attaching() -> None:
+    """A legacy owner-NULL group is adopted by this import, then attached."""
+    registry = ChannelRegistry([])
+    groups = ChannelGroupRegistry()
+    groups.create_group(name="cms-tv", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv")
+    sink = InMemoryAuditSink()
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id="cms-tv",
+        revenue_required=True,
+    )
+
+    _apply(_plan(entry), registry, groups, sink)
+
+    stored = groups.get_group_by_cms_id("cms-tv")
+    assert stored is not None
+    assert stored.content_owner_id == CONTENT_OWNER
+    assert stored.channel_ids == (CHANNEL_ID,)

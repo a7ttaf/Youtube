@@ -58,6 +58,18 @@ class ChannelImportArchivedGroupError(ChannelImportError):
     """
 
 
+class ChannelImportGroupOwnerMismatchError(ChannelImportError):
+    """A row's CMS group already belongs to a DIFFERENT content owner.
+
+    ``channel_groups.cms_group_id`` is unique per TENANT, not per owner, so an
+    import running for owner A can resolve a group that owner B's CMS sync
+    owns. Attaching A's channel there would put a foreign channel inside B's
+    mirrored group — which B's next sync would then manage (and remove) as if
+    the CMS had said so. Fails the import closed instead; the route maps it to
+    HTTP 409. Owner-NULL groups are adopted rather than rejected.
+    """
+
+
 # ============================================================================
 # Purpose: Domain-side planning entry point for the bulk import — gathers the
 #   store state a roster diffs against and delegates to the pure planner,
@@ -453,6 +465,22 @@ def _attach_group_membership(
         raise ChannelImportArchivedGroupError(
             f"channel group was archived during the import: {cms_group_id}; "
             "reactivate it (or remove the Group_ID) and retry"
+        )
+    # cms_group_id is unique per TENANT, so this lookup can resolve a group
+    # another content owner's CMS sync owns. Adding this roster's channel
+    # there would inject a foreign channel into that owner's mirrored group,
+    # which their next sync would then manage — and remove — as if YouTube had
+    # said so. Fail the import closed; only an owner-NULL group is adoptable.
+    if group.content_owner_id is not None and group.content_owner_id != content_owner_id:
+        raise ChannelImportGroupOwnerMismatchError(
+            f"channel group {cms_group_id} belongs to content owner "
+            f"{group.content_owner_id!r}, not {content_owner_id!r}; "
+            "import that group's channels under its own content owner"
+        )
+    if group.content_owner_id is None:
+        # Adopt the legacy/unstamped group so CMS sync can see it afterwards.
+        groups.update_group(
+            group_id=group.id, name=None, active=None, content_owner_id=content_owner_id
         )
     if channel_id not in group.channel_ids:
         updated = groups.add_members(group_id=group.id, channel_ids=[channel_id])

@@ -73,6 +73,7 @@ from ums_smart_revenue.org.channel_import import (
 )
 from ums_smart_revenue.org.channel_import_apply import (
     ChannelImportArchivedGroupError,
+    ChannelImportGroupOwnerMismatchError,
     apply_channel_import,
     plan_channel_import_with_stores,
 )
@@ -654,6 +655,7 @@ def import_channels(
     except (
         ChannelGroupConflictError,
         ChannelImportArchivedGroupError,
+        ChannelImportGroupOwnerMismatchError,
         ChannelRegistryConflictError,
         ChannelRevenueRequirementLockedMonthError,
     ) as exc:
