@@ -32,14 +32,18 @@ def _local(**overrides: object) -> ChannelGroupEntry:
         "active": True,
         "channel_ids": (CH_A,),
         "cms_group_id": "g1",
+        "content_owner_id": "owner-a",
     }
     defaults.update(overrides)
     return ChannelGroupEntry(**defaults)  # type: ignore[arg-type]
 
 
-def _plan(snapshot=(), local=(), known=KNOWN):
+def _plan(snapshot=(), local=(), known=KNOWN, content_owner_id="owner-a"):
     return plan_group_sync(
-        snapshot=tuple(snapshot), local_groups=tuple(local), known_channel_ids=known
+        snapshot=tuple(snapshot),
+        local_groups=tuple(local),
+        known_channel_ids=known,
+        content_owner_id=content_owner_id,
     )
 
 
@@ -79,6 +83,27 @@ def test_group_absent_upstream_plans_deactivate() -> None:
     entry = plan.entries[0]
     assert entry.outcome is GroupSyncOutcome.DEACTIVATE
     assert entry.active_change == (True, False)
+    assert entry.upstream_present is False
+
+
+def test_upstream_presence_is_carried_on_every_entry() -> None:
+    """The apply layer mirrors ACTIVE from this flag, not from active_change.
+
+    active_change is a diff against the plan-time snapshot and is None
+    whenever the group was already active, so it cannot express "should be
+    active" — this flag is what survives a mid-flight archive.
+    """
+    plan = _plan(
+        snapshot=[_snapshot(cms_group_id="g1")],
+        local=[_local(cms_group_id="g1"), _local(id="local-2", cms_group_id="g2")],
+    )
+    by_key = {entry.cms_group_id: entry for entry in plan.entries}
+
+    assert by_key["g1"].outcome is GroupSyncOutcome.UNCHANGED
+    assert by_key["g1"].active_change is None
+    assert by_key["g1"].upstream_present is True
+    assert by_key["g2"].outcome is GroupSyncOutcome.DEACTIVATE
+    assert by_key["g2"].upstream_present is False
 
 
 def test_inactive_group_reappearing_plans_reactivate() -> None:
@@ -164,3 +189,35 @@ def test_counts_cover_every_outcome_key() -> None:
         "REACTIVATE",
         "UNCHANGED",
     }
+
+
+def test_owner_null_local_match_is_planned_as_an_adoption() -> None:
+    """The dry run must PREVIEW the owner stamp, not spring it at apply.
+
+    This route's contract is a mandatory dry run: the preview is the apply.
+    An owner-NULL legacy group matched by this owner's upstream key will be
+    stamped, so the plan has to say so.
+    """
+    plan = _plan(
+        snapshot=[_snapshot()],
+        local=[_local(content_owner_id=None)],
+    )
+    entry = plan.entries[0]
+    assert entry.outcome is GroupSyncOutcome.UNCHANGED
+    assert entry.will_adopt_content_owner is True
+
+
+def test_already_owned_local_match_is_not_planned_as_an_adoption() -> None:
+    """A group that already carries this owner has no stamp owed."""
+    plan = _plan(
+        snapshot=[_snapshot()],
+        local=[_local(content_owner_id="owner-a")],
+    )
+    assert plan.entries[0].will_adopt_content_owner is False
+
+
+def test_create_entries_never_plan_an_adoption() -> None:
+    """A created group is stamped at creation; there is nothing to adopt."""
+    plan = _plan(snapshot=[_snapshot()])
+    assert plan.entries[0].outcome is GroupSyncOutcome.CREATE
+    assert plan.entries[0].will_adopt_content_owner is False

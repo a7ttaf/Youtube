@@ -110,7 +110,10 @@ def plan_channel_import_with_stores(
     planned as a CREATE that the duplicate guard turns into a conflict
     mid-apply. Archived CMS groups likewise fail their rows closed at
     planning; attaching members to a retired group would audit a change that
-    active listings and finance scope selection never surface.
+    active listings and finance scope selection never surface. Groups already
+    stamped to a different content owner get the same treatment, so a cross-
+    owner conflict shows up in the dry run rather than only as a 409 from the
+    write boundary's own recheck.
     """
     wanted = {row.youtube_channel_id for row in parsed.rows}
     existing = {
@@ -125,6 +128,9 @@ def plan_channel_import_with_stores(
         content_owner_id=content_owner_id,
         cms_status=cms_status,
         archived_group_ids=frozenset(groups.list_archived_cms_group_ids(group_ids)),
+        foreign_owner_group_ids=frozenset(
+            groups.list_foreign_owner_cms_group_ids(group_ids, content_owner_id=content_owner_id)
+        ),
     )
 
 
@@ -287,7 +293,7 @@ def apply_channel_import(
         # UNCHANGED row's group change would be invisible in the audit
         # trail (the summary event carries only counts).
         if group_change is not None:
-            group_action, group = group_change
+            group_action, group, group_adopted = group_change
             record_audit_event(
                 sink=audit_sink,
                 actor=actor,
@@ -302,6 +308,7 @@ def apply_channel_import(
                     "group_type": group.group_type,
                     "channel_id": channel_id,
                     "source": AUDIT_SOURCE_BULK_IMPORT,
+                    "adopted_content_owner": group_adopted,
                 },
             )
     record_audit_event(
@@ -434,16 +441,16 @@ def _attach_group_membership(
     cms_group_id: str,
     channel_id: str,
     content_owner_id: str,
-) -> tuple[str, ChannelGroupEntry] | None:
+) -> tuple[str, ChannelGroupEntry, bool] | None:
     """Ensure the channel belongs to the group carrying this CMS key.
 
-    Returns the (action, group) pair for the mutation performed — group
-    creation or membership addition — so the caller can audit it, or None when
-    the membership already existed and nothing changed. Planning fails rows
-    targeting archived groups closed, and the write boundary RE-CHECKS under a
-    row lock: a group archived in the plan-to-apply window raises
-    ChannelImportArchivedGroupError so the race fails the transaction closed
-    instead of silently mutating a retired group.
+    Returns ``(action, group, adopted_content_owner)`` for the mutation
+    performed — group creation, membership addition, or a bare owner adoption
+    — so the caller can audit it, or None when nothing at all was written.
+    Planning fails rows targeting archived groups closed, and the write
+    boundary RE-CHECKS under a row lock: a group archived in the plan-to-apply
+    window raises ChannelImportArchivedGroupError so the race fails the
+    transaction closed instead of silently mutating a retired group.
 
     The import's ``content_owner_id`` is stamped on any group created here so
     CMS group sync — which scopes ``list_synced_groups`` to one owner — can
@@ -460,7 +467,8 @@ def _attach_group_membership(
             cms_group_id=cms_group_id,
             content_owner_id=content_owner_id,
         )
-        return ("group_created", created)
+        # Created stamped with this owner — nothing was adopted.
+        return ("group_created", created, False)
     if not group.active:
         raise ChannelImportArchivedGroupError(
             f"channel group was archived during the import: {cms_group_id}; "
@@ -477,12 +485,18 @@ def _attach_group_membership(
             f"{group.content_owner_id!r}, not {content_owner_id!r}; "
             "import that group's channels under its own content owner"
         )
-    if group.content_owner_id is None:
+    adopted = group.content_owner_id is None
+    if adopted:
         # Adopt the legacy/unstamped group so CMS sync can see it afterwards.
-        groups.update_group(
+        # This is a real write, so it must reach the audit trail even when the
+        # membership below turns out to be a no-op — an unaudited write is the
+        # same dishonesty as an audit row for a write that never happened.
+        group = groups.update_group(
             group_id=group.id, name=None, active=None, content_owner_id=content_owner_id
         )
     if channel_id not in group.channel_ids:
         updated = groups.add_members(group_id=group.id, channel_ids=[channel_id])
-        return ("member_added", updated)
+        return ("member_added", updated, adopted)
+    if adopted:
+        return ("group_adopted", group, True)
     return None

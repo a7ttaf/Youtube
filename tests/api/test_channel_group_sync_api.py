@@ -306,8 +306,15 @@ def test_apply_creates_the_group_with_members_and_audits():
     assert summary.details["counts"]["UNCHANGED"] == 0
 
 
-def test_summary_counts_come_from_the_apply_not_the_plan():
-    """The GROUPS_SYNCED summary reports executed counts, never plan counts."""
+def test_apply_response_and_summary_both_report_executed_counts():
+    """An apply's response must agree with its own audit row.
+
+    Both now come from the write boundary. The earlier contract returned the
+    PLAN's counts in the response while persisting the EXECUTED counts in
+    GROUPS_SYNCED; once the apply layer started re-diffing against current
+    state, those could genuinely diverge under a concurrent writer and the
+    operator would be told RENAME where the durable trail said UNCHANGED.
+    """
     fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
     client, _registry, _groups, audit_sink = create_sync_app(fake)
     executed = {"CREATE": 0, "RENAME": 3, "UNCHANGED": 0}
@@ -319,10 +326,23 @@ def test_summary_counts_come_from_the_apply_not_the_plan():
         response = post_sync(client)
 
     assert response.status_code == 200, response.text
-    # The response echoes the PLAN (one CREATE) ...
+    summary_counts = sole_record(audit_sink, "GROUPS_SYNCED").details["counts"]
+    assert summary_counts == executed
+    # The response reports the same thing the audit row persisted — the plan
+    # said CREATE=1, but nothing executed a CREATE.
+    assert response.json()["counts"] == executed
+    assert response.json()["counts"]["CREATE"] == 0
+
+
+def test_dry_run_counts_still_report_the_plan():
+    """A dry run has no executed counts — it must still preview the plan."""
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, _groups, _audit_sink = create_sync_app(fake)
+
+    response = post_sync(client, dry_run=True)
+
+    assert response.status_code == 200, response.text
     assert response.json()["counts"]["CREATE"] == 1
-    # ... while the durable summary carries what the write boundary reported.
-    assert sole_record(audit_sink, "GROUPS_SYNCED").details["counts"] == executed
 
 
 def test_full_mirror_round_renames_churns_members_and_deactivates():
@@ -707,6 +727,45 @@ def test_legacy_owner_null_group_is_reconciled_not_recreated():
     assert group_by_cms_id(groups, "cms-a").name == "News HD"
 
 
+def test_dry_run_previews_the_owner_adoption_write():
+    """The mandatory dry run must show the owner stamp it is about to write.
+
+    This route's whole contract is preview-then-apply. An adoption that only
+    materialized at apply time would be a write the operator was never shown.
+    """
+    seeded = ChannelGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id="grp-legacy",
+                name="News",
+                group_type="SECTOR",
+                active=True,
+                channel_ids=(CHANNEL_ONE,),
+                cms_group_id="cms-a",
+                content_owner_id=None,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "News", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake, groups=seeded)
+
+    preview = post_sync(client, dry_run=True)
+
+    assert preview.status_code == 200, preview.text
+    entry = preview.json()["groups"][0]
+    assert entry["outcome"] == "UNCHANGED"
+    assert entry["will_adopt_content_owner"] is True
+    # A dry run still writes nothing.
+    assert groups.get_group("grp-legacy").content_owner_id is None
+    assert audit_sink.records == []
+
+    # And the apply performs exactly the write the preview advertised.
+    applied = post_sync(client)
+    assert applied.status_code == 200, applied.text
+    assert groups.get_group("grp-legacy").content_owner_id == CONTENT_OWNER
+    assert sole_record(audit_sink, "GROUP_UPDATED").details["adopted_content_owner"] is True
+
+
 def test_legacy_owner_null_group_absent_upstream_is_not_deactivated():
     """An unowned legacy group must not be retired by an owner that may not own it.
 
@@ -767,6 +826,61 @@ def test_create_conflict_on_concurrent_cms_key_returns_409():
     assert "cms-a" in response.json()["detail"]
     # No partial write: the raced-in group is untouched, no audit emitted.
     assert groups.get_group("grp-raced").content_owner_id == OTHER_OWNER
+    assert audit_sink.records == []
+
+
+class _ClaimedMidFlightGroupRegistry(ChannelGroupRegistry):
+    """Owner-NULL when the planner lists it, claimed when the apply locks it.
+
+    Reproduces the other half of the create-conflict race: instead of a NEW
+    key colliding, an existing UNCLAIMED group is adopted by another owner in
+    the plan-to-apply window. Only the locked re-read can see it.
+    """
+
+    def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
+        """Stamp the rival owner the moment the apply takes the row lock."""
+        group = super().get_group(group_id, for_update=for_update)
+        if for_update and group is not None and group.content_owner_id is None:
+            super().update_group(
+                group_id=group_id, name=None, active=None, content_owner_id=OTHER_OWNER
+            )
+            return super().get_group(group_id, for_update=for_update)
+        return group
+
+
+def test_group_claimed_by_another_owner_mid_apply_returns_409():
+    """Losing the adoption race is a 409, not a silent cross-owner write.
+
+    The planner legitimately matches owner-NULL rows (hiding them would make
+    an existing cms_group_id plan as CREATE and collide on the tenant-unique
+    key), so the apply's locked re-read is the only place the rival claim
+    becomes visible. Mirroring anyway would rename another owner's group and
+    stamp THIS owner's id onto the audit row describing it.
+    """
+    seeded = _ClaimedMidFlightGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id="grp-legacy",
+                name="Old Name",
+                group_type="SECTOR",
+                active=True,
+                channel_ids=(CHANNEL_ONE,),
+                cms_group_id="cms-a",
+                content_owner_id=None,
+            ),
+        ]
+    )
+    fake = FakeGroupsClient([("cms-a", "Renamed Upstream", (CHANNEL_ONE,), 0)])
+    client, _registry, groups, audit_sink = create_sync_app(fake, groups=seeded)
+
+    response = post_sync(client, content_owner_id=CONTENT_OWNER)
+
+    assert response.status_code == 409, response.text
+    assert OTHER_OWNER in response.json()["detail"]
+    # The rival's group keeps its name and its stamp; nothing was audited.
+    survivor = groups.get_group("grp-legacy")
+    assert survivor.name == "Old Name"
+    assert survivor.content_owner_id == OTHER_OWNER
     assert audit_sink.records == []
 
 

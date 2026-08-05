@@ -878,6 +878,55 @@ def test_list_archived_cms_group_ids_is_tenant_scoped_and_bulk() -> None:
     assert registry.list_archived_cms_group_ids(set()) == set()
 
 
+def test_list_foreign_owner_cms_group_ids_is_tenant_scoped_and_skips_nulls() -> None:
+    """Only OTHER owners' keys conflict; owner-NULL rows stay adoptable.
+
+    The NULL case is the one worth pinning at the SQL tier: three-valued logic
+    already makes ``content_owner_id != :owner`` UNKNOWN for a NULL stamp, so
+    a future rewrite of the predicate that "simplifies away" the explicit
+    IS NOT NULL could silently start classifying legacy rows as conflicts and
+    break adoption for every pre-migration tenant.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    other_registry = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID)
+
+    registry.create_group(
+        name="Mine",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-mine",
+        content_owner_id="owner-a",
+    )
+    registry.create_group(
+        name="Theirs",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-theirs",
+        content_owner_id="owner-b",
+    )
+    registry.create_group(
+        name="Legacy", group_type="SECTOR", channel_ids=[], cms_group_id="cms-legacy"
+    )
+    # Another tenant's cross-owner group must not leak into this tenant's view.
+    other_registry.create_group(
+        name="Other Tenant",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-other-tenant",
+        content_owner_id="owner-b",
+    )
+
+    result = registry.list_foreign_owner_cms_group_ids(
+        {"cms-mine", "cms-theirs", "cms-legacy", "cms-other-tenant", "cms-missing"},
+        content_owner_id="owner-a",
+    )
+
+    assert result == {"cms-theirs"}
+    assert registry.list_foreign_owner_cms_group_ids(set(), content_owner_id="owner-a") == set()
+
+
 def test_create_group_duplicate_cms_key_raises_typed_conflict() -> None:
     """Losing the per-tenant cms_group_id uniqueness race is a typed conflict.
 

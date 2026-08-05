@@ -281,6 +281,30 @@ class SqlAlchemyChannelGroupRegistry:
         # the column's Optional type for the checker without a cast.
         return {key for key in rows if key is not None}
 
+    def list_foreign_owner_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys stamped to a different content owner.
+
+        ``IS NOT NULL`` is explicit rather than implied by the inequality:
+        SQL three-valued logic makes ``content_owner_id != :owner`` UNKNOWN
+        (not TRUE) for a NULL stamp, so the predicate would already exclude
+        owner-NULL rows — but silently, and adoption depends on those rows
+        staying attachable. One bounded SELECT, mirroring
+        ``list_archived_cms_group_ids``.
+        """
+        if not cms_group_ids:
+            return set()
+        rows = self._session.scalars(
+            select(ChannelGroupORM.cms_group_id).where(
+                ChannelGroupORM.tenant_id == self._tenant_id,
+                ChannelGroupORM.cms_group_id.in_(cms_group_ids),
+                ChannelGroupORM.content_owner_id.is_not(None),
+                ChannelGroupORM.content_owner_id != content_owner_id,
+            )
+        ).all()
+        return {key for key in rows if key is not None}
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.
 

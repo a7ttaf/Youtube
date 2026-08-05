@@ -645,6 +645,45 @@ def test_archived_group_is_a_row_error_not_a_write():
     assert archived is not None and archived.channel_ids == (CHANNEL_ID,)
 
 
+def test_group_owned_by_another_content_owner_fails_the_dry_run():
+    """A cross-owner group conflict is visible in the PREVIEW, not just the apply.
+
+    The write boundary already refuses it with a 409, but this route's whole
+    dry-run contract is that the preview tells the operator what will happen.
+    Since the conflict is knowable from stored state, an "all clear" preview
+    followed by a 409 would be the preview lying.
+    """
+    client, registry, groups, audit_sink = create_import_app()
+    groups.create_group(
+        name="Theirs",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-theirs",
+        content_owner_id="SomeOtherOwner",
+    )
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-theirs,Yes", header=header)
+
+    # A dry run reports its plan (errors included) with 200 — that IS the
+    # preview contract; what matters is that the conflict appears at all.
+    preview = post_import(client, body, dry_run="true")
+
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()
+    assert plan["counts"]["ERROR"] == 1
+    assert "another content owner" in plan["rows"][0]["reason"]
+    assert "cms-theirs" in plan["rows"][0]["reason"]
+
+    # And the apply agrees with the preview: a 422 naming the same conflict,
+    # not a 409 from the write boundary that the preview never hinted at.
+    applied = post_import(client, body)
+    assert applied.status_code == 422, applied.text
+    assert "another content owner" in applied.json()["detail"]["rows"][0]["reason"]
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert groups.get_group_by_cms_id("cms-theirs").channel_ids == ()
+    assert audit_sink.records == []
+
+
 class _ArchivingDuringApplyGroups(ChannelGroupRegistry):
     """Simulate a concurrent archive landing between planning and apply.
 

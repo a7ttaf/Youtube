@@ -347,15 +347,13 @@ class _FailingGroupStore:
         self._fail_on_call = fail_on_call
         self.create_calls = 0
 
-    def list_synced_groups(
-        self, *, content_owner_id: str | None = None
-    ) -> list[ChannelGroupEntry]:
+    def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
         """Delegate the CMS-keyed group listing to the real store."""
         return self._inner.list_synced_groups(content_owner_id=content_owner_id)
 
-    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
-        """Delegate the group lookup to the real store."""
-        return self._inner.get_group(group_id)
+    def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
+        """Delegate the group lookup, keeping the store's row-lock option."""
+        return self._inner.get_group(group_id, for_update=for_update)
 
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
@@ -409,9 +407,7 @@ def _seed_other_owner_group(engine: sa.Engine, *, cms_group_id: str, content_own
         )
 
 
-def test_create_stamps_content_owner_id_on_postgres(
-    pg_url: str, owner_engine: sa.Engine
-) -> None:
+def test_create_stamps_content_owner_id_on_postgres(pg_url: str, owner_engine: sa.Engine) -> None:
     """An applied CREATE stamps the group's content_owner_id in SQL."""
     _seed_channel(owner_engine, CHANNEL_ID, "Alpha News")
     fake = FakeGroupsClient([(GROUP_ID, GROUP_TITLE, (CHANNEL_ID,))])

@@ -63,6 +63,7 @@ from ums_smart_revenue.org.channel_group_sync import (
 from ums_smart_revenue.org.channel_group_sync_apply import apply_group_sync
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
+    ChannelGroupOwnerReassignmentError,
     ChannelGroupRegistryStore,
 )
 from ums_smart_revenue.org.channel_import import (
@@ -1001,8 +1002,22 @@ def sync_channel_groups(
     # the store translates that into the typed conflict instead of letting an
     # IntegrityError-aborted session escape as a 500. Mirrors import_channels'
     # identical translation earlier in this file.
-    except ChannelGroupConflictError as exc:
+    #
+    # The reassignment error is the OTHER side of that same race: rather than
+    # colliding on a new key, the racer CLAIMED a group this plan matched while
+    # it was still owner-NULL. Only the apply layer's locked re-read can see
+    # it, and it refuses to mirror another owner's group. Both are lost races
+    # on the same row, both retryable, so both get the one 409 — matching the
+    # import route's identical cross-owner rejection.
+    except (ChannelGroupConflictError, ChannelGroupOwnerReassignmentError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # An apply's response must agree with its audit row. `counts` is rendered
+    # from the PLAN above, which is right for a dry run ("what will happen")
+    # but stale for an apply: a concurrent writer can make the executed tally
+    # diverge, and returning the plan's numbers while GROUPS_SYNCED persists
+    # the executed ones would tell the operator RENAME where the trail says
+    # UNCHANGED. Both now report the same thing.
+    payload_out["counts"] = dict(executed)
     record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -1043,6 +1058,7 @@ def _group_sync_plan_to_api(
                 "members_removed": list(entry.members_removed),
                 "unknown_channel_ids": list(entry.unknown_channel_ids[:50]),
                 "unknown_channel_count": len(entry.unknown_channel_ids),
+                "will_adopt_content_owner": entry.will_adopt_content_owner,
             }
             for entry in plan.entries
         ],

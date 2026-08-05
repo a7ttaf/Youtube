@@ -79,6 +79,10 @@ def _entry(**overrides: object) -> GroupSyncPlanEntry:
         "members_added": (),
         "members_removed": (),
         "unknown_channel_ids": (),
+        # Matches the planner: every outcome except the vanished-group ones is
+        # built from an upstream item, and upstream presence is what the write
+        # boundary mirrors into `active`. DEACTIVATE tests override this.
+        "upstream_present": True,
     }
     defaults.update(overrides)
     return GroupSyncPlanEntry(**defaults)  # type: ignore[arg-type]
@@ -343,18 +347,100 @@ def test_unchanged_owned_group_still_writes_and_audits_nothing() -> None:
     assert executed["UNCHANGED"] == 1
 
 
-def test_already_owned_group_is_not_restamped() -> None:
-    """A group that already carries an owner is never reassigned."""
-    groups = _seeded(content_owner_id="SomeOtherOwner")
+def test_already_owned_group_is_mirrored_without_being_restamped() -> None:
+    """Adoption is owed once, not on every sync of an already-owned group.
+
+    The mirror still applies in full; the difference from the legacy path is
+    that no owner stamp rides along, so ``adopted_content_owner`` stays false
+    and an auditor can tell a one-time claim from routine mirroring.
+    """
+    groups = _seeded(name="Old Name")
     sink = InMemoryAuditSink()
 
     _apply(
-        _plan(_entry(outcome=GroupSyncOutcome.RENAME, local_group_id="local-1")),
+        _plan(
+            _entry(
+                outcome=GroupSyncOutcome.RENAME,
+                local_group_id="local-1",
+                name_change=("Old Name", "TV Sector"),
+            )
+        ),
         groups,
         sink,
     )
 
-    assert groups.get_group("local-1").content_owner_id == "SomeOtherOwner"
+    stored = groups.get_group("local-1")
+    assert stored.name == "TV Sector"
+    assert stored.content_owner_id == CONTENT_OWNER
+    assert sink.records[0].details["adopted_content_owner"] is False
+
+
+def test_group_deactivated_mid_flight_is_reactivated_because_it_is_upstream() -> None:
+    """Active state is mirrored from UPSTREAM PRESENCE, not from the stale diff.
+
+    A group that was active when the plan was built carries no active_change,
+    so re-diffing the plan's fields alone cannot notice that an operator
+    archived it in the plan-to-apply window (the group API deliberately still
+    allows archiving a synced group). The sync would then report success and
+    leave an upstream-present group inactive until some later run happened to
+    plan REACTIVATE — a mirror that silently is not one.
+    """
+    groups = _seeded(active=False)
+    sink = InMemoryAuditSink()
+
+    executed = _apply(
+        _plan(
+            _entry(
+                outcome=GroupSyncOutcome.UNCHANGED,
+                local_group_id="local-1",
+                active_change=None,
+            )
+        ),
+        groups,
+        sink,
+    )
+
+    assert groups.get_group("local-1").active is True
+    assert executed["REACTIVATE"] == 1
+    assert sink.records[0].details["active_change"] == [False, True]
+
+
+def test_apply_refuses_a_group_another_owner_claimed_mid_flight() -> None:
+    """The locked re-read must re-verify SCOPE, not just the mirrored fields.
+
+    Sequence: the planner sees an owner-NULL legacy group (the OR-NULL scoped
+    read deliberately includes it), another owner's import adopts it before
+    this apply takes the lock, and the entry's premise — "this group is mine
+    or unclaimed" — is now false. Skipping only the owner stamp is not enough:
+    the rename/membership writes would still land on the other owner's group,
+    and the GROUP_UPDATED row would carry THIS owner's content_owner_id on it,
+    so the audit trail would misattribute the change too.
+
+    Fails closed at the entry rather than absorbing it as UNCHANGED, because
+    the operator has to be shown the state — a group whose jurisdiction moved
+    mid-sync is exactly what a silent no-op would hide.
+    """
+    groups = _seeded(content_owner_id="SomeOtherOwner")
+    sink = InMemoryAuditSink()
+
+    with pytest.raises(ChannelGroupOwnerReassignmentError):
+        _apply(
+            _plan(
+                _entry(
+                    outcome=GroupSyncOutcome.RENAME,
+                    local_group_id="local-1",
+                    name_change=("TV Sector", "TV Sector (renamed upstream)"),
+                    members_added=(CH_B,),
+                )
+            ),
+            groups,
+            sink,
+        )
+
+    survivor = groups.get_group("local-1")
+    assert survivor.name == "TV Sector"
+    assert survivor.channel_ids == (CH_A,)
+    assert survivor.content_owner_id == "SomeOtherOwner"
     assert groups.writes == []
     assert sink.records == []
 
@@ -439,6 +525,7 @@ def test_deactivate_flips_active_and_leaves_membership_untouched() -> None:
                 title=None,
                 local_group_id="local-1",
                 active_change=(True, False),
+                upstream_present=False,
             )
         ),
         groups,
@@ -582,6 +669,7 @@ def test_returned_counts_are_the_executed_tally_not_the_plan_counts() -> None:
                 title=None,
                 local_group_id="local-3",
                 active_change=(True, False),
+                upstream_present=False,
             ),
             counts=bogus_counts,
         ),

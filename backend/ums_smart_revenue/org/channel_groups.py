@@ -32,7 +32,7 @@ from uuid import uuid4
 
 
 class ChannelGroupOwnerReassignmentError(ValueError):
-    """A write tried to move an already-owned group to a different owner.
+    """A write crossed a content-owner boundary it does not own.
 
     ``content_owner_id`` is what scopes CMS group sync: it decides which
     groups a sync may reconcile and which it may deactivate. Filling the
@@ -40,6 +40,12 @@ class ChannelGroupOwnerReassignmentError(ValueError):
     row that already names an owner is not, because it would silently move the
     group between content owners and corrupt both sides' subsequent plans.
     Raised by the store so a call-site bug fails loudly instead of writing.
+
+    Also raised by the sync apply layer when the locked re-read shows a group
+    that was owner-NULL at plan time now claimed by someone else: the entry's
+    scoping premise is falsified, so mirroring it would write another owner's
+    group AND misattribute the audit row. The API maps this to a 409, the same
+    treatment the import's cross-owner rejection gets.
     """
 
 
@@ -127,6 +133,18 @@ class ChannelGroupRegistryStore(Protocol):
         One bulk lookup (no per-key round trips) so import planning can vet a
         full roster's group keys without a lookup-per-group query storm.
         Unknown keys are simply absent from the result.
+        """
+
+    def list_foreign_owner_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys stamped to a DIFFERENT content owner.
+
+        Owner-NULL and same-owner keys are excluded — both are attachable.
+        One bulk lookup, matching ``list_archived_cms_group_ids``, so import
+        planning can vet a whole roster's group keys in one query and surface
+        cross-owner conflicts in the dry run instead of only at the write
+        boundary.
         """
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
@@ -226,6 +244,18 @@ class ChannelGroupRegistry:
             group.cms_group_id
             for group in self._groups.values()
             if group.cms_group_id in cms_group_ids and not group.active
+        }
+
+    def list_foreign_owner_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys stamped to a different content owner."""
+        return {
+            group.cms_group_id
+            for group in self._groups.values()
+            if group.cms_group_id in cms_group_ids
+            and group.content_owner_id is not None
+            and group.content_owner_id != content_owner_id
         }
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:

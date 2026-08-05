@@ -135,6 +135,30 @@ def test_archived_group_is_a_row_error() -> None:
     assert plan.has_errors is True
 
 
+def test_group_owned_by_another_content_owner_is_a_row_error() -> None:
+    """A cross-owner group conflict must fail at PLANNING, not only at apply.
+
+    The apply already refuses it (ChannelImportGroupOwnerMismatchError -> 409),
+    but the conflict is knowable from current database state, so leaving it to
+    the write boundary makes ``dry_run=true`` return a clean plan for an import
+    that cannot succeed — the operator trusts the preview and then eats a 409.
+    Same treatment as an archived group.
+    """
+    plan = plan_channel_import(
+        rows=(_row(group_id="cms-theirs"),),
+        errors=(),
+        existing={},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        foreign_owner_group_ids=frozenset({"cms-theirs"}),
+    )
+    entry = plan.entries[0]
+    assert entry.outcome is ChannelImportOutcome.ERROR
+    assert entry.reason is not None and "content owner" in entry.reason
+    assert "cms-theirs" in entry.reason
+    assert plan.has_errors is True
+
+
 def test_row_errors_surface_and_block() -> None:
     plan = _plan(errors=(ChannelImportRowError(row_number=2, reason="bad id"),))
     assert plan.has_errors is True

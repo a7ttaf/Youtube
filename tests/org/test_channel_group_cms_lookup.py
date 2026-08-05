@@ -49,6 +49,35 @@ def test_list_archived_cms_group_ids_returns_only_archived_keys() -> None:
     assert registry.get_group_by_cms_id("cms-active") == active
 
 
+def test_list_foreign_owner_cms_group_ids_excludes_own_and_unclaimed_keys() -> None:
+    """Only keys stamped to ANOTHER owner conflict; owner-NULL is adoptable."""
+    registry = ChannelGroupRegistry()
+    registry.create_group(
+        name="Mine",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-mine",
+        content_owner_id="owner-a",
+    )
+    registry.create_group(
+        name="Theirs",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-theirs",
+        content_owner_id="owner-b",
+    )
+    registry.create_group(
+        name="Legacy", group_type="SECTOR", channel_ids=[], cms_group_id="cms-legacy"
+    )
+
+    result = registry.list_foreign_owner_cms_group_ids(
+        {"cms-mine", "cms-theirs", "cms-legacy", "cms-missing"},
+        content_owner_id="owner-a",
+    )
+
+    assert result == {"cms-theirs"}
+
+
 def test_create_group_duplicate_cms_key_raises_typed_conflict() -> None:
     """Parity with the SQL store's per-tenant unique key on cms_group_id."""
     registry = ChannelGroupRegistry()

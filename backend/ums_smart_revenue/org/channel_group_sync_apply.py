@@ -27,7 +27,11 @@ from ums_smart_revenue.org.channel_group_sync import (
     GroupSyncPlan,
     GroupSyncPlanEntry,
 )
-from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistryStore
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupEntry,
+    ChannelGroupOwnerReassignmentError,
+    ChannelGroupRegistryStore,
+)
 
 # Provenance marker on every audit record this module writes: it is how an
 # auditor separates CMS-mirror changes from manual group API edits and from the
@@ -83,12 +87,16 @@ def apply_group_sync(
     mutation that did not occur. They are still counted — the route's
     GROUPS_SYNCED summary reports the whole mirror, not just its deltas.
 
-    ONE exception to "UNCHANGED writes nothing": adopting an owner-NULL legacy
-    group. Matching this owner's upstream key proves ownership, so the stamp is
-    backfilled even when the mirror itself is already in sync. That IS a real
-    write, so it IS audited (``adopted_content_owner``) rather than being
-    silently applied — the outcome label still reflects the mirror change,
-    which for an otherwise-in-sync group is UNCHANGED.
+    The governing rule is not "UNCHANGED writes nothing" but the stricter and
+    more general one it was reaching for: **no executed write means no audit
+    row, and every executed write is audited.** Adopting an owner-NULL legacy
+    group is a real write even when the mirror itself is already in sync, so it
+    happens AND is audited (``adopted_content_owner``) rather than being
+    applied silently; the outcome label still reports the mirror change, which
+    for an otherwise-in-sync group is UNCHANGED. The planner marks that write
+    in advance (``will_adopt_content_owner``) so the mandatory dry run previews
+    it like any other, and this layer re-verifies it under the row lock rather
+    than trusting the plan.
     """
     # Counted at the WRITE BOUNDARY, never from plan.counts (the same rule the
     # bulk import's CHANNEL_IMPORTED summary follows): the plan is a snapshot of
@@ -226,10 +234,12 @@ def _resolve_pending_change(
         entry.name_change[1] if entry.name_change else None,
         current.name,
     )
-    active = _still_pending(
-        entry.active_change[1] if entry.active_change else None,
-        current.active,
-    )
+    # Target comes from upstream PRESENCE, not from entry.active_change. The
+    # diff is against the plan-time snapshot, so it is None for a group that
+    # was already active — which would leave a group archived in the
+    # plan-to-apply window inactive despite being present upstream, and the
+    # sync would report success on a mirror it did not actually restore.
+    active = _still_pending(entry.upstream_present, current.active)
     current_members = set(current.channel_ids)
     members_added = tuple(cid for cid in entry.members_added if cid not in current_members)
     members_removed = tuple(cid for cid in entry.members_removed if cid in current_members)
@@ -264,11 +274,46 @@ def _execute_update(
     these writes land, so a loser could perform zero inserts/deletes and STILL
     report members_added/members_removed. Holding the lock across diff-then-
     write makes the reported change the change that actually happened.
+
+    The re-read also re-verifies the entry's SCOPING PREMISE — that the group
+    is this owner's or still unclaimed — because the planner matches owner-NULL
+    rows on purpose and a rival can claim one before this lock is taken.
     """
     group_id = _require_local_group_id(entry)
     current = groups.get_group(group_id, for_update=True)
     if current is None:
+        # Bare ValueError on purpose: this is an invariant breach, not an
+        # expected client-visible outcome. There is NO hard-delete path for
+        # groups anywhere in the Protocol or the SQL store — they deactivate,
+        # and only member rows are ever DELETEd — so a group the planner just
+        # listed cannot disappear here except via out-of-band SQL or a store
+        # regression. A 500 that rolls the transaction back is the correct
+        # response to that. If a hard delete ever ships, this must become a
+        # typed error mapped to 409 in the same change.
         raise ValueError(f"sync plan entry's local group vanished before apply: {group_id}")
+    # The locked re-read re-verifies the entry's SCOPING PREMISE, not just its
+    # mirrored fields. The planner's scoped read deliberately includes
+    # owner-NULL rows, so a group that was unclaimed at plan time can be
+    # adopted by ANOTHER owner's import before this lock is taken. Declining
+    # only the owner stamp is not enough — the rename/membership writes would
+    # still land on that owner's group, and the GROUP_UPDATED row would carry
+    # THIS owner's content_owner_id on it. Fail the entry closed instead of
+    # absorbing it as UNCHANGED: a group whose jurisdiction moved mid-sync is
+    # precisely the state a silent no-op would hide from the operator.
+    #
+    # The message deliberately does NOT say "re-run": retrying cannot clear
+    # this. Once the row is stamped to someone else, the scoped read
+    # (list_synced_groups is owner-OR-NULL) no longer returns it, so the next
+    # plan sees the upstream key with no local match, emits CREATE, and
+    # collides on the tenant-unique cms_group_id — a different 409, forever.
+    # A wrong stamp has no API remedy today; see the clear-stamp item in
+    # Docs/pulls/2026-08-05-pr-tbd-cms-group-sync-report.md.
+    if current.content_owner_id not in (None, content_owner_id):
+        raise ChannelGroupOwnerReassignmentError(
+            f"channel group {group_id} is held by content owner "
+            f"{current.content_owner_id!r}; this sync for {content_owner_id!r} cannot "
+            "mirror it, and re-running will not release the claim"
+        )
     # Matching this owner's upstream key IS the proof of ownership, so an
     # owner-NULL legacy row is adopted here. Without the stamp it stays
     # unclaimable forever: _plan_entries_for_vanished_groups skips owner-NULL

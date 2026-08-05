@@ -58,6 +58,28 @@ class GroupSyncPlanEntry:
     members_added: tuple[str, ...]
     members_removed: tuple[str, ...]
     unknown_channel_ids: tuple[str, ...]
+    # Whether this key is in the CMS snapshot, which IS the mirrored active
+    # state ("YouTube wins": present => active, vanished => inactive). The
+    # apply layer takes the target from here rather than from active_change,
+    # because active_change is a diff against the PLAN-TIME snapshot and is
+    # therefore None for a group that was already active — leaving the write
+    # boundary blind to an operator archiving it in the plan-to-apply window
+    # (the group API deliberately still permits archiving a synced group).
+    # active_change stays the operator-facing "what will visibly flip".
+    upstream_present: bool = False
+    # True when applying this entry will also backfill content_owner_id on an
+    # owner-NULL legacy group. It rides the PLAN so the mandatory dry run
+    # previews that write like every other one; the apply re-verifies it under
+    # the row lock rather than trusting this snapshot.
+    #
+    # Divergence from the preview is ONE-DIRECTIONAL: true here can still not
+    # adopt (a racer claimed the row first — the apply then fails the sync
+    # closed rather than mirroring another owner's group), but false here can
+    # never turn into an adoption. content_owner_id is monotonic — update_group
+    # treats None as "unchanged", no route clears a stamp, and
+    # require_adoptable_owner forbids moving one — so a row that already names
+    # an owner at plan time still names that same owner at apply time.
+    will_adopt_content_owner: bool = False
 
 
 @dataclass(frozen=True)
@@ -75,6 +97,7 @@ def _plan_entry_for_upstream_item(
     *,
     local_by_key: Mapping[str, ChannelGroupEntry],
     known_channel_ids: frozenset[str],
+    content_owner_id: str | None,
 ) -> tuple[GroupSyncPlanEntry, int]:
     """Plan one upstream CMS group against its local match, if any.
 
@@ -99,6 +122,7 @@ def _plan_entry_for_upstream_item(
                 members_added=wanted_known,
                 members_removed=(),
                 unknown_channel_ids=unknown,
+                upstream_present=True,
             ),
             len(unknown),
         )
@@ -127,6 +151,12 @@ def _plan_entry_for_upstream_item(
             members_added=added,
             members_removed=removed,
             unknown_channel_ids=unknown,
+            upstream_present=True,
+            # Matching this owner's upstream key is what proves ownership, so
+            # an owner-NULL local match will be stamped at apply.
+            will_adopt_content_owner=(
+                content_owner_id is not None and local.content_owner_id is None
+            ),
         ),
         len(unknown),
     )
@@ -164,6 +194,7 @@ def _plan_entries_for_vanished_groups(
                 members_added=(),
                 members_removed=(),
                 unknown_channel_ids=(),
+                upstream_present=False,
             )
         )
     return entries
@@ -220,7 +251,10 @@ def plan_group_sync(
     for item in sorted(snapshot, key=lambda entry: entry.cms_group_id):
         non_channel_total += item.non_channel_member_count
         entry, unknown_count = _plan_entry_for_upstream_item(
-            item, local_by_key=local_by_key, known_channel_ids=known_channel_ids
+            item,
+            local_by_key=local_by_key,
+            known_channel_ids=known_channel_ids,
+            content_owner_id=content_owner_id,
         )
         unknown_total += unknown_count
         entries.append(entry)
