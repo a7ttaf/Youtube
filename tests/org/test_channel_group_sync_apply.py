@@ -249,6 +249,44 @@ def test_stale_members_changed_entry_already_applied_is_recounted_unchanged() ->
     assert executed["UNCHANGED"] == 1
 
 
+def test_partial_race_reports_the_outcome_that_actually_happened() -> None:
+    """A plan whose rename/activation a racer already landed is not mislabelled.
+
+    The entry plans REACTIVATE (activation + member churn), but by the write
+    boundary another writer has already reactivated the group and applied the
+    rename. Only membership is left for this request, so both the count and
+    the audit row must say MEMBERS_CHANGED — claiming REACTIVATE would assert
+    an activation this request never performed.
+    """
+    groups = _seeded(active=True, name="TV", channel_ids=(CH_A,))
+    sink = InMemoryAuditSink()
+
+    executed = _apply(
+        _plan(
+            _entry(
+                outcome=GroupSyncOutcome.REACTIVATE,
+                title="TV",
+                local_group_id="local-1",
+                name_change=("TV Sector", "TV"),
+                active_change=(False, True),
+                members_added=(CH_B,),
+            )
+        ),
+        groups,
+        sink,
+    )
+
+    assert executed["REACTIVATE"] == 0
+    assert executed["MEMBERS_CHANGED"] == 1
+    assert groups.writes == ["add_members"]
+    assert len(sink.records) == 1
+    record = sink.records[0]
+    assert record.details["outcome"] == "MEMBERS_CHANGED"
+    assert record.details["active_change"] is None
+    assert record.details["name_change"] is None
+    assert record.details["members_added"] == 1
+
+
 def test_deactivate_flips_active_and_leaves_membership_untouched() -> None:
     """A vanished CMS group deactivates locally; its members stay attached."""
     groups = _seeded(channel_ids=(CH_A, CH_B))

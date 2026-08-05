@@ -103,7 +103,13 @@ def apply_group_sync(
             # request did not make.
             executed[GroupSyncOutcome.UNCHANGED.value] += 1
             continue
-        executed[entry.outcome.value] += 1
+        # Label from what was WRITTEN, not what was planned. A partial race —
+        # another writer already flipped active or the name, leaving only
+        # membership for this request — would otherwise have the count and the
+        # audit row claim REACTIVATE/RENAME/DEACTIVATE for a request that only
+        # moved members.
+        outcome = _effective_outcome(entry, applied)
+        executed[outcome.value] += 1
         record_audit_event(
             sink=audit_sink,
             actor=actor,
@@ -116,7 +122,7 @@ def apply_group_sync(
                 "source": AUDIT_SOURCE_CMS_SYNC,
                 "content_owner_id": content_owner_id,
                 "cms_group_id": entry.cms_group_id,
-                "outcome": entry.outcome.value,
+                "outcome": outcome.value,
                 "name_change": list(applied.name_change) if applied.name_change else None,
                 "active_change": list(applied.active_change) if applied.active_change else None,
                 "members_added": len(applied.members_added),
@@ -160,6 +166,26 @@ def _execute_create(
         members_added=entry.members_added,
         members_removed=entry.members_removed,
     )
+
+
+def _effective_outcome(entry: GroupSyncPlanEntry, applied: _AppliedChange) -> GroupSyncOutcome:
+    """Return the outcome this apply ACTUALLY produced, not the planned one.
+
+    Mirrors the planner's dominance order (activation > rename > membership)
+    but reads it off the executed change, so a plan whose rename or activation
+    a concurrent writer already landed is reported as the MEMBERS_CHANGED it
+    really was. CREATE is definitionally what it did.
+    """
+    if entry.outcome is GroupSyncOutcome.CREATE:
+        return GroupSyncOutcome.CREATE
+    if applied.active_change is not None:
+        _, became_active = applied.active_change
+        return GroupSyncOutcome.REACTIVATE if became_active else GroupSyncOutcome.DEACTIVATE
+    if applied.name_change is not None:
+        return GroupSyncOutcome.RENAME
+    if applied.members_added or applied.members_removed:
+        return GroupSyncOutcome.MEMBERS_CHANGED
+    return GroupSyncOutcome.UNCHANGED
 
 
 @dataclass(frozen=True)
