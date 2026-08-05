@@ -15,11 +15,14 @@
 #   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> apply+audit.
 #   - File: backend/ums_smart_revenue/app.py -> dependency wiring.
 # ============================================================================
-"""Channel registry and bulk-import HTTP routes."""
+"""Channel registry, bulk-import, and CMS group sync HTTP routes."""
 
+from collections.abc import Callable
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from google.oauth2.credentials import Credentials
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -43,6 +46,21 @@ from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink, SqlAlchemyAuditSink
+from ums_smart_revenue.connectors.google.errors import (
+    CredentialNotFoundError,
+    GoogleConnectorError,
+    InactiveCredentialError,
+    OAuthRefreshError,
+)
+from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
+from ums_smart_revenue.connectors.google.youtube_groups_client import YouTubeGroupsClient
+from ums_smart_revenue.connectors.runs.orchestrator import resolve_connector_credentials
+from ums_smart_revenue.org.channel_group_sync import (
+    CmsGroupSnapshot,
+    GroupSyncPlan,
+    plan_group_sync,
+)
+from ums_smart_revenue.org.channel_group_sync_apply import apply_group_sync
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
     ChannelGroupRegistryStore,
@@ -73,6 +91,7 @@ from ums_smart_revenue.org.channel_registry import (
     bootstrap_channel_registry,
 )
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 
@@ -742,6 +761,204 @@ def _import_plan_to_api(
                     name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
                 },
                 "reason": entry.reason,
+            }
+            for entry in plan.entries
+        ],
+    }
+
+
+class GroupSyncRequest(BaseModel):
+    """Operator request to mirror a content owner's CMS groups."""
+
+    content_owner_id: str
+    dry_run: bool
+    reason: str
+
+
+def current_groups_client_factory() -> Callable[[Credentials], YouTubeGroupsClient]:
+    """Build a live groups client from resolved credentials (test-overridable)."""
+
+    def _factory(credentials: Credentials) -> YouTubeGroupsClient:
+        return YouTubeGroupsClient(http=GoogleHttpClient(credentials=credentials))
+
+    return _factory
+
+
+def _resolve_tenant_uuid(user: UserPrincipal) -> UUID:
+    """Resolve a trusted tenant UUID from the principal headers, falling back closed.
+
+    Replicated from ``api/connectors.py``, which owns the original: that module
+    imports THIS one at load time (audit_record_to_api / current_audit_sink), so
+    importing the helper back from it is a circular import that fails at
+    startup. Keep the two copies in step — both must fall back to the bootstrap
+    tenant instead of letting a malformed header raise a bare ValueError.
+    """
+    try:
+        return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+    except ValueError:
+        return UUID(UMS_TENANT_ID)
+
+
+# ============================================================================
+# Purpose: Mirror a YouTube CMS content owner's groups into channel_groups —
+#   titles, membership (adds AND removals), deactivation of vanished groups,
+#   reactivation of reappearing keys. Mandatory dry-run; YouTube wins.
+# Database/ORM: ChannelGroupORM/ChannelGroupMemberORM via the group store;
+#   ApiConnectorCredentialORM read via resolve_connector_credentials.
+# Standards: Global MANAGE_GROUPS fail-closed (group writes must not bypass
+#   the group API's authorization); fetch completes before any write; single
+#   tenant transaction so a mid-apply failure rolls groups + audit together;
+#   GROUPS_SYNCED summary uses ACTUAL apply counts, never the plan's; canned
+#   error details only — Google/credential exception text never reaches HTTP.
+# Blast Radius: Group naming/membership/active state, audit. Finance
+#   group-scope rollups change composition only as the CMS does. No channel
+#   rows are ever created here (unknown members surface in the response).
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_group_sync.py -> planner.
+#   - File: backend/ums_smart_revenue/org/channel_group_sync_apply.py -> apply.
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_groups_client.py.
+# ============================================================================
+@router.post("/groups/sync")
+def sync_channel_groups(
+    payload: GroupSyncRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    session: Annotated[Session, Depends(current_db_session)],
+    registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
+    groups: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    client_factory: Annotated[
+        Callable[[Credentials], YouTubeGroupsClient], Depends(current_groups_client_factory)
+    ],
+) -> dict[str, object]:
+    """Mirror the content owner's CMS groups locally, previewing or applying."""
+    target_scope = AccessScope.global_scope()
+    if not has_permission(user, Permission.MANAGE_GROUPS, target_scope, org_index):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
+        )
+    content_owner_id = payload.content_owner_id.strip()
+    reason = payload.reason.strip()
+    if not content_owner_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="content_owner_id is required",
+        )
+    if not reason:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="reason is required",
+        )
+
+    try:
+        credentials = resolve_connector_credentials(
+            session=session,
+            tenant_id=_resolve_tenant_uuid(user),
+            connector_key="youtube-analytics",
+            account_id=content_owner_id,
+        )
+    except (CredentialNotFoundError, InactiveCredentialError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "No active youtube-analytics credential for this content owner; "
+                "register one before syncing groups."
+            ),
+        ) from exc
+    except OAuthRefreshError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Google credential token refresh failed; "
+                "check that the credential secret is current."
+            ),
+        ) from exc
+
+    client = client_factory(credentials)
+    try:
+        cms_groups = client.list_groups(account_id=content_owner_id)
+        snapshot = tuple(
+            CmsGroupSnapshot(
+                cms_group_id=group.cms_group_id,
+                title=group.title,
+                member_channel_ids=members.channel_ids,
+                non_channel_member_count=members.non_channel_count,
+            )
+            for group in cms_groups
+            for members in (
+                client.list_group_items(group_id=group.cms_group_id, account_id=content_owner_id),
+            )
+        )
+    except GoogleConnectorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "YouTube groups fetch failed; check connector configuration and account access."
+            ),
+        ) from exc
+
+    local_groups = tuple(groups.list_synced_groups())
+    member_ids = {cid for item in snapshot for cid in item.member_channel_ids}
+    known = frozenset(
+        entry.youtube_channel_id for entry in registry.list_channels_by_ids(member_ids)
+    )
+    plan = plan_group_sync(snapshot=snapshot, local_groups=local_groups, known_channel_ids=known)
+    payload_out = _group_sync_plan_to_api(
+        plan, dry_run=payload.dry_run, content_owner_id=content_owner_id
+    )
+    if payload.dry_run:
+        return payload_out
+
+    executed = apply_group_sync(
+        plan,
+        groups=groups,
+        audit_sink=audit_sink,
+        actor=user,
+        scope=target_scope,
+        content_owner_id=content_owner_id,
+        reason=reason,
+    )
+    record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.GROUPS_SYNCED,
+        entity_type="channel_group_sync",
+        entity_id=content_owner_id,
+        scope=target_scope,
+        reason=reason,
+        details={
+            "content_owner_id": content_owner_id,
+            "counts": executed,
+            "unknown_channel_total": plan.unknown_channel_total,
+            "non_channel_member_count": plan.non_channel_member_count,
+        },
+    )
+    return payload_out
+
+
+def _group_sync_plan_to_api(
+    plan: GroupSyncPlan, *, dry_run: bool, content_owner_id: str
+) -> dict[str, object]:
+    """Render a sync plan as the API response body (identical for both modes)."""
+    return {
+        "dry_run": dry_run,
+        "content_owner_id": content_owner_id,
+        "counts": dict(plan.counts),
+        "unknown_channel_total": plan.unknown_channel_total,
+        "non_channel_member_count": plan.non_channel_member_count,
+        "groups": [
+            {
+                "cms_group_id": entry.cms_group_id,
+                "outcome": entry.outcome.value,
+                "title": entry.title,
+                "local_group_id": entry.local_group_id,
+                "name_change": list(entry.name_change) if entry.name_change else None,
+                "active_change": list(entry.active_change) if entry.active_change else None,
+                "members_added": list(entry.members_added),
+                "members_removed": list(entry.members_removed),
+                "unknown_channel_ids": list(entry.unknown_channel_ids[:50]),
+                "unknown_channel_count": len(entry.unknown_channel_ids),
             }
             for entry in plan.entries
         ],
