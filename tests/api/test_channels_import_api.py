@@ -895,7 +895,7 @@ def test_dry_run_discloses_the_ownership_stamp_an_adoption_performs():
 
 def test_dry_run_does_not_claim_an_adoption_for_a_group_already_owned():
     """The flag must be false when the apply has no ownership write to make."""
-    client, registry, groups, audit_sink = create_import_app()
+    client, _registry, groups, _audit_sink = create_import_app()
     groups.create_group(
         name="Mine",
         group_type="SECTOR",
