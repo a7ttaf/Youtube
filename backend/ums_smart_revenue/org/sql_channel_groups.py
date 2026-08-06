@@ -49,6 +49,7 @@ from ums_smart_revenue.db.org_models import (
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
     ChannelGroupEntry,
+    ChannelGroupNoOwnerStampError,
     require_adoptable_owner,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -486,6 +487,46 @@ class SqlAlchemyChannelGroupRegistry:
         if content_owner_id is not None:
             require_adoptable_owner(row.content_owner_id, content_owner_id, group_id=group_id)
             row.content_owner_id = content_owner_id
+        self._session.flush()
+        return self._to_entry(row)
+
+    # ========================================================================
+    # Purpose: Erase a group's content-owner stamp — the one sanctioned admin
+    #   recovery path for a wrong stamp (adoption is one-way, so an API-level
+    #   fix has no other route). Returns the group to the adoptable pool so
+    #   the correct owner's next sync can adopt it.
+    # Database/ORM: ChannelGroupORM row-locked FOR NO KEY UPDATE (mirrors the
+    #   get_group_by_cms_id/_get_group_row for_update idiom), then a plain
+    #   column write and flush. No membership touched.
+    # Standards: KeyError on an unknown/cross-tenant group id (the store's
+    #   existing convention); ChannelGroupNoOwnerStampError when
+    #   content_owner_id is already NULL — clearing nothing is a caller bug,
+    #   not a silent no-op. Does NOT route through require_adoptable_owner:
+    #   that guard governs SETTING an owner, not erasing one. The row lock is
+    #   taken BEFORE the NULL check so the check itself observes a
+    #   consistent value under concurrency; SQLite ignores FOR UPDATE
+    #   (single-writer), matching every other locked read in this file.
+    # Blast Radius: Channel-group ownership only. No membership, no revenue
+    #   math, no audit of its own — the caller (the DELETE route) audits.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_groups.py -> Protocol +
+    #     in-memory parity implementation.
+    #   - File: backend/ums_smart_revenue/api/groups.py -> the sanctioned
+    #     DELETE /groups/{id}/content-owner route.
+    # ========================================================================
+    def clear_content_owner(self, *, group_id: str) -> ChannelGroupEntry:
+        """Erase a group's owner stamp, returning it to the adoptable pool.
+
+        Row-locks the group FOR NO KEY UPDATE (the get_group_by_cms_id
+        for_update idiom) so a concurrent adopt serializes against the clear.
+        Raises ChannelGroupNoOwnerStampError when there is nothing to clear.
+        """
+        row = self._require_group_row(group_id, for_update=True)
+        if row.content_owner_id is None:
+            raise ChannelGroupNoOwnerStampError(
+                f"channel group {group_id} has no content-owner stamp to clear"
+            )
+        row.content_owner_id = None
         self._session.flush()
         return self._to_entry(row)
 

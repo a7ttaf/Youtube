@@ -991,3 +991,75 @@ def test_create_group_duplicate_cms_key_raises_typed_conflict() -> None:
         registry.create_group(
             name="TV Again", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv"
         )
+
+
+# ---------------------------------------------------------------------------
+# clear_content_owner
+# ---------------------------------------------------------------------------
+
+
+def test_clear_content_owner_persists_null_and_leaves_other_fields_unchanged() -> None:
+    """A cleared stamp round-trips as NULL and the rest of the row is untouched."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    group = registry.create_group(
+        name="TV Sector",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL],
+        cms_group_id="cms-tv",
+        content_owner_id="owner-a",
+    )
+
+    cleared = registry.clear_content_owner(group_id=group.id)
+
+    assert cleared.content_owner_id is None
+    assert cleared.name == "TV Sector"
+    assert cleared.cms_group_id == "cms-tv"
+    assert cleared.channel_ids == (CHANNEL_DEFAULT_A_EXTERNAL,)
+    assert cleared.active is True
+
+    row = session.scalars(select(ChannelGroupORM).where(ChannelGroupORM.id == UUID(group.id))).one()
+    assert row.content_owner_id is None
+
+
+def test_clear_content_owner_on_owner_null_group_raises_typed_error() -> None:
+    """Clearing an already owner-NULL group raises instead of no-op-ing."""
+    from ums_smart_revenue.org.channel_groups import ChannelGroupNoOwnerStampError
+
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    group = registry.create_group(
+        name="Legacy Sector",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-legacy",
+    )
+
+    with pytest.raises(ChannelGroupNoOwnerStampError, match=group.id):
+        registry.clear_content_owner(group_id=group.id)
+
+
+def test_clear_content_owner_for_cross_tenant_group_raises_keyerror() -> None:
+    """`_require_group_row` rejects clear_content_owner on another tenant's group."""
+    session = build_session()
+    seed_org(session)
+
+    other_group = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID).create_group(
+        name="Other Group",
+        group_type="CUSTOM_GROUP",
+        channel_ids=[CHANNEL_OTHER_EXTERNAL],
+        cms_group_id="cms-other",
+        content_owner_id="owner-b",
+    )
+
+    default_registry = SqlAlchemyChannelGroupRegistry(session)
+    with pytest.raises(KeyError, match=other_group.id):
+        default_registry.clear_content_owner(group_id=other_group.id)
+
+    other_group_after = SqlAlchemyChannelGroupRegistry(
+        session, tenant_id=OTHER_TENANT_ID
+    ).get_group(other_group.id)
+    assert other_group_after is not None
+    assert other_group_after.content_owner_id == "owner-b"

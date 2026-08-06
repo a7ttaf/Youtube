@@ -58,6 +58,18 @@ def require_adoptable_owner(current: str | None, incoming: str, *, group_id: str
         )
 
 
+class ChannelGroupNoOwnerStampError(ValueError):
+    """A clear was requested on a group that has no content-owner stamp.
+
+    ``clear_content_owner`` is the one sanctioned eraser for a wrong stamp
+    (admin recovery once the group's owner can no longer be fixed by an
+    import or sync, both of which are adopt-only). Raising here instead of
+    silently no-opping means a caller cannot mistake "nothing to clear" for
+    "cleared" — the API layer maps this to a 409 telling the operator there
+    was no stamp on the group they targeted.
+    """
+
+
 class ChannelGroupConflictError(ValueError):
     """A group write lost a uniqueness race (duplicate per-tenant cms_group_id).
 
@@ -188,6 +200,14 @@ class ChannelGroupRegistryStore(Protocol):
         group sync can ADOPT an owner-NULL legacy group once the upstream key
         proves ownership; it never reassigns a group that already carries an
         owner.
+        """
+
+    def clear_content_owner(self, *, group_id: str) -> ChannelGroupEntry:
+        """Erase a group's owner stamp, returning it to the adoptable pool.
+
+        The adopt-only guard governs SETTING an owner; this is the one
+        sanctioned eraser (admin recovery for a wrong stamp). Raises
+        ChannelGroupNoOwnerStampError when there is nothing to clear.
         """
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
@@ -337,6 +357,21 @@ class ChannelGroupRegistry:
                 content_owner_id if content_owner_id is not None else group.content_owner_id
             ),
         )
+        self._groups[group_id] = updated
+        return updated
+
+    def clear_content_owner(self, *, group_id: str) -> ChannelGroupEntry:
+        """Erase a group's owner stamp, returning it to the adoptable pool.
+
+        Does NOT route through require_adoptable_owner: that guard governs
+        SETTING an owner, not erasing one.
+        """
+        group = self._require_group(group_id)
+        if group.content_owner_id is None:
+            raise ChannelGroupNoOwnerStampError(
+                f"channel group {group_id} has no content-owner stamp to clear"
+            )
+        updated = replace(group, content_owner_id=None)
         self._groups[group_id] = updated
         return updated
 
