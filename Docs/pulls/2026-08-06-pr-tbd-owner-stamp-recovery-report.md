@@ -109,12 +109,23 @@ All local against Postgres 18.
 
 | Gate | Result |
 | --- | --- |
-| Full suite `pytest -q` with Postgres | 2688 passed, 0 failed |
-| `ruff check backend tests scripts` | All checks passed |
-| `ruff format --check` (14 touched `.py`) | All formatted |
+| Full suite `pytest -q` with Postgres | 2692 passed, 0 failed (exit 0) |
+| `ruff check backend tests` | All checks passed |
+| `ruff format --check` | 458 files already formatted |
+| `mypy` on the changed backend modules | No issues in 3 source files |
 | 100-char guard | No violations |
 | Alembic (no migration in PR) | single head `20260805_0001` |
 | `git diff --check` | Clean |
+
+The count rose from 2688 to 2692 with the review fixes: the Postgres-tier
+stale-audit guard, two API-tier NUL-reason guards (the clear route and the
+member-remove route the shared helper also protects), and an in-memory store
+assertion on the erased owner id.
+
+Postgres-tier tests must not run concurrently with another pytest session
+against the same container — `_purge_test_rows` is module-scoped and deletes
+rows a parallel run seeded. The number above is from a run with nothing else
+touching the database.
 
 Postgres tier (4 new tests): clear persists + re-adoption on the real
 engine; **clear-vs-adopt serialization proven with `pg_blocking_pids()`**
