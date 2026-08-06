@@ -1,3 +1,20 @@
+# ============================================================================
+# Purpose: Load process-level runtime settings from UMS_* environment
+#   variables into the frozen AppSettings dataclass (cached via lru_cache),
+#   including the connector job-executor and group-sync scheduler flags the
+#   app boot wiring enforces fail-fast.
+# Database/ORM: None.
+# Standards: every setting is read through an explicit UMS_* env constant;
+#   strict truthy/falsy token parsing; no implicit defaults for identity or
+#   URL values. Callers consume load_app_settings(), never os.environ
+#   directly.
+# Blast Radius: App boot wiring only -- the feature flags gate thread-
+#   spawning workers at startup. No authorization, finance, audit, or export
+#   behavior.
+# Connections:
+#   - File: backend/ums_smart_revenue/app.py -> create_app consumes
+#     AppSettings and enforces the cross-flag fail-fast contract.
+# ============================================================================
 """Runtime configuration loaded from UMS_* environment variables."""
 
 from dataclasses import dataclass

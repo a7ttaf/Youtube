@@ -105,6 +105,27 @@ _CREDENTIAL_STATUS_ACTIVE = "active"
 _CLOSE_JOIN_TIMEOUT_SECONDS = 10.0
 
 
+# ============================================================================
+# Purpose: Daemon-thread scheduler that ticks once per interval and submits a
+#   CMS group-sync reservation for every ACTIVE tenant's active
+#   youtube-analytics credential, so grouping converges without an operator
+#   curling the manual sync route. The full design contract (tenants
+#   exemption, shared-session rollback discipline, fault isolation) sits in
+#   the module contract block at the top of this file.
+# Database/ORM: reads TenantORM + api_connector_credentials through one
+#   shared, explicitly-rolled-back session per tick; writes NOTHING itself --
+#   the executor worker it activates owns every domain and audit row.
+# Standards: explicit start()/close() with a weakref.finalize GC backstop;
+#   per-tenant fault isolation inside tick(); the stop flag is checked per
+#   tenant and per submission so close() halts NEW submissions promptly;
+#   _tick_safely never lets a poisoned tick kill the thread.
+# Blast Radius: Triggers CMS group-sync jobs on a timer; the jobs inherit the
+#   audit/RLS/atomicity guarantees of the shared group_sync.py core.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     submit_group_sync_if_absent / activate / cancel_reservation.
+#   - File: backend/ums_smart_revenue/app.py -> boot wiring + lifespan close.
+# ============================================================================
 class GroupSyncScheduler:
     """Tick a background thread that submits CMS group-sync jobs for ACTIVE tenants.
 
@@ -175,10 +196,22 @@ class GroupSyncScheduler:
         ``Event.set()`` wakes a thread blocked in ``Event.wait(interval)``
         immediately, so the join below is prompt even with a long interval --
         it does not wait for the next scheduled tick.
+
+        A thread still alive after the bounded join is winding down, not
+        starting new work -- ``tick`` checks the stop flag per tenant and per
+        submission -- but the app lifespan closes the executor right behind
+        us, so that case is logged as a warning rather than silently racing
+        executor shutdown.
         """
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=_CLOSE_JOIN_TIMEOUT_SECONDS)
+            if self._thread.is_alive():
+                logger.warning(
+                    "group-sync scheduler thread still running after %.1fs join;"
+                    " shutdown proceeds (stop flag blocks new submissions)",
+                    _CLOSE_JOIN_TIMEOUT_SECONDS,
+                )
         self._finalizer.detach()
 
     def _run_loop(self) -> None:
@@ -233,6 +266,11 @@ class GroupSyncScheduler:
             submitted_total = 0
             in_flight_total = 0
             for tenant_id in tenant_ids:
+                if self._stop.is_set():
+                    # close() began mid-tick: stop making NEW submissions now
+                    # -- the executor may be shutting down right behind us.
+                    logger.info("group-sync tick aborted early: scheduler is closing")
+                    break
                 try:
                     with connector_tenant_context(tenant_id, session=session):
                         submitted, in_flight = self._submit_for_tenant(session, tenant_id=tenant_id)
@@ -287,12 +325,20 @@ class GroupSyncScheduler:
         in_flight_skipped = 0
         offset = 0
         while True:
+            if self._stop.is_set():
+                # close() began mid-tenant: return what we have; the tick's
+                # per-tenant check stops the loop above us.
+                return submitted, in_flight_skipped
             page = repository.list_credentials(
                 connector_keys=frozenset({YOUTUBE_ANALYTICS_CONNECTOR}),
                 limit=_CREDENTIAL_LIST_PAGE_SIZE,
                 offset=offset,
             )
             for entry in page.items:
+                if self._stop.is_set():
+                    # Same close() race, one level finer: stop submitting
+                    # mid-page instead of draining the tenant's credentials.
+                    return submitted, in_flight_skipped
                 if entry.status != _CREDENTIAL_STATUS_ACTIVE:
                     continue
                 reservation = self._executor.submit_group_sync_if_absent(

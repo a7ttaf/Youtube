@@ -602,3 +602,51 @@ def test_close_audits_queued_sync_job_with_before_start_row(
     assert shutdown[0].entity_id == f"{GROUP_SYNC_JOB_CONNECTOR_SLUG}:{CONTENT_OWNER}"
     assert shutdown[0].details["action"] == "job_failed_before_start"
     assert shutdown[0].details["report_month"] == GROUP_SYNC_JOB_MONTH
+
+
+def test_activate_enqueue_failure_drops_reservation(tmp_path: Path) -> None:
+    """A pool refusing the worker must NOT wedge the slot as in-flight forever.
+
+    Qodo PR-171 finding ("wedge on activate exception"): if
+    ``ThreadPoolExecutor.submit`` raises inside ``activate`` (e.g. shutdown
+    raced the enqueue), the reservation used to stay in the registry, so
+    every later scheduled sync for that (tenant, owner) was dedup-skipped
+    until process restart -- a transient failure became a permanent liveness
+    failure. The fix is compare-and-delete cleanup inside ``activate``
+    itself: OUR reservation is dropped while the lock is held, the exception
+    still propagates for the caller to log, and the next tick can claim the
+    slot again.
+    """
+    factory = _factory(tmp_path)
+    executor = _executor(factory)
+    try:
+        reservation = executor.submit_group_sync_if_absent(
+            tenant_id=TENANT, content_owner_id=CONTENT_OWNER, actor_identity=ACTOR
+        )
+        assert reservation is not None
+
+        with patch.object(
+            executor._executor,
+            "submit",
+            side_effect=RuntimeError("cannot schedule new futures after shutdown"),
+        ):
+            with pytest.raises(RuntimeError, match="cannot schedule new futures"):
+                executor.activate(reservation)
+
+        # The wedge, before the fix: the key was still in the registry here.
+        assert not executor.has_active_job(
+            tenant_id=TENANT,
+            connector_key=GROUP_SYNC_JOB_CONNECTOR_SLUG,
+            account_id=CONTENT_OWNER,
+            report_month=GROUP_SYNC_JOB_MONTH,
+        )
+
+        # The retry path: the slot is claimable again immediately.
+        retry = executor.submit_group_sync_if_absent(
+            tenant_id=TENANT, content_owner_id=CONTENT_OWNER, actor_identity=ACTOR
+        )
+        assert retry is not None
+        # No real worker needed for the assertion; release the slot cleanly.
+        assert executor.cancel_reservation(retry) is True
+    finally:
+        executor.close()

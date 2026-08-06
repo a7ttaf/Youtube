@@ -1,3 +1,26 @@
+# ============================================================================
+# Purpose: In-process bounded executor that runs connector pulls (and CMS
+#   group-sync jobs) off the request thread, with an atomic reserve ->
+#   activate registry that makes duplicate concurrent submissions impossible
+#   and a failed audit commit a no-op for the worker. The detailed class
+#   contract sits directly above ConnectorJobExecutor below.
+# Database/ORM: opens its own Session per job via session_factory; workers
+#   write connector_runs/audit_logs and (group-sync) channel-group rows; the
+#   shutdown path audits cancelled queued futures as job_failed_before_start.
+# Standards: module-owned threads with a weakref.finalize GC backstop plus an
+#   explicit close(); workers never propagate exceptions out of the thread
+#   (typed failures are audited, everything else is logged); registry slots
+#   are dropped on every path, including a failed worker enqueue.
+# Blast Radius: Authorization (tenant-pinned workers), audit rows, connector
+#   run lifecycle, and group naming/membership state via the group-sync
+#   worker. No finance math.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> the route's
+#     submit_if_absent + after_commit.activate / after_rollback.cancel flow.
+#   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> the only
+#     scheduled submitter of the group-sync job kind.
+#   - File: backend/ums_smart_revenue/app.py -> lifespan close() wiring.
+# ============================================================================
 """In-process bounded executor that runs connector pulls off the request thread."""
 
 from __future__ import annotations
@@ -59,7 +82,7 @@ _JobKey = tuple[UUID, str, str, str]
 # collide: no real connector is keyed "cms_group_sync", so the two live in
 # disjoint connector-key namespaces and dedup/has_active_job/_deregister need no
 # special-casing.
-# FIX: named ..._SLUG, not ..._KEY -- a "KEY = <string literal>" module constant
+# NOTE: named ..._SLUG, not ..._KEY -- a "KEY = <string literal>" module constant
 # trips hardcoded-credential scanners, and this value is a namespace slug, never
 # a secret.
 GROUP_SYNC_JOB_CONNECTOR_SLUG = "cms_group_sync"
@@ -300,6 +323,13 @@ class ConnectorJobExecutor:
         already activated. Raises ``RuntimeError`` if the registry no
         longer holds the reservation (e.g. it was cancelled or replaced
         by a re-submission with the same key).
+
+        Fail-closed on enqueue failure: if the pool refuses the worker
+        (e.g. ``shutdown`` raced ``activate``), the reservation is dropped
+        from the registry while the lock is still held, so a transient
+        submit failure can never wedge the slot as in-flight forever --
+        the next submission (a scheduler tick or a route retry) can claim
+        it again.
         """
         key = reservation.key
         with self._lock:
@@ -310,7 +340,17 @@ class ConnectorJobExecutor:
                 return current
             if current is not reservation:
                 raise RuntimeError(f"reservation for {key} was deregistered or replaced")
-            future = self._enqueue_worker(reservation)
+            try:
+                future = self._enqueue_worker(reservation)
+            except Exception:
+                # Compare-and-delete: only drop the entry if it is still THIS
+                # reservation (a concurrent cancel/resubmission could not have
+                # run under the lock, but the identity check keeps the
+                # invariant explicit). Then re-raise so the caller audits/logs
+                # the real failure instead of a phantom in-flight slot.
+                if self._registry.get(key) is reservation:
+                    del self._registry[key]
+                raise
             self._stash_and_register(
                 future=future,
                 key=key,

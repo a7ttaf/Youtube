@@ -129,6 +129,26 @@ def default_groups_client_factory(credentials: Credentials) -> YouTubeGroupsClie
     return YouTubeGroupsClient(http=GoogleHttpClient(credentials=credentials))
 
 
+# ============================================================================
+# Purpose: HTTP-free core that resolves one content owner's CMS groups,
+#   fetches the remote grouping state, plans against stored state, and
+#   previews (dry run) or applies the changes -- the ONE implementation
+#   shared by the manual sync route and the scheduled executor worker.
+# Database/ORM: drives the channel registry, group registry, and audit sink
+#   stores on the CALLER's session; the caller owns the transaction boundary
+#   (domain rows + per-group GROUP_UPDATED rows commit together).
+# Standards: typed domain errors (GoogleConnectorError / GroupSyncFetchError
+#   / GroupSyncConflictRefusedError) propagate for the caller to map; this
+#   module NEVER raises HTTPException and NEVER writes the run-level
+#   GROUPS_SYNCED summary -- both stay caller-owned.
+# Blast Radius: Group naming/membership/active state and per-group audit
+#   rows; no finance math, no authorization changes.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> the manual sync
+#     route (POST /channels/groups/sync) drives this core.
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     _run_group_sync_job drives it from the scheduled worker.
+# ============================================================================
 def run_group_sync(
     session: Session,
     *,

@@ -30,6 +30,8 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -57,6 +59,7 @@ TENANT_B = uuid4()
 TENANT_SUSPENDED = uuid4()
 
 OWNER_A_ACTIVE = "OwnerAActiveAAAAAAAAAA"
+OWNER_A_SECOND_ACTIVE = "OwnerASecondActiveAAAA"
 OWNER_A_INACTIVE = "OwnerAInactiveXXXXXXXX"
 OWNER_A_OTHER_CONNECTOR = "OwnerAOtherConnXXXXXXX"
 OWNER_B_ACTIVE = "OwnerBActiveBBBBBBBBBB"
@@ -405,3 +408,93 @@ def test_close_without_start_is_harmless(tmp_path: Path) -> None:
     scheduler = _scheduler(factory, _RecordingExecutor())
 
     scheduler.close()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# close() vs in-flight tick: the stop flag blocks NEW submissions at every
+# loop level, and a thread outliving the bounded join is warned, not raced.
+# ---------------------------------------------------------------------------
+
+
+def test_tick_aborts_new_submissions_once_close_begins(tmp_path: Path) -> None:
+    """Stop set mid-tick: the current submission finishes, NO new ones start.
+
+    Qodo PR-171 finding ("close returns while thread runs"): close() could
+    return while a tick kept submitting into a shutting-down executor. The
+    fix: tick() checks the stop flag per tenant and _submit_for_tenant checks
+    it per page and per credential, so a closing scheduler halts new
+    submissions right after the current one. Two ACTIVE tenants, with TWO
+    active credentials on tenant A, prove both levels: tenant A's SECOND
+    credential is never attempted (per-entry guard) and tenant B is never
+    reached (per-tenant guard).
+    """
+    factory = _factory(tmp_path)
+    with factory() as session:
+        _seed_tenant(session, tenant_id=TENANT_A, status=TenantStatus.ACTIVE, slug="tenant-a")
+        _seed_tenant(session, tenant_id=TENANT_B, status=TenantStatus.ACTIVE, slug="tenant-b")
+        for owner in (OWNER_A_ACTIVE, OWNER_A_SECOND_ACTIVE):
+            _seed_credential(
+                session,
+                tenant_id=TENANT_A,
+                connector_key=YOUTUBE_ANALYTICS_CONNECTOR,
+                account_id=owner,
+                status="active",
+            )
+        _seed_credential(
+            session,
+            tenant_id=TENANT_B,
+            connector_key=YOUTUBE_ANALYTICS_CONNECTOR,
+            account_id=OWNER_B_ACTIVE,
+            status="active",
+        )
+        session.commit()
+    fake = _RecordingExecutor()
+    scheduler = _scheduler(factory, fake)
+
+    real_activate = fake.activate
+
+    def _closing_activate(reservation: _RecordedSubmission) -> _RecordedSubmission:
+        """First activation simulates close() landing mid-tick."""
+        scheduler._stop.set()
+        return real_activate(reservation)
+
+    fake.activate = _closing_activate  # type: ignore[method-assign]
+
+    scheduler.tick()
+
+    # Exactly ONE attempt+activation: whichever tenant-A credential the page
+    # yielded first. The stop flag blocked its sibling and tenant B alike.
+    assert len(fake.attempted) == 1
+    only = fake.attempted[0]
+    assert only[0] == TENANT_A
+    assert only[1] in {OWNER_A_ACTIVE, OWNER_A_SECOND_ACTIVE}
+    assert [(s.tenant_id, s.content_owner_id) for s in fake.activated] == [only]
+
+
+def test_close_warns_when_thread_outlives_join(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A tick thread still alive after the bounded join is warned, not silently raced.
+
+    Qodo PR-171 finding: close() used to return without verifying the thread
+    exited, letting the app lifespan close the executor while a tick was
+    still running. close() now checks is_alive() after the join and logs a
+    warning (the stop flag still blocks new submissions from that thread).
+    """
+    factory = _factory(tmp_path)
+    scheduler = _scheduler(factory, _RecordingExecutor())
+    gate = threading.Event()
+    zombie = threading.Thread(target=gate.wait, name="ums-test-zombie", daemon=True)
+    zombie.start()
+    scheduler._thread = zombie  # a start()ed thread stuck mid-tick
+    monkeypatch.setattr(scheduler_module, "_CLOSE_JOIN_TIMEOUT_SECONDS", 0.01)
+
+    with caplog.at_level(logging.WARNING, logger=scheduler_module.logger.name):
+        scheduler.close()
+
+    gate.set()
+    zombie.join(timeout=1)
+    assert "still running" in caplog.text
+    assert not zombie.is_alive()
