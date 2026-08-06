@@ -62,9 +62,11 @@ governs setting; this is the sanctioned eraser.
 
 ## Review fixes (post-first-push)
 
-Three findings from the review pass. The first two are defects, each fixed
-with a proof that fails without the fix; the third is a structural one that
-was initially declined and then implemented on Mahmoud's call:
+Seven findings across three review rounds. The first two are defects, each
+fixed with a proof that fails without the fix; the third is a structural one
+that was initially declined and then implemented on Mahmoud's call; the last
+four were introduced BY that implementation and caught only because the
+review re-ran against the fix:
 
 1. **NUL in the query reason was an unhandled 500.** `_normalize_query_reason`
    stripped and blank-checked but did not reject `\x00`, and the reason lands
@@ -113,6 +115,34 @@ was initially declined and then implemented on Mahmoud's call:
    `_registry_not_found`. That matches what the route's own header already
    promised — `str(exc)` never reaches HTTP.
 
+4. **The route returned an assembled dict.** Replaced with a declared
+   `ClearContentOwnerResponse` (group fields + `content_owner_id` +
+   `GroupAuditEventResponse`). The emitted key set was checked identical to
+   the previous `to_api()`-plus-two-keys payload, so no client sees a change.
+   The audit event is projected field-by-field from the `AuditRecord` rather
+   than splatting `audit_record_to_api`'s `dict[str, object]` — mypy rejects
+   that splat, and the explicit form makes omitting `user_id`, `details`, and
+   `permission` a checked decision instead of a consequence of whichever keys
+   that helper happens to return.
+5. **The service signalled "not found" with a bare `KeyError`.** A non-HTTP
+   caller cannot tell that apart from a lookup bug inside store internals it
+   does not own. Now `ChannelGroupNotFoundError`, with the store's own
+   `KeyError` translated at the service boundary so the untyped signal never
+   escapes. It subclasses `LookupError` and deliberately NOT `KeyError`:
+   inheriting from `KeyError` would let a bare `except KeyError` keep
+   swallowing it, which is the ambiguity the typed error exists to remove.
+   Pinned by `test_typed_not_found_does_not_masquerade_as_a_keyerror`.
+6. **Missing contract block on the new service entry point.** The module had
+   one at the top; the convention (`sql_channel_groups.py`,
+   `channel_import_apply.py`) is per-function. Added directly above
+   `clear_group_owner_stamp`.
+7. **Missing return annotation** on the `_clear` test helper.
+
+Findings 4–7 are the useful lesson of this PR: the FIX for a review finding
+needs reviewing as much as the original code did. All four came from the
+service extraction in finding 3, and none would have surfaced if the review
+had stopped at the first green re-run.
+
 ## Recovery loop, end to end
 
 wrong stamp → `DELETE /groups/{id}/content-owner` → correct owner's sync
@@ -125,19 +155,20 @@ All local against Postgres 18.
 
 | Gate | Result |
 | --- | --- |
-| Full suite `pytest -q` with Postgres | 2696 passed, 0 failed (exit 0) |
+| Full suite `pytest -q` with Postgres | 2697 passed, 0 failed (exit 0) |
 | `ruff check backend tests` | All checks passed |
-| `ruff format --check` | 458 files already formatted |
-| `mypy` on the changed backend modules | No issues in 3 source files |
+| `ruff format --check` | 460 files already formatted |
+| `mypy` on the changed backend modules | No issues found |
 | 100-char guard | No violations |
 | Alembic (no migration in PR) | single head `20260805_0001` |
 | `git diff --check` | Clean |
 
-The count rose from 2688 to 2696 with the review fixes: the Postgres-tier
+The count rose from 2688 to 2697 with the review fixes: the Postgres-tier
 stale-audit guard, two API-tier NUL-reason guards (the clear route and the
 member-remove route the shared helper also protects), an in-memory store
-assertion on the erased owner id, and the four domain-tier tests the
-service extraction made possible.
+assertion on the erased owner id, the four domain-tier tests the service
+extraction made possible, and the guard proving the typed not-found error
+does not masquerade as a `KeyError`.
 
 Postgres-tier tests must not run concurrently with another pytest session
 against the same container — `_purge_test_rows` is module-scoped and deletes
