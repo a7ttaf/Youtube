@@ -515,14 +515,18 @@ def test_abandoned_running_scheduler_is_collected_and_stopped(tmp_path: Path) ->
     exits on its next wake.
     """
     factory = _factory(tmp_path)
-    scheduler = _scheduler(factory, _RecordingExecutor(), interval_seconds=3600.0)
-    scheduler.start()
-    thread = scheduler._thread
-    assert thread is not None
+
+    def _spawn() -> tuple[threading.Thread, weakref.ref[scheduler_module.GroupSyncScheduler]]:
+        """Start a scheduler; its last strong reference dies when this frame exits."""
+        scheduler = _scheduler(factory, _RecordingExecutor(), interval_seconds=3600.0)
+        scheduler.start()
+        assert scheduler._thread is not None
+        assert scheduler._thread.is_alive()
+        return scheduler._thread, weakref.ref(scheduler)
+
+    thread, scheduler_ref = _spawn()
     assert thread.is_alive()
 
-    scheduler_ref = weakref.ref(scheduler)
-    del scheduler
     gc.collect()
 
     # The live thread must NOT keep the scheduler alive: it is collected,

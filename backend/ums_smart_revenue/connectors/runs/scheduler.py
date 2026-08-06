@@ -195,26 +195,32 @@ class GroupSyncScheduler:
         # bound target strongly retains this scheduler for the thread's whole
         # lifetime, which made the weakref.finalize GC backstop above
         # un-fireable for an abandoned RUNNING scheduler -- the exact case it
-        # exists for. This closure captures only the stop event, the interval,
-        # and a weakref, and drops its per-tick strong reference before the
-        # next wait, so an abandoned scheduler really is collected, the
-        # finalizer sets the stop event, and the loop exits on its next wake.
+        # exists for. The loop closure captures only the stop event, the
+        # interval, a weakref, and the UNBOUND _tick_safely function. Its
+        # per-tick strong reference is scoped to the _tick_once frame (dying
+        # on return -- no `del`), so during the long Event.wait() the loop
+        # holds nothing strong: an abandoned scheduler really is collected,
+        # the finalizer sets the stop event, and the loop exits on its next
+        # wake.
         stop = self._stop
         interval_seconds = self._interval_seconds
         self_ref = weakref.ref(self)
+        tick_safely = GroupSyncScheduler._tick_safely
+
+        def _tick_once() -> bool:
+            """Tick iff the scheduler still lives; False means collected -- stop looping."""
+            scheduler = self_ref()
+            if scheduler is None:
+                # The abandoned scheduler was collected and the finalizer
+                # already set the stop event; nothing left to tick for.
+                return False
+            tick_safely(scheduler)
+            return True
 
         def _detached_loop() -> None:
             while not stop.wait(interval_seconds):
-                scheduler = self_ref()
-                if scheduler is None:
-                    # The abandoned scheduler was collected and the finalizer
-                    # already set the stop event; nothing left to tick for.
+                if not _tick_once():
                     return
-                try:
-                    # Never lets a tick kill the thread (see _tick_safely).
-                    scheduler._tick_safely()
-                finally:
-                    del scheduler  # release the strong ref before the next wait
 
         self._thread = threading.Thread(
             target=_detached_loop,
