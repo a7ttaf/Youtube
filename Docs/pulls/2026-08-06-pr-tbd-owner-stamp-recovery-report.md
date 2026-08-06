@@ -46,18 +46,56 @@ changes which owner's sync governs the group, which is tenant-level
 governance, not group curation. Clears the stamp only (name, members,
 `active`, `cms_group_id` untouched); 404 unknown; **409 when there is no
 stamp to clear** (idempotent-200 would hide operator confusion); blank
-reason 422. Works on archived groups — verified `get_group` sees inactive
-rows (the neighbouring list reads do not; using one of those would have made
-an archived group's stamp permanently unclearable). Audit: one
-`GROUP_UPDATED` via the **atomic sink** (the #169 invariant — this route
-writes a domain row + an audit row in one request) with
+reason 422; **NUL in the reason 422**. Works on archived groups — verified
+`get_group` sees inactive rows (the neighbouring list reads do not; using one
+of those would have made an archived group's stamp permanently unclearable).
+Audit: one `GROUP_UPDATED` via the **atomic sink** (the #169 invariant — this
+route writes a domain row + an audit row in one request) with
 `{"action": "content_owner_cleared", "cms_group_id", "previous_content_owner_id"}`.
 
 **Store.** `clear_content_owner(*, group_id)` on the Protocol and both
-stores; SQL takes the row via the existing `for_update=True` idiom so a
-concurrent sync-adopt serializes; `ChannelGroupNoOwnerStampError` when NULL.
+stores, returning `ClearedContentOwner(group, previous_content_owner_id)`;
+SQL takes the row via the existing `for_update=True` idiom so a concurrent
+sync-adopt serializes; `ChannelGroupNoOwnerStampError` when NULL.
 Deliberately not routed through `require_adoptable_owner` — that guard
 governs setting; this is the sanctioned eraser.
+
+## Review fixes (post-first-push)
+
+Two real defects found reviewing the first push, both fixed with a proof that
+fails without the fix:
+
+1. **NUL in the query reason was an unhandled 500.** `_normalize_query_reason`
+   stripped and blank-checked but did not reject `\x00`, and the reason lands
+   in `audit_logs.reason` — a Postgres text column. Reproduced against Postgres
+   18 before fixing: `psycopg.DataError: PostgreSQL text fields cannot contain
+   NUL (0x00) bytes` raised out of the audit insert, with the stamp already
+   cleared in the same transaction. `api/channels.py` rejects exactly this on
+   both of its reason fields, citing `audit_logs.reason`; the query-parameter
+   helper now matches (422 `reason contains a NUL character`). The fix lands in
+   the shared helper, so it also closes the same hole on the pre-existing
+   `DELETE /groups/{id}/members/{channel_id}` route. Guards at the API tier
+   for both routes, following the import's existing NUL tests.
+2. **The audited `previous_content_owner_id` could be stale.** The route read
+   the group unlocked (it needs the 404 before taking a write lock) and audited
+   *that* value, while the erase happens later under `FOR NO KEY UPDATE`.
+   Ownership is monotonic, so exactly one interleaving diverges: the pre-read
+   sees NULL, a sync-adopt commits, and the clear then erases a stamp the
+   pre-read never saw — the trail records `null` for an owner that was really
+   removed. `clear_content_owner` now returns the value read under its own
+   lock and the route audits that. New Postgres-tier test stages the adopt in
+   the pre-read window deterministically (the real store, subclassed only to
+   sequence a second session at that seam); it fails on the pre-fix route with
+   `assert None == 'WrongOwnerDDDDDDDDDDDD'`.
+
+Declined, with reasoning: a rule-violation finding asked for the route's
+registry calls to move behind a service/domain function. Every sibling route in
+`api/groups.py` (`create_group`, `update_group`, `add_group_members`,
+`remove_group_member`) calls the store directly; introducing a service layer
+for this one route alone would make the module less consistent, not more. The
+route is already thin — permission gate, reason validation, one store call,
+one audit call, response shaping — with no business logic to extract. Worth
+doing as a module-wide refactor, not as a rider on this PR.
 
 ## Recovery loop, end to end
 
@@ -78,13 +116,15 @@ All local against Postgres 18.
 | Alembic (no migration in PR) | single head `20260805_0001` |
 | `git diff --check` | Clean |
 
-Postgres tier (3 new tests): clear persists + re-adoption on the real
+Postgres tier (4 new tests): clear persists + re-adoption on the real
 engine; **clear-vs-adopt serialization proven with `pg_blocking_pids()`**
 (the blocked backend is observed reporting the clearing backend as its
 blocker; a mutant probe with the lock dropped fails the test, so the proof
-is falsifiable, not decorative); lost-commit audit atomicity for the new
-route (in-flight probe shows the audit row existed inside the transaction
-and died with it).
+is falsifiable, not decorative); **the audit row names the owner read under
+the lock, not the route's unlocked pre-read** (an adopt is staged in the
+pre-read window; the pre-fix route records `null` for an owner it really
+erased); lost-commit audit atomicity for the new route (in-flight probe
+shows the audit row existed inside the transaction and died with it).
 
 ## Notes for reviewers
 

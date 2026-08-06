@@ -722,7 +722,13 @@ single P-tier above.
   serializes against a concurrent sync-adopt via the store's row lock (proven
   on Postgres with `pg_blocking_pids()`), and the cleared group is re-adoptable
   by the correct owner's next sync (round-trip proven end-to-end). Store gains
-  `clear_content_owner` + `ChannelGroupNoOwnerStampError`. No migration. Spec:
+  `clear_content_owner` (returning `ClearedContentOwner`: the cleared group
+  plus the owner id read UNDER the row lock, so the audit detail can never be
+  a stale pre-read observation — proven on Postgres by staging an adopt in the
+  pre-read window) + `ChannelGroupNoOwnerStampError`. The route's `reason`
+  rejects a NUL character with 422, matching the import and sync routes:
+  `audit_logs.reason` is a Postgres text column, so reaching the insert raised
+  `psycopg.DataError` as an unhandled 500. No migration. Spec:
   `Docs/superpowers/specs/2026-08-06-owner-stamp-recovery-design.md`.
 - ✅ CMS group sync (2026-08-05, branch `feat/cms-group-sync`) —
   `POST /channels/groups/sync` mirrors a YouTube CMS content owner's groups
