@@ -1,6 +1,6 @@
 # Delivery Backlog
 
-## Status (2026-06-18)
+## Status (2026-08-06)
 
 Reconciled through PR #121 (skipped source-row smart alerts). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
@@ -707,6 +707,31 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
+- ✅ Scheduled CMS group sync (2026-08-06, branch `feat/scheduled-group-sync`)
+  — grouping now converges automatically instead of only on an operator's
+  `POST /channels/groups/sync` curl. **Executor job kind:** a reserved
+  `cms_group_sync` connector-key sentinel (month `-`) on the connector-job
+  executor, keyed so it can never collide with a report pull, drives the SAME
+  `run_group_sync` core the manual route uses — same plan/apply, same
+  conflict refusals. **Scheduler:** a new in-process `GroupSyncScheduler`
+  ticks a daemon thread every `UMS_GROUP_SYNC_INTERVAL_HOURS` (default 24h,
+  first tick one full interval after boot) and, per ACTIVE tenant, submits
+  one job for every active `youtube-analytics` credential — the credential
+  list itself IS the target registry (registering or revoking one opts a
+  content owner in or out), no new table. **Fail-closed OFF by default**
+  (`UMS_GROUP_SYNC_SCHEDULE_ENABLED`); boot FAILS FAST if the schedule is
+  enabled without the connector-job executor also enabled or without
+  `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` set. **Audit taxonomy:** per-group
+  `GROUP_UPDATED` rows come from `apply_group_sync` exactly as the manual
+  route; the run-level `GROUPS_SYNCED` summary is written by the worker ONLY
+  when a tick's execution actually changed something (the manual route still
+  writes it unconditionally after every apply) — a converged tick therefore
+  writes ZERO audit rows. Failures (credential missing/inactive/refresh, CMS
+  fetch, conflict/lost race) fold into one `CONNECTOR_JOB_RUN` row,
+  `action=group_sync_job_failed`, `error_class` the exception class name only
+  (never `str(exc)`). No new HTTP endpoint — the scheduler is the only
+  submitter; the manual route is unchanged. Spec:
+  `Docs/superpowers/specs/2026-08-06-scheduled-group-sync-design.md`.
 - ✅ Owner-stamp recovery (2026-08-06, branch `feat/owner-stamp-recovery`) —
   completes the group-ownership lifecycle merged in #169. **Path A:** the
   import now REFUSES a row targeting an existing owner-NULL group (row-level

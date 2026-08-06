@@ -447,7 +447,13 @@ on real ingestion (Phase 2) and the inventory load workflow.
   Ownership lifecycle closed 2026-08-06 (`feat/owner-stamp-recovery`): the
   import refuses adopting owner-NULL groups — sync is the only stamp-writer on
   existing groups — and `DELETE /groups/{id}/content-owner` recovers a wrong
-  stamp. Company/sector (org-unit) mapping remains the Registry Map UI's job.
+  stamp. **Scheduled convergence added 2026-08-06**
+  (`feat/scheduled-group-sync`): an in-process scheduler now ticks the same
+  sync core in the background — per ACTIVE tenant, per active
+  `youtube-analytics` credential, every `UMS_GROUP_SYNC_INTERVAL_HOURS` — OFF
+  by default (`UMS_GROUP_SYNC_SCHEDULE_ENABLED`); the manual route above is
+  unchanged and stays the only HTTP path. Company/sector (org-unit) mapping
+  remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to
   `GET /channels/outside-cms` + `GET /channels/issues` (PR #98,
