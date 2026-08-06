@@ -281,6 +281,25 @@ class SqlAlchemyChannelGroupRegistry:
         # the column's Optional type for the checker without a cast.
         return {key for key in rows if key is not None}
 
+    # ========================================================================
+    # Purpose: Bulk-classify a roster's CMS group keys by CROSS-OWNER conflict
+    #   so import planning can fail those rows closed, rather than letting the
+    #   write boundary's own recheck 409 an import the preview called clean.
+    # Database/ORM: ChannelGroupORM (read-only; cms_group_id + content_owner_id
+    #   under the per-tenant unique key). No membership loading, no writes.
+    # Standards: One bounded SELECT for the whole key set; tenant-scoped;
+    #   unknown keys absent. IS NOT NULL is EXPLICIT, not implied by the
+    #   inequality — three-valued logic already excludes NULL stamps, but
+    #   silently, and adoption depends on those rows staying attachable.
+    #   Read-only -> RLS-safe, no platform lane.
+    # Blast Radius: Import planning's cross-owner per-row errors and sync's
+    #   CONFLICT outcomes. No group writes, no audit.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     plan_channel_import_with_stores feeds the result to the planner.
+    #   - File: backend/ums_smart_revenue/org/channel_group_sync_apply.py ->
+    #     _foreign_owner_group_ids chunks this for sync planning.
+    # ========================================================================
     def list_foreign_owner_cms_group_ids(
         self, cms_group_ids: set[str], *, content_owner_id: str
     ) -> set[str]:
@@ -305,6 +324,29 @@ class SqlAlchemyChannelGroupRegistry:
         ).all()
         return {key for key in rows if key is not None}
 
+    # ========================================================================
+    # Purpose: Bulk-classify a roster's CMS group keys by ADOPTABILITY — the
+    #   owner-NULL rows — so import planning can disclose the ownership stamp
+    #   that attaching to one performs. Third of a matched set with the
+    #   archived and cross-owner lookups above; the same pass reads all three.
+    # Database/ORM: ChannelGroupORM (read-only; cms_group_id + content_owner_id
+    #   under the per-tenant unique key). No membership loading, no writes.
+    # Standards: One bounded SELECT for the whole key set; tenant-scoped;
+    #   unknown keys absent — a key with no group is a CREATE, and a group the
+    #   import creates is stamped at birth rather than adopted. Deliberately
+    #   NOT filtered on active: the archived lookup fails those rows closed on
+    #   its own, and narrowing here would make two reads of one row disagree.
+    #   Read-only -> RLS-safe, no platform lane.
+    # Blast Radius: The import preview's will_adopt_content_owner flag only.
+    #   No group writes, no audit — the stamp itself happens at the apply's
+    #   locked write boundary, which re-reads and can decline to repeat it.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     plan_channel_import_with_stores feeds the result to the planner, and
+    #     _attach_group_membership performs the stamp this set predicts.
+    #   - File: backend/ums_smart_revenue/org/channel_import.py ->
+    #     plan_channel_import flags rows whose key lands in this set.
+    # ========================================================================
     def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
         """Return the subset of CMS keys whose existing group is owner-NULL.
 
