@@ -1,3 +1,20 @@
+# ============================================================================
+# Purpose: Pin create_app's GroupSyncScheduler boot wiring — the fail-fast
+#   ValueErrors when the schedule flag is set without the executor flag or
+#   without the service-actor id, the scheduler construction/start when both
+#   are set, the lifespan teardown ORDER (scheduler first, then executor),
+#   and the disabled-by-default app spawning no scheduler at all.
+# Database/ORM: a real SQLite URL per test (tmp_path) so create_app builds
+#   its real session factories; no tables are exercised.
+# Standards: UMS_* env vars are set/cleared explicitly per test with
+#   load_app_settings.cache_clear() between mutations; threads started by the
+#   wiring are torn down through the app lifespan, never leaked.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/app.py -> the boot wiring under test.
+#   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> the
+#     scheduler whose start/close lifecycle is asserted.
+# ============================================================================
 """Tests for GroupSyncScheduler wiring + lifespan teardown in create_app."""
 
 from __future__ import annotations

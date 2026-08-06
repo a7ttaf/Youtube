@@ -1,3 +1,18 @@
+# ============================================================================
+# Purpose: Pin AppSettings/load_app_settings parsing — database URL, trusted
+#   gateway token, authz source, the T36 service-principal actor id (UUID
+#   validated, canonical string stored, missing -> None, malformed ->
+#   load-time failure), and the connector job-executor / group-sync
+#   scheduler flags with strict truthy/falsy token parsing.
+# Database/ORM: None.
+# Standards: the cached loader is cleared between env mutations (the autouse
+#   conftest fixture plus explicit cache_clear calls); no UMS_* env leakage
+#   between tests.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/config/settings.py -> the loader under
+#     test.
+# ============================================================================
 """Unit tests for ``AppSettings`` and ``load_app_settings``.
 
 Covers the existing UMS_DATABASE_URL / UMS_TRUSTED_GATEWAY_TOKEN /
