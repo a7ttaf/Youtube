@@ -3,7 +3,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
-from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
+from ums_smart_revenue.api.channels import (
+    audit_record_to_api,
+    current_atomic_audit_sink,
+    current_audit_sink,
+)
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.api.registry_dependencies import (
@@ -18,6 +22,7 @@ from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
     ChannelGroupEntry,
+    ChannelGroupNoOwnerStampError,
     ChannelGroupRegistryStore,
 )
 
@@ -260,6 +265,100 @@ def remove_group_member(
         action="member_removed",
     )
     response = updated.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
+# ============================================================================
+# Purpose: Erase one group's content-owner stamp — the single sanctioned
+#   eraser, and the only recovery path once a group is stamped to the WRONG
+#   YouTube content owner. Every other writer is adopt-only (the import
+#   refuses owner-NULL groups outright, sync and the store only fill a NULL),
+#   so without this route a mis-stamped group stays governed by the wrong
+#   owner's sync forever. Clearing returns it to the adoptable pool so the
+#   right owner's next sync re-adopts it.
+# Database/ORM: ChannelGroupORM via
+#   ChannelGroupRegistryStore.clear_content_owner (row-locked FOR NO KEY
+#   UPDATE, so a concurrent adopt serializes against this clear); audit_logs
+#   via the sink. No membership, name, or active-state write.
+# Standards: Global MANAGE_GROUPS fail-closed FIRST — ownership decides which
+#   content owner's sync governs the group, which is tenant-level governance,
+#   not the per-channel manageability the membership routes evaluate; a
+#   company-scoped manager of every member channel still may not move a group
+#   between owners. The pre-read is get_group, which carries NO active filter
+#   (unlike list_groups): deactivation is exactly how a wrongly-synced group
+#   gets parked, so an archived group's stamp must stay clearable, and a
+#   genuinely unknown id still 404s. The audit row runs on
+#   current_atomic_audit_sink, NOT this module's pre-existing plain sink: this
+#   route writes a domain row and an audit row in one request, so a lost
+#   tenant commit must not leave an audit row claiming a clear that never
+#   landed (#169 invariant). Store failures map typed — KeyError (a row that
+#   vanished between the pre-read and the locked write) to 404,
+#   ChannelGroupNoOwnerStampError to 409 with a canned detail; str(exc) never
+#   reaches HTTP.
+# Blast Radius: Channel-group ownership only. No membership, no revenue math,
+#   no allocation. Both owners' NEXT sync plans change — that is the point.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py ->
+#     clear_content_owner performs the locked write.
+#   - File: backend/ums_smart_revenue/api/channels.py -> the CMS group sync
+#     that re-adopts the cleared group under the correct owner.
+# ============================================================================
+@router.delete("/{group_id}/content-owner")
+def clear_group_content_owner(
+    group_id: str,
+    reason: Annotated[str, Query(min_length=1)],
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
+) -> dict[str, object]:
+    """Erase a group's content-owner stamp so the right owner's sync re-adopts it."""
+    target_scope = AccessScope.global_scope()
+    if not has_permission(user, Permission.MANAGE_GROUPS, target_scope, org_index):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
+        )
+    normalized_reason = _normalize_query_reason(reason)
+    previous = registry.get_group(group_id)
+    if previous is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Group not found",
+        )
+    try:
+        updated = registry.clear_content_owner(group_id=group_id)
+    except KeyError as exc:
+        raise _registry_not_found(exc) from exc
+    except ChannelGroupNoOwnerStampError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"group {group_id} has no content-owner stamp to clear",
+        ) from exc
+    # _audit_group_change cannot carry these details: it hard-codes the
+    # group_type/channel_ids pair every membership-shaped change reports, and
+    # neither field moves here. Record directly so the row states what was
+    # actually erased.
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.GROUP_UPDATED,
+        entity_type="channel_group",
+        entity_id=updated.id,
+        scope=target_scope,
+        reason=normalized_reason,
+        details={
+            "action": "content_owner_cleared",
+            "cms_group_id": updated.cms_group_id,
+            "previous_content_owner_id": previous.content_owner_id,
+        },
+    )
+    response = updated.to_api()
+    # to_api() omits content_owner_id (it is not part of the general group
+    # view), yet this route's entire outcome IS that field. Disclose it from
+    # the store's post-write return rather than assuming the None we asked for.
+    response["content_owner_id"] = updated.content_owner_id
     response["audit_event"] = audit_record_to_api(record)
     return response
 

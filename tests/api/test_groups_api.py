@@ -1,11 +1,17 @@
-from uuid import UUID
+from unittest.mock import MagicMock, patch
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.channels import current_groups_client_factory
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.connectors.google.youtube_groups_client import (
+    CmsGroup,
+    CmsGroupMembers,
+)
 from ums_smart_revenue.db.org_models import (
     ChannelGroupMemberORM,
     ChannelGroupORM,
@@ -27,6 +33,9 @@ CHANNEL_NEWS_ROW_ID = UUID("00000000-0000-0000-0000-000000003302")
 GROUP_TV_ID = UUID("00000000-0000-0000-0000-000000003401")
 GROUP_MIXED_ID = UUID("00000000-0000-0000-0000-000000003402")
 USER_ID = UUID("00000000-0000-0000-0000-000000003501")
+CONTENT_OWNER_WRONG = "WrongOwnerAAAAAAAAAAAA"
+CONTENT_OWNER_RIGHT = "RightOwnerBBBBBBBBBBBB"
+SYNC_URL = "/channels/groups/sync"
 
 
 def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
@@ -133,8 +142,15 @@ def seed_synced_group(
     name: str = "CMS Synced Group",
     channel_ids: list[str] | None = None,
     cms_group_id: str = "cms-x",
+    content_owner_id: str | None = None,
+    active: bool = True,
 ) -> str:
-    """Create a CMS-synced group (cms_group_id set) via the store, committed."""
+    """Create a CMS-synced group (cms_group_id set) via the store, committed.
+
+    ``content_owner_id`` stamps the group at birth (the store supports it) and
+    ``active=False`` archives it afterwards, so ownership-recovery tests can
+    seed the exact states the clear-stamp route must handle.
+    """
     engine = create_engine(database_url)
     with Session(engine) as session:
         registry = SqlAlchemyChannelGroupRegistry(session)
@@ -143,7 +159,10 @@ def seed_synced_group(
             group_type="CUSTOM_GROUP",
             channel_ids=channel_ids or [],
             cms_group_id=cms_group_id,
+            content_owner_id=content_owner_id,
         )
+        if not active:
+            registry.update_group(group_id=group.id, name=None, active=False)
         session.commit()
         return group.id
 
@@ -722,3 +741,250 @@ def test_update_group_name_succeeds_on_manual_group(tmp_path):
 
     assert response.status_code == 200
     assert response.json()["name"] == "Renamed TV Group"
+
+
+# ============================================================================
+# DELETE /groups/{group_id}/content-owner — the sanctioned stamp eraser.
+# Adoption is one-way everywhere else, so these tests pin the only route that
+# can undo a wrong content-owner stamp: who may call it, which states it
+# refuses, what it discloses, and that a cleared group really is re-adoptable
+# by the correct owner's next sync.
+# ============================================================================
+
+
+class FakeGroupsClient:
+    """Canned stand-in for YouTubeGroupsClient; never performs any I/O."""
+
+    def __init__(self, snapshot: list[tuple[str, str, tuple[str, ...]]]) -> None:
+        """Hold the canned (cms key, title, member ids) snapshot."""
+        self._snapshot = snapshot
+
+    def list_groups(self, *, account_id: str) -> list[CmsGroup]:
+        """Return the canned group list for the requested content owner."""
+        assert account_id == CONTENT_OWNER_RIGHT
+        return [CmsGroup(cms_group_id=key, title=title) for key, title, _members in self._snapshot]
+
+    def list_group_items(self, *, group_id: str, account_id: str) -> CmsGroupMembers:
+        """Return the canned members of one group."""
+        assert account_id == CONTENT_OWNER_RIGHT
+        for key, _title, members in self._snapshot:
+            if key == group_id:
+                return CmsGroupMembers(channel_ids=members, non_channel_count=0)
+        raise AssertionError(f"unexpected group_id: {group_id}")
+
+    def close(self) -> None:
+        """No-op: this double never opens a real HTTP client."""
+
+
+def clear_stamp(
+    client: TestClient,
+    group_id: str,
+    *,
+    reason: str = "Stamped to the wrong content owner during migration",
+    headers: dict[str, str] | None = None,
+):
+    """DELETE one group's content-owner stamp, as a global admin by default."""
+    return client.delete(
+        f"/groups/{group_id}/content-owner",
+        headers=headers or auth_headers("corporate_admin", "global"),
+        params={"reason": reason},
+    )
+
+
+def stored_owner_stamp(database_url: str, group_id: str) -> str | None:
+    """Read the group's persisted content_owner_id straight from the table."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        row = session.get(ChannelGroupORM, UUID(group_id))
+        assert row is not None, f"group row vanished: {group_id}"
+        return row.content_owner_id
+
+
+def group_audit_events(database_url: str, group_id: str) -> list[dict[str, object]]:
+    """Return the persisted audit rows for one group as detached plain dicts."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        rows = session.scalars(
+            select(AuditLogORM)
+            .where(AuditLogORM.entity_id == group_id)
+            .order_by(AuditLogORM.created_at)
+        ).all()
+        return [
+            {
+                "event_type": row.event_type,
+                "entity_type": row.entity_type,
+                "scope_type": row.scope_type,
+                "reason": row.reason,
+                "details": row.details,
+            }
+            for row in rows
+        ]
+
+
+def test_clear_content_owner_requires_global_manage_groups(tmp_path):
+    """A manager of every member channel still may not move a group's ownership."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        content_owner_id=CONTENT_OWNER_WRONG,
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = clear_stamp(
+        client,
+        group_id,
+        headers=auth_headers("data_steward", "company", str(COMPANY_TV_ID)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: registry.manage_groups"
+    assert stored_owner_stamp(database_url, group_id) == CONTENT_OWNER_WRONG
+    assert group_audit_events(database_url, group_id) == []
+
+
+def test_clear_content_owner_returns_404_for_unknown_group(tmp_path):
+    """An id no group carries is a 404, not a 409 about a missing stamp."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = clear_stamp(client, str(uuid4()))
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Group not found"
+
+
+def test_clear_content_owner_conflicts_when_synced_group_has_no_stamp(tmp_path):
+    """A synced but owner-NULL group has nothing to clear: 409, not a silent 200."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    group_id = seed_synced_group(database_url, channel_ids=["group-channel-tv"])
+    client = TestClient(create_app(database_url=database_url))
+
+    response = clear_stamp(client, group_id)
+
+    assert response.status_code == 409
+    assert "no content-owner stamp to clear" in response.json()["detail"]
+    assert group_audit_events(database_url, group_id) == []
+
+
+def test_clear_content_owner_conflicts_on_unstamped_manual_group(tmp_path):
+    """The route keys on the stamp alone — a manual group without one 409s too."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = clear_stamp(client, str(GROUP_TV_ID))
+
+    assert response.status_code == 409
+    assert "no content-owner stamp to clear" in response.json()["detail"]
+    assert group_audit_events(database_url, str(GROUP_TV_ID)) == []
+
+
+def test_clear_content_owner_clears_the_stamp_and_audits_the_previous_owner(tmp_path):
+    """Only the stamp changes, and the audit row names the owner that was erased."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        content_owner_id=CONTENT_OWNER_WRONG,
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = clear_stamp(client, group_id, reason="Clear the mis-synced owner stamp")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["content_owner_id"] is None
+    assert payload["name"] == "CMS Synced Group"
+    assert payload["channel_ids"] == ["group-channel-tv"]
+    assert payload["active"] is True
+    assert payload["cms_group_id"] == "cms-x"
+    assert payload["audit_event"]["reason"] == "Clear the mis-synced owner stamp"
+    assert stored_owner_stamp(database_url, group_id) is None
+    events = group_audit_events(database_url, group_id)
+    assert len(events) == 1, events
+    assert events[0]["event_type"] == "GROUP_UPDATED"
+    assert events[0]["entity_type"] == "channel_group"
+    assert events[0]["reason"] == "Clear the mis-synced owner stamp"
+    assert events[0]["details"]["action"] == "content_owner_cleared"
+    assert events[0]["details"]["cms_group_id"] == "cms-x"
+    assert events[0]["details"]["previous_content_owner_id"] == CONTENT_OWNER_WRONG
+
+
+def test_clear_content_owner_rejects_blank_reason(tmp_path):
+    """A whitespace-only reason is a 422 before any write or audit row."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        content_owner_id=CONTENT_OWNER_WRONG,
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = clear_stamp(client, group_id, reason="   ")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "reason must not be blank"
+    assert stored_owner_stamp(database_url, group_id) == CONTENT_OWNER_WRONG
+    assert group_audit_events(database_url, group_id) == []
+
+
+def test_clear_content_owner_works_on_an_archived_group(tmp_path):
+    """Deactivation is how a mis-synced group gets parked, so its stamp must clear."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        content_owner_id=CONTENT_OWNER_WRONG,
+        active=False,
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = clear_stamp(client, group_id, reason="Clear the stamp on the parked group")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["active"] is False
+    assert response.json()["content_owner_id"] is None
+    assert stored_owner_stamp(database_url, group_id) is None
+
+
+def test_cleared_group_is_readopted_by_the_right_owners_next_sync(tmp_path):
+    """The recovery loop end to end: clear the wrong stamp, the right owner adopts."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        content_owner_id=CONTENT_OWNER_WRONG,
+    )
+    app = create_app(database_url=database_url)
+    fake = FakeGroupsClient([("cms-x", "CMS Synced Group", ("group-channel-tv",))])
+    app.dependency_overrides[current_groups_client_factory] = lambda: lambda _credentials: fake
+    client = TestClient(app)
+
+    cleared = clear_stamp(client, group_id, reason="Wrong owner: hand the group back")
+    stamp_after_clear = stored_owner_stamp(database_url, group_id)
+    with patch(
+        "ums_smart_revenue.api.channels.resolve_connector_credentials",
+        return_value=MagicMock(name="credentials"),
+    ):
+        synced = client.post(
+            SYNC_URL,
+            headers=auth_headers("corporate_admin", "global"),
+            json={
+                "content_owner_id": CONTENT_OWNER_RIGHT,
+                "dry_run": False,
+                "reason": "Re-adopt the group under its real content owner",
+            },
+        )
+
+    assert cleared.status_code == 200, cleared.text
+    assert stamp_after_clear is None
+    assert synced.status_code == 200, synced.text
+    assert stored_owner_stamp(database_url, group_id) == CONTENT_OWNER_RIGHT
