@@ -2,7 +2,8 @@
 
 ## Status (2026-08-06)
 
-Reconciled through PR #121 (skipped source-row smart alerts). Marker conventions
+Reconciled through PR #170 (owner-stamp recovery, merged 2026-08-06) plus the
+unmerged `feat/scheduled-group-sync` branch. Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
 
 - `✅ PR #N` — shipped end-to-end at the layer being marked.
@@ -49,6 +50,25 @@ corrected + PR #111/112 entries added + FX scaffold and deduction-ingestion CLI 
 12 "this PR" placeholders resolved to PR #98; Docs/16 stack/allocation/RLS decisions
 closed; Docs/01 status header and 12 "this PR" placeholders updated.
 
+**Backlog reconciliation note (2026-08-06):** the "Reconciled through" line above
+had read PR #121 since the 2026-06-18 sweep while PRs #122–#170 kept appending
+entries beneath it, so the header date and the claim had drifted apart. Verified
+in this pass against the merged history of `a7ttaf/Youtube` and the code on
+`main`. Five entries misstated shipped behaviour and are corrected inline below:
+live Google ingestion was still described as "blocked only on owner-approved
+credentials" (the 2026-06-22 operator smoke ran for real, so that clause and the
+matching one on the credential-smoke sub-item are retired); the Registry Phase 2
+item still called the bulk inventory import "definition-blocked" (shipped as
+`POST /channels/import`, PR #159); the Phase 5 item still called missing-REPORT
+detection deferred (closed from the connector side by PR #131); the CMS group
+sync entry still listed both of its follow-ups as "Still open" (both closed by
+PR #170); and the CI entry listed only the original vendored gate while four CI
+surfaces had been added and removed since. Six shipped PRs had no entry at all
+and are added: #127, #129, #130, #131, #155 and #159. Entries that named only a
+branch now also carry their merged PR number. PRs #136–#148, #150, #151, #153
+and #154 are absent from this doc on purpose — they are Dependabot PRs that were
+closed unmerged and superseded by the consolidated batch in #156.
+
 ## P0 — Must build first
 
 - ⏳ Dynamic org hierarchy — remaining: ORG models (PR #25); hierarchy
@@ -60,10 +80,19 @@ closed; Docs/01 status header and 12 "this PR" placeholders updated.
   stay open (Hard Problem #1).
 - ✅ Group builder (tenant-scoped channel group registry, PR #25 + tests
   in PR #30).
-- ⏳ YouTube report ingestion — remaining: the live pull engine + `run_one`
+- ⏳ YouTube report ingestion — the live pull engine + `run_one`
   orchestrator + C1 normalizer wiring + executing `POST /connectors/jobs` are all
-  built and mock-tested (PRs #47-#50, #90/#93, #94/#95/#97); blocked only on
-  owner-approved Google connector credentials. API-key-only access is valid
+  built (PRs #47-#50, #90/#93, #94/#95/#97) and have now run against live Google
+  APIs: the 2026-06-22 operator smoke ingested one content owner for 2026-04 and
+  produced 25 real `monthly_channel_revenue_facts` (PRs #132 credential contract,
+  #134 smoke CLI, #135 live-run gate). **The long-standing "blocked only on
+  owner-approved Google connector credentials" note is retired** — approval
+  arrived and the credentials work. Remaining: ingestion is operator-triggered
+  only (the CLI or `POST /connectors/jobs`); there is no recurring revenue-pull
+  schedule (only the group sync has one, on the unmerged
+  `feat/scheduled-group-sync` branch), and breadth beyond the single smoked
+  owner/month is still unproven at the 300+-channel target. API-key-only access
+  is valid
   only for YouTube Data API public metadata where Google permits it; private
   YouTube Reporting/Analytics and AdSense revenue/account data require official
   Google authorization tokens/scopes, never Gmail passwords, browser cookies, or
@@ -74,8 +103,11 @@ closed; Docs/01 status header and 12 "this PR" placeholders updated.
       contract, UMS metadata-only credential registration, audited credential
       token-refresh probe, ingestion CLI `--dry-run` smoke, live-run gate,
       rollback/rotation notes, and test coverage references. No live
-      credentials are added and live ingestion remains blocked until
-      owner-approved Google material/scopes are supplied.
+      credentials are committed to the repo. **Superseded (2026-06-22):** this
+      entry's original "live ingestion remains blocked until owner-approved
+      Google material/scopes are supplied" clause was true when the runbook
+      landed; owner approval then arrived and the smoke ran for real — see the
+      ingestion item above and the B2-credentials-CLOSED notes below.
     - ✅ PR #47 — Google live connector foundation (B2.1-B2.4 in one
       stack, merged 2026-05-27 as commit 52734a3): credential foundation (secret resolver dispatch +
       gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
@@ -296,7 +328,8 @@ closed; Docs/01 status header and 12 "this PR" placeholders updated.
   channels with no monthly fact).
 - ✅ Excel export — shipped: GET /exports/{export_id}/finance-workbook.xlsx
   (+ preview) via build_finance_workbook_xlsx; tenant-scoped export jobs,
-  persisted + audited. Final column template/branding may iterate.
+  persisted + audited. Final column template/branding may iterate; templates are
+  now configurable per tenant via `/export-templates` (PR #130).
 
 ## P1 — Strong beta features
 
@@ -614,7 +647,25 @@ single P-tier above.
 - ✅ Trusted-gateway tenant middleware + bootstrap UMS tenant for
   SQL-backed trusted-header requests (PR #36).
 - ✅ Governance + quickstart docs (PR #11).
-- ✅ CI gate (Elite-CI vendored) + Dependabot (PRs #14, #17).
+- ✅ CI gate (Elite-CI vendored under `ci/`) + Dependabot (PRs #14, #17).
+  CI-surface churn since, because this entry alone would imply more automation
+  than exists: the Pullfrog workflow (PR #103, SHA-pinned in #108) was removed
+  in PR #124; the CircleCI pipeline (PRs #114/#116, hardened by the Bun frontend
+  lane #123, image-digest pinning #126, and binary checksum verification #128)
+  was removed wholesale in PR #133; the DeepSource analyzer config (PRs
+  #117/#118) was deleted in PR #160 after an earlier delete in PR #101. **Net
+  surviving automation:** the vendored `ci/` gate, Dependabot, and a single
+  Claude Code (`@claude`) GitHub Action workflow (PR #107) — the only file in
+  `.github/workflows/` today.
+- ✅ Dependency supply-chain hardening (PR #155, merged 2026-08-03) — `main`'s
+  `uv.lock` had drifted from `pyproject.toml` (still resolving `fastapi==0.136.3`
+  and `pytest==9.0.3` against declared `0.137.1`/`9.1.0`), and the Dockerfile ran
+  `uv sync --frozen`, which reads the lockfile **without comparing it to the
+  manifest** — so the image built green while silently installing stale
+  packages (`uv lock --check` and `uv sync --locked` both exit 1 on the same
+  tree; `--frozen` exits 0). Fixed with the surrounding batch: PR #156
+  consolidated the Dependabot bumps that the drift had been blocking (closing
+  #140/#153/#154 unmerged).
 - ✅ Docker + docker-compose stack (PR #15).
 - ✅ Architecture docs: multi-tenant (`Docs/17`), source-reported currency
   policy (`Docs/18`, revised 2026-05-23) — PR #16 plus B1 planning update.
@@ -671,7 +722,7 @@ single P-tier above.
   tiles are wired off it
   (live Total events / High sensitivity / Events-24h; Retention stays a static
   policy constant), replacing the `AUDIT_SUMMARY` mock and the "live aggregate
-  endpoint coming" disclaimer — branch `feat/audit-summary-endpoint`.
+  endpoint coming" disclaimer — PR #91, branch `feat/audit-summary-endpoint`.
 - ✅ Connector credential test-connection probe — `POST /connectors/credentials/{connector_key}/{account_id}/test`
   (branch `docs/plan-hygiene-post-71`): wraps `resolve_connector_credentials()` (load
   credential row → resolve secret URI → official Google token refresh, no live data pull).
@@ -695,7 +746,7 @@ single P-tier above.
   blocked: official Google authorization setup, live pulls,
   token-expiry/last-error schema + background monitoring (the refresh-telemetry
   columns landed in PR #95 Part 2).
-- ✅ Connector credential token-health surface — branch
+- ✅ Connector credential token-health surface — PR #105, branch
   `feat/connector-credential-health`: new read-only `GET
   /connectors/credentials/health` (`VIEW_CONNECTOR_HEALTH` gate, fail-closed;
   distinct from the `MANAGE_CONNECTORS`-gated `GET /connectors/credentials`)
@@ -732,8 +783,9 @@ single P-tier above.
   (never `str(exc)`). No new HTTP endpoint — the scheduler is the only
   submitter; the manual route is unchanged. Spec:
   `Docs/superpowers/specs/2026-08-06-scheduled-group-sync-design.md`.
-- ✅ Owner-stamp recovery (2026-08-06, branch `feat/owner-stamp-recovery`) —
-  completes the group-ownership lifecycle merged in #169. **Path A:** the
+- ✅ Owner-stamp recovery (PR #170, 2026-08-06, branch
+  `feat/owner-stamp-recovery`) — completes the group-ownership lifecycle merged
+  in #169. **Path A:** the
   import now REFUSES a row targeting an existing owner-NULL group (row-level
   ERROR naming the remedy — run that owner's `POST /channels/groups/sync`;
   blocks the whole apply per the all-or-nothing contract), so sync is the
@@ -759,7 +811,34 @@ single P-tier above.
   as orchestration and making the behaviour testable without FastAPI. No
   migration. Spec:
   `Docs/superpowers/specs/2026-08-06-owner-stamp-recovery-design.md`.
-- ✅ CMS group sync (2026-08-05, branch `feat/cms-group-sync`) —
+- ✅ Bulk channel inventory import (2026-08-05, PR #159, branch
+  `feat/bulk-channel-inventory-import`) — `POST /channels/import` loads a CMS
+  channel roster from a CSV in one call, closing the blocker that had kept the
+  proven connector from ever running at scale: the only creation route was
+  `POST /channels`, one channel per call, and the 2026-06-22 live smoke had to
+  hand-seed its 25 channels with raw SQL. **The hazard it is designed around:**
+  `youtube_channels.cms_status` defaults to `UNKNOWN` and `list_target_channels`
+  selects only `INSIDE_CMS` rows with a matching `content_owner_id`, so a
+  channel imported without both is silently skipped by ingest — no error, no
+  alert, and its revenue never reaches the fact table. Three rules follow:
+  unknown CSV headers are rejected rather than ignored, `dry_run` is a required
+  form field (no default) returning a field-level diff before anything is
+  written, and applying is all-or-nothing (any ERROR row → nothing written)
+  while error *reporting* is batch, so one bad row surfaces every bad row.
+  `multipart/form-data`: `file`, `content_owner_id`, `dry_run`, `reason` all
+  required; `cms_status` defaults to `INSIDE_CMS` and is validated against the
+  table CHECK (`IMPORTABLE_CMS_STATUSES` = INSIDE_CMS / OUTSIDE_CMS / UNKNOWN).
+  Required CSV columns `youtube_channel_id` (`^UC[A-Za-z0-9_-]{22}$`) and
+  `channel_name`; optional `group_id` and `view_revenue` (→ `revenue_required`);
+  UTF-8 and BOM-tolerant, headers case-insensitive and order-independent. Every
+  row resolves to CREATE / UPDATE (with diff) / UNCHANGED / ERROR; upsert is
+  file-wins. `MANAGE_CHANNELS` at **global** scope, fail-closed — the per-company
+  scoping of `POST /channels` does not extend here because the import
+  deliberately leaves `primary_org_unit_id` unset. The apply serializes on the
+  month-close advisory guard so a LOCKED month's `revenue_required` cannot be
+  flipped underneath it. Parse/plan lives in `org/channel_import.py`, apply+audit
+  in `org/channel_import_apply.py`, leaving the route as orchestration.
+- ✅ CMS group sync (PR #169, 2026-08-05, branch `feat/cms-group-sync`) —
   `POST /channels/groups/sync` mirrors a YouTube CMS content owner's groups
   into `channel_groups`: real titles, membership set-reconciled with adds AND
   removals, DEACTIVATE when a group vanishes upstream, REACTIVATE when its key
@@ -783,25 +862,27 @@ single P-tier above.
   is legacy-but-working: sync converges whatever it created. The import also
   gained `will_adopt_content_owner` per row, so its dry run discloses the one
   permanent write its `outcome` never implied — attaching to an owner-NULL
-  group stamps that group's `content_owner_id`. **Still open:** whether the
-  import should adopt at ALL rather than 409 with "sync first" (a CSV cell is
-  weaker evidence of ownership than an authenticated `groups.list` for that
-  owner), and a `MANAGE_GROUPS` clear-stamp admin action — a wrong stamp has no
-  API-level remedy today. Spec:
+  group stamps that group's `content_owner_id`. **Both follow-ups this entry
+  left open are now CLOSED by PR #170** (owner-stamp recovery, entry above):
+  the import no longer adopts at all — it refuses the row and names sync as the
+  remedy (Path A), and `will_adopt_content_owner` is gone from the import
+  response (it survives only on the sync response, where adoption is
+  legitimate); and `DELETE /groups/{id}/content-owner` is the `MANAGE_GROUPS`
+  clear-stamp remedy for a wrong stamp. Spec:
   `Docs/superpowers/specs/2026-08-05-cms-group-sync-design.md`.
 - ✅ Channel Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the
   Registry table is wired to `GET /channels` (replacing the `REGISTRY_ROWS`
   mock). All display fields derived client-side (avatar, CMS badge, source
   label, state per Option A, trace key). Extracted to `views/RegistryView.tsx`;
   16 new Vitest tests. All six dashboard pages off mock data.
-- ✅ Soft Dark design system — on `feat/design-system-softdark` (stacked on
-  Registry Phase 2): `frontend/src/styles.css` token values converted to the
+- ✅ Soft Dark design system — PR #79, on `feat/design-system-softdark` (stacked
+  on Registry Phase 2): `frontend/src/styles.css` token values converted to the
   UMS Revenue Design System Soft Dark theme (dark_dimmed surfaces/ink/status,
   `--ink-strong` money tier, DS weight tiers, srgb topbar color-mix fix); OFL
   webfonts shipped in `frontend/public/fonts/` (+licenses); `DESIGN.md`
   re-pinned to the new palette/fonts. Visual-only — zero selector/logic change;
   vite build + 190 Vitest + tsc green.
-- ✅ Channel Registry Phase 2 — on `feat/registry-phase2`: `GET /org-units`
+- ✅ Channel Registry Phase 2 — PR #78, on `feat/registry-phase2`: `GET /org-units`
   (read-only, tenant-scoped, active-only, fail-closed VIEW_ANALYTICS; no
   migration) resolves Company/Sector display names with an honest raw-id
   fallback and supplies the Map modal's company options. Live write paths:
@@ -813,8 +894,10 @@ single P-tier above.
   org-units tests; frontend 189 Vitest green (10 new RegistryView + 5 hook).
   Mapping-route month-lock enforcement (the pre-existing gap named here) is now
   CLOSED by PR #98 — `PATCH /channels/{id}/mapping` rejects (409) a re-parenting
-  that would rewrite a LOCKED month's attribution. Remaining (definition-blocked):
-  bulk inventory import format; "Scoped changes" tile.
+  that would rewrite a LOCKED month's attribution. The bulk inventory import
+  format is no longer definition-blocked either — it shipped as
+  `POST /channels/import` in PR #159 (see the entry below). Remaining
+  (definition-blocked): the "Scoped changes" tile.
 - ✅ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-
@@ -853,8 +936,8 @@ single P-tier above.
   produced facts. Remaining: FX/conversion (B3). See
   `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`
   and `Docs/superpowers/plans/2026-05-25-spec-c1-google-source-normalizer.md`.
-- ✅ Track E (2026-06-08) — **Postgres RLS enforcement DONE** (S3 storage-layer
-  hardening). Migration `20260608_0001` creates the `app_tenant`/`app_platform`
+- ✅ Track E (PR #85, 2026-06-08) — **Postgres RLS enforcement DONE** (S3
+  storage-layer hardening). Migration `20260608_0001` creates the `app_tenant`/`app_platform`
   roles and a `<table>_tenant_isolation` policy on all 25 tenant-scoped tables
   (allowlist drift-checked against live `information_schema`). The tenant
   context is held in an `app_tenant_context` table keyed by `backend_pid` (NOT a
@@ -874,7 +957,7 @@ single P-tier above.
   `GRANT app_tenant/app_platform TO <login> WITH INHERIT FALSE, SET TRUE`;
   migration is idempotent and does not assume superuser. See
   `Docs/superpowers/plans/2026-06-08-track-e-tenant-rls-source-currency.md`.
-- ✅ FORCE RLS (2026-06-14, branch `feat/force-row-level-security`) —
+- ✅ FORCE RLS (PR #106, branch `feat/force-row-level-security`) —
   **`FORCE ROW LEVEL SECURITY` DONE** (S3 tenant-hardening follow-up to Track E).
   Migration `20260612_0002_force_tenant_rls` runs
   `ALTER TABLE ... FORCE ROW LEVEL SECURITY` on all 25
@@ -892,7 +975,7 @@ single P-tier above.
   owner) in `tests/tenancy/test_force_rls.py`; migration-state proof
   (`relforcerowsecurity`) alongside it. See
   `Docs/17_MULTI_TENANT_ARCHITECTURE.md` "FORCE ROW LEVEL SECURITY follow-up".
-- ✅ Track E (2026-06-08) — **B1 source-rows read API DONE.**
+- ✅ Track E (PR #85, 2026-06-08) — **B1 source-rows read API DONE.**
   `GET /revenue/source-rows?month=&source_system=` + `/{id}`,
   `finance.view_revenue`-gated, tenant-scoped, keyset-paged
   (`{items, pagination:{limit, returned, has_more, next_cursor}}`);
@@ -900,7 +983,7 @@ single P-tier above.
   half-cursor/bad input -> 422, missing/cross-tenant id -> 404. The
   paired-column `*_usd` -> native migration is still ⏳ PENDING as a separate
   future spec (out of scope for Track E).
-- ✅ Main red-gate fix (2026-06-09) — **merged Track-E PG suite restored to green.**
+- ✅ Main red-gate fix (PR #88, 2026-06-09) — **merged Track-E PG suite restored to green.**
   Five clusters fixed on `fix/main-red-gate`: session hook cleared tenant context
   via a new SECURITY DEFINER `clear_app_current_tenant_id()` fn (migration
   `20260609_0002`) + tolerated absent context objects (was a raw `DELETE` →
@@ -910,7 +993,7 @@ single P-tier above.
   compares typed `uuid`; version baseline realigned to pyproject pins. Full
   suite 1956 passed.
 
-- ✅ Track F (2026-06-09) — **Smart revenue reconciliation workflow DONE.**
+- ✅ Track F (PR #87, 2026-06-09) — **Smart revenue reconciliation workflow DONE.**
   Pure compute core derives US tax + YouTube->AdSense fee + AdSense->bank fee+FX
   from actual figures, attributed per channel proportional to CMS gross with a
   rounding-remainder rule; persists typed `deduction_components` +
@@ -920,13 +1003,13 @@ single P-tier above.
   409 locked / 422 bad month) + `GET .../reconciliation` (`VIEW_REVENUE@channel`,
   404 none). **Outside-CMS 1:1 ALLOCATION attribution DONE** (single verified
   account->channel link writes the gross fact; many -> skip + warn).
-- ✅ Track F (2026-06-09) — **Manual report purge DONE.**
+- ✅ Track F (PR #87, 2026-06-09) — **Manual report purge DONE.**
   `DELETE /reports/raw-files/{id}` (`MANAGE_CONNECTORS@connector(source)`,
   reason-required -> 422, 404 unknown/cross-tenant, 409 re-purge) marks PURGED
   keeping metadata; additive `purged_at`/`purged_by` columns + CHECK swap.
   ⏳ Refine-later: real US-view-share feed, withholding-rate calibration, and
   multi-API-key ingestion scaling.
-- ✅ Phase 5 analytics & monitoring surface (2026-06-13, branch
+- ✅ Phase 5 analytics & monitoring surface (PR #98, 2026-06-13, branch
   `feat/phase5-analytics-monitoring`) — one combined PR closing the
   highest-value Phase 1 / 5 / 7 acceptance-gate gaps plus this doc
   reconciliation:
@@ -945,7 +1028,10 @@ single P-tier above.
     `{channel_count, sample_channel_ids capped 20}`) for active+revenue_required
     channels with no monthly fact; the route pre-reads the id list with the same
     query shape as close-readiness (no new permission). Missing-REPORT detection
-    deferred (no expected-connectors baseline).
+    was deferred here for want of an expected-connectors baseline; PR #131 later
+    closed it from the connector side instead — an empty YouTube Reporting
+    report list is now a typed per-report failure that surfaces as the
+    `CONNECTOR_RUNS_FAILED` alert (see the entry below).
   - **Mapping-route month-lock** — `PATCH /channels/{id}/mapping` now rejects
     (409) a re-parenting that would rewrite a LOCKED month's attribution
     (read-only locked-fact guard in `org/sql_channel_registry.py`, typed
@@ -958,8 +1044,8 @@ single P-tier above.
     scope-aware `can_view_analytics` (any active VIEW_ANALYTICS grant at any
     scope; fail-closed disabled -> false) threaded through the FE AppShell to
     gate the monitor panel.
-- ✅ Command Center group/sector rollup scope selector (2026-06-13, branch
-  `feat/group-sector-rollup`) — closes the Phase 1 / 5 acceptance gate "user
+- ✅ Command Center group/sector rollup scope selector (PR #102, 2026-06-13,
+  branch `feat/group-sector-rollup`) — closes the Phase 1 / 5 acceptance gate "user
   selects month + group/sector and receives source-backed gross/deduction/net"
   for **global / sector / company** rollup:
   - **`GET /revenue/scopes`** — new fail-closed read-only endpoint
@@ -1008,6 +1094,55 @@ single P-tier above.
   to any authenticated user. Both now require `VIEW_AUDIT_LOG` at global
   scope (fail-closed 403), per `ROLE_PERMISSION_MODEL.md`. SPA does not
   consume either endpoint so no UI impact.
+- ✅ Command Center reconciliation cards (PR #127, merged 2026-06-19) —
+  CommandView gains a `BankReconciliationStatusStrip` of three cards (AdSense
+  payment, bank received, unresolved gap) fed by
+  `GET /revenue/months/{month}/bank-reconciliation` through a new
+  `useBankReconciliation` hook. The read is disabled unless the session holds
+  **both** the payment and bank-reconciliation grants (fails closed), is
+  isolated from net-revenue/smart-alert render failures, and hides backend
+  diagnostics (403 → permission copy, 5xx → status code only).
+  `MonthBankReconciliationSummary.to_api()` gained an additive `money_provenance`
+  map (source, formula, confidence token, export value per official money
+  field) — serializer metadata only, no persistence or calculation change. The
+  `canViewPayments` / `canViewBankReconciliation` session capabilities became
+  scope-aware (GLOBAL and FINANCE_MONTH only, disabled users fail closed), so a
+  finance-month-scoped admin now gets the render hint while the routes still
+  re-check per requested scope.
+- ✅ Analytics summary CSV export (PR #129, merged 2026-06-20) —
+  `ANALYTICS_SUMMARY_CSV` generation/download over normalized
+  `youtube_analytics` source rows (`reports/analytics_summary_csv.py`), with
+  artifact persistence, checksum metadata, and scoped CSV output. **Permission
+  change:** because the CSV carries revenue amounts, creation *and* download
+  require `finance.view_revenue` in addition to `exports.analytics` +
+  `analytics.view` for the requested scope — analytics-only export operators can
+  no longer queue or download it. Served artifacts emit both `REVENUE_VIEWED`
+  and `EXPORT_DOWNLOADED`.
+- ✅ Configurable export templates (PR #130, merged 2026-06-20) — tenant-scoped
+  CRUD under `/export-templates` (`api/export_templates.py`) plus an optional
+  `template_id` on export jobs, validated for tenant, active state, and matching
+  `export_type` before persist. Additive migration `20260620_0001_export_templates`
+  (new `export_templates` table + nullable `export_jobs.template_id`);
+  `EXPORT_TEMPLATE_CHANGED` audit coverage.
+- ✅ Alert on missing connector reports (PR #131, merged 2026-06-21) — a
+  configured YouTube Reporting job that returned an empty report list used to
+  finish as a silent success with zero ingested rows. `_missing_youtube_report_failure`
+  now converts that empty list into a typed `ProducedReportFailure`
+  (`GoogleApiResponseError` with a sanitized synthetic URL — no listing URL,
+  credential, or upstream payload exposed), so the run reports the gap. The pure
+  builder in `finance/smart_alerts.py` gained `_connector_runs_failed_alert`,
+  emitting a HIGH `CONNECTOR_RUNS_FAILED` alert when the latest terminal
+  `CONNECTOR_JOB_RUN` audit edge per (connector, account) for a month is FAILED
+  or PARTIAL; a later SUCCEEDED edge for the same pair clears it, and connector-key
+  normalization collapses the `youtube-reporting`/`youtube_reporting` aliases so
+  a success on either clears an older failure. Read model:
+  `SqlAlchemyAuditLogRepository.connector_run_failure_summary()`. Gated on global
+  `audit.view` (same gate as `SOURCE_ROWS_SKIPPED`), but carrying no sensitive
+  skipped-row reasons its `details_redacted` is always False. Surfaced on the
+  monthly smart-alerts route and on global finance export source summaries
+  (scoped exports suppress the tenant-wide signal until connector runs can be
+  tied to the frozen channel set). No migration — `audit_logs` stays the source
+  of truth.
 - ⏳ FX exchange-rate scaffold — `backend/ums_smart_revenue/finance/exchange_rates.py`,
   `api/exchange_rates.py`, and migration `20260513_0004_currency_exchange_rates`
   exist as legacy scaffolding (`POST /exchange-rates/sync`,
@@ -1034,9 +1169,11 @@ single P-tier above.
    built.
 3. ⏳ Payment gap explanation — remaining: gap value + comparison ARE computed
    (payment_gap_usd via /revenue/months/{month}/payment-match, bank variance
-   via /bank-reconciliation, high-gap smart alerts); remaining is a dedicated
-   reconciling explanation/narrative pass tying gaps to receipts/fees/currency
-   effects.
+   via /bank-reconciliation, high-gap smart alerts) and PR #127 now surfaces the
+   AdSense-payment / bank-received / unresolved-gap cards in the Command Center,
+   so the gap is visible to finance rather than API-only; remaining is a
+   dedicated reconciling explanation/narrative pass tying gaps to
+   receipts/fees/currency effects.
 4. ⏳ Bank/transfer/local-currency variance evidence — remaining: bank recon
    repo (PR #29) is the substrate; variance explanations must reconcile
    Google/AdSense reported money, bank receipts, transfer fees, and bank-side
