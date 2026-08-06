@@ -210,7 +210,11 @@ group carries no stamp to clear (clearing nothing is a caller bug, not a silent
 no-op), and `422` for a blank reason or one containing a NUL character —
 `audit_logs.reason` is a PostgreSQL text column, which cannot store NUL, so the
 same rejection the import and sync routes apply to their reasons is enforced
-here before any write. Archived groups stay clearable: deactivation is exactly
+here before any write. The handler is thin orchestration only — the store read,
+the row-locked write, and the audit row live in
+`org/channel_group_owner_recovery.clear_group_owner_stamp`, the same
+store-plus-sink shape the import and sync apply layers use, so the behaviour is
+testable without HTTP. Archived groups stay clearable: deactivation is exactly
 how a wrongly-synced group gets parked. The response discloses the resulting
 `content_owner_id` (always `null`) alongside the `GROUP_UPDATED` audit event,
 whose `details.previous_content_owner_id` names the owner erased **as read

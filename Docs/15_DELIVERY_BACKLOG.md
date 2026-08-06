@@ -728,7 +728,11 @@ single P-tier above.
   pre-read window) + `ChannelGroupNoOwnerStampError`. The route's `reason`
   rejects a NUL character with 422, matching the import and sync routes:
   `audit_logs.reason` is a Postgres text column, so reaching the insert raised
-  `psycopg.DataError` as an unhandled 500. No migration. Spec:
+  `psycopg.DataError` as an unhandled 500. The clear's store read, locked
+  write, and audit row live in `org/channel_group_owner_recovery.py` (the
+  `channel_import_apply` / `channel_group_sync_apply` shape), leaving the route
+  as orchestration and making the behaviour testable without FastAPI. No
+  migration. Spec:
   `Docs/superpowers/specs/2026-08-06-owner-stamp-recovery-design.md`.
 - ✅ CMS group sync (2026-08-05, branch `feat/cms-group-sync`) —
   `POST /channels/groups/sync` mirrors a YouTube CMS content owner's groups

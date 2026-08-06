@@ -62,8 +62,9 @@ governs setting; this is the sanctioned eraser.
 
 ## Review fixes (post-first-push)
 
-Two real defects found reviewing the first push, both fixed with a proof that
-fails without the fix:
+Three findings from the review pass. The first two are defects, each fixed
+with a proof that fails without the fix; the third is a structural one that
+was initially declined and then implemented on Mahmoud's call:
 
 1. **NUL in the query reason was an unhandled 500.** `_normalize_query_reason`
    stripped and blank-checked but did not reject `\x00`, and the reason lands
@@ -88,14 +89,29 @@ fails without the fix:
    sequence a second session at that seam); it fails on the pre-fix route with
    `assert None == 'WrongOwnerDDDDDDDDDDDD'`.
 
-Declined, with reasoning: a rule-violation finding asked for the route's
-registry calls to move behind a service/domain function. Every sibling route in
-`api/groups.py` (`create_group`, `update_group`, `add_group_members`,
-`remove_group_member`) calls the store directly; introducing a service layer
-for this one route alone would make the module less consistent, not more. The
-route is already thin — permission gate, reason validation, one store call,
-one audit call, response shaping — with no business logic to extract. Worth
-doing as a module-wide refactor, not as a rider on this PR.
+3. **The route reached into the store directly.** Initially declined on
+   consistency grounds — every sibling route in `api/groups.py` calls the
+   store directly, so extracting only this one looked like it would fragment
+   the module. Mahmoud overruled that, correctly: consistency with an existing
+   pattern is not a reason to keep new code in it. The store read, the locked
+   write, and the audit row moved to
+   `org/channel_group_owner_recovery.clear_group_owner_stamp`, following the
+   same shape as `channel_import_apply` and `channel_group_sync_apply` (store
+   + sink + actor + scope in, typed errors out). The handler is now permission
+   gate → reason validation → one domain call → error-to-status mapping →
+   response shaping, and touches neither the registry nor the audit sink.
+
+   The payoff is concrete, not stylistic: `tests/org/test_channel_group_owner_recovery.py`
+   exercises the whole behaviour — outcome, audit details, both typed failures,
+   and the return to the adoptable pool — with no FastAPI, no `TestClient`, and
+   no database, in 0.06s. That tier did not exist before, because the behaviour
+   was not reachable outside HTTP.
+
+   One contract detail changed with the move: the 404 detail is now canned
+   ("Group not found") for BOTH the unknown-group case and the vanished-row
+   race, where the race previously surfaced `str(exc)` through
+   `_registry_not_found`. That matches what the route's own header already
+   promised — `str(exc)` never reaches HTTP.
 
 ## Recovery loop, end to end
 
@@ -109,7 +125,7 @@ All local against Postgres 18.
 
 | Gate | Result |
 | --- | --- |
-| Full suite `pytest -q` with Postgres | 2692 passed, 0 failed (exit 0) |
+| Full suite `pytest -q` with Postgres | 2696 passed, 0 failed (exit 0) |
 | `ruff check backend tests` | All checks passed |
 | `ruff format --check` | 458 files already formatted |
 | `mypy` on the changed backend modules | No issues in 3 source files |
@@ -117,10 +133,11 @@ All local against Postgres 18.
 | Alembic (no migration in PR) | single head `20260805_0001` |
 | `git diff --check` | Clean |
 
-The count rose from 2688 to 2692 with the review fixes: the Postgres-tier
+The count rose from 2688 to 2696 with the review fixes: the Postgres-tier
 stale-audit guard, two API-tier NUL-reason guards (the clear route and the
-member-remove route the shared helper also protects), and an in-memory store
-assertion on the erased owner id.
+member-remove route the shared helper also protects), an in-memory store
+assertion on the erased owner id, and the four domain-tier tests the
+service extraction made possible.
 
 Postgres-tier tests must not run concurrently with another pytest session
 against the same container — `_purge_test_rows` is module-scoped and deletes
