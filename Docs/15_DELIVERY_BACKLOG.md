@@ -707,6 +707,36 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
+- ✅ CMS group sync (2026-08-05, branch `feat/cms-group-sync`) —
+  `POST /channels/groups/sync` mirrors a YouTube CMS content owner's groups
+  into `channel_groups`: real titles, membership set-reconciled with adds AND
+  removals, DEACTIVATE when a group vanishes upstream, REACTIVATE when its key
+  returns; mandatory dry-run with a full per-group diff; global `MANAGE_GROUPS`
+  fail-closed; `GROUP_UPDATED` per changed group + `GROUPS_SYNCED` summary
+  accumulated from actual write-boundary outcomes, atomic with the group
+  writes (`PlatformLaneAuditSink` on the tenant transaction — proven on
+  Postgres incl. the lost-commit path). Unknown CMS member channels are
+  surfaced (capped list + total), never auto-created — `POST /channels/import`
+  stays the only channel-creation path. The groups API now 409s manual
+  rename/membership edits on synced groups (`active`-only PATCH allowed);
+  manual groups are untouched. New read surface
+  `YouTubeGroupsClient` (`groups.list`/`groupItems.list`). **Scope caveat:**
+  `groups.list` runs on the already-granted `yt-analytics.readonly`, but
+  `groupItems.list` does NOT — per Google's GroupItems: list authorization
+  notes it needs `.../auth/youtube` alone, or `youtube.readonly` together with
+  `yt-analytics.readonly`. A credential holding only `yt-analytics.readonly`
+  lists the groups and then fails every member fetch (canned 502). Confirm the
+  stored credential's scopes and re-consent before the first live sync. The
+  import's `group_id` CSV column
+  is legacy-but-working: sync converges whatever it created. The import also
+  gained `will_adopt_content_owner` per row, so its dry run discloses the one
+  permanent write its `outcome` never implied — attaching to an owner-NULL
+  group stamps that group's `content_owner_id`. **Still open:** whether the
+  import should adopt at ALL rather than 409 with "sync first" (a CSV cell is
+  weaker evidence of ownership than an authenticated `groups.list` for that
+  owner), and a `MANAGE_GROUPS` clear-stamp admin action — a wrong stamp has no
+  API-level remedy today. Spec:
+  `Docs/superpowers/specs/2026-08-05-cms-group-sync-design.md`.
 - ✅ Channel Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the
   Registry table is wired to `GET /channels` (replacing the `REGISTRY_ROWS`
   mock). All display fields derived client-side (avatar, CMS badge, source

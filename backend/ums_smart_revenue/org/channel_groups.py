@@ -31,6 +31,33 @@ from typing import Protocol
 from uuid import uuid4
 
 
+class ChannelGroupOwnerReassignmentError(ValueError):
+    """A write crossed a content-owner boundary it does not own.
+
+    ``content_owner_id`` is what scopes CMS group sync: it decides which
+    groups a sync may reconcile and which it may deactivate. Filling the
+    column on an owner-NULL legacy row is adoption and is allowed; changing a
+    row that already names an owner is not, because it would silently move the
+    group between content owners and corrupt both sides' subsequent plans.
+    Raised by the store so a call-site bug fails loudly instead of writing.
+
+    Also raised by the sync apply layer when the locked re-read shows a group
+    that was owner-NULL at plan time now claimed by someone else: the entry's
+    scoping premise is falsified, so mirroring it would write another owner's
+    group AND misattribute the audit row. The API maps this to a 409, the same
+    treatment the import's cross-owner rejection gets.
+    """
+
+
+def require_adoptable_owner(current: str | None, incoming: str, *, group_id: str) -> None:
+    """Allow filling an owner-NULL row (or a no-op re-stamp); reject a move."""
+    if current is not None and current != incoming:
+        raise ChannelGroupOwnerReassignmentError(
+            f"channel group {group_id} already belongs to content owner {current!r}; "
+            f"refusing to reassign it to {incoming!r}"
+        )
+
+
 class ChannelGroupConflictError(ValueError):
     """A group write lost a uniqueness race (duplicate per-tenant cms_group_id).
 
@@ -49,6 +76,7 @@ class ChannelGroupEntry:
     active: bool
     channel_ids: tuple[str, ...]
     cms_group_id: str | None = None
+    content_owner_id: str | None = None
 
     def to_api(self) -> dict[str, object]:
         return {
@@ -68,8 +96,26 @@ class ChannelGroupRegistryStore(Protocol):
     def list_groups_full(self) -> list[ChannelGroupEntry]:
         pass
 
-    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
+    def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
+        """Return every CMS-keyed group, optionally scoped to one owner.
+
+        ``content_owner_id=None`` (the default) returns every synced group
+        tenant-wide. CMS group sync MUST pass its content owner: groups carry
+        no owner column of their own beyond content_owner_id stamped at
+        create time, so an unscoped call would hand sync planning every OTHER
+        owner's groups too, and any group missing from the CURRENT owner's
+        upstream snapshot looks "vanished" and gets deactivated.
+        """
         pass
+
+    def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
+        """Return the group by id, or None.
+
+        ``for_update`` row-locks the parent group — the membership
+        serialization point — so a caller that diffs membership under the lock
+        cannot have that diff invalidated by a concurrent add/remove before it
+        writes. CMS group sync's apply uses it for exactly that.
+        """
 
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
@@ -89,6 +135,31 @@ class ChannelGroupRegistryStore(Protocol):
         Unknown keys are simply absent from the result.
         """
 
+    def list_foreign_owner_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys stamped to a DIFFERENT content owner.
+
+        Owner-NULL and same-owner keys are excluded — both are attachable.
+        One bulk lookup, matching ``list_archived_cms_group_ids``, so import
+        planning can vet a whole roster's group keys in one query and surface
+        cross-owner conflicts in the dry run instead of only at the write
+        boundary.
+        """
+
+    def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Return the subset of CMS keys whose existing group is owner-NULL.
+
+        The exact complement of ``list_foreign_owner_cms_group_ids`` over the
+        keys that resolve to a group: those are refused, these are ADOPTED —
+        attaching to one stamps ``content_owner_id`` as a side effect. That
+        stamp is a real, permanent, un-previewed write unless planning knows
+        about it, which is why this exists rather than being inferred from the
+        other two sets. Unknown keys are absent from the result: a key with no
+        group is a CREATE, and a group created by the import is stamped at
+        birth rather than adopted.
+        """
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         pass
 
@@ -99,13 +170,25 @@ class ChannelGroupRegistryStore(Protocol):
         group_type: str,
         channel_ids: list[str],
         cms_group_id: str | None = None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
         pass
 
     def update_group(
-        self, *, group_id: str, name: str | None, active: bool | None
+        self,
+        *,
+        group_id: str,
+        name: str | None,
+        active: bool | None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        pass
+        """Update a group's name, active state, and/or content owner.
+
+        Every field is None-means-unchanged. ``content_owner_id`` exists so CMS
+        group sync can ADOPT an owner-NULL legacy group once the upstream key
+        proves ownership; it never reassigns a group that already carries an
+        owner.
+        """
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
         pass
@@ -127,7 +210,31 @@ class ChannelGroupRegistry:
     def list_groups_full(self) -> list[ChannelGroupEntry]:
         return sorted(self._groups.values(), key=lambda group: group.name)
 
-    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
+    def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
+        """Return every CMS-keyed group, active or not, for sync planning.
+
+        Parity with the SQL store: a scoped call also returns owner-NULL rows
+        so legacy/unstamped groups stay reconcilable instead of colliding on
+        the tenant-wide unique cms_group_id.
+        """
+        return [
+            group
+            for group in self._groups.values()
+            if group.cms_group_id is not None
+            and (
+                content_owner_id is None
+                or group.content_owner_id is None
+                or group.content_owner_id == content_owner_id
+            )
+        ]
+
+    def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
+        """Return the group by id, or None.
+
+        ``for_update`` is a no-op in memory (single-threaded test registry),
+        matching get_group_by_cms_id's documented divergence; the SQL
+        implementation takes the real FOR NO KEY UPDATE row lock.
+        """
         return self._groups.get(group_id)
 
     def get_group_by_cms_id(
@@ -152,6 +259,26 @@ class ChannelGroupRegistry:
             if group.cms_group_id in cms_group_ids and not group.active
         }
 
+    def list_foreign_owner_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys stamped to a different content owner."""
+        return {
+            group.cms_group_id
+            for group in self._groups.values()
+            if group.cms_group_id in cms_group_ids
+            and group.content_owner_id is not None
+            and group.content_owner_id != content_owner_id
+        }
+
+    def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Return the subset of CMS keys whose existing group is owner-NULL."""
+        return {
+            group.cms_group_id
+            for group in self._groups.values()
+            if group.cms_group_id in cms_group_ids and group.content_owner_id is None
+        }
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.
 
@@ -170,6 +297,7 @@ class ChannelGroupRegistry:
         group_type: str,
         channel_ids: list[str],
         cms_group_id: str | None = None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
         # Parity with the SQL store's per-tenant unique key: a duplicate CMS
         # key must fail typed here too, not silently create a second group.
@@ -184,18 +312,30 @@ class ChannelGroupRegistry:
             active=True,
             channel_ids=tuple(dict.fromkeys(channel_ids)),
             cms_group_id=cms_group_id,
+            content_owner_id=content_owner_id,
         )
         self._groups[group.id] = group
         return group
 
     def update_group(
-        self, *, group_id: str, name: str | None, active: bool | None
+        self,
+        *,
+        group_id: str,
+        name: str | None,
+        active: bool | None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
         group = self._require_group(group_id)
+        # Parity with the SQL store: adopt-only, reassignment raises.
+        if content_owner_id is not None:
+            require_adoptable_owner(group.content_owner_id, content_owner_id, group_id=group_id)
         updated = replace(
             group,
             name=name if name is not None else group.name,
             active=active if active is not None else group.active,
+            content_owner_id=(
+                content_owner_id if content_owner_id is not None else group.content_owner_id
+            ),
         )
         self._groups[group_id] = updated
         return updated

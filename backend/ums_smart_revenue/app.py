@@ -29,12 +29,12 @@ from ums_smart_revenue.api.channel_account_links import (
     router as channel_account_links_router,
 )
 from ums_smart_revenue.api.channels import (
+    current_atomic_audit_sink,
     current_audit_sink,
     current_channel_registry,
-    current_import_audit_sink,
+    sql_atomic_audit_sink_from_session,
     sql_audit_sink_from_session,
     sql_channel_registry_from_session,
-    sql_import_audit_sink_from_session,
 )
 from ums_smart_revenue.api.channels import (
     router as channels_router,
@@ -174,10 +174,11 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         overrides[current_channel_registry] = sql_channel_registry_from_session
         overrides[current_group_registry] = sql_group_registry_from_session
         overrides[current_audit_sink] = sql_audit_sink_from_session
-        # The bulk import's audit rows must commit atomically with its channel
-        # writes, so its sink runs on the request's tenant session (platform-
-        # lane elevated per append) instead of the independent platform session.
-        overrides[current_import_audit_sink] = sql_import_audit_sink_from_session
+        # All-or-nothing routes (the bulk channel import, the CMS group sync)
+        # must commit their audit rows atomically with their domain writes, so
+        # their sink runs on the request's tenant session (platform-lane
+        # elevated per append) instead of the independent platform session.
+        overrides[current_atomic_audit_sink] = sql_atomic_audit_sink_from_session
         overrides[current_revenue_audit_sink] = sql_revenue_audit_sink_from_session
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_principal_from_headers] = current_principal_from_database

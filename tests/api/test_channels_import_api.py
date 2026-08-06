@@ -645,6 +645,45 @@ def test_archived_group_is_a_row_error_not_a_write():
     assert archived is not None and archived.channel_ids == (CHANNEL_ID,)
 
 
+def test_group_owned_by_another_content_owner_fails_the_dry_run():
+    """A cross-owner group conflict is visible in the PREVIEW, not just the apply.
+
+    The write boundary already refuses it with a 409, but this route's whole
+    dry-run contract is that the preview tells the operator what will happen.
+    Since the conflict is knowable from stored state, an "all clear" preview
+    followed by a 409 would be the preview lying.
+    """
+    client, registry, groups, audit_sink = create_import_app()
+    groups.create_group(
+        name="Theirs",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-theirs",
+        content_owner_id="SomeOtherOwner",
+    )
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-theirs,Yes", header=header)
+
+    # A dry run reports its plan (errors included) with 200 — that IS the
+    # preview contract; what matters is that the conflict appears at all.
+    preview = post_import(client, body, dry_run="true")
+
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()
+    assert plan["counts"]["ERROR"] == 1
+    assert "another content owner" in plan["rows"][0]["reason"]
+    assert "cms-theirs" in plan["rows"][0]["reason"]
+
+    # And the apply agrees with the preview: a 422 naming the same conflict,
+    # not a 409 from the write boundary that the preview never hinted at.
+    applied = post_import(client, body)
+    assert applied.status_code == 422, applied.text
+    assert "another content owner" in applied.json()["detail"]["rows"][0]["reason"]
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert groups.get_group_by_cms_id("cms-theirs").channel_ids == ()
+    assert audit_sink.records == []
+
+
 class _ArchivingDuringApplyGroups(ChannelGroupRegistry):
     """Simulate a concurrent archive landing between planning and apply.
 
@@ -804,3 +843,70 @@ def test_import_rejects_global_role_without_manage_channels():
     assert response.json()["detail"] == "Missing permission: registry.manage_channels"
     assert registry.get_channel(CHANNEL_ID) is None
     assert audit_sink.records == []
+
+
+def test_dry_run_discloses_the_ownership_stamp_an_adoption_performs():
+    """The preview must name the ownership write, which no row outcome implies.
+
+    An owner-NULL legacy group is ADOPTED rather than refused: the apply stamps
+    its content_owner_id permanently. Nothing else in the row says so — the
+    channel is already correct, so the row reads UNCHANGED with an empty diff,
+    and the group already contains the channel, so not even a membership add
+    appears. Without the flag the operator previews "nothing happens" and the
+    apply claims a group for this owner forever (review #169 r3723536284).
+    """
+    client, registry, groups, audit_sink = create_import_app()
+    registry.create_channel(
+        youtube_channel_id=CHANNEL_ID,
+        channel_name="Alpha News",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        content_owner_id=CONTENT_OWNER,
+        revenue_required=True,
+    )
+    groups.create_group(
+        name="Legacy",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_ID],
+        cms_group_id="cms-legacy",
+        content_owner_id=None,
+    )
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-legacy,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true")
+
+    assert preview.status_code == 200, preview.text
+    row = preview.json()["rows"][0]
+    # Everything else about this row says "nothing to do" — that is the point.
+    assert row["outcome"] == "UNCHANGED"
+    assert row["changes"] == {}
+    assert row["reason"] is None
+    assert row["will_adopt_content_owner"] is True
+    assert groups.get_group_by_cms_id("cms-legacy").content_owner_id is None
+    assert audit_sink.records == []
+
+    applied = post_import(client, body)
+
+    assert applied.status_code == 200, applied.text
+    # The preview told the truth: the apply performed exactly that stamp.
+    assert groups.get_group_by_cms_id("cms-legacy").content_owner_id == CONTENT_OWNER
+
+
+def test_dry_run_does_not_claim_an_adoption_for_a_group_already_owned():
+    """The flag must be false when the apply has no ownership write to make."""
+    client, _registry, groups, _audit_sink = create_import_app()
+    groups.create_group(
+        name="Mine",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-mine",
+        content_owner_id=CONTENT_OWNER,
+    )
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-mine,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true")
+
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["rows"][0]["will_adopt_content_owner"] is False

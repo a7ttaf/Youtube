@@ -37,6 +37,7 @@
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select
+from sqlalchemy import or_ as sa_or
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -45,7 +46,11 @@ from ums_smart_revenue.db.org_models import (
     ChannelGroupORM,
     YouTubeChannelORM,
 )
-from ums_smart_revenue.org.channel_groups import ChannelGroupConflictError, ChannelGroupEntry
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupConflictError,
+    ChannelGroupEntry,
+    require_adoptable_owner,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -110,8 +115,90 @@ class SqlAlchemyChannelGroupRegistry:
             self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
         ]
 
-    def get_group(self, group_id: str) -> ChannelGroupEntry | None:
-        row = self._get_group_row(group_id)
+    # ========================================================================
+    # Purpose: Enumerate the CMS-keyed groups a sync must reconcile — every
+    #   group carrying a cms_group_id, active or not, optionally narrowed to
+    #   one content owner.
+    # Database/ORM: ChannelGroupORM (read-only), tenant-scoped, plus
+    #   ChannelGroupMemberORM x YouTubeChannelORM for FULL membership (not the
+    #   active-only member set the finance scope selector uses).
+    # Standards: Owner scoping is OR-NULL by design. (tenant_id, cms_group_id)
+    #   is unique tenant-wide, so an owner-NULL row hidden from a scoped read
+    #   would be planned as CREATE and collide on that key, making the group
+    #   permanently unsyncable. Those rows are therefore returned for matching;
+    #   refusing to DEACTIVATE them is the planner's job, not this read's.
+    # Blast Radius: CMS group-sync planning only — group naming, membership,
+    #   and active state as the mirror resolves them. No finance totals.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/channels.py -> sync route caller.
+    #   - File: backend/ums_smart_revenue/org/channel_group_sync.py ->
+    #     plan_group_sync consumes the result and owns the deactivation gate.
+    # ========================================================================
+    def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
+        """Return every CMS-keyed group (active or not) with full membership.
+
+        Sync planning must see deactivated synced groups so a CMS key that
+        reappears upstream can REACTIVATE its original local group instead of
+        creating a duplicate. ``content_owner_id`` scopes the result to one
+        owner's groups (see the Protocol docstring for why CMS group sync must
+        always pass it).
+
+        A scoped call ALSO returns owner-NULL rows — groups created before
+        ``content_owner_id`` existed, or by an older import that did not stamp
+        it. They must stay visible: ``(tenant_id, cms_group_id)`` is unique
+        tenant-wide, so hiding them would make the planner emit CREATE for a
+        key that already exists and the apply would collide on that key,
+        leaving those groups permanently unsyncable. Surfacing them instead
+        lets sync reconcile (and thereby adopt) them.
+        """
+        conditions = [
+            ChannelGroupORM.tenant_id == self._tenant_id,
+            ChannelGroupORM.cms_group_id.is_not(None),
+        ]
+        if content_owner_id is not None:
+            conditions.append(
+                sa_or(
+                    ChannelGroupORM.content_owner_id == content_owner_id,
+                    ChannelGroupORM.content_owner_id.is_(None),
+                )
+            )
+        rows = self._session.scalars(
+            select(ChannelGroupORM).where(*conditions).order_by(ChannelGroupORM.name)
+        ).all()
+        group_ids = [row.id for row in rows]
+        channel_ids_by_group = self._channel_ids_by_group(group_ids)
+        return [
+            self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows
+        ]
+
+    # ========================================================================
+    # Purpose: Resolve one group by id, optionally under the membership
+    #   serialization lock so a caller can diff membership and write without a
+    #   racing writer invalidating the diff in between.
+    # Database/ORM: ChannelGroupORM (SELECT, tenant-scoped), plus
+    #   ChannelGroupMemberORM x YouTubeChannelORM for the member ids;
+    #   with_for_update(key_share=True) when for_update is set.
+    # Standards: The lock is FOR NO KEY UPDATE, never plain FOR UPDATE — plain
+    #   FOR UPDATE conflicts with the FOR KEY SHARE lock a member INSERT takes
+    #   on its referenced group row and deadlocks import against the groups
+    #   API. SQLite ignores FOR UPDATE (single-writer), so this is a
+    #   PostgreSQL-only concern.
+    # Blast Radius: Read-only here; the lock it takes serializes the CALLER's
+    #   subsequent membership/name/active writes and their audit rows.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_group_sync_apply.py ->
+    #     _execute_update diffs under this lock before writing.
+    # ========================================================================
+    def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
+        """Return the group by id, or None.
+
+        ``for_update`` takes the parent row's FOR NO KEY UPDATE lock — the
+        membership serialization point every membership writer also takes — so
+        a caller that diffs membership under it (CMS group sync's apply) cannot
+        have that diff invalidated by a concurrent add/remove committing before
+        its own write lands.
+        """
+        row = self._get_group_row(group_id, for_update=for_update)
         if row is None:
             return None
         return self._to_entry(row)
@@ -194,6 +281,91 @@ class SqlAlchemyChannelGroupRegistry:
         # the column's Optional type for the checker without a cast.
         return {key for key in rows if key is not None}
 
+    # ========================================================================
+    # Purpose: Bulk-classify a roster's CMS group keys by CROSS-OWNER conflict
+    #   so import planning can fail those rows closed, rather than letting the
+    #   write boundary's own recheck 409 an import the preview called clean.
+    # Database/ORM: ChannelGroupORM (read-only; cms_group_id + content_owner_id
+    #   under the per-tenant unique key). No membership loading, no writes.
+    # Standards: One bounded SELECT for the whole key set; tenant-scoped;
+    #   unknown keys absent. IS NOT NULL is EXPLICIT, not implied by the
+    #   inequality — three-valued logic already excludes NULL stamps, but
+    #   silently, and adoption depends on those rows staying attachable.
+    #   Read-only -> RLS-safe, no platform lane.
+    # Blast Radius: Import planning's cross-owner per-row errors and sync's
+    #   CONFLICT outcomes. No group writes, no audit.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     plan_channel_import_with_stores feeds the result to the planner.
+    #   - File: backend/ums_smart_revenue/org/channel_group_sync_apply.py ->
+    #     _foreign_owner_group_ids chunks this for sync planning.
+    # ========================================================================
+    def list_foreign_owner_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys stamped to a different content owner.
+
+        ``IS NOT NULL`` is explicit rather than implied by the inequality:
+        SQL three-valued logic makes ``content_owner_id != :owner`` UNKNOWN
+        (not TRUE) for a NULL stamp, so the predicate would already exclude
+        owner-NULL rows — but silently, and adoption depends on those rows
+        staying attachable. One bounded SELECT, mirroring
+        ``list_archived_cms_group_ids``.
+        """
+        if not cms_group_ids:
+            return set()
+        rows = self._session.scalars(
+            select(ChannelGroupORM.cms_group_id).where(
+                ChannelGroupORM.tenant_id == self._tenant_id,
+                ChannelGroupORM.cms_group_id.in_(cms_group_ids),
+                ChannelGroupORM.content_owner_id.is_not(None),
+                ChannelGroupORM.content_owner_id != content_owner_id,
+            )
+        ).all()
+        return {key for key in rows if key is not None}
+
+    # ========================================================================
+    # Purpose: Bulk-classify a roster's CMS group keys by ADOPTABILITY — the
+    #   owner-NULL rows — so import planning can disclose the ownership stamp
+    #   that attaching to one performs. Third of a matched set with the
+    #   archived and cross-owner lookups above; the same pass reads all three.
+    # Database/ORM: ChannelGroupORM (read-only; cms_group_id + content_owner_id
+    #   under the per-tenant unique key). No membership loading, no writes.
+    # Standards: One bounded SELECT for the whole key set; tenant-scoped;
+    #   unknown keys absent — a key with no group is a CREATE, and a group the
+    #   import creates is stamped at birth rather than adopted. Deliberately
+    #   NOT filtered on active: the archived lookup fails those rows closed on
+    #   its own, and narrowing here would make two reads of one row disagree.
+    #   Read-only -> RLS-safe, no platform lane.
+    # Blast Radius: The import preview's will_adopt_content_owner flag only.
+    #   No group writes, no audit — the stamp itself happens at the apply's
+    #   locked write boundary, which re-reads and can decline to repeat it.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     plan_channel_import_with_stores feeds the result to the planner, and
+    #     _attach_group_membership performs the stamp this set predicts.
+    #   - File: backend/ums_smart_revenue/org/channel_import.py ->
+    #     plan_channel_import flags rows whose key lands in this set.
+    # ========================================================================
+    def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Return the subset of CMS keys whose existing group is owner-NULL.
+
+        Deliberately NOT filtered on ``active``: an archived group is already
+        failed closed by ``list_archived_cms_group_ids``, and narrowing here
+        would make the two sets disagree about the same row for no gain. One
+        bounded SELECT, mirroring its two siblings.
+        """
+        if not cms_group_ids:
+            return set()
+        rows = self._session.scalars(
+            select(ChannelGroupORM.cms_group_id).where(
+                ChannelGroupORM.tenant_id == self._tenant_id,
+                ChannelGroupORM.cms_group_id.in_(cms_group_ids),
+                ChannelGroupORM.content_owner_id.is_(None),
+            )
+        ).all()
+        return {key for key in rows if key is not None}
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.
 
@@ -252,6 +424,7 @@ class SqlAlchemyChannelGroupRegistry:
         group_type: str,
         channel_ids: list[str],
         cms_group_id: str | None = None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
         """Create a group row plus membership, raising typed on a CMS-key race.
 
@@ -268,6 +441,7 @@ class SqlAlchemyChannelGroupRegistry:
             group_type=group_type,
             active=True,
             cms_group_id=cms_group_id,
+            content_owner_id=content_owner_id,
         )
         self._session.add(row)
         try:
@@ -287,13 +461,30 @@ class SqlAlchemyChannelGroupRegistry:
         return self._to_entry(row)
 
     def update_group(
-        self, *, group_id: str, name: str | None, active: bool | None
+        self,
+        *,
+        group_id: str,
+        name: str | None,
+        active: bool | None,
+        content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
+        """Update name / active / content owner; None means leave unchanged.
+
+        ``content_owner_id`` is ADOPT-ONLY and enforced here, not just by the
+        caller: it may fill an owner-NULL row, and re-passing the owner a row
+        already has is a no-op, but reassigning an owned group to a different
+        owner raises. Ownership is what scopes CMS group sync, so a call-site
+        bug that silently moved a group between content owners would corrupt
+        every later sync's plan on both sides.
+        """
         row = self._require_group_row(group_id)
         if name is not None:
             row.name = name
         if active is not None:
             row.active = active
+        if content_owner_id is not None:
+            require_adoptable_owner(row.content_owner_id, content_owner_id, group_id=group_id)
+            row.content_owner_id = content_owner_id
         self._session.flush()
         return self._to_entry(row)
 
@@ -557,6 +748,7 @@ class SqlAlchemyChannelGroupRegistry:
             active=row.active,
             channel_ids=resolved_channel_ids,
             cms_group_id=row.cms_group_id,
+            content_owner_id=row.content_owner_id,
         )
 
 

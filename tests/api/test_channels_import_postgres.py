@@ -283,6 +283,18 @@ class _FailingGroupStore:
         """Delegate the bulk archived-key lookup to the real store."""
         return self._inner.list_archived_cms_group_ids(cms_group_ids)
 
+    def list_foreign_owner_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Delegate the bulk cross-owner-key lookup to the real store."""
+        return self._inner.list_foreign_owner_cms_group_ids(
+            cms_group_ids, content_owner_id=content_owner_id
+        )
+
+    def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Delegate the bulk owner-NULL-key lookup to the real store."""
+        return self._inner.list_adoptable_cms_group_ids(cms_group_ids)
+
     def create_group(self, **kwargs: object) -> ChannelGroupEntry:
         """Delegate group creation to the real store."""
         return self._inner.create_group(**kwargs)

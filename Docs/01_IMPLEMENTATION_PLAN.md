@@ -1,9 +1,14 @@
 # Implementation Plan
 
-## Status (2026-08-03)
+## Status (2026-08-05)
 
-Reconciled through the bulk channel inventory import branch
-(`feat/bulk-channel-inventory-import`). Two corrections landed in this pass:
+Reconciled through the CMS group sync branch (`feat/cms-group-sync`): YouTube
+is now the source of truth for channel-GROUP structure via
+`POST /channels/groups/sync` (see the Phase 1 group-mapping item), and the
+bulk import's manual `group_id` CSV column is legacy-but-working.
+
+Previously reconciled through the bulk channel inventory import branch
+(`feat/bulk-channel-inventory-import`, merged as PR #159). Two corrections landed in this pass:
 the Google ingestion foundation and the source-rows→facts normalization bridge
 are lifted from ⏳ to ✅ in `15_DELIVERY_BACKLOG.md`, because the 2026-06-22
 operator smoke produced 25 real `monthly_channel_revenue_facts` totalling
@@ -426,7 +431,14 @@ on real ingestion (Phase 2) and the inventory load workflow.
   Registry page now drives live re-parenting via `PATCH /channels/{id}/mapping`
   (Registry Phase 2, PR #78), now month-lock-guarded (PR #98 rejects a mapping
   change that would rewrite a LOCKED month's attribution); bulk inventory
-  assignment workflow still not built.
+  assignment workflow still not built. **GROUP mapping is now CMS-driven
+  (2026-08-05):** `POST /channels/groups/sync` mirrors YouTube CMS groups —
+  real titles, membership with adds AND removals, deactivate on upstream
+  disappearance, reactivate on return — with a mandatory dry-run, and the
+  groups API 409s manual rename/membership edits on synced groups (YouTube
+  Content Manager is the source of truth; `active`-only PATCH stays allowed,
+  but any sync that still sees the group upstream re-activates it).
+  Company/sector (org-unit) mapping remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to
   `GET /channels/outside-cms` + `GET /channels/issues` (PR #98,

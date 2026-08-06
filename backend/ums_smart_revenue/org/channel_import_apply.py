@@ -58,6 +58,18 @@ class ChannelImportArchivedGroupError(ChannelImportError):
     """
 
 
+class ChannelImportGroupOwnerMismatchError(ChannelImportError):
+    """A row's CMS group already belongs to a DIFFERENT content owner.
+
+    ``channel_groups.cms_group_id`` is unique per TENANT, not per owner, so an
+    import running for owner A can resolve a group that owner B's CMS sync
+    owns. Attaching A's channel there would put a foreign channel inside B's
+    mirrored group — which B's next sync would then manage (and remove) as if
+    the CMS had said so. Fails the import closed instead; the route maps it to
+    HTTP 409. Owner-NULL groups are adopted rather than rejected.
+    """
+
+
 # ============================================================================
 # Purpose: Domain-side planning entry point for the bulk import — gathers the
 #   store state a roster diffs against and delegates to the pure planner,
@@ -98,7 +110,13 @@ def plan_channel_import_with_stores(
     planned as a CREATE that the duplicate guard turns into a conflict
     mid-apply. Archived CMS groups likewise fail their rows closed at
     planning; attaching members to a retired group would audit a change that
-    active listings and finance scope selection never surface.
+    active listings and finance scope selection never surface. Groups already
+    stamped to a different content owner get the same treatment, so a cross-
+    owner conflict shows up in the dry run rather than only as a 409 from the
+    write boundary's own recheck. The owner-NULL keys are read too, for the
+    opposite reason: those groups are not refused but ADOPTED, and the
+    ownership stamp that adoption performs is a write no row outcome implies,
+    so planning marks it rather than letting the apply spring it.
     """
     wanted = {row.youtube_channel_id for row in parsed.rows}
     existing = {
@@ -113,6 +131,10 @@ def plan_channel_import_with_stores(
         content_owner_id=content_owner_id,
         cms_status=cms_status,
         archived_group_ids=frozenset(groups.list_archived_cms_group_ids(group_ids)),
+        foreign_owner_group_ids=frozenset(
+            groups.list_foreign_owner_cms_group_ids(group_ids, content_owner_id=content_owner_id)
+        ),
+        adoptable_group_ids=frozenset(groups.list_adoptable_cms_group_ids(group_ids)),
     )
 
 
@@ -265,14 +287,17 @@ def apply_channel_import(
         if channel_id is None or entry.channel_name is None or not entry.group_id:
             continue
         group_change = _attach_group_membership(
-            groups, cms_group_id=entry.group_id, channel_id=channel_id
+            groups,
+            cms_group_id=entry.group_id,
+            channel_id=channel_id,
+            content_owner_id=content_owner_id,
         )
         # A group creation or membership addition is a finance-scope
         # mutation; without its own GROUP_UPDATED record an inventory-
         # UNCHANGED row's group change would be invisible in the audit
         # trail (the summary event carries only counts).
         if group_change is not None:
-            group_action, group = group_change
+            group_action, group, group_adopted = group_change
             record_audit_event(
                 sink=audit_sink,
                 actor=actor,
@@ -287,6 +312,7 @@ def apply_channel_import(
                     "group_type": group.group_type,
                     "channel_id": channel_id,
                     "source": AUDIT_SOURCE_BULK_IMPORT,
+                    "adopted_content_owner": group_adopted,
                 },
             )
     record_audit_event(
@@ -414,17 +440,27 @@ def _entry_changes(
 #     conflict errors to 409.
 # ============================================================================
 def _attach_group_membership(
-    groups: ChannelGroupRegistryStore, *, cms_group_id: str, channel_id: str
-) -> tuple[str, ChannelGroupEntry] | None:
+    groups: ChannelGroupRegistryStore,
+    *,
+    cms_group_id: str,
+    channel_id: str,
+    content_owner_id: str,
+) -> tuple[str, ChannelGroupEntry, bool] | None:
     """Ensure the channel belongs to the group carrying this CMS key.
 
-    Returns the (action, group) pair for the mutation performed — group
-    creation or membership addition — so the caller can audit it, or None when
-    the membership already existed and nothing changed. Planning fails rows
-    targeting archived groups closed, and the write boundary RE-CHECKS under a
-    row lock: a group archived in the plan-to-apply window raises
-    ChannelImportArchivedGroupError so the race fails the transaction closed
-    instead of silently mutating a retired group.
+    Returns ``(action, group, adopted_content_owner)`` for the mutation
+    performed — group creation, membership addition, or a bare owner adoption
+    — so the caller can audit it, or None when nothing at all was written.
+    Planning fails rows targeting archived groups closed, and the write
+    boundary RE-CHECKS under a row lock: a group archived in the plan-to-apply
+    window raises ChannelImportArchivedGroupError so the race fails the
+    transaction closed instead of silently mutating a retired group.
+
+    The import's ``content_owner_id`` is stamped on any group created here so
+    CMS group sync — which scopes ``list_synced_groups`` to one owner — can
+    match this group later. Without the stamp the row stays owner-NULL, sync
+    cannot see it, plans it as CREATE, and then collides with the per-tenant
+    unique ``cms_group_id`` key.
     """
     group = groups.get_group_by_cms_id(cms_group_id, for_update=True)
     if group is None:
@@ -433,14 +469,38 @@ def _attach_group_membership(
             group_type="SECTOR",
             channel_ids=[channel_id],
             cms_group_id=cms_group_id,
+            content_owner_id=content_owner_id,
         )
-        return ("group_created", created)
+        # Created stamped with this owner — nothing was adopted.
+        return ("group_created", created, False)
     if not group.active:
         raise ChannelImportArchivedGroupError(
             f"channel group was archived during the import: {cms_group_id}; "
             "reactivate it (or remove the Group_ID) and retry"
         )
+    # cms_group_id is unique per TENANT, so this lookup can resolve a group
+    # another content owner's CMS sync owns. Adding this roster's channel
+    # there would inject a foreign channel into that owner's mirrored group,
+    # which their next sync would then manage — and remove — as if YouTube had
+    # said so. Fail the import closed; only an owner-NULL group is adoptable.
+    if group.content_owner_id is not None and group.content_owner_id != content_owner_id:
+        raise ChannelImportGroupOwnerMismatchError(
+            f"channel group {cms_group_id} belongs to content owner "
+            f"{group.content_owner_id!r}, not {content_owner_id!r}; "
+            "import that group's channels under its own content owner"
+        )
+    adopted = group.content_owner_id is None
+    if adopted:
+        # Adopt the legacy/unstamped group so CMS sync can see it afterwards.
+        # This is a real write, so it must reach the audit trail even when the
+        # membership below turns out to be a no-op — an unaudited write is the
+        # same dishonesty as an audit row for a write that never happened.
+        group = groups.update_group(
+            group_id=group.id, name=None, active=None, content_owner_id=content_owner_id
+        )
     if channel_id not in group.channel_ids:
         updated = groups.add_members(group_id=group.id, channel_ids=[channel_id])
-        return ("member_added", updated)
+        return ("member_added", updated, adopted)
+    if adopted:
+        return ("group_adopted", group, True)
     return None

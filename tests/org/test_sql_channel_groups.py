@@ -485,6 +485,72 @@ def test_list_groups_uses_request_tenant_context_by_default() -> None:
 
 
 # ---------------------------------------------------------------------------
+# list_synced_groups
+# ---------------------------------------------------------------------------
+
+
+def test_list_synced_groups_returns_only_cms_keyed_groups() -> None:
+    """Groups without a cms_group_id never appear in list_synced_groups."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    registry.create_group(
+        name="Manual",
+        group_type="CUSTOM_GROUP",
+        channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL],
+    )
+    synced = registry.create_group(
+        name="TV Sector",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_DEFAULT_B_EXTERNAL],
+        cms_group_id="cms-tv",
+    )
+
+    result = registry.list_synced_groups()
+
+    assert [entry.id for entry in result] == [synced.id]
+    assert result[0].channel_ids == (CHANNEL_DEFAULT_B_EXTERNAL,)
+
+
+def test_list_synced_groups_includes_inactive_group_with_full_membership() -> None:
+    """A deactivated synced group is still returned, with its full member set."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    synced = registry.create_group(
+        name="News Sector",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL, CHANNEL_INACTIVE_EXTERNAL],
+        cms_group_id="cms-news",
+    )
+    registry.update_group(group_id=synced.id, name=None, active=False)
+
+    result = registry.list_synced_groups()
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry.id == synced.id
+    assert entry.active is False
+    assert set(entry.channel_ids) == {CHANNEL_DEFAULT_A_EXTERNAL, CHANNEL_INACTIVE_EXTERNAL}
+
+
+def test_list_synced_groups_filters_to_bound_tenant_only() -> None:
+    """list_synced_groups never surfaces another tenant's synced groups."""
+    session = build_session()
+    seed_org(session)
+    SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID).create_group(
+        name="Other Synced Group",
+        group_type="SECTOR",
+        channel_ids=[CHANNEL_OTHER_EXTERNAL],
+        cms_group_id="cms-other",
+    )
+
+    default_registry = SqlAlchemyChannelGroupRegistry(session)
+
+    assert default_registry.list_synced_groups() == []
+
+
+# ---------------------------------------------------------------------------
 # get_group / IDOR
 # ---------------------------------------------------------------------------
 
@@ -810,6 +876,95 @@ def test_list_archived_cms_group_ids_is_tenant_scoped_and_bulk() -> None:
     assert registry.get_group_by_cms_id("cms-active") is not None
     assert active.cms_group_id == "cms-active"
     assert registry.list_archived_cms_group_ids(set()) == set()
+
+
+def test_list_foreign_owner_cms_group_ids_is_tenant_scoped_and_skips_nulls() -> None:
+    """Only OTHER owners' keys conflict; owner-NULL rows stay adoptable.
+
+    The NULL case is the one worth pinning at the SQL tier: three-valued logic
+    already makes ``content_owner_id != :owner`` UNKNOWN for a NULL stamp, so
+    a future rewrite of the predicate that "simplifies away" the explicit
+    IS NOT NULL could silently start classifying legacy rows as conflicts and
+    break adoption for every pre-migration tenant.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    other_registry = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID)
+
+    registry.create_group(
+        name="Mine",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-mine",
+        content_owner_id="owner-a",
+    )
+    registry.create_group(
+        name="Theirs",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-theirs",
+        content_owner_id="owner-b",
+    )
+    registry.create_group(
+        name="Legacy", group_type="SECTOR", channel_ids=[], cms_group_id="cms-legacy"
+    )
+    # Another tenant's cross-owner group must not leak into this tenant's view.
+    other_registry.create_group(
+        name="Other Tenant",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-other-tenant",
+        content_owner_id="owner-b",
+    )
+
+    result = registry.list_foreign_owner_cms_group_ids(
+        {"cms-mine", "cms-theirs", "cms-legacy", "cms-other-tenant", "cms-missing"},
+        content_owner_id="owner-a",
+    )
+
+    assert result == {"cms-theirs"}
+    assert registry.list_foreign_owner_cms_group_ids(set(), content_owner_id="owner-a") == set()
+
+
+def test_list_adoptable_cms_group_ids_returns_only_owner_null_keys() -> None:
+    """The exact complement of the foreign-owner set, over the same rows.
+
+    Pinned together with the tenant boundary and the unknown key: an adoption
+    preview that leaked another tenant's legacy group, or that claimed a key
+    with no group at all, would advertise an ownership write the apply cannot
+    perform. An archived owner-NULL group IS returned — the archived set fails
+    that row closed on its own, and disagreeing here would make two reads of
+    the same row contradict each other.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    other_registry = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID)
+
+    registry.create_group(
+        name="Mine",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-mine",
+        content_owner_id="owner-a",
+    )
+    registry.create_group(
+        name="Legacy", group_type="SECTOR", channel_ids=[], cms_group_id="cms-legacy"
+    )
+    other_registry.create_group(
+        name="Other Tenant Legacy",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-other-tenant",
+    )
+
+    result = registry.list_adoptable_cms_group_ids(
+        {"cms-mine", "cms-legacy", "cms-other-tenant", "cms-missing"}
+    )
+
+    assert result == {"cms-legacy"}
+    assert registry.list_adoptable_cms_group_ids(set()) == set()
 
 
 def test_create_group_duplicate_cms_key_raises_typed_conflict() -> None:

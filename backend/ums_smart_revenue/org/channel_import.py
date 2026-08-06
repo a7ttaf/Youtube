@@ -330,7 +330,14 @@ class ChannelImportOutcome(StrEnum):
 
 @dataclass(frozen=True)
 class ChannelImportPlanEntry:
-    """The planned outcome for one CSV row, with its field-level diff."""
+    """The planned outcome for one CSV row, with its field-level diff.
+
+    ``will_adopt_content_owner`` is the one field that describes a write the
+    row's own outcome does not imply: attaching to an owner-NULL group stamps
+    that group's ``content_owner_id`` permanently, so a row can read UNCHANGED
+    (or show only a membership add) while the apply also claims a group. The
+    dry run has to say so, or it is not a preview of what the apply does.
+    """
 
     row_number: int
     youtube_channel_id: str | None
@@ -341,6 +348,7 @@ class ChannelImportPlanEntry:
     view_revenue_raw: str | None = None
     changes: Mapping[str, tuple[object, object]] = MappingProxyType({})
     reason: str | None = None
+    will_adopt_content_owner: bool = False
 
 
 @dataclass(frozen=True)
@@ -383,6 +391,33 @@ class ChannelImportPlan:
 #     executes these entries.
 #   - File: backend/ums_smart_revenue/api/channels.py -> renders the plan as
 #     the dry-run/apply response payload.
+def _blocked_group_reason(
+    group_id: str | None,
+    *,
+    archived_group_ids: frozenset[str],
+    foreign_owner_group_ids: frozenset[str],
+) -> str | None:
+    """Return the row-error reason for an unattachable group key, else None.
+
+    Both conditions are knowable from stored state, so they belong to PLANNING
+    even though the write boundary rechecks them under a row lock: a dry run
+    that reports a clean plan for an import the apply will reject is a preview
+    that lies. An owner-NULL key is deliberately not blocked — it is adoptable.
+    """
+    if group_id is None:
+        return None
+    if group_id in archived_group_ids:
+        return (
+            f"channel group is archived (active=false): {group_id}; reactivate it before importing"
+        )
+    if group_id in foreign_owner_group_ids:
+        return (
+            f"channel group belongs to another content owner: {group_id}; "
+            "import that group's channels under its own content owner"
+        )
+    return None
+
+
 # ============================================================================
 def plan_channel_import(
     *,
@@ -392,6 +427,8 @@ def plan_channel_import(
     content_owner_id: str,
     cms_status: str,
     archived_group_ids: frozenset[str] = frozenset(),
+    foreign_owner_group_ids: frozenset[str] = frozenset(),
+    adoptable_group_ids: frozenset[str] = frozenset(),
 ) -> ChannelImportPlan:
     """Diff parsed rows against the registry into a per-row execution plan.
 
@@ -399,6 +436,22 @@ def plan_channel_import(
     archived (active=false); a row targeting one fails closed. Attaching a
     channel to a retired group would audit a membership change that active
     group listings and finance scope selection never surface.
+
+    ``foreign_owner_group_ids`` carries the CMS group keys already stamped to a
+    DIFFERENT content owner. The apply refuses those too, but the conflict is
+    knowable from stored state, so classifying it here is what keeps
+    ``dry_run=true`` honest: a preview that reports a clean plan for an import
+    the write boundary will 409 is worse than no preview. Owner-NULL keys are
+    deliberately absent from this set — they are adoptable, not conflicting.
+
+    ``adoptable_group_ids`` carries those owner-NULL keys, and closes the last
+    gap in that same honesty argument. Attaching to one of those groups stamps
+    its ``content_owner_id`` permanently, but the stamp is invisible in the
+    row's own outcome: the row can read UNCHANGED, or show nothing but a
+    membership add, while the apply also claims a group for this owner. Rows
+    targeting such a key are flagged ``will_adopt_content_owner`` so the dry
+    run states the ownership write instead of leaving the operator to infer it
+    from the absence of a conflict.
     """
     entries: list[ChannelImportPlanEntry] = [
         ChannelImportPlanEntry(
@@ -413,19 +466,29 @@ def plan_channel_import(
     seen_channels: set[str] = set()
     for row in rows:
         revenue_required = True if row.view_revenue is None else row.view_revenue
-        if row.group_id and row.group_id in archived_group_ids:
+        blocked = _blocked_group_reason(
+            row.group_id,
+            archived_group_ids=archived_group_ids,
+            foreign_owner_group_ids=foreign_owner_group_ids,
+        )
+        if blocked is not None:
             entries.append(
                 ChannelImportPlanEntry(
                     row_number=row.row_number,
                     youtube_channel_id=row.youtube_channel_id,
                     outcome=ChannelImportOutcome.ERROR,
-                    reason=(
-                        "channel group is archived (active=false): "
-                        f"{row.group_id}; reactivate it before importing"
-                    ),
+                    reason=blocked,
                 )
             )
             continue
+        # Set on EVERY row targeting an adoptable group, not just the one the
+        # apply's group pass happens to reach first. The flag describes the
+        # ROW'S TARGET — "this group is owner-NULL and this import claims it" —
+        # which is true of every such row and is what the operator needs to
+        # decide. Marking a single winner would be precise about the one
+        # UPDATE statement and silent on the other rows, and it would couple
+        # planning to the apply's (group_id, channel_id) write order.
+        adopts = row.group_id is not None and row.group_id in adoptable_group_ids
         current = existing.get(row.youtube_channel_id)
         # The archived check runs BEFORE the repeated-membership shortcut: a
         # repeated archived channel must report EVERY copy as an ERROR with
@@ -449,6 +512,7 @@ def plan_channel_import(
                         group_id=row.group_id,
                         revenue_required=revenue_required,
                         view_revenue_raw=row.view_revenue_raw,
+                        will_adopt_content_owner=adopts,
                     )
                 )
                 continue
@@ -493,6 +557,7 @@ def plan_channel_import(
                 revenue_required=revenue_required,
                 view_revenue_raw=row.view_revenue_raw,
                 changes=MappingProxyType(dict(changes)),
+                will_adopt_content_owner=adopts,
             )
         )
 
