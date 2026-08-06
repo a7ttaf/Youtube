@@ -332,11 +332,10 @@ class ChannelImportOutcome(StrEnum):
 class ChannelImportPlanEntry:
     """The planned outcome for one CSV row, with its field-level diff.
 
-    ``will_adopt_content_owner`` is the one field that describes a write the
-    row's own outcome does not imply: attaching to an owner-NULL group stamps
-    that group's ``content_owner_id`` permanently, so a row can read UNCHANGED
-    (or show only a membership add) while the apply also claims a group. The
-    dry run has to say so, or it is not a preview of what the apply does.
+    Every write the apply performs for a row is implied by its ``outcome``,
+    its ``changes`` diff, and its ``group_id`` membership. Nothing rides along
+    invisibly: the import never claims ownership of a group it did not create,
+    so there is no ownership write left for an extra field to disclose.
     """
 
     row_number: int
@@ -348,7 +347,6 @@ class ChannelImportPlanEntry:
     view_revenue_raw: str | None = None
     changes: Mapping[str, tuple[object, object]] = MappingProxyType({})
     reason: str | None = None
-    will_adopt_content_owner: bool = False
 
 
 @dataclass(frozen=True)
@@ -375,7 +373,9 @@ class ChannelImportPlan:
 #   reported so an operator fixes one file rather than one row at a time, and
 #   the route rejects the whole apply if any ERROR remains. Archived registry
 #   rows and archived CMS groups are ERRORs, never silent creates or
-#   reactivations. `revenue_required` is finance-sensitive: an absent
+#   reactivations, and so is an EXISTING owner-NULL CMS group: only that
+#   group's content owner may claim it, and a CSV cell is not that owner
+#   speaking. `revenue_required` is finance-sensitive: an absent
 #   view_revenue column defaults to required, and turning it ON is separately
 #   guarded against LOCKED months at the registry write boundary. A repeated
 #   channel id is an ADDITIONAL group membership (many-to-many) when its
@@ -396,13 +396,17 @@ def _blocked_group_reason(
     *,
     archived_group_ids: frozenset[str],
     foreign_owner_group_ids: frozenset[str],
+    adoptable_group_ids: frozenset[str],
+    content_owner_id: str,
 ) -> str | None:
     """Return the row-error reason for an unattachable group key, else None.
 
-    Both conditions are knowable from stored state, so they belong to PLANNING
-    even though the write boundary rechecks them under a row lock: a dry run
-    that reports a clean plan for an import the apply will reject is a preview
-    that lies. An owner-NULL key is deliberately not blocked — it is adoptable.
+    All three conditions are knowable from stored state, so they belong to
+    PLANNING even though the write boundary rechecks them under a row lock: a
+    dry run that reports a clean plan for an import the apply will reject is a
+    preview that lies. Only keys that resolve to an EXISTING group are blocked
+    — a key with no local group is created here, stamped at birth with the
+    request's owner, which is a claim the request already carries.
     """
     if group_id is None:
         return None
@@ -414,6 +418,12 @@ def _blocked_group_reason(
         return (
             f"channel group belongs to another content owner: {group_id}; "
             "import that group's channels under its own content owner"
+        )
+    if group_id in adoptable_group_ids:
+        return (
+            f"channel group {group_id} exists without a content owner; run "
+            f"POST /channels/groups/sync for content owner {content_owner_id} "
+            "to adopt it, or clear/archive the group if it is stale"
         )
     return None
 
@@ -442,16 +452,14 @@ def plan_channel_import(
     knowable from stored state, so classifying it here is what keeps
     ``dry_run=true`` honest: a preview that reports a clean plan for an import
     the write boundary will 409 is worse than no preview. Owner-NULL keys are
-    deliberately absent from this set — they are adoptable, not conflicting.
+    deliberately absent from this set — they carry no conflicting claim.
 
-    ``adoptable_group_ids`` carries those owner-NULL keys, and closes the last
-    gap in that same honesty argument. Attaching to one of those groups stamps
-    its ``content_owner_id`` permanently, but the stamp is invisible in the
-    row's own outcome: the row can read UNCHANGED, or show nothing but a
-    membership add, while the apply also claims a group for this owner. Rows
-    targeting such a key are flagged ``will_adopt_content_owner`` so the dry
-    run states the ownership write instead of leaving the operator to infer it
-    from the absence of a conflict.
+    ``adoptable_group_ids`` carries those owner-NULL keys, and rows targeting
+    one are refused as well. Stamping an existing group's ``content_owner_id``
+    decides which owner's CMS sync governs that group from then on, and a CSV
+    cell is not that owner speaking: the evidence has to come from YouTube, so
+    only ``POST /channels/groups/sync`` may make the claim. The row error says
+    so, and it blocks the whole apply the way every other row error does.
     """
     entries: list[ChannelImportPlanEntry] = [
         ChannelImportPlanEntry(
@@ -470,6 +478,8 @@ def plan_channel_import(
             row.group_id,
             archived_group_ids=archived_group_ids,
             foreign_owner_group_ids=foreign_owner_group_ids,
+            adoptable_group_ids=adoptable_group_ids,
+            content_owner_id=content_owner_id,
         )
         if blocked is not None:
             entries.append(
@@ -481,14 +491,6 @@ def plan_channel_import(
                 )
             )
             continue
-        # Set on EVERY row targeting an adoptable group, not just the one the
-        # apply's group pass happens to reach first. The flag describes the
-        # ROW'S TARGET — "this group is owner-NULL and this import claims it" —
-        # which is true of every such row and is what the operator needs to
-        # decide. Marking a single winner would be precise about the one
-        # UPDATE statement and silent on the other rows, and it would couple
-        # planning to the apply's (group_id, channel_id) write order.
-        adopts = row.group_id is not None and row.group_id in adoptable_group_ids
         current = existing.get(row.youtube_channel_id)
         # The archived check runs BEFORE the repeated-membership shortcut: a
         # repeated archived channel must report EVERY copy as an ERROR with
@@ -512,7 +514,6 @@ def plan_channel_import(
                         group_id=row.group_id,
                         revenue_required=revenue_required,
                         view_revenue_raw=row.view_revenue_raw,
-                        will_adopt_content_owner=adopts,
                     )
                 )
                 continue
@@ -557,7 +558,6 @@ def plan_channel_import(
                 revenue_required=revenue_required,
                 view_revenue_raw=row.view_revenue_raw,
                 changes=MappingProxyType(dict(changes)),
-                will_adopt_content_owner=adopts,
             )
         )
 

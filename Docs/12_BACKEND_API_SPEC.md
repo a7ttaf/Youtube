@@ -65,14 +65,14 @@ group API's checks. The response (`dry_run` and apply alike) is the declared
 `ChannelImportResult` model: `counts` by outcome plus per-row entries carrying
 `row_number`, `youtube_channel_id`, `outcome` (`CREATE`/`UPDATE`/`UNCHANGED`/
 `ERROR`), the planned `channel_name`/`group_id`/`revenue_required`, the
-field-level `changes` diff, a `reason` for ERROR rows, and
-`will_adopt_content_owner`. That last flag reports the one write a row's
-`outcome` cannot: attaching to an existing group whose `content_owner_id` is
-NULL stamps that group with this import's content owner permanently, so a row
-can read `UNCHANGED` with an empty `changes` diff while the apply also claims a
-group. It is set on every row targeting such a group (it describes the row's
-target, not a count of `UPDATE` statements) and is never set on an `ERROR` row,
-which is never applied. A dry run writes
+field-level `changes` diff, and a `reason` for ERROR rows. A row whose
+`group_id` targets an existing group with a NULL `content_owner_id` is an
+`ERROR` row (Path A, 2026-08-06): the import never adopts an existing group —
+only the owner's own CMS sync (`POST /channels/groups/sync`) may claim one,
+and `DELETE /groups/{id}/content-owner` is the admin remedy for a wrong stamp.
+The former `will_adopt_content_owner` disclosure field is gone from the import
+response (it survives on the group-sync response, where adoption is
+legitimate). A dry run writes
 nothing (no audit event). The apply is all-or-nothing: any ERROR row —
 malformed id/name/token, a value containing a NUL character, a group_id over
 255 characters, a CONFLICTING duplicate id (copies that disagree on
@@ -195,7 +195,34 @@ POST /groups
 PATCH /groups/{group_id}
 POST /groups/{group_id}/members
 DELETE /groups/{group_id}/members/{channel_id}
+DELETE /groups/{group_id}/content-owner
 ```
+
+`DELETE /groups/{group_id}/content-owner` (2026-08-06) is the one sanctioned
+eraser for a wrong content-owner stamp. Every other writer is adopt-only — the
+import refuses owner-NULL existing groups and the CMS sync only fills a NULL —
+so without it a mis-stamped group stays governed by the wrong owner's sync
+forever. It requires `registry.manage_groups` at GLOBAL scope (ownership
+decides which content owner's sync governs the group, which is tenant-level
+governance, not the per-channel manageability the membership routes evaluate)
+and a `reason` query parameter. `404` for an unknown group id, `409` when the
+group carries no stamp to clear (clearing nothing is a caller bug, not a silent
+no-op), and `422` for a blank reason or one containing a NUL character —
+`audit_logs.reason` is a PostgreSQL text column, which cannot store NUL, so the
+same rejection the import and sync routes apply to their reasons is enforced
+here before any write. The handler is thin orchestration only — the store read,
+the row-locked write, and the audit row live in
+`org/channel_group_owner_recovery.clear_group_owner_stamp`, the same
+store-plus-sink shape the import and sync apply layers use, so the behaviour is
+testable without HTTP. Archived groups stay clearable: deactivation is exactly
+how a wrongly-synced group gets parked. The response discloses the resulting
+`content_owner_id` (always `null`) alongside the `GROUP_UPDATED` audit event,
+whose `details.previous_content_owner_id` names the owner erased **as read
+under the store's row lock**, not from the route's unlocked pre-read — a
+concurrent sync-adopt landing between the two would otherwise leave the trail
+understating what was removed. The audit row runs on the atomic sink, so a lost
+tenant commit takes it too. The cleared group returns to the adoptable pool and
+the correct owner's next sync re-adopts it.
 
 ### Users and roles
 

@@ -58,6 +58,32 @@ def require_adoptable_owner(current: str | None, incoming: str, *, group_id: str
         )
 
 
+class ChannelGroupNotFoundError(LookupError):
+    """No channel group with the requested id exists for this tenant.
+
+    The stores signal a missing row with a bare ``KeyError`` and let each
+    route translate it, which works only because every caller is an HTTP
+    handler. A service function is callable from a job, a script, or another
+    service, so it raises this instead: the caller can distinguish "no such
+    group" from any other ``KeyError`` bubbling out of store internals it does
+    not own. Deliberately NOT a ``KeyError`` subclass — inheriting from it
+    would let a bare ``except KeyError`` keep swallowing this silently, which
+    is the ambiguity the typed error exists to remove.
+    """
+
+
+class ChannelGroupNoOwnerStampError(ValueError):
+    """A clear was requested on a group that has no content-owner stamp.
+
+    ``clear_content_owner`` is the one sanctioned eraser for a wrong stamp
+    (admin recovery once the group's owner can no longer be fixed by an
+    import or sync, both of which are adopt-only). Raising here instead of
+    silently no-opping means a caller cannot mistake "nothing to clear" for
+    "cleared" — the API layer maps this to a 409 telling the operator there
+    was no stamp on the group they targeted.
+    """
+
+
 class ChannelGroupConflictError(ValueError):
     """A group write lost a uniqueness race (duplicate per-tenant cms_group_id).
 
@@ -87,6 +113,23 @@ class ChannelGroupEntry:
             "channel_ids": list(self.channel_ids),
             "cms_group_id": self.cms_group_id,
         }
+
+
+@dataclass(frozen=True)
+class ClearedContentOwner:
+    """The outcome of one ``clear_content_owner`` call, read under its lock.
+
+    ``previous_content_owner_id`` is never ``None``: clearing an owner-NULL
+    group raises ``ChannelGroupNoOwnerStampError`` instead of returning. The
+    store returns it rather than leaving the caller to pre-read it, because a
+    caller's read is NOT serialized against a concurrent adopt — only the
+    store's ``for_update`` read is. An unlocked pre-read can observe a NULL
+    stamp that an adopt then fills before the clear takes its lock, which
+    would make the audit row understate the owner actually erased.
+    """
+
+    group: ChannelGroupEntry
+    previous_content_owner_id: str
 
 
 class ChannelGroupRegistryStore(Protocol):
@@ -151,13 +194,13 @@ class ChannelGroupRegistryStore(Protocol):
         """Return the subset of CMS keys whose existing group is owner-NULL.
 
         The exact complement of ``list_foreign_owner_cms_group_ids`` over the
-        keys that resolve to a group: those are refused, these are ADOPTED —
-        attaching to one stamps ``content_owner_id`` as a side effect. That
-        stamp is a real, permanent, un-previewed write unless planning knows
-        about it, which is why this exists rather than being inferred from the
-        other two sets. Unknown keys are absent from the result: a key with no
-        group is a CREATE, and a group created by the import is stamped at
-        birth rather than adopted.
+        keys that resolve to a group. Both sets are refused by import
+        planning, for different reasons: a foreign key would inject a channel
+        into another owner's mirrored group, while an owner-NULL key would let
+        a CSV cell decide which content owner's sync governs that group from
+        then on. Unknown keys are absent from the result: a key with no group
+        is a CREATE, and a group created by the import is stamped at birth —
+        an ownership claim the request already carries.
         """
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
@@ -188,6 +231,16 @@ class ChannelGroupRegistryStore(Protocol):
         group sync can ADOPT an owner-NULL legacy group once the upstream key
         proves ownership; it never reassigns a group that already carries an
         owner.
+        """
+
+    def clear_content_owner(self, *, group_id: str) -> ClearedContentOwner:
+        """Erase a group's owner stamp, returning it to the adoptable pool.
+
+        The adopt-only guard governs SETTING an owner; this is the one
+        sanctioned eraser (admin recovery for a wrong stamp). Raises
+        ChannelGroupNoOwnerStampError when there is nothing to clear.
+        Returns the cleared group AND the owner id observed under the write
+        lock, so the caller's audit row names what was actually erased.
         """
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
@@ -339,6 +392,25 @@ class ChannelGroupRegistry:
         )
         self._groups[group_id] = updated
         return updated
+
+    def clear_content_owner(self, *, group_id: str) -> ClearedContentOwner:
+        """Erase a group's owner stamp, returning it to the adoptable pool.
+
+        Does NOT route through require_adoptable_owner: that guard governs
+        SETTING an owner, not erasing one. Reports the erased owner id
+        alongside the cleared group, matching the SQL store's contract.
+        """
+        group = self._require_group(group_id)
+        previous_content_owner_id = group.content_owner_id
+        if previous_content_owner_id is None:
+            raise ChannelGroupNoOwnerStampError(
+                f"channel group {group_id} has no content-owner stamp to clear"
+            )
+        updated = replace(group, content_owner_id=None)
+        self._groups[group_id] = updated
+        return ClearedContentOwner(
+            group=updated, previous_content_owner_id=previous_content_owner_id
+        )
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
         group = self._require_group(group_id)

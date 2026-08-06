@@ -703,7 +703,16 @@ def test_group_archived_between_plan_and_apply_returns_409():
     app = create_app()
     registry = bootstrap_channel_registry()
     groups = _ArchivingDuringApplyGroups()
-    groups.create_group(name="cms-tv", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv")
+    # Stamped with THIS import's owner: planning must clear the row (an
+    # owner-NULL group is its own row error) so the archive race is what the
+    # apply actually trips over.
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
     audit_sink = InMemoryAuditSink()
     app.dependency_overrides[current_channel_registry] = lambda: registry
     app.dependency_overrides[sql_group_registry_from_session] = lambda: groups
@@ -723,6 +732,64 @@ def test_group_archived_between_plan_and_apply_returns_409():
     assert "archived during the import" in response.json()["detail"]
     stored = groups.get_group_by_cms_id("cms-tv")
     assert stored is not None and stored.channel_ids == ()
+
+
+class _UnstampingDuringApplyGroups(ChannelGroupRegistry):
+    """Simulate a stamp cleared between planning and apply.
+
+    Planning's bulk adoptable-key lookup sees the group STAMPED, so the row
+    plans clean; the apply's locked write-boundary lookup (for_update=True)
+    observes it owner-NULL — the window the admin clear-stamp action opens.
+    """
+
+    def get_group_by_cms_id(self, cms_group_id, *, for_update=False):
+        group = super().get_group_by_cms_id(cms_group_id, for_update=for_update)
+        if group is not None and for_update:
+            return dataclasses.replace(group, content_owner_id=None)
+        return group
+
+
+def test_group_unstamped_between_plan_and_apply_returns_409():
+    """The one adoption race planning cannot catch becomes a 409, not a stamp.
+
+    The preview reported a clean row because the group WAS owned; if the apply
+    adopted it anyway, the import would be minting ownership from a CSV cell
+    after Path A closed exactly that. The detail is canned — the remedy is
+    fixed — and nothing is written.
+    """
+    app = create_app()
+    registry = bootstrap_channel_registry()
+    groups = _UnstampingDuringApplyGroups()
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_channel_registry] = lambda: registry
+    app.dependency_overrides[sql_group_registry_from_session] = lambda: groups
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    app.dependency_overrides[current_org_access_index] = lambda: BOOTSTRAP_ORG_INDEX
+    client = TestClient(app)
+
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+            header="youtube_channel_id,channel_name,group_id,view_revenue",
+        ),
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "lost its content owner" in detail
+    assert "POST /channels/groups/sync" in detail
+    stored = groups.get_group_by_cms_id("cms-tv")
+    assert stored is not None
+    assert stored.channel_ids == ()
+    assert stored.content_owner_id == CONTENT_OWNER
 
 
 class _ConcurrentlyCreatedRegistry(ChannelRegistry):
@@ -845,15 +912,15 @@ def test_import_rejects_global_role_without_manage_channels():
     assert audit_sink.records == []
 
 
-def test_dry_run_discloses_the_ownership_stamp_an_adoption_performs():
-    """The preview must name the ownership write, which no row outcome implies.
+def test_owner_null_group_is_a_row_error_in_both_modes():
+    """The import refuses to claim an existing unowned group (Path A).
 
-    An owner-NULL legacy group is ADOPTED rather than refused: the apply stamps
-    its content_owner_id permanently. Nothing else in the row says so — the
-    channel is already correct, so the row reads UNCHANGED with an empty diff,
-    and the group already contains the channel, so not even a membership add
-    appears. Without the flag the operator previews "nothing happens" and the
-    apply claims a group for this owner forever (review #169 r3723536284).
+    Stamping ``content_owner_id`` on an existing group decides which content
+    owner's CMS sync governs it from then on, and a CSV cell is not that owner
+    speaking. Nothing else in this row would have shown the claim — the
+    channel is already correct, so the row would read UNCHANGED with an empty
+    diff, and the group already contains the channel, so not even a membership
+    add would appear. The refusal carries the remedy instead.
     """
     client, registry, groups, audit_sink = create_import_app()
     registry.create_channel(
@@ -877,24 +944,30 @@ def test_dry_run_discloses_the_ownership_stamp_an_adoption_performs():
     preview = post_import(client, body, dry_run="true")
 
     assert preview.status_code == 200, preview.text
-    row = preview.json()["rows"][0]
-    # Everything else about this row says "nothing to do" — that is the point.
-    assert row["outcome"] == "UNCHANGED"
-    assert row["changes"] == {}
-    assert row["reason"] is None
-    assert row["will_adopt_content_owner"] is True
+    plan = preview.json()
+    assert plan["counts"]["ERROR"] == 1
+    row = plan["rows"][0]
+    assert row["outcome"] == "ERROR"
+    assert "exists without a content owner" in row["reason"]
+    assert "POST /channels/groups/sync" in row["reason"]
+    assert CONTENT_OWNER in row["reason"]
+    # The Path B disclosure is gone from the wire contract, not merely false.
+    assert "will_adopt_content_owner" not in row
     assert groups.get_group_by_cms_id("cms-legacy").content_owner_id is None
     assert audit_sink.records == []
 
     applied = post_import(client, body)
 
-    assert applied.status_code == 200, applied.text
-    # The preview told the truth: the apply performed exactly that stamp.
-    assert groups.get_group_by_cms_id("cms-legacy").content_owner_id == CONTENT_OWNER
+    # The apply agrees with the preview: 422 on the row error, never a stamp.
+    assert applied.status_code == 422, applied.text
+    detail = applied.json()["detail"]
+    assert "exists without a content owner" in detail["rows"][0]["reason"]
+    assert groups.get_group_by_cms_id("cms-legacy").content_owner_id is None
+    assert audit_sink.records == []
 
 
-def test_dry_run_does_not_claim_an_adoption_for_a_group_already_owned():
-    """The flag must be false when the apply has no ownership write to make."""
+def test_group_this_owner_already_holds_imports_cleanly():
+    """Only owner-NULL keys are refused; this owner's own group attaches."""
     client, _registry, groups, _audit_sink = create_import_app()
     groups.create_group(
         name="Mine",
@@ -909,4 +982,12 @@ def test_dry_run_does_not_claim_an_adoption_for_a_group_already_owned():
     preview = post_import(client, body, dry_run="true")
 
     assert preview.status_code == 200, preview.text
-    assert preview.json()["rows"][0]["will_adopt_content_owner"] is False
+    row = preview.json()["rows"][0]
+    assert row["outcome"] == "CREATE"
+    assert row["reason"] is None
+    assert "will_adopt_content_owner" not in row
+
+    applied = post_import(client, body)
+
+    assert applied.status_code == 200, applied.text
+    assert groups.get_group_by_cms_id("cms-mine").channel_ids == (CHANNEL_ID,)

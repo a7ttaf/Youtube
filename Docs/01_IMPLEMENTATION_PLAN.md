@@ -1,9 +1,15 @@
 # Implementation Plan
 
-## Status (2026-08-05)
+## Status (2026-08-06)
 
-Reconciled through the CMS group sync branch (`feat/cms-group-sync`): YouTube
-is now the source of truth for channel-GROUP structure via
+Reconciled through the owner-stamp recovery branch
+(`feat/owner-stamp-recovery`): the group-ownership lifecycle is closed — CMS
+sync is the only writer of `content_owner_id` on existing groups (the import
+now refuses adoption, Path A), and `DELETE /groups/{id}/content-owner` is the
+sanctioned recovery for a wrong stamp.
+
+Previously (2026-08-05): CMS group sync (`feat/cms-group-sync`, merged as PR
+#169): YouTube is the source of truth for channel-GROUP structure via
 `POST /channels/groups/sync` (see the Phase 1 group-mapping item), and the
 bulk import's manual `group_id` CSV column is legacy-but-working.
 
@@ -438,7 +444,10 @@ on real ingestion (Phase 2) and the inventory load workflow.
   groups API 409s manual rename/membership edits on synced groups (YouTube
   Content Manager is the source of truth; `active`-only PATCH stays allowed,
   but any sync that still sees the group upstream re-activates it).
-  Company/sector (org-unit) mapping remains the Registry Map UI's job.
+  Ownership lifecycle closed 2026-08-06 (`feat/owner-stamp-recovery`): the
+  import refuses adopting owner-NULL groups — sync is the only stamp-writer on
+  existing groups — and `DELETE /groups/{id}/content-owner` recovers a wrong
+  stamp. Company/sector (org-unit) mapping remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to
   `GET /channels/outside-cms` + `GET /channels/issues` (PR #98,

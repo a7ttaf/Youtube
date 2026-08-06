@@ -231,15 +231,13 @@ def test_every_repeated_row_for_an_archived_channel_is_an_error() -> None:
     assert all("reactivate" in (entry.reason or "") for entry in plan.entries)
 
 
-def test_owner_null_group_is_flagged_as_an_ownership_write() -> None:
-    """A row attaching to an owner-NULL group must SAY it stamps that group.
+def test_owner_null_group_is_a_row_error_naming_the_sync_remedy() -> None:
+    """A row targeting an existing owner-NULL group is REFUSED, not adopted.
 
-    This is the gap the archived and cross-owner cases do not cover: those
-    fail the row closed, so the preview is honest by refusing. Adoption
-    succeeds silently — the apply stamps ``content_owner_id`` permanently
-    while the row itself reports UNCHANGED and an empty diff, so a dry run
-    without this flag shows an operator nothing at all before an irreversible
-    ownership claim (review #169 r3723536284).
+    Stamping ``content_owner_id`` on an existing group decides which content
+    owner's CMS sync governs it from then on, and a CSV cell is not Google
+    co-signing that claim. Only the owner's own group sync may make it, so the
+    row fails closed and its reason carries the remedy (Path A, #169 handoff).
     """
     plan = plan_channel_import(
         rows=(_row(group_id="cms-legacy"),),
@@ -250,23 +248,67 @@ def test_owner_null_group_is_flagged_as_an_ownership_write() -> None:
         adoptable_group_ids=frozenset({"cms-legacy"}),
     )
     entry = plan.entries[0]
-    assert entry.outcome is ChannelImportOutcome.UNCHANGED
-    assert dict(entry.changes) == {}
-    assert entry.will_adopt_content_owner is True
+    assert entry.outcome is ChannelImportOutcome.ERROR
+    assert plan.has_errors is True
+    reason = entry.reason or ""
+    assert "cms-legacy" in reason
+    assert "exists without a content owner" in reason
+    assert "POST /channels/groups/sync" in reason
+    assert CONTENT_OWNER in reason
+    assert "or clear/archive the group if it is stale" in reason
 
 
-def test_already_owned_group_is_not_flagged_as_an_adoption() -> None:
-    """Only owner-NULL keys adopt; a group this owner already holds writes nothing."""
+def test_plan_entries_carry_no_adoption_disclosure_field() -> None:
+    """Path A makes the Path B disclosure unreachable, so the field is gone.
+
+    A response field that can only ever be false is API noise; pin its absence
+    so a revert of the predicate cannot quietly restore the flag alone.
+    """
+    plan = _plan(rows=(_row(),))
+    assert not hasattr(plan.entries[0], "will_adopt_content_owner")
+
+
+def test_group_this_owner_already_holds_is_not_refused() -> None:
+    """Only owner-NULL keys are refused; a group this owner holds attaches."""
     plan = _plan(rows=(_row(group_id="cms-mine"),), existing={CHANNEL_ID: _existing()})
-    assert plan.entries[0].will_adopt_content_owner is False
+    entry = plan.entries[0]
+    assert entry.outcome is ChannelImportOutcome.UNCHANGED
+    assert entry.group_id == "cms-mine"
+    assert entry.reason is None
 
 
-def test_blocked_group_rows_never_claim_an_adoption() -> None:
-    """An ERROR row is never applied, so it must not advertise an ownership write.
+def test_rows_without_a_resolvable_group_are_untouched_by_the_refusal() -> None:
+    """No key targets nothing, and an unknown key is a birth-stamped CREATE.
 
-    A key cannot be both archived and adoptable in the same read, but the flag
-    and the block are computed from independent sets, so pin that the block
-    wins rather than relying on the store never disagreeing with itself.
+    Group CREATION semantics are deliberately unchanged: the request-level
+    owner covers everything the row mints, so only ADOPTION of an existing
+    group is refused.
+    """
+    other = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    plan = plan_channel_import(
+        rows=(
+            _row(row_number=1, group_id=None),
+            _row(row_number=2, youtube_channel_id=other, group_id="cms-brand-new"),
+        ),
+        errors=(),
+        existing={},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        adoptable_group_ids=frozenset({"cms-legacy"}),
+    )
+    assert [entry.outcome for entry in plan.entries] == [
+        ChannelImportOutcome.CREATE,
+        ChannelImportOutcome.CREATE,
+    ]
+    assert plan.has_errors is False
+
+
+def test_archived_reason_wins_over_the_owner_null_one() -> None:
+    """Both predicates block; the archived reason is the actionable one.
+
+    A key cannot be both archived and owner-NULL in one consistent read, but
+    the sets are computed independently, so pin the precedence rather than
+    relying on the store never disagreeing with itself.
     """
     plan = plan_channel_import(
         rows=(_row(group_id="cms-legacy"),),
@@ -279,16 +321,15 @@ def test_blocked_group_rows_never_claim_an_adoption() -> None:
     )
     entry = plan.entries[0]
     assert entry.outcome is ChannelImportOutcome.ERROR
-    assert entry.will_adopt_content_owner is False
+    assert "archived" in (entry.reason or "")
+    assert "reactivate" in (entry.reason or "")
 
 
-def test_every_row_targeting_one_adoptable_group_carries_the_flag() -> None:
-    """The flag describes the row's TARGET, not which UPDATE statement runs.
+def test_every_row_targeting_one_owner_null_group_is_refused() -> None:
+    """The refusal is per row: no row rides in on another row's group key.
 
-    The apply stamps the group once, on whichever row its (group, channel)
-    write order reaches first. Marking only that row would leave the other
-    rows silently claiming nothing while their group is in fact being claimed,
-    and would couple planning to the apply's write order.
+    The import is all-or-nothing, so a single unrefused row would carry the
+    whole roster's ownership claim through on the apply's write order.
     """
     other = "UC3Dci3BzZXDo4jw4dU8KqWg"
     plan = plan_channel_import(
@@ -302,15 +343,19 @@ def test_every_row_targeting_one_adoptable_group_carries_the_flag() -> None:
         cms_status="INSIDE_CMS",
         adoptable_group_ids=frozenset({"cms-legacy"}),
     )
-    assert [entry.will_adopt_content_owner for entry in plan.entries] == [True, True]
+    assert [entry.outcome for entry in plan.entries] == [
+        ChannelImportOutcome.ERROR,
+        ChannelImportOutcome.ERROR,
+    ]
+    assert plan.counts["ERROR"] == 2
 
 
-def test_repeated_membership_rows_carry_the_adoption_flag() -> None:
-    """The second row for one channel is a bare membership add — and can adopt.
+def test_repeated_membership_row_is_refused_for_an_owner_null_group() -> None:
+    """The second row for one channel is a bare membership add — also refused.
 
     That branch emits its entry through a different code path than the
-    inventory branch, so it is exactly where a flag added in one place and not
-    the other would go missing.
+    inventory branch, so it is exactly where a predicate wired into only one
+    of them would go missing.
     """
     plan = plan_channel_import(
         rows=(
@@ -323,4 +368,7 @@ def test_repeated_membership_rows_carry_the_adoption_flag() -> None:
         cms_status="INSIDE_CMS",
         adoptable_group_ids=frozenset({"cms-legacy"}),
     )
-    assert [entry.will_adopt_content_owner for entry in plan.entries] == [False, True]
+    assert [entry.outcome for entry in plan.entries] == [
+        ChannelImportOutcome.UNCHANGED,
+        ChannelImportOutcome.ERROR,
+    ]

@@ -707,6 +707,33 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
+- ✅ Owner-stamp recovery (2026-08-06, branch `feat/owner-stamp-recovery`) —
+  completes the group-ownership lifecycle merged in #169. **Path A:** the
+  import now REFUSES a row targeting an existing owner-NULL group (row-level
+  ERROR naming the remedy — run that owner's `POST /channels/groups/sync`;
+  blocks the whole apply per the all-or-nothing contract), so sync is the
+  ONLY stamp-writer on existing groups; the Path B disclosure field
+  `will_adopt_content_owner` is gone from the import response (it remains on
+  the sync response, where adoption is legitimate); the write boundary fails
+  closed on a mid-flight stamp-clear (`ChannelImportAdoptableGroupError` →
+  409). **Clear-stamp admin action:** `DELETE /groups/{id}/content-owner`
+  (global `MANAGE_GROUPS`, reason-required, atomic audit sink) erases a wrong
+  stamp — 409 when there is nothing to clear, works on archived groups,
+  serializes against a concurrent sync-adopt via the store's row lock (proven
+  on Postgres with `pg_blocking_pids()`), and the cleared group is re-adoptable
+  by the correct owner's next sync (round-trip proven end-to-end). Store gains
+  `clear_content_owner` (returning `ClearedContentOwner`: the cleared group
+  plus the owner id read UNDER the row lock, so the audit detail can never be
+  a stale pre-read observation — proven on Postgres by staging an adopt in the
+  pre-read window) + `ChannelGroupNoOwnerStampError`. The route's `reason`
+  rejects a NUL character with 422, matching the import and sync routes:
+  `audit_logs.reason` is a Postgres text column, so reaching the insert raised
+  `psycopg.DataError` as an unhandled 500. The clear's store read, locked
+  write, and audit row live in `org/channel_group_owner_recovery.py` (the
+  `channel_import_apply` / `channel_group_sync_apply` shape), leaving the route
+  as orchestration and making the behaviour testable without FastAPI. No
+  migration. Spec:
+  `Docs/superpowers/specs/2026-08-06-owner-stamp-recovery-design.md`.
 - ✅ CMS group sync (2026-08-05, branch `feat/cms-group-sync`) —
   `POST /channels/groups/sync` mirrors a YouTube CMS content owner's groups
   into `channel_groups`: real titles, membership set-reconciled with adds AND

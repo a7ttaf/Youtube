@@ -49,6 +49,8 @@ from ums_smart_revenue.db.org_models import (
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
     ChannelGroupEntry,
+    ChannelGroupNoOwnerStampError,
+    ClearedContentOwner,
     require_adoptable_owner,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -326,9 +328,10 @@ class SqlAlchemyChannelGroupRegistry:
 
     # ========================================================================
     # Purpose: Bulk-classify a roster's CMS group keys by ADOPTABILITY — the
-    #   owner-NULL rows — so import planning can disclose the ownership stamp
-    #   that attaching to one performs. Third of a matched set with the
-    #   archived and cross-owner lookups above; the same pass reads all three.
+    #   owner-NULL rows — so import planning can REFUSE the rows targeting
+    #   them: claiming an existing group belongs to the owner's CMS sync, not
+    #   to a CSV cell. Third of a matched set with the archived and
+    #   cross-owner lookups above; the same pass reads all three.
     # Database/ORM: ChannelGroupORM (read-only; cms_group_id + content_owner_id
     #   under the per-tenant unique key). No membership loading, no writes.
     # Standards: One bounded SELECT for the whole key set; tenant-scoped;
@@ -337,15 +340,15 @@ class SqlAlchemyChannelGroupRegistry:
     #   NOT filtered on active: the archived lookup fails those rows closed on
     #   its own, and narrowing here would make two reads of one row disagree.
     #   Read-only -> RLS-safe, no platform lane.
-    # Blast Radius: The import preview's will_adopt_content_owner flag only.
-    #   No group writes, no audit — the stamp itself happens at the apply's
-    #   locked write boundary, which re-reads and can decline to repeat it.
+    # Blast Radius: Which import rows plan as ERROR. No group writes, no
+    #   audit — and no stamp anywhere downstream: the apply's locked write
+    #   boundary refuses these groups rather than claiming them.
     # Connections:
     #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
     #     plan_channel_import_with_stores feeds the result to the planner, and
-    #     _attach_group_membership performs the stamp this set predicts.
+    #     _attach_group_membership re-checks it under the row lock.
     #   - File: backend/ums_smart_revenue/org/channel_import.py ->
-    #     plan_channel_import flags rows whose key lands in this set.
+    #     plan_channel_import fails rows whose key lands in this set.
     # ========================================================================
     def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
         """Return the subset of CMS keys whose existing group is owner-NULL.
@@ -487,6 +490,53 @@ class SqlAlchemyChannelGroupRegistry:
             row.content_owner_id = content_owner_id
         self._session.flush()
         return self._to_entry(row)
+
+    # ========================================================================
+    # Purpose: Erase a group's content-owner stamp — the one sanctioned admin
+    #   recovery path for a wrong stamp (adoption is one-way, so an API-level
+    #   fix has no other route). Returns the group to the adoptable pool so
+    #   the correct owner's next sync can adopt it.
+    # Database/ORM: ChannelGroupORM row-locked FOR NO KEY UPDATE (mirrors the
+    #   get_group_by_cms_id/_get_group_row for_update idiom), then a plain
+    #   column write and flush. No membership touched.
+    # Standards: KeyError on an unknown/cross-tenant group id (the store's
+    #   existing convention); ChannelGroupNoOwnerStampError when
+    #   content_owner_id is already NULL — clearing nothing is a caller bug,
+    #   not a silent no-op. Does NOT route through require_adoptable_owner:
+    #   that guard governs SETTING an owner, not erasing one. The row lock is
+    #   taken BEFORE the NULL check so the check itself observes a
+    #   consistent value under concurrency; SQLite ignores FOR UPDATE
+    #   (single-writer), matching every other locked read in this file.
+    # Blast Radius: Channel-group ownership only. No membership, no revenue
+    #   math, no audit of its own — the caller (the DELETE route) audits.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_groups.py -> Protocol +
+    #     in-memory parity implementation.
+    #   - File: backend/ums_smart_revenue/api/groups.py -> the sanctioned
+    #     DELETE /groups/{id}/content-owner route.
+    # ========================================================================
+    def clear_content_owner(self, *, group_id: str) -> ClearedContentOwner:
+        """Erase a group's owner stamp, returning it to the adoptable pool.
+
+        Row-locks the group FOR NO KEY UPDATE (the get_group_by_cms_id
+        for_update idiom) so a concurrent adopt serializes against the clear.
+        Raises ChannelGroupNoOwnerStampError when there is nothing to clear.
+        Reports the owner id read UNDER that lock, which is the only value a
+        caller may audit as erased: an unlocked pre-read can miss an adopt
+        that lands between it and this write.
+        """
+        row = self._require_group_row(group_id, for_update=True)
+        previous_content_owner_id = row.content_owner_id
+        if previous_content_owner_id is None:
+            raise ChannelGroupNoOwnerStampError(
+                f"channel group {group_id} has no content-owner stamp to clear"
+            )
+        row.content_owner_id = None
+        self._session.flush()
+        return ClearedContentOwner(
+            group=self._to_entry(row),
+            previous_content_owner_id=previous_content_owner_id,
+        )
 
     # ========================================================================
     # Purpose: Attach channels to an existing group idempotently — the bulk

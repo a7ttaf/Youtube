@@ -1,23 +1,60 @@
+# ============================================================================
+# Purpose: Channel-group HTTP routes — listing, creation, rename/activation,
+#   membership add/remove, and the sanctioned content-owner stamp eraser
+#   (DELETE /groups/{id}/content-owner).
+# Database/ORM: ChannelGroupORM + ChannelGroupMemberORM via
+#   ChannelGroupRegistryStore dependencies; AuditLogORM via audit sinks. The
+#   clear route delegates its store and audit work to
+#   org/channel_group_owner_recovery.
+# Standards: Thin routes — authorize, validate, translate typed domain errors
+#   to HTTP, delegate the rest. Scoped manageability is evaluated over the
+#   COMPLETE member set (list_groups_full, not the active-only read), so a
+#   deactivated member cannot open a fail-open gap; ownership changes are
+#   global MANAGE_GROUPS instead, being tenant-level governance. Synced groups
+#   409 on manual rename/membership edits — YouTube is the source of truth for
+#   those, `active`-only PATCH stays allowed. Every reason is non-blank and
+#   NUL-free before it reaches audit_logs.reason. Typed store errors map to
+#   status codes; a bare IntegrityError never surfaces as a 500.
+# Blast Radius: Channel-group membership and ownership, and therefore the
+#   finance group-scope selection built on them, plus the audit trail. No
+#   revenue math, no allocation, no month-close.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_groups.py -> the store
+#     Protocol, the typed errors, and the in-memory parity implementation.
+#   - File: backend/ums_smart_revenue/org/channel_group_owner_recovery.py ->
+#     the clear-stamp service these routes orchestrate.
+#   - File: backend/ums_smart_revenue/api/channels.py -> the CMS group sync
+#     that owns synced groups and re-adopts a cleared one.
+# ============================================================================
+"""Channel-group listing, mutation, membership, and owner-stamp HTTP routes."""
+
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 
-from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
+from ums_smart_revenue.api.channels import (
+    audit_record_to_api,
+    current_atomic_audit_sink,
+    current_audit_sink,
+)
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.api.registry_dependencies import (
     sql_group_registry_from_session,
 )
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
+from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.org.channel_group_owner_recovery import clear_group_owner_stamp
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
     ChannelGroupEntry,
+    ChannelGroupNoOwnerStampError,
+    ChannelGroupNotFoundError,
     ChannelGroupRegistryStore,
 )
 
@@ -72,6 +109,60 @@ class GroupUpdateRequest(BaseModel):
     @classmethod
     def strip_reason(cls, value):
         return _strip_required_string(value)
+
+
+class GroupAuditEventResponse(BaseModel):
+    """The audit-event shape ``audit_record_to_api`` returns.
+
+    Declared rather than passed through as a dict so the disclosed field set is
+    machine-checked: an audit record carries actor and details columns this
+    surface deliberately does NOT publish.
+    """
+
+    event_type: str
+    entity_type: str | None
+    entity_id: str | None
+    scope_type: str | None
+    scope_id: str | None
+    reason: str | None
+    sensitive: bool
+
+
+def _audit_event_response(record: AuditRecord) -> GroupAuditEventResponse:
+    """Project an AuditRecord onto the fields this surface publishes.
+
+    Built field-by-field from the record rather than splatting
+    ``audit_record_to_api``'s dict: the explicit form is what makes the
+    omission of ``user_id``, ``details``, and ``permission`` a checked
+    decision instead of an accident of whichever keys that helper returns.
+    """
+    return GroupAuditEventResponse(
+        event_type=record.event_type,
+        entity_type=record.entity_type,
+        entity_id=record.entity_id,
+        scope_type=record.scope_type,
+        scope_id=record.scope_id,
+        reason=record.reason,
+        sensitive=record.sensitive,
+    )
+
+
+class ClearContentOwnerResponse(BaseModel):
+    """Typed response for DELETE /groups/{group_id}/content-owner.
+
+    The general group view (``ChannelGroupEntry.to_api``) omits
+    ``content_owner_id``, but it is this route's entire outcome, so the model
+    declares it explicitly alongside the group fields and the audit event.
+    """
+
+    id: str
+    name: str
+    group_type: str
+    active: bool
+    channel_ids: list[str]
+    cms_group_id: str | None
+    content_owner_id: str | None
+    audit_event: GroupAuditEventResponse
 
 
 class GroupMembersRequest(BaseModel):
@@ -264,6 +355,95 @@ def remove_group_member(
     return response
 
 
+# ============================================================================
+# Purpose: Erase one group's content-owner stamp — the single sanctioned
+#   eraser, and the only recovery path once a group is stamped to the WRONG
+#   YouTube content owner. Every other writer is adopt-only (the import
+#   refuses owner-NULL groups outright, sync and the store only fill a NULL),
+#   so without this route a mis-stamped group stays governed by the wrong
+#   owner's sync forever. Clearing returns it to the adoptable pool so the
+#   right owner's next sync re-adopts it.
+# Database/ORM: None directly. The store read, the row-locked write, and the
+#   audit row all live in org/channel_group_owner_recovery.py; this handler
+#   only supplies the dependencies and translates outcomes to HTTP.
+# Standards: Thin orchestration — permission gate, reason validation, one
+#   domain call, error-to-status mapping, response shaping. Global
+#   MANAGE_GROUPS fail-closed FIRST, because ownership decides which content
+#   owner's sync governs the group: tenant-level governance, not the
+#   per-channel manageability the membership routes evaluate, so a
+#   company-scoped manager of every member channel still may not move a group
+#   between owners. The reason is rejected for blank and for NUL before the
+#   domain call (422), because it becomes audit_logs.reason and PostgreSQL
+#   cannot store NUL in a text column — the same contract channels.py
+#   enforces on its reasons. The audit sink is current_atomic_audit_sink, NOT
+#   this module's pre-existing plain sink: the domain call writes a group row
+#   and an audit row in one request, so a lost tenant commit must not leave an
+#   audit row claiming a clear that never landed (#169 invariant). Domain
+#   failures map typed — ChannelGroupNotFoundError (unknown group, or one that
+#   vanished between the existence check and the locked write) to 404,
+#   ChannelGroupNoOwnerStampError to 409. Both details are CANNED: str(exc)
+#   never reaches HTTP. The response is a declared model, not an assembled
+#   dict, so the disclosed field set cannot drift silently.
+# Blast Radius: Channel-group ownership only. No membership, no revenue math,
+#   no allocation. Both owners' NEXT sync plans change — that is the point.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_group_owner_recovery.py ->
+#     clear_group_owner_stamp, the domain function this orchestrates.
+#   - File: backend/ums_smart_revenue/api/channels.py -> the CMS group sync
+#     that re-adopts the cleared group under the correct owner.
+# ============================================================================
+@router.delete("/{group_id}/content-owner")
+def clear_group_content_owner(
+    group_id: str,
+    reason: Annotated[str, Query(min_length=1)],
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
+) -> ClearContentOwnerResponse:
+    """Erase a group's content-owner stamp so the right owner's sync re-adopts it."""
+    target_scope = AccessScope.global_scope()
+    if not has_permission(user, Permission.MANAGE_GROUPS, target_scope, org_index):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
+        )
+    try:
+        cleared = clear_group_owner_stamp(
+            groups=registry,
+            group_id=group_id,
+            actor=user,
+            scope=target_scope,
+            reason=_normalize_query_reason(reason),
+            audit_sink=audit_sink,
+        )
+    except ChannelGroupNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Group not found",
+        ) from exc
+    except ChannelGroupNoOwnerStampError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"group {group_id} has no content-owner stamp to clear",
+        ) from exc
+    group = cleared.group
+    # content_owner_id is declared on the model but absent from to_api() (it is
+    # not part of the general group view), yet this route's entire outcome IS
+    # that field. It comes from the domain call's post-write group rather than
+    # from the None we asked for.
+    return ClearContentOwnerResponse(
+        id=group.id,
+        name=group.name,
+        group_type=group.group_type,
+        active=group.active,
+        channel_ids=list(group.channel_ids),
+        cms_group_id=group.cms_group_id,
+        content_owner_id=group.content_owner_id,
+        audit_event=_audit_event_response(cleared.audit_record),
+    )
+
+
 def _validate_group_type(group_type: str) -> None:
     if group_type not in GROUP_TYPES:
         raise HTTPException(
@@ -283,12 +463,24 @@ def _strip_required_string(value):
 
 def _normalize_query_reason(reason: str) -> str:
     try:
-        return _strip_required_string(reason)
+        normalized = _strip_required_string(reason)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="reason must not be blank",
         ) from exc
+    # PostgreSQL cannot store NUL in a text column (audit_logs.reason), and
+    # every route reaching this helper writes its reason there. Rejecting it
+    # at the boundary keeps the 422 contract instead of an unhandled
+    # psycopg DataError 500 at the audit insert — the same rule
+    # channels.py's _validated_import_form and the sync route already apply
+    # to their body-supplied reasons.
+    if "\x00" in normalized:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="reason contains a NUL character",
+        )
+    return normalized
 
 
 def _registry_not_found(exc: KeyError) -> HTTPException:
