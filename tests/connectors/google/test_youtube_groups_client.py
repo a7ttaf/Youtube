@@ -1,3 +1,18 @@
+# ============================================================================
+# Purpose: Pin the YouTube CMS groups fetch client — pagination, the
+#   channel-only item filter, and the parse failures it must refuse rather
+#   than pass upstream garbage into planning.
+# Database/ORM: None. The HTTP transport is substituted; no session, no I/O.
+# Standards: Malformed upstream input is asserted to raise a TYPED error the
+#   route maps to 502, never to yield a partially-parsed snapshot. A snapshot
+#   is what the planner diffs against, so a silently dropped field would plan
+#   a rename or a membership removal that YouTube never said.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_groups_client.py
+#     -> subject.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps these errors.
+# ============================================================================
 """YouTube groups client tests (CMS group sync fetch client)."""
 
 from __future__ import annotations

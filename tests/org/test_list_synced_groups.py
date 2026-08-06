@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: Pin the in-memory store's synced-group enumeration, including the
+#   inactive rows the sync must still see.
+# Database/ORM: None. In-memory store only; the SQL counterpart is pinned in
+#   tests/org/test_sql_channel_groups.py.
+# Standards: Inactive groups are RETURNED, not filtered. A vanished-then-
+#   returned CMS key has to be reactivated rather than re-created, and the
+#   per-tenant unique cms_group_id makes the re-create a hard conflict.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_groups.py -> subject.
+#   - File: backend/ums_smart_revenue/org/channel_group_sync.py -> the consumer
+#     whose REACTIVATE outcome depends on this behaviour.
+# ============================================================================
 """In-memory store: enumerate CMS-synced groups including inactive ones."""
 
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistry

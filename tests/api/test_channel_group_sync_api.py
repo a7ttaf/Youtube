@@ -1,3 +1,19 @@
+# ============================================================================
+# Purpose: Pin the HTTP contract of POST /channels/groups/sync — authz, the
+#   dry-run/apply split, the declared response shape, and every upstream or
+#   mid-flight condition the route must translate into a status code.
+# Database/ORM: SQLite in-memory through the app's real store wiring; the
+#   Google fetch is the only substituted collaborator, so a plan built here
+#   crosses the same store boundary production does.
+# Standards: Status codes are asserted with the body that justifies them — a
+#   409 must name the conflicting owner, a 502 must not leak upstream detail.
+#   Dry runs assert the ABSENCE of writes and audit rows, not just a 200.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> subject (sync route).
+#   - File: tests/api/test_channel_group_sync_postgres.py -> the same route at
+#     the Postgres tier, where RLS and rollback are provable.
+# ============================================================================
 """API tests for the CMS group sync route (POST /channels/groups/sync).
 
 The Google fetch is substituted through the route's groups-client factory

@@ -229,3 +229,98 @@ def test_every_repeated_row_for_an_archived_channel_is_an_error() -> None:
     assert plan.counts["ERROR"] == 2
     assert all("archived" in (entry.reason or "") for entry in plan.entries)
     assert all("reactivate" in (entry.reason or "") for entry in plan.entries)
+
+
+def test_owner_null_group_is_flagged_as_an_ownership_write() -> None:
+    """A row attaching to an owner-NULL group must SAY it stamps that group.
+
+    This is the gap the archived and cross-owner cases do not cover: those
+    fail the row closed, so the preview is honest by refusing. Adoption
+    succeeds silently — the apply stamps ``content_owner_id`` permanently
+    while the row itself reports UNCHANGED and an empty diff, so a dry run
+    without this flag shows an operator nothing at all before an irreversible
+    ownership claim (review #169 r3723536284).
+    """
+    plan = plan_channel_import(
+        rows=(_row(group_id="cms-legacy"),),
+        errors=(),
+        existing={CHANNEL_ID: _existing()},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        adoptable_group_ids=frozenset({"cms-legacy"}),
+    )
+    entry = plan.entries[0]
+    assert entry.outcome is ChannelImportOutcome.UNCHANGED
+    assert dict(entry.changes) == {}
+    assert entry.will_adopt_content_owner is True
+
+
+def test_already_owned_group_is_not_flagged_as_an_adoption() -> None:
+    """Only owner-NULL keys adopt; a group this owner already holds writes nothing."""
+    plan = _plan(rows=(_row(group_id="cms-mine"),), existing={CHANNEL_ID: _existing()})
+    assert plan.entries[0].will_adopt_content_owner is False
+
+
+def test_blocked_group_rows_never_claim_an_adoption() -> None:
+    """An ERROR row is never applied, so it must not advertise an ownership write.
+
+    A key cannot be both archived and adoptable in the same read, but the flag
+    and the block are computed from independent sets, so pin that the block
+    wins rather than relying on the store never disagreeing with itself.
+    """
+    plan = plan_channel_import(
+        rows=(_row(group_id="cms-legacy"),),
+        errors=(),
+        existing={},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        archived_group_ids=frozenset({"cms-legacy"}),
+        adoptable_group_ids=frozenset({"cms-legacy"}),
+    )
+    entry = plan.entries[0]
+    assert entry.outcome is ChannelImportOutcome.ERROR
+    assert entry.will_adopt_content_owner is False
+
+
+def test_every_row_targeting_one_adoptable_group_carries_the_flag() -> None:
+    """The flag describes the row's TARGET, not which UPDATE statement runs.
+
+    The apply stamps the group once, on whichever row its (group, channel)
+    write order reaches first. Marking only that row would leave the other
+    rows silently claiming nothing while their group is in fact being claimed,
+    and would couple planning to the apply's write order.
+    """
+    other = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    plan = plan_channel_import(
+        rows=(
+            _row(row_number=1, group_id="cms-legacy"),
+            _row(row_number=2, youtube_channel_id=other, group_id="cms-legacy"),
+        ),
+        errors=(),
+        existing={},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        adoptable_group_ids=frozenset({"cms-legacy"}),
+    )
+    assert [entry.will_adopt_content_owner for entry in plan.entries] == [True, True]
+
+
+def test_repeated_membership_rows_carry_the_adoption_flag() -> None:
+    """The second row for one channel is a bare membership add — and can adopt.
+
+    That branch emits its entry through a different code path than the
+    inventory branch, so it is exactly where a flag added in one place and not
+    the other would go missing.
+    """
+    plan = plan_channel_import(
+        rows=(
+            _row(row_number=1, group_id="cms-mine"),
+            _row(row_number=2, group_id="cms-legacy"),
+        ),
+        errors=(),
+        existing={CHANNEL_ID: _existing()},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        adoptable_group_ids=frozenset({"cms-legacy"}),
+    )
+    assert [entry.will_adopt_content_owner for entry in plan.entries] == [False, True]

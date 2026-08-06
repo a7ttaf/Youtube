@@ -305,6 +305,25 @@ class SqlAlchemyChannelGroupRegistry:
         ).all()
         return {key for key in rows if key is not None}
 
+    def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Return the subset of CMS keys whose existing group is owner-NULL.
+
+        Deliberately NOT filtered on ``active``: an archived group is already
+        failed closed by ``list_archived_cms_group_ids``, and narrowing here
+        would make the two sets disagree about the same row for no gain. One
+        bounded SELECT, mirroring its two siblings.
+        """
+        if not cms_group_ids:
+            return set()
+        rows = self._session.scalars(
+            select(ChannelGroupORM.cms_group_id).where(
+                ChannelGroupORM.tenant_id == self._tenant_id,
+                ChannelGroupORM.cms_group_id.in_(cms_group_ids),
+                ChannelGroupORM.content_owner_id.is_(None),
+            )
+        ).all()
+        return {key for key in rows if key is not None}
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.
 

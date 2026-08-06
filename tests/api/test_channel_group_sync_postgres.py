@@ -1,3 +1,19 @@
+# ============================================================================
+# Purpose: Prove at the Postgres tier what SQLite cannot — tenant RLS isolation
+#   for the sync route and all-or-nothing rollback when a write fails mid-apply.
+# Database/ORM: Real PostgreSQL via UMS_TEST_DATABASE_URL. require_postgres_url
+#   RAISES rather than skipping, so a missing container fails the suite loudly
+#   instead of quietly deleting this coverage.
+# Standards: Failure is injected through a store DOUBLE that delegates every
+#   other method to the real store, so the rollback under test is the real
+#   transaction's. Each double must implement the full store Protocol — a
+#   missing method would make the test pass for the wrong reason.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> subject (sync route).
+#   - File: backend/ums_smart_revenue/db/session.py -> the after_begin hook
+#     whose SET LOCAL is what these isolation assertions actually exercise.
+# ============================================================================
 """Postgres-tier proof for POST /channels/groups/sync: RLS isolation + rollback.
 
 The SQLite tier (``tests/api/test_channel_group_sync_api.py``) substitutes the
@@ -373,6 +389,10 @@ class _FailingGroupStore:
             cms_group_ids, content_owner_id=content_owner_id
         )
 
+    def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Delegate the bulk owner-NULL-key lookup to the real store."""
+        return self._inner.list_adoptable_cms_group_ids(cms_group_ids)
+
     def create_group(self, **kwargs: object) -> ChannelGroupEntry:
         """Delegate group creation until the armed call, then raise."""
         self.create_calls += 1
@@ -551,12 +571,16 @@ def test_mid_apply_failure_rolls_back_groups_and_audit_on_postgres(
     original_append = SqlAlchemyAuditSink.append
 
     def recording_append(sink: SqlAlchemyAuditSink, record: AuditRecord) -> None:
-        """Append through the real sink, then read the in-transaction count."""
+        """Append through the real sink, then read the in-transaction count.
+
+        The count MUST be read through the sink's own session. Any other
+        connection sits outside the uncommitted transaction and would report
+        zero regardless of what the sink wrote, which would make this test pass
+        for a reason unrelated to what it claims to prove.
+        """
         original_append(sink, record)
         audit_counts_in_flight.append(
-            sink._session.execute(  # noqa: SLF001 — test probe of the audit lane
-                sa.text("SELECT COUNT(*) FROM audit_logs")
-            ).scalar_one()
+            sink._session.execute(sa.text("SELECT COUNT(*) FROM audit_logs")).scalar_one()
         )
 
     def failing_group_store(

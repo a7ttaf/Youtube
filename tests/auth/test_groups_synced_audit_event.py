@@ -1,3 +1,16 @@
+# ============================================================================
+# Purpose: Pin that CMS group sync has its OWN summary audit event type with
+#   the right permission and sensitivity, rather than borrowing another.
+# Database/ORM: None. The audit event catalogue is a pure in-code definition.
+# Standards: An event type is part of the audit contract — auditors filter on
+#   it — so its permission binding is asserted explicitly rather than inherited
+#   silently from a definition default.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit.py -> subject.
+#   - File: backend/ums_smart_revenue/org/channel_group_sync_apply.py -> emits
+#     the per-group events this summary accompanies.
+# ============================================================================
 """The CMS group sync needs its own summary audit event type."""
 
 from ums_smart_revenue.auth.audit import (

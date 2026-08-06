@@ -255,10 +255,27 @@ disappear cleanly. Groups already mirrored keep their synced names/membership
 re-upgrade leaves it NULL, which sync tolerates (owner-NULL rows stay
 matchable and are never deactivated by an owner that cannot claim them).
 
-## Open decision for the owner: import adoption, Path A or Path B
+## Import adoption: Path B taken (with Path A still open to the owner)
 
-Not an open-ended question — two paths, both cheap now, and the status quo is
-the one position neither defends.
+**Resolved in this PR: Path B.** The import keeps adopting owner-NULL groups
+and now discloses it — `will_adopt_content_owner` on every import row whose
+group key resolves to an owner-NULL group, read in the same bulk pass as the
+archived and cross-owner keys (`list_adoptable_cms_group_ids`). The flag
+describes the row's TARGET rather than which `UPDATE` statement runs, so every
+row pointing at that group carries it; the apply stamps once, under its
+existing row lock.
+
+Path B was chosen over Path A because Path A changes import SEMANTICS — a
+roster that imports today would start failing until an operator runs a sync
+first — while Path B only removes a silence. Restoring the preview's honesty is
+what the review asked for and what this PR's own governing principle demands; a
+behavioural restriction on an existing route is a bigger, separable decision.
+The argument for Path A below is unchanged and still stands on its merits: it
+is the stronger position on EVIDENCE, and it remains available as its own
+change. What is no longer true is the part that made the status quo
+indefensible — the preview no longer hides the permanent write.
+
+The analysis both paths rest on follows.
 
 The principle this PR establishes is that anything knowable from stored state
 belongs to PLANNING, because a preview that reports a clean plan for work the
@@ -287,9 +304,14 @@ Google co-signing the claim. A CSV cell is not that.
   `will_adopt_content_owner`, and the clear-stamp action below stops being a
   nice-to-have: a wrong stamp still bricks the rightful owner's next sync
   through the CREATE-collision path, which this PR's guard does not change.
+  **This is what shipped.** The second half of that sentence is now a
+  commitment, not a caveat: with the import still able to mint a stamp,
+  clear-stamp is the only remedy for a wrong one, and it is still not built.
 
-Neither is decided here — both alter import semantics or add surface, and that
-is not a review-cleanup call.
+Taking B does not retire A. If the owner wants the evidence standard enforced
+rather than merely disclosed, A is one predicate in `_blocked_group_reason` and
+the tests to pin it — the surrounding pass, the bulk read, and the per-row
+error shape all exist now.
 
 ## Next PR candidates
 

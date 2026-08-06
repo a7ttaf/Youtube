@@ -147,6 +147,19 @@ class ChannelGroupRegistryStore(Protocol):
         boundary.
         """
 
+    def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Return the subset of CMS keys whose existing group is owner-NULL.
+
+        The exact complement of ``list_foreign_owner_cms_group_ids`` over the
+        keys that resolve to a group: those are refused, these are ADOPTED —
+        attaching to one stamps ``content_owner_id`` as a side effect. That
+        stamp is a real, permanent, un-previewed write unless planning knows
+        about it, which is why this exists rather than being inferred from the
+        other two sets. Unknown keys are absent from the result: a key with no
+        group is a CREATE, and a group created by the import is stamped at
+        birth rather than adopted.
+        """
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         pass
 
@@ -256,6 +269,14 @@ class ChannelGroupRegistry:
             if group.cms_group_id in cms_group_ids
             and group.content_owner_id is not None
             and group.content_owner_id != content_owner_id
+        }
+
+    def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
+        """Return the subset of CMS keys whose existing group is owner-NULL."""
+        return {
+            group.cms_group_id
+            for group in self._groups.values()
+            if group.cms_group_id in cms_group_ids and group.content_owner_id is None
         }
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:

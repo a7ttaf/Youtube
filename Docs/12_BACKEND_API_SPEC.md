@@ -65,7 +65,14 @@ group API's checks. The response (`dry_run` and apply alike) is the declared
 `ChannelImportResult` model: `counts` by outcome plus per-row entries carrying
 `row_number`, `youtube_channel_id`, `outcome` (`CREATE`/`UPDATE`/`UNCHANGED`/
 `ERROR`), the planned `channel_name`/`group_id`/`revenue_required`, the
-field-level `changes` diff, and a `reason` for ERROR rows. A dry run writes
+field-level `changes` diff, a `reason` for ERROR rows, and
+`will_adopt_content_owner`. That last flag reports the one write a row's
+`outcome` cannot: attaching to an existing group whose `content_owner_id` is
+NULL stamps that group with this import's content owner permanently, so a row
+can read `UNCHANGED` with an empty `changes` diff while the apply also claims a
+group. It is set on every row targeting such a group (it describes the row's
+target, not a count of `UPDATE` statements) and is never set on an `ERROR` row,
+which is never applied. A dry run writes
 nothing (no audit event). The apply is all-or-nothing: any ERROR row —
 malformed id/name/token, a value containing a NUL character, a group_id over
 255 characters, a CONFLICTING duplicate id (copies that disagree on

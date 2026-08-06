@@ -927,6 +927,46 @@ def test_list_foreign_owner_cms_group_ids_is_tenant_scoped_and_skips_nulls() -> 
     assert registry.list_foreign_owner_cms_group_ids(set(), content_owner_id="owner-a") == set()
 
 
+def test_list_adoptable_cms_group_ids_returns_only_owner_null_keys() -> None:
+    """The exact complement of the foreign-owner set, over the same rows.
+
+    Pinned together with the tenant boundary and the unknown key: an adoption
+    preview that leaked another tenant's legacy group, or that claimed a key
+    with no group at all, would advertise an ownership write the apply cannot
+    perform. An archived owner-NULL group IS returned — the archived set fails
+    that row closed on its own, and disagreeing here would make two reads of
+    the same row contradict each other.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    other_registry = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID)
+
+    registry.create_group(
+        name="Mine",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-mine",
+        content_owner_id="owner-a",
+    )
+    registry.create_group(
+        name="Legacy", group_type="SECTOR", channel_ids=[], cms_group_id="cms-legacy"
+    )
+    other_registry.create_group(
+        name="Other Tenant Legacy",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-other-tenant",
+    )
+
+    result = registry.list_adoptable_cms_group_ids(
+        {"cms-mine", "cms-legacy", "cms-other-tenant", "cms-missing"}
+    )
+
+    assert result == {"cms-legacy"}
+    assert registry.list_adoptable_cms_group_ids(set()) == set()
+
+
 def test_create_group_duplicate_cms_key_raises_typed_conflict() -> None:
     """Losing the per-tenant cms_group_id uniqueness race is a typed conflict.
 

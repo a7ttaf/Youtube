@@ -171,7 +171,14 @@ class ChannelImportFieldChange(BaseModel):
 
 
 class ChannelImportRowResult(BaseModel):
-    """One CSV row's planned or applied outcome."""
+    """One CSV row's planned or applied outcome.
+
+    ``will_adopt_content_owner`` reports an ownership write the row's own
+    ``outcome`` cannot: a row whose group key resolves to an owner-NULL group
+    stamps that group with this import's content owner, permanently, even when
+    the row itself is UNCHANGED. Every row targeting such a group carries the
+    flag — it describes the row's TARGET, not a count of UPDATE statements.
+    """
 
     row_number: int
     youtube_channel_id: str | None
@@ -181,6 +188,7 @@ class ChannelImportRowResult(BaseModel):
     revenue_required: bool | None
     changes: dict[str, ChannelImportFieldChange]
     reason: str | None
+    will_adopt_content_owner: bool
 
 
 class ChannelImportResult(BaseModel):
@@ -821,6 +829,12 @@ def _import_plan_to_api(
     design, and the dry run's whole purpose is letting the operator verify the
     exact values a full-roster apply would write. The request-level owner and
     CMS status are echoed at the top level for the same reason.
+
+    Both modes render the PLAN — unlike the sync route, whose apply renders the
+    write boundary's own record. That is why ``will_adopt_content_owner`` is
+    named for an intention: it states what this plan would claim, and the apply
+    re-reads the group under a row lock, so a group another writer stamped in
+    between is simply not adopted a second time.
     """
     return {
         "dry_run": dry_run,
@@ -839,6 +853,7 @@ def _import_plan_to_api(
                     name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
                 },
                 "reason": entry.reason,
+                "will_adopt_content_owner": entry.will_adopt_content_owner,
             }
             for entry in plan.entries
         ],

@@ -113,7 +113,10 @@ def plan_channel_import_with_stores(
     active listings and finance scope selection never surface. Groups already
     stamped to a different content owner get the same treatment, so a cross-
     owner conflict shows up in the dry run rather than only as a 409 from the
-    write boundary's own recheck.
+    write boundary's own recheck. The owner-NULL keys are read too, for the
+    opposite reason: those groups are not refused but ADOPTED, and the
+    ownership stamp that adoption performs is a write no row outcome implies,
+    so planning marks it rather than letting the apply spring it.
     """
     wanted = {row.youtube_channel_id for row in parsed.rows}
     existing = {
@@ -131,6 +134,7 @@ def plan_channel_import_with_stores(
         foreign_owner_group_ids=frozenset(
             groups.list_foreign_owner_cms_group_ids(group_ids, content_owner_id=content_owner_id)
         ),
+        adoptable_group_ids=frozenset(groups.list_adoptable_cms_group_ids(group_ids)),
     )
 
 

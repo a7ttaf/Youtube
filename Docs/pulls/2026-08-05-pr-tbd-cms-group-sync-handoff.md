@@ -144,10 +144,16 @@ cleanup. If you do it, do it there, not by widening the deltas.
 
 ## Open threads beyond this PR
 
-- **Owner decision needed:** should the bulk import adopt owner-NULL groups at
-  all, or 409 with "sync first"? See the report's open-design-question section.
+- **Import adoption — Path B shipped in this PR.** The import still adopts
+  owner-NULL groups, but the dry run now discloses it per row
+  (`will_adopt_content_owner`, read via `list_adoptable_cms_group_ids`). Path A
+  — refuse instead, "run sync for owner X first" — is still open as its own
+  change and remains the stronger position on evidence: a CSV cell is not
+  Google co-signing an ownership claim. It is one predicate in
+  `_blocked_group_reason` plus tests; everything around it exists now.
 - **Clear-stamp admin action** — the recovery path a wrong stamp has no route
-  to today.
+  to today. Path B keeps the import able to mint a stamp, so this is now the
+  only remedy for a wrong one rather than a nice-to-have.
 - Scheduled sync (connector-jobs executor) — the route is the reusable core.
 - Frontend surface for sync results.
 - The standing outside-CMS reality: Digisay-held channels remain unreadable;

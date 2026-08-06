@@ -1,3 +1,18 @@
+# ============================================================================
+# Purpose: Guard the additive channel_groups.content_owner_id column at BOTH
+#   levels — the ORM mirror and the migration that creates it — so the two
+#   cannot drift apart unnoticed.
+# Database/ORM: ChannelGroupORM plus the Alembic revision itself; the schema
+#   assertions run against a real migrated database, not the ORM's metadata.
+# Standards: The column stays NULLABLE. Existing groups predate any content
+#   owner, and a NOT NULL would either fail the migration or force a fabricated
+#   backfill value that the sync would then treat as a real ownership claim.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/alembic/versions/
+#     20260805_0001_channel_group_content_owner.py -> subject.
+#   - File: backend/ums_smart_revenue/db/org_models.py -> the ORM mirror.
+# ============================================================================
 """Schema guard for the additive channel_groups.content_owner_id column.
 
 Covers both the ORM mirror and the migration itself, mirroring
