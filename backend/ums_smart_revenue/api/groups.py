@@ -1,3 +1,33 @@
+# ============================================================================
+# Purpose: Channel-group HTTP routes — listing, creation, rename/activation,
+#   membership add/remove, and the sanctioned content-owner stamp eraser
+#   (DELETE /groups/{id}/content-owner).
+# Database/ORM: ChannelGroupORM + ChannelGroupMemberORM via
+#   ChannelGroupRegistryStore dependencies; AuditLogORM via audit sinks. The
+#   clear route delegates its store and audit work to
+#   org/channel_group_owner_recovery.
+# Standards: Thin routes — authorize, validate, translate typed domain errors
+#   to HTTP, delegate the rest. Scoped manageability is evaluated over the
+#   COMPLETE member set (list_groups_full, not the active-only read), so a
+#   deactivated member cannot open a fail-open gap; ownership changes are
+#   global MANAGE_GROUPS instead, being tenant-level governance. Synced groups
+#   409 on manual rename/membership edits — YouTube is the source of truth for
+#   those, `active`-only PATCH stays allowed. Every reason is non-blank and
+#   NUL-free before it reaches audit_logs.reason. Typed store errors map to
+#   status codes; a bare IntegrityError never surfaces as a 500.
+# Blast Radius: Channel-group membership and ownership, and therefore the
+#   finance group-scope selection built on them, plus the audit trail. No
+#   revenue math, no allocation, no month-close.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_groups.py -> the store
+#     Protocol, the typed errors, and the in-memory parity implementation.
+#   - File: backend/ums_smart_revenue/org/channel_group_owner_recovery.py ->
+#     the clear-stamp service these routes orchestrate.
+#   - File: backend/ums_smart_revenue/api/channels.py -> the CMS group sync
+#     that owns synced groups and re-adopts a cleared one.
+# ============================================================================
+"""Channel-group listing, mutation, membership, and owner-stamp HTTP routes."""
+
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
