@@ -169,6 +169,11 @@ class GroupSyncScheduler:
         # not join (finalizers must not block) and does not reference `self`
         # (it is bound to `self._stop`, not `self`, so it cannot itself keep
         # this object alive and fail to ever fire).
+        # FIX: the backstop was previously defeated by the tick thread itself
+        # -- its `target=self._run_loop` bound method strongly retained this
+        # scheduler, so an abandoned RUNNING scheduler could never be
+        # collected and the finalizer never fired. start() now uses a detached
+        # loop closure holding only a weakref + the stop event; see its note.
         self._finalizer = weakref.finalize(self, self._stop.set)
 
     def start(self) -> None:
@@ -177,12 +182,42 @@ class GroupSyncScheduler:
         A second call is a harmless no-op (the first thread is left running);
         boot wiring calls this exactly once. Not started automatically in
         ``__init__`` because most tests drive :meth:`tick` directly and never
-        want a background thread at all.
+        want a background thread at all. The FIRST tick fires one full
+        interval after start(), not immediately -- ``Event.wait(interval)``
+        blocks for the interval (or returns early+True the instant close()
+        sets the stop flag) before the loop body ever runs, so a deploy
+        restart does not thunder every ACTIVE tenant's group sync the moment
+        the process comes back up.
         """
         if self._thread is not None:
             return
+        # The thread target is deliberately NOT a bound method on self: a
+        # bound target strongly retains this scheduler for the thread's whole
+        # lifetime, which made the weakref.finalize GC backstop above
+        # un-fireable for an abandoned RUNNING scheduler -- the exact case it
+        # exists for. This closure captures only the stop event, the interval,
+        # and a weakref, and drops its per-tick strong reference before the
+        # next wait, so an abandoned scheduler really is collected, the
+        # finalizer sets the stop event, and the loop exits on its next wake.
+        stop = self._stop
+        interval_seconds = self._interval_seconds
+        self_ref = weakref.ref(self)
+
+        def _detached_loop() -> None:
+            while not stop.wait(interval_seconds):
+                scheduler = self_ref()
+                if scheduler is None:
+                    # The abandoned scheduler was collected and the finalizer
+                    # already set the stop event; nothing left to tick for.
+                    return
+                try:
+                    # Never lets a tick kill the thread (see _tick_safely).
+                    scheduler._tick_safely()
+                finally:
+                    del scheduler  # release the strong ref before the next wait
+
         self._thread = threading.Thread(
-            target=self._run_loop,
+            target=_detached_loop,
             name="ums-group-sync-scheduler",
             daemon=True,
         )
@@ -213,21 +248,6 @@ class GroupSyncScheduler:
                     _CLOSE_JOIN_TIMEOUT_SECONDS,
                 )
         self._finalizer.detach()
-
-    def _run_loop(self) -> None:
-        """Daemon thread body: tick once per interval, forever, until close().
-
-        The FIRST tick fires one full interval after start(), not
-        immediately -- ``Event.wait(interval)`` blocks for the interval (or
-        returns early+True the instant close() sets the stop flag) before the
-        loop body ever runs, so a deploy restart does not thunder every ACTIVE
-        tenant's group sync the moment the process comes back up.
-        ``_tick_safely`` guards the only statement in the loop body, so no
-        exception -- a poisoned tick or otherwise -- can ever escape this
-        thread and kill it.
-        """
-        while not self._stop.wait(self._interval_seconds):
-            self._tick_safely()
 
     def _tick_safely(self) -> None:
         """Catch-all wrapper around one tick: log and move on, never die.

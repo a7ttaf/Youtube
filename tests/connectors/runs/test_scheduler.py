@@ -4,9 +4,10 @@
 #   active/inactive credentials, other-connector credentials), pagination
 #   across list_credentials pages, per-tenant fault isolation, in-flight
 #   dedup skip (no activate() call), the tick-level catch-all
-#   (_tick_safely never lets a poisoned tick escape), and the start/close
+#   (_tick_safely never lets a poisoned tick escape), the start/close
 #   thread lifecycle (prompt join, double-close and never-started-close both
-#   harmless).
+#   harmless), the stop-flag early-abort guards, the surviving-thread close
+#   warning, and the abandoned-scheduler GC backstop.
 # Database/ORM: a real SQLite session factory (TenantBase + SecurityBase
 #   metadata only -- no org/report tables needed, this suite never touches
 #   channel groups or connector runs) seeded directly via ORM inserts.
@@ -30,8 +31,10 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -498,3 +501,32 @@ def test_close_warns_when_thread_outlives_join(
     zombie.join(timeout=1)
     assert "still running" in caplog.text
     assert not zombie.is_alive()
+
+
+def test_abandoned_running_scheduler_is_collected_and_stopped(tmp_path: Path) -> None:
+    """Dropping the last strong reference lets GC stop a RUNNING scheduler.
+
+    Qodo PR-171 finding ("finalizer ineffective"): pre-fix, the thread's
+    ``target=self._run_loop`` bound method strongly retained the scheduler,
+    so an abandoned running scheduler was never collected and the
+    ``weakref.finalize`` GC backstop could never fire. Post-fix, the loop
+    closure holds only a weakref + the stop event: GC collects the abandoned
+    scheduler, the finalizer sets the stop event, and the detached loop
+    exits on its next wake.
+    """
+    factory = _factory(tmp_path)
+    scheduler = _scheduler(factory, _RecordingExecutor(), interval_seconds=3600.0)
+    scheduler.start()
+    thread = scheduler._thread
+    assert thread is not None
+    assert thread.is_alive()
+
+    scheduler_ref = weakref.ref(scheduler)
+    del scheduler
+    gc.collect()
+
+    # The live thread must NOT keep the scheduler alive: it is collected,
+    # the finalizer sets the stop event, and the loop exits promptly.
+    assert scheduler_ref() is None
+    thread.join(timeout=5)
+    assert not thread.is_alive()

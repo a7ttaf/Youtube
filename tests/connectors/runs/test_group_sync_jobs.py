@@ -652,3 +652,52 @@ def test_activate_enqueue_failure_drops_reservation(tmp_path: Path) -> None:
         assert executor.cancel_reservation(retry) is True
     finally:
         executor.close()
+
+
+def test_failure_audits_swallow_actor_construction_error(tmp_path: Path) -> None:
+    """A broken audit-actor build must NOT escape the failure handlers.
+
+    Qodo PR-171 finding ("exception escape"): the executor-owned audit writers
+    used to build the actor BEFORE their best-effort guard, so a construction
+    failure escaped the worker's "never propagate" contract -- naked from the
+    group-sync worker's except block, and into route transaction hooks via the
+    public ``audit_failed_before_start``. All three now construct INSIDE the
+    guard: a broken build degrades to a logged skip with zero rows written.
+    """
+    factory = _factory(tmp_path)
+    executor = _executor(factory)
+    outcome = ConnectorRunOutcome(run=None, counts={}, per_report_failures=[])
+    try:
+        with patch.object(
+            ConnectorJobExecutor,
+            "_build_audit_actor",
+            side_effect=RuntimeError("actor build exploded"),
+        ):
+            # The Qodo-flagged group-sync failure handler ...
+            executor._audit_group_sync_failure(
+                tenant_id=TENANT,
+                content_owner_id=CONTENT_OWNER,
+                error_class="GroupSyncFetchError",
+                actor_identity=ACTOR,
+            )
+            # ... its pull-job sibling via the public after_commit hook ...
+            executor.audit_failed_before_start(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                error_class="ExecutorShutdown",
+                actor_identity=ACTOR,
+            )
+            # ... and the dry-run outcome writer: none may raise.
+            executor._audit_dry_run_outcome(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                outcome=outcome,
+                actor_identity=ACTOR,
+            )
+        assert _audit_rows(factory) == []
+    finally:
+        executor.close()

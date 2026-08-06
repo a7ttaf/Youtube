@@ -835,14 +835,20 @@ class ConnectorJobExecutor:
         embeds ``str(exc)`` -- ``error_class`` is the class name only, which can
         never carry a secret locator.
         """
-        actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
-        minimal_tenant = make_placeholder_tenant(
-            tenant_id=tenant_id,
-            slug=f"group-sync-job-failed-audit:{tenant_id}",
-            display_name="group sync job failed-audit",
-        )
-        token = TENANT_CTX.set(minimal_tenant)
+        # Actor/placeholder/token construction sits INSIDE the guard: the
+        # "never escape the thread" contract covers this failure handler
+        # itself, so a broken actor build or TENANT_CTX.set degrades to the
+        # same logged skip as a failed audit write instead of escaping the
+        # worker's except block.
+        token = None
         try:
+            actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
+            minimal_tenant = make_placeholder_tenant(
+                tenant_id=tenant_id,
+                slug=f"group-sync-job-failed-audit:{tenant_id}",
+                display_name="group sync job failed-audit",
+            )
+            token = TENANT_CTX.set(minimal_tenant)
             with self._session_factory() as session, platform_lane(session):
                 sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
                 record_audit_event(
@@ -866,7 +872,8 @@ class ConnectorJobExecutor:
                 tenant_id,
             )
         finally:
-            TENANT_CTX.reset(token)
+            if token is not None:
+                TENANT_CTX.reset(token)
 
     def audit_failed_before_start(
         self,
@@ -924,18 +931,26 @@ class ConnectorJobExecutor:
         # app_current_tenant_id() is NULL and the audit_logs WITH CHECK denies
         # the INSERT (app_platform is NOBYPASSRLS, so elevation alone is not
         # enough); the Bucket-A failure audit was silently lost on Postgres.
-        actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
-        # Minimal-tenant fabrication for the contextvar: only ``.id`` is read by
-        # the after_begin hook / RLS policy, so the remaining fields are
-        # placeholders, never persisted or validated against ``tenants``. Built
-        # via the shared factory so the placeholder shape stays centralized.
-        minimal_tenant = make_placeholder_tenant(
-            tenant_id=tenant_id,
-            slug=f"connector-job-failed-audit:{tenant_id}",
-            display_name="connector job failed-audit",
-        )
-        token = TENANT_CTX.set(minimal_tenant)
+        # Actor/placeholder/token construction sits INSIDE the guard (same
+        # contract as _audit_group_sync_failure): this hook is called from
+        # failure paths -- including the route's after_commit via
+        # audit_failed_before_start -- where an escape would surface inside
+        # transaction hooks or the worker's except block, so construction
+        # failures degrade to the same logged skip as a failed write.
+        token = None
         try:
+            actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
+            # Minimal-tenant fabrication for the contextvar: only ``.id`` is
+            # read by the after_begin hook / RLS policy, so the remaining fields
+            # are placeholders, never persisted or validated against ``tenants``.
+            # Built via the shared factory so the placeholder shape stays
+            # centralized.
+            minimal_tenant = make_placeholder_tenant(
+                tenant_id=tenant_id,
+                slug=f"connector-job-failed-audit:{tenant_id}",
+                display_name="connector job failed-audit",
+            )
+            token = TENANT_CTX.set(minimal_tenant)
             with self._session_factory() as session, platform_lane(session):
                 # audit_logs is platform-only-write: elevate to app_platform for
                 # this standalone audit (run_one does its own elevation; this
@@ -962,7 +977,8 @@ class ConnectorJobExecutor:
                 tenant_id,
             )
         finally:
-            TENANT_CTX.reset(token)
+            if token is not None:
+                TENANT_CTX.reset(token)
 
     def _audit_dry_run_outcome(
         self,
@@ -983,12 +999,15 @@ class ConnectorJobExecutor:
         ``[{"report_type": ..., "error_class": ...}, ...]`` array so an
         operator console can render them directly.
         """
-        actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
-        per_report_failures = [
-            {"report_type": report_type, "error_class": error_class}
-            for report_type, error_class in outcome.per_report_failures
-        ]
+        # Actor construction sits INSIDE the guard, matching the two failure
+        # audit siblings: a broken build degrades to the same logged skip as a
+        # failed write, so this method's own "never escape" contract holds.
         try:
+            actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
+            per_report_failures = [
+                {"report_type": report_type, "error_class": error_class}
+                for report_type, error_class in outcome.per_report_failures
+            ]
             with (
                 self._session_factory() as session,
                 connector_tenant_context(tenant_id, session=session),
