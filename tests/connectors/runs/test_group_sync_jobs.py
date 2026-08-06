@@ -625,13 +625,15 @@ def test_activate_enqueue_failure_drops_reservation(tmp_path: Path) -> None:
         )
         assert reservation is not None
 
-        with patch.object(
-            executor._executor,
-            "submit",
-            side_effect=RuntimeError("cannot schedule new futures after shutdown"),
+        with (
+            patch.object(
+                executor._executor,
+                "submit",
+                side_effect=RuntimeError("cannot schedule new futures after shutdown"),
+            ),
+            pytest.raises(RuntimeError, match="cannot schedule new futures"),
         ):
-            with pytest.raises(RuntimeError, match="cannot schedule new futures"):
-                executor.activate(reservation)
+            executor.activate(reservation)
 
         # The wedge, before the fix: the key was still in the registry here.
         assert not executor.has_active_job(
