@@ -233,7 +233,7 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
 #   - File: backend/ums_smart_revenue/config/settings.py -> AppSettings flags.
 # ============================================================================
 def _wire_connector_background_workers(
-    app: FastAPI,
+    fastapi_app: FastAPI,
     *,
     settings: AppSettings,
     session_factory: SessionFactory,
@@ -247,7 +247,7 @@ def _wire_connector_background_workers(
         # path and the worker pool both had to share. ThreadPoolExecutor
         # workers call session_factory() per job, so they pick up the
         # same pooled connection lifecycle the request handlers do.
-        app.state.connector_job_executor = ConnectorJobExecutor(
+        fastapi_app.state.connector_job_executor = ConnectorJobExecutor(
             session_factory=session_factory,
             max_workers=settings.connector_job_max_workers,
             stale_running_hours=settings.connector_job_stale_running_hours,
@@ -268,12 +268,12 @@ def _wire_connector_background_workers(
             )
         scheduler = GroupSyncScheduler(
             session_factory=session_factory,
-            executor=app.state.connector_job_executor,
+            executor=fastapi_app.state.connector_job_executor,
             interval_seconds=settings.group_sync_interval_hours * 3600,
             service_actor_id=settings.google_connector_service_actor_id,
         )
         scheduler.start()
-        app.state.group_sync_scheduler = scheduler
+        fastapi_app.state.group_sync_scheduler = scheduler
 
 
 # ============================================================================
@@ -292,7 +292,7 @@ def _wire_connector_background_workers(
 #   - File: backend/ums_smart_revenue/api/channels.py -> registry/sink factories.
 # ============================================================================
 def _configure_database_dependencies(
-    app: FastAPI,
+    fastapi_app: FastAPI,
     *,
     resolved_authz_source: str,
     sqlite_database: bool,
@@ -300,7 +300,7 @@ def _configure_database_dependencies(
     platform_session_factory: SessionFactory,
 ) -> None:
     """Install session/registry/sink overrides and authz middleware on ``app``."""
-    overrides = app.dependency_overrides
+    overrides = fastapi_app.dependency_overrides
     if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
         overrides[current_db_session] = authenticated_session_dependency(session_factory)
         overrides[current_platform_db_session] = (
@@ -315,7 +315,7 @@ def _configure_database_dependencies(
             if sqlite_database
             else session_dependency(platform_session_factory)
         )
-        app.add_middleware(DefaultTenantMiddleware)
+        fastapi_app.add_middleware(DefaultTenantMiddleware)
     overrides[current_channel_registry] = sql_channel_registry_from_session
     overrides[current_group_registry] = sql_group_registry_from_session
     overrides[current_audit_sink] = sql_audit_sink_from_session
@@ -337,7 +337,7 @@ def _configure_database_dependencies(
         # Blast Radius: Authorization/tenant resolution; reads platform
         #   `tenants` only (no RLS table), so BYPASSRLS is immaterial here.
         # ============================================================
-        app.add_middleware(
+        fastapi_app.add_middleware(
             TrustedGatewayTenantResolverMiddleware,
             session_factory=platform_session_factory,
             authorize_tenant=_allow_database_auth_tenant,
