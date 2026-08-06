@@ -79,6 +79,7 @@ from ums_smart_revenue.config.settings import (
 )
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
 from ums_smart_revenue.connectors.runs.executor import ConnectorJobExecutor
+from ums_smart_revenue.connectors.runs.scheduler import GroupSyncScheduler
 from ums_smart_revenue.db.session import (
     build_platform_session_factory,
     build_session_factory,
@@ -109,24 +110,34 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         raise ValueError("database authz_source requires database_url or UMS_DATABASE_URL")
 
     # ========================================================================
-    # Purpose: Close the module-owned ConnectorJobExecutor on app shutdown so
-    #   worker threads tear down deterministically (the weakref.finalize GC
-    #   backstop is a safety net, not the primary teardown). No startup work.
-    # Database/ORM: None directly; the executor owns its own session factory.
-    # Standards: getattr-guarded so a disabled app (no executor) shuts down
-    #   cleanly. Fail-closed default OFF means the import-time app spawns no
-    #   threads.
+    # Purpose: Close the module-owned GroupSyncScheduler and ConnectorJobExecutor
+    #   on app shutdown so the tick thread and worker threads tear down
+    #   deterministically (each one's weakref.finalize GC backstop is a safety
+    #   net, not the primary teardown). No startup work.
+    # Database/ORM: None directly; both own their own session factories.
+    # Standards: getattr-guarded so a disabled app (no scheduler, no executor)
+    #   shuts down cleanly. Fail-closed default OFF means the import-time app
+    #   spawns no threads. Close ORDER matters: scheduler FIRST (stop ticking,
+    #   so it can submit no further jobs), THEN executor (drain in-flight
+    #   workers) -- closing the executor first would let a scheduler tick
+    #   submit into an already-shutting-down pool.
     # Blast Radius: Process lifecycle / threads only. No finance, auth, audit,
     #   or graph projection impact.
     # Connections:
     #   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> close().
+    #   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> close().
     # ========================================================================
     @asynccontextmanager
     async def _lifespan(fastapi_app: FastAPI):
-        """Yield through serving, then close the connector-job executor if present."""
+        """Yield through serving, then close the scheduler and executor if present."""
         try:
             yield
         finally:
+            # Scheduler first (stop ticking), then executor (drain workers) --
+            # see the Standards note above for why the order is load-bearing.
+            scheduler = getattr(fastapi_app.state, "group_sync_scheduler", None)
+            if scheduler is not None:
+                scheduler.close()
             executor = getattr(fastapi_app.state, "connector_job_executor", None)
             if executor is not None:
                 executor.close()
@@ -155,6 +166,31 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
                 max_workers=settings.connector_job_max_workers,
                 stale_running_hours=settings.connector_job_stale_running_hours,
             )
+        # No database URL never reaches this line at all (the whole block
+        # sits inside `if resolved_database_url`), so the flag is inert
+        # without one -- matching the executor's own behaviour just above.
+        if settings.group_sync_schedule_enabled:
+            if not settings.connector_job_executor_enabled:
+                raise ValueError(
+                    "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
+                    " UMS_CONNECTOR_JOB_EXECUTOR_ENABLED to be enabled"
+                    " -- a scheduler with nothing to submit to is a"
+                    " misconfiguration"
+                )
+            if settings.google_connector_service_actor_id is None:
+                raise ValueError(
+                    "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
+                    " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID to be set"
+                    " -- the scheduler has no identity to submit jobs as"
+                )
+            scheduler = GroupSyncScheduler(
+                session_factory=session_factory,
+                executor=_app.state.connector_job_executor,
+                interval_seconds=settings.group_sync_interval_hours * 3600,
+                service_actor_id=settings.google_connector_service_actor_id,
+            )
+            scheduler.start()
+            _app.state.group_sync_scheduler = scheduler
         overrides = _app.dependency_overrides
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_db_session] = authenticated_session_dependency(session_factory)

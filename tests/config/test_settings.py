@@ -25,6 +25,8 @@ from ums_smart_revenue.config.settings import (
     CONNECTOR_JOB_MAX_WORKERS_ENV,
     CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV,
     GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+    GROUP_SYNC_INTERVAL_HOURS_ENV,
+    GROUP_SYNC_SCHEDULE_ENABLED_ENV,
     AppSettings,
     load_app_settings,
 )
@@ -37,10 +39,21 @@ _EXECUTOR_ENVS = (
     CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV,
 )
 
+_GROUP_SYNC_ENVS = (
+    GROUP_SYNC_SCHEDULE_ENABLED_ENV,
+    GROUP_SYNC_INTERVAL_HOURS_ENV,
+)
+
 
 def _clear_executor_envs(monkeypatch: pytest.MonkeyPatch) -> None:
     """Remove every executor env var so defaults apply."""
     for name in _EXECUTOR_ENVS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def _clear_group_sync_envs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove every group-sync scheduler env var so defaults apply."""
+    for name in _GROUP_SYNC_ENVS:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -172,3 +185,70 @@ def test_load_app_settings_rejects_malformed_service_actor_id(
     with pytest.raises(ValueError) as excinfo:
         load_app_settings()
     assert GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV in str(excinfo.value)
+
+
+def test_load_app_settings_group_sync_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset group-sync envs resolve to the fail-closed defaults."""
+    _clear_group_sync_envs(monkeypatch)
+    load_app_settings.cache_clear()
+    settings = load_app_settings()
+    assert settings.group_sync_schedule_enabled is False
+    assert settings.group_sync_interval_hours == 24
+
+
+@pytest.mark.parametrize("truthy", ["1", "true", "TRUE", "  yes  ", "on"])
+def test_load_app_settings_group_sync_enabled_truthy(
+    monkeypatch: pytest.MonkeyPatch, truthy: str
+) -> None:
+    """Recognised truthy tokens enable the group-sync schedule."""
+    _clear_group_sync_envs(monkeypatch)
+    monkeypatch.setenv(GROUP_SYNC_SCHEDULE_ENABLED_ENV, truthy)
+    load_app_settings.cache_clear()
+    assert load_app_settings().group_sync_schedule_enabled is True
+
+
+@pytest.mark.parametrize("falsy", ["0", "false", "FALSE", "  no  ", "off", ""])
+def test_load_app_settings_group_sync_enabled_falsy(
+    monkeypatch: pytest.MonkeyPatch, falsy: str
+) -> None:
+    """Recognised falsy/blank tokens leave the group-sync schedule disabled."""
+    _clear_group_sync_envs(monkeypatch)
+    monkeypatch.setenv(GROUP_SYNC_SCHEDULE_ENABLED_ENV, falsy)
+    load_app_settings.cache_clear()
+    assert load_app_settings().group_sync_schedule_enabled is False
+
+
+def test_load_app_settings_group_sync_interval_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid interval-hours env value overrides the default."""
+    _clear_group_sync_envs(monkeypatch)
+    monkeypatch.setenv(GROUP_SYNC_INTERVAL_HOURS_ENV, "6")
+    load_app_settings.cache_clear()
+    assert load_app_settings().group_sync_interval_hours == 6
+
+
+def test_load_app_settings_rejects_zero_group_sync_interval_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero interval-hours value fails fast at load time with the env name."""
+    _clear_group_sync_envs(monkeypatch)
+    monkeypatch.setenv(GROUP_SYNC_INTERVAL_HOURS_ENV, "0")
+    load_app_settings.cache_clear()
+    with pytest.raises(ValueError) as excinfo:
+        load_app_settings()
+    assert GROUP_SYNC_INTERVAL_HOURS_ENV in str(excinfo.value)
+
+
+def test_load_app_settings_rejects_negative_group_sync_interval_hours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A negative interval-hours value fails fast at load time with the env name."""
+    _clear_group_sync_envs(monkeypatch)
+    monkeypatch.setenv(GROUP_SYNC_INTERVAL_HOURS_ENV, "-1")
+    load_app_settings.cache_clear()
+    with pytest.raises(ValueError) as excinfo:
+        load_app_settings()
+    assert GROUP_SYNC_INTERVAL_HOURS_ENV in str(excinfo.value)

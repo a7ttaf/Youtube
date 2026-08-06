@@ -12,6 +12,8 @@ GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
 CONNECTOR_JOB_EXECUTOR_ENABLED_ENV = "UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"
 CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
 CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"
+GROUP_SYNC_SCHEDULE_ENABLED_ENV = "UMS_GROUP_SYNC_SCHEDULE_ENABLED"
+GROUP_SYNC_INTERVAL_HOURS_ENV = "UMS_GROUP_SYNC_INTERVAL_HOURS"
 
 _TRUTHY_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSY_TOKENS = frozenset({"0", "false", "no", "off", ""})
@@ -46,6 +48,16 @@ class AppSettings:
     connector_job_executor_enabled: bool = False
     connector_job_max_workers: int = 1
     connector_job_stale_running_hours: int = 6
+    # In-process CMS group-sync scheduler toggle + tick interval. Fail-closed
+    # OFF: when False, create_app spawns no scheduler thread and boots exactly
+    # as it does today. When True, create_app FAILS FAST (ValueError) at boot
+    # unless the connector-job executor is also enabled and a service actor id
+    # is configured -- a scheduler with nothing to submit to, or no identity
+    # to submit jobs as, is a misconfiguration caught at boot, not silently at
+    # the first tick. interval_hours is a positive int validated at load time,
+    # same contract as max_workers.
+    group_sync_schedule_enabled: bool = False
+    group_sync_interval_hours: int = 24
 
 
 @lru_cache(maxsize=1)
@@ -72,6 +84,8 @@ def load_app_settings() -> AppSettings:
         connector_job_stale_running_hours=_load_int(
             CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV, default=6
         ),
+        group_sync_schedule_enabled=_load_bool(GROUP_SYNC_SCHEDULE_ENABLED_ENV, default=False),
+        group_sync_interval_hours=_load_int(GROUP_SYNC_INTERVAL_HOURS_ENV, default=24),
     )
 
 
