@@ -49,7 +49,7 @@ from ums_smart_revenue.connectors.google.youtube_groups_client import (
     CmsGroupMembers,
 )
 from ums_smart_revenue.connectors.runs.executor import (
-    GROUP_SYNC_JOB_CONNECTOR_KEY,
+    GROUP_SYNC_JOB_CONNECTOR_SLUG,
     GROUP_SYNC_JOB_MONTH,
     ConnectorJobActor,
     ConnectorJobExecutor,
@@ -247,7 +247,7 @@ def test_pull_and_sync_jobs_coexist_in_registry(tmp_path: Path) -> None:
         assert (
             executor.has_active_job(
                 tenant_id=TENANT,
-                connector_key=GROUP_SYNC_JOB_CONNECTOR_KEY,
+                connector_key=GROUP_SYNC_JOB_CONNECTOR_SLUG,
                 account_id=CONTENT_OWNER,
                 report_month=GROUP_SYNC_JOB_MONTH,
             )
@@ -283,7 +283,7 @@ def test_submit_group_sync_if_absent_dedups_then_frees_after_completion(
         assert (
             executor.has_active_job(
                 tenant_id=TENANT,
-                connector_key=GROUP_SYNC_JOB_CONNECTOR_KEY,
+                connector_key=GROUP_SYNC_JOB_CONNECTOR_SLUG,
                 account_id=CONTENT_OWNER,
                 report_month=GROUP_SYNC_JOB_MONTH,
             )
@@ -437,7 +437,7 @@ def _one_failure_row(factory: sessionmaker) -> AuditLogORM:
     assert len(rows) == 1, rows
     row = rows[0]
     assert row.event_type == AuditEventType.CONNECTOR_JOB_RUN.value
-    assert row.entity_id == f"{GROUP_SYNC_JOB_CONNECTOR_KEY}:{CONTENT_OWNER}"
+    assert row.entity_id == f"{GROUP_SYNC_JOB_CONNECTOR_SLUG}:{CONTENT_OWNER}"
     assert row.details["content_owner_id"] == CONTENT_OWNER
     return row
 
@@ -599,6 +599,6 @@ def test_close_audits_queued_sync_job_with_before_start_row(
         a for a in _audit_rows(factory) if a.details.get("error_class") == "ExecutorShutdown"
     ]
     assert len(shutdown) == 1
-    assert shutdown[0].entity_id == f"{GROUP_SYNC_JOB_CONNECTOR_KEY}:{CONTENT_OWNER}"
+    assert shutdown[0].entity_id == f"{GROUP_SYNC_JOB_CONNECTOR_SLUG}:{CONTENT_OWNER}"
     assert shutdown[0].details["action"] == "job_failed_before_start"
     assert shutdown[0].details["report_month"] == GROUP_SYNC_JOB_MONTH

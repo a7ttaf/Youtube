@@ -75,12 +75,14 @@ from ums_smart_revenue.api.users import router as users_router
 from ums_smart_revenue.config.settings import (
     AUTHZ_SOURCE_DATABASE,
     AUTHZ_SOURCE_HEADERS,
+    AppSettings,
     load_app_settings,
 )
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
 from ums_smart_revenue.connectors.runs.executor import ConnectorJobExecutor
 from ums_smart_revenue.connectors.runs.scheduler import GroupSyncScheduler
 from ums_smart_revenue.db.session import (
+    SessionFactory,
     build_platform_session_factory,
     build_session_factory,
     session_dependency,
@@ -153,86 +155,18 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         session_factory = build_session_factory(resolved_database_url)
         sqlite_database = _is_sqlite_database_url(resolved_database_url)
         platform_session_factory = build_platform_session_factory(resolved_database_url)
-        if settings.connector_job_executor_enabled:
-            # FIX: reuse the request-scoped session_factory the app already
-            # created. build_session_factory caches the engine per URL, but
-            # calling it twice still produced a second sessionmaker object
-            # over the same engine -- a wasted allocation that the request
-            # path and the worker pool both had to share. ThreadPoolExecutor
-            # workers call session_factory() per job, so they pick up the
-            # same pooled connection lifecycle the request handlers do.
-            _app.state.connector_job_executor = ConnectorJobExecutor(
-                session_factory=session_factory,
-                max_workers=settings.connector_job_max_workers,
-                stale_running_hours=settings.connector_job_stale_running_hours,
-            )
-        # No database URL never reaches this line at all (the whole block
-        # sits inside `if resolved_database_url`), so the flag is inert
-        # without one -- matching the executor's own behaviour just above.
-        if settings.group_sync_schedule_enabled:
-            if not settings.connector_job_executor_enabled:
-                raise ValueError(
-                    "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
-                    " UMS_CONNECTOR_JOB_EXECUTOR_ENABLED to be enabled"
-                    " -- a scheduler with nothing to submit to is a"
-                    " misconfiguration"
-                )
-            if settings.google_connector_service_actor_id is None:
-                raise ValueError(
-                    "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
-                    " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID to be set"
-                    " -- the scheduler has no identity to submit jobs as"
-                )
-            scheduler = GroupSyncScheduler(
-                session_factory=session_factory,
-                executor=_app.state.connector_job_executor,
-                interval_seconds=settings.group_sync_interval_hours * 3600,
-                service_actor_id=settings.google_connector_service_actor_id,
-            )
-            scheduler.start()
-            _app.state.group_sync_scheduler = scheduler
-        overrides = _app.dependency_overrides
-        if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
-            overrides[current_db_session] = authenticated_session_dependency(session_factory)
-            overrides[current_platform_db_session] = (
-                _sqlite_platform_session_from_request
-                if sqlite_database
-                else authenticated_session_dependency(platform_session_factory)
-            )
-        else:
-            overrides[current_db_session] = session_dependency(session_factory)
-            overrides[current_platform_db_session] = (
-                _sqlite_platform_session_from_request
-                if sqlite_database
-                else session_dependency(platform_session_factory)
-            )
-            _app.add_middleware(DefaultTenantMiddleware)
-        overrides[current_channel_registry] = sql_channel_registry_from_session
-        overrides[current_group_registry] = sql_group_registry_from_session
-        overrides[current_audit_sink] = sql_audit_sink_from_session
-        # All-or-nothing routes (the bulk channel import, the CMS group sync)
-        # must commit their audit rows atomically with their domain writes, so
-        # their sink runs on the request's tenant session (platform-lane
-        # elevated per append) instead of the independent platform session.
-        overrides[current_atomic_audit_sink] = sql_atomic_audit_sink_from_session
-        overrides[current_revenue_audit_sink] = sql_revenue_audit_sink_from_session
-        if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
-            overrides[current_principal_from_headers] = current_principal_from_database
-            # ============================================================
-            # Purpose: The tenant resolver reads `tenants` to map slug->tenant
-            #   BEFORE TENANT_CTX is set, so its session has no tenant and the
-            #   app_tenant lane never activates. Run that lookup on the platform
-            #   lane (app_platform) which the session hook switches to via
-            #   session.info regardless of context, so it holds the grants a
-            #   restricted (INHERIT FALSE) login otherwise lacks.
-            # Blast Radius: Authorization/tenant resolution; reads platform
-            #   `tenants` only (no RLS table), so BYPASSRLS is immaterial here.
-            # ============================================================
-            _app.add_middleware(
-                TrustedGatewayTenantResolverMiddleware,
-                session_factory=platform_session_factory,
-                authorize_tenant=_allow_database_auth_tenant,
-            )
+        _wire_connector_background_workers(
+            _app,
+            settings=settings,
+            session_factory=session_factory,
+        )
+        _configure_database_dependencies(
+            _app,
+            resolved_authz_source=resolved_authz_source,
+            sqlite_database=sqlite_database,
+            session_factory=session_factory,
+            platform_session_factory=platform_session_factory,
+        )
 
     _app.include_router(adsense_router)
     _app.include_router(allocation_router)
@@ -278,6 +212,136 @@ def create_app(*, database_url: str | None = None, authz_source: str | None = No
         return health_payload()
 
     return _app
+
+
+# ============================================================================
+# Purpose: Attach the connector background workers (job executor + group-sync
+#   scheduler) to the app state, enforcing the fail-fast settings contract
+#   BEFORE any thread starts. Extracted from create_app so the factory stays
+#   under the cyclomatic-complexity budget; guards and construction order are
+#   unchanged. Called only when a database URL resolved, so both flags are
+#   inert without one -- matching the previous inline behavior.
+# Database/ORM: None directly; both workers take the request-scoped
+#   session_factory and own their per-job/tick session lifecycle.
+# Standards: Fail-fast ValueError on misconfiguration; threads start only
+#   after every guard passes.
+# Blast Radius: Process lifecycle / threads only. No finance, auth, audit, or
+#   export impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> ConnectorJobExecutor.
+#   - File: backend/ums_smart_revenue/connectors/runs/scheduler.py -> GroupSyncScheduler.
+#   - File: backend/ums_smart_revenue/config/settings.py -> AppSettings flags.
+# ============================================================================
+def _wire_connector_background_workers(
+    app: FastAPI,
+    *,
+    settings: AppSettings,
+    session_factory: SessionFactory,
+) -> None:
+    """Create the enabled connector workers and store them on ``app.state``."""
+    if settings.connector_job_executor_enabled:
+        # FIX: reuse the request-scoped session_factory the app already
+        # created. build_session_factory caches the engine per URL, but
+        # calling it twice still produced a second sessionmaker object
+        # over the same engine -- a wasted allocation that the request
+        # path and the worker pool both had to share. ThreadPoolExecutor
+        # workers call session_factory() per job, so they pick up the
+        # same pooled connection lifecycle the request handlers do.
+        app.state.connector_job_executor = ConnectorJobExecutor(
+            session_factory=session_factory,
+            max_workers=settings.connector_job_max_workers,
+            stale_running_hours=settings.connector_job_stale_running_hours,
+        )
+    if settings.group_sync_schedule_enabled:
+        if not settings.connector_job_executor_enabled:
+            raise ValueError(
+                "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
+                " UMS_CONNECTOR_JOB_EXECUTOR_ENABLED to be enabled"
+                " -- a scheduler with nothing to submit to is a"
+                " misconfiguration"
+            )
+        if settings.google_connector_service_actor_id is None:
+            raise ValueError(
+                "UMS_GROUP_SYNC_SCHEDULE_ENABLED requires"
+                " UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID to be set"
+                " -- the scheduler has no identity to submit jobs as"
+            )
+        scheduler = GroupSyncScheduler(
+            session_factory=session_factory,
+            executor=app.state.connector_job_executor,
+            interval_seconds=settings.group_sync_interval_hours * 3600,
+            service_actor_id=settings.google_connector_service_actor_id,
+        )
+        scheduler.start()
+        app.state.group_sync_scheduler = scheduler
+
+
+# ============================================================================
+# Purpose: Install the database-backed dependency overrides (sessions,
+#   registries, audit sinks, principal loader) and the authz-mode middleware.
+#   Extracted from create_app so the factory stays under the cyclomatic-
+#   complexity budget; override and middleware order is verbatim.
+# Database/ORM: Wires SQLAlchemy session factories into FastAPI dependencies;
+#   no table or query changes.
+# Standards: Atomic-lane audit sinks for all-or-nothing routes; platform-lane
+#   session for tenant resolution under database authz.
+# Blast Radius: Authorization (principal source + tenant resolver middleware)
+#   and audit-sink routing -- moved verbatim, no behavior change.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> override targets.
+#   - File: backend/ums_smart_revenue/api/channels.py -> registry/sink factories.
+# ============================================================================
+def _configure_database_dependencies(
+    app: FastAPI,
+    *,
+    resolved_authz_source: str,
+    sqlite_database: bool,
+    session_factory: SessionFactory,
+    platform_session_factory: SessionFactory,
+) -> None:
+    """Install session/registry/sink overrides and authz middleware on ``app``."""
+    overrides = app.dependency_overrides
+    if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
+        overrides[current_db_session] = authenticated_session_dependency(session_factory)
+        overrides[current_platform_db_session] = (
+            _sqlite_platform_session_from_request
+            if sqlite_database
+            else authenticated_session_dependency(platform_session_factory)
+        )
+    else:
+        overrides[current_db_session] = session_dependency(session_factory)
+        overrides[current_platform_db_session] = (
+            _sqlite_platform_session_from_request
+            if sqlite_database
+            else session_dependency(platform_session_factory)
+        )
+        app.add_middleware(DefaultTenantMiddleware)
+    overrides[current_channel_registry] = sql_channel_registry_from_session
+    overrides[current_group_registry] = sql_group_registry_from_session
+    overrides[current_audit_sink] = sql_audit_sink_from_session
+    # All-or-nothing routes (the bulk channel import, the CMS group sync)
+    # must commit their audit rows atomically with their domain writes, so
+    # their sink runs on the request's tenant session (platform-lane
+    # elevated per append) instead of the independent platform session.
+    overrides[current_atomic_audit_sink] = sql_atomic_audit_sink_from_session
+    overrides[current_revenue_audit_sink] = sql_revenue_audit_sink_from_session
+    if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
+        overrides[current_principal_from_headers] = current_principal_from_database
+        # ============================================================
+        # Purpose: The tenant resolver reads `tenants` to map slug->tenant
+        #   BEFORE TENANT_CTX is set, so its session has no tenant and the
+        #   app_tenant lane never activates. Run that lookup on the platform
+        #   lane (app_platform) which the session hook switches to via
+        #   session.info regardless of context, so it holds the grants a
+        #   restricted (INHERIT FALSE) login otherwise lacks.
+        # Blast Radius: Authorization/tenant resolution; reads platform
+        #   `tenants` only (no RLS table), so BYPASSRLS is immaterial here.
+        # ============================================================
+        app.add_middleware(
+            TrustedGatewayTenantResolverMiddleware,
+            session_factory=platform_session_factory,
+            authorize_tenant=_allow_database_auth_tenant,
+        )
 
 
 def _allow_database_auth_tenant(_scope: object, _tenant_slug: str) -> bool:

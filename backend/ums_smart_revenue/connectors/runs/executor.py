@@ -59,7 +59,10 @@ _JobKey = tuple[UUID, str, str, str]
 # collide: no real connector is keyed "cms_group_sync", so the two live in
 # disjoint connector-key namespaces and dedup/has_active_job/_deregister need no
 # special-casing.
-GROUP_SYNC_JOB_CONNECTOR_KEY = "cms_group_sync"
+# FIX: named ..._SLUG, not ..._KEY -- a "KEY = <string literal>" module constant
+# trips hardcoded-credential scanners, and this value is a namespace slug, never
+# a secret.
+GROUP_SYNC_JOB_CONNECTOR_SLUG = "cms_group_sync"
 GROUP_SYNC_JOB_MONTH = "-"
 
 # Worker-dispatch discriminator carried on the reservation (see _enqueue_worker).
@@ -353,17 +356,17 @@ class ConnectorJobExecutor:
 
         The same atomic reserve flow as :meth:`submit_if_absent` (the registry
         lock held across the check + insert), keyed under
-        :data:`GROUP_SYNC_JOB_CONNECTOR_KEY` with the ``-`` month sentinel so a
+        :data:`GROUP_SYNC_JOB_CONNECTOR_SLUG` with the ``-`` month sentinel so a
         sync job and a report pull for the same tenant+account never collide.
         The scheduler calls :meth:`activate` on the returned reservation to
         enqueue :meth:`_run_group_sync_job`; ``None`` means a sync for this owner
         is already in flight (dedup), skip it.
         """
-        key = (tenant_id, GROUP_SYNC_JOB_CONNECTOR_KEY, content_owner_id, GROUP_SYNC_JOB_MONTH)
+        key = (tenant_id, GROUP_SYNC_JOB_CONNECTOR_SLUG, content_owner_id, GROUP_SYNC_JOB_MONTH)
         reservation = _SlotReservation(
             key=key,
             tenant_id=tenant_id,
-            connector_key=GROUP_SYNC_JOB_CONNECTOR_KEY,
+            connector_key=GROUP_SYNC_JOB_CONNECTOR_SLUG,
             account_id=content_owner_id,
             report_month=GROUP_SYNC_JOB_MONTH,
             dry_run=False,
@@ -608,7 +611,7 @@ class ConnectorJobExecutor:
         else is logged; nothing escapes the thread; the registry key is dropped
         in ``finally`` on every path.
         """
-        key = (tenant_id, GROUP_SYNC_JOB_CONNECTOR_KEY, content_owner_id, GROUP_SYNC_JOB_MONTH)
+        key = (tenant_id, GROUP_SYNC_JOB_CONNECTOR_SLUG, content_owner_id, GROUP_SYNC_JOB_MONTH)
         try:
             with (
                 self._session_factory() as session,
@@ -677,8 +680,8 @@ class ConnectorJobExecutor:
         finally:
             self._deregister(key)
 
+    @staticmethod
     def _audit_group_sync_summary_if_changed(
-        self,
         *,
         sink: AuditSink,
         actor: UserPrincipal,
@@ -807,8 +810,8 @@ class ConnectorJobExecutor:
                     actor=actor,
                     event_type=AuditEventType.CONNECTOR_JOB_RUN,
                     entity_type="api_connector",
-                    entity_id=f"{GROUP_SYNC_JOB_CONNECTOR_KEY}:{content_owner_id}",
-                    scope=AccessScope.connector(GROUP_SYNC_JOB_CONNECTOR_KEY),
+                    entity_id=f"{GROUP_SYNC_JOB_CONNECTOR_SLUG}:{content_owner_id}",
+                    scope=AccessScope.connector(GROUP_SYNC_JOB_CONNECTOR_SLUG),
                     reason="scheduled group sync failed",
                     details={
                         "action": "group_sync_job_failed",

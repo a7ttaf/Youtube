@@ -256,7 +256,8 @@ class GroupSyncScheduler:
                 len(tenant_ids),
             )
 
-    def _enumerate_active_tenant_ids(self, session: Session) -> list[UUID]:
+    @staticmethod
+    def _enumerate_active_tenant_ids(session: Session) -> list[UUID]:
         """Return every ACTIVE tenant id and leave the session transaction-free.
 
         Ids are extracted into a plain list BEFORE the rollback below so the

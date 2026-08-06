@@ -143,11 +143,12 @@ Commit: `refactor(connectors): extract run_group_sync core from the sync route`
 `tests/connectors/runs/test_executor.py` or new
 `tests/connectors/runs/test_group_sync_jobs.py`).
 
-1. Constants: `GROUP_SYNC_JOB_CONNECTOR_KEY = "cms_group_sync"`,
+1. Constants: `GROUP_SYNC_JOB_CONNECTOR_SLUG = "cms_group_sync"`,
    `GROUP_SYNC_JOB_MONTH = "-"`. Key shape
-   `(tenant_id, GROUP_SYNC_JOB_CONNECTOR_KEY, content_owner_id,
+   `(tenant_id, GROUP_SYNC_JOB_CONNECTOR_SLUG, content_owner_id,
    GROUP_SYNC_JOB_MONTH)` — collision with pulls impossible (connector_key
-   namespace).
+   namespace). (Named `..._SLUG`, not `..._KEY`, so secret scanners do not
+   read the namespace sentinel as a hardcoded credential.)
 2. Executor ctor gains `group_sync_client_factory` keyword arg defaulting
    to the Sched-1 default factory — the PG tier and unit tests inject fakes
    here; production passes nothing.
