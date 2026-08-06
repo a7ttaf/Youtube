@@ -537,8 +537,8 @@ def _execute_update(
     # (list_synced_groups is owner-OR-NULL) no longer returns it, so the next
     # plan sees the upstream key with no local match, emits CREATE, and
     # collides on the tenant-unique cms_group_id — a different 409, forever.
-    # A wrong stamp has no API remedy today; see the clear-stamp item in
-    # Docs/pulls/2026-08-05-pr-tbd-cms-group-sync-report.md.
+    # A wrong stamp's remedy is DELETE /groups/{id}/content-owner (global
+    # MANAGE_GROUPS): clear it, then re-run the right owner's sync.
     if current.content_owner_id not in (None, content_owner_id):
         raise ChannelGroupOwnerReassignmentError(
             f"channel group {group_id} is held by content owner "
