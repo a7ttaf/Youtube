@@ -14,7 +14,7 @@ from ums_smart_revenue.api.registry_dependencies import (
     sql_group_registry_from_session,
 )
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
+from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
@@ -24,6 +24,7 @@ from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
     ChannelGroupEntry,
     ChannelGroupNoOwnerStampError,
+    ChannelGroupNotFoundError,
     ChannelGroupRegistryStore,
 )
 
@@ -78,6 +79,60 @@ class GroupUpdateRequest(BaseModel):
     @classmethod
     def strip_reason(cls, value):
         return _strip_required_string(value)
+
+
+class GroupAuditEventResponse(BaseModel):
+    """The audit-event shape ``audit_record_to_api`` returns.
+
+    Declared rather than passed through as a dict so the disclosed field set is
+    machine-checked: an audit record carries actor and details columns this
+    surface deliberately does NOT publish.
+    """
+
+    event_type: str
+    entity_type: str | None
+    entity_id: str | None
+    scope_type: str | None
+    scope_id: str | None
+    reason: str | None
+    sensitive: bool
+
+
+def _audit_event_response(record: AuditRecord) -> GroupAuditEventResponse:
+    """Project an AuditRecord onto the fields this surface publishes.
+
+    Built field-by-field from the record rather than splatting
+    ``audit_record_to_api``'s dict: the explicit form is what makes the
+    omission of ``user_id``, ``details``, and ``permission`` a checked
+    decision instead of an accident of whichever keys that helper returns.
+    """
+    return GroupAuditEventResponse(
+        event_type=record.event_type,
+        entity_type=record.entity_type,
+        entity_id=record.entity_id,
+        scope_type=record.scope_type,
+        scope_id=record.scope_id,
+        reason=record.reason,
+        sensitive=record.sensitive,
+    )
+
+
+class ClearContentOwnerResponse(BaseModel):
+    """Typed response for DELETE /groups/{group_id}/content-owner.
+
+    The general group view (``ChannelGroupEntry.to_api``) omits
+    ``content_owner_id``, but it is this route's entire outcome, so the model
+    declares it explicitly alongside the group fields and the audit event.
+    """
+
+    id: str
+    name: str
+    group_type: str
+    active: bool
+    channel_ids: list[str]
+    cms_group_id: str | None
+    content_owner_id: str | None
+    audit_event: GroupAuditEventResponse
 
 
 class GroupMembersRequest(BaseModel):
@@ -294,10 +349,11 @@ def remove_group_member(
 #   this module's pre-existing plain sink: the domain call writes a group row
 #   and an audit row in one request, so a lost tenant commit must not leave an
 #   audit row claiming a clear that never landed (#169 invariant). Domain
-#   failures map typed — KeyError (unknown group, or one that vanished
-#   between the existence pre-read and the locked write) to 404,
+#   failures map typed — ChannelGroupNotFoundError (unknown group, or one that
+#   vanished between the existence check and the locked write) to 404,
 #   ChannelGroupNoOwnerStampError to 409. Both details are CANNED: str(exc)
-#   never reaches HTTP.
+#   never reaches HTTP. The response is a declared model, not an assembled
+#   dict, so the disclosed field set cannot drift silently.
 # Blast Radius: Channel-group ownership only. No membership, no revenue math,
 #   no allocation. Both owners' NEXT sync plans change — that is the point.
 # Connections:
@@ -314,7 +370,7 @@ def clear_group_content_owner(
     registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_atomic_audit_sink)],
-) -> dict[str, object]:
+) -> ClearContentOwnerResponse:
     """Erase a group's content-owner stamp so the right owner's sync re-adopts it."""
     target_scope = AccessScope.global_scope()
     if not has_permission(user, Permission.MANAGE_GROUPS, target_scope, org_index):
@@ -331,7 +387,7 @@ def clear_group_content_owner(
             reason=_normalize_query_reason(reason),
             audit_sink=audit_sink,
         )
-    except KeyError as exc:
+    except ChannelGroupNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Group not found",
@@ -341,14 +397,21 @@ def clear_group_content_owner(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"group {group_id} has no content-owner stamp to clear",
         ) from exc
-    response = cleared.group.to_api()
-    # to_api() omits content_owner_id (it is not part of the general group
-    # view), yet this route's entire outcome IS that field. Disclose it from
-    # the domain call's post-write group rather than assuming the None we
-    # asked for.
-    response["content_owner_id"] = cleared.group.content_owner_id
-    response["audit_event"] = audit_record_to_api(cleared.audit_record)
-    return response
+    group = cleared.group
+    # content_owner_id is declared on the model but absent from to_api() (it is
+    # not part of the general group view), yet this route's entire outcome IS
+    # that field. It comes from the domain call's post-write group rather than
+    # from the None we asked for.
+    return ClearContentOwnerResponse(
+        id=group.id,
+        name=group.name,
+        group_type=group.group_type,
+        active=group.active,
+        channel_ids=list(group.channel_ids),
+        cms_group_id=group.cms_group_id,
+        content_owner_id=group.content_owner_id,
+        audit_event=_audit_event_response(cleared.audit_record),
+    )
 
 
 def _validate_group_type(group_type: str) -> None:

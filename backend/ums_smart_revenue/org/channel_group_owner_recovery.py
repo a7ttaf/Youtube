@@ -42,6 +42,7 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupEntry,
+    ChannelGroupNotFoundError,
     ChannelGroupRegistryStore,
 )
 
@@ -64,6 +65,32 @@ class ClearedGroupOwnerStamp:
     audit_record: AuditRecord
 
 
+# ============================================================================
+# Purpose: Erase one group's content-owner stamp and audit the erasure — the
+#   service entry point behind DELETE /groups/{id}/content-owner, and the only
+#   sanctioned eraser now that every other writer is adopt-only.
+# Database/ORM: ChannelGroupORM via ChannelGroupRegistryStore.get_group (the
+#   unlocked existence check) and clear_content_owner (the FOR NO KEY UPDATE
+#   write), inside the caller's tenant transaction; audit_logs via ``sink``.
+#   No membership, name, or active-state write.
+# Standards: The existence check carries NO active filter — an archived group's
+#   stamp must stay clearable, because deactivation is how a wrongly-synced
+#   group gets parked. It establishes EXISTENCE ONLY: its content_owner_id is
+#   unlocked and a concurrent adopt can invalidate it, so the audited previous
+#   owner comes from ClearedContentOwner, read under the store's own lock.
+#   Both failure modes are TYPED for any caller, HTTP or not —
+#   ChannelGroupNotFoundError (never a bare KeyError, which would be
+#   indistinguishable from a store-internal lookup bug) and
+#   ChannelGroupNoOwnerStampError. Neither writes an audit row: a failed clear
+#   that still audited would claim an erasure that never happened.
+# Blast Radius: Channel-group ownership and the audit trail. No membership, no
+#   revenue math, no allocation. Both owners' NEXT sync plans change.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/groups.py -> the route that maps
+#     these typed errors to 404/409.
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py ->
+#     clear_content_owner performs the locked write.
+# ============================================================================
 def clear_group_owner_stamp(
     *,
     groups: ChannelGroupRegistryStore,
@@ -75,13 +102,20 @@ def clear_group_owner_stamp(
 ) -> ClearedGroupOwnerStamp:
     """Erase ``group_id``'s owner stamp, auditing the owner actually removed.
 
-    Raises ``KeyError`` when no such group exists for this tenant and
-    ``ChannelGroupNoOwnerStampError`` when the group carries no stamp to
-    clear — clearing nothing is a caller bug, not a silent no-op.
+    Raises ``ChannelGroupNotFoundError`` when no such group exists for this
+    tenant (or the row vanished between the existence check and the locked
+    write) and ``ChannelGroupNoOwnerStampError`` when the group carries no
+    stamp to clear — clearing nothing is a caller bug, not a silent no-op.
     """
     if groups.get_group(group_id) is None:
-        raise KeyError(group_id)
-    cleared = groups.clear_content_owner(group_id=group_id)
+        raise ChannelGroupNotFoundError(f"channel group not found: {group_id}")
+    try:
+        cleared = groups.clear_content_owner(group_id=group_id)
+    except KeyError as exc:
+        # The row existed a statement ago, so this is the vanished-row race,
+        # not a caller error. Translate rather than leak the store's untyped
+        # signal past the service boundary.
+        raise ChannelGroupNotFoundError(f"channel group not found: {group_id}") from exc
     # The group-shaped audit helper in the API layer cannot carry these
     # details: it hard-codes the group_type/channel_ids pair every
     # membership-shaped change reports, and neither field moves here. Record

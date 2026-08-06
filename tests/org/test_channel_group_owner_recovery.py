@@ -24,9 +24,13 @@ import pytest
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.org.channel_group_owner_recovery import clear_group_owner_stamp
+from ums_smart_revenue.org.channel_group_owner_recovery import (
+    ClearedGroupOwnerStamp,
+    clear_group_owner_stamp,
+)
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupNoOwnerStampError,
+    ChannelGroupNotFoundError,
     ChannelGroupRegistry,
 )
 
@@ -48,7 +52,9 @@ def _registry_with_group(*, content_owner_id: str | None) -> tuple[ChannelGroupR
     return registry, group.id
 
 
-def _clear(registry: ChannelGroupRegistry, group_id: str, sink: InMemoryAuditSink):
+def _clear(
+    registry: ChannelGroupRegistry, group_id: str, sink: InMemoryAuditSink
+) -> ClearedGroupOwnerStamp:
     """Invoke the domain function with this module's fixed actor and scope."""
     return clear_group_owner_stamp(
         groups=registry,
@@ -91,15 +97,30 @@ def test_cleared_group_returns_to_the_adoptable_pool() -> None:
     assert registry.list_adoptable_cms_group_ids({"cms-tv"}) == {"cms-tv"}
 
 
-def test_unknown_group_raises_keyerror_and_writes_no_audit_row() -> None:
-    """The caller maps this to 404; a failed clear must not audit an erasure."""
+def test_unknown_group_raises_typed_not_found_and_writes_no_audit_row() -> None:
+    """The caller maps this to 404; a failed clear must not audit an erasure.
+
+    Typed, never a bare KeyError: a non-HTTP caller cannot otherwise tell "no
+    such group" apart from a lookup bug inside store internals it does not own.
+    """
     registry, _group_id = _registry_with_group(content_owner_id=OWNER_WRONG)
     sink = InMemoryAuditSink()
 
-    with pytest.raises(KeyError):
+    with pytest.raises(ChannelGroupNotFoundError):
         _clear(registry, "missing-group", sink)
 
     assert sink.records == []
+
+
+def test_typed_not_found_does_not_masquerade_as_a_keyerror() -> None:
+    """`except KeyError` must NOT swallow it — that is the ambiguity being removed."""
+    registry, _group_id = _registry_with_group(content_owner_id=OWNER_WRONG)
+
+    with pytest.raises(ChannelGroupNotFoundError):
+        try:
+            _clear(registry, "missing-group", InMemoryAuditSink())
+        except KeyError as exc:  # pragma: no cover - only runs if the guard regresses
+            raise AssertionError("ChannelGroupNotFoundError was caught as a KeyError") from exc
 
 
 def test_group_without_a_stamp_raises_typed_error_and_writes_no_audit_row() -> None:

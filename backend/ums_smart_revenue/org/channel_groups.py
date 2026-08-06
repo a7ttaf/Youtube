@@ -58,6 +58,20 @@ def require_adoptable_owner(current: str | None, incoming: str, *, group_id: str
         )
 
 
+class ChannelGroupNotFoundError(LookupError):
+    """No channel group with the requested id exists for this tenant.
+
+    The stores signal a missing row with a bare ``KeyError`` and let each
+    route translate it, which works only because every caller is an HTTP
+    handler. A service function is callable from a job, a script, or another
+    service, so it raises this instead: the caller can distinguish "no such
+    group" from any other ``KeyError`` bubbling out of store internals it does
+    not own. Deliberately NOT a ``KeyError`` subclass — inheriting from it
+    would let a bare ``except KeyError`` keep swallowing this silently, which
+    is the ambiguity the typed error exists to remove.
+    """
+
+
 class ChannelGroupNoOwnerStampError(ValueError):
     """A clear was requested on a group that has no content-owner stamp.
 
