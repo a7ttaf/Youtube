@@ -10,12 +10,25 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_service import record_audit_event
+from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
-from ums_smart_revenue.connectors.google.errors import GoogleConnectorError
+from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink, SqlAlchemyAuditSink
+from ums_smart_revenue.config.settings import GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV
+from ums_smart_revenue.connectors.google.audit import build_connector_service_principal
+from ums_smart_revenue.connectors.google.errors import (
+    ConnectorServicePrincipalUnavailableError,
+    GoogleConnectorError,
+)
+from ums_smart_revenue.connectors.runs.group_sync import (
+    GroupsClientFactory,
+    GroupSyncConflictRefusedError,
+    GroupSyncFetchError,
+    GroupSyncRunResult,
+    default_groups_client_factory,
+    run_group_sync,
+)
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
     run_one,
@@ -25,12 +38,33 @@ from ums_smart_revenue.connectors.runs.tenant_context import (
 )
 from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.session import SessionFactory
+from ums_smart_revenue.org.channel_group_sync import GroupSyncOutcome
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupConflictError,
+    ChannelGroupOwnerReassignmentError,
+)
+from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
+from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import make_placeholder_tenant
 
 logger = logging.getLogger(__name__)
 
 _JobKey = tuple[UUID, str, str, str]
+
+# Reserved registry identity for CMS group-sync jobs. The registry key stays the
+# same 4-tuple as report pulls -- (tenant_id, connector_key, account_id,
+# report_month) -- but a sync job uses this sentinel connector_key and a "-"
+# month, so a sync job and a report pull for the same tenant+account can NEVER
+# collide: no real connector is keyed "cms_group_sync", so the two live in
+# disjoint connector-key namespaces and dedup/has_active_job/_deregister need no
+# special-casing.
+GROUP_SYNC_JOB_CONNECTOR_KEY = "cms_group_sync"
+GROUP_SYNC_JOB_MONTH = "-"
+
+# Worker-dispatch discriminator carried on the reservation (see _enqueue_worker).
+_JOB_KIND_PULL = "pull"
+_JOB_KIND_GROUP_SYNC = "group_sync"
 
 
 @dataclass(frozen=True)
@@ -67,6 +101,12 @@ class _SlotReservation:
     dry_run: bool
     triggered_by_user_id: UUID | None
     actor_identity: ConnectorJobActor
+    # Which worker body ``activate`` dispatches this reservation to. Defaults to
+    # the report-pull worker so every existing caller is unchanged; a group-sync
+    # reservation sets ``_JOB_KIND_GROUP_SYNC``. Chosen over branching on the
+    # connector_key sentinel so dispatch states its intent explicitly rather than
+    # riding on a magic-string match (see _enqueue_worker).
+    job_kind: str = _JOB_KIND_PULL
 
 
 @dataclass(frozen=True)
@@ -100,6 +140,17 @@ class _ActiveJob:
 #   operators have counts + per-report-failure detail to inspect instead
 #   of just the green ``submitted`` signal.
 #
+#   A SECOND job kind rides the same registry + reserve/activate machinery:
+#   CMS group sync (``submit_group_sync_if_absent`` -> ``activate`` ->
+#   ``_run_group_sync_job``). It is keyed under the ``cms_group_sync`` sentinel
+#   connector_key so it can never collide with a report pull, and its worker
+#   drives the shared ``run_group_sync`` core on ITS OWN session: the domain
+#   rows (apply_group_sync) and the audit rows (per-group GROUP_UPDATED + a
+#   run-level GROUPS_SYNCED summary written only on change) share that one
+#   session and ONE commit, so the #169 atomic invariant holds by construction.
+#   Failures fold into one ``group_sync_job_failed`` row via the fresh-session
+#   ``_audit_group_sync_failure`` sibling.
+#
 # Database/ORM: opens its own Session via session_factory; run_one writes
 #   connector_runs + audit_logs; the Bucket-A catch writes one CONNECTOR_JOB_RUN
 #   audit row via SqlAlchemyAuditSink on a fresh own session, wrapped in
@@ -111,13 +162,17 @@ class _ActiveJob:
 #   thread: Bucket-A errors are audited (canned class name only), everything else
 #   is logged. Registry key removed in finally on every path.
 # Blast Radius: Authorization (tenant-pinned worker), audit (additive
-#   job_failed_before_start / job_dry_run_completed), connector run lifecycle.
-#   No finance math change.
+#   job_failed_before_start / job_dry_run_completed / GROUPS_SYNCED /
+#   GROUP_UPDATED / group_sync_job_failed), connector run lifecycle, and group
+#   naming/membership/active state (via the group-sync worker's apply). No
+#   finance math change.
 # Connections:
 #   - File: backend/ums_smart_revenue/tenancy/resolver.py -> executor +
 #     weakref.finalize + close() precedent.
 #   - File: backend/ums_smart_revenue/connectors/runs/tenant_context.py ->
 #     connector_tenant_context replays the ACTIVE-only tenant gate.
+#   - File: backend/ums_smart_revenue/connectors/runs/group_sync.py -> the
+#     HTTP-free sync core the group-sync worker drives (Sched 1).
 #   - File: scripts/run_google_connector.py -> the CLI pattern this reuses.
 #   - File: backend/ums_smart_revenue/api/connectors.py -> the route uses
 #     submit_if_absent + after_commit.activate / after_rollback.cancel_reservation.
@@ -137,10 +192,17 @@ class ConnectorJobExecutor:
         session_factory: SessionFactory,
         max_workers: int,
         stale_running_hours: int,
+        group_sync_client_factory: GroupsClientFactory = default_groups_client_factory,
     ) -> None:
-        """Build the pool, the registry lock, and the GC-safe shutdown backstop."""
+        """Build the pool, the registry lock, and the GC-safe shutdown backstop.
+
+        ``group_sync_client_factory`` is the seam the PG tier and unit tests use
+        to inject a fake CMS groups client; production passes nothing and the
+        real ``default_groups_client_factory`` (from the Sched-1 core) is used.
+        """
         self._session_factory = session_factory
         self._stale_running_hours = stale_running_hours
+        self._group_sync_client_factory = group_sync_client_factory
         self._lock = threading.Lock()
         self._registry: dict[_JobKey, Future | _SlotReservation | _ActiveJob] = {}
         self._executor = ThreadPoolExecutor(
@@ -245,22 +307,75 @@ class ConnectorJobExecutor:
                 return current
             if current is not reservation:
                 raise RuntimeError(f"reservation for {key} was deregistered or replaced")
-            future = self._executor.submit(
-                self._run_job,
-                tenant_id=reservation.tenant_id,
-                connector_key=reservation.connector_key,
-                account_id=reservation.account_id,
-                report_month=reservation.report_month,
-                dry_run=reservation.dry_run,
-                triggered_by_user_id=reservation.triggered_by_user_id,
-                actor_identity=reservation.actor_identity,
-            )
+            future = self._enqueue_worker(reservation)
             self._stash_and_register(
                 future=future,
                 key=key,
                 actor_identity=reservation.actor_identity,
             )
         return future
+
+    def _enqueue_worker(self, reservation: _SlotReservation) -> Future:
+        """Submit the worker matching the reservation's ``job_kind``. Caller holds the lock.
+
+        The ONLY kind-dependent branch in the reserve -> activate flow: a
+        group-sync reservation dispatches to :meth:`_run_group_sync_job`, every
+        other reservation to :meth:`_run_job` (report pulls). Everything else --
+        dedup, registry stash, ``_deregister`` -- is shared and keyed only by the
+        4-tuple, so a sync key needs zero special-casing anywhere else.
+        """
+        if reservation.job_kind == _JOB_KIND_GROUP_SYNC:
+            return self._executor.submit(
+                self._run_group_sync_job,
+                tenant_id=reservation.tenant_id,
+                content_owner_id=reservation.account_id,
+                actor_identity=reservation.actor_identity,
+            )
+        return self._executor.submit(
+            self._run_job,
+            tenant_id=reservation.tenant_id,
+            connector_key=reservation.connector_key,
+            account_id=reservation.account_id,
+            report_month=reservation.report_month,
+            dry_run=reservation.dry_run,
+            triggered_by_user_id=reservation.triggered_by_user_id,
+            actor_identity=reservation.actor_identity,
+        )
+
+    def submit_group_sync_if_absent(
+        self,
+        *,
+        tenant_id: UUID,
+        content_owner_id: str,
+        actor_identity: ConnectorJobActor,
+    ) -> _SlotReservation | None:
+        """Reserve a CMS group-sync slot for one content owner; None if already held.
+
+        The same atomic reserve flow as :meth:`submit_if_absent` (the registry
+        lock held across the check + insert), keyed under
+        :data:`GROUP_SYNC_JOB_CONNECTOR_KEY` with the ``-`` month sentinel so a
+        sync job and a report pull for the same tenant+account never collide.
+        The scheduler calls :meth:`activate` on the returned reservation to
+        enqueue :meth:`_run_group_sync_job`; ``None`` means a sync for this owner
+        is already in flight (dedup), skip it.
+        """
+        key = (tenant_id, GROUP_SYNC_JOB_CONNECTOR_KEY, content_owner_id, GROUP_SYNC_JOB_MONTH)
+        reservation = _SlotReservation(
+            key=key,
+            tenant_id=tenant_id,
+            connector_key=GROUP_SYNC_JOB_CONNECTOR_KEY,
+            account_id=content_owner_id,
+            report_month=GROUP_SYNC_JOB_MONTH,
+            dry_run=False,
+            triggered_by_user_id=None,
+            actor_identity=actor_identity,
+            job_kind=_JOB_KIND_GROUP_SYNC,
+        )
+        with self._lock:
+            if key in self._registry:
+                return None
+            self._registry[key] = reservation
+        return reservation
 
     def cancel_reservation(self, reservation: _SlotReservation) -> bool:
         """Drop a pending reservation; no-op if it was already activated.
@@ -376,6 +491,18 @@ class ConnectorJobExecutor:
 
         for job_key, actor_identity in cancelled:
             tenant_id, connector_key, account_id, report_month = job_key
+            # A cancelled-at-shutdown GROUP-SYNC job is audited by this SAME
+            # pull-shaped path, on purpose. Its key carries connector_key
+            # ``cms_group_sync`` and report_month ``-``, so the emitted row is
+            # fully attributable to the sync job via its connector-key-bearing
+            # entity_id + scope and the month sentinel; and
+            # ``action="job_failed_before_start"`` + ``error_class="ExecutorShutdown"``
+            # honestly describes a job the pool cancelled before it ran. It is
+            # NOT a run-time failure, so re-tagging it with the sync taxonomy's
+            # ``group_sync_job_failed`` (credential/fetch/conflict) would
+            # mislabel a job that never started. Kind-awareness here would fork a
+            # near-identical audit for zero governance gain, so the shared row
+            # stays.
             self._audit_failed_before_start(
                 tenant_id=tenant_id,
                 connector_key=connector_key,
@@ -456,6 +583,247 @@ class ConnectorJobExecutor:
             )
         finally:
             self._deregister(key)
+
+    def _run_group_sync_job(
+        self,
+        *,
+        tenant_id: UUID,
+        content_owner_id: str,
+        actor_identity: ConnectorJobActor,
+    ) -> None:
+        """Worker body for a scheduled CMS group sync: own session -> tenant -> sync.
+
+        Drives the SAME ``run_group_sync`` core the manual route uses, on the
+        worker's own session under ``connector_tenant_context`` (the ACTIVE-only
+        gate replays here, just like ``_run_job``). The domain rows written by
+        ``apply_group_sync`` and the audit rows -- the per-group GROUP_UPDATED
+        rows plus, on change, the run-level GROUPS_SYNCED summary -- share this
+        one session and one commit, so the #169 atomic invariant (domain and
+        audit succeed or fail together) holds here by construction: there is no
+        second sink session to drift.
+
+        Fail-closed like ``_run_job``: the typed failure families are audited as
+        one ``group_sync_job_failed`` row via :meth:`_audit_group_sync_failure`
+        (a fresh-session sibling of ``_audit_failed_before_start``); anything
+        else is logged; nothing escapes the thread; the registry key is dropped
+        in ``finally`` on every path.
+        """
+        key = (tenant_id, GROUP_SYNC_JOB_CONNECTOR_KEY, content_owner_id, GROUP_SYNC_JOB_MONTH)
+        try:
+            with (
+                self._session_factory() as session,
+                connector_tenant_context(tenant_id, session=session),
+            ):
+                # Actor built INSIDE the tenant context: a missing service-actor
+                # env raises ConnectorServicePrincipalUnavailableError (a
+                # GoogleConnectorError), which the failure catch below audits as
+                # a pre-start failure -- never a swallowed ValueError.
+                actor = self._build_group_sync_actor(tenant_id=tenant_id)
+                # The SAME SQL stores + atomic sink the api dependencies build,
+                # imported directly (connectors.runs must never import api.*). One
+                # sink on this one session so the per-group GROUP_UPDATED rows and
+                # the summary below join the worker's single transaction.
+                sink = PlatformLaneAuditSink(session, tenant_id=tenant_id)
+                result = run_group_sync(
+                    session,
+                    tenant_id=tenant_id,
+                    content_owner_id=content_owner_id,
+                    registry=SqlAlchemyChannelRegistry(session),
+                    groups=SqlAlchemyChannelGroupRegistry(session),
+                    audit_sink=sink,
+                    actor=actor,
+                    reason="scheduled CMS group sync",
+                    dry_run=False,
+                    client_factory=self._group_sync_client_factory,
+                )
+                self._audit_group_sync_summary_if_changed(
+                    sink=sink,
+                    actor=actor,
+                    content_owner_id=content_owner_id,
+                    result=result,
+                )
+                # ONE commit: domain rows + per-group GROUP_UPDATED + the summary
+                # (or, for an all-UNCHANGED tick, nothing pending -- harmless).
+                session.commit()
+        except (
+            # TenantLifecycleError, the credential trio (CredentialNotFoundError /
+            # InactiveCredentialError / OAuthRefreshError) and
+            # ConnectorServicePrincipalUnavailableError are all GoogleConnectorError
+            # subclasses, so this one clause covers them; error_class carries the
+            # CONCRETE subclass name via type(exc).__name__.
+            GoogleConnectorError,
+            GroupSyncFetchError,
+            GroupSyncConflictRefusedError,
+            ChannelGroupConflictError,
+            ChannelGroupOwnerReassignmentError,
+        ) as exc:
+            logger.exception(
+                "Scheduled group sync failed (tenant=%s owner=%s)",
+                tenant_id,
+                content_owner_id,
+            )
+            self._audit_group_sync_failure(
+                tenant_id=tenant_id,
+                content_owner_id=content_owner_id,
+                error_class=type(exc).__name__,
+                actor_identity=actor_identity,
+            )
+        except Exception:  # noqa: BLE001 — fail-closed: never escape the thread
+            logger.exception(
+                "Scheduled group sync worker raised (tenant=%s owner=%s)",
+                tenant_id,
+                content_owner_id,
+            )
+        finally:
+            self._deregister(key)
+
+    def _audit_group_sync_summary_if_changed(
+        self,
+        *,
+        sink: AuditSink,
+        actor: UserPrincipal,
+        content_owner_id: str,
+        result: GroupSyncRunResult,
+    ) -> None:
+        """Write the run-level GROUPS_SYNCED summary iff the apply changed anything.
+
+        The summary is caller-owned (the core writes only the per-group
+        GROUP_UPDATED rows). The manual route writes it unconditionally after
+        every apply -- operator actions are always audited; the worker writes it
+        ONLY when the executed counts contain a non-UNCHANGED outcome. A
+        converged fleet on a daily tick therefore writes no audit rows at all --
+        liveness is a log line, not a governance event. Written through the
+        SAME sink (same session) as the per-group rows, so it commits with them;
+        field shape mirrors the route's summary (entity_type/entity_id/scope/
+        details).
+        """
+        execution = result.execution
+        if execution is None:
+            # dry_run is always False here, so an apply always yields an
+            # execution; guard defensively for typing and never claim a change.
+            return
+        changed = any(
+            count > 0
+            for outcome, count in execution.counts.items()
+            if outcome != GroupSyncOutcome.UNCHANGED.value
+        )
+        if not changed:
+            logger.info(
+                "Scheduled group sync converged with no changes (owner=%s)", content_owner_id
+            )
+            return
+        record_audit_event(
+            sink=sink,
+            actor=actor,
+            event_type=AuditEventType.GROUPS_SYNCED,
+            entity_type="channel_group_sync",
+            entity_id=content_owner_id,
+            scope=AccessScope.global_scope(),
+            reason="scheduled CMS group sync",
+            details={
+                "content_owner_id": content_owner_id,
+                "counts": dict(execution.counts),
+                "unknown_channel_total": result.plan.unknown_channel_total,
+                "non_channel_member_count": result.plan.non_channel_member_count,
+            },
+        )
+
+    @staticmethod
+    def _build_group_sync_actor(*, tenant_id: UUID) -> UserPrincipal:
+        """Build the tenant-pinned service principal for a group-sync worker's audit rows.
+
+        Starts from ``build_connector_service_principal`` (the stable service
+        identity carrying ``RUN_CONNECTOR_JOBS@global``, id sourced from
+        ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID``) and ADDS a
+        ``MANAGE_GROUPS@global`` grant, because the rows this actor signs --
+        GROUPS_SYNCED and the per-group GROUP_UPDATED rows from
+        ``apply_group_sync`` -- declare MANAGE_GROUPS as their effective
+        permission; the audit trail must honestly carry the authority the action
+        exercises (the executor's fabricate-with-the-relevant-grant precedent,
+        ``_build_audit_actor``).
+
+        A missing service-actor env raises the typed
+        ``ConnectorServicePrincipalUnavailableError`` (a ``GoogleConnectorError``)
+        rather than a bare ``ValueError`` -- the same conversion the orchestrator
+        does for pulls -- so the worker's failure catch audits it as a pre-start
+        failure instead of the catch-all swallowing it.
+        """
+        try:
+            base = build_connector_service_principal(tenant_id=tenant_id)
+        except ValueError as exc:
+            raise ConnectorServicePrincipalUnavailableError(
+                env_var=GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+            ) from exc
+        return UserPrincipal(
+            user_id=base.user_id,
+            email=base.email,
+            role_assignments=base.role_assignments,
+            direct_permissions=(
+                *base.direct_permissions,
+                PermissionGrant(
+                    permission=Permission.MANAGE_GROUPS,
+                    scope=AccessScope.global_scope(),
+                    active=True,
+                ),
+            ),
+            is_service_account=base.is_service_account,
+            disabled=base.disabled,
+            tenant_id=base.tenant_id,
+        )
+
+    def _audit_group_sync_failure(
+        self,
+        *,
+        tenant_id: UUID,
+        content_owner_id: str,
+        error_class: str,
+        actor_identity: ConnectorJobActor,
+    ) -> None:
+        """Write ONE CONNECTOR_JOB_RUN group_sync_job_failed row, fresh session.
+
+        A sibling of :meth:`_audit_failed_before_start` with the SAME mechanics
+        -- fresh own session, ``platform_lane`` elevation, the placeholder-tenant
+        ``TENANT_CTX`` RLS bridge set/reset in ``finally`` -- because a group-sync
+        failure can itself be a non-ACTIVE tenant, so this must NOT re-enter
+        ``connector_tenant_context`` (which would raise the same lifecycle error
+        before the row could land). Kept separate from
+        ``_audit_failed_before_start`` so the pull job's audit shape never drifts;
+        only the entity/scope/details differ (the group-sync taxonomy). NEVER
+        embeds ``str(exc)`` -- ``error_class`` is the class name only, which can
+        never carry a secret locator.
+        """
+        actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
+        minimal_tenant = make_placeholder_tenant(
+            tenant_id=tenant_id,
+            slug=f"group-sync-job-failed-audit:{tenant_id}",
+            display_name="group sync job failed-audit",
+        )
+        token = TENANT_CTX.set(minimal_tenant)
+        try:
+            with self._session_factory() as session, platform_lane(session):
+                sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+                record_audit_event(
+                    sink=sink,
+                    actor=actor,
+                    event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                    entity_type="api_connector",
+                    entity_id=f"{GROUP_SYNC_JOB_CONNECTOR_KEY}:{content_owner_id}",
+                    scope=AccessScope.connector(GROUP_SYNC_JOB_CONNECTOR_KEY),
+                    reason="scheduled group sync failed",
+                    details={
+                        "action": "group_sync_job_failed",
+                        "content_owner_id": content_owner_id,
+                        "error_class": error_class,
+                    },
+                )
+                session.commit()
+        except Exception:  # noqa: BLE001 — best-effort audit, never escape
+            logger.exception(
+                "Failed to persist group_sync_job_failed audit (tenant=%s)",
+                tenant_id,
+            )
+        finally:
+            TENANT_CTX.reset(token)
 
     def audit_failed_before_start(
         self,
