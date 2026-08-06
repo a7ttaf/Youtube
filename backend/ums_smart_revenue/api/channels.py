@@ -52,20 +52,16 @@ from ums_smart_revenue.connectors.google.errors import (
     InactiveCredentialError,
     OAuthRefreshError,
 )
-from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 from ums_smart_revenue.connectors.google.youtube_groups_client import YouTubeGroupsClient
-from ums_smart_revenue.connectors.keys import YOUTUBE_ANALYTICS_CONNECTOR
+from ums_smart_revenue.connectors.runs.group_sync import (
+    GroupSyncConflictRefusedError,
+    GroupSyncFetchError,
+    default_groups_client_factory,
+    run_group_sync,
+)
 from ums_smart_revenue.connectors.runs.orchestrator import resolve_connector_credentials
-from ums_smart_revenue.org.channel_group_sync import (
-    CmsGroupSnapshot,
-    GroupSyncOutcome,
-    GroupSyncPlan,
-)
-from ums_smart_revenue.org.channel_group_sync_apply import (
-    GroupSyncAppliedEntry,
-    apply_group_sync,
-    plan_group_sync_with_stores,
-)
+from ums_smart_revenue.org.channel_group_sync import GroupSyncPlan
+from ums_smart_revenue.org.channel_group_sync_apply import GroupSyncAppliedEntry
 from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
     ChannelGroupOwnerReassignmentError,
@@ -882,12 +878,12 @@ class GroupSyncRequest(BaseModel):
 
 
 def current_groups_client_factory() -> Callable[[Credentials], YouTubeGroupsClient]:
-    """Build a live groups client from resolved credentials (test-overridable)."""
+    """Build a live groups client from resolved credentials (test-overridable).
 
-    def _factory(credentials: Credentials) -> YouTubeGroupsClient:
-        return YouTubeGroupsClient(http=GoogleHttpClient(credentials=credentials))
-
-    return _factory
+    Delegates to the ``connectors.runs`` default factory so the scheduled worker
+    (Sched 2) can build the same production client without importing ``api``.
+    """
+    return default_groups_client_factory
 
 
 def _resolve_tenant_uuid(user: UserPrincipal) -> UUID:
@@ -965,11 +961,18 @@ def sync_channel_groups(
         )
 
     try:
-        credentials = resolve_connector_credentials(
-            session=session,
+        result = run_group_sync(
+            session,
             tenant_id=_resolve_tenant_uuid(user),
-            connector_key=YOUTUBE_ANALYTICS_CONNECTOR,
-            account_id=content_owner_id,
+            content_owner_id=content_owner_id,
+            registry=registry,
+            groups=groups,
+            audit_sink=audit_sink,
+            actor=user,
+            reason=reason,
+            dry_run=payload.dry_run,
+            client_factory=client_factory,
+            resolver=resolve_connector_credentials,
         )
     except (CredentialNotFoundError, InactiveCredentialError) as exc:
         raise HTTPException(
@@ -987,10 +990,19 @@ def sync_channel_groups(
                 "check that the credential secret is current."
             ),
         ) from exc
+    except GroupSyncFetchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "YouTube groups fetch failed; check connector configuration and account access."
+            ),
+        ) from exc
     # FIX: A different GoogleConnectorError subclass (e.g. SecretFetchError) raised
     # inside resolve_connector_credentials previously escaped as a raw 500; mirror
     # the connector-test route's broad catch so any credential-layer failure fails
-    # closed as 503 with a canned detail (str(exc) can embed secret locators).
+    # closed as 503 with a canned detail (str(exc) can embed secret locators). The
+    # fetch phase raises GroupSyncFetchError (caught above), so this broad clause
+    # now means the credential layer alone — preserving the 503-vs-502 split.
     except GoogleConnectorError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -998,100 +1010,40 @@ def sync_channel_groups(
                 "Credential resolution failed; check connector configuration and secret references."
             ),
         ) from exc
-
-    # End the credential transaction BEFORE the external fetch. Resolution
-    # touched the session (credential SELECT + refresh-telemetry stamp), and
-    # the fetch below is one groups.list plus a groupItems.list PER GROUP — for
-    # a large content owner that is a long stretch of network I/O with a
-    # Postgres transaction sitting idle behind it, which
-    # idle_in_transaction_session_timeout will eventually kill after the Google
-    # work is already paid for.
-    #
-    _end_credential_transaction(session, dry_run=payload.dry_run)
-
-    client = client_factory(credentials)
-    try:
-        try:
-            cms_groups = client.list_groups(account_id=content_owner_id)
-            snapshot = tuple(
-                CmsGroupSnapshot(
-                    cms_group_id=group.cms_group_id,
-                    title=group.title,
-                    member_channel_ids=members.channel_ids,
-                    non_channel_member_count=members.non_channel_count,
-                )
-                for group in cms_groups
-                for members in (
-                    client.list_group_items(
-                        group_id=group.cms_group_id, account_id=content_owner_id
-                    ),
-                )
-            )
-        except GoogleConnectorError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=(
-                    "YouTube groups fetch failed; check connector configuration and account access."
-                ),
-            ) from exc
-    finally:
-        client.close()
-
-    plan = plan_group_sync_with_stores(
-        snapshot,
-        registry=registry,
-        groups=groups,
-        content_owner_id=content_owner_id,
-    )
-    payload_out = _group_sync_plan_to_api(
-        plan, dry_run=payload.dry_run, content_owner_id=content_owner_id
-    )
-    if payload.dry_run:
-        # Second rollback, deliberately. The one before the fetch discarded the
-        # credential telemetry; this one covers the window since, because the
-        # route's session dependency auto-commits on a successful response
-        # regardless of dry_run. Nothing is written between the two today, so
-        # this is belt-and-braces against a future read that dirties the
-        # session — cheap, and the alternative is a dry run that persists.
-        session.rollback()
-        return GroupSyncResult.model_validate(payload_out)
-
-    _reject_foreign_owner_conflicts(plan, session=session)
-
-    try:
-        executed = apply_group_sync(
-            plan,
-            groups=groups,
-            audit_sink=audit_sink,
-            actor=user,
-            scope=target_scope,
-            content_owner_id=content_owner_id,
-            reason=reason,
-        )
-    # A concurrent writer (another sync, or the bulk import) can win a
-    # uniqueness race on the same CMS key between planning and this apply;
-    # the store translates that into the typed conflict instead of letting an
-    # IntegrityError-aborted session escape as a 500. Mirrors import_channels'
-    # identical translation earlier in this file.
+    # The foreign-owner refusal the mandatory dry run already previewed as
+    # CONFLICT: run_group_sync rolled back and raised a typed error carrying the
+    # exact detail, and the route maps it to the same 409 it used to raise inline.
+    except GroupSyncConflictRefusedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.detail) from exc
+    # A concurrent writer (another sync, or the bulk import) can win a uniqueness
+    # race on the same CMS key between planning and apply; the store translates
+    # that into the typed conflict instead of letting an IntegrityError-aborted
+    # session escape as a 500. Mirrors import_channels' identical translation
+    # earlier in this file.
     #
     # The reassignment error is the OTHER side of that same race: rather than
     # colliding on a new key, the racer CLAIMED a group this plan matched while
-    # it was still owner-NULL. Only the apply layer's locked re-read can see
-    # it, and it refuses to mirror another owner's group. Both are lost races
-    # on the same row, both retryable, so both get the one 409 — matching the
-    # import route's identical cross-owner rejection.
+    # it was still owner-NULL. Only the apply layer's locked re-read can see it,
+    # and it refuses to mirror another owner's group. Both are lost races on the
+    # same row, both retryable, so both get the one 409 — matching the import
+    # route's identical cross-owner rejection.
     except (ChannelGroupConflictError, ChannelGroupOwnerReassignmentError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    payload_out = _group_sync_plan_to_api(
+        result.plan, dry_run=payload.dry_run, content_owner_id=content_owner_id
+    )
+    if result.execution is None:
+        return GroupSyncResult.model_validate(payload_out)
+
     # An apply's response must agree with its audit rows, per group and in
     # aggregate. `payload_out` was rendered from the PLAN, which is right for a
     # dry run ("what will happen") but stale for an apply: a concurrent writer
     # can land the rename before the locked re-read, leaving the plan claiming
     # RENAME with a full diff while GROUPS_SYNCED recorded UNCHANGED and no
-    # GROUP_UPDATED was written. Both surfaces now come from the write
-    # boundary. Only the CONFLICT entries stay plan-rendered — nothing executes
-    # for them, and the route 409s above before reaching here if any exist.
-    payload_out["counts"] = dict(executed.counts)
-    payload_out["groups"] = _applied_entries_to_api(executed.entries)
+    # GROUP_UPDATED was written. Both surfaces now come from the write boundary.
+    payload_out["counts"] = dict(result.execution.counts)
+    payload_out["groups"] = _applied_entries_to_api(result.execution.entries)
     record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -1102,68 +1054,12 @@ def sync_channel_groups(
         reason=reason,
         details={
             "content_owner_id": content_owner_id,
-            "counts": dict(executed.counts),
-            "unknown_channel_total": plan.unknown_channel_total,
-            "non_channel_member_count": plan.non_channel_member_count,
+            "counts": dict(result.execution.counts),
+            "unknown_channel_total": result.plan.unknown_channel_total,
+            "non_channel_member_count": result.plan.non_channel_member_count,
         },
     )
     return GroupSyncResult.model_validate(payload_out)
-
-
-def _end_credential_transaction(session: Session, *, dry_run: bool) -> None:
-    """Close the credential transaction before the external fetch begins.
-
-    Mode-dependent on purpose. ``resolve_connector_credentials`` returns a
-    Credentials object built from the resolved secret, not an ORM-bound row, so
-    it survives either call; what differs is the refresh-telemetry stamp that
-    resolution leaves pending:
-
-    - dry run -> roll back, because "a dry run persists nothing" includes that
-      stamp (the credential helper's own documented dry-run contract).
-    - apply   -> commit it, which is where that stamp was always meant to land.
-
-    Safe at exactly this point for the same reason the helper's own failure
-    path commits here: nothing else is pending yet. The group writes and their
-    audit rows still share ONE later transaction, so the audit-atomicity
-    invariant this route already proved on Postgres is untouched.
-
-    The non-obvious part is RLS. Tenant isolation is applied by an
-    ``after_begin`` Session hook (db/session.py) using SET LOCAL, which a
-    COMMIT resets — but because the hook fires on EVERY transaction begin, the
-    next statement starts a fresh transaction that re-enters the app_tenant
-    role and re-writes the trusted tenant-context row. Ending the transaction
-    here therefore cannot strand the rest of the request outside RLS. Proven,
-    not assumed: ``test_sync_persists_groups_on_postgres`` and
-    ``test_create_stamps_content_owner_id_on_postgres`` drive the full apply
-    through this route and assert durable rows, and every write they make now
-    happens after this commit.
-    """
-    if dry_run:
-        session.rollback()
-    else:
-        session.commit()
-
-
-def _reject_foreign_owner_conflicts(plan: GroupSyncPlan, *, session: Session) -> None:
-    """Fail a conflicted plan closed BEFORE any write lands.
-
-    The dry run already showed these entries as CONFLICT; this is the apply
-    refusing exactly what the preview declined to promise, rather than getting
-    part-way through the mirror and hitting the unique key.
-    """
-    conflicts = sorted(
-        entry.cms_group_id for entry in plan.entries if entry.outcome is GroupSyncOutcome.CONFLICT
-    )
-    if not conflicts:
-        return
-    session.rollback()
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail=(
-            "CMS group keys already belong to another content owner: "
-            f"{', '.join(conflicts)}; import or sync them under their own content owner"
-        ),
-    )
 
 
 def _applied_entries_to_api(entries: tuple[GroupSyncAppliedEntry, ...]) -> list[dict[str, object]]:
