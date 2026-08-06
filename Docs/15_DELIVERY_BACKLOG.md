@@ -2,9 +2,8 @@
 
 ## Status (2026-08-06)
 
-Reconciled through PR #170 (owner-stamp recovery, merged 2026-08-06) plus the
-unmerged `feat/scheduled-group-sync` branch. Marker conventions
-match `01_IMPLEMENTATION_PLAN.md`:
+Reconciled through PR #170 (owner-stamp recovery, merged 2026-08-06). Marker
+conventions match `01_IMPLEMENTATION_PLAN.md`:
 
 - `✅ PR #N` — shipped end-to-end at the layer being marked.
 - `⏳ PR #N — remaining: <note>` — partial; concrete remaining work is
@@ -13,6 +12,13 @@ match `01_IMPLEMENTATION_PLAN.md`:
 
 Honesty rule: scaffolding-only items (ORM + repo + tests but no real
 ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
+
+**Unmerged-branch note (2026-08-06):** the "Reconciled through PR #N" line
+above counts MERGED PRs only, per the PR-numbered marker conventions. The
+scheduled group sync is reconciled inline under its branch name
+(`feat/scheduled-group-sync`, open as PR #171 at reconciliation time) and is
+deliberately OUTSIDE that high-water mark; on merge its entries convert to
+`✅ PR #171`.
 
 **Test-harness note (2026-06-11, branch `fix/pg-migration-test-lock-timeout`):** the PG
 migration round-trip tests' `fresh_engine` schema reset now sets `SET LOCAL lock_timeout`
@@ -758,7 +764,8 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
-- ✅ Scheduled CMS group sync (2026-08-06, branch `feat/scheduled-group-sync`)
+- ✅ Scheduled CMS group sync (2026-08-06, open PR #171, branch
+  `feat/scheduled-group-sync`)
   — grouping now converges automatically instead of only on an operator's
   `POST /channels/groups/sync` curl. **Executor job kind:** a reserved
   `cms_group_sync` connector-key sentinel (month `-`) on the connector-job
