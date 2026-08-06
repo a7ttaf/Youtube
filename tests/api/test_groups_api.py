@@ -417,6 +417,29 @@ def test_remove_group_member_rejects_blank_audit_reason(tmp_path):
     assert response.json()["detail"] == "reason must not be blank"
 
 
+def test_remove_group_member_rejects_nul_in_audit_reason(tmp_path):
+    """A NUL byte in the query reason is a 422, never an audit-insert 500.
+
+    Every route reaching ``_normalize_query_reason`` persists the value to
+    ``audit_logs.reason``, and PostgreSQL refuses NUL in a text column
+    (``psycopg.DataError``). The bulk-import and sync routes already reject it
+    on their body-supplied reasons; the query-parameter helper has to match or
+    the 422 contract holds only on SQLite.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.delete(
+        f"/groups/{GROUP_TV_ID}/members/group-channel-tv",
+        headers=auth_headers("corporate_admin", "global"),
+        params={"reason": "Remove\x00member"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "reason contains a NUL character"
+
+
 def test_malformed_group_id_returns_not_found(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -930,6 +953,32 @@ def test_clear_content_owner_rejects_blank_reason(tmp_path):
 
     assert response.status_code == 422
     assert response.json()["detail"] == "reason must not be blank"
+    assert stored_owner_stamp(database_url, group_id) == CONTENT_OWNER_WRONG
+    assert group_audit_events(database_url, group_id) == []
+
+
+def test_clear_content_owner_rejects_nul_in_reason(tmp_path):
+    """A NUL byte in the reason is a 422 before the stamp write or audit row.
+
+    The reason lands in ``audit_logs.reason``, which PostgreSQL cannot store
+    with a NUL byte — reaching the insert raises ``psycopg.DataError`` and the
+    route answers 500 with the stamp already cleared in the same transaction.
+    Refusing at the boundary keeps this route on the same contract the import
+    and sync routes already promise for their reasons.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    group_id = seed_synced_group(
+        database_url,
+        channel_ids=["group-channel-tv"],
+        content_owner_id=CONTENT_OWNER_WRONG,
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = clear_stamp(client, group_id, reason="Wrong\x00owner")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "reason contains a NUL character"
     assert stored_owner_stamp(database_url, group_id) == CONTENT_OWNER_WRONG
     assert group_audit_events(database_url, group_id) == []
 

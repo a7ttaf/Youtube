@@ -101,6 +101,23 @@ class ChannelGroupEntry:
         }
 
 
+@dataclass(frozen=True)
+class ClearedContentOwner:
+    """The outcome of one ``clear_content_owner`` call, read under its lock.
+
+    ``previous_content_owner_id`` is never ``None``: clearing an owner-NULL
+    group raises ``ChannelGroupNoOwnerStampError`` instead of returning. The
+    store returns it rather than leaving the caller to pre-read it, because a
+    caller's read is NOT serialized against a concurrent adopt — only the
+    store's ``for_update`` read is. An unlocked pre-read can observe a NULL
+    stamp that an adopt then fills before the clear takes its lock, which
+    would make the audit row understate the owner actually erased.
+    """
+
+    group: ChannelGroupEntry
+    previous_content_owner_id: str
+
+
 class ChannelGroupRegistryStore(Protocol):
     def list_groups(self) -> list[ChannelGroupEntry]:
         pass
@@ -202,12 +219,14 @@ class ChannelGroupRegistryStore(Protocol):
         owner.
         """
 
-    def clear_content_owner(self, *, group_id: str) -> ChannelGroupEntry:
+    def clear_content_owner(self, *, group_id: str) -> ClearedContentOwner:
         """Erase a group's owner stamp, returning it to the adoptable pool.
 
         The adopt-only guard governs SETTING an owner; this is the one
         sanctioned eraser (admin recovery for a wrong stamp). Raises
         ChannelGroupNoOwnerStampError when there is nothing to clear.
+        Returns the cleared group AND the owner id observed under the write
+        lock, so the caller's audit row names what was actually erased.
         """
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
@@ -360,20 +379,24 @@ class ChannelGroupRegistry:
         self._groups[group_id] = updated
         return updated
 
-    def clear_content_owner(self, *, group_id: str) -> ChannelGroupEntry:
+    def clear_content_owner(self, *, group_id: str) -> ClearedContentOwner:
         """Erase a group's owner stamp, returning it to the adoptable pool.
 
         Does NOT route through require_adoptable_owner: that guard governs
-        SETTING an owner, not erasing one.
+        SETTING an owner, not erasing one. Reports the erased owner id
+        alongside the cleared group, matching the SQL store's contract.
         """
         group = self._require_group(group_id)
-        if group.content_owner_id is None:
+        previous_content_owner_id = group.content_owner_id
+        if previous_content_owner_id is None:
             raise ChannelGroupNoOwnerStampError(
                 f"channel group {group_id} has no content-owner stamp to clear"
             )
         updated = replace(group, content_owner_id=None)
         self._groups[group_id] = updated
-        return updated
+        return ClearedContentOwner(
+            group=updated, previous_content_owner_id=previous_content_owner_id
+        )
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
         group = self._require_group(group_id)

@@ -1,10 +1,11 @@
 # ============================================================================
-# Purpose: Prove at the Postgres tier the three claims the owner-stamp
+# Purpose: Prove at the Postgres tier the four claims the owner-stamp
 #   recovery route (DELETE /groups/{group_id}/content-owner) makes and which
 #   SQLite cannot check: the clear is durable and really returns the group to
 #   the adoptable pool on the real engine; its FOR NO KEY UPDATE row lock
-#   actually serializes a concurrent adopt; and its audit row shares the
-#   tenant transaction's fate.
+#   actually serializes a concurrent adopt; the audited previous owner comes
+#   from that locked read rather than the route's unlocked pre-read; and its
+#   audit row shares the tenant transaction's fate.
 # Database/ORM: Real PostgreSQL via UMS_TEST_DATABASE_URL. require_postgres_url
 #   RAISES rather than skipping, so a missing container fails the suite loudly
 #   instead of quietly deleting this coverage.
@@ -28,7 +29,7 @@
 
 The SQLite tier (``tests/api/test_groups_api.py``) already pins who may call
 the route, which states it refuses, and that a cleared group is re-adopted by
-the right owner's next sync. Three of its promises are not decidable there:
+the right owner's next sync. Four of its promises are not decidable there:
 
 1. **Durability of the recovery loop on real SQL.** SQLite's store shares one
    session per app, so "the clear persisted and a later sync re-stamped it"
@@ -37,7 +38,12 @@ the right owner's next sync. Three of its promises are not decidable there:
    documents a FOR NO KEY UPDATE row lock so that "a concurrent adopt
    serializes against this clear". SQLite ignores locking clauses entirely, so
    that sentence is unfalsifiable there and only means something here.
-3. **All-or-nothing including audit.** The route writes a domain row and an
+3. **The audit names what the LOCKED write erased.** The route pre-reads the
+   group unlocked (it needs the 404 before taking a write lock), so an adopt
+   committing in that window makes the pre-read's ``content_owner_id`` stale.
+   Staging that interleaving needs two committed sessions and READ COMMITTED
+   re-reads under a lock — neither exists on SQLite.
+4. **All-or-nothing including audit.** The route writes a domain row and an
    audit row in one request through ``current_atomic_audit_sink``. A tenant
    commit that fails to persist must take the ``GROUP_UPDATED`` row with it,
    or the trail claims a clear that never landed (#169 invariant).
@@ -59,12 +65,14 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
+from fastapi import Depends
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from tests.db._postgres_helpers import require_postgres_url
 from ums_smart_revenue.api.channels import current_groups_client_factory
 from ums_smart_revenue.api.dependencies import current_db_session
+from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import AuditRecord
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
@@ -73,6 +81,7 @@ from ums_smart_revenue.connectors.google.youtube_groups_client import (
     CmsGroupMembers,
 )
 from ums_smart_revenue.db.session import build_session_factory
+from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import TENANT_CTX
@@ -191,7 +200,7 @@ def _seed_channel(engine: sa.Engine, *, content_owner_id: str) -> None:
 
 
 def _seed_stamped_group(
-    engine: sa.Engine, *, content_owner_id: str, channel_ids: tuple[str, ...] = ()
+    engine: sa.Engine, *, content_owner_id: str | None, channel_ids: tuple[str, ...] = ()
 ) -> str:
     """Create one CMS-keyed group stamped to ``content_owner_id``; return its id.
 
@@ -519,7 +528,8 @@ def test_clear_serializes_against_concurrent_adopt_on_postgres(owner_engine: sa.
         holder_store = SqlAlchemyChannelGroupRegistry(holder)
         cleared = holder_store.clear_content_owner(group_id=group_id)
         # A now holds the row lock with the clear flushed but NOT committed.
-        assert cleared.content_owner_id is None
+        assert cleared.group.content_owner_id is None
+        assert cleared.previous_content_owner_id == CONTENT_OWNER_WRONG
 
         adopter.start()
         assert started.wait(timeout=LOCK_DEADLINE_SECONDS), "the adopt thread never started"
@@ -550,6 +560,112 @@ def test_clear_serializes_against_concurrent_adopt_on_postgres(owner_engine: sa.
     stored = _group_row(owner_engine)
     assert stored is not None
     assert stored.content_owner_id == CONTENT_OWNER_RIGHT
+
+
+class _AdoptAtPreReadRegistry(SqlAlchemyChannelGroupRegistry):
+    """The real store, with one concurrent adopt committed at the pre-read seam.
+
+    NOT a store double: every read and write below is the production store's.
+    The subclass only sequences a second session to land its adopt in the exact
+    window the route leaves open — after the unlocked ``get_group`` pre-read
+    and before ``clear_content_owner`` takes its row lock. That window is
+    microseconds wide in production and cannot be hit reliably by racing
+    threads, so it is opened deterministically here instead.
+    """
+
+    def __init__(self, session: Session, *, adopt_engine: sa.Engine, owner: str) -> None:
+        """Wrap the real store with the engine and owner the interloper uses."""
+        super().__init__(session)
+        self._adopt_engine = adopt_engine
+        self._adopt_owner = owner
+        self._adopted = False
+
+    def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
+        """Run the real pre-read, then let a committed adopt invalidate it once."""
+        entry = super().get_group(group_id, for_update=for_update)
+        if not self._adopted and not for_update:
+            self._adopted = True
+            with Session(self._adopt_engine) as adopter:
+                SqlAlchemyChannelGroupRegistry(adopter).update_group(
+                    group_id=group_id,
+                    name=None,
+                    active=None,
+                    content_owner_id=self._adopt_owner,
+                )
+                adopter.commit()
+        return entry
+
+
+def _clear_audit_details(engine: sa.Engine, group_id: str) -> dict:
+    """Return the one clear-stamp audit row's details for ``group_id``.
+
+    Scoped by entity_id: ``_purge_test_rows`` clears group and channel rows
+    between tests but deliberately leaves audit_logs alone, so a module-wide
+    query would also match earlier tests' clears.
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sa.text(
+                "SELECT details FROM audit_logs WHERE tenant_id = :tenant "
+                "AND event_type = 'GROUP_UPDATED' AND entity_id = :group_id "
+                "AND details->>'action' = 'content_owner_cleared'"
+            ),
+            {"tenant": TENANT_A, "group_id": group_id},
+        ).all()
+    assert len(rows) == 1, f"expected exactly one clear audit row, got {len(rows)}"
+    return rows[0].details
+
+
+def test_clear_audits_the_owner_read_under_the_lock_not_the_pre_read(
+    pg_url: str, owner_engine: sa.Engine
+) -> None:
+    """The audit row names the owner the LOCKED write erased, not a stale pre-read.
+
+    The route pre-reads the group unlocked (it needs the 404 before taking a
+    write lock). Only ``clear_content_owner``'s ``FOR NO KEY UPDATE`` read is
+    serialized against a concurrent adopt, so the pre-read's ``content_owner_id``
+    is not a safe source for ``previous_content_owner_id``.
+
+    The ordering staged here is the one that breaks it: the group is owner-NULL
+    when the route pre-reads it, the correct owner's sync adopts and commits,
+    and only then does the clear take its lock and erase a stamp that the
+    pre-read never saw. Sourcing the audit detail from the pre-read yields
+    ``None`` — a row claiming nothing was erased while a real owner stamp was.
+    Sourcing it from under the lock yields the owner actually removed.
+
+    Only PostgreSQL can stage this: under READ COMMITTED the locked re-read
+    picks up the interloper's committed tuple, which is precisely the
+    divergence being asserted. SQLite's single writer has no such window.
+    """
+    group_id = _seed_stamped_group(owner_engine, content_owner_id=None)
+    seeded = _group_row(owner_engine)
+    assert seeded is not None
+    assert seeded.content_owner_id is None
+
+    def _registry_adopting_at_pre_read(
+        session: Session = Depends(current_db_session),
+    ) -> _AdoptAtPreReadRegistry:
+        return _AdoptAtPreReadRegistry(
+            session, adopt_engine=owner_engine, owner=CONTENT_OWNER_WRONG
+        )
+
+    app = build_recovery_app(pg_url)
+    app.dependency_overrides[sql_group_registry_from_session] = _registry_adopting_at_pre_read
+    with TestClient(app) as client:
+        response = clear_stamp(client, group_id)
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["content_owner_id"] is None
+    # Read from the persisted row, not the response: audit_record_to_api omits
+    # details, and the durable trail is what an auditor actually reads.
+    # Anti-vacuity: the interloper's adopt really landed, so there WAS a stamp
+    # to erase and the pre-read's None was genuinely stale.
+    details = _clear_audit_details(owner_engine, group_id)
+    assert details["previous_content_owner_id"] == CONTENT_OWNER_WRONG
+    final = _group_row(owner_engine)
+    assert final is not None
+    assert final.content_owner_id is None
 
 
 def test_clear_route_lost_commit_persists_no_audit_rows_on_postgres(

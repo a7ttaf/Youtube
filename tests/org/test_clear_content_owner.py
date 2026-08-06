@@ -34,11 +34,33 @@ def test_clear_content_owner_nulls_the_stamp_and_leaves_other_fields_unchanged()
 
     cleared = registry.clear_content_owner(group_id=group.id)
 
-    assert cleared.content_owner_id is None
-    assert cleared.name == "TV Sector"
-    assert cleared.cms_group_id == "cms-tv"
-    assert cleared.channel_ids == ("channel-a", "channel-b")
-    assert cleared.active is True
+    assert cleared.group.content_owner_id is None
+    assert cleared.group.name == "TV Sector"
+    assert cleared.group.cms_group_id == "cms-tv"
+    assert cleared.group.channel_ids == ("channel-a", "channel-b")
+    assert cleared.group.active is True
+
+
+def test_clear_content_owner_reports_the_owner_it_erased() -> None:
+    """The store names the erased owner so the caller never has to pre-read it.
+
+    A caller's own pre-read is not serialized against a concurrent adopt; only
+    the store's read is (``for_update`` in the SQL store). Returning the value
+    from inside the store is what lets the API's audit row state the owner
+    that was actually erased rather than a possibly stale observation.
+    """
+    registry = ChannelGroupRegistry()
+    group = registry.create_group(
+        name="TV Sector",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id="owner-a",
+    )
+
+    cleared = registry.clear_content_owner(group_id=group.id)
+
+    assert cleared.previous_content_owner_id == "owner-a"
 
 
 def test_clear_content_owner_on_owner_null_group_raises_typed_error() -> None:

@@ -1013,11 +1013,14 @@ def test_clear_content_owner_persists_null_and_leaves_other_fields_unchanged() -
 
     cleared = registry.clear_content_owner(group_id=group.id)
 
-    assert cleared.content_owner_id is None
-    assert cleared.name == "TV Sector"
-    assert cleared.cms_group_id == "cms-tv"
-    assert cleared.channel_ids == (CHANNEL_DEFAULT_A_EXTERNAL,)
-    assert cleared.active is True
+    assert cleared.group.content_owner_id is None
+    assert cleared.group.name == "TV Sector"
+    assert cleared.group.cms_group_id == "cms-tv"
+    assert cleared.group.channel_ids == (CHANNEL_DEFAULT_A_EXTERNAL,)
+    assert cleared.group.active is True
+    # Read under the row lock, so the caller can audit it without a pre-read
+    # that a concurrent adopt could invalidate.
+    assert cleared.previous_content_owner_id == "owner-a"
 
     row = session.scalars(select(ChannelGroupORM).where(ChannelGroupORM.id == UUID(group.id))).one()
     assert row.content_owner_id is None

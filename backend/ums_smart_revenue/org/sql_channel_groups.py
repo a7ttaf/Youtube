@@ -50,6 +50,7 @@ from ums_smart_revenue.org.channel_groups import (
     ChannelGroupConflictError,
     ChannelGroupEntry,
     ChannelGroupNoOwnerStampError,
+    ClearedContentOwner,
     require_adoptable_owner,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -514,21 +515,28 @@ class SqlAlchemyChannelGroupRegistry:
     #   - File: backend/ums_smart_revenue/api/groups.py -> the sanctioned
     #     DELETE /groups/{id}/content-owner route.
     # ========================================================================
-    def clear_content_owner(self, *, group_id: str) -> ChannelGroupEntry:
+    def clear_content_owner(self, *, group_id: str) -> ClearedContentOwner:
         """Erase a group's owner stamp, returning it to the adoptable pool.
 
         Row-locks the group FOR NO KEY UPDATE (the get_group_by_cms_id
         for_update idiom) so a concurrent adopt serializes against the clear.
         Raises ChannelGroupNoOwnerStampError when there is nothing to clear.
+        Reports the owner id read UNDER that lock, which is the only value a
+        caller may audit as erased: an unlocked pre-read can miss an adopt
+        that lands between it and this write.
         """
         row = self._require_group_row(group_id, for_update=True)
-        if row.content_owner_id is None:
+        previous_content_owner_id = row.content_owner_id
+        if previous_content_owner_id is None:
             raise ChannelGroupNoOwnerStampError(
                 f"channel group {group_id} has no content-owner stamp to clear"
             )
         row.content_owner_id = None
         self._session.flush()
-        return self._to_entry(row)
+        return ClearedContentOwner(
+            group=self._to_entry(row),
+            previous_content_owner_id=previous_content_owner_id,
+        )
 
     # ========================================================================
     # Purpose: Attach channels to an existing group idempotently — the bulk

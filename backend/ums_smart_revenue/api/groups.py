@@ -288,14 +288,19 @@ def remove_group_member(
 #   between owners. The pre-read is get_group, which carries NO active filter
 #   (unlike list_groups): deactivation is exactly how a wrongly-synced group
 #   gets parked, so an archived group's stamp must stay clearable, and a
-#   genuinely unknown id still 404s. The audit row runs on
-#   current_atomic_audit_sink, NOT this module's pre-existing plain sink: this
-#   route writes a domain row and an audit row in one request, so a lost
-#   tenant commit must not leave an audit row claiming a clear that never
-#   landed (#169 invariant). Store failures map typed — KeyError (a row that
-#   vanished between the pre-read and the locked write) to 404,
-#   ChannelGroupNoOwnerStampError to 409 with a canned detail; str(exc) never
-#   reaches HTTP.
+#   genuinely unknown id still 404s. That pre-read establishes EXISTENCE only:
+#   the owner id it reports is unlocked and a concurrent adopt can invalidate
+#   it, so previous_content_owner_id is taken from the store's locked read
+#   instead. The reason is rejected for NUL before any write (422), because it
+#   becomes audit_logs.reason and PostgreSQL cannot store NUL in a text
+#   column — the same contract channels.py enforces on its reasons. The audit
+#   row runs on current_atomic_audit_sink, NOT this module's pre-existing
+#   plain sink: this route writes a domain row and an audit row in one
+#   request, so a lost tenant commit must not leave an audit row claiming a
+#   clear that never landed (#169 invariant). Store failures map typed —
+#   KeyError (a row that vanished between the pre-read and the locked write)
+#   to 404, ChannelGroupNoOwnerStampError to 409 with a canned detail;
+#   str(exc) never reaches HTTP.
 # Blast Radius: Channel-group ownership only. No membership, no revenue math,
 #   no allocation. Both owners' NEXT sync plans change — that is the point.
 # Connections:
@@ -321,14 +326,13 @@ def clear_group_content_owner(
             detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
         )
     normalized_reason = _normalize_query_reason(reason)
-    previous = registry.get_group(group_id)
-    if previous is None:
+    if registry.get_group(group_id) is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Group not found",
         )
     try:
-        updated = registry.clear_content_owner(group_id=group_id)
+        cleared = registry.clear_content_owner(group_id=group_id)
     except KeyError as exc:
         raise _registry_not_found(exc) from exc
     except ChannelGroupNoOwnerStampError as exc:
@@ -336,10 +340,14 @@ def clear_group_content_owner(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"group {group_id} has no content-owner stamp to clear",
         ) from exc
+    updated = cleared.group
     # _audit_group_change cannot carry these details: it hard-codes the
     # group_type/channel_ids pair every membership-shaped change reports, and
     # neither field moves here. Record directly so the row states what was
-    # actually erased.
+    # actually erased. previous_content_owner_id comes from the store's
+    # LOCKED read, never from the pre-read above: the pre-read is unlocked, so
+    # an adopt landing between it and the clear would otherwise make this row
+    # understate the owner that was really erased.
     record = record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -351,7 +359,7 @@ def clear_group_content_owner(
         details={
             "action": "content_owner_cleared",
             "cms_group_id": updated.cms_group_id,
-            "previous_content_owner_id": previous.content_owner_id,
+            "previous_content_owner_id": cleared.previous_content_owner_id,
         },
     )
     response = updated.to_api()
@@ -382,12 +390,24 @@ def _strip_required_string(value):
 
 def _normalize_query_reason(reason: str) -> str:
     try:
-        return _strip_required_string(reason)
+        normalized = _strip_required_string(reason)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="reason must not be blank",
         ) from exc
+    # PostgreSQL cannot store NUL in a text column (audit_logs.reason), and
+    # every route reaching this helper writes its reason there. Rejecting it
+    # at the boundary keeps the 422 contract instead of an unhandled
+    # psycopg DataError 500 at the audit insert — the same rule
+    # channels.py's _validated_import_form and the sync route already apply
+    # to their body-supplied reasons.
+    if "\x00" in normalized:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="reason contains a NUL character",
+        )
+    return normalized
 
 
 def _registry_not_found(exc: KeyError) -> HTTPException:
