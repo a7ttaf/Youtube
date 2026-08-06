@@ -20,6 +20,7 @@ from ums_smart_revenue.org.channel_import import (
     ChannelImportPlanEntry,
 )
 from ums_smart_revenue.org.channel_import_apply import (
+    ChannelImportAdoptableGroupError,
     ChannelImportArchivedGroupError,
     ChannelImportGroupOwnerMismatchError,
     apply_channel_import,
@@ -396,24 +397,73 @@ def test_import_into_another_owners_group_fails_closed() -> None:
     assert stored.content_owner_id == "SomeOtherOwner"
 
 
-def test_import_adopts_an_owner_null_group_before_attaching() -> None:
-    """A legacy owner-NULL group is adopted by this import, then attached."""
-    registry = ChannelRegistry([])
-    groups = ChannelGroupRegistry()
-    groups.create_group(name="cms-tv", group_type="SECTOR", channel_ids=[], cms_group_id="cms-tv")
+class _UnstampedAtApplyGroups(ChannelGroupRegistry):
+    """Simulate an owner stamp cleared between planning and the apply lookup.
+
+    Planning's bulk adoptable-key lookup sees the group STAMPED, so no row
+    error is raised and the plan is clean; the apply's locked write-boundary
+    lookup (for_update=True) observes it owner-NULL — the window the admin
+    clear-stamp action opens.
+    """
+
+    def get_group_by_cms_id(
+        self, cms_group_id: str, *, for_update: bool = False
+    ) -> ChannelGroupEntry | None:
+        group = super().get_group_by_cms_id(cms_group_id, for_update=for_update)
+        if group is not None and for_update:
+            return replace(group, content_owner_id=None)
+        return group
+
+
+def test_group_unstamped_between_plan_and_apply_fails_closed() -> None:
+    """The write boundary refuses the adoption planning can no longer catch.
+
+    Path A refuses owner-NULL groups at PLANNING, which makes this path
+    unreachable for any row the planner vetted — but only for the state the
+    planner read. A stamp cleared in the plan-to-apply window would otherwise
+    put the apply back in the business of minting ownership from a CSV cell,
+    so the locked recheck raises and the whole import rolls back. Nothing is
+    written and nothing is audited: the row is inventory-identical, so its
+    registry write replaces nothing, and the raise precedes both the group
+    mutation and the import summary.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Alpha News",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    groups = _UnstampedAtApplyGroups()
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
     sink = InMemoryAuditSink()
     entry = ChannelImportPlanEntry(
         row_number=1,
         youtube_channel_id=CHANNEL_ID,
-        outcome=ChannelImportOutcome.CREATE,
+        outcome=ChannelImportOutcome.UNCHANGED,
         channel_name="Alpha News",
         group_id="cms-tv",
         revenue_required=True,
     )
 
-    _apply(_plan(entry), registry, groups, sink)
+    with pytest.raises(ChannelImportAdoptableGroupError, match="cms-tv"):
+        _apply(_plan(entry), registry, groups, sink)
 
     stored = groups.get_group_by_cms_id("cms-tv")
     assert stored is not None
+    # No membership added, and the stamp the import never had a right to
+    # rewrite is exactly as it was.
+    assert stored.channel_ids == ()
     assert stored.content_owner_id == CONTENT_OWNER
-    assert stored.channel_ids == (CHANNEL_ID,)
+    assert sink.records == []

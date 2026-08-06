@@ -326,9 +326,10 @@ class SqlAlchemyChannelGroupRegistry:
 
     # ========================================================================
     # Purpose: Bulk-classify a roster's CMS group keys by ADOPTABILITY — the
-    #   owner-NULL rows — so import planning can disclose the ownership stamp
-    #   that attaching to one performs. Third of a matched set with the
-    #   archived and cross-owner lookups above; the same pass reads all three.
+    #   owner-NULL rows — so import planning can REFUSE the rows targeting
+    #   them: claiming an existing group belongs to the owner's CMS sync, not
+    #   to a CSV cell. Third of a matched set with the archived and
+    #   cross-owner lookups above; the same pass reads all three.
     # Database/ORM: ChannelGroupORM (read-only; cms_group_id + content_owner_id
     #   under the per-tenant unique key). No membership loading, no writes.
     # Standards: One bounded SELECT for the whole key set; tenant-scoped;
@@ -337,15 +338,15 @@ class SqlAlchemyChannelGroupRegistry:
     #   NOT filtered on active: the archived lookup fails those rows closed on
     #   its own, and narrowing here would make two reads of one row disagree.
     #   Read-only -> RLS-safe, no platform lane.
-    # Blast Radius: The import preview's will_adopt_content_owner flag only.
-    #   No group writes, no audit — the stamp itself happens at the apply's
-    #   locked write boundary, which re-reads and can decline to repeat it.
+    # Blast Radius: Which import rows plan as ERROR. No group writes, no
+    #   audit — and no stamp anywhere downstream: the apply's locked write
+    #   boundary refuses these groups rather than claiming them.
     # Connections:
     #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
     #     plan_channel_import_with_stores feeds the result to the planner, and
-    #     _attach_group_membership performs the stamp this set predicts.
+    #     _attach_group_membership re-checks it under the row lock.
     #   - File: backend/ums_smart_revenue/org/channel_import.py ->
-    #     plan_channel_import flags rows whose key lands in this set.
+    #     plan_channel_import fails rows whose key lands in this set.
     # ========================================================================
     def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
         """Return the subset of CMS keys whose existing group is owner-NULL.

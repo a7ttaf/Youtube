@@ -78,6 +78,7 @@ from ums_smart_revenue.org.channel_import import (
     parse_channel_import_csv,
 )
 from ums_smart_revenue.org.channel_import_apply import (
+    ChannelImportAdoptableGroupError,
     ChannelImportArchivedGroupError,
     ChannelImportGroupOwnerMismatchError,
     apply_channel_import,
@@ -173,11 +174,11 @@ class ChannelImportFieldChange(BaseModel):
 class ChannelImportRowResult(BaseModel):
     """One CSV row's planned or applied outcome.
 
-    ``will_adopt_content_owner`` reports an ownership write the row's own
-    ``outcome`` cannot: a row whose group key resolves to an owner-NULL group
-    stamps that group with this import's content owner, permanently, even when
-    the row itself is UNCHANGED. Every row targeting such a group carries the
-    flag — it describes the row's TARGET, not a count of UPDATE statements.
+    ``outcome``, ``changes``, and ``group_id`` describe every write the row
+    performs — there is no ownership write hiding behind them. An import never
+    claims an existing group for its content owner (a row targeting an unowned
+    group is an ERROR naming the sync remedy), so the only stamp it can write
+    belongs to a group the same row creates.
     """
 
     row_number: int
@@ -188,7 +189,6 @@ class ChannelImportRowResult(BaseModel):
     revenue_required: bool | None
     changes: dict[str, ChannelImportFieldChange]
     reason: str | None
-    will_adopt_content_owner: bool
 
 
 class ChannelImportResult(BaseModel):
@@ -707,6 +707,20 @@ def import_channels(
             reason=reason,
             filename=file.filename,
         )
+    # A group whose owner stamp was cleared between the plan and the write is
+    # the one plan-to-apply race the operator's preview cannot have shown: the
+    # dry run reported a clean row because the group WAS owned. Canned detail
+    # rather than str(exc) — the remedy is fixed (run the owner's sync, then
+    # retry), so nothing in the exception text needs to reach the client.
+    except ChannelImportAdoptableGroupError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "A CMS group in this roster lost its content owner during the "
+                "import; run POST /channels/groups/sync for this content owner "
+                "to adopt it, then retry the import"
+            ),
+        ) from exc
     # Expected apply-time domain failures abort the whole request as 409, not
     # 500: a revenue_required flip rejected by the locked-month guard, a group
     # archived in the plan-to-apply window, or a uniqueness race lost to a
@@ -831,10 +845,10 @@ def _import_plan_to_api(
     CMS status are echoed at the top level for the same reason.
 
     Both modes render the PLAN — unlike the sync route, whose apply renders the
-    write boundary's own record. That is why ``will_adopt_content_owner`` is
-    named for an intention: it states what this plan would claim, and the apply
-    re-reads the group under a row lock, so a group another writer stamped in
-    between is simply not adopted a second time.
+    write boundary's own record. That is safe here because the plan states
+    every write a row performs: the import claims no existing group's
+    ownership, so there is no write the apply could make that this payload
+    does not already show.
     """
     return {
         "dry_run": dry_run,
@@ -853,7 +867,6 @@ def _import_plan_to_api(
                     name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
                 },
                 "reason": entry.reason,
-                "will_adopt_content_owner": entry.will_adopt_content_owner,
             }
             for entry in plan.entries
         ],

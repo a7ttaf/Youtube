@@ -151,13 +151,13 @@ class ChannelGroupRegistryStore(Protocol):
         """Return the subset of CMS keys whose existing group is owner-NULL.
 
         The exact complement of ``list_foreign_owner_cms_group_ids`` over the
-        keys that resolve to a group: those are refused, these are ADOPTED —
-        attaching to one stamps ``content_owner_id`` as a side effect. That
-        stamp is a real, permanent, un-previewed write unless planning knows
-        about it, which is why this exists rather than being inferred from the
-        other two sets. Unknown keys are absent from the result: a key with no
-        group is a CREATE, and a group created by the import is stamped at
-        birth rather than adopted.
+        keys that resolve to a group. Both sets are refused by import
+        planning, for different reasons: a foreign key would inject a channel
+        into another owner's mirrored group, while an owner-NULL key would let
+        a CSV cell decide which content owner's sync governs that group from
+        then on. Unknown keys are absent from the result: a key with no group
+        is a CREATE, and a group created by the import is stamped at birth —
+        an ownership claim the request already carries.
         """
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
