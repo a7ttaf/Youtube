@@ -59,16 +59,24 @@ while import has a curl runbook. Each PR runs the standard loop (this spec
 
 ## PR-A — Groups view
 
-### Backend touch (the only one)
+### Backend touches (two, both additive — verified 2026-08-07)
 
-`ChannelGroupEntry.to_api()` (org/channel_groups.py:107) gains
-`"content_owner_id": self.content_owner_id` — additive on every group
-response. The #170 clear route then drops its manual
-`response["content_owner_id"] = ...` add (it becomes redundant). Small
-tests: list/get/create/patch responses carry the field; the clear-route
-response shape is unchanged key-for-key. (`GET /groups` exists at
-api/groups.py:185 and already returns `cms_group_id` via to_api — verified
-2026-08-07.)
+1. `ChannelGroupEntry.to_api()` (org/channel_groups.py:107) gains
+   `"content_owner_id": self.content_owner_id` — additive on every group
+   response. The #170 clear route already uses a declared
+   `ClearContentOwnerResponse` model (NOT a manual dict add — earlier
+   drafts of this spec said otherwise), so it is unaffected except for its
+   docstring, whose "to_api omits content_owner_id" sentence becomes
+   false and gets updated. Tests: `GET /groups` list (bare `to_api()`
+   array, api/groups.py:185) carries the field; any exact key-set
+   assertions gain the key.
+2. `GET /session/me` capabilities gain `can_manage_groups` (wire:
+   `canManageGroups` via the model's `to_camel` alias), derived
+   `_can(Permission.MANAGE_GROUPS)` — the existing capability set
+   (api/session.py:64-78) has `can_manage_registry` (from
+   MANAGE_ORG_MAPPING) and nothing groups-shaped; gating the UI on the
+   registry capability would show controls that silently 403, the exact
+   trap the session module's own comments warn about.
 
 ### View
 
@@ -104,9 +112,10 @@ api/groups.py:185 and already returns `cms_group_id` via to_api — verified
 ### Permissions
 
 Mirror the `canManageRegistry` capability pattern: sync, clear, archive
-require the session's MANAGE_GROUPS capability; the view itself is
-readable to any signed-in role that can see Registry. Buttons hidden (not
-disabled) without capability, matching existing views.
+require the new `canManageGroups` session capability (backend touch 2);
+the view itself is readable to any signed-in role that can see Registry.
+Buttons hidden (not disabled) without capability, matching existing
+views.
 
 ## PR-B — Import stepper in Registry
 
