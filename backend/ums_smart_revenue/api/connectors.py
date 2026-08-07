@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -46,7 +47,7 @@ from ums_smart_revenue.auth.policy import (
     connector_health_connector_ids,
     has_permission,
 )
-from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
     MAX_CREDENTIAL_PAGE_SIZE,
@@ -188,6 +189,77 @@ def list_connector_credentials(
             "has_more": page.has_more,
         },
     }
+
+
+class ContentOwnerEntry(BaseModel):
+    """One pickable content owner: an ACTIVE credential's account id, nothing else."""
+
+    account_id: str
+
+
+class ContentOwnersResponse(BaseModel):
+    """Least-privilege picker payload — a declared model so the disclosed field
+    set cannot drift silently (mirrors the groups.py response-model rule)."""
+
+    items: list[ContentOwnerEntry]
+
+
+# ============================================================================
+# Purpose: Feed the Groups view's content-owner picker WITHOUT requiring
+#   MANAGE_CONNECTORS. The group sync workflow is authorized on MANAGE_GROUPS
+#   (sync_channel_groups / clear_group_content_owner gate on it globally), but
+#   the picker previously read GET /connectors/credentials, which 403s for a
+#   principal holding MANAGE_GROUPS without MANAGE_CONNECTORS (e.g.
+#   revenue_operations_admin) and silently blocked the whole sync flow.
+# Database/ORM: ApiConnectorCredentialORM via the repository's
+#   list_active_account_ids (read only, tenant-scoped, ACTIVE + exact
+#   connector_key predicates).
+# Standards: Global MANAGE_GROUPS fail-closed FIRST — the same gate the sync
+#   route itself enforces — so this read can never out-widen the write it
+#   serves. Disclosure is least-privilege by construction: account_id strings
+#   only, no credential UUIDs, no has_secret_ref, no telemetry, and only ACTIVE
+#   rows (a revoked credential's owner could never sync anyway). Unknown
+#   connector keys are a 422 mirroring the jobs route's canned detail. No
+#   audit emission (read-only picker metadata, mirroring the credential-list
+#   route); the sync itself audits when invoked.
+# Blast Radius: Authorization read surface only — deliberately NARROWER than
+#   /connectors/credentials (fewer fields, stricter row filter, independent
+#   permission). No credential write, no job dispatch, no finance/audit/graph
+#   impact. A connector_admin (MANAGE_CONNECTORS without MANAGE_GROUPS) gets
+#   403 here by design: managing credentials does not imply governing groups.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/credentials.py ->
+#     list_active_account_ids, the repository read this orchestrates.
+#   - File: backend/ums_smart_revenue/api/channels.py:926 sync_channel_groups
+#     -> the MANAGE_GROUPS-gated write this picker feeds.
+#   - File: frontend/src/lib/api/useContentOwners.ts -> the SPA hook caller.
+# ============================================================================
+@router.get("/content-owners", response_model=ContentOwnersResponse)
+def list_content_owners(
+    connector_key: Annotated[str, Query(min_length=1)],
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)
+    ],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+) -> ContentOwnersResponse:
+    """List ACTIVE credential account ids for the group-sync owner picker."""
+    if not has_permission(user, Permission.MANAGE_GROUPS, AccessScope.global_scope(), org_index):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
+        )
+    if connector_key not in known_keys():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Unknown connector key",
+        )
+    return ContentOwnersResponse(
+        items=[
+            ContentOwnerEntry(account_id=account_id)
+            for account_id in repository.list_active_account_ids(connector_key=connector_key)
+        ]
+    )
 
 
 @router.get("/runs")

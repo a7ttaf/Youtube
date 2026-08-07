@@ -1,6 +1,7 @@
 import { type ReactNode, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
+import { describeApiError } from "@/lib/api/errors";
 import type { GroupSyncGroupResult, GroupSyncResult } from "@/lib/api/types";
 import { useGroupSyncAction } from "@/lib/api/useGroupSync";
 import type { Severity } from "@/lib/mock/data";
@@ -29,9 +30,9 @@ import { Badge } from "../shared";
 //   burst). The reason obeys the same required + no-NUL audit contract as the
 //   table's row panels via the shared isValidAuditReason helper (backend 422s a
 //   NUL reason), so a knowably-invalid reason never round-trips. Backend detail
-//   is shown verbatim (operator-facing canned copy); a 503 appends a Connectors
-//   pointer. Reuses ActionStepper + OutcomeTable + Badge — no parallel visual
-//   language.
+//   is shown only on canned-copy statuses (describeApiError); a 503 appends a
+//   Connectors pointer. Reuses ActionStepper + OutcomeTable + Badge — no
+//   parallel visual language.
 // Blast Radius: Channel-group membership/ownership/active-state (the sync write
 //   path) — but only via the backend's own guarded, audited sync route.
 // Connections:
@@ -54,20 +55,18 @@ export const isValidAuditReason = (reason: string): boolean => {
 };
 
 /**
- * Map a sync failure to operator-facing copy — backend detail verbatim, with a
+ * Map a sync failure to operator-facing copy via the shared sanitizer (canned
+ * backend detail on operator-copy statuses, generic copy otherwise), with a
  * Connectors pointer appended on 503 (the sync route 503s when the youtube
  * -analytics credential is missing/expired, which is fixed in the Connectors
- * view). Distinct from GroupsView's describeMutationError by that 503 behavior.
+ * view; its canned detail is on the operator-copy list, so the pointer
+ * attaches to the backend's own message, never to raw diagnostics).
  */
 const describeSyncError = (err: unknown): string => {
-  if (err instanceof ApiError) {
-    const body = err.body as { detail?: unknown } | null;
-    const base = String(body?.detail ?? err.message);
-    return err.status === 503
-      ? `${base} — check the credential in the Connectors view.`
-      : base;
-  }
-  return err instanceof Error ? err.message : String(err);
+  const base = describeApiError(err, "The sync request failed");
+  return err instanceof ApiError && err.status === 503
+    ? `${base} — check the credential in the Connectors view.`
+    : base;
 };
 
 /** Outcome chip tone: green create/reactivate, amber deactivate, red conflict,

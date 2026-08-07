@@ -628,6 +628,21 @@ export type ConnectorCredentialListResponse = {
   pagination: PaginationMeta;
 };
 
+// One pickable content owner: an ACTIVE credential's account_id, nothing else.
+// Source: ContentOwnerEntry (connectors.py, list_content_owners). The backend's
+// least-privilege picker surface deliberately discloses no credential UUID,
+// has_secret_ref, status, or telemetry — do not widen this type.
+export type ContentOwnerEntry = {
+  account_id: string;
+};
+
+// GET /connectors/content-owners?connector_key=… — MANAGE_GROUPS-gated (NOT
+// MANAGE_CONNECTORS): the group-sync picker read for principals who manage
+// groups but not connectors. Source: ContentOwnersResponse (connectors.py).
+export type ContentOwnersResponse = {
+  items: ContentOwnerEntry[];
+};
+
 // POST /connectors/jobs request body. Source: ConnectorJobRequest (connectors.py:46-49).
 // reason is REQUIRED (min_length=1) — recorded on the CONNECTOR_JOB_RUN audit event.
 // report_month is REQUIRED on the executing path (the month the pull targets);

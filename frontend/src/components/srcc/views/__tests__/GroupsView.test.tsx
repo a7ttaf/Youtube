@@ -5,8 +5,7 @@ import { GroupsView } from "@/components/srcc/views/GroupsView";
 import type {
   ChannelGroupApiEntry,
   ClearOwnerStampResponse,
-  ConnectorCredential,
-  ConnectorCredentialListResponse,
+  ContentOwnersResponse,
   GroupSyncResult,
   GroupUpdateResponse,
 } from "@/lib/api/types";
@@ -87,39 +86,15 @@ const ARCHIVE_RESULT: GroupUpdateResponse = {
   audit_event: { event_type: "GROUP_UPDATED" },
 };
 
-// Credential fixtures for the owner picker. The picker keeps only ACTIVE
-// youtube-analytics rows; account_id is the content owner id the sync targets.
-const OWNER_ACTIVE: ConnectorCredential = {
-  id: "cred-active",
-  connector_key: "youtube-analytics",
-  account_id: "OWNERaaa",
-  status: "ACTIVE",
-  has_secret_ref: true,
+// Content-owner fixtures for the picker. The backend's least-privilege
+// /connectors/content-owners route returns ONLY the account_id strings of
+// ACTIVE youtube-analytics credentials — the ACTIVE/connector-key filtering
+// happens server-side (pinned by tests/api/test_connectors_api.py), so the
+// picker renders exactly the ids it is given.
+const ownersResponse = (accountIds: string[]): ContentOwnersResponse => {
+  return { items: accountIds.map((account_id) => ({ account_id })) };
 };
-const OWNER_INACTIVE: ConnectorCredential = {
-  id: "cred-revoked",
-  connector_key: "youtube-analytics",
-  account_id: "OWNERrev",
-  status: "REVOKED",
-  has_secret_ref: true,
-};
-const OWNER_OTHER: ConnectorCredential = {
-  id: "cred-other",
-  connector_key: "youtube-reporting",
-  account_id: "OWNERoth",
-  status: "ACTIVE",
-  has_secret_ref: true,
-};
-
-const credsResponse = (
-  items: ConnectorCredential[],
-): ConnectorCredentialListResponse => {
-  return {
-    items,
-    pagination: { limit: 50, offset: 0, returned: items.length, has_more: false },
-  };
-};
-const DEFAULT_CREDS = credsResponse([OWNER_ACTIVE]);
+const DEFAULT_OWNERS = ownersResponse(["OWNERaaa"]);
 
 // Dry-run diff with a CONFLICT (+ a CREATE) and unknown channels: exercises the
 // warn row tone, the disabled Apply, and the remedy + unknown notes.
@@ -220,7 +195,7 @@ type SyncBody = { content_owner_id: string; dry_run: boolean; reason: string };
 
 type RouteOverrides = {
   groups?: () => Response;
-  credentials?: () => Response;
+  contentOwners?: () => Response;
   sync?: (body: SyncBody) => Response;
   clear?: () => Response;
   archive?: () => Response;
@@ -236,11 +211,12 @@ type Route = {
 };
 
 // Route table for the fetch router below, matched in order on method + path.
-// The view fetches /groups AND (for a manager) /connectors/credentials on mount,
-// and effects fire child-before-parent, so the mount order is not guaranteed —
-// key on method+path instead of a positional queue. Each route has a sensible
-// default; tests override only what they assert. An un-overridden sync POST
-// rejects, so a test that does not expect one fails loudly.
+// The view fetches /groups AND (for a manager) /connectors/content-owners on
+// mount, and effects fire child-before-parent, so the mount order is not
+// guaranteed — key on method+path instead of a positional queue. Each route
+// has a sensible default; tests override only what they assert. An
+// un-overridden sync POST rejects, so a test that does not expect one fails
+// loudly.
 const ROUTES: Route[] = [
   {
     method: "GET",
@@ -250,9 +226,11 @@ const ROUTES: Route[] = [
   },
   {
     method: "GET",
-    path: "/connectors/credentials",
+    path: "/connectors/content-owners?connector_key=youtube-analytics",
     respond: (overrides) =>
-      Promise.resolve((overrides.credentials ?? (() => jsonResponse(DEFAULT_CREDS)))()),
+      Promise.resolve(
+        (overrides.contentOwners ?? (() => jsonResponse(DEFAULT_OWNERS)))(),
+      ),
   },
   {
     method: "POST",
@@ -502,6 +480,49 @@ describe("GroupsView clear-stamp flow", () => {
     expect(groupGetCount()).toBe(1);
   });
 
+  it("shows generic copy on a 500 and never renders raw backend internals", async () => {
+    routeFetch({
+      clear: () =>
+        jsonResponse(
+          {
+            detail:
+              'psycopg.DataError: relation "audit_logs" at db-host-04.internal:5432',
+          },
+          500,
+        ),
+    });
+    renderGroups();
+
+    await waitFor(() =>
+      expect(screen.getByText("TV Sector")).toBeInTheDocument(),
+    );
+    fireEvent.click(
+      within(rowByName("TV Sector")).getByRole("button", {
+        name: /clear stamp/i,
+      }),
+    );
+    fireEvent.change(
+      screen.getByLabelText(/Reason \(required, audited\)/i),
+      { target: { value: "wrong owner stamp" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^confirm$/i }));
+
+    // Qodo rule 1052052 guard: a 5xx detail is internal diagnostics, so the UI
+    // shows generic copy + the numeric status — never the raw payload.
+    await waitFor(() =>
+      expect(
+        screen.getByText("The change could not be saved (HTTP 500)."),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/psycopg\.DataError/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/db-host-04\.internal/)).not.toBeInTheDocument();
+    // Panel stays open for retry, and no reload fired.
+    expect(
+      screen.getByLabelText(/Reason \(required, audited\)/i),
+    ).toBeInTheDocument();
+    expect(groupGetCount()).toBe(1);
+  });
+
   it("disables Confirm when the reason contains a NUL character", async () => {
     routeFetch();
     renderGroups();
@@ -560,11 +581,8 @@ describe("GroupsView archive flow", () => {
 });
 
 describe("GroupsView sync header / owner picker", () => {
-  it("lists only ACTIVE youtube-analytics account ids in the owner picker", async () => {
-    routeFetch({
-      credentials: () =>
-        jsonResponse(credsResponse([OWNER_ACTIVE, OWNER_INACTIVE, OWNER_OTHER])),
-    });
+  it("feeds the picker from /connectors/content-owners, never /connectors/credentials", async () => {
+    routeFetch();
     renderGroups();
 
     const picker = await screen.findByLabelText("Content owner");
@@ -573,23 +591,42 @@ describe("GroupsView sync header / owner picker", () => {
         within(picker).getByRole("option", { name: "OWNERaaa" }),
       ).toBeInTheDocument(),
     );
-    // Placeholder + the single ACTIVE youtube-analytics owner only; the inactive
-    // analytics cred and the active OTHER-connector cred are both excluded.
+    // Qodo PR #174 regression guard: the picker must read the least-privilege,
+    // MANAGE_GROUPS-gated route — not the MANAGE_CONNECTORS-gated credential
+    // list, which 403s for group managers without connector management.
+    await waitFor(() =>
+      expect(
+        callsMatching((url) => url.startsWith("/connectors/content-owners")),
+      ).toHaveLength(1),
+    );
+    expect(
+      callsMatching((url) => url.startsWith("/connectors/credentials")),
+    ).toHaveLength(0);
+  });
+
+  it("lists exactly the account ids the backend returns", async () => {
+    routeFetch({
+      contentOwners: () => jsonResponse(ownersResponse(["OWNERaaa", "OWNERbbb"])),
+    });
+    renderGroups();
+
+    const picker = await screen.findByLabelText("Content owner");
+    await waitFor(() =>
+      expect(
+        within(picker).getByRole("option", { name: "OWNERbbb" }),
+      ).toBeInTheDocument(),
+    );
+    // Placeholder + the two returned owners, in backend order; the
+    // ACTIVE/connector-key filtering is the backend's contract, not the UI's.
     const optionValues = within(picker)
       .getAllByRole("option")
       .map((option) => (option as HTMLOptionElement).value);
-    expect(optionValues).toEqual(["", "OWNERaaa"]);
-    expect(
-      within(picker).queryByRole("option", { name: "OWNERrev" }),
-    ).not.toBeInTheDocument();
-    expect(
-      within(picker).queryByRole("option", { name: "OWNERoth" }),
-    ).not.toBeInTheDocument();
+    expect(optionValues).toEqual(["", "OWNERaaa", "OWNERbbb"]);
     expect(picker).toBeEnabled();
   });
 
-  it("disables the picker and points at Connectors when no youtube-analytics credential exists", async () => {
-    routeFetch({ credentials: () => jsonResponse(credsResponse([OWNER_OTHER])) });
+  it("disables the picker and points at Connectors when no content owner exists", async () => {
+    routeFetch({ contentOwners: () => jsonResponse(ownersResponse([])) });
     renderGroups();
 
     const picker = await screen.findByLabelText("Content owner");

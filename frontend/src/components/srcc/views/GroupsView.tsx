@@ -1,12 +1,9 @@
 import { type ReactNode, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
-import type {
-  ChannelGroupApiEntry,
-  ConnectorCredential,
-  ConnectorCredentialListResponse,
-} from "@/lib/api/types";
-import { useConnectorCredentials } from "@/lib/api/useConnectors";
+import { describeApiError } from "@/lib/api/errors";
+import type { ChannelGroupApiEntry } from "@/lib/api/types";
+import { useContentOwners } from "@/lib/api/useContentOwners";
 import { useGroups } from "@/lib/api/useGroups";
 import {
   useClearOwnerStampAction,
@@ -30,8 +27,9 @@ import { GroupsSyncFlow, isValidAuditReason } from "./GroupsSyncFlow";
 //   member) + the two MANAGE_GROUPS-gated, audited write routes above.
 // Standards: No client-side authorization is invented. canManageGroups gates the
 //   row-action affordances (fail-closed; buttons hidden, not disabled); the
-//   backend checks stay the authority and 4xx bodies surface inline verbatim
-//   (house rule: canned backend messages are operator-facing). Mutations use the
+//   backend checks stay the authority and only canned-copy statuses surface
+//   their detail inline via describeApiError (everything else renders generic
+//   copy — Qodo rule 1052052). Mutations use the
 //   synchronous in-flight ref latch (one request per click burst -> one audit
 //   event) and reload on success. Reason is required + trimmed and client-blocked
 //   on a NUL, mirroring the backend audit_logs 422 so a knowably-invalid reason
@@ -41,7 +39,7 @@ import { GroupsSyncFlow, isValidAuditReason } from "./GroupsSyncFlow";
 // Connections:
 //   - File: frontend/src/lib/api/useGroups.ts -> GET /groups list.
 //   - File: frontend/src/lib/api/useGroupSync.ts -> clear-stamp + archive actions.
-//   - File: frontend/src/lib/api/useConnectors.ts -> credential list (owner picker).
+//   - File: frontend/src/lib/api/useContentOwners.ts -> owner picker read.
 //   - File: frontend/src/components/srcc/views/GroupsSyncFlow.tsx -> sync stepper.
 //   - File: backend/ums_smart_revenue/api/groups.py -> the group routes.
 //   - File: Docs/superpowers/specs/2026-08-07-import-sync-ui-design.md -> spec.
@@ -49,15 +47,6 @@ import { GroupsSyncFlow, isValidAuditReason } from "./GroupsSyncFlow";
 
 // Only one panel is open at a time; opening another row's action replaces it.
 type PanelTarget = { groupId: string; kind: "clear" | "archive" };
-
-/** Map a mutation failure to operator-facing copy — backend detail verbatim. */
-const describeMutationError = (err: unknown): string => {
-  if (err instanceof ApiError) {
-    const body = err.body as { detail?: unknown } | null;
-    return String(body?.detail ?? err.message);
-  }
-  return err instanceof Error ? err.message : String(err);
-};
 
 /** Read-only groups header (no sync controls): title + subtitle only. Rendered
  * for a viewer who cannot manage groups, so the sync affordance stays hidden. */
@@ -77,31 +66,14 @@ const GroupsPanelHeader = () => {
 // the sync's content owner comes from a youtube-analytics credential's account_id.
 const YOUTUBE_ANALYTICS_KEY = "youtube-analytics";
 
-/**
- * The pickable content owners: ACTIVE youtube-analytics credentials only. Status
- * is compared case-insensitively against the "ACTIVE" literal the credential rows
- * carry (matching ConnectorsView's credentialStatusTone idiom); account_id is the
- * content owner id the sync targets.
- */
-const activeAnalyticsOwners = (
-  list: ConnectorCredentialListResponse | null,
-): ConnectorCredential[] => {
-  if (!list) return [];
-  return list.items.filter(
-    (credential) =>
-      credential.connector_key === YOUTUBE_ANALYTICS_KEY &&
-      credential.status.toUpperCase() === "ACTIVE",
-  );
-};
-
 /** Short muted note under the picker for its non-ready states (or null). */
 const pickerNote = (
-  state: ReturnType<typeof useConnectorCredentials>,
-  owners: ConnectorCredential[],
+  state: ReturnType<typeof useContentOwners>,
+  ownerCount: number,
 ): string | null => {
-  if (state.error) return "Couldn't load connector credentials.";
-  if (!state.data) return "Loading credentials…";
-  if (owners.length === 0) {
+  if (state.error) return "Couldn't load content owners.";
+  if (!state.data) return "Loading content owners…";
+  if (ownerCount === 0) {
     return "Register a youtube-analytics credential in Connectors first.";
   }
   return null;
@@ -116,13 +88,15 @@ type GroupsSyncHeaderProps = {
 
 /**
  * The manager-only panel header: title + subtitle, plus the content-owner picker
- * (fed by the ACTIVE youtube-analytics credentials) and the Sync (dry-run) button
- * that opens the stepper. Owns the credential fetch, so a read-only viewer (who
- * gets GroupsPanelHeader instead) never fires it. The picker degrades gracefully
- * while credentials load, on error, and when none exist (disabled + a short muted
- * note pointing at Connectors). Sync is disabled without a selection or while the
- * stepper is already open; per the fail-closed house rule it renders only for a
- * manager (this component), never as a disabled control for a read-only viewer.
+ * (fed by GET /connectors/content-owners — the least-privilege, MANAGE_GROUPS-
+ * gated read that returns only ACTIVE youtube-analytics account ids) and the
+ * Sync (dry-run) button that opens the stepper. Owns the fetch, so a read-only
+ * viewer (who gets GroupsPanelHeader instead) never fires it. The picker
+ * degrades gracefully while owners load, on error, and when none exist
+ * (disabled + a short muted note pointing at Connectors). Sync is disabled
+ * without a selection or while the stepper is already open; per the fail-closed
+ * house rule it renders only for a manager (this component), never as a
+ * disabled control for a read-only viewer.
  */
 const GroupsSyncHeader = ({
   selectedOwnerId,
@@ -130,9 +104,11 @@ const GroupsSyncHeader = ({
   onStartSync,
   syncDisabled,
 }: GroupsSyncHeaderProps) => {
-  const credentialState = useConnectorCredentials();
-  const owners = activeAnalyticsOwners(credentialState.data);
-  const note = pickerNote(credentialState, owners);
+  const ownerState = useContentOwners(YOUTUBE_ANALYTICS_KEY);
+  // The backend already restricts the payload to ACTIVE youtube-analytics
+  // account ids; the picker renders exactly what it is given.
+  const owners = ownerState.data?.items.map((item) => item.account_id) ?? [];
+  const note = pickerNote(ownerState, owners.length);
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -148,9 +124,9 @@ const GroupsSyncHeader = ({
           onChange={(event) => onSelectOwner(event.target.value)}
         >
           <option value="">Select a content owner…</option>
-          {owners.map((credential) => (
-            <option key={credential.id} value={credential.account_id}>
-              {credential.account_id}
+          {owners.map((accountId) => (
+            <option key={accountId} value={accountId}>
+              {accountId}
             </option>
           ))}
         </select>
@@ -203,7 +179,7 @@ const GroupsTableMessageRow = ({ title, sub }: { title: string; sub: string }) =
   );
 };
 
-/** Error message row: 403 -> no-permission copy; else status + verbatim detail. */
+/** Error message row: 403 -> no-permission copy; else status + sanitized detail. */
 const groupsErrorRow = (error: unknown) => {
   const isApi = error instanceof ApiError;
   const status = isApi ? error.status : null;
@@ -218,7 +194,7 @@ const groupsErrorRow = (error: unknown) => {
   return (
     <GroupsTableMessageRow
       title={`Failed to load groups${status ? ` (${status})` : ""}`}
-      sub={describeMutationError(error)}
+      sub={describeApiError(error, "The groups could not be loaded")}
     />
   );
 };
@@ -374,7 +350,9 @@ const GroupActionPanel = ({
       onMutated();
       onClose();
     } catch (caught) {
-      setError(describeMutationError(caught));
+      // Canned backend detail on operator-copy statuses; generic copy otherwise
+      // (a 5xx/proxy payload can carry internals the operator must never see).
+      setError(describeApiError(caught, "The change could not be saved"));
       // Panel state survives so the operator can correct and retry.
     } finally {
       setBusy(false);

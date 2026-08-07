@@ -353,6 +353,11 @@ const EMPTY_EXPORTS = {
 // wrapper shapes above. The Groups view fetches it unconditionally on mount.
 const EMPTY_GROUPS: unknown[] = [];
 
+// GET /connectors/content-owners returns the least-privilege picker payload
+// ({items: [{account_id}]} — no pagination wrapper, see useContentOwners.ts);
+// the manage-groups sync header fetches it on mount.
+const EMPTY_CONTENT_OWNERS = { items: [] };
+
 type FetchRouteMap = ReadonlyMap<string, () => Response>;
 
 const defaultSessionRouteResponse = () => jsonResponse(NET_REVENUE_BODY);
@@ -361,6 +366,7 @@ const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRou
   ["/session/me", sessionResponder],
   ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
   ["/connectors/credentials", () => jsonResponse(EMPTY_CONNECTOR_CREDENTIALS)],
+  ["/connectors/content-owners", () => jsonResponse(EMPTY_CONTENT_OWNERS)],
   ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
   ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
   ["/groups", () => jsonResponse(EMPTY_GROUPS)],
