@@ -13,9 +13,9 @@ import {
 } from "@/lib/api/useGroupSync";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) {
+const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-}
+};
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -28,29 +28,29 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function jsonResponse(body: unknown, status = 200) {
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function fetchMock() {
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
-function urlOf(input: unknown): string {
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
 
-function requireFetchArgs() {
+const requireFetchArgs = () => {
   const args = fetchMock().mock.calls.at(-1);
   if (!args) throw new Error("expected fetch to have been called");
   return args;
-}
+};
 
 const SYNC_RESULT: GroupSyncResult = {
   dry_run: true,

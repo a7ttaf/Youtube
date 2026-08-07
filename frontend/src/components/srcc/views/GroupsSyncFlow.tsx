@@ -49,9 +49,9 @@ import { Badge } from "../shared";
  * a reason). Extracted here so the sync Reason step and the table's row confirm
  * panels (GroupsView) validate identically instead of each inlining the rule.
  */
-export function isValidAuditReason(reason: string): boolean {
+export const isValidAuditReason = (reason: string): boolean => {
   return reason.trim() !== "" && !reason.includes("\u0000");
-}
+};
 
 /**
  * Map a sync failure to operator-facing copy — backend detail verbatim, with a
@@ -59,7 +59,7 @@ export function isValidAuditReason(reason: string): boolean {
  * -analytics credential is missing/expired, which is fixed in the Connectors
  * view). Distinct from GroupsView's describeMutationError by that 503 behavior.
  */
-function describeSyncError(err: unknown): string {
+const describeSyncError = (err: unknown): string => {
   if (err instanceof ApiError) {
     const body = err.body as { detail?: unknown } | null;
     const base = String(body?.detail ?? err.message);
@@ -68,7 +68,7 @@ function describeSyncError(err: unknown): string {
       : base;
   }
   return err instanceof Error ? err.message : String(err);
-}
+};
 
 /** Outcome chip tone: green create/reactivate, amber deactivate, red conflict,
  * blue for other changes — matching shared Badge tones. Outcomes absent from
@@ -87,13 +87,13 @@ const OUTCOME_TONES: Partial<Record<GroupSyncGroupResult["outcome"], Severity>> 
  * a plain-object read of an untyped value like "toString" would walk the
  * prototype chain to a truthy function where the old switch's default arm
  * rendered muted — the own-property check keeps every unknown string muted. */
-function outcomeChip(outcome: GroupSyncGroupResult["outcome"]): ReactNode {
+const outcomeChip = (outcome: GroupSyncGroupResult["outcome"]): ReactNode => {
   const tone = Object.hasOwn(OUTCOME_TONES, outcome)
     ? OUTCOME_TONES[outcome]
     : undefined;
   if (!tone) return <span className="muted">{outcome}</span>;
   return <Badge tone={tone}>{outcome}</Badge>;
-}
+};
 
 const activeLabel = (active: boolean): string => (active ? "active" : "archived");
 
@@ -103,7 +103,7 @@ const activeLabel = (active: boolean): string => (active ? "active" : "archived"
  * line is keyed by the field it describes — "name" and "active" are each pushed
  * at most once, so the keys are unique within the cell and stable per render.
  */
-function ChangesCell({ group }: { group: GroupSyncGroupResult }) {
+const ChangesCell = ({ group }: { group: GroupSyncGroupResult }) => {
   const lines: { field: string; text: string }[] = [];
   if (group.name_change) {
     lines.push({
@@ -125,10 +125,10 @@ function ChangesCell({ group }: { group: GroupSyncGroupResult }) {
       ))}
     </>
   );
-}
+};
 
 /** Map one per-group dry-run result to an OutcomeTable row (CONFLICT -> warn). */
-function groupOutcomeRow(group: GroupSyncGroupResult): OutcomeTableRow {
+const groupOutcomeRow = (group: GroupSyncGroupResult): OutcomeTableRow => {
   return {
     key: group.cms_group_id,
     tone: group.outcome === "CONFLICT" ? "warn" : undefined,
@@ -142,17 +142,17 @@ function groupOutcomeRow(group: GroupSyncGroupResult): OutcomeTableRow {
       group.unknown_channel_count,
     ],
   };
-}
+};
 
 /** Inline error banner shown in the current step; backend detail verbatim. */
-function SyncErrorBanner({ title, detail }: { title: string; detail: string }) {
+const SyncErrorBanner = ({ title, detail }: { title: string; detail: string }) => {
   return (
     <div className="form-error" role="alert">
       <strong>{title}</strong>
       <span>{detail}</span>
     </div>
   );
-}
+};
 
 type ReasonStepProps = {
   reason: string;
@@ -163,7 +163,7 @@ type ReasonStepProps = {
 };
 
 /** Step 1: required, audited reason + a "Run dry-run" trigger. */
-function ReasonStep({ reason, onReasonChange, onRun, busy, error }: ReasonStepProps) {
+const ReasonStep = ({ reason, onReasonChange, onRun, busy, error }: ReasonStepProps) => {
   const canRun = isValidAuditReason(reason) && !busy;
   return (
     <div className="confirm-panel" role="group" aria-label="Sync reason">
@@ -196,9 +196,37 @@ function ReasonStep({ reason, onReasonChange, onRun, busy, error }: ReasonStepPr
       </div>
     </div>
   );
-}
+};
 
 const SYNC_COLUMNS = ["Group", "Outcome", "Changes", "Members", "Unknown"];
+
+/**
+ * The conflict remedy line, shown only when the plan carries a CONFLICT row.
+ * Split out of PreviewStep so the note owns its own single condition; the
+ * rendered markup is exactly what PreviewStep emitted inline.
+ */
+const ConflictNote = ({ show }: { show: boolean }) => {
+  return show ? (
+    <p className="muted" role="note">
+      Conflicts block apply: clear the wrong owner stamp (Groups table → Clear
+      stamp) or run the sync under the owning content owner.
+    </p>
+  ) : null;
+};
+
+/**
+ * The unknown-channels note, shown only when CMS returned channels the local
+ * registry does not have. Same `> 0` threshold and same markup as the inline
+ * block it replaces.
+ */
+const UnknownChannelsNote = ({ total }: { total: number }) => {
+  return total > 0 ? (
+    <p className="muted" role="note">
+      {total} channels are in CMS but not in the
+      registry — import them first.
+    </p>
+  ) : null;
+};
 
 type PreviewStepProps = {
   result: GroupSyncResult;
@@ -213,7 +241,7 @@ type PreviewStepProps = {
  * API 409s a conflicted plan) or while an apply is in flight. A conflict remedy
  * line and an unknown-channels note render below the table when applicable.
  */
-function PreviewStep({ result, onBack, onApply, busy, error }: PreviewStepProps) {
+const PreviewStep = ({ result, onBack, onApply, busy, error }: PreviewStepProps) => {
   const hasConflict = result.groups.some((group) => group.outcome === "CONFLICT");
   const rows = result.groups.map(groupOutcomeRow);
   return (
@@ -227,18 +255,8 @@ function PreviewStep({ result, onBack, onApply, busy, error }: PreviewStepProps)
         rows={rows}
         emptyLabel="No group changes for this content owner."
       />
-      {hasConflict ? (
-        <p className="muted" role="note">
-          Conflicts block apply: clear the wrong owner stamp (Groups table → Clear
-          stamp) or run the sync under the owning content owner.
-        </p>
-      ) : null}
-      {result.unknown_channel_total > 0 ? (
-        <p className="muted" role="note">
-          {result.unknown_channel_total} channels are in CMS but not in the
-          registry — import them first.
-        </p>
-      ) : null}
+      <ConflictNote show={hasConflict} />
+      <UnknownChannelsNote total={result.unknown_channel_total} />
       {error ? <SyncErrorBanner title="Apply failed" detail={error} /> : null}
       <div className="action-row">
         <button className="ghost-button" type="button" onClick={onBack}>
@@ -256,7 +274,7 @@ function PreviewStep({ result, onBack, onApply, busy, error }: PreviewStepProps)
       </div>
     </div>
   );
-}
+};
 
 type AppliedStepProps = {
   result: GroupSyncResult;
@@ -265,7 +283,7 @@ type AppliedStepProps = {
 };
 
 /** Step 3: the applied outcome counts (non-zero only) + reason echo. */
-function AppliedStep({ result, reason, onDone }: AppliedStepProps) {
+const AppliedStep = ({ result, reason, onDone }: AppliedStepProps) => {
   const counts = Object.entries(result.counts).filter(([, value]) => value > 0);
   return (
     <div className="confirm-panel" role="group" aria-label="Sync applied">
@@ -286,7 +304,7 @@ function AppliedStep({ result, reason, onDone }: AppliedStepProps) {
       </div>
     </div>
   );
-}
+};
 
 export type GroupsSyncFlowProps = {
   /** The content owner whose CMS groups are being synced (from the picker). */
@@ -308,7 +326,11 @@ const STEP_INDEX: Record<SyncStep, number> = { reason: 0, preview: 1, applied: 2
  * in-flight ref latch collapses a same-tick double submit so one click burst
  * fires one request.
  */
-export function GroupsSyncFlow({ contentOwnerId, onCancel, onDone }: GroupsSyncFlowProps) {
+export const GroupsSyncFlow = ({
+  contentOwnerId,
+  onCancel,
+  onDone,
+}: GroupsSyncFlowProps) => {
   const runSync = useGroupSyncAction();
   const [step, setStep] = useState<SyncStep>("reason");
   const [reason, setReason] = useState("");
@@ -371,9 +393,16 @@ export function GroupsSyncFlow({ contentOwnerId, onCancel, onDone }: GroupsSyncF
     else onCancel();
   };
 
-  return (
-    <ActionStepper steps={SYNC_STEPS} activeIndex={STEP_INDEX[step]} onCancel={handleCancel}>
-      {step === "reason" ? (
+  /**
+   * The active step's panel. Exactly one step renders; a step whose result has
+   * not arrived yet renders nothing — the same output as the three sibling
+   * conditionals this replaced, whose two inactive branches each rendered null.
+   * A plain helper (invoked, not mounted as a component) so the flow's state
+   * stays in this closure and the element tree is unchanged.
+   */
+  const renderStepBody = (): ReactNode => {
+    if (step === "reason") {
+      return (
         <ReasonStep
           reason={reason}
           onReasonChange={setReason}
@@ -381,8 +410,10 @@ export function GroupsSyncFlow({ contentOwnerId, onCancel, onDone }: GroupsSyncF
           busy={busy}
           error={error}
         />
-      ) : null}
-      {step === "preview" && preview ? (
+      );
+    }
+    if (step === "preview") {
+      return preview ? (
         <PreviewStep
           result={preview}
           onBack={backToReason}
@@ -390,10 +421,16 @@ export function GroupsSyncFlow({ contentOwnerId, onCancel, onDone }: GroupsSyncF
           busy={busy}
           error={error}
         />
-      ) : null}
-      {step === "applied" && applied ? (
-        <AppliedStep result={applied} reason={trimmedReason} onDone={onDone} />
-      ) : null}
+      ) : null;
+    }
+    return applied ? (
+      <AppliedStep result={applied} reason={trimmedReason} onDone={onDone} />
+    ) : null;
+  };
+
+  return (
+    <ActionStepper steps={SYNC_STEPS} activeIndex={STEP_INDEX[step]} onCancel={handleCancel}>
+      {renderStepBody()}
     </ActionStepper>
   );
-}
+};

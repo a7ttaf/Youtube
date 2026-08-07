@@ -39,13 +39,13 @@ import type {
 //       update_group -> PATCH /groups/{id}.
 // ============================================================================
 
-export function useGroupSyncAction(): (
+export const useGroupSyncAction = (): ((
   args: {
     contentOwnerId: string;
     dryRun: boolean;
     reason: string;
   },
-) => Promise<GroupSyncResult> {
+) => Promise<GroupSyncResult>) => {
   const client = useApiClient();
   return useCallback(
     ({ contentOwnerId, dryRun, reason }) =>
@@ -56,14 +56,14 @@ export function useGroupSyncAction(): (
       }),
     [client],
   );
-}
+};
 
-export function useClearOwnerStampAction(): (
+export const useClearOwnerStampAction = (): ((
   args: {
     groupId: string;
     reason: string;
   },
-) => Promise<ClearOwnerStampResponse> {
+) => Promise<ClearOwnerStampResponse>) => {
   const client = useApiClient();
   return useCallback(
     ({ groupId, reason }) =>
@@ -72,15 +72,15 @@ export function useClearOwnerStampAction(): (
       ),
     [client],
   );
-}
+};
 
-export function useGroupArchiveAction(): (
+export const useGroupArchiveAction = (): ((
   args: {
     groupId: string;
     active: boolean;
     reason: string;
   },
-) => Promise<GroupUpdateResponse> {
+) => Promise<GroupUpdateResponse>) => {
   const client = useApiClient();
   return useCallback(
     ({ groupId, active, reason }) =>
@@ -90,4 +90,4 @@ export function useGroupArchiveAction(): (
       ),
     [client],
   );
-}
+};

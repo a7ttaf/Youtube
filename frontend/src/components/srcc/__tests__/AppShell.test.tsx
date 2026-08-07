@@ -48,12 +48,12 @@ afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
 });
 
-function jsonResponse(body: unknown, status = 200) {
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
 // Minimal real-shaped net-revenue body so the wired CommandView can render
 // without errors while these tests focus on the tenant bootstrap behavior.
@@ -78,36 +78,36 @@ const NET_REVENUE_BODY = {
   audit_events: [],
 };
 
-function urlOf(input: unknown): string {
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
 
-function isTenantCall(input: unknown): boolean {
+const isTenantCall = (input: unknown): boolean => {
   return urlOf(input).includes("/tenants/me");
-}
+};
 
-function isSessionCall(input: unknown): boolean {
+const isSessionCall = (input: unknown): boolean => {
   return urlOf(input).includes("/session/me");
-}
+};
 
 // Route fetch by URL: /session/me -> a ready full-capability session (so the
 // dashboard renders), /tenants/me -> the provided tenant responder, everything
 // else (the wired CommandView net-revenue call) -> a neutral net-revenue body.
-function routeFetch(tenantResponder: () => Response) {
+const routeFetch = (tenantResponder: () => Response) => {
   return (input: unknown) => {
     if (isSessionCall(input)) return Promise.resolve(jsonResponse(FULL_SESSION));
     if (isTenantCall(input)) return Promise.resolve(tenantResponder());
     return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
   };
-}
+};
 
-function tenantFetchCalls() {
+const tenantFetchCalls = () => {
   const mock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
   return mock.mock.calls.filter(([input]) => isTenantCall(input));
-}
+};
 
 describe("AppShell tenant proof tag", () => {
   it("hydrates the tenant and shows UMS (ums) on the dev-only tag", async () => {
@@ -305,10 +305,10 @@ describe("AppShell tenant proof tag", () => {
 
 // Build a /session/me body from a capability override + flags. Defaults to all
 // capabilities false so each test opts INTO exactly the capabilities it asserts.
-function sessionBody(
+const sessionBody = (
   capabilities: Partial<SessionMe["capabilities"]> = {},
   overrides: Partial<SessionMe> = {},
-): SessionMe {
+): SessionMe => {
   return {
     ...FULL_SESSION,
     capabilities: {
@@ -332,7 +332,7 @@ function sessionBody(
     },
     ...overrides,
   };
-}
+};
 
 // Empty-but-real connector + AdSense list shapes so the Connectors view renders
 // its always-visible controls without a malformed body.
@@ -382,7 +382,7 @@ const routeFetchWithSession = (sessionResponder: () => Response) => {
   };
 };
 
-function renderShell() {
+const renderShell = () => {
   return render(
     <SessionProvider>
       <TenantProvider initialSlug="ums">
@@ -390,7 +390,7 @@ function renderShell() {
       </TenantProvider>
     </SessionProvider>,
   );
-}
+};
 
 describe("AppShell production session hydration", () => {
   afterEach(() => {

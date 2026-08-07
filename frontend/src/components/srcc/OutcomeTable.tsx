@@ -45,7 +45,7 @@ export type OutcomeTableProps = {
 };
 
 /** Render the column header row — one <th> per column, in order. */
-function OutcomeTableHead({ columns }: { columns: string[] }) {
+const OutcomeTableHead = ({ columns }: { columns: string[] }) => {
   return (
     <thead>
       <tr>
@@ -55,13 +55,13 @@ function OutcomeTableHead({ columns }: { columns: string[] }) {
       </tr>
     </thead>
   );
-}
+};
 
 /** Single full-width message row shown when there are no data rows. */
-function OutcomeTableEmptyRow({ columnCount, emptyLabel }: {
+const OutcomeTableEmptyRow = ({ columnCount, emptyLabel }: {
   columnCount: number;
   emptyLabel: string;
-}) {
+}) => {
   return (
     <tr>
       <td colSpan={columnCount}>
@@ -69,17 +69,17 @@ function OutcomeTableEmptyRow({ columnCount, emptyLabel }: {
       </td>
     </tr>
   );
-}
+};
 
 /**
  * A single data row: the caller's cells in order, with data-tone when set. Each
  * cell is keyed by its column label (unique per the `columns` contract), so a
  * reordered or filtered `rows` array never reuses a cell across columns.
  */
-function OutcomeTableRowView({ columns, row }: {
+const OutcomeTableRowView = ({ columns, row }: {
   columns: string[];
   row: OutcomeTableRow;
-}) {
+}) => {
   return (
     <tr data-tone={row.tone}>
       {row.cells.map((cell, index) => (
@@ -87,14 +87,14 @@ function OutcomeTableRowView({ columns, row }: {
       ))}
     </tr>
   );
-}
+};
 
 /**
  * Render a semantic <table> from caller-supplied columns/rows. An empty
  * `rows` array renders exactly one full-width message row (never an empty
  * tbody) so the diff view always shows an explicit state.
  */
-export function OutcomeTable({ columns, rows, emptyLabel }: OutcomeTableProps) {
+export const OutcomeTable = ({ columns, rows, emptyLabel }: OutcomeTableProps) => {
   return (
     <div className="table-wrap">
       <table>
@@ -111,4 +111,4 @@ export function OutcomeTable({ columns, rows, emptyLabel }: OutcomeTableProps) {
       </table>
     </div>
   );
-}
+};

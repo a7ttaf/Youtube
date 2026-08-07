@@ -22,11 +22,11 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 //   - File: frontend/src/lib/api/types.ts -> ChannelGroupApiEntry.
 //   - File: backend/ums_smart_revenue/api/groups.py:185 list_groups.
 // ============================================================================
-export function useGroups(): AsyncState<ChannelGroupApiEntry[]> {
+export const useGroups = (): AsyncState<ChannelGroupApiEntry[]> => {
   const client = useApiClient();
   const run = useCallback(
     () => client.get<ChannelGroupApiEntry[]>("/groups"),
     [client],
   );
   return useAsync(run);
-}
+};

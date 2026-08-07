@@ -66,7 +66,7 @@ const describeMutationError = (err: unknown): string => {
  * down. Row actions set the single open-panel target ({groupId, kind}); opening
  * another closes the previous. Successful mutations reload the group list.
  */
-export function GroupsView({ canManageGroups }: { canManageGroups: boolean }) {
+export const GroupsView = ({ canManageGroups }: { canManageGroups: boolean }) => {
   const groupState = useGroups();
   const [panel, setPanel] = useState<PanelTarget | null>(null);
   // The picker selection (a content owner's account id) + whether the sync
@@ -114,11 +114,11 @@ export function GroupsView({ canManageGroups }: { canManageGroups: boolean }) {
       </section>
     </section>
   );
-}
+};
 
 /** Read-only groups header (no sync controls): title + subtitle only. Rendered
  * for a viewer who cannot manage groups, so the sync affordance stays hidden. */
-function GroupsPanelHeader() {
+const GroupsPanelHeader = () => {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -127,7 +127,7 @@ function GroupsPanelHeader() {
       </div>
     </div>
   );
-}
+};
 
 // The credential connector_key the group sync reads a content owner from. Mirrors
 // backend YOUTUBE_ANALYTICS_CONNECTOR ("youtube-analytics", connectors/keys.py):
@@ -140,29 +140,29 @@ const YOUTUBE_ANALYTICS_KEY = "youtube-analytics";
  * carry (matching ConnectorsView's credentialStatusTone idiom); account_id is the
  * content owner id the sync targets.
  */
-function activeAnalyticsOwners(
+const activeAnalyticsOwners = (
   list: ConnectorCredentialListResponse | null,
-): ConnectorCredential[] {
+): ConnectorCredential[] => {
   if (!list) return [];
   return list.items.filter(
     (credential) =>
       credential.connector_key === YOUTUBE_ANALYTICS_KEY &&
       credential.status.toUpperCase() === "ACTIVE",
   );
-}
+};
 
 /** Short muted note under the picker for its non-ready states (or null). */
-function pickerNote(
+const pickerNote = (
   state: ReturnType<typeof useConnectorCredentials>,
   owners: ConnectorCredential[],
-): string | null {
+): string | null => {
   if (state.error) return "Couldn't load connector credentials.";
   if (!state.data) return "Loading credentials…";
   if (owners.length === 0) {
     return "Register a youtube-analytics credential in Connectors first.";
   }
   return null;
-}
+};
 
 type GroupsSyncHeaderProps = {
   selectedOwnerId: string;
@@ -181,12 +181,12 @@ type GroupsSyncHeaderProps = {
  * stepper is already open; per the fail-closed house rule it renders only for a
  * manager (this component), never as a disabled control for a read-only viewer.
  */
-function GroupsSyncHeader({
+const GroupsSyncHeader = ({
   selectedOwnerId,
   onSelectOwner,
   onStartSync,
   syncDisabled,
-}: GroupsSyncHeaderProps) {
+}: GroupsSyncHeaderProps) => {
   const credentialState = useConnectorCredentials();
   const owners = activeAnalyticsOwners(credentialState.data);
   const note = pickerNote(credentialState, owners);
@@ -223,7 +223,7 @@ function GroupsSyncHeader({
       {note ? <span className="muted">{note}</span> : null}
     </div>
   );
-}
+};
 
 type GroupAsyncState = ReturnType<typeof useGroups>;
 
@@ -237,7 +237,7 @@ type GroupTableProps = {
 };
 
 /** Column header row. Extracted to keep nesting shallow. */
-function GroupsTableHead() {
+const GroupsTableHead = () => {
   return (
     <thead>
       <tr>
@@ -246,10 +246,10 @@ function GroupsTableHead() {
       </tr>
     </thead>
   );
-}
+};
 
 /** Single-row message cell inside the groups table shell (loading, error, empty). */
-function GroupsTableMessageRow({ title, sub }: { title: string; sub: string }) {
+const GroupsTableMessageRow = ({ title, sub }: { title: string; sub: string }) => {
   return (
     <tr>
       <td colSpan={6}>
@@ -258,10 +258,10 @@ function GroupsTableMessageRow({ title, sub }: { title: string; sub: string }) {
       </td>
     </tr>
   );
-}
+};
 
 /** Error message row: 403 -> no-permission copy; else status + verbatim detail. */
-function groupsErrorRow(error: unknown) {
+const groupsErrorRow = (error: unknown) => {
   const isApi = error instanceof ApiError;
   const status = isApi ? error.status : null;
   if (status === 403) {
@@ -278,21 +278,21 @@ function groupsErrorRow(error: unknown) {
       sub={describeMutationError(error)}
     />
   );
-}
+};
 
 /**
  * Channel groups data table. Handles loading, error (403 -> no-permission row),
  * empty, and loaded states, mirroring RegistryTable. Renders the bespoke group
  * rows (OutcomeTable is for the sync diff, not this steady-state table).
  */
-function GroupsTable({
+const GroupsTable = ({
   canManageGroups,
   groupState,
   panel,
   onOpenPanel,
   onClosePanel,
   onMutated,
-}: GroupTableProps) {
+}: GroupTableProps) => {
   const { data: groups, error } = groupState;
 
   if (error) {
@@ -336,10 +336,10 @@ function GroupsTable({
       ))}
     </GroupsTableShell>
   );
-}
+};
 
 /** The table-wrap + labelled table + header shell shared by every table state. */
-function GroupsTableShell({
+const GroupsTableShell = ({
   role,
   busy,
   children,
@@ -347,7 +347,7 @@ function GroupsTableShell({
   role?: string;
   busy?: boolean;
   children: ReactNode;
-}) {
+}) => {
   return (
     <div className="table-wrap" role={role} aria-busy={busy ? "true" : undefined}>
       <table aria-label="Channel groups">
@@ -356,7 +356,7 @@ function GroupsTableShell({
       </table>
     </div>
   );
-}
+};
 
 type GroupRowProps = {
   group: ChannelGroupApiEntry;
@@ -372,23 +372,23 @@ type GroupRowProps = {
  * Shared by the CMS-id and owner-stamp columns, which differ only in that
  * NULL marker ("manual" vs the adoptable "unstamped" badge).
  */
-function GroupIdCell({ id, nullMarker }: { id: string | null; nullMarker: ReactNode }) {
+const GroupIdCell = ({ id, nullMarker }: { id: string | null; nullMarker: ReactNode }) => {
   return <td>{id === null ? nullMarker : <span className="code-chip">{id}</span>}</td>;
-}
+};
 
 /**
  * A single channel-group row. Derives every display cell from the API shape and,
  * when its action panel is open, renders the inline confirm panel as a full-width
  * row directly beneath it (component-local; no portal/modal).
  */
-function GroupRow({
+const GroupRow = ({
   group,
   canManageGroups,
   panelOpen,
   onOpenPanel,
   onClosePanel,
   onMutated,
-}: GroupRowProps) {
+}: GroupRowProps) => {
   const memberCount = group.channel_ids.length;
   return (
     <>
@@ -434,16 +434,16 @@ function GroupRow({
       ) : null}
     </>
   );
-}
+};
 
 /** The row's action buttons: Clear stamp (only when stamped) + Archive/Restore. */
-function GroupRowActions({
+const GroupRowActions = ({
   group,
   onOpenPanel,
 }: {
   group: ChannelGroupApiEntry;
   onOpenPanel: (target: PanelTarget) => void;
-}) {
+}) => {
   return (
     <span className="row-actions">
       {group.content_owner_id !== null ? (
@@ -464,13 +464,13 @@ function GroupRowActions({
       </button>
     </span>
   );
-}
+};
 
 /** Static copy per panel kind: title, explanatory line, error-banner heading. */
-function panelCopy(
+const panelCopy = (
   kind: PanelTarget["kind"],
   active: boolean,
-): { title: string; explanation: string; failTitle: string } {
+): { title: string; explanation: string; failTitle: string } => {
   if (kind === "clear") {
     return {
       title: "Clear owner stamp",
@@ -493,7 +493,7 @@ function panelCopy(
       "Restores the group to active; the next sync will maintain its membership again.",
     failTitle: "Restore failed",
   };
-}
+};
 
 /**
  * Inline confirm panel for a single row action (clear stamp OR archive/restore).
@@ -503,7 +503,7 @@ function panelCopy(
  * click burst records one audit event. On success it reloads the list and closes;
  * an ApiError surfaces inline (backend detail verbatim) with the panel kept open.
  */
-function GroupActionPanel({
+const GroupActionPanel = ({
   group,
   kind,
   onClose,
@@ -513,7 +513,7 @@ function GroupActionPanel({
   kind: PanelTarget["kind"];
   onClose: () => void;
   onMutated: () => void;
-}) {
+}) => {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -593,4 +593,4 @@ function GroupActionPanel({
       </div>
     </div>
   );
-}
+};

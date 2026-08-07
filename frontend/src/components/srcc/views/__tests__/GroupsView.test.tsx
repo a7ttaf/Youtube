@@ -111,14 +111,14 @@ const OWNER_OTHER: ConnectorCredential = {
   has_secret_ref: true,
 };
 
-function credsResponse(
+const credsResponse = (
   items: ConnectorCredential[],
-): ConnectorCredentialListResponse {
+): ConnectorCredentialListResponse => {
   return {
     items,
     pagination: { limit: 50, offset: 0, returned: items.length, has_more: false },
   };
-}
+};
 const DEFAULT_CREDS = credsResponse([OWNER_ACTIVE]);
 
 // Dry-run diff with a CONFLICT (+ a CREATE) and unknown channels: exercises the
@@ -194,27 +194,27 @@ const APPLY_RESULT: GroupSyncResult = {
   groups: [],
 };
 
-function jsonResponse(body: unknown, status = 200) {
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function fetchMock() {
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
-function urlOf(input: unknown): string {
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
 
-function methodOf(init: unknown): string {
+const methodOf = (init: unknown): string => {
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
-}
+};
 
 type SyncBody = { content_owner_id: string; dry_run: boolean; reason: string };
 
@@ -280,13 +280,13 @@ const ROUTES: Route[] = [
 ];
 
 /** Does this request line hit `route`? Exact path unless the route is a prefix. */
-function routeMatches(route: Route, method: string, url: string): boolean {
+const routeMatches = (route: Route, method: string, url: string): boolean => {
   if (route.method !== method) return false;
   return route.prefix ? url.startsWith(route.path) : url === route.path;
-}
+};
 
 /** Install the URL-keyed fetch router, with the given per-route overrides. */
-function routeFetch(overrides: RouteOverrides = {}) {
+const routeFetch = (overrides: RouteOverrides = {}) => {
   fetchMock().mockImplementation((input: unknown, init: unknown) => {
     const url = urlOf(input);
     const method = methodOf(init);
@@ -294,54 +294,54 @@ function routeFetch(overrides: RouteOverrides = {}) {
     if (!route) return Promise.reject(new Error(`unrouted ${method} ${url}`));
     return route.respond(overrides, init);
   });
-}
+};
 
-function callsMatching(
+const callsMatching = (
   predicate: (url: string, init: unknown) => boolean,
-) {
+) => {
   return fetchMock().mock.calls.filter(([input, init]) =>
     predicate(urlOf(input), init),
   );
-}
+};
 
 /** How many times the group LIST (GET /groups) was fetched (mount + reloads). */
-function groupGetCount(): number {
+const groupGetCount = (): number => {
   return callsMatching((url, init) => url === "/groups" && methodOf(init) === "GET")
     .length;
-}
+};
 
 /** All POSTs to the sync route, parsed bodies in call order. */
-function syncPosts(): SyncBody[] {
+const syncPosts = (): SyncBody[] => {
   return callsMatching(
     (url, init) => url === "/channels/groups/sync" && methodOf(init) === "POST",
   ).map(([, init]) => JSON.parse(String((init as RequestInit).body)) as SyncBody);
-}
+};
 
-function renderGroups(canManageGroups = true) {
+const renderGroups = (canManageGroups = true) => {
   return render(
     <TenantProvider initialSlug="ums">
       <GroupsView canManageGroups={canManageGroups} />
     </TenantProvider>,
   );
-}
+};
 
 /** The <tr> whose name cell holds `name`. */
-function rowByName(name: string): HTMLElement {
+const rowByName = (name: string): HTMLElement => {
   const row = screen.getByText(name).closest("tr");
   if (!row) throw new Error(`no row for ${name}`);
   return row;
-}
+};
 
 /**
  * Manager flow helper: wait for credentials, select the ACTIVE owner, open the
  * stepper, enter `reason`, and fire the dry-run. `sync` decides the dry-run /
  * apply responses (defaults: clean dry-run, then APPLY_RESULT).
  */
-async function openStepperAndRunDryRun(
+const openStepperAndRunDryRun = async (
   reason: string,
   sync: (body: SyncBody) => Response = (body) =>
     jsonResponse(body.dry_run ? DRY_RUN_CLEAN : APPLY_RESULT),
-) {
+) => {
   routeFetch({ sync });
   renderGroups();
   const picker = await screen.findByLabelText("Content owner");
@@ -354,7 +354,7 @@ async function openStepperAndRunDryRun(
     target: { value: reason },
   });
   fireEvent.click(screen.getByRole("button", { name: /run dry-run/i }));
-}
+};
 
 describe("GroupsView table", () => {
   it("renders group rows from GET /groups with owner stamp, manual cms, unstamped badge, and member counts", async () => {

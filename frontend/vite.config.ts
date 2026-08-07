@@ -76,12 +76,12 @@ const GATEWAY_HEADER_SOURCES: [header: string, envVar: string, fallback: string]
 // Resolve that set once per config load, in declaration order. A blank value —
 // an empty fallback, or an env var explicitly set to "" — drops its header, so
 // the proxy sends exactly the headers the previous per-header guards sent.
-function resolveGatewayHeaders(env: Record<string, string>): [string, string][] {
+const resolveGatewayHeaders = (env: Record<string, string>): [string, string][] => {
   const resolved = GATEWAY_HEADER_SOURCES.map(
     ([header, envVar, fallback]) => [header, env[envVar] ?? fallback] as [string, string],
   );
   return resolved.filter(([, value]) => value !== "");
-}
+};
 
 export default defineConfig(({ mode }) => {
   // ============================================================================
