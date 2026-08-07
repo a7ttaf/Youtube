@@ -50,7 +50,7 @@ from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
 
 CH_A = "UCB6sc84dcg6VQGB_d89sx2g"
 CH_B = "UC3Dci3BzZXDo4jw4dU8KqWg"
-CONTENT_OWNER = "PlZrS5Fh56RMd9dmSL6XSA"
+CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 ACTOR = UserPrincipal(user_id="user-1", email="user@example.com")
 REASON = "Mirror CMS grouping for August close"
 
