@@ -1,3 +1,16 @@
+# ============================================================================
+# Purpose: Tracked-file hygiene guard — forbidden operator-real identifiers
+#   (held as SHA-256 digests, never literals) must stay out of this public repo.
+# Database/ORM: None.
+# Standards: Fail-closed scanning; unreadable tracked files and git-worktree
+#   preconditions are reported explicitly, never silently skipped.
+# Blast Radius: None detected (test-only guard; no finance, authz, or audit paths).
+# Connections:
+#   - File: tests/org/test_channel_group_sync_apply.py -> Fixture placeholder
+#     convention (PR #164) that this guard protects from regression.
+#   - File: Docs/superpowers/plans/2026-08-05-cms-group-sync.md -> Plan doc
+#     re-redacted under the same convention.
+# ============================================================================
 """Tracked-file hygiene guard: operator-real identifiers must stay out of the repo.
 
 The repository is PUBLIC (since 2026-08-04). The hygiene convention set by the
@@ -18,8 +31,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -45,14 +61,30 @@ FORBIDDEN_TOKEN_SHA256: dict[str, str] = {
 _BASE64URLISH = re.compile(r"[A-Za-z0-9_-]{20,64}")
 _EMAILISH = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
-# Binary or generated artifacts where tokenized scanning is noise, not signal.
-_SKIP_SUFFIXES = frozenset(
-    {".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".woff", ".woff2", ".lock"}
-)
+# Binary artifacts where tokenized scanning is noise, not signal. Plaintext
+# formats (.lock, .svg, ...) stay scanned: they can carry identifiers just as
+# docs do, and excluding them would leave a leak surface the guard cannot see.
+_SKIP_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2"})
 
 
 def _tracked_files() -> list[Path]:
-    """Every git-tracked file — the exact set a push would publish."""
+    """Every git-tracked file — the exact set a push would publish.
+
+    The guard is meaningful only inside a git worktree with git on PATH; any
+    other environment (source archive, vendored tree) skips explicitly instead
+    of erroring the whole suite on a precondition the guard cannot control.
+    """
+    if shutil.which("git") is None:
+        pytest.skip("repo hygiene guard requires git on PATH")
+    probe = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip("repo hygiene guard is meaningful only inside a git worktree")
     listing = subprocess.run(
         ["git", "ls-files", "-z"],
         cwd=REPO_ROOT,
@@ -74,12 +106,18 @@ def _digest(token: str) -> str:
 def test_no_forbidden_identifiers_in_tracked_files() -> None:
     """Fail with file:line coordinates if any forbidden identifier is tracked."""
     hits: list[str] = []
+    unreadable: list[str] = []
     for path in _tracked_files():
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            # A path git tracks but the OS cannot read (deleted mid-run) is a
-            # worktree quirk, not a hygiene violation.
+        except OSError as error:
+            if not path.exists():
+                # git tracks the path but it vanished mid-run (checkout race):
+                # a worktree quirk, not a hygiene violation.
+                continue
+            # A tracked file that still exists but cannot be read is an
+            # unscanned leak surface: the guard must fail closed, not pass.
+            unreadable.append(f"{path.relative_to(REPO_ROOT)}: {type(error).__name__}")
             continue
         for line_number, line in enumerate(text.splitlines(), start=1):
             for pattern in (_BASE64URLISH, _EMAILISH):
@@ -88,6 +126,10 @@ def test_no_forbidden_identifiers_in_tracked_files() -> None:
                     if description is not None:
                         rel = path.relative_to(REPO_ROOT)
                         hits.append(f"{rel}:{line_number}: {description}")
+    assert not unreadable, (
+        "hygiene guard could not scan these git-tracked files; failing closed "
+        "rather than passing over an unscanned leak surface:\n" + "\n".join(unreadable)
+    )
     assert not hits, (
         "forbidden operator-real identifiers found in tracked files "
         "(redact with placeholders, per the PR #164 convention):\n" + "\n".join(hits)
