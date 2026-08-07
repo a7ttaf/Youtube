@@ -1089,6 +1089,7 @@ export type ChannelIssuesResponse = {
 //       GroupAuditEventResponse      (lines 114-128) -> GroupAuditEventResponse
 //       _audit_event_response()      (lines 131-147) -> GroupAuditEventResponse
 //       ClearContentOwnerResponse    (lines 150-165) -> ClearOwnerStampResponse
+//       list_groups()                (lines 185-202) -> GET /groups
 //       update_group()               (lines 245-279) -> GroupUpdateResponse
 //         (PATCH /groups/{id}: response = updated.to_api(); response
 //         ["audit_event"] = audit_record_to_api(record) — same wrap pattern
