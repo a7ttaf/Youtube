@@ -165,23 +165,6 @@ const canCreateAnyExport = (permissions: AccessPermissions) => {
   );
 };
 
-/**
- * Render the fail-closed fallback panel shown when the session could not be
- * hydrated (401/403/network) or the principal is disabled. The detail copy
- * distinguishes a disabled principal from a failed/absent session.
- */
-const AccessDeniedState = ({ disabled = false }: { disabled?: boolean }) => {
-  return (
-    <div className="app">
-      <main className="main" aria-labelledby="accessDeniedTitle">
-        <section className="panel">
-          <AccessDeniedHeader disabled={disabled} />
-        </section>
-      </main>
-    </div>
-  );
-};
-
 /** Panel header for the access-denied state, kept flat to limit JSX nesting. */
 const AccessDeniedHeader = ({ disabled }: { disabled: boolean }) => {
   return (
@@ -195,6 +178,23 @@ const AccessDeniedHeader = ({ disabled }: { disabled: boolean }) => {
         </span>
       </div>
       <Badge tone="red">{disabled ? "Account disabled" : "No session"}</Badge>
+    </div>
+  );
+};
+
+/**
+ * Render the fail-closed fallback panel shown when the session could not be
+ * hydrated (401/403/network) or the principal is disabled. The detail copy
+ * distinguishes a disabled principal from a failed/absent session.
+ */
+const AccessDeniedState = ({ disabled = false }: { disabled?: boolean }) => {
+  return (
+    <div className="app">
+      <main className="main" aria-labelledby="accessDeniedTitle">
+        <section className="panel">
+          <AccessDeniedHeader disabled={disabled} />
+        </section>
+      </main>
     </div>
   );
 };
@@ -230,6 +230,54 @@ const SessionLoadingState = () => {
 type TenantBootstrap = {
   /** The label rendered in the dev-only tenant proof tag. */
   proofLabel: string;
+};
+
+/** A parsed error body that carries an operator-facing `detail` message. */
+type ApiErrorDetailBody = { detail: string };
+
+/**
+ * Predicate for "an object body carrying a non-blank string detail". Written as
+ * an `x is` type guard so TypeScript still narrows the body at the call site
+ * after the check moved out of apiErrorDetail's own condition.
+ */
+const hasDetailMessage = (body: unknown): body is ApiErrorDetailBody =>
+  typeof body === "object" &&
+  body !== null &&
+  typeof (body as { detail?: unknown }).detail === "string" &&
+  (body as ApiErrorDetailBody).detail.trim().length > 0;
+
+/**
+ * Extract the trimmed `detail` string from a typed ApiError JSON body, or null
+ * when the body has no usable detail message.
+ */
+const apiErrorDetail = (error: ApiError | Error | null): string | null => {
+  if (!(error instanceof ApiError)) return null;
+  // Bound to a local so the type guard's narrowing applies to the value read.
+  const body: unknown = error.body;
+  return hasDetailMessage(body) ? body.detail : null;
+};
+
+/**
+ * Build the dev-only tenant proof label from the hydrated tenant context and
+ * any bootstrap error, covering the loading, success, and failure states.
+ */
+const tenantProofLabel = (
+  tenant: ReturnType<typeof useTenant>,
+  tenantError: ApiError | Error | null,
+): string => {
+  // Pre-hydration the slug is intentionally empty — show a sentinel rather
+  // than a stray space so the dev proof tag stays readable.
+  const displaySlug = tenant.tenantSlug || "(resolving…)";
+  if (tenantError) {
+    const detail = apiErrorDetail(tenantError);
+    return `Tenant: ${displaySlug}; /tenants/me failed: ${tenantError.message}${
+      detail ? ` — ${detail}` : ""
+    }`;
+  }
+  if (tenant.id) {
+    return `Tenant: ${tenant.displayName} (${tenant.tenantSlug}) — id ${tenant.id}`;
+  }
+  return `Tenant: ${displaySlug} (loading…)`;
 };
 
 // ============================================================================
@@ -292,255 +340,7 @@ const useTenantBootstrap = (
   return { proofLabel: tenantProofLabel(tenant, tenantError) };
 };
 
-/** A parsed error body that carries an operator-facing `detail` message. */
-type ApiErrorDetailBody = { detail: string };
-
-/**
- * Predicate for "an object body carrying a non-blank string detail". Written as
- * an `x is` type guard so TypeScript still narrows the body at the call site
- * after the check moved out of apiErrorDetail's own condition.
- */
-const hasDetailMessage = (body: unknown): body is ApiErrorDetailBody =>
-  typeof body === "object" &&
-  body !== null &&
-  typeof (body as { detail?: unknown }).detail === "string" &&
-  (body as ApiErrorDetailBody).detail.trim().length > 0;
-
-/**
- * Extract the trimmed `detail` string from a typed ApiError JSON body, or null
- * when the body has no usable detail message.
- */
-const apiErrorDetail = (error: ApiError | Error | null): string | null => {
-  if (!(error instanceof ApiError)) return null;
-  // Bound to a local so the type guard's narrowing applies to the value read.
-  const body: unknown = error.body;
-  return hasDetailMessage(body) ? body.detail : null;
-};
-
-/**
- * Build the dev-only tenant proof label from the hydrated tenant context and
- * any bootstrap error, covering the loading, success, and failure states.
- */
-const tenantProofLabel = (
-  tenant: ReturnType<typeof useTenant>,
-  tenantError: ApiError | Error | null,
-): string => {
-  // Pre-hydration the slug is intentionally empty — show a sentinel rather
-  // than a stray space so the dev proof tag stays readable.
-  const displaySlug = tenant.tenantSlug || "(resolving…)";
-  if (tenantError) {
-    const detail = apiErrorDetail(tenantError);
-    return `Tenant: ${displaySlug}; /tenants/me failed: ${tenantError.message}${
-      detail ? ` — ${detail}` : ""
-    }`;
-  }
-  if (tenant.id) {
-    return `Tenant: ${tenant.displayName} (${tenant.tenantSlug}) — id ${tenant.id}`;
-  }
-  return `Tenant: ${displaySlug} (loading…)`;
-};
-
-/* ------------------------------------------------------------------ shell */
-
-/**
- * A bootstrap whose session hydrated to a usable, NON-disabled principal. The
- * intersection is what keeps `session` non-null for the gated dashboard below.
- */
-type ActiveSessionBootstrap = SessionBootstrap & { session: SessionMe };
-
-/**
- * The fail-closed session gate, evaluated in the SAME left-to-right order the
- * shell body used inline: a failed hydration (401/403/network) is rejected
- * first, then an absent session, then a disabled principal. Written as an
- * `x is` type guard so the narrowed non-null session survives the early return
- * into the gated dashboard.
- */
-const hasActiveSession = (
-  bootstrap: SessionBootstrap,
-): bootstrap is ActiveSessionBootstrap =>
-  bootstrap.status !== "error" &&
-  bootstrap.session !== null &&
-  !bootstrap.session.disabled;
-
-/**
- * Whether the denied panel reads "account disabled" rather than "no session":
- * true only when a session hydrated AND carries disabled=true.
- */
-const isDisabledPrincipal = (bootstrap: SessionBootstrap): boolean =>
-  bootstrap.session?.disabled ?? false;
-
-// ============================================================================
-// Purpose: Top-level SRCC shell. Hydrates the authenticated session from
-//          /session/me, then renders: a loading state while the bootstrap runs;
-//          the fail-closed <AccessDeniedState/> when hydration failed (401/403/
-//          network) OR the principal is disabled; otherwise the dashboard gated
-//          by the backend-DERIVED session.capabilities. The dev-only role
-//          selector drives the DISPLAYED label only — every capability gate
-//          comes from the session, never from the role string, so dev preview
-//          can never fabricate a capability the backend did not grant.
-// Database/ORM: None (frontend).
-// Standards: Hooks are called unconditionally before any early return. Fail
-//            closed: loading -> loading, error/disabled -> access denied.
-// Blast Radius: Authorization (UI gating). No graph projection impact detected.
-// Connections:
-//   - File: frontend/src/contexts/SessionContext.tsx -> useSessionBootstrap.
-//   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
-// ============================================================================
-export default function AppShell() {
-  const [view, setView] = useState<ViewKey>("command");
-  const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
-  // Registry "Review" navigation target: seeds TraceView's initial channel
-  // selection. Navigation-only state — carries no authorization meaning.
-  const [traceChannelId, setTraceChannelId] = useState<string | null>(null);
-
-  const sessionBootstrap = useSessionBootstrap();
-  // The tenant bootstrap only runs once the authenticated session is ready, so
-  // a loading or access-denied shell never issues a /tenants/me fetch.
-  const sessionReady = sessionBootstrap.status === "ready";
-  // previewRole is passed as the retry token: a dev role switch after a failed
-  // tenant bootstrap re-fires it (dev-only; it does not affect capabilities).
-  const { proofLabel } = useTenantBootstrap(sessionReady, previewRole);
-
-  // FIX: Clear the Registry→Trace navigation seed when leaving the trace view
-  // so that a later manual click on the Trace nav item opens a blank view
-  // instead of pre-selecting the last "Review" channel.
-  const handleViewChange = useCallback(
-    (next: ViewKey) => {
-      if (next !== "trace") setTraceChannelId(null);
-      setView(next);
-    },
-    [setView, setTraceChannelId],
-  );
-
-  if (sessionBootstrap.status === "loading") {
-    return <SessionLoadingState />;
-  }
-
-  // Fail closed: a failed hydration (401/403/network) OR an absent session OR a
-  // disabled principal renders the access-denied screen instead of any gated
-  // dashboard. hasActiveSession holds exactly that order (defined just above);
-  // isDisabledPrincipal picks the denied copy without re-reading the session.
-  if (!hasActiveSession(sessionBootstrap)) {
-    return <AccessDeniedState disabled={isDisabledPrincipal(sessionBootstrap)} />;
-  }
-
-  // Capabilities are AUTHORITATIVE from the session. The dev role selector only
-  // changes the displayed label; permissions are derived from capabilities only.
-  const displayedRole = previewRole;
-  const permissions = capabilitiesToPermissions(
-    displayedRole,
-    sessionBootstrap.session.capabilities,
-  );
-  const canViewFinance = permissions.canViewFinance;
-  const copy = VIEW_COPY[view];
-
-  return (
-    <div className="app">
-      {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
-      <Sidebar
-        view={view}
-        onSelectView={handleViewChange}
-        previewRole={previewRole}
-        onSelectPreviewRole={setPreviewRole}
-        displayedRole={displayedRole}
-        canViewFinance={canViewFinance}
-      />
-      <main className="main">
-        <Topbar
-          title={copy.title}
-          subtitle={copy.subtitle}
-          canViewFinance={canViewFinance}
-          canCreateExport={canCreateAnyExport(permissions)}
-        />
-        <ViewRouter
-          view={view}
-          permissions={permissions}
-          canViewFinance={canViewFinance}
-          displayedRole={displayedRole}
-          traceChannelId={traceChannelId}
-          onOpenTrace={(channelId) => {
-            setTraceChannelId(channelId);
-            setView("trace");
-          }}
-        />
-        {view === "command" && <WorkflowRail />}
-      </main>
-    </div>
-  );
-}
-
-/** Dev-only fixed-position tag that proves which tenant the shell resolved. */
-const TenantProofTag = ({ label }: { label: string }) => {
-  return (
-    <small
-      data-testid="tenant-proof"
-      style={{
-        position: "fixed",
-        bottom: 8,
-        right: 8,
-        fontSize: 11,
-        opacity: 0.6,
-        padding: "2px 6px",
-        borderRadius: 4,
-        background: "rgba(0,0,0,0.4)",
-        color: "#fff",
-        zIndex: 9999,
-        pointerEvents: "none",
-      }}
-    >
-      {label}
-    </small>
-  );
-};
-
 /* ------------------------------------------------------------------ sidebar */
-
-/** Primary navigation sidebar: brand mark, nav groups, and the role card. */
-const Sidebar = ({
-  view,
-  onSelectView,
-  previewRole,
-  onSelectPreviewRole,
-  displayedRole,
-  canViewFinance,
-}: {
-  view: ViewKey;
-  onSelectView: (key: ViewKey) => void;
-  previewRole: Role;
-  onSelectPreviewRole: (role: Role) => void;
-  displayedRole: Role;
-  canViewFinance: boolean;
-}) => {
-  return (
-    <aside className="sidebar" aria-label="Primary navigation">
-      <div className="brand">
-        <div className="brand-mark">
-          <BrandIcon />
-        </div>
-        <div>
-          <strong>UMS Revenue</strong>
-          <span>Control Center</span>
-        </div>
-      </div>
-
-      {NAV_GROUPS.map((group) => (
-        <NavSection
-          key={group.label}
-          group={group}
-          view={view}
-          onSelectView={onSelectView}
-        />
-      ))}
-
-      <RoleCard
-        previewRole={previewRole}
-        onSelectPreviewRole={onSelectPreviewRole}
-        displayedRole={displayedRole}
-        canViewFinance={canViewFinance}
-      />
-    </aside>
-  );
-};
 
 /** Render a single labelled navigation group with its selectable items. */
 const NavSection = ({
@@ -572,6 +372,22 @@ const NavSection = ({
         );
       })}
     </nav>
+  );
+};
+
+/**
+ * Presentation-only disclaimer rendered beneath the dev role switcher. The
+ * switcher only changes the UI's permission MODELLING; every API request still
+ * carries the fixed dev-proxy identity (VITE_DEV_GATEWAY_ROLE, injected
+ * server-side at proxy start), so backend authorization does not change when the
+ * preview role does. The hint makes that explicit so a demo viewer does not read
+ * the switcher as a real privilege change.
+ */
+const RolePreviewHint = () => {
+  return (
+    <small className="role-preview-hint" data-testid="role-preview-hint">
+      Presentation preview only — API permissions come from the dev gateway role.
+    </small>
   );
 };
 
@@ -622,23 +438,78 @@ const RoleCard = ({
   );
 };
 
-/**
- * Presentation-only disclaimer rendered beneath the dev role switcher. The
- * switcher only changes the UI's permission MODELLING; every API request still
- * carries the fixed dev-proxy identity (VITE_DEV_GATEWAY_ROLE, injected
- * server-side at proxy start), so backend authorization does not change when the
- * preview role does. The hint makes that explicit so a demo viewer does not read
- * the switcher as a real privilege change.
- */
-const RolePreviewHint = () => {
+/** Primary navigation sidebar: brand mark, nav groups, and the role card. */
+const Sidebar = ({
+  view,
+  onSelectView,
+  previewRole,
+  onSelectPreviewRole,
+  displayedRole,
+  canViewFinance,
+}: {
+  view: ViewKey;
+  onSelectView: (key: ViewKey) => void;
+  previewRole: Role;
+  onSelectPreviewRole: (role: Role) => void;
+  displayedRole: Role;
+  canViewFinance: boolean;
+}) => {
   return (
-    <small className="role-preview-hint" data-testid="role-preview-hint">
-      Presentation preview only — API permissions come from the dev gateway role.
-    </small>
+    <aside className="sidebar" aria-label="Primary navigation">
+      <div className="brand">
+        <div className="brand-mark">
+          <BrandIcon />
+        </div>
+        <div>
+          <strong>UMS Revenue</strong>
+          <span>Control Center</span>
+        </div>
+      </div>
+
+      {NAV_GROUPS.map((group) => (
+        <NavSection
+          key={group.label}
+          group={group}
+          view={view}
+          onSelectView={onSelectView}
+        />
+      ))}
+
+      <RoleCard
+        previewRole={previewRole}
+        onSelectPreviewRole={onSelectPreviewRole}
+        displayedRole={displayedRole}
+        canViewFinance={canViewFinance}
+      />
+    </aside>
   );
 };
 
 /* ------------------------------------------------------------------ topbar */
+
+/**
+ * Operational status cues for the top bar (source, bank gap, export blockers,
+ * trace). Extracted so the Topbar JSX tree stays shallow; the bank-gap value is
+ * gated behind canViewFinance so non-finance roles see the restricted sentinel.
+ */
+const OperationalCues = ({ canViewFinance }: { canViewFinance: boolean }) => {
+  return (
+    <div className="operational-cues" aria-label="Operational status">
+      <span className="cue green">
+        Source <strong>A Official</strong>
+      </span>
+      <span className="cue amber">
+        Bank gap <strong>{canViewFinance ? "$31.4K" : RESTRICTED_FINANCE_VALUE}</strong>
+      </span>
+      <span className="cue red">
+        Export blockers <strong>2</strong>
+      </span>
+      <span className="cue violet">
+        Trace <strong>SQL scoped</strong>
+      </span>
+    </div>
+  );
+};
 
 /** Page header: title, operational cues, and the report filter / export controls. */
 const Topbar = ({
@@ -686,30 +557,6 @@ const Topbar = ({
         </button>
       </div>
     </header>
-  );
-};
-
-/**
- * Operational status cues for the top bar (source, bank gap, export blockers,
- * trace). Extracted so the Topbar JSX tree stays shallow; the bank-gap value is
- * gated behind canViewFinance so non-finance roles see the restricted sentinel.
- */
-const OperationalCues = ({ canViewFinance }: { canViewFinance: boolean }) => {
-  return (
-    <div className="operational-cues" aria-label="Operational status">
-      <span className="cue green">
-        Source <strong>A Official</strong>
-      </span>
-      <span className="cue amber">
-        Bank gap <strong>{canViewFinance ? "$31.4K" : RESTRICTED_FINANCE_VALUE}</strong>
-      </span>
-      <span className="cue red">
-        Export blockers <strong>2</strong>
-      </span>
-      <span className="cue violet">
-        Trace <strong>SQL scoped</strong>
-      </span>
-    </div>
   );
 };
 
@@ -861,3 +708,158 @@ const WorkflowRail = () => {
 // reads GET /audit/events via useAuditEvents (cursor-paginated, server-driven
 // redaction). The timeline gate is canViewAudit (restricted -> no fetch); the
 // summary tiles + coverage panel stay static context (no aggregate-count route).
+
+/* ------------------------------------------------------------------ shell */
+
+/**
+ * A bootstrap whose session hydrated to a usable, NON-disabled principal. The
+ * intersection is what keeps `session` non-null for the gated dashboard below.
+ */
+type ActiveSessionBootstrap = SessionBootstrap & { session: SessionMe };
+
+/**
+ * The fail-closed session gate, evaluated in the SAME left-to-right order the
+ * shell body used inline: a failed hydration (401/403/network) is rejected
+ * first, then an absent session, then a disabled principal. Written as an
+ * `x is` type guard so the narrowed non-null session survives the early return
+ * into the gated dashboard.
+ */
+const hasActiveSession = (
+  bootstrap: SessionBootstrap,
+): bootstrap is ActiveSessionBootstrap =>
+  bootstrap.status !== "error" &&
+  bootstrap.session !== null &&
+  !bootstrap.session.disabled;
+
+/**
+ * Whether the denied panel reads "account disabled" rather than "no session":
+ * true only when a session hydrated AND carries disabled=true.
+ */
+const isDisabledPrincipal = (bootstrap: SessionBootstrap): boolean =>
+  bootstrap.session?.disabled ?? false;
+
+/** Dev-only fixed-position tag that proves which tenant the shell resolved. */
+const TenantProofTag = ({ label }: { label: string }) => {
+  return (
+    <small
+      data-testid="tenant-proof"
+      style={{
+        position: "fixed",
+        bottom: 8,
+        right: 8,
+        fontSize: 11,
+        opacity: 0.6,
+        padding: "2px 6px",
+        borderRadius: 4,
+        background: "rgba(0,0,0,0.4)",
+        color: "#fff",
+        zIndex: 9999,
+        pointerEvents: "none",
+      }}
+    >
+      {label}
+    </small>
+  );
+};
+
+// ============================================================================
+// Purpose: Top-level SRCC shell. Hydrates the authenticated session from
+//          /session/me, then renders: a loading state while the bootstrap runs;
+//          the fail-closed <AccessDeniedState/> when hydration failed (401/403/
+//          network) OR the principal is disabled; otherwise the dashboard gated
+//          by the backend-DERIVED session.capabilities. The dev-only role
+//          selector drives the DISPLAYED label only — every capability gate
+//          comes from the session, never from the role string, so dev preview
+//          can never fabricate a capability the backend did not grant.
+// Database/ORM: None (frontend).
+// Standards: Hooks are called unconditionally before any early return. Fail
+//            closed: loading -> loading, error/disabled -> access denied.
+// Blast Radius: Authorization (UI gating). No graph projection impact detected.
+// Connections:
+//   - File: frontend/src/contexts/SessionContext.tsx -> useSessionBootstrap.
+//   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
+// ============================================================================
+const AppShell = () => {
+  const [view, setView] = useState<ViewKey>("command");
+  const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
+  // Registry "Review" navigation target: seeds TraceView's initial channel
+  // selection. Navigation-only state — carries no authorization meaning.
+  const [traceChannelId, setTraceChannelId] = useState<string | null>(null);
+
+  const sessionBootstrap = useSessionBootstrap();
+  // The tenant bootstrap only runs once the authenticated session is ready, so
+  // a loading or access-denied shell never issues a /tenants/me fetch.
+  const sessionReady = sessionBootstrap.status === "ready";
+  // previewRole is passed as the retry token: a dev role switch after a failed
+  // tenant bootstrap re-fires it (dev-only; it does not affect capabilities).
+  const { proofLabel } = useTenantBootstrap(sessionReady, previewRole);
+
+  // FIX: Clear the Registry→Trace navigation seed when leaving the trace view
+  // so that a later manual click on the Trace nav item opens a blank view
+  // instead of pre-selecting the last "Review" channel.
+  const handleViewChange = useCallback(
+    (next: ViewKey) => {
+      if (next !== "trace") setTraceChannelId(null);
+      setView(next);
+    },
+    [setView, setTraceChannelId],
+  );
+
+  if (sessionBootstrap.status === "loading") {
+    return <SessionLoadingState />;
+  }
+
+  // Fail closed: a failed hydration (401/403/network) OR an absent session OR a
+  // disabled principal renders the access-denied screen instead of any gated
+  // dashboard. hasActiveSession holds exactly that order (defined just above);
+  // isDisabledPrincipal picks the denied copy without re-reading the session.
+  if (!hasActiveSession(sessionBootstrap)) {
+    return <AccessDeniedState disabled={isDisabledPrincipal(sessionBootstrap)} />;
+  }
+
+  // Capabilities are AUTHORITATIVE from the session. The dev role selector only
+  // changes the displayed label; permissions are derived from capabilities only.
+  const displayedRole = previewRole;
+  const permissions = capabilitiesToPermissions(
+    displayedRole,
+    sessionBootstrap.session.capabilities,
+  );
+  const canViewFinance = permissions.canViewFinance;
+  const copy = VIEW_COPY[view];
+
+  return (
+    <div className="app">
+      {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
+      <Sidebar
+        view={view}
+        onSelectView={handleViewChange}
+        previewRole={previewRole}
+        onSelectPreviewRole={setPreviewRole}
+        displayedRole={displayedRole}
+        canViewFinance={canViewFinance}
+      />
+      <main className="main">
+        <Topbar
+          title={copy.title}
+          subtitle={copy.subtitle}
+          canViewFinance={canViewFinance}
+          canCreateExport={canCreateAnyExport(permissions)}
+        />
+        <ViewRouter
+          view={view}
+          permissions={permissions}
+          canViewFinance={canViewFinance}
+          displayedRole={displayedRole}
+          traceChannelId={traceChannelId}
+          onOpenTrace={(channelId) => {
+            setTraceChannelId(channelId);
+            setView("trace");
+          }}
+        />
+        {view === "command" && <WorkflowRail />}
+      </main>
+    </div>
+  );
+};
+
+export default AppShell;

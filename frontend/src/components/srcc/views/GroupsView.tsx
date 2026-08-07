@@ -59,63 +59,6 @@ const describeMutationError = (err: unknown): string => {
   return err instanceof Error ? err.message : String(err);
 };
 
-// ---- Root component ---------------------------------------------------------
-
-/**
- * The real-data channel groups view. useGroups() is called ONCE here and threaded
- * down. Row actions set the single open-panel target ({groupId, kind}); opening
- * another closes the previous. Successful mutations reload the group list.
- */
-export const GroupsView = ({ canManageGroups }: { canManageGroups: boolean }) => {
-  const groupState = useGroups();
-  const [panel, setPanel] = useState<PanelTarget | null>(null);
-  // The picker selection (a content owner's account id) + whether the sync
-  // stepper is open. Both live here: the stepper needs the selected owner, and
-  // opening it replaces the table. Only a manager renders the header controls, so
-  // syncOpen can only ever become true for a manager.
-  const [selectedOwnerId, setSelectedOwnerId] = useState("");
-  const [syncOpen, setSyncOpen] = useState(false);
-
-  return (
-    <section className="view-page" aria-labelledby="groupsTitle">
-      <section className="panel">
-        {canManageGroups ? (
-          <GroupsSyncHeader
-            selectedOwnerId={selectedOwnerId}
-            onSelectOwner={setSelectedOwnerId}
-            onStartSync={() => {
-              setPanel(null);
-              setSyncOpen(true);
-            }}
-            syncDisabled={syncOpen}
-          />
-        ) : (
-          <GroupsPanelHeader />
-        )}
-        {syncOpen ? (
-          <GroupsSyncFlow
-            contentOwnerId={selectedOwnerId}
-            onCancel={() => setSyncOpen(false)}
-            onDone={() => {
-              setSyncOpen(false);
-              groupState.reload();
-            }}
-          />
-        ) : (
-          <GroupsTable
-            canManageGroups={canManageGroups}
-            groupState={groupState}
-            panel={panel}
-            onOpenPanel={setPanel}
-            onClosePanel={() => setPanel(null)}
-            onMutated={groupState.reload}
-          />
-        )}
-      </section>
-    </section>
-  );
-};
-
 /** Read-only groups header (no sync controls): title + subtitle only. Rendered
  * for a viewer who cannot manage groups, so the sync affordance stays hidden. */
 const GroupsPanelHeader = () => {
@@ -280,64 +223,6 @@ const groupsErrorRow = (error: unknown) => {
   );
 };
 
-/**
- * Channel groups data table. Handles loading, error (403 -> no-permission row),
- * empty, and loaded states, mirroring RegistryTable. Renders the bespoke group
- * rows (OutcomeTable is for the sync diff, not this steady-state table).
- */
-const GroupsTable = ({
-  canManageGroups,
-  groupState,
-  panel,
-  onOpenPanel,
-  onClosePanel,
-  onMutated,
-}: GroupTableProps) => {
-  const { data: groups, error } = groupState;
-
-  if (error) {
-    return <GroupsTableShell role="alert">{groupsErrorRow(error)}</GroupsTableShell>;
-  }
-
-  if (!groups) {
-    return (
-      <GroupsTableShell busy>
-        <GroupsTableMessageRow
-          title="Loading groups…"
-          sub="Reading the channel-group registry"
-        />
-      </GroupsTableShell>
-    );
-  }
-
-  if (groups.length === 0) {
-    return (
-      <GroupsTableShell>
-        <GroupsTableMessageRow
-          title="No groups yet"
-          sub="Import a roster, then sync your content owner's groups."
-        />
-      </GroupsTableShell>
-    );
-  }
-
-  return (
-    <GroupsTableShell>
-      {groups.map((group) => (
-        <GroupRow
-          key={group.id}
-          group={group}
-          canManageGroups={canManageGroups}
-          panelOpen={panel?.groupId === group.id ? panel.kind : null}
-          onOpenPanel={onOpenPanel}
-          onClosePanel={onClosePanel}
-          onMutated={onMutated}
-        />
-      ))}
-    </GroupsTableShell>
-  );
-};
-
 /** The table-wrap + labelled table + header shell shared by every table state. */
 const GroupsTableShell = ({
   role,
@@ -374,66 +259,6 @@ type GroupRowProps = {
  */
 const GroupIdCell = ({ id, nullMarker }: { id: string | null; nullMarker: ReactNode }) => {
   return <td>{id === null ? nullMarker : <span className="code-chip">{id}</span>}</td>;
-};
-
-/**
- * A single channel-group row. Derives every display cell from the API shape and,
- * when its action panel is open, renders the inline confirm panel as a full-width
- * row directly beneath it (component-local; no portal/modal).
- */
-const GroupRow = ({
-  group,
-  canManageGroups,
-  panelOpen,
-  onOpenPanel,
-  onClosePanel,
-  onMutated,
-}: GroupRowProps) => {
-  const memberCount = group.channel_ids.length;
-  return (
-    <>
-      <tr>
-        <td>{group.name}</td>
-        <GroupIdCell
-          id={group.cms_group_id}
-          nullMarker={<span className="muted">manual</span>}
-        />
-        <GroupIdCell
-          id={group.content_owner_id}
-          nullMarker={
-            // Distinct marker: a NULL stamp is adoptable by the next sync.
-            <span className="badge amber" data-testid="owner-unstamped">
-              unstamped
-            </span>
-          }
-        />
-        <td>{memberCount}</td>
-        <td>
-          {group.active ? "active" : <span className="muted">archived</span>}
-        </td>
-        <td>
-          {canManageGroups ? (
-            <GroupRowActions
-              group={group}
-              onOpenPanel={onOpenPanel}
-            />
-          ) : null}
-        </td>
-      </tr>
-      {canManageGroups && panelOpen ? (
-        <tr>
-          <td colSpan={6}>
-            <GroupActionPanel
-              group={group}
-              kind={panelOpen}
-              onClose={onClosePanel}
-              onMutated={onMutated}
-            />
-          </td>
-        </tr>
-      ) : null}
-    </>
-  );
 };
 
 /** The row's action buttons: Clear stamp (only when stamped) + Archive/Restore. */
@@ -592,5 +417,180 @@ const GroupActionPanel = ({
         </button>
       </div>
     </div>
+  );
+};
+
+/**
+ * A single channel-group row. Derives every display cell from the API shape and,
+ * when its action panel is open, renders the inline confirm panel as a full-width
+ * row directly beneath it (component-local; no portal/modal).
+ */
+const GroupRow = ({
+  group,
+  canManageGroups,
+  panelOpen,
+  onOpenPanel,
+  onClosePanel,
+  onMutated,
+}: GroupRowProps) => {
+  const memberCount = group.channel_ids.length;
+  return (
+    <>
+      <tr>
+        <td>{group.name}</td>
+        <GroupIdCell
+          id={group.cms_group_id}
+          nullMarker={<span className="muted">manual</span>}
+        />
+        <GroupIdCell
+          id={group.content_owner_id}
+          nullMarker={
+            // Distinct marker: a NULL stamp is adoptable by the next sync.
+            <span className="badge amber" data-testid="owner-unstamped">
+              unstamped
+            </span>
+          }
+        />
+        <td>{memberCount}</td>
+        <td>
+          {group.active ? "active" : <span className="muted">archived</span>}
+        </td>
+        <td>
+          {canManageGroups ? (
+            <GroupRowActions
+              group={group}
+              onOpenPanel={onOpenPanel}
+            />
+          ) : null}
+        </td>
+      </tr>
+      {canManageGroups && panelOpen ? (
+        <tr>
+          <td colSpan={6}>
+            <GroupActionPanel
+              group={group}
+              kind={panelOpen}
+              onClose={onClosePanel}
+              onMutated={onMutated}
+            />
+          </td>
+        </tr>
+      ) : null}
+    </>
+  );
+};
+
+/**
+ * Channel groups data table. Handles loading, error (403 -> no-permission row),
+ * empty, and loaded states, mirroring RegistryTable. Renders the bespoke group
+ * rows (OutcomeTable is for the sync diff, not this steady-state table).
+ */
+const GroupsTable = ({
+  canManageGroups,
+  groupState,
+  panel,
+  onOpenPanel,
+  onClosePanel,
+  onMutated,
+}: GroupTableProps) => {
+  const { data: groups, error } = groupState;
+
+  if (error) {
+    return <GroupsTableShell role="alert">{groupsErrorRow(error)}</GroupsTableShell>;
+  }
+
+  if (!groups) {
+    return (
+      <GroupsTableShell busy>
+        <GroupsTableMessageRow
+          title="Loading groups…"
+          sub="Reading the channel-group registry"
+        />
+      </GroupsTableShell>
+    );
+  }
+
+  if (groups.length === 0) {
+    return (
+      <GroupsTableShell>
+        <GroupsTableMessageRow
+          title="No groups yet"
+          sub="Import a roster, then sync your content owner's groups."
+        />
+      </GroupsTableShell>
+    );
+  }
+
+  return (
+    <GroupsTableShell>
+      {groups.map((group) => (
+        <GroupRow
+          key={group.id}
+          group={group}
+          canManageGroups={canManageGroups}
+          panelOpen={panel?.groupId === group.id ? panel.kind : null}
+          onOpenPanel={onOpenPanel}
+          onClosePanel={onClosePanel}
+          onMutated={onMutated}
+        />
+      ))}
+    </GroupsTableShell>
+  );
+};
+
+// ---- Root component ---------------------------------------------------------
+
+/**
+ * The real-data channel groups view. useGroups() is called ONCE here and threaded
+ * down. Row actions set the single open-panel target ({groupId, kind}); opening
+ * another closes the previous. Successful mutations reload the group list.
+ */
+export const GroupsView = ({ canManageGroups }: { canManageGroups: boolean }) => {
+  const groupState = useGroups();
+  const [panel, setPanel] = useState<PanelTarget | null>(null);
+  // The picker selection (a content owner's account id) + whether the sync
+  // stepper is open. Both live here: the stepper needs the selected owner, and
+  // opening it replaces the table. Only a manager renders the header controls, so
+  // syncOpen can only ever become true for a manager.
+  const [selectedOwnerId, setSelectedOwnerId] = useState("");
+  const [syncOpen, setSyncOpen] = useState(false);
+
+  return (
+    <section className="view-page" aria-labelledby="groupsTitle">
+      <section className="panel">
+        {canManageGroups ? (
+          <GroupsSyncHeader
+            selectedOwnerId={selectedOwnerId}
+            onSelectOwner={setSelectedOwnerId}
+            onStartSync={() => {
+              setPanel(null);
+              setSyncOpen(true);
+            }}
+            syncDisabled={syncOpen}
+          />
+        ) : (
+          <GroupsPanelHeader />
+        )}
+        {syncOpen ? (
+          <GroupsSyncFlow
+            contentOwnerId={selectedOwnerId}
+            onCancel={() => setSyncOpen(false)}
+            onDone={() => {
+              setSyncOpen(false);
+              groupState.reload();
+            }}
+          />
+        ) : (
+          <GroupsTable
+            canManageGroups={canManageGroups}
+            groupState={groupState}
+            panel={panel}
+            onOpenPanel={setPanel}
+            onClosePanel={() => setPanel(null)}
+            onMutated={groupState.reload}
+          />
+        )}
+      </section>
+    </section>
   );
 };
