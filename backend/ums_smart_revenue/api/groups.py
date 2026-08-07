@@ -150,9 +150,9 @@ def _audit_event_response(record: AuditRecord) -> GroupAuditEventResponse:
 class ClearContentOwnerResponse(BaseModel):
     """Typed response for DELETE /groups/{group_id}/content-owner.
 
-    The general group view (``ChannelGroupEntry.to_api``) omits
-    ``content_owner_id``, but it is this route's entire outcome, so the model
-    declares it explicitly alongside the group fields and the audit event.
+    ``to_api`` now carries ``content_owner_id`` on every group response; this
+    model still declares it explicitly because the field is this route's
+    entire outcome, alongside the audit event.
     """
 
     id: str
@@ -428,10 +428,10 @@ def clear_group_content_owner(
             detail=f"group {group_id} has no content-owner stamp to clear",
         ) from exc
     group = cleared.group
-    # content_owner_id is declared on the model but absent from to_api() (it is
-    # not part of the general group view), yet this route's entire outcome IS
-    # that field. It comes from the domain call's post-write group rather than
-    # from the None we asked for.
+    # content_owner_id is on every to_api() response now, but this route's
+    # entire outcome IS that field, so the model still declares it explicitly
+    # alongside the audit event. It comes from the domain call's post-write
+    # group rather than from the None we asked for.
     return ClearContentOwnerResponse(
         id=group.id,
         name=group.name,

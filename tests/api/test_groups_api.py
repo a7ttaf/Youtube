@@ -615,6 +615,35 @@ def test_list_groups_endpoint_keeps_deactivated_member_in_authz_check(tmp_path):
     assert str(GROUP_MIXED_ID) in visible_ids
 
 
+def test_list_groups_carries_content_owner_id(tmp_path):
+    """GET /groups surfaces content_owner_id per group for the Groups view owner column.
+
+    A CMS-synced, owner-stamped group reports its stamp; a plain manual group
+    (never touched by import or sync) reports None rather than omitting the key.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_synced_group(
+        database_url,
+        name="TV Sector",
+        cms_group_id="cms-tv-sector",
+        content_owner_id="COabc",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/groups",
+        headers=auth_headers("corporate_admin", "global"),
+    )
+
+    assert response.status_code == 200
+    by_name = {group["name"]: group for group in response.json()}
+    assert by_name["TV Sector"]["content_owner_id"] == "COabc"
+    # "TV Brand Group" comes from seed_database() plain (no cms_group_id, no
+    # content_owner_id) — the "manual group" case.
+    assert by_name["TV Brand Group"]["content_owner_id"] is None
+
+
 def test_sql_group_add_members_treats_duplicate_race_as_idempotent(tmp_path, monkeypatch):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
