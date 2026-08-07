@@ -5,7 +5,7 @@ import type { ChannelGroupApiEntry } from "@/lib/api/types";
 import { useGroups } from "@/lib/api/useGroups";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) { // skipcq: JS-0067
+function wrapper({ children }: { children: React.ReactNode }) {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
 }
 
@@ -32,25 +32,25 @@ const GROUPS: ChannelGroupApiEntry[] = [
   },
 ];
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function fetchMock() { // skipcq: JS-0067
+function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
+function urlOf(input: unknown): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
 }
 
-function requireFetchArgs() { // skipcq: JS-0067
+function requireFetchArgs() {
   const args = fetchMock().mock.calls.at(-1);
   if (!args) throw new Error("expected fetch to have been called");
   return args;

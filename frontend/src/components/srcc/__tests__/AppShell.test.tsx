@@ -48,7 +48,7 @@ afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
 });
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
@@ -78,25 +78,25 @@ const NET_REVENUE_BODY = {
   audit_events: [],
 };
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
+function urlOf(input: unknown): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
 }
 
-function isTenantCall(input: unknown): boolean { // skipcq: JS-0067
+function isTenantCall(input: unknown): boolean {
   return urlOf(input).includes("/tenants/me");
 }
 
-function isSessionCall(input: unknown): boolean { // skipcq: JS-0067
+function isSessionCall(input: unknown): boolean {
   return urlOf(input).includes("/session/me");
 }
 
 // Route fetch by URL: /session/me -> a ready full-capability session (so the
 // dashboard renders), /tenants/me -> the provided tenant responder, everything
 // else (the wired CommandView net-revenue call) -> a neutral net-revenue body.
-function routeFetch(tenantResponder: () => Response) { // skipcq: JS-0067
+function routeFetch(tenantResponder: () => Response) {
   return (input: unknown) => {
     if (isSessionCall(input)) return Promise.resolve(jsonResponse(FULL_SESSION));
     if (isTenantCall(input)) return Promise.resolve(tenantResponder());
@@ -104,7 +104,7 @@ function routeFetch(tenantResponder: () => Response) { // skipcq: JS-0067
   };
 }
 
-function tenantFetchCalls() { // skipcq: JS-0067
+function tenantFetchCalls() {
   const mock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
   return mock.mock.calls.filter(([input]) => isTenantCall(input));
 }
@@ -305,7 +305,7 @@ describe("AppShell tenant proof tag", () => {
 
 // Build a /session/me body from a capability override + flags. Defaults to all
 // capabilities false so each test opts INTO exactly the capabilities it asserts.
-function sessionBody( // skipcq: JS-0067
+function sessionBody(
   capabilities: Partial<SessionMe["capabilities"]> = {},
   overrides: Partial<SessionMe> = {},
 ): SessionMe {
@@ -382,7 +382,7 @@ const routeFetchWithSession = (sessionResponder: () => Response) => {
   };
 };
 
-function renderShell() { // skipcq: JS-0067
+function renderShell() {
   return render(
     <SessionProvider>
       <TenantProvider initialSlug="ums">

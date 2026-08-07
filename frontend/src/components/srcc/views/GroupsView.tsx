@@ -66,7 +66,7 @@ const describeMutationError = (err: unknown): string => {
  * down. Row actions set the single open-panel target ({groupId, kind}); opening
  * another closes the previous. Successful mutations reload the group list.
  */
-export function GroupsView({ canManageGroups }: { canManageGroups: boolean }) { // skipcq: JS-0067
+export function GroupsView({ canManageGroups }: { canManageGroups: boolean }) {
   const groupState = useGroups();
   const [panel, setPanel] = useState<PanelTarget | null>(null);
   // The picker selection (a content owner's account id) + whether the sync
@@ -118,7 +118,7 @@ export function GroupsView({ canManageGroups }: { canManageGroups: boolean }) { 
 
 /** Read-only groups header (no sync controls): title + subtitle only. Rendered
  * for a viewer who cannot manage groups, so the sync affordance stays hidden. */
-function GroupsPanelHeader() { // skipcq: JS-0067
+function GroupsPanelHeader() {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -181,7 +181,7 @@ type GroupsSyncHeaderProps = {
  * stepper is already open; per the fail-closed house rule it renders only for a
  * manager (this component), never as a disabled control for a read-only viewer.
  */
-function GroupsSyncHeader({ // skipcq: JS-0067
+function GroupsSyncHeader({
   selectedOwnerId,
   onSelectOwner,
   onStartSync,
@@ -237,7 +237,7 @@ type GroupTableProps = {
 };
 
 /** Column header row. Extracted to keep nesting shallow. */
-function GroupsTableHead() { // skipcq: JS-0067
+function GroupsTableHead() {
   return (
     <thead>
       <tr>
@@ -249,7 +249,7 @@ function GroupsTableHead() { // skipcq: JS-0067
 }
 
 /** Single-row message cell inside the groups table shell (loading, error, empty). */
-function GroupsTableMessageRow({ title, sub }: { title: string; sub: string }) { // skipcq: JS-0067
+function GroupsTableMessageRow({ title, sub }: { title: string; sub: string }) {
   return (
     <tr>
       <td colSpan={6}>
@@ -261,7 +261,7 @@ function GroupsTableMessageRow({ title, sub }: { title: string; sub: string }) {
 }
 
 /** Error message row: 403 -> no-permission copy; else status + verbatim detail. */
-function groupsErrorRow(error: unknown) { // skipcq: JS-0067
+function groupsErrorRow(error: unknown) {
   const isApi = error instanceof ApiError;
   const status = isApi ? error.status : null;
   if (status === 403) {
@@ -285,7 +285,7 @@ function groupsErrorRow(error: unknown) { // skipcq: JS-0067
  * empty, and loaded states, mirroring RegistryTable. Renders the bespoke group
  * rows (OutcomeTable is for the sync diff, not this steady-state table).
  */
-function GroupsTable({ // skipcq: JS-0067
+function GroupsTable({
   canManageGroups,
   groupState,
   panel,
@@ -339,7 +339,7 @@ function GroupsTable({ // skipcq: JS-0067
 }
 
 /** The table-wrap + labelled table + header shell shared by every table state. */
-function GroupsTableShell({ // skipcq: JS-0067
+function GroupsTableShell({
   role,
   busy,
   children,
@@ -372,7 +372,7 @@ type GroupRowProps = {
  * when its action panel is open, renders the inline confirm panel as a full-width
  * row directly beneath it (component-local; no portal/modal).
  */
-function GroupRow({ // skipcq: JS-0067
+function GroupRow({
   group,
   canManageGroups,
   panelOpen,
@@ -432,7 +432,7 @@ function GroupRow({ // skipcq: JS-0067
 }
 
 /** The row's action buttons: Clear stamp (only when stamped) + Archive/Restore. */
-function GroupRowActions({ // skipcq: JS-0067
+function GroupRowActions({
   group,
   onOpenPanel,
 }: {
@@ -498,7 +498,7 @@ function panelCopy(
  * click burst records one audit event. On success it reloads the list and closes;
  * an ApiError surfaces inline (backend detail verbatim) with the panel kept open.
  */
-function GroupActionPanel({ // skipcq: JS-0067
+function GroupActionPanel({
   group,
   kind,
   onClose,

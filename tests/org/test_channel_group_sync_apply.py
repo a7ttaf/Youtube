@@ -71,22 +71,22 @@ class _RecordingGroupRegistry(ChannelGroupRegistry):
     def create_group(self, **kwargs: object) -> ChannelGroupEntry:
         """Record and delegate the group creation."""
         self.writes.append("create_group")
-        return super().create_group(**kwargs)  # type: ignore[arg-type]
+        return super().create_group(**kwargs)
 
     def update_group(self, **kwargs: object) -> ChannelGroupEntry:
         """Record and delegate the name/active update."""
         self.writes.append("update_group")
-        return super().update_group(**kwargs)  # type: ignore[arg-type]
+        return super().update_group(**kwargs)
 
     def add_members(self, **kwargs: object) -> ChannelGroupEntry:
         """Record and delegate the membership addition."""
         self.writes.append("add_members")
-        return super().add_members(**kwargs)  # type: ignore[arg-type]
+        return super().add_members(**kwargs)
 
     def remove_member(self, **kwargs: object) -> ChannelGroupEntry:
         """Record and delegate the membership removal."""
         self.writes.append("remove_member")
-        return super().remove_member(**kwargs)  # type: ignore[arg-type]
+        return super().remove_member(**kwargs)
 
 
 def _entry(**overrides: object) -> GroupSyncPlanEntry:
@@ -106,7 +106,7 @@ def _entry(**overrides: object) -> GroupSyncPlanEntry:
         "upstream_present": True,
     }
     defaults.update(overrides)
-    return GroupSyncPlanEntry(**defaults)  # type: ignore[arg-type]
+    return GroupSyncPlanEntry(**defaults)
 
 
 def _plan(*entries: GroupSyncPlanEntry, counts: dict[str, int] | None = None) -> GroupSyncPlan:
@@ -149,7 +149,7 @@ def _seeded(**overrides: object) -> _RecordingGroupRegistry:
         "content_owner_id": CONTENT_OWNER,
     }
     defaults.update(overrides)
-    registry = _RecordingGroupRegistry([ChannelGroupEntry(**defaults)])  # type: ignore[arg-type]
+    registry = _RecordingGroupRegistry([ChannelGroupEntry(**defaults)])
     return registry
 
 
@@ -821,7 +821,7 @@ def test_realistic_member_lookup_is_one_atomic_read() -> None:
     registry = _RecordingChannelRegistry(member_ids, content_owner_id=CONTENT_OWNER)
 
     known = _known_member_channel_ids(
-        registry,  # type: ignore[arg-type]
+        registry,
         member_ids=member_ids,
         content_owner_id=CONTENT_OWNER,
     )
@@ -848,7 +848,7 @@ def test_member_lookup_is_chunked_under_the_bind_parameter_cap() -> None:
     registry = _RecordingChannelRegistry(member_ids, content_owner_id=CONTENT_OWNER)
 
     known = _known_member_channel_ids(
-        registry,  # type: ignore[arg-type]
+        registry,
         member_ids=member_ids,
         content_owner_id=CONTENT_OWNER,
     )

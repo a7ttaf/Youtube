@@ -38,7 +38,7 @@ export type OutcomeTableProps = {
 };
 
 /** Render the column header row — one <th> per column, in order. */
-function OutcomeTableHead({ columns }: { columns: string[] }) { // skipcq: JS-0067
+function OutcomeTableHead({ columns }: { columns: string[] }) {
   return (
     <thead>
       <tr>
@@ -51,7 +51,7 @@ function OutcomeTableHead({ columns }: { columns: string[] }) { // skipcq: JS-00
 }
 
 /** Single full-width message row shown when there are no data rows. */
-function OutcomeTableEmptyRow({ columnCount, emptyLabel }: { // skipcq: JS-0067
+function OutcomeTableEmptyRow({ columnCount, emptyLabel }: {
   columnCount: number;
   emptyLabel: string;
 }) {
@@ -65,7 +65,7 @@ function OutcomeTableEmptyRow({ columnCount, emptyLabel }: { // skipcq: JS-0067
 }
 
 /** A single data row: the caller's cells in order, with data-tone when set. */
-function OutcomeTableRowView({ row }: { row: OutcomeTableRow }) { // skipcq: JS-0067
+function OutcomeTableRowView({ row }: { row: OutcomeTableRow }) {
   return (
     <tr data-tone={row.tone}>
       {row.cells.map((cell, index) => (
@@ -80,7 +80,7 @@ function OutcomeTableRowView({ row }: { row: OutcomeTableRow }) { // skipcq: JS-
  * `rows` array renders exactly one full-width message row (never an empty
  * tbody) so the diff view always shows an explicit state.
  */
-export function OutcomeTable({ columns, rows, emptyLabel }: OutcomeTableProps) { // skipcq: JS-0067
+export function OutcomeTable({ columns, rows, emptyLabel }: OutcomeTableProps) {
   return (
     <div className="table-wrap">
       <table>

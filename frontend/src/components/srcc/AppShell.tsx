@@ -75,7 +75,7 @@ const DEFAULT_PREVIEW_ROLE: Role = "assistant";
 // Standards: Dev preview is presentation only; capabilities stay backend-derived.
 // Blast Radius: Authorization (UI label only — never grants a capability).
 // ============================================================================
-function canPreviewRoles(): boolean { // skipcq: JS-0067
+function canPreviewRoles(): boolean {
   return (
     import.meta.env.DEV || import.meta.env.VITE_ENABLE_ROLE_PREVIEW === "true"
   );
@@ -108,7 +108,7 @@ function canPreviewRoles(): boolean { // skipcq: JS-0067
 //   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> canRunConnectors,
 //     canManageConnectors.
 // ============================================================================
-function capabilitiesToPermissions( // skipcq: JS-0067
+function capabilitiesToPermissions(
   role: Role,
   capabilities: SessionCapabilities,
 ): AccessPermissions {
@@ -151,7 +151,7 @@ function capabilitiesToPermissions( // skipcq: JS-0067
  * Report whether the viewer may create any export variant (global, scoped, or
  * raw), used to enable the header Create Export action.
  */
-function canCreateAnyExport(permissions: AccessPermissions) { // skipcq: JS-0067
+function canCreateAnyExport(permissions: AccessPermissions) {
   return (
     permissions.canCreateGlobalExports ||
     permissions.canCreateScopedExports ||
@@ -167,7 +167,7 @@ function canCreateAnyExport(permissions: AccessPermissions) { // skipcq: JS-0067
  * hydrated (401/403/network) or the principal is disabled. The detail copy
  * distinguishes a disabled principal from a failed/absent session.
  */
-function AccessDeniedState({ disabled = false }: { disabled?: boolean }) { // skipcq: JS-0067
+function AccessDeniedState({ disabled = false }: { disabled?: boolean }) {
   return (
     <div className="app">
       <main className="main" aria-labelledby="accessDeniedTitle">
@@ -180,7 +180,7 @@ function AccessDeniedState({ disabled = false }: { disabled?: boolean }) { // sk
 }
 
 /** Panel header for the access-denied state, kept flat to limit JSX nesting. */
-function AccessDeniedHeader({ disabled }: { disabled: boolean }) { // skipcq: JS-0067
+function AccessDeniedHeader({ disabled }: { disabled: boolean }) {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -197,7 +197,7 @@ function AccessDeniedHeader({ disabled }: { disabled: boolean }) { // skipcq: JS
 }
 
 /** Panel body shown while the one-shot /session/me bootstrap is in flight. */
-function SessionLoadingPanelContent() { // skipcq: JS-0067
+function SessionLoadingPanelContent() {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -210,7 +210,7 @@ function SessionLoadingPanelContent() { // skipcq: JS-0067
 }
 
 /** Render the loading panel shown while the one-shot /session/me bootstrap runs. */
-function SessionLoadingState() { // skipcq: JS-0067
+function SessionLoadingState() {
   return (
     <div className="app">
       <main className="main" aria-labelledby="sessionLoadingTitle" aria-busy="true">
@@ -253,7 +253,7 @@ type TenantBootstrap = {
  * changes after a failure, re-fires the bootstrap so a transient 5xx is not
  * permanent.
  */
-function useTenantBootstrap( // skipcq: JS-0067
+function useTenantBootstrap(
   enabled: boolean,
   retryToken: string,
 ): TenantBootstrap {
@@ -293,7 +293,7 @@ function useTenantBootstrap( // skipcq: JS-0067
  * Extract the trimmed `detail` string from a typed ApiError JSON body, or null
  * when the body has no usable detail message.
  */
-function apiErrorDetail(error: ApiError | Error | null): string | null { // skipcq: JS-0067, JS-R1005
+function apiErrorDetail(error: ApiError | Error | null): string | null {
   if (
     error instanceof ApiError &&
     typeof error.body === "object" &&
@@ -310,7 +310,7 @@ function apiErrorDetail(error: ApiError | Error | null): string | null { // skip
  * Build the dev-only tenant proof label from the hydrated tenant context and
  * any bootstrap error, covering the loading, success, and failure states.
  */
-function tenantProofLabel( // skipcq: JS-0067
+function tenantProofLabel(
   tenant: ReturnType<typeof useTenant>,
   tenantError: ApiError | Error | null,
 ): string {
@@ -348,7 +348,7 @@ function tenantProofLabel( // skipcq: JS-0067
 //   - File: frontend/src/contexts/SessionContext.tsx -> useSessionBootstrap.
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
 // ============================================================================
-export default function AppShell() { // skipcq: JS-0067, JS-R1005
+export default function AppShell() {
   const [view, setView] = useState<ViewKey>("command");
   const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
   // Registry "Review" navigation target: seeds TraceView's initial channel
@@ -434,7 +434,7 @@ export default function AppShell() { // skipcq: JS-0067, JS-R1005
 }
 
 /** Dev-only fixed-position tag that proves which tenant the shell resolved. */
-function TenantProofTag({ label }: { label: string }) { // skipcq: JS-0067
+function TenantProofTag({ label }: { label: string }) {
   return (
     <small
       data-testid="tenant-proof"
@@ -460,7 +460,7 @@ function TenantProofTag({ label }: { label: string }) { // skipcq: JS-0067
 /* ------------------------------------------------------------------ sidebar */
 
 /** Primary navigation sidebar: brand mark, nav groups, and the role card. */
-function Sidebar({ // skipcq: JS-0067
+function Sidebar({
   view,
   onSelectView,
   previewRole,
@@ -507,7 +507,7 @@ function Sidebar({ // skipcq: JS-0067
 }
 
 /** Render a single labelled navigation group with its selectable items. */
-function NavSection({ // skipcq: JS-0067
+function NavSection({
   group,
   view,
   onSelectView,
@@ -540,7 +540,7 @@ function NavSection({ // skipcq: JS-0067
 }
 
 /** Role selector (preview) plus the finance-visibility permission indicators. */
-function RoleCard({ // skipcq: JS-0067
+function RoleCard({
   previewRole,
   onSelectPreviewRole,
   displayedRole,
@@ -594,7 +594,7 @@ function RoleCard({ // skipcq: JS-0067
  * preview role does. The hint makes that explicit so a demo viewer does not read
  * the switcher as a real privilege change.
  */
-function RolePreviewHint() { // skipcq: JS-0067
+function RolePreviewHint() {
   return (
     <small className="role-preview-hint" data-testid="role-preview-hint">
       Presentation preview only — API permissions come from the dev gateway role.
@@ -605,7 +605,7 @@ function RolePreviewHint() { // skipcq: JS-0067
 /* ------------------------------------------------------------------ topbar */
 
 /** Page header: title, operational cues, and the report filter / export controls. */
-function Topbar({ // skipcq: JS-0067
+function Topbar({
   title,
   subtitle,
   canViewFinance,
@@ -658,7 +658,7 @@ function Topbar({ // skipcq: JS-0067
  * trace). Extracted so the Topbar JSX tree stays shallow; the bank-gap value is
  * gated behind canViewFinance so non-finance roles see the restricted sentinel.
  */
-function OperationalCues({ canViewFinance }: { canViewFinance: boolean }) { // skipcq: JS-0067
+function OperationalCues({ canViewFinance }: { canViewFinance: boolean }) {
   return (
     <div className="operational-cues" aria-label="Operational status">
       <span className="cue green">
@@ -680,7 +680,7 @@ function OperationalCues({ canViewFinance }: { canViewFinance: boolean }) { // s
 /* ------------------------------------------------------------------ view router */
 
 /** Route the active view key to its wired or mock view with the right props. */
-function ViewRouter({ // skipcq: JS-0067, JS-R1005
+function ViewRouter({
   view,
   permissions,
   canViewFinance,
@@ -755,7 +755,7 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
 // and is wired to GET /revenue/months/{month}/net-revenue via useNetRevenue.
 
 /** Month-close workflow rail shown beneath the Command view. */
-function WorkflowRail() { // skipcq: JS-0067
+function WorkflowRail() {
   return (
     <footer className="workflow" aria-label="Month close workflow">
       <div className="workflow-label">

@@ -39,7 +39,7 @@ import type {
 //       update_group -> PATCH /groups/{id}.
 // ============================================================================
 
-export function useGroupSyncAction(): ( // skipcq: JS-0067
+export function useGroupSyncAction(): (
   args: {
     contentOwnerId: string;
     dryRun: boolean;
@@ -58,7 +58,7 @@ export function useGroupSyncAction(): ( // skipcq: JS-0067
   );
 }
 
-export function useClearOwnerStampAction(): ( // skipcq: JS-0067
+export function useClearOwnerStampAction(): (
   args: {
     groupId: string;
     reason: string;
@@ -74,7 +74,7 @@ export function useClearOwnerStampAction(): ( // skipcq: JS-0067
   );
 }
 
-export function useGroupArchiveAction(): ( // skipcq: JS-0067
+export function useGroupArchiveAction(): (
   args: {
     groupId: string;
     active: boolean;

@@ -48,7 +48,7 @@ import { Badge } from "../shared";
  * a reason). Extracted here so the sync Reason step and the table's row confirm
  * panels (GroupsView) validate identically instead of each inlining the rule.
  */
-export function isValidAuditReason(reason: string): boolean { // skipcq: JS-0067
+export function isValidAuditReason(reason: string): boolean {
   return reason.trim() !== "" && !reason.includes("\u0000");
 }
 
@@ -58,7 +58,7 @@ export function isValidAuditReason(reason: string): boolean { // skipcq: JS-0067
  * -analytics credential is missing/expired, which is fixed in the Connectors
  * view). Distinct from GroupsView's describeMutationError by that 503 behavior.
  */
-function describeSyncError(err: unknown): string { // skipcq: JS-0067
+function describeSyncError(err: unknown): string {
   if (err instanceof ApiError) {
     const body = err.body as { detail?: unknown } | null;
     const base = String(body?.detail ?? err.message);
@@ -71,7 +71,7 @@ function describeSyncError(err: unknown): string { // skipcq: JS-0067
 
 /** Outcome chip tone: green create/reactivate, amber deactivate, red conflict,
  * blue for other changes, muted for UNCHANGED — matching shared Badge tones. */
-function outcomeChip(outcome: GroupSyncGroupResult["outcome"]): ReactNode { // skipcq: JS-0067, JS-R1005
+function outcomeChip(outcome: GroupSyncGroupResult["outcome"]): ReactNode {
   switch (outcome) {
     case "CREATE":
     case "REACTIVATE":
@@ -94,7 +94,7 @@ const activeLabel = (active: boolean): string => (active ? "active" : "archived"
  * Render a group's name/active transitions as "old → new" lines (or a muted dash
  * when nothing changed). name_change/active_change are [from, to] tuples.
  */
-function ChangesCell({ group }: { group: GroupSyncGroupResult }) { // skipcq: JS-0067
+function ChangesCell({ group }: { group: GroupSyncGroupResult }) {
   const lines: string[] = [];
   if (group.name_change) {
     lines.push(`${group.name_change[0]} → ${group.name_change[1]}`);
@@ -115,7 +115,7 @@ function ChangesCell({ group }: { group: GroupSyncGroupResult }) { // skipcq: JS
 }
 
 /** Map one per-group dry-run result to an OutcomeTable row (CONFLICT -> warn). */
-function groupOutcomeRow(group: GroupSyncGroupResult): OutcomeTableRow { // skipcq: JS-0067
+function groupOutcomeRow(group: GroupSyncGroupResult): OutcomeTableRow {
   return {
     key: group.cms_group_id,
     tone: group.outcome === "CONFLICT" ? "warn" : undefined,
@@ -130,7 +130,7 @@ function groupOutcomeRow(group: GroupSyncGroupResult): OutcomeTableRow { // skip
 }
 
 /** Inline error banner shown in the current step; backend detail verbatim. */
-function SyncErrorBanner({ title, detail }: { title: string; detail: string }) { // skipcq: JS-0067
+function SyncErrorBanner({ title, detail }: { title: string; detail: string }) {
   return (
     <div className="form-error" role="alert">
       <strong>{title}</strong>
@@ -148,7 +148,7 @@ type ReasonStepProps = {
 };
 
 /** Step 1: required, audited reason + a "Run dry-run" trigger. */
-function ReasonStep({ reason, onReasonChange, onRun, busy, error }: ReasonStepProps) { // skipcq: JS-0067
+function ReasonStep({ reason, onReasonChange, onRun, busy, error }: ReasonStepProps) {
   const canRun = isValidAuditReason(reason) && !busy;
   return (
     <div className="confirm-panel" role="group" aria-label="Sync reason">
@@ -198,7 +198,7 @@ type PreviewStepProps = {
  * API 409s a conflicted plan) or while an apply is in flight. A conflict remedy
  * line and an unknown-channels note render below the table when applicable.
  */
-function PreviewStep({ result, onBack, onApply, busy, error }: PreviewStepProps) { // skipcq: JS-0067
+function PreviewStep({ result, onBack, onApply, busy, error }: PreviewStepProps) {
   const hasConflict = result.groups.some((group) => group.outcome === "CONFLICT");
   const rows = result.groups.map(groupOutcomeRow);
   return (
@@ -250,7 +250,7 @@ type AppliedStepProps = {
 };
 
 /** Step 3: the applied outcome counts (non-zero only) + reason echo. */
-function AppliedStep({ result, reason, onDone }: AppliedStepProps) { // skipcq: JS-0067
+function AppliedStep({ result, reason, onDone }: AppliedStepProps) {
   const counts = Object.entries(result.counts).filter(([, value]) => value > 0);
   return (
     <div className="confirm-panel" role="group" aria-label="Sync applied">
@@ -293,7 +293,7 @@ const STEP_INDEX: Record<SyncStep, number> = { reason: 0, preview: 1, applied: 2
  * in-flight ref latch collapses a same-tick double submit so one click burst
  * fires one request.
  */
-export function GroupsSyncFlow({ contentOwnerId, onCancel, onDone }: GroupsSyncFlowProps) { // skipcq: JS-0067
+export function GroupsSyncFlow({ contentOwnerId, onCancel, onDone }: GroupsSyncFlowProps) {
   const runSync = useGroupSyncAction();
   const [step, setStep] = useState<SyncStep>("reason");
   const [reason, setReason] = useState("");

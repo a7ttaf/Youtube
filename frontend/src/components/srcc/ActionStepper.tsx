@@ -40,14 +40,14 @@ export type ActionStepperProps = {
  * done/current/pending coloring AppShell's WorkflowRail already uses for its
  * own step Dots (see workflowDotTone in shared.tsx).
  */
-function stepDotTone(index: number, activeIndex: number): Severity | undefined { // skipcq: JS-0067
+function stepDotTone(index: number, activeIndex: number): Severity | undefined {
   if (index < activeIndex) return "green";
   if (index === activeIndex) return undefined;
   return "amber";
 }
 
 /** Render a single step pill: leading Dot + label, active/done state classes. */
-function StepPill({ label, index, activeIndex }: { // skipcq: JS-0067
+function StepPill({ label, index, activeIndex }: {
   label: string;
   index: number;
   activeIndex: number;
@@ -71,7 +71,7 @@ function StepPill({ label, index, activeIndex }: { // skipcq: JS-0067
  * caller's body below it, and a Cancel action. Purely presentational — no
  * state, no data fetching; the calling flow decides activeIndex and children.
  */
-export function ActionStepper({ // skipcq: JS-0067
+export function ActionStepper({
   steps,
   activeIndex,
   onCancel,

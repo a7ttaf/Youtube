@@ -43,7 +43,7 @@ const REPO_ROOT = path.resolve(
   "..",
 );
 
-export default defineConfig(({ mode }) => { // skipcq: JS-R1005
+export default defineConfig(({ mode }) => {
   // ============================================================================
   // Purpose: Load env from the repository root in Node only. VITE_-prefixed
   //          names are EXPOSED to the client bundle via import.meta.env, so
@@ -107,7 +107,7 @@ export default defineConfig(({ mode }) => { // skipcq: JS-R1005
             target: backendTarget,
             changeOrigin: true,
             configure(proxy) {
-              proxy.on("proxyReq", (proxyReq) => { // skipcq: JS-R1005
+              proxy.on("proxyReq", (proxyReq) => {
                 // Inject the full trusted-principal header set so the backend
                 // current_principal_from_headers dependency succeeds in the
                 // default UMS_AUTHZ_SOURCE=headers mode (it requires X-User-ID,

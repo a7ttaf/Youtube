@@ -194,25 +194,25 @@ const APPLY_RESULT: GroupSyncResult = {
   groups: [],
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function fetchMock() { // skipcq: JS-0067
+function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
+function urlOf(input: unknown): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
 }
 
-function methodOf(init: unknown): string { // skipcq: JS-0067
+function methodOf(init: unknown): string {
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
 }
 
@@ -222,7 +222,7 @@ type SyncBody = { content_owner_id: string; dry_run: boolean; reason: string };
 // /connectors/credentials on mount, and effects fire child-before-parent, so the
 // mount order is not guaranteed — key on URL+method instead of a positional
 // queue. Each route has a sensible default; tests override only what they assert.
-function routeFetch(overrides: { // skipcq: JS-0067, JS-R1005
+function routeFetch(overrides: {
   groups?: () => Response;
   credentials?: () => Response;
   sync?: (body: SyncBody) => Response;
@@ -257,7 +257,7 @@ function routeFetch(overrides: { // skipcq: JS-0067, JS-R1005
   });
 }
 
-function callsMatching( // skipcq: JS-0067
+function callsMatching(
   predicate: (url: string, init: unknown) => boolean,
 ) {
   return fetchMock().mock.calls.filter(([input, init]) =>
@@ -266,19 +266,19 @@ function callsMatching( // skipcq: JS-0067
 }
 
 /** How many times the group LIST (GET /groups) was fetched (mount + reloads). */
-function groupGetCount(): number { // skipcq: JS-0067
+function groupGetCount(): number {
   return callsMatching((url, init) => url === "/groups" && methodOf(init) === "GET")
     .length;
 }
 
 /** All POSTs to the sync route, parsed bodies in call order. */
-function syncPosts(): SyncBody[] { // skipcq: JS-0067
+function syncPosts(): SyncBody[] {
   return callsMatching(
     (url, init) => url === "/channels/groups/sync" && methodOf(init) === "POST",
   ).map(([, init]) => JSON.parse(String((init as RequestInit).body)) as SyncBody);
 }
 
-function renderGroups(canManageGroups = true) { // skipcq: JS-0067
+function renderGroups(canManageGroups = true) {
   return render(
     <TenantProvider initialSlug="ums">
       <GroupsView canManageGroups={canManageGroups} />
@@ -287,7 +287,7 @@ function renderGroups(canManageGroups = true) { // skipcq: JS-0067
 }
 
 /** The <tr> whose name cell holds `name`. */
-function rowByName(name: string): HTMLElement { // skipcq: JS-0067
+function rowByName(name: string): HTMLElement {
   const row = screen.getByText(name).closest("tr");
   if (!row) throw new Error(`no row for ${name}`);
   return row;
@@ -298,7 +298,7 @@ function rowByName(name: string): HTMLElement { // skipcq: JS-0067
  * stepper, enter `reason`, and fire the dry-run. `sync` decides the dry-run /
  * apply responses (defaults: clean dry-run, then APPLY_RESULT).
  */
-async function openStepperAndRunDryRun( // skipcq: JS-0067
+async function openStepperAndRunDryRun(
   reason: string,
   sync: (body: SyncBody) => Response = (body) =>
     jsonResponse(body.dry_run ? DRY_RUN_CLEAN : APPLY_RESULT),
