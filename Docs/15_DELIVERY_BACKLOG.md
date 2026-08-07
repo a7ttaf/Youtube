@@ -1,6 +1,6 @@
 # Delivery Backlog
 
-## Status (2026-08-06)
+## Status (2026-08-07)
 
 Reconciled through PR #170 (owner-stamp recovery, merged 2026-08-06). Marker
 conventions match `01_IMPLEMENTATION_PLAN.md`:
@@ -764,6 +764,24 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
+- ✅ Groups view UI — PR-A of the import/sync UI arc (2026-08-07, branch
+  `feat/groups-view-ui`) — the grouping loop gets its first operator surface:
+  a new **CMS Groups** nav view (table-first: name · CMS id · owner stamp ·
+  members · status) with per-row **Clear stamp** (the #170 recovery route,
+  reason-required confirm) and **Archive/Restore** (the lockdown-permitted
+  active-only PATCH); a **content-owner picker fed by stored
+  youtube-analytics credentials** (no free-text owner ids) driving the
+  **sync stepper** (Reason → dry-run Preview via OutcomeTable with outcome
+  chips, CONFLICT rows warn-toned and blocking Apply with the remedy named →
+  Applied counts + refetch). Shared `ActionStepper`/`OutcomeTable`
+  primitives built for reuse by PR-B's import stepper. Backend touches (2,
+  additive): `content_owner_id` on every group response
+  (`ChannelGroupEntry.to_api`) and a `can_manage_groups` session capability
+  (MANAGE_GROUPS-derived) gating the manage controls — hidden, not
+  disabled, without it. Dev proxy gains `/groups`. Rode along: re-redaction
+  of the CMS owner id #169 had reintroduced + the hash-based tracked-file
+  hygiene guard (`tests/test_repo_hygiene.py`, also standalone PR #173).
+  No migration.
 - ✅ Scheduled CMS group sync (2026-08-06, open PR #171, branch
   `feat/scheduled-group-sync`)
   — grouping now converges automatically instead of only on an operator's
