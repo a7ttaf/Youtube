@@ -145,6 +145,42 @@ transaction as the group writes. Manual rename and membership edits on a
 synced group are rejected 409 by the groups API; an `active`-only PATCH stays
 allowed, but any sync that still sees the group upstream re-activates it.
 
+**Scheduled mode** (2026-08-06) adds no new HTTP surface: the manual route
+above is unchanged and the scheduler is the ONLY submitter of scheduled sync
+jobs. Two settings gate it — `UMS_GROUP_SYNC_SCHEDULE_ENABLED` (default
+`false`) and `UMS_GROUP_SYNC_INTERVAL_HOURS` (default `24`, positive int) —
+and boot FAILS FAST (`ValueError`) if the schedule is enabled without the
+connector-job executor also enabled or without
+`UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` set: a scheduler with nothing to
+submit to, or no identity to submit jobs as, is a boot-time misconfiguration,
+not a first-tick surprise. When enabled, an in-process `GroupSyncScheduler`
+runs one daemon thread that ticks every `UMS_GROUP_SYNC_INTERVAL_HOURS` (the
+FIRST tick fires one full interval after boot, not immediately, so a deploy
+restart never thunders every tenant's sync at once); each tick enumerates
+every ACTIVE tenant and submits one `cms_group_sync` job per active
+`youtube-analytics` credential to the connector-job executor — the credential
+list itself is the subscription registry, so registering or revoking a
+credential opts a content owner in or out, with no new table.
+
+Each scheduled job runs the SAME `run_group_sync` core the manual route above
+drives, as a fixed service principal: the connector service actor extended
+with a `registry.manage_groups` grant, since the rows it signs declare that
+permission. A scheduled job and a concurrent manual sync for the same content
+owner are not mutually exclusive — the executor's dedup registry only
+throttles two scheduled ticks from double-submitting the same owner, it is
+not the correctness mechanism; correctness is the same row-locked
+uniqueness/conflict handling the manual route already relies on, so the loser
+of a genuine race gets a typed conflict and the next tick converges it. Audit
+taxonomy for a scheduled run: per-group `GROUP_UPDATED` rows come from
+`apply_group_sync` in the identical shape the manual route produces; the
+run-level `GROUPS_SYNCED` summary is written ONLY when the tick's execution
+counts contain a non-UNCHANGED outcome (the manual route still writes it
+unconditionally after every apply), so a fully converged tick writes ZERO
+audit rows — liveness is a log line, not a governance event. A failure
+(credential missing/inactive/refresh, CMS fetch, conflict/lost race, or a
+non-ACTIVE tenant) folds into one `CONNECTOR_JOB_RUN` row with `error_class`
+set to the exception class name only, never `str(exc)`.
+
 `PATCH /channels/{youtube_channel_id}/content-owner` sets or clears a channel's
 CMS `content_owner_id` — the value `list_target_channels` matches against the
 connector account id to choose which channels a revenue pull targets. It requires
