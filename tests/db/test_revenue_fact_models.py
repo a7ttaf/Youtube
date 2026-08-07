@@ -18,8 +18,7 @@ def build_engine():
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, connection_record):
-        del connection_record
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     FinanceBase.metadata.create_all(engine)
@@ -76,10 +75,14 @@ def test_monthly_channel_revenue_fact_model_persists_canonical_values():
 
 def test_monthly_channel_revenue_fact_model_declares_channel_foreign_key():
     foreign_key = next(
-        constraint
-        for constraint in MonthlyChannelRevenueFactORM.__table__.foreign_key_constraints
-        if constraint.name == "fk_monthly_channel_revenue_facts_tenant_channel"
+        (
+            constraint
+            for constraint in MonthlyChannelRevenueFactORM.__table__.foreign_key_constraints
+            if constraint.name == "fk_monthly_channel_revenue_facts_tenant_channel"
+        ),
+        None,
     )
+    assert foreign_key is not None, "fk_monthly_channel_revenue_facts_tenant_channel missing"
 
     assert [column.name for column in foreign_key.columns] == [
         "tenant_id",
