@@ -65,6 +65,7 @@ export type SessionCapabilities = {
   canExportRevenue: boolean;
   canExportAnalyticsReports: boolean;
   canManageRegistry: boolean;
+  canManageGroups: boolean;
   canManageConnectors: boolean;
   canViewConnectorHealth: boolean;
   canRunConnectorJobs: boolean;
@@ -1061,6 +1062,78 @@ export type ChannelIssuesResponse = {
     // Per-issue-type counts keyed by ChannelIssueType value (counts are ints).
     issue_type_counts: Record<string, number>;
   };
+};
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend channel-GROUP JSON contracts
+//   consumed by the Groups view: the group list (GET /groups) and the CMS
+//   group-sync preview/apply cycle (POST /channels/groups/sync). Fields are
+//   matched 1:1 against the backend models (not guessed); nullable fields
+//   serialize as null. WIRE CASING NOTE: unlike SessionCapabilities, these
+//   backend models have NO alias generator, so payloads stay snake_case on the
+//   wire and these types keep snake_case field names.
+// Standards: Read-only typed boundary at the API surface; no logic here. The
+//   sync response is a PREVIEW when dry_run is true and an APPLIED result when
+//   false — the view must read the flag rather than assume either.
+// Connections:
+//   - File: backend/ums_smart_revenue/org/channel_groups.py
+//       ChannelGroupEntry.to_api()   (lines 107-116) -> ChannelGroupApiEntry
+//   - File: backend/ums_smart_revenue/api/groups.py
+//       list_groups()                (lines 185-202) -> GET /groups
+//   - File: backend/ums_smart_revenue/api/channels.py
+//       GroupSyncGroupResult         (lines 200-227) -> GroupSyncGroupResult
+//       GroupSyncResult              (lines 230-245) -> GroupSyncResult
+//       sync_channel_groups()        (lines 926-1064) -> POST /channels/groups/sync
+//   - File: backend/ums_smart_revenue/org/channel_group_sync.py
+//       GroupSyncOutcome             (lines 27-41) -> GroupSyncGroupResult.outcome
+//         literal set (the Pydantic field itself is a plain str; the enum is
+//         the actual source of truth for the 7 values).
+// ============================================================================
+
+// One row of GET /groups (backend ChannelGroupEntry.to_api,
+// org/channel_groups.py:107 — content_owner_id added 2026-08-07).
+export type ChannelGroupApiEntry = {
+  id: string;
+  name: string;
+  group_type: string;
+  active: boolean;
+  channel_ids: string[];
+  cms_group_id: string | null;
+  content_owner_id: string | null;
+};
+
+// POST /channels/groups/sync per-group result
+// (backend GroupSyncGroupResult, api/channels.py:200).
+export type GroupSyncGroupResult = {
+  cms_group_id: string;
+  outcome:
+    | "CREATE"
+    | "RENAME"
+    | "MEMBERS_CHANGED"
+    | "DEACTIVATE"
+    | "REACTIVATE"
+    | "UNCHANGED"
+    | "CONFLICT";
+  title: string | null;
+  local_group_id: string | null;
+  name_change: [string, string] | null;
+  active_change: [boolean, boolean] | null;
+  members_added: string[];
+  members_removed: string[];
+  unknown_channel_ids: string[];
+  unknown_channel_count: number;
+  will_adopt_content_owner: boolean;
+};
+
+// POST /channels/groups/sync response
+// (backend GroupSyncResult, api/channels.py:230).
+export type GroupSyncResult = {
+  dry_run: boolean;
+  content_owner_id: string;
+  counts: Record<string, number>;
+  unknown_channel_total: number;
+  non_channel_member_count: number;
+  groups: GroupSyncGroupResult[];
 };
 
 // ============================================================================
