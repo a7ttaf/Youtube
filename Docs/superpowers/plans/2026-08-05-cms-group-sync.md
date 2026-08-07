@@ -276,7 +276,7 @@ Create `tests/connectors/google/test_youtube_groups_client.py` covering, with a 
 # Follow tests/connectors/google/test_youtube_reporting_client.py for the fake
 # GoogleHttpClient technique used in this repo.
 
-CO = "PlZrS5Fh56RMd9dmSL6XSA"
+CO = "TestOwnerAAAAAAAAAAAAA"
 
 
 def test_list_groups_returns_id_title_and_item_count(...):
