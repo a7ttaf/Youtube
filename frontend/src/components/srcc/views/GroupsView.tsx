@@ -1,12 +1,18 @@
 import { type ReactNode, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
-import type { ChannelGroupApiEntry } from "@/lib/api/types";
+import type {
+  ChannelGroupApiEntry,
+  ConnectorCredential,
+  ConnectorCredentialListResponse,
+} from "@/lib/api/types";
+import { useConnectorCredentials } from "@/lib/api/useConnectors";
 import { useGroups } from "@/lib/api/useGroups";
 import {
   useClearOwnerStampAction,
   useGroupArchiveAction,
 } from "@/lib/api/useGroupSync";
+import { GroupsSyncFlow, isValidAuditReason } from "./GroupsSyncFlow";
 
 // ============================================================================
 // Purpose: The REAL-data Channel Groups screen (import/sync arc, PR-A) — the
@@ -17,7 +23,9 @@ import {
 //   required reason: Clear stamp -> DELETE /groups/{id}/content-owner?reason=…
 //   (#170 owner-recovery; shown only when a stamp exists) and Archive/Restore
 //   -> PATCH /groups/{id} {active, reason} (the one manual edit the synced-group
-//   lockdown permits). The header Sync affordance and sync stepper are Task 6.
+//   lockdown permits). The panel header also carries the credential-fed
+//   content-owner picker + a Sync (dry-run) button that opens the sync stepper
+//   (GroupsSyncFlow), which replaces the table while active.
 // Database/ORM: None (frontend) — consumes GET /groups (VIEW_ANALYTICS per
 //   member) + the two MANAGE_GROUPS-gated, audited write routes above.
 // Standards: No client-side authorization is invented. canManageGroups gates the
@@ -33,6 +41,8 @@ import {
 // Connections:
 //   - File: frontend/src/lib/api/useGroups.ts -> GET /groups list.
 //   - File: frontend/src/lib/api/useGroupSync.ts -> clear-stamp + archive actions.
+//   - File: frontend/src/lib/api/useConnectors.ts -> credential list (owner picker).
+//   - File: frontend/src/components/srcc/views/GroupsSyncFlow.tsx -> sync stepper.
 //   - File: backend/ums_smart_revenue/api/groups.py -> the group routes.
 //   - File: Docs/superpowers/specs/2026-08-07-import-sync-ui-design.md -> spec.
 // ============================================================================
@@ -59,25 +69,55 @@ const describeMutationError = (err: unknown): string => {
 export function GroupsView({ canManageGroups }: { canManageGroups: boolean }) { // skipcq: JS-0067
   const groupState = useGroups();
   const [panel, setPanel] = useState<PanelTarget | null>(null);
+  // The picker selection (a content owner's account id) + whether the sync
+  // stepper is open. Both live here: the stepper needs the selected owner, and
+  // opening it replaces the table. Only a manager renders the header controls, so
+  // syncOpen can only ever become true for a manager.
+  const [selectedOwnerId, setSelectedOwnerId] = useState("");
+  const [syncOpen, setSyncOpen] = useState(false);
 
   return (
     <section className="view-page" aria-labelledby="groupsTitle">
       <section className="panel">
-        <GroupsPanelHeader />
-        <GroupsTable
-          canManageGroups={canManageGroups}
-          groupState={groupState}
-          panel={panel}
-          onOpenPanel={setPanel}
-          onClosePanel={() => setPanel(null)}
-          onMutated={groupState.reload}
-        />
+        {canManageGroups ? (
+          <GroupsSyncHeader
+            selectedOwnerId={selectedOwnerId}
+            onSelectOwner={setSelectedOwnerId}
+            onStartSync={() => {
+              setPanel(null);
+              setSyncOpen(true);
+            }}
+            syncDisabled={syncOpen}
+          />
+        ) : (
+          <GroupsPanelHeader />
+        )}
+        {syncOpen ? (
+          <GroupsSyncFlow
+            contentOwnerId={selectedOwnerId}
+            onCancel={() => setSyncOpen(false)}
+            onDone={() => {
+              setSyncOpen(false);
+              groupState.reload();
+            }}
+          />
+        ) : (
+          <GroupsTable
+            canManageGroups={canManageGroups}
+            groupState={groupState}
+            panel={panel}
+            onOpenPanel={setPanel}
+            onClosePanel={() => setPanel(null)}
+            onMutated={groupState.reload}
+          />
+        )}
       </section>
     </section>
   );
 }
 
-/** Groups panel header: title + subtitle. The Sync affordance lands in Task 6. */
+/** Read-only groups header (no sync controls): title + subtitle only. Rendered
+ * for a viewer who cannot manage groups, so the sync affordance stays hidden. */
 function GroupsPanelHeader() { // skipcq: JS-0067
   return (
     <div className="panel-header">
@@ -85,6 +125,102 @@ function GroupsPanelHeader() { // skipcq: JS-0067
         <strong id="groupsTitle">Channel Groups</strong>
         <span>CMS-mirrored groups, their content-owner stamp, and membership</span>
       </div>
+    </div>
+  );
+}
+
+// The credential connector_key the group sync reads a content owner from. Mirrors
+// backend YOUTUBE_ANALYTICS_CONNECTOR ("youtube-analytics", connectors/keys.py):
+// the sync's content owner comes from a youtube-analytics credential's account_id.
+const YOUTUBE_ANALYTICS_KEY = "youtube-analytics";
+
+/**
+ * The pickable content owners: ACTIVE youtube-analytics credentials only. Status
+ * is compared case-insensitively against the "ACTIVE" literal the credential rows
+ * carry (matching ConnectorsView's credentialStatusTone idiom); account_id is the
+ * content owner id the sync targets.
+ */
+function activeAnalyticsOwners(
+  list: ConnectorCredentialListResponse | null,
+): ConnectorCredential[] {
+  if (!list) return [];
+  return list.items.filter(
+    (credential) =>
+      credential.connector_key === YOUTUBE_ANALYTICS_KEY &&
+      credential.status.toUpperCase() === "ACTIVE",
+  );
+}
+
+/** Short muted note under the picker for its non-ready states (or null). */
+function pickerNote(
+  state: ReturnType<typeof useConnectorCredentials>,
+  owners: ConnectorCredential[],
+): string | null {
+  if (state.error) return "Couldn't load connector credentials.";
+  if (!state.data) return "Loading credentials…";
+  if (owners.length === 0) {
+    return "Register a youtube-analytics credential in Connectors first.";
+  }
+  return null;
+}
+
+type GroupsSyncHeaderProps = {
+  selectedOwnerId: string;
+  onSelectOwner: (ownerId: string) => void;
+  onStartSync: () => void;
+  syncDisabled: boolean;
+};
+
+/**
+ * The manager-only panel header: title + subtitle, plus the content-owner picker
+ * (fed by the ACTIVE youtube-analytics credentials) and the Sync (dry-run) button
+ * that opens the stepper. Owns the credential fetch, so a read-only viewer (who
+ * gets GroupsPanelHeader instead) never fires it. The picker degrades gracefully
+ * while credentials load, on error, and when none exist (disabled + a short muted
+ * note pointing at Connectors). Sync is disabled without a selection or while the
+ * stepper is already open; per the fail-closed house rule it renders only for a
+ * manager (this component), never as a disabled control for a read-only viewer.
+ */
+function GroupsSyncHeader({ // skipcq: JS-0067
+  selectedOwnerId,
+  onSelectOwner,
+  onStartSync,
+  syncDisabled,
+}: GroupsSyncHeaderProps) {
+  const credentialState = useConnectorCredentials();
+  const owners = activeAnalyticsOwners(credentialState.data);
+  const note = pickerNote(credentialState, owners);
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id="groupsTitle">Channel Groups</strong>
+        <span>CMS-mirrored groups, their content-owner stamp, and membership</span>
+      </div>
+      <div className="control-row">
+        <select
+          className="control"
+          aria-label="Content owner"
+          value={selectedOwnerId}
+          disabled={owners.length === 0}
+          onChange={(event) => onSelectOwner(event.target.value)}
+        >
+          <option value="">Select a content owner…</option>
+          {owners.map((credential) => (
+            <option key={credential.id} value={credential.account_id}>
+              {credential.account_id}
+            </option>
+          ))}
+        </select>
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!selectedOwnerId || syncDisabled}
+          onClick={onStartSync}
+        >
+          Sync (dry-run)
+        </button>
+      </div>
+      {note ? <span className="muted">{note}</span> : null}
     </div>
   );
 }
@@ -383,7 +519,7 @@ function GroupActionPanel({ // skipcq: JS-0067
   const { title, explanation, failTitle } = panelCopy(kind, group.active);
   const trimmedReason = reason.trim();
   // Mirror the backend audit_logs contract: reason required + no NUL (422).
-  const reasonValid = trimmedReason !== "" && !reason.includes("\u0000");
+  const reasonValid = isValidAuditReason(reason);
   const canSubmit = reasonValid && !busy;
 
   /** Run the clear/archive mutation; latched against concurrent double-clicks. */

@@ -5,6 +5,9 @@ import { GroupsView } from "@/components/srcc/views/GroupsView";
 import type {
   ChannelGroupApiEntry,
   ClearOwnerStampResponse,
+  ConnectorCredential,
+  ConnectorCredentialListResponse,
+  GroupSyncResult,
   GroupUpdateResponse,
 } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
@@ -84,6 +87,113 @@ const ARCHIVE_RESULT: GroupUpdateResponse = {
   audit_event: { event_type: "GROUP_UPDATED" },
 };
 
+// Credential fixtures for the owner picker. The picker keeps only ACTIVE
+// youtube-analytics rows; account_id is the content owner id the sync targets.
+const OWNER_ACTIVE: ConnectorCredential = {
+  id: "cred-active",
+  connector_key: "youtube-analytics",
+  account_id: "OWNERaaa",
+  status: "ACTIVE",
+  has_secret_ref: true,
+};
+const OWNER_INACTIVE: ConnectorCredential = {
+  id: "cred-revoked",
+  connector_key: "youtube-analytics",
+  account_id: "OWNERrev",
+  status: "REVOKED",
+  has_secret_ref: true,
+};
+const OWNER_OTHER: ConnectorCredential = {
+  id: "cred-other",
+  connector_key: "youtube-reporting",
+  account_id: "OWNERoth",
+  status: "ACTIVE",
+  has_secret_ref: true,
+};
+
+function credsResponse(
+  items: ConnectorCredential[],
+): ConnectorCredentialListResponse {
+  return {
+    items,
+    pagination: { limit: 50, offset: 0, returned: items.length, has_more: false },
+  };
+}
+const DEFAULT_CREDS = credsResponse([OWNER_ACTIVE]);
+
+// Dry-run diff with a CONFLICT (+ a CREATE) and unknown channels: exercises the
+// warn row tone, the disabled Apply, and the remedy + unknown notes.
+const DRY_RUN_CONFLICT: GroupSyncResult = {
+  dry_run: true,
+  content_owner_id: "OWNERaaa",
+  counts: { CREATE: 1, CONFLICT: 1 },
+  unknown_channel_total: 3,
+  non_channel_member_count: 0,
+  groups: [
+    {
+      cms_group_id: "cmsCreate",
+      outcome: "CREATE",
+      title: "New Sector",
+      local_group_id: null,
+      name_change: null,
+      active_change: null,
+      members_added: ["UCa", "UCb"],
+      members_removed: [],
+      unknown_channel_ids: ["UCx"],
+      unknown_channel_count: 1,
+      will_adopt_content_owner: true,
+    },
+    {
+      cms_group_id: "cmsConflict",
+      outcome: "CONFLICT",
+      title: "Owned Elsewhere",
+      local_group_id: "g9",
+      name_change: null,
+      active_change: null,
+      members_added: [],
+      members_removed: [],
+      unknown_channel_ids: [],
+      unknown_channel_count: 0,
+      will_adopt_content_owner: false,
+    },
+  ],
+};
+
+// Conflict-free dry-run (a rename with member deltas) -> Apply is allowed.
+const DRY_RUN_CLEAN: GroupSyncResult = {
+  dry_run: true,
+  content_owner_id: "OWNERaaa",
+  counts: { RENAME: 1 },
+  unknown_channel_total: 0,
+  non_channel_member_count: 0,
+  groups: [
+    {
+      cms_group_id: "cmsRename",
+      outcome: "RENAME",
+      title: "Renamed Group",
+      local_group_id: "g5",
+      name_change: ["Old Name", "New Name"],
+      active_change: null,
+      members_added: ["UCn"],
+      members_removed: ["UCm"],
+      unknown_channel_ids: [],
+      unknown_channel_count: 0,
+      will_adopt_content_owner: false,
+    },
+  ],
+};
+
+// The applied (dry_run:false) result echoed on the Applied step. UNCHANGED:0 is
+// present to prove zero counts are hidden.
+const APPLY_RESULT: GroupSyncResult = {
+  dry_run: false,
+  content_owner_id: "OWNERaaa",
+  counts: { RENAME: 1, UNCHANGED: 0, CREATE: 2 },
+  unknown_channel_total: 0,
+  non_channel_member_count: 0,
+  groups: [],
+};
+
 function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
@@ -106,11 +216,45 @@ function methodOf(init: unknown): string { // skipcq: JS-0067
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
 }
 
-// Queue one Response per expected request, in order. An unexpected extra fetch
-// exhausts the queue and rejects with undefined so the over-fetch fails loudly.
-function queue(...responses: Response[]) { // skipcq: JS-0067
-  const fm = fetchMock();
-  for (const response of responses) fm.mockResolvedValueOnce(response);
+type SyncBody = { content_owner_id: string; dry_run: boolean; reason: string };
+
+// URL-keyed fetch router. The view fetches /groups AND (for a manager)
+// /connectors/credentials on mount, and effects fire child-before-parent, so the
+// mount order is not guaranteed — key on URL+method instead of a positional
+// queue. Each route has a sensible default; tests override only what they assert.
+function routeFetch(overrides: { // skipcq: JS-0067, JS-R1005
+  groups?: () => Response;
+  credentials?: () => Response;
+  sync?: (body: SyncBody) => Response;
+  clear?: () => Response;
+  archive?: () => Response;
+} = {}) {
+  fetchMock().mockImplementation((input: unknown, init: unknown) => {
+    const url = urlOf(input);
+    const method = methodOf(init);
+    if (method === "GET" && url === "/groups") {
+      return Promise.resolve((overrides.groups ?? (() => jsonResponse(GROUPS)))());
+    }
+    if (method === "GET" && url === "/connectors/credentials") {
+      return Promise.resolve(
+        (overrides.credentials ?? (() => jsonResponse(DEFAULT_CREDS)))(),
+      );
+    }
+    if (method === "POST" && url === "/channels/groups/sync") {
+      if (!overrides.sync) return Promise.reject(new Error("unexpected sync POST"));
+      const body = JSON.parse(String((init as RequestInit).body)) as SyncBody;
+      return Promise.resolve(overrides.sync(body));
+    }
+    if (method === "DELETE" && url.startsWith("/groups/")) {
+      return Promise.resolve((overrides.clear ?? (() => jsonResponse(CLEAR_RESULT)))());
+    }
+    if (method === "PATCH" && url.startsWith("/groups/")) {
+      return Promise.resolve(
+        (overrides.archive ?? (() => jsonResponse(ARCHIVE_RESULT)))(),
+      );
+    }
+    return Promise.reject(new Error(`unrouted ${method} ${url}`));
+  });
 }
 
 function callsMatching( // skipcq: JS-0067
@@ -119,6 +263,19 @@ function callsMatching( // skipcq: JS-0067
   return fetchMock().mock.calls.filter(([input, init]) =>
     predicate(urlOf(input), init),
   );
+}
+
+/** How many times the group LIST (GET /groups) was fetched (mount + reloads). */
+function groupGetCount(): number { // skipcq: JS-0067
+  return callsMatching((url, init) => url === "/groups" && methodOf(init) === "GET")
+    .length;
+}
+
+/** All POSTs to the sync route, parsed bodies in call order. */
+function syncPosts(): SyncBody[] { // skipcq: JS-0067
+  return callsMatching(
+    (url, init) => url === "/channels/groups/sync" && methodOf(init) === "POST",
+  ).map(([, init]) => JSON.parse(String((init as RequestInit).body)) as SyncBody);
 }
 
 function renderGroups(canManageGroups = true) { // skipcq: JS-0067
@@ -136,9 +293,33 @@ function rowByName(name: string): HTMLElement { // skipcq: JS-0067
   return row;
 }
 
+/**
+ * Manager flow helper: wait for credentials, select the ACTIVE owner, open the
+ * stepper, enter `reason`, and fire the dry-run. `sync` decides the dry-run /
+ * apply responses (defaults: clean dry-run, then APPLY_RESULT).
+ */
+async function openStepperAndRunDryRun( // skipcq: JS-0067
+  reason: string,
+  sync: (body: SyncBody) => Response = (body) =>
+    jsonResponse(body.dry_run ? DRY_RUN_CLEAN : APPLY_RESULT),
+) {
+  routeFetch({ sync });
+  renderGroups();
+  const picker = await screen.findByLabelText("Content owner");
+  await waitFor(() =>
+    expect(within(picker).getByRole("option", { name: "OWNERaaa" })).toBeInTheDocument(),
+  );
+  fireEvent.change(picker, { target: { value: "OWNERaaa" } });
+  fireEvent.click(screen.getByRole("button", { name: /sync \(dry-run\)/i }));
+  fireEvent.change(screen.getByLabelText(/Reason \(required, audited\)/i), {
+    target: { value: reason },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /run dry-run/i }));
+}
+
 describe("GroupsView table", () => {
   it("renders group rows from GET /groups with owner stamp, manual cms, unstamped badge, and member counts", async () => {
-    queue(jsonResponse(GROUPS));
+    routeFetch();
     renderGroups();
 
     await waitFor(() =>
@@ -160,7 +341,7 @@ describe("GroupsView table", () => {
   });
 
   it("renders NO action buttons anywhere when the viewer cannot manage groups", async () => {
-    queue(jsonResponse(GROUPS));
+    routeFetch();
     renderGroups(false);
 
     await waitFor(() =>
@@ -175,13 +356,14 @@ describe("GroupsView table", () => {
     expect(
       screen.queryByRole("button", { name: /^restore$/i }),
     ).not.toBeInTheDocument();
-    // The header carries no Sync affordance yet (Task 6), so the whole view
-    // is button-free for a read-only viewer.
+    // The sync cluster is manager-only, so a read-only viewer gets the plain
+    // header (title + subtitle): no Sync button and no owner picker at all.
     expect(screen.queryAllByRole("button")).toHaveLength(0);
+    expect(screen.queryByLabelText("Content owner")).not.toBeInTheDocument();
   });
 
   it("shows the empty state when there are no groups", async () => {
-    queue(jsonResponse([]));
+    routeFetch({ groups: () => jsonResponse([]) });
     renderGroups();
 
     await waitFor(() =>
@@ -195,11 +377,7 @@ describe("GroupsView table", () => {
 
 describe("GroupsView clear-stamp flow", () => {
   it("opens a confirm panel, blocks a blank reason, then DELETEs the stamp and refetches", async () => {
-    queue(
-      jsonResponse(GROUPS), // mount read
-      jsonResponse(CLEAR_RESULT), // DELETE clear
-      jsonResponse(GROUPS), // reload after mutation
-    );
+    routeFetch({ clear: () => jsonResponse(CLEAR_RESULT) });
     renderGroups();
 
     await waitFor(() =>
@@ -220,6 +398,7 @@ describe("GroupsView clear-stamp flow", () => {
     // Blank reason -> Confirm disabled.
     expect(confirm).toBeDisabled();
 
+    // A reason WITH spaces is valid (only blank / NUL are rejected).
     fireEvent.change(reasonInput, { target: { value: "wrong owner stamp" } });
     expect(confirm).toBeEnabled();
     fireEvent.click(confirm);
@@ -234,8 +413,8 @@ describe("GroupsView clear-stamp flow", () => {
     expect(urlOf(deleteCall[0])).toBe(
       "/groups/g1/content-owner?reason=wrong%20owner%20stamp",
     );
-    // Groups refetched after success: mount GET + DELETE + reload GET = 3.
-    await waitFor(() => expect(fetchMock().mock.calls).toHaveLength(3));
+    // Groups refetched after success: mount GET + reload GET = 2.
+    await waitFor(() => expect(groupGetCount()).toBe(2));
     // Panel closed on success.
     expect(
       screen.queryByLabelText(/Reason \(required, audited\)/i),
@@ -243,10 +422,9 @@ describe("GroupsView clear-stamp flow", () => {
   });
 
   it("keeps the panel open and shows the backend 409 detail verbatim in a banner", async () => {
-    queue(
-      jsonResponse(GROUPS), // mount read
-      jsonResponse({ detail: "Group has no owner stamp to clear." }, 409),
-    );
+    routeFetch({
+      clear: () => jsonResponse({ detail: "Group has no owner stamp to clear." }, 409),
+    });
     renderGroups();
 
     await waitFor(() =>
@@ -269,18 +447,24 @@ describe("GroupsView clear-stamp flow", () => {
         screen.getByText("Group has no owner stamp to clear."),
       ).toBeInTheDocument(),
     );
-    // Panel stays open for retry (reason input + Confirm still present); no reload.
+    // Panel stays open for retry (reason input + Confirm still present).
     expect(
       screen.getByLabelText(/Reason \(required, audited\)/i),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /^confirm$/i }),
     ).toBeInTheDocument();
-    expect(fetchMock().mock.calls).toHaveLength(2);
+    // No reload on failure: only the mount GET fired for the list.
+    await waitFor(() =>
+      expect(
+        callsMatching((url, init) => methodOf(init) === "DELETE"),
+      ).toHaveLength(1),
+    );
+    expect(groupGetCount()).toBe(1);
   });
 
   it("disables Confirm when the reason contains a NUL character", async () => {
-    queue(jsonResponse(GROUPS));
+    routeFetch();
     renderGroups();
 
     await waitFor(() =>
@@ -302,11 +486,7 @@ describe("GroupsView clear-stamp flow", () => {
 
 describe("GroupsView archive flow", () => {
   it("PATCHes the group inactive with the reason, then refetches", async () => {
-    queue(
-      jsonResponse(GROUPS), // mount read
-      jsonResponse(ARCHIVE_RESULT), // PATCH archive
-      jsonResponse(GROUPS), // reload after mutation
-    );
+    routeFetch({ archive: () => jsonResponse(ARCHIVE_RESULT) });
     renderGroups();
 
     await waitFor(() =>
@@ -335,7 +515,204 @@ describe("GroupsView archive flow", () => {
     expect(
       JSON.parse(String((patchCall[1] as RequestInit).body)),
     ).toEqual({ active: false, reason: "stale group" });
-    // Refetched after success: mount GET + PATCH + reload GET = 3.
-    await waitFor(() => expect(fetchMock().mock.calls).toHaveLength(3));
+    // Refetched after success: mount GET + reload GET = 2.
+    await waitFor(() => expect(groupGetCount()).toBe(2));
+  });
+});
+
+describe("GroupsView sync header / owner picker", () => {
+  it("lists only ACTIVE youtube-analytics account ids in the owner picker", async () => {
+    routeFetch({
+      credentials: () =>
+        jsonResponse(credsResponse([OWNER_ACTIVE, OWNER_INACTIVE, OWNER_OTHER])),
+    });
+    renderGroups();
+
+    const picker = await screen.findByLabelText("Content owner");
+    await waitFor(() =>
+      expect(
+        within(picker).getByRole("option", { name: "OWNERaaa" }),
+      ).toBeInTheDocument(),
+    );
+    // Placeholder + the single ACTIVE youtube-analytics owner only; the inactive
+    // analytics cred and the active OTHER-connector cred are both excluded.
+    const optionValues = within(picker)
+      .getAllByRole("option")
+      .map((option) => (option as HTMLOptionElement).value);
+    expect(optionValues).toEqual(["", "OWNERaaa"]);
+    expect(
+      within(picker).queryByRole("option", { name: "OWNERrev" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(picker).queryByRole("option", { name: "OWNERoth" }),
+    ).not.toBeInTheDocument();
+    expect(picker).toBeEnabled();
+  });
+
+  it("disables the picker and points at Connectors when no youtube-analytics credential exists", async () => {
+    routeFetch({ credentials: () => jsonResponse(credsResponse([OWNER_OTHER])) });
+    renderGroups();
+
+    const picker = await screen.findByLabelText("Content owner");
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          /Register a youtube-analytics credential in Connectors first\./i,
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(picker).toBeDisabled();
+    // Only the placeholder option — no ownerable rows.
+    expect(within(picker).getAllByRole("option")).toHaveLength(1);
+  });
+});
+
+describe("GroupsView sync button gating", () => {
+  it("hides the Sync button from a viewer who cannot manage groups", async () => {
+    routeFetch();
+    renderGroups(false);
+
+    await waitFor(() =>
+      expect(screen.getByText("TV Sector")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: /sync \(dry-run\)/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("disables the Sync button until a content owner is selected", async () => {
+    routeFetch();
+    renderGroups();
+
+    const syncButton = await screen.findByRole("button", {
+      name: /sync \(dry-run\)/i,
+    });
+    // No selection yet -> disabled.
+    expect(syncButton).toBeDisabled();
+
+    const picker = await screen.findByLabelText("Content owner");
+    await waitFor(() =>
+      expect(
+        within(picker).getByRole("option", { name: "OWNERaaa" }),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.change(picker, { target: { value: "OWNERaaa" } });
+    expect(syncButton).toBeEnabled();
+  });
+});
+
+describe("GroupsView sync stepper", () => {
+  it("POSTs the dry-run with {content_owner_id, dry_run:true, reason} after entering a reason", async () => {
+    await openStepperAndRunDryRun("quarterly sync");
+
+    await waitFor(() => expect(syncPosts()).toHaveLength(1));
+    expect(syncPosts()[0]).toEqual({
+      content_owner_id: "OWNERaaa",
+      dry_run: true,
+      reason: "quarterly sync",
+    });
+  });
+
+  it("renders the preview diff with a CONFLICT row (warn tone), a disabled Apply, and the remedy + unknown notes", async () => {
+    await openStepperAndRunDryRun("cms sync", (body) =>
+      jsonResponse(body.dry_run ? DRY_RUN_CONFLICT : APPLY_RESULT),
+    );
+
+    // Advanced to Preview.
+    await waitFor(() =>
+      expect(screen.getByText("Review the plan")).toBeInTheDocument(),
+    );
+    // One row per group: the CREATE + CONFLICT titles render.
+    expect(screen.getByText("New Sector")).toBeInTheDocument();
+    expect(screen.getByText("Owned Elsewhere")).toBeInTheDocument();
+    // Outcome chips.
+    expect(screen.getByText("CREATE")).toBeInTheDocument();
+    expect(screen.getByText("CONFLICT")).toBeInTheDocument();
+    // The CONFLICT row carries data-tone="warn".
+    expect(screen.getByText("Owned Elsewhere").closest("tr")).toHaveAttribute(
+      "data-tone",
+      "warn",
+    );
+    // Member deltas for the CREATE row (+2 added / -0 removed).
+    expect(screen.getByText("+2 / -0")).toBeInTheDocument();
+    // Apply disabled while conflicted, with the explanatory 409 title.
+    const applyButton = screen.getByRole("button", { name: /^apply$/i });
+    expect(applyButton).toBeDisabled();
+    expect(applyButton).toHaveAttribute(
+      "title",
+      "The API refuses conflicted plans (409)",
+    );
+    // Remedy line + unknown-channels note.
+    expect(screen.getByText(/Conflicts block apply/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/3 channels are in CMS but not in the registry/i),
+    ).toBeInTheDocument();
+  });
+
+  it("applies a conflict-free plan and refetches groups from the Applied step", async () => {
+    await openStepperAndRunDryRun("apply me");
+
+    await waitFor(() =>
+      expect(screen.getByText("Review the plan")).toBeInTheDocument(),
+    );
+    const applyButton = screen.getByRole("button", { name: /^apply$/i });
+    expect(applyButton).toBeEnabled();
+    fireEvent.click(applyButton);
+
+    // Applied step: non-zero counts + reason echo (UNCHANGED:0 is hidden).
+    await waitFor(() =>
+      expect(screen.getByText("Sync applied")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("RENAME: 1")).toBeInTheDocument();
+    expect(screen.getByText("CREATE: 2")).toBeInTheDocument();
+    expect(screen.queryByText("UNCHANGED: 0")).not.toBeInTheDocument();
+    expect(screen.getByText("Reason: apply me")).toBeInTheDocument();
+
+    // The apply POST fired with dry_run:false.
+    expect(syncPosts()).toHaveLength(2);
+    expect(syncPosts()[1].dry_run).toBe(false);
+
+    // Before "Back to groups": only the mount read. After: a reload (2).
+    expect(groupGetCount()).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: /back to groups/i }));
+    await waitFor(() => expect(groupGetCount()).toBe(2));
+  });
+
+  it("shows a 503 detail with a Connectors pointer, stays on Reason, and re-enables retry", async () => {
+    await openStepperAndRunDryRun("try sync", () =>
+      jsonResponse({ detail: "Credential unavailable." }, 503),
+    );
+
+    // Banner shows the backend detail verbatim + the 503 Connectors pointer.
+    await waitFor(() =>
+      expect(screen.getByText(/Credential unavailable\./)).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/check the credential in the Connectors view\./i),
+    ).toBeInTheDocument();
+    // Still on the Reason step: reason input + Run dry-run present, no Apply.
+    expect(
+      screen.getByLabelText(/Reason \(required, audited\)/i),
+    ).toBeInTheDocument();
+    const runButton = screen.getByRole("button", { name: /run dry-run/i });
+    expect(runButton).toBeEnabled(); // re-enabled for a retry
+    expect(
+      screen.queryByRole("button", { name: /^apply$/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("restores the table without refetching groups when Cancel is used from Preview", async () => {
+    await openStepperAndRunDryRun("peek");
+
+    await waitFor(() =>
+      expect(screen.getByText("Review the plan")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+
+    // Table restored (no apply committed) and no reload fired.
+    await waitFor(() =>
+      expect(screen.getByText("TV Sector")).toBeInTheDocument(),
+    );
+    expect(groupGetCount()).toBe(1);
   });
 });

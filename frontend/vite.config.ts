@@ -22,6 +22,9 @@ const TENANT_SCOPED_ROUTES = [
   "/connectors",
   "/adsense",
   "/channels",
+  // The Groups view's list/clear/archive calls hit /groups and must ride the
+  // same injected trusted-principal proxying in dev as the other tenant routes.
+  "/groups",
   // /audit/events bootstraps on the Audit view mount and uses the same
   // trusted-gateway auth, so it must be proxied with the injected principal
   // headers in dev or the bootstrap call would 401.
