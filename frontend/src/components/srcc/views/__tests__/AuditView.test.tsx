@@ -131,6 +131,26 @@ function fetchMock() { // skipcq: JS-0067
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
+// Pick the /audit/events fixture page matching the query-string variant.
+const eventsResponse = (url: string) => {
+  if (url.includes("cursor_created_at=")) {
+    return jsonResponse(PAGED_EVENTS_SECOND);
+  }
+  if (url.includes("event_type=CHANNEL_UPDATED")) {
+    return jsonResponse({
+      ...EVENTS,
+      items: [
+        {
+          ...EVENTS.items[0],
+          event_type: "CHANNEL_UPDATED",
+          id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        },
+      ],
+    });
+  }
+  return jsonResponse(EVENTS);
+};
+
 // Route the auto-fetch GET /audit/events to a fixed body; let callers override.
 function routeEvents( // skipcq: JS-0067
   responder: (url: string) => Response | null,
@@ -143,24 +163,7 @@ function routeEvents( // skipcq: JS-0067
       return Promise.resolve(jsonResponse(SUMMARY));
     }
     if (url.startsWith("/audit/events")) {
-      if (url.includes("cursor_created_at=")) {
-        return Promise.resolve(jsonResponse(PAGED_EVENTS_SECOND));
-      }
-      if (url.includes("event_type=CHANNEL_UPDATED")) {
-        return Promise.resolve(
-          jsonResponse({
-            ...EVENTS,
-            items: [
-              {
-                ...EVENTS.items[0],
-                event_type: "CHANNEL_UPDATED",
-                id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
-              },
-            ],
-          }),
-        );
-      }
-      return Promise.resolve(jsonResponse(EVENTS));
+      return Promise.resolve(eventsResponse(url));
     }
     return Promise.resolve(jsonResponse({}, 200));
   };

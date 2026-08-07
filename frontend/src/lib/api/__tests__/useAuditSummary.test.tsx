@@ -10,13 +10,13 @@ function wrapper({ children }: { children: ReactNode }) { // skipcq: JS-0067
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
 }
 
-function strictWrapper({ children }: { children: ReactNode }): ReactElement {
+const strictWrapper = ({ children }: { children: ReactNode }): ReactElement => {
   return (
     <StrictMode>
       <TenantProvider initialSlug="ums">{children}</TenantProvider>
     </StrictMode>
   );
-}
+};
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -44,11 +44,11 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   });
 }
 
-function abortError(): Error {
+const abortError = (): Error => {
   const err = new Error("aborted");
   err.name = "AbortError";
   return err;
-}
+};
 
 type DeferredFetch = {
   promise: Promise<Response>;
@@ -56,7 +56,7 @@ type DeferredFetch = {
   reject: (reason?: unknown) => void;
 };
 
-function deferredResponse(): DeferredFetch {
+const deferredResponse = (): DeferredFetch => {
   let resolve!: (value: Response) => void;
   let reject!: (reason?: unknown) => void;
   const promise = new Promise<Response>((promiseResolve, promiseReject) => {
@@ -64,7 +64,7 @@ function deferredResponse(): DeferredFetch {
     reject = promiseReject;
   });
   return { promise, resolve, reject };
-}
+};
 
 function fetchMock() { // skipcq: JS-0067
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
