@@ -218,42 +218,81 @@ function methodOf(init: unknown): string {
 
 type SyncBody = { content_owner_id: string; dry_run: boolean; reason: string };
 
-// URL-keyed fetch router. The view fetches /groups AND (for a manager)
-// /connectors/credentials on mount, and effects fire child-before-parent, so the
-// mount order is not guaranteed — key on URL+method instead of a positional
-// queue. Each route has a sensible default; tests override only what they assert.
-function routeFetch(overrides: {
+type RouteOverrides = {
   groups?: () => Response;
   credentials?: () => Response;
   sync?: (body: SyncBody) => Response;
   clear?: () => Response;
   archive?: () => Response;
-} = {}) {
-  fetchMock().mockImplementation((input: unknown, init: unknown) => {
-    const url = urlOf(input);
-    const method = methodOf(init);
-    if (method === "GET" && url === "/groups") {
-      return Promise.resolve((overrides.groups ?? (() => jsonResponse(GROUPS)))());
-    }
-    if (method === "GET" && url === "/connectors/credentials") {
-      return Promise.resolve(
-        (overrides.credentials ?? (() => jsonResponse(DEFAULT_CREDS)))(),
-      );
-    }
-    if (method === "POST" && url === "/channels/groups/sync") {
+};
+
+type Route = {
+  method: string;
+  /** Exact path, or a path PREFIX when `prefix` is set (id-bearing routes). */
+  path: string;
+  prefix?: true;
+  /** Resolve the route: the test's override if present, else its default. */
+  respond: (overrides: RouteOverrides, init: unknown) => Promise<Response>;
+};
+
+// Route table for the fetch router below, matched in order on method + path.
+// The view fetches /groups AND (for a manager) /connectors/credentials on mount,
+// and effects fire child-before-parent, so the mount order is not guaranteed —
+// key on method+path instead of a positional queue. Each route has a sensible
+// default; tests override only what they assert. An un-overridden sync POST
+// rejects, so a test that does not expect one fails loudly.
+const ROUTES: Route[] = [
+  {
+    method: "GET",
+    path: "/groups",
+    respond: (overrides) =>
+      Promise.resolve((overrides.groups ?? (() => jsonResponse(GROUPS)))()),
+  },
+  {
+    method: "GET",
+    path: "/connectors/credentials",
+    respond: (overrides) =>
+      Promise.resolve((overrides.credentials ?? (() => jsonResponse(DEFAULT_CREDS)))()),
+  },
+  {
+    method: "POST",
+    path: "/channels/groups/sync",
+    respond: (overrides, init) => {
       if (!overrides.sync) return Promise.reject(new Error("unexpected sync POST"));
       const body = JSON.parse(String((init as RequestInit).body)) as SyncBody;
       return Promise.resolve(overrides.sync(body));
-    }
-    if (method === "DELETE" && url.startsWith("/groups/")) {
-      return Promise.resolve((overrides.clear ?? (() => jsonResponse(CLEAR_RESULT)))());
-    }
-    if (method === "PATCH" && url.startsWith("/groups/")) {
-      return Promise.resolve(
-        (overrides.archive ?? (() => jsonResponse(ARCHIVE_RESULT)))(),
-      );
-    }
-    return Promise.reject(new Error(`unrouted ${method} ${url}`));
+    },
+  },
+  {
+    method: "DELETE",
+    path: "/groups/",
+    prefix: true,
+    respond: (overrides) =>
+      Promise.resolve((overrides.clear ?? (() => jsonResponse(CLEAR_RESULT)))()),
+  },
+  {
+    method: "PATCH",
+    path: "/groups/",
+    prefix: true,
+    respond: (overrides) =>
+      Promise.resolve((overrides.archive ?? (() => jsonResponse(ARCHIVE_RESULT)))()),
+  },
+];
+
+/** Does this request line hit `route`? Exact path unless the route is a prefix. */
+function routeMatches(route: Route, method: string, url: string): boolean {
+  if (route.method !== method) return false;
+  return route.prefix ? url.startsWith(route.path) : url === route.path;
+}
+
+/** Install the URL-keyed fetch router, with the given per-route overrides. */
+function routeFetch(overrides: RouteOverrides = {}) {
+  fetchMock().mockImplementation((input: unknown, init: unknown) => {
+    const url = urlOf(input);
+    const method = methodOf(init);
+    const route = ROUTES.find((candidate) => routeMatches(candidate, method, url));
+    if (!route) return Promise.reject(new Error(`unrouted ${method} ${url}`));
+    return route.respond(overrides, init);
   });
 }
 

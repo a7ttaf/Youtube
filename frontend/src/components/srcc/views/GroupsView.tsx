@@ -368,6 +368,15 @@ type GroupRowProps = {
 };
 
 /**
+ * One id cell: the id as a code chip, or the caller's marker when it is NULL.
+ * Shared by the CMS-id and owner-stamp columns, which differ only in that
+ * NULL marker ("manual" vs the adoptable "unstamped" badge).
+ */
+function GroupIdCell({ id, nullMarker }: { id: string | null; nullMarker: ReactNode }) {
+  return <td>{id === null ? nullMarker : <span className="code-chip">{id}</span>}</td>;
+}
+
+/**
  * A single channel-group row. Derives every display cell from the API shape and,
  * when its action panel is open, renders the inline confirm panel as a full-width
  * row directly beneath it (component-local; no portal/modal).
@@ -385,23 +394,19 @@ function GroupRow({
     <>
       <tr>
         <td>{group.name}</td>
-        <td>
-          {group.cms_group_id === null ? (
-            <span className="muted">manual</span>
-          ) : (
-            <span className="code-chip">{group.cms_group_id}</span>
-          )}
-        </td>
-        <td>
-          {group.content_owner_id === null ? (
+        <GroupIdCell
+          id={group.cms_group_id}
+          nullMarker={<span className="muted">manual</span>}
+        />
+        <GroupIdCell
+          id={group.content_owner_id}
+          nullMarker={
             // Distinct marker: a NULL stamp is adoptable by the next sync.
             <span className="badge amber" data-testid="owner-unstamped">
               unstamped
             </span>
-          ) : (
-            <span className="code-chip">{group.content_owner_id}</span>
-          )}
-        </td>
+          }
+        />
         <td>{memberCount}</td>
         <td>
           {group.active ? "active" : <span className="muted">archived</span>}

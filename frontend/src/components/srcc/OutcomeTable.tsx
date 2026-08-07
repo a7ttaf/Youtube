@@ -24,12 +24,19 @@ export type OutcomeTableRow = {
   key: string;
   /** Optional tone surfaced as the row's data-tone attribute. */
   tone?: "warn" | "error";
-  /** Cell content, rendered in column order. */
+  /**
+   * Cell content, rendered in column order — one entry per `columns` label,
+   * whose label keys the cell (see the uniqueness note on `columns`).
+   */
   cells: ReactNode[];
 };
 
 export type OutcomeTableProps = {
-  /** Column header labels, in display order. */
+  /**
+   * Column header labels, in display order. Labels MUST be unique: each label
+   * is the React key of its header cell and of that column's cell in every
+   * row, so a duplicate label would collide with its twin among its siblings.
+   */
   columns: string[];
   /** Data rows; an empty array renders the emptyLabel message row instead. */
   rows: OutcomeTableRow[];
@@ -42,8 +49,8 @@ function OutcomeTableHead({ columns }: { columns: string[] }) {
   return (
     <thead>
       <tr>
-        {columns.map((column, index) => (
-          <th key={index}>{column}</th>
+        {columns.map((column) => (
+          <th key={column}>{column}</th>
         ))}
       </tr>
     </thead>
@@ -64,12 +71,19 @@ function OutcomeTableEmptyRow({ columnCount, emptyLabel }: {
   );
 }
 
-/** A single data row: the caller's cells in order, with data-tone when set. */
-function OutcomeTableRowView({ row }: { row: OutcomeTableRow }) {
+/**
+ * A single data row: the caller's cells in order, with data-tone when set. Each
+ * cell is keyed by its column label (unique per the `columns` contract), so a
+ * reordered or filtered `rows` array never reuses a cell across columns.
+ */
+function OutcomeTableRowView({ columns, row }: {
+  columns: string[];
+  row: OutcomeTableRow;
+}) {
   return (
     <tr data-tone={row.tone}>
       {row.cells.map((cell, index) => (
-        <td key={index}>{cell}</td>
+        <td key={columns[index]}>{cell}</td>
       ))}
     </tr>
   );
@@ -89,7 +103,9 @@ export function OutcomeTable({ columns, rows, emptyLabel }: OutcomeTableProps) {
           {rows.length === 0 ? (
             <OutcomeTableEmptyRow columnCount={columns.length} emptyLabel={emptyLabel} />
           ) : (
-            rows.map((row) => <OutcomeTableRowView key={row.key} row={row} />)
+            rows.map((row) => (
+              <OutcomeTableRowView key={row.key} columns={columns} row={row} />
+            ))
           )}
         </tbody>
       </table>

@@ -43,6 +43,46 @@ const REPO_ROOT = path.resolve(
   "..",
 );
 
+// The full trusted-principal header set the dev proxy injects, as
+// [header, env var, fallback] triples. The set is what makes the backend's
+// current_principal_from_headers dependency succeed in the default
+// UMS_AUTHZ_SOURCE=headers mode (it requires X-User-ID, X-User-Email, X-Role,
+// X-Scope-Type, and the gateway token). Per-header notes:
+//   - SECURITY: the trusted-gateway token is read from a non-VITE_ env var only.
+//     Any VITE_*-prefixed variable Vite reads here also becomes available to
+//     client code via import.meta.env at build time, which would leak the token
+//     into the browser bundle. Server-only names (UMS_TRUSTED_GATEWAY_TOKEN)
+//     stay confined to Node and never reach the browser.
+//   - X-UMS-Tenant is overridden or supplied by the proxy. The bootstrap call
+//     from <TenantProvider> ships with no slug, and downstream calls may carry a
+//     stale "ums" — the proxy is the authority during dev, matching the
+//     production gateway contract, which is the source of truth for tenant
+//     identity rather than the browser bundle. The "ums" fallback keeps local
+//     dev pointed at the seeded tenant unless explicitly overridden.
+//   - X-Scope-ID is optional: it applies to non-global dev identities only, and
+//     its empty fallback omits it, which is safe for global-scope dev.
+// The non-secret dev defaults (user id/email/role/scope_type/tenant slug) keep
+// the VITE_DEV_ prefix only because they are intentionally non-secret.
+const GATEWAY_HEADER_SOURCES: [header: string, envVar: string, fallback: string][] = [
+  ["X-User-ID", "VITE_DEV_GATEWAY_USER_ID", "00000000-0000-0000-0000-0000000000aa"],
+  ["X-User-Email", "VITE_DEV_GATEWAY_USER_EMAIL", "dev@ums.local"],
+  ["X-Role", "VITE_DEV_GATEWAY_ROLE", "assistant_analyst"],
+  ["X-Scope-Type", "VITE_DEV_GATEWAY_SCOPE_TYPE", "global"],
+  ["X-UMS-Trusted-Gateway-Token", "UMS_TRUSTED_GATEWAY_TOKEN", ""],
+  ["X-UMS-Tenant", "VITE_DEV_GATEWAY_TENANT_SLUG", "ums"],
+  ["X-Scope-ID", "VITE_DEV_GATEWAY_SCOPE_ID", ""],
+];
+
+// Resolve that set once per config load, in declaration order. A blank value —
+// an empty fallback, or an env var explicitly set to "" — drops its header, so
+// the proxy sends exactly the headers the previous per-header guards sent.
+function resolveGatewayHeaders(env: Record<string, string>): [string, string][] {
+  const resolved = GATEWAY_HEADER_SOURCES.map(
+    ([header, envVar, fallback]) => [header, env[envVar] ?? fallback] as [string, string],
+  );
+  return resolved.filter(([, value]) => value !== "");
+}
+
 export default defineConfig(({ mode }) => {
   // ============================================================================
   // Purpose: Load env from the repository root in Node only. VITE_-prefixed
@@ -58,26 +98,13 @@ export default defineConfig(({ mode }) => {
   // ============================================================================
   const env = loadEnv(mode, REPO_ROOT, "");
   const backendTarget = env.VITE_DEV_BACKEND_URL ?? "http://127.0.0.1:8000";
-  const gatewayUserId =
-    env.VITE_DEV_GATEWAY_USER_ID ?? "00000000-0000-0000-0000-0000000000aa";
-  const gatewayUserEmail =
-    env.VITE_DEV_GATEWAY_USER_EMAIL ?? "dev@ums.local";
-  const gatewayRole = env.VITE_DEV_GATEWAY_ROLE ?? "assistant_analyst";
-  const gatewayScopeType = env.VITE_DEV_GATEWAY_SCOPE_TYPE ?? "global";
-  // Tenant slug injected by the dev proxy mirrors the production reverse-proxy
-  // model: the trusted gateway is the source of truth for tenant identity,
-  // not the browser bundle. The frontend bootstraps with an empty slug and
-  // discovers its real tenant from /tenants/me; this default keeps local
-  // dev pointed at the seeded "ums" tenant unless explicitly overridden.
-  const gatewayTenantSlug = env.VITE_DEV_GATEWAY_TENANT_SLUG ?? "ums";
-  // SECURITY: Read trusted-gateway token from a non-VITE_ env var only. Any
-  // VITE_*-prefixed variable Vite reads here also becomes available to client
-  // code via import.meta.env at build time, which would leak the token into
-  // the browser bundle. Server-only names (UMS_TRUSTED_GATEWAY_TOKEN) stay
-  // confined to Node and never reach the browser.
+  // The frontend bootstraps with an empty tenant slug and discovers its real
+  // tenant from /tenants/me; the injected header set (see
+  // GATEWAY_HEADER_SOURCES) is the dev stand-in for the production gateway.
+  const gatewayHeaders = resolveGatewayHeaders(env);
+  // SECURITY: read separately for the startup hint only — same non-VITE_ name,
+  // so the token still never reaches the browser bundle.
   const gatewayToken = env.UMS_TRUSTED_GATEWAY_TOKEN ?? "";
-  // Optional scope ID for non-global dev identities; empty string = omit.
-  const gatewayScopeId = env.VITE_DEV_GATEWAY_SCOPE_ID ?? "";
 
   if (mode === "development" && !gatewayToken) {
     // Surface a single startup hint so missing trusted-gateway secrets do not
@@ -108,29 +135,12 @@ export default defineConfig(({ mode }) => {
             changeOrigin: true,
             configure(proxy) {
               proxy.on("proxyReq", (proxyReq) => {
-                // Inject the full trusted-principal header set so the backend
-                // current_principal_from_headers dependency succeeds in the
-                // default UMS_AUTHZ_SOURCE=headers mode (it requires X-User-ID,
-                // X-User-Email, X-Role, X-Scope-Type, and the gateway token).
-                if (gatewayUserId) proxyReq.setHeader("X-User-ID", gatewayUserId);
-                if (gatewayUserEmail)
-                  proxyReq.setHeader("X-User-Email", gatewayUserEmail);
-                if (gatewayRole) proxyReq.setHeader("X-Role", gatewayRole);
-                if (gatewayScopeType)
-                  proxyReq.setHeader("X-Scope-Type", gatewayScopeType);
-                if (gatewayToken)
-                  proxyReq.setHeader("X-UMS-Trusted-Gateway-Token", gatewayToken);
-                // Override or supply X-UMS-Tenant from the proxy. The
-                // bootstrap call from <TenantProvider> ships with no slug,
-                // and downstream calls may carry a stale "ums" — the proxy
-                // is the authority during dev, matching the production
-                // gateway contract.
-                if (gatewayTenantSlug)
-                  proxyReq.setHeader("X-UMS-Tenant", gatewayTenantSlug);
-                // Inject X-Scope-ID when a non-global scope identity is
-                // configured; omitting it is safe for global-scope dev.
-                if (gatewayScopeId)
-                  proxyReq.setHeader("X-Scope-ID", gatewayScopeId);
+                // Inject the resolved trusted-principal header set (blank
+                // values were already dropped) so the backend's
+                // current_principal_from_headers dependency succeeds.
+                for (const [header, value] of gatewayHeaders) {
+                  proxyReq.setHeader(header, value);
+                }
               });
             },
           },

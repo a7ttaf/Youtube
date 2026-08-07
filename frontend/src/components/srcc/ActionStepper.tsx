@@ -24,7 +24,11 @@ import { Dot } from "./shared";
 // ============================================================================
 
 export type ActionStepperProps = {
-  /** Ordered step labels, e.g. ["Reason", "Preview", "Applied"]. */
+  /**
+   * Ordered step labels, e.g. ["Reason", "Preview", "Applied"]. Labels MUST be
+   * unique: each label is its step pill's React key, so a duplicate label would
+   * collide with its twin among its siblings.
+   */
   steps: string[];
   /** Index of the currently active step (0-based). */
   activeIndex: number;
@@ -85,7 +89,7 @@ export function ActionStepper({
         style={{ gridTemplateColumns: `repeat(${steps.length}, minmax(100px, 1fr))` }}
       >
         {steps.map((label, index) => (
-          <StepPill key={index} label={label} index={index} activeIndex={activeIndex} />
+          <StepPill key={label} label={label} index={index} activeIndex={activeIndex} />
         ))}
       </div>
       {children}

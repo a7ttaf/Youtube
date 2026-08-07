@@ -3,6 +3,7 @@ import { type ReactNode, useRef, useState } from "react";
 import { ApiError } from "@/lib/api/client";
 import type { GroupSyncGroupResult, GroupSyncResult } from "@/lib/api/types";
 import { useGroupSyncAction } from "@/lib/api/useGroupSync";
+import type { Severity } from "@/lib/mock/data";
 import { ActionStepper } from "../ActionStepper";
 import { OutcomeTable, type OutcomeTableRow } from "../OutcomeTable";
 import { Badge } from "../shared";
@@ -70,45 +71,57 @@ function describeSyncError(err: unknown): string {
 }
 
 /** Outcome chip tone: green create/reactivate, amber deactivate, red conflict,
- * blue for other changes, muted for UNCHANGED — matching shared Badge tones. */
+ * blue for other changes — matching shared Badge tones. Outcomes absent from
+ * this table (UNCHANGED) render as muted text instead of a Badge. */
+const OUTCOME_TONES: Partial<Record<GroupSyncGroupResult["outcome"], Severity>> = {
+  CREATE: "green",
+  REACTIVATE: "green",
+  DEACTIVATE: "amber",
+  CONFLICT: "red",
+  RENAME: "blue",
+  MEMBERS_CHANGED: "blue",
+};
+
+/** Render one outcome as its toned Badge, or as muted text when it has none.
+ * Object.hasOwn guards the lookup: the outcome string comes off the wire, and
+ * a plain-object read of an untyped value like "toString" would walk the
+ * prototype chain to a truthy function where the old switch's default arm
+ * rendered muted — the own-property check keeps every unknown string muted. */
 function outcomeChip(outcome: GroupSyncGroupResult["outcome"]): ReactNode {
-  switch (outcome) {
-    case "CREATE":
-    case "REACTIVATE":
-      return <Badge tone="green">{outcome}</Badge>;
-    case "DEACTIVATE":
-      return <Badge tone="amber">{outcome}</Badge>;
-    case "CONFLICT":
-      return <Badge tone="red">{outcome}</Badge>;
-    case "RENAME":
-    case "MEMBERS_CHANGED":
-      return <Badge tone="blue">{outcome}</Badge>;
-    default:
-      return <span className="muted">{outcome}</span>;
-  }
+  const tone = Object.hasOwn(OUTCOME_TONES, outcome)
+    ? OUTCOME_TONES[outcome]
+    : undefined;
+  if (!tone) return <span className="muted">{outcome}</span>;
+  return <Badge tone={tone}>{outcome}</Badge>;
 }
 
 const activeLabel = (active: boolean): string => (active ? "active" : "archived");
 
 /**
  * Render a group's name/active transitions as "old → new" lines (or a muted dash
- * when nothing changed). name_change/active_change are [from, to] tuples.
+ * when nothing changed). name_change/active_change are [from, to] tuples. Each
+ * line is keyed by the field it describes — "name" and "active" are each pushed
+ * at most once, so the keys are unique within the cell and stable per render.
  */
 function ChangesCell({ group }: { group: GroupSyncGroupResult }) {
-  const lines: string[] = [];
+  const lines: { field: string; text: string }[] = [];
   if (group.name_change) {
-    lines.push(`${group.name_change[0]} → ${group.name_change[1]}`);
+    lines.push({
+      field: "name",
+      text: `${group.name_change[0]} → ${group.name_change[1]}`,
+    });
   }
   if (group.active_change) {
-    lines.push(
-      `${activeLabel(group.active_change[0])} → ${activeLabel(group.active_change[1])}`,
-    );
+    lines.push({
+      field: "active",
+      text: `${activeLabel(group.active_change[0])} → ${activeLabel(group.active_change[1])}`,
+    });
   }
   if (lines.length === 0) return <span className="muted">—</span>;
   return (
     <>
-      {lines.map((line, index) => (
-        <div key={index}>{line}</div>
+      {lines.map((line) => (
+        <div key={line.field}>{line.text}</div>
       ))}
     </>
   );
@@ -122,7 +135,9 @@ function groupOutcomeRow(group: GroupSyncGroupResult): OutcomeTableRow {
     cells: [
       group.title ?? group.cms_group_id,
       outcomeChip(group.outcome),
-      <ChangesCell group={group} />,
+      // The only element literal in this cells array, so a constant key is
+      // unique among its siblings; OutcomeTable re-keys each cell by column.
+      <ChangesCell key="changes" group={group} />,
       `+${group.members_added.length} / -${group.members_removed.length}`,
       group.unknown_channel_count,
     ],

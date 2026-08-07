@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type { SessionCapabilities, TenantRead } from "@/lib/api/types";
@@ -679,7 +679,22 @@ function OperationalCues({ canViewFinance }: { canViewFinance: boolean }) {
 
 /* ------------------------------------------------------------------ view router */
 
-/** Route the active view key to its wired or mock view with the right props. */
+type ViewRouterProps = {
+  view: ViewKey;
+  permissions: AccessPermissions;
+  canViewFinance: boolean;
+  displayedRole: Role;
+  traceChannelId: string | null;
+  onOpenTrace: (channelId: string) => void;
+};
+
+/**
+ * Route the active view key to its wired or mock view with the right props. A
+ * ViewKey-keyed render map replaces the per-view conditional chain: the Record
+ * is exhaustive by type (adding a ViewKey without a renderer is a type error),
+ * and only the active key's renderer is invoked — one mounted view, exactly as
+ * the chain produced.
+ */
 function ViewRouter({
   view,
   permissions,
@@ -687,66 +702,57 @@ function ViewRouter({
   displayedRole,
   traceChannelId,
   onOpenTrace,
-}: {
-  view: ViewKey;
-  permissions: AccessPermissions;
-  canViewFinance: boolean;
-  displayedRole: Role;
-  traceChannelId: string | null;
-  onOpenTrace: (channelId: string) => void;
-}) {
-  return (
-    <>
-      {view === "command" && (
-        <CommandView
-          canViewFinance={canViewFinance}
-          canViewAnalytics={permissions.canViewAnalytics}
-          canViewPayments={permissions.canViewPayments}
-          canViewBankReconciliation={permissions.canViewBankReconciliation}
-        />
-      )}
-      {view === "registry" && (
-        <RegistryView
-          canManageRegistry={permissions.canManageRegistry}
-          canViewFinance={permissions.canViewFinance}
-          onOpenTrace={onOpenTrace}
-        />
-      )}
-      {view === "groups" && (
-        <GroupsView canManageGroups={permissions.canManageGroups} />
-      )}
-      {view === "close" && <CloseView permissions={permissions} />}
-      {view === "trace" && (
-        <TraceView
-          canViewFinance={canViewFinance}
-          role={displayedRole}
-          presetChannelId={traceChannelId ?? undefined}
-        />
-      )}
-      {view === "exports" && (
-        <ExportsView
-          canCreateExport={canCreateAnyExport(permissions)}
-          canExportFinance={permissions.canExportFinanceReports}
-          canExportAnalytics={permissions.canExportAnalyticsReports}
-          canViewRevenue={permissions.canViewRevenue}
-        />
-      )}
-      {view === "connectors" && (
-        <ConnectorsView
-          canRunConnectors={permissions.canRunConnectors}
-          canManageConnectors={permissions.canManageConnectors}
-          canViewFinance={permissions.canViewFinance}
-          canViewConnectorHealth={permissions.canViewConnectorHealth}
-        />
-      )}
-      {view === "audit" && (
-        <AuditView
-          canViewAudit={permissions.canViewAudit}
-          canViewFinance={permissions.canViewFinance}
-        />
-      )}
-    </>
-  );
+}: ViewRouterProps) {
+  const renderView: Record<ViewKey, () => ReactNode> = {
+    command: () => (
+      <CommandView
+        canViewFinance={canViewFinance}
+        canViewAnalytics={permissions.canViewAnalytics}
+        canViewPayments={permissions.canViewPayments}
+        canViewBankReconciliation={permissions.canViewBankReconciliation}
+      />
+    ),
+    registry: () => (
+      <RegistryView
+        canManageRegistry={permissions.canManageRegistry}
+        canViewFinance={permissions.canViewFinance}
+        onOpenTrace={onOpenTrace}
+      />
+    ),
+    groups: () => <GroupsView canManageGroups={permissions.canManageGroups} />,
+    close: () => <CloseView permissions={permissions} />,
+    trace: () => (
+      <TraceView
+        canViewFinance={canViewFinance}
+        role={displayedRole}
+        presetChannelId={traceChannelId ?? undefined}
+      />
+    ),
+    exports: () => (
+      <ExportsView
+        canCreateExport={canCreateAnyExport(permissions)}
+        canExportFinance={permissions.canExportFinanceReports}
+        canExportAnalytics={permissions.canExportAnalyticsReports}
+        canViewRevenue={permissions.canViewRevenue}
+      />
+    ),
+    connectors: () => (
+      <ConnectorsView
+        canRunConnectors={permissions.canRunConnectors}
+        canManageConnectors={permissions.canManageConnectors}
+        canViewFinance={permissions.canViewFinance}
+        canViewConnectorHealth={permissions.canViewConnectorHealth}
+      />
+    ),
+    audit: () => (
+      <AuditView
+        canViewAudit={permissions.canViewAudit}
+        canViewFinance={permissions.canViewFinance}
+      />
+    ),
+  };
+
+  return <>{renderView[view]()}</>;
 }
 
 /* ------------------------------------------------------------------ command */
