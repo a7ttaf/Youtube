@@ -1,5 +1,5 @@
 // frontend/src/components/srcc/__tests__/AppShell.test.tsx
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -349,6 +349,9 @@ const EMPTY_EXPORTS = {
   items: [],
   pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
 };
+// GET /groups returns a bare array (see useGroups.ts) — unlike the paginated
+// wrapper shapes above. The Groups view fetches it unconditionally on mount.
+const EMPTY_GROUPS: unknown[] = [];
 
 type FetchRouteMap = ReadonlyMap<string, () => Response>;
 
@@ -360,6 +363,7 @@ const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRou
   ["/connectors/credentials", () => jsonResponse(EMPTY_CONNECTOR_CREDENTIALS)],
   ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
   ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
+  ["/groups", () => jsonResponse(EMPTY_GROUPS)],
 ]);
 
 const requestPathOf = (input: unknown) =>
@@ -630,5 +634,54 @@ describe("AppShell production session hydration", () => {
       name: /run pull/i,
     })) as HTMLButtonElement;
     expect(runPull).toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------- groups nav
+
+describe("AppShell groups navigation", () => {
+  it("GROUPS NAV: CMS Groups sits after Channel Registry in the Workspace group and renders the Groups view", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
+    );
+    renderShell();
+
+    // Nav order: the Workspace group lists CMS Groups after Channel Registry.
+    const workspaceNav = await screen.findByRole("navigation", { name: "Workspace" });
+    const itemLabels = within(workspaceNav)
+      .getAllByRole("button")
+      .map((button) => button.textContent ?? "");
+    const registryIndex = itemLabels.findIndex((text) => text.includes("Channel Registry"));
+    const groupsIndex = itemLabels.findIndex((text) => text.includes("CMS Groups"));
+    expect(registryIndex).toBeGreaterThanOrEqual(0);
+    expect(groupsIndex).toBeGreaterThan(registryIndex);
+
+    // Clicking it renders the Groups view via its VIEW_COPY title as the page heading.
+    fireEvent.click(await screen.findByText("CMS Groups"));
+    expect(
+      await screen.findByRole("heading", { name: "CMS Groups", level: 1 }),
+    ).toBeInTheDocument();
+  });
+
+  it("GROUPS NAV: shows the manage-groups sync surface when canManageGroups is granted", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canManageGroups: true }))),
+    );
+    renderShell();
+
+    fireEvent.click(await screen.findByText("CMS Groups"));
+    expect(await screen.findByRole("button", { name: /sync/i })).toBeInTheDocument();
+  });
+
+  it("GROUPS NAV: hides the manage-groups sync surface with the default all-false session", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody())),
+    );
+    renderShell();
+
+    fireEvent.click(await screen.findByText("CMS Groups"));
+    // Settle on the Groups view's loaded (empty) state before asserting absence.
+    await screen.findByRole("heading", { name: "CMS Groups", level: 1 });
+    expect(screen.queryByRole("button", { name: /sync/i })).not.toBeInTheDocument();
   });
 });

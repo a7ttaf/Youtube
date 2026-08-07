@@ -16,6 +16,7 @@ import CloseView from "./views/CloseView";
 import CommandView from "./views/CommandView";
 import { ConnectorsView } from "./views/ConnectorsView";
 import ExportsView from "./views/ExportsView";
+import { GroupsView } from "./views/GroupsView";
 import RegistryView from "./views/RegistryView";
 import TraceView from "./views/TraceView";
 import {
@@ -40,6 +41,7 @@ type AccessPermissions = {
   canViewPayments: boolean;
   canViewBankReconciliation: boolean;
   canManageRegistry: boolean;
+  canManageGroups: boolean;
   canManageConnectors: boolean;
   canCloseMonth: boolean;
   canUnlockMonth: boolean;
@@ -118,6 +120,7 @@ function capabilitiesToPermissions( // skipcq: JS-0067
     canViewPayments: capabilities.canViewPayments,
     canViewBankReconciliation: capabilities.canViewBankReconciliation,
     canManageRegistry: capabilities.canManageRegistry,
+    canManageGroups: capabilities.canManageGroups,
     canManageConnectors: capabilities.canManageConnectors,
     canCloseMonth: capabilities.canCloseMonth,
     canUnlockMonth: capabilities.canUnlockMonth,
@@ -708,6 +711,9 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
           canViewFinance={permissions.canViewFinance}
           onOpenTrace={onOpenTrace}
         />
+      )}
+      {view === "groups" && (
+        <GroupsView canManageGroups={permissions.canManageGroups} />
       )}
       {view === "close" && <CloseView permissions={permissions} />}
       {view === "trace" && (
