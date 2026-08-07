@@ -106,10 +106,13 @@ flush_entry() {
     echo "Debt entry '$current_id' is missing required field: allowed_until"
     return 1
   fi
-  if ! [[ "$current_allowed_until" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-    echo "Debt entry '$current_id' has invalid allowed_until format (expected YYYY-MM-DD): $current_allowed_until"
-    return 1
-  fi
+  case "$current_allowed_until" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *)
+      echo "Debt entry '$current_id' has invalid allowed_until format (expected YYYY-MM-DD): $current_allowed_until"
+      return 1
+      ;;
+  esac
   if ! is_valid_iso_date "$current_allowed_until"; then
     echo "Debt entry '$current_id' has invalid allowed_until date: $current_allowed_until"
     return 1
@@ -155,36 +158,42 @@ flush_entry() {
 while IFS= read -r line || [ -n "$line" ]; do
   line="$(trim "$line")"
   [ -z "$line" ] && continue
-  [[ "$line" == \#* ]] && continue
+  [[ "$line" = \#* ]] && continue
 
-  if [[ "$line" =~ ^-[[:space:]]id: ]]; then
-    if ! flush_entry; then
-      exit "$CI_RESULT_FAIL_INFRA"
-    fi
-    current_id="$(extract_value "$line")"
-    in_signatures=0
-    continue
-  fi
+  case "$line" in
+    -[[:space:]]id:*)
+      if ! flush_entry; then
+        exit "$CI_RESULT_FAIL_INFRA"
+      fi
+      current_id="$(extract_value "$line")"
+      in_signatures=0
+      continue
+      ;;
+  esac
 
   if [ -z "$current_id" ]; then
     continue
   fi
 
-  if [[ "$line" == signatures:* ]]; then
+  if [[ "$line" = signatures:* ]]; then
     in_signatures=1
     continue
   fi
 
-  if [ "$in_signatures" -eq 1 ] && [[ "$line" =~ ^-[[:space:]] ]]; then
-    signature="$(strip_quotes "$(trim "${line#-}")")"
-    if [ -n "$signature" ]; then
-      if [ -z "$current_signatures" ]; then
-        current_signatures="$signature"
-      else
-        current_signatures="${current_signatures}"$'\n'"$signature"
-      fi
-    fi
-    continue
+  if [ "$in_signatures" -eq 1 ]; then
+    case "$line" in
+      -[[:space:]]*)
+        signature="$(strip_quotes "$(trim "${line#-}")")"
+        if [ -n "$signature" ]; then
+          if [ -z "$current_signatures" ]; then
+            current_signatures="$signature"
+          else
+            current_signatures="${current_signatures}"$'\n'"$signature"
+          fi
+        fi
+        continue
+        ;;
+    esac
   fi
 
   in_signatures=0
@@ -216,10 +225,12 @@ while IFS= read -r line || [ -n "$line" ]; do
       ;;
     expected_count:*)
       current_expected_count="$(extract_value "$line")"
-      if [ -n "$current_expected_count" ] && ! [[ "$current_expected_count" =~ ^[0-9]+$ ]]; then
-        echo "Debt entry '$current_id' has non-numeric expected_count: $current_expected_count"
-        exit "$CI_RESULT_FAIL_INFRA"
-      fi
+      case "$current_expected_count" in
+        *[!0-9]*)
+          echo "Debt entry '$current_id' has non-numeric expected_count: $current_expected_count"
+          exit "$CI_RESULT_FAIL_INFRA"
+          ;;
+      esac
       ;;
   esac
 done < "$DEBT_FILE"
@@ -238,7 +249,7 @@ expired=0
 for i in "${!ENTRY_ALLOWED_UNTIL[@]}"; do
   until="${ENTRY_ALLOWED_UNTIL[$i]}"
   entry_id="${ENTRY_IDS[$i]}"
-  if [ "$today" \> "$until" ]; then
+  if [ "$(printf '%s\n' "$today" "$until" | LC_ALL=C sort | head -n1)" != "$today" ]; then
     echo "Known debt expiry passed: $until (entry: $entry_id)"
     expired=1
   fi

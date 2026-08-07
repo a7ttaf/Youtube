@@ -63,7 +63,7 @@ lint::run_shell() {
   local files=()
   if [ -n "${CI_GATE_CHANGED_FILES:-}" ]; then
     while IFS= read -r f; do
-      [[ "$f" == *.sh ]] && [ -f "$f" ] && files+=("$f")
+      [[ "$f" = *.sh ]] && [ -f "$f" ] && files+=("$f")
     done <<< "$CI_GATE_CHANGED_FILES"
   else
     while IFS= read -r f; do
@@ -125,7 +125,7 @@ lint::run_python() {
     if [ -n "${CI_GATE_CHANGED_FILES:-}" ]; then
       local pyfiles=()
       while IFS= read -r f; do
-        [[ "$f" == *.py ]] && [ -f "$f" ] && pyfiles+=("$f")
+        [[ "$f" = *.py ]] && [ -f "$f" ] && pyfiles+=("$f")
       done <<< "$CI_GATE_CHANGED_FILES"
       if [ "${#pyfiles[@]}" -eq 0 ]; then
         ci::log::info "No Python changed files to lint."
@@ -316,6 +316,6 @@ _lint_main() {
 }
 
 # Run main only when executed directly (not sourced)
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+if [[ "${BASH_SOURCE[0]}" = "${0}" ]]; then
   _lint_main "$@"
 fi

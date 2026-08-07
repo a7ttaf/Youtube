@@ -252,6 +252,6 @@ _tests_main() {
   exit "$OVERALL_RESULT"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+if [[ "${BASH_SOURCE[0]}" = "${0}" ]]; then
   _tests_main "$@"
 fi
