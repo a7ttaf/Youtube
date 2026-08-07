@@ -122,7 +122,7 @@ function GroupsPanelHeader() { // skipcq: JS-0067
   return (
     <div className="panel-header">
       <div className="panel-title">
-        <strong id="groupsTitle">Channel Groups</strong>
+        <strong id="groupsTitle">CMS Groups</strong>
         <span>CMS-mirrored groups, their content-owner stamp, and membership</span>
       </div>
     </div>
@@ -193,7 +193,7 @@ function GroupsSyncHeader({ // skipcq: JS-0067
   return (
     <div className="panel-header">
       <div className="panel-title">
-        <strong id="groupsTitle">Channel Groups</strong>
+        <strong id="groupsTitle">CMS Groups</strong>
         <span>CMS-mirrored groups, their content-owner stamp, and membership</span>
       </div>
       <div className="control-row">
