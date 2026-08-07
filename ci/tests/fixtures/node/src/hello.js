@@ -1,7 +1,7 @@
 'use strict';
 
-function hello(name) {
+const hello = (name) => {
   return `Hello, ${name}!`;
-}
+};
 
 module.exports = { hello };
