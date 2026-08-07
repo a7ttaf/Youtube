@@ -187,6 +187,23 @@ const urlOf = (input: unknown): string => {
   return String(input);
 };
 
+/**
+ * Reduce a request URL to its pathname + (decoded) query string, stripping any
+ * origin so routing is independent of VITE_API_BASE_URL (resolveUrl prefixes
+ * relative paths with the configured base). A bare "/groups" and an absolute
+ * "https://api.example/groups" both reduce to "/groups"; the content-owners
+ * route keeps its connector_key query because the hook builds it deterministically.
+ */
+const pathAndQuery = (input: unknown): string => {
+  try {
+    const parsed = new URL(urlOf(input), "http://test.local");
+    const query = parsed.search ? `?${parsed.searchParams.toString()}` : "";
+    return `${parsed.pathname}${query}`;
+  } catch {
+    return urlOf(input);
+  }
+};
+
 const methodOf = (init: unknown): string => {
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
 };
@@ -257,41 +274,48 @@ const ROUTES: Route[] = [
   },
 ];
 
-/** Does this request line hit `route`? Exact path unless the route is a prefix. */
+/** Does this request line hit `route`? Pathname+query, not raw URL, so an
+ *  absolute URL built by resolveUrl (VITE_API_BASE_URL set) still matches. */
 const routeMatches = (route: Route, method: string, url: string): boolean => {
   if (route.method !== method) return false;
-  return route.prefix ? url.startsWith(route.path) : url === route.path;
+  const target = pathAndQuery(url);
+  return route.prefix ? target.startsWith(route.path) : target === route.path;
 };
 
 /** Install the URL-keyed fetch router, with the given per-route overrides. */
 const routeFetch = (overrides: RouteOverrides = {}) => {
   fetchMock().mockImplementation((input: unknown, init: unknown) => {
-    const url = urlOf(input);
     const method = methodOf(init);
-    const route = ROUTES.find((candidate) => routeMatches(candidate, method, url));
-    if (!route) return Promise.reject(new Error(`unrouted ${method} ${url}`));
+    const route = ROUTES.find((candidate) =>
+      routeMatches(candidate, method, urlOf(input)),
+    );
+    if (!route) {
+      return Promise.reject(
+        new Error(`unrouted ${method} ${pathAndQuery(input)}`),
+      );
+    }
     return route.respond(overrides, init);
   });
 };
 
 const callsMatching = (
-  predicate: (url: string, init: unknown) => boolean,
+  predicate: (path: string, init: unknown) => boolean,
 ) => {
   return fetchMock().mock.calls.filter(([input, init]) =>
-    predicate(urlOf(input), init),
+    predicate(pathAndQuery(input), init),
   );
 };
 
 /** How many times the group LIST (GET /groups) was fetched (mount + reloads). */
 const groupGetCount = (): number => {
-  return callsMatching((url, init) => url === "/groups" && methodOf(init) === "GET")
+  return callsMatching((path, init) => path === "/groups" && methodOf(init) === "GET")
     .length;
 };
 
 /** All POSTs to the sync route, parsed bodies in call order. */
 const syncPosts = (): SyncBody[] => {
   return callsMatching(
-    (url, init) => url === "/channels/groups/sync" && methodOf(init) === "POST",
+    (path, init) => path === "/channels/groups/sync" && methodOf(init) === "POST",
   ).map(([, init]) => JSON.parse(String((init as RequestInit).body)) as SyncBody);
 };
 

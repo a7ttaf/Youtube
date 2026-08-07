@@ -1,4 +1,19 @@
 """GET /session/me — return the authenticated principal's identity + capabilities."""
+# ============================================================================
+# Purpose: Public session-hydration route. Reads the trusted-gateway-loaded
+#   principal and derives the SPA's render-hint capabilities (camelCase wire
+#   keys) from its in-memory permission grants. No finance/auth write surface;
+#   the underlying routes re-check each grant per requested scope, so the
+#   capability flags here stay conservative render hints, never the boundary.
+# Database/ORM: None — pure policy evaluation over the already-loaded principal.
+# Standards: Thin route handler; capability derivation is a single sourced helper
+#   (_derive_capabilities) that mirrors the same Permission checks each guarded
+#   route enforces. No client-side authorization is invented.
+# Blast Radius: Authorization read surface only. No write, no broadening.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/policy.py -> has_permission.
+#   - File: backend/ums_smart_revenue/auth/permissions.py -> Permission enum.
+# ============================================================================
 
 from __future__ import annotations
 

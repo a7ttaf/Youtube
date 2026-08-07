@@ -38,7 +38,6 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
-from ums_smart_revenue.api.dependencies_finance import current_org_access_index
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -47,7 +46,7 @@ from ums_smart_revenue.auth.policy import (
     connector_health_connector_ids,
     has_permission,
 )
-from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
     MAX_CREDENTIAL_PAGE_SIZE,
@@ -241,10 +240,15 @@ def list_content_owners(
     repository: Annotated[
         SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)
     ],
-    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> ContentOwnersResponse:
     """List ACTIVE credential account ids for the group-sync owner picker."""
-    if not has_permission(user, Permission.MANAGE_GROUPS, AccessScope.global_scope(), org_index):
+    # MANAGE_GROUPS is tenant-level governance evaluated at global scope, so
+    # the OrgAccessIndex (which only matters for org-scoped targets) is not
+    # needed here — mirrors the MANAGE_CONNECTORS global check used by the
+    # sibling /connectors/credentials route and avoids an avoidable DB load
+    # on the page-load picker call. has_permission is fail-closed for a
+    # disabled principal.
+    if not has_permission(user, Permission.MANAGE_GROUPS, AccessScope.global_scope()):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",

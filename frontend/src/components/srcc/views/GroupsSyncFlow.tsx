@@ -1,7 +1,7 @@
 import { type ReactNode, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
-import { describeApiError } from "@/lib/api/errors";
+import { describeApiError, describeCanned503 } from "@/lib/api/errors";
 import type { GroupSyncGroupResult, GroupSyncResult } from "@/lib/api/types";
 import { useGroupSyncAction } from "@/lib/api/useGroupSync";
 import type { Severity } from "@/lib/mock/data";
@@ -57,16 +57,17 @@ export const isValidAuditReason = (reason: string): boolean => {
 /**
  * Map a sync failure to operator-facing copy via the shared sanitizer (canned
  * backend detail on operator-copy statuses, generic copy otherwise), with a
- * Connectors pointer appended on 503 (the sync route 503s when the youtube
- * -analytics credential is missing/expired, which is fixed in the Connectors
- * view; its canned detail is on the operator-copy list, so the pointer
- * attaches to the backend's own message, never to raw diagnostics).
+ * Connectors pointer appended on 503. The sync route's 503 carries a CANNED
+ * "credential unavailable" message, so it is read through describeCanned503
+ * (NOT the generic allowlist, which deliberately excludes all 5xx because some
+ * other endpoints raise 503 with detail=str(exc)); a different 503 payload
+ * would surface as the canned fallback, never raw diagnostics.
  */
 const describeSyncError = (err: unknown): string => {
-  const base = describeApiError(err, "The sync request failed");
+  const base = describeCanned503(err, "The sync request failed");
   return err instanceof ApiError && err.status === 503
     ? `${base} — check the credential in the Connectors view.`
-    : base;
+    : describeApiError(err, "The sync request failed");
 };
 
 /** Outcome chip tone: green create/reactivate, amber deactivate, red conflict,

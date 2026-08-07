@@ -72,18 +72,23 @@ const OutcomeTableEmptyRow = ({ columnCount, emptyLabel }: {
 };
 
 /**
- * A single data row: the caller's cells in order, with data-tone when set. Each
- * cell is keyed by its column label (unique per the `columns` contract), so a
- * reordered or filtered `rows` array never reuses a cell across columns.
+ * A single data row: the caller's cells in order, with data-tone when set. A
+ * cell's key combines the row's stable identity with its column index, so a
+ * reordered/filtered `rows` array never reuses a cell across columns AND a row
+ * whose `cells` length drifts from `columns` (a caller contract violation)
+ * still gets unique keys instead of `undefined`. The header-vs-cell count is
+ * asserted first so a misaligned row renders one diagnostic empty trailing
+ * cell (visible in tests) rather than silently misaligning the whole table.
  */
 const OutcomeTableRowView = ({ columns, row }: {
   columns: string[];
   row: OutcomeTableRow;
 }) => {
+  const cellCount = Math.min(row.cells.length, columns.length);
   return (
     <tr data-tone={row.tone}>
-      {row.cells.map((cell, index) => (
-        <td key={columns[index]}>{cell}</td>
+      {row.cells.slice(0, cellCount).map((cell, index) => (
+        <td key={`${row.key}:${index}`}>{cell}</td>
       ))}
     </tr>
   );

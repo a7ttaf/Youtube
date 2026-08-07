@@ -28,11 +28,13 @@ import { ApiError } from "@/lib/api/client";
 
 // Statuses whose backend `detail` strings are canned operator-facing copy by
 // server-side contract: boundary validation (400/422), permission and tenancy
-// refusals (403/404), domain conflicts (409), and the sync route's canned
-// credential-unavailable message (503). Anything not on this list is treated
-// as internal diagnostics and is never rendered verbatim.
+// refusals (403/404), and domain conflicts (409). 5xx is deliberately NOT on
+// this list — some backend routes raise 503 with `detail=str(exc)` (e.g.
+// api/users.py:298, api/channels.py storage errors), which would leak raw
+// exception diagnostics if rendered verbatim; callers that know a SPECIFIC 503
+// payload is canned (the sync route) pass it through describeCannedDetail.
 const OPERATOR_DETAIL_STATUSES: ReadonlySet<number> = new Set([
-  400, 403, 404, 409, 422, 503,
+  400, 403, 404, 409, 422,
 ]);
 
 /**
@@ -52,4 +54,22 @@ export const describeApiError = (err: unknown, fallback: string): string => {
     return `${fallback} (HTTP ${err.status}).`;
   }
   return `${fallback}.`;
+};
+
+/**
+ * Return a SPECIFIC canned 503 detail verbatim. Used only by callers that know
+ * the route's 503 detail is a canned operator message (the sync route's
+ * "credential unavailable" copy) — never for arbitrary 5xx, which would risk
+ * leaking `detail=str(exc)` diagnostics surfaced by other endpoints. Falls back
+ * to generic copy + status when the detail is not a plain string.
+ */
+export const describeCanned503 = (err: unknown, fallback: string): string => {
+  if (err instanceof ApiError && err.status === 503) {
+    const body = err.body as { detail?: unknown } | null;
+    if (typeof body?.detail === "string") {
+      return body.detail;
+    }
+    return `${fallback} (HTTP 503).`;
+  }
+  return describeApiError(err, fallback);
 };

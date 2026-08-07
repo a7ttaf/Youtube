@@ -717,13 +717,21 @@ const WorkflowRail = () => {
  */
 type ActiveSessionBootstrap = SessionBootstrap & { session: SessionMe };
 
-/**
- * The fail-closed session gate, evaluated in the SAME left-to-right order the
- * shell body used inline: a failed hydration (401/403/network) is rejected
- * first, then an absent session, then a disabled principal. Written as an
- * `x is` type guard so the narrowed non-null session survives the early return
- * into the gated dashboard.
- */
+// ============================================================================
+// Purpose: Fail-closed session gate, evaluated in the SAME left-to-right order
+//   the shell body used inline: a failed hydration (401/403/network) is
+//   rejected first, then an absent session, then a disabled principal. Written
+//   as an `x is` type guard so the narrowed non-null session survives the
+//   early return into the gated dashboard.
+// Database/ORM: None (frontend).
+// Standards: Read-only authorization predicate; no permission is granted here —
+//   the underlying routes re-check every capability server-side. Fail-closed:
+//   the "error" and null-session branches both narrow to never (no dashboard).
+// Blast Radius: Authorization render surface only; no mutation, no network.
+// Connections:
+//   - File: frontend/src/components/srcc/AppShell.tsx (AppShell body) -> the
+//     single consumer; returns AccessDeniedState when this predicate is false.
+// ============================================================================
 const hasActiveSession = (
   bootstrap: SessionBootstrap,
 ): bootstrap is ActiveSessionBootstrap =>
@@ -731,10 +739,19 @@ const hasActiveSession = (
   bootstrap.session !== null &&
   !bootstrap.session.disabled;
 
-/**
- * Whether the denied panel reads "account disabled" rather than "no session":
- * true only when a session hydrated AND carries disabled=true.
- */
+// ============================================================================
+// Purpose: Whether the denied panel reads "account disabled" rather than "no
+//   session": true only when a session hydrated AND carries disabled=true. Kept
+//   distinct from hasActiveSession so the denied copy is chosen without
+//   re-reading the session fields.
+// Database/ORM: None (frontend).
+// Standards: Read-only predicate over the already-hydrated session; no authz
+//   decision of its own.
+// Blast Radius: UI copy selection only.
+// Connections:
+//   - File: frontend/src/components/srcc/AppShell.tsx (AppShell body) -> passes
+//     its result to AccessDeniedState's `disabled` prop.
+// ============================================================================
 const isDisabledPrincipal = (bootstrap: SessionBootstrap): boolean =>
   bootstrap.session?.disabled ?? false;
 
