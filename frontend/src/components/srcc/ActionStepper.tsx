@@ -45,8 +45,12 @@ export type ActionStepperProps = {
  * own step Dots (see workflowDotTone in shared.tsx).
  */
 const stepDotTone = (index: number, activeIndex: number): Severity | undefined => {
-  if (index < activeIndex) return "green";
-  if (index === activeIndex) return undefined;
+  if (index < activeIndex) {
+    return "green";
+  }
+  if (index === activeIndex) {
+    return undefined;
+  }
   return "amber";
 };
 

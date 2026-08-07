@@ -71,8 +71,12 @@ const pickerNote = (
   state: ReturnType<typeof useContentOwners>,
   ownerCount: number,
 ): string | null => {
-  if (state.error) return "Couldn't load content owners.";
-  if (!state.data) return "Loading content owners…";
+  if (state.error) {
+    return "Couldn't load content owners.";
+  }
+  if (!state.data) {
+    return "Loading content owners…";
+  }
   if (ownerCount === 0) {
     return "Register a youtube-analytics credential in Connectors first.";
   }

@@ -90,7 +90,9 @@ const outcomeChip = (outcome: GroupSyncGroupResult["outcome"]): ReactNode => {
   const tone = Object.hasOwn(OUTCOME_TONES, outcome)
     ? OUTCOME_TONES[outcome]
     : undefined;
-  if (!tone) return <span className="muted">{outcome}</span>;
+  if (!tone) {
+    return <span className="muted">{outcome}</span>;
+  }
   return <Badge tone={tone}>{outcome}</Badge>;
 };
 
@@ -116,7 +118,9 @@ const ChangesCell = ({ group }: { group: GroupSyncGroupResult }) => {
       text: `${activeLabel(group.active_change[0])} → ${activeLabel(group.active_change[1])}`,
     });
   }
-  if (lines.length === 0) return <span className="muted">—</span>;
+  if (lines.length === 0) {
+    return <span className="muted">—</span>;
+  }
   return (
     <>
       {lines.map((line) => (
