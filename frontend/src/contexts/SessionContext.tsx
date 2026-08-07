@@ -58,7 +58,7 @@ const SessionContext = createContext<SessionContextValue | null>(null);
 //   - File: frontend/src/components/srcc/AppShell.tsx -> consumes capabilities.
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me contract.
 // ============================================================================
-export function SessionProvider({ // skipcq: JS-0067
+export const SessionProvider = ({
   children,
   initialSession = null,
 }: {
@@ -66,7 +66,7 @@ export function SessionProvider({ // skipcq: JS-0067
   // Opt-in seed for tests/storybooks that need a specific session without a
   // network round-trip. Production main.tsx uses the null default and bootstraps.
   initialSession?: SessionMe | null;
-}) {
+}) => {
   const [state, setState] = useState<SessionState>(() =>
     initialSession
       ? { status: "ready", session: initialSession, error: null }
@@ -91,16 +91,16 @@ export function SessionProvider({ // skipcq: JS-0067
   return (
     <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
   );
-}
+};
 
 /** Return the current session context value; must be called inside SessionProvider. */
-export function useSession(): SessionContextValue { // skipcq: JS-0067
+export const useSession = (): SessionContextValue => {
   const value = useContext(SessionContext);
   if (value === null) {
     throw new Error("useSession must be used within <SessionProvider>");
   }
   return value;
-}
+};
 
 export type SessionBootstrap = {
   status: SessionStatus;
@@ -127,7 +127,7 @@ export type SessionBootstrap = {
 //   - File: frontend/src/contexts/SessionContext.tsx -> hydrate()/fail().
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
 // ============================================================================
-export function useSessionBootstrap(): SessionBootstrap { // skipcq: JS-0067
+export const useSessionBootstrap = (): SessionBootstrap => {
   const session = useSession();
   const client = useApiClient();
   const hasRequestedRef = useRef(false);
@@ -158,4 +158,4 @@ export function useSessionBootstrap(): SessionBootstrap { // skipcq: JS-0067
   }, [client, status, hydrate, fail]);
 
   return { status: session.status, session: session.session, error: session.error };
-}
+};

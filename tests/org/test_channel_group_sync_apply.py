@@ -24,6 +24,8 @@ executed tally rather than the plan's (a plan is a snapshot; the write boundary
 is the record).
 """
 
+from typing import cast
+
 import pytest
 
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
@@ -46,7 +48,7 @@ from ums_smart_revenue.org.channel_groups import (
     ChannelGroupOwnerReassignmentError,
     ChannelGroupRegistry,
 )
-from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
+from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry, ChannelRegistryStore
 
 CH_A = "UCB6sc84dcg6VQGB_d89sx2g"
 CH_B = "UC3Dci3BzZXDo4jw4dU8KqWg"
@@ -68,45 +70,81 @@ class _RecordingGroupRegistry(ChannelGroupRegistry):
         super().__init__(groups)
         self.writes: list[str] = []
 
-    def create_group(self, **kwargs: object) -> ChannelGroupEntry:
+    def create_group(
+        self,
+        *,
+        name: str,
+        group_type: str,
+        channel_ids: list[str],
+        cms_group_id: str | None = None,
+        content_owner_id: str | None = None,
+    ) -> ChannelGroupEntry:
         """Record and delegate the group creation."""
         self.writes.append("create_group")
-        return super().create_group(**kwargs)  # type: ignore[arg-type]
+        return super().create_group(
+            name=name,
+            group_type=group_type,
+            channel_ids=channel_ids,
+            cms_group_id=cms_group_id,
+            content_owner_id=content_owner_id,
+        )
 
-    def update_group(self, **kwargs: object) -> ChannelGroupEntry:
+    def update_group(
+        self,
+        *,
+        group_id: str,
+        name: str | None,
+        active: bool | None,
+        content_owner_id: str | None = None,
+    ) -> ChannelGroupEntry:
         """Record and delegate the name/active update."""
         self.writes.append("update_group")
-        return super().update_group(**kwargs)  # type: ignore[arg-type]
+        return super().update_group(
+            group_id=group_id,
+            name=name,
+            active=active,
+            content_owner_id=content_owner_id,
+        )
 
-    def add_members(self, **kwargs: object) -> ChannelGroupEntry:
+    def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
         """Record and delegate the membership addition."""
         self.writes.append("add_members")
-        return super().add_members(**kwargs)  # type: ignore[arg-type]
+        return super().add_members(group_id=group_id, channel_ids=channel_ids)
 
-    def remove_member(self, **kwargs: object) -> ChannelGroupEntry:
+    def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
         """Record and delegate the membership removal."""
         self.writes.append("remove_member")
-        return super().remove_member(**kwargs)  # type: ignore[arg-type]
+        return super().remove_member(group_id=group_id, channel_id=channel_id)
 
 
-def _entry(**overrides: object) -> GroupSyncPlanEntry:
-    defaults: dict[str, object] = {
-        "cms_group_id": "g1",
-        "outcome": GroupSyncOutcome.CREATE,
-        "title": "TV Sector",
-        "local_group_id": None,
-        "name_change": None,
-        "active_change": None,
-        "members_added": (),
-        "members_removed": (),
-        "unknown_channel_ids": (),
-        # Matches the planner: every outcome except the vanished-group ones is
-        # built from an upstream item, and upstream presence is what the write
-        # boundary mirrors into `active`. DEACTIVATE tests override this.
-        "upstream_present": True,
-    }
-    defaults.update(overrides)
-    return GroupSyncPlanEntry(**defaults)  # type: ignore[arg-type]
+def _entry(
+    *,
+    cms_group_id: str = "g1",
+    outcome: GroupSyncOutcome = GroupSyncOutcome.CREATE,
+    title: str | None = "TV Sector",
+    local_group_id: str | None = None,
+    name_change: tuple[str, str] | None = None,
+    active_change: tuple[bool, bool] | None = None,
+    members_added: tuple[str, ...] = (),
+    members_removed: tuple[str, ...] = (),
+    unknown_channel_ids: tuple[str, ...] = (),
+    # Matches the planner: every outcome except the vanished-group ones is
+    # built from an upstream item, and upstream presence is what the write
+    # boundary mirrors into `active`. DEACTIVATE tests override this.
+    upstream_present: bool = True,
+) -> GroupSyncPlanEntry:
+    return GroupSyncPlanEntry(
+        cms_group_id=cms_group_id,
+        outcome=outcome,
+        title=title,
+        local_group_id=local_group_id,
+        name_change=name_change,
+        active_change=active_change,
+        members_added=members_added,
+        members_removed=members_removed,
+        unknown_channel_ids=unknown_channel_ids,
+        upstream_present=upstream_present,
+    )
 
 
 def _plan(*entries: GroupSyncPlanEntry, counts: dict[str, int] | None = None) -> GroupSyncPlan:
@@ -135,21 +173,32 @@ def _apply(
     )
 
 
-def _seeded(**overrides: object) -> _RecordingGroupRegistry:
-    defaults: dict[str, object] = {
-        "id": "local-1",
-        "name": "TV Sector",
-        "group_type": "SECTOR",
-        "active": True,
-        "channel_ids": (CH_A,),
-        "cms_group_id": "g1",
-        # Already owned by the syncing content owner — the normal case. Tests
-        # covering legacy/unstamped rows pass content_owner_id=None explicitly,
-        # which triggers the adoption path.
-        "content_owner_id": CONTENT_OWNER,
-    }
-    defaults.update(overrides)
-    registry = _RecordingGroupRegistry([ChannelGroupEntry(**defaults)])  # type: ignore[arg-type]
+def _seeded(
+    *,
+    id: str = "local-1",
+    name: str = "TV Sector",
+    group_type: str = "SECTOR",
+    active: bool = True,
+    channel_ids: tuple[str, ...] = (CH_A,),
+    cms_group_id: str | None = "g1",
+    # Already owned by the syncing content owner — the normal case. Tests
+    # covering legacy/unstamped rows pass content_owner_id=None explicitly,
+    # which triggers the adoption path.
+    content_owner_id: str | None = CONTENT_OWNER,
+) -> _RecordingGroupRegistry:
+    registry = _RecordingGroupRegistry(
+        [
+            ChannelGroupEntry(
+                id=id,
+                name=name,
+                group_type=group_type,
+                active=active,
+                channel_ids=channel_ids,
+                cms_group_id=cms_group_id,
+                content_owner_id=content_owner_id,
+            )
+        ]
+    )
     return registry
 
 
@@ -337,7 +386,9 @@ def test_in_sync_legacy_group_is_still_adopted_and_audited() -> None:
         sink,
     )
 
-    assert groups.get_group("local-1").content_owner_id == CONTENT_OWNER
+    unchanged = groups.get_group("local-1")
+    assert unchanged is not None
+    assert unchanged.content_owner_id == CONTENT_OWNER
     assert groups.writes == ["update_group"]
     # No mirror change happened, so the label is UNCHANGED ...
     assert executed.counts["UNCHANGED"] == 1
@@ -391,6 +442,7 @@ def test_already_owned_group_is_mirrored_without_being_restamped() -> None:
     )
 
     stored = groups.get_group("local-1")
+    assert stored is not None
     assert stored.name == "TV Sector"
     assert stored.content_owner_id == CONTENT_OWNER
     assert sink.records[0].details["adopted_content_owner"] is False
@@ -421,7 +473,9 @@ def test_group_deactivated_mid_flight_is_reactivated_because_it_is_upstream() ->
         sink,
     )
 
-    assert groups.get_group("local-1").active is True
+    reactivated = groups.get_group("local-1")
+    assert reactivated is not None
+    assert reactivated.active is True
     assert executed.counts["REACTIVATE"] == 1
     assert sink.records[0].details["active_change"] == [False, True]
 
@@ -494,6 +548,7 @@ def test_apply_refuses_a_group_another_owner_claimed_mid_flight() -> None:
         )
 
     survivor = groups.get_group("local-1")
+    assert survivor is not None
     assert survivor.name == "TV Sector"
     assert survivor.channel_ids == (CH_A,)
     assert survivor.content_owner_id == "SomeOtherOwner"
@@ -524,11 +579,15 @@ def test_store_refuses_to_reassign_an_owned_group() -> None:
 
     # Re-stamping the SAME owner is a harmless no-op.
     groups.update_group(group_id="local-1", name=None, active=None, content_owner_id="OwnerA")
-    assert groups.get_group("local-1").content_owner_id == "OwnerA"
+    stamped = groups.get_group("local-1")
+    assert stamped is not None
+    assert stamped.content_owner_id == "OwnerA"
 
     with pytest.raises(ChannelGroupOwnerReassignmentError):
         groups.update_group(group_id="local-1", name=None, active=None, content_owner_id="OwnerB")
-    assert groups.get_group("local-1").content_owner_id == "OwnerA"
+    stamped = groups.get_group("local-1")
+    assert stamped is not None
+    assert stamped.content_owner_id == "OwnerA"
 
 
 def test_partial_race_reports_the_outcome_that_actually_happened() -> None:
@@ -782,7 +841,12 @@ def test_non_create_entry_without_a_local_group_id_fails_closed() -> None:
 
 
 class _RecordingChannelRegistry:
-    """Channel store double that records the size of each id lookup."""
+    """Channel store double that records the size of each id lookup.
+
+    Deliberately implements only list_channels_by_ids — the single member the
+    lookup path under test exercises — so it is NOT a ChannelRegistryStore
+    subtype; the two call sites cast it explicitly at the boundary.
+    """
 
     def __init__(self, known: set[str], *, content_owner_id: str) -> None:
         """Hold the ids that exist and the owner every one of them carries."""
@@ -821,7 +885,10 @@ def test_realistic_member_lookup_is_one_atomic_read() -> None:
     registry = _RecordingChannelRegistry(member_ids, content_owner_id=CONTENT_OWNER)
 
     known = _known_member_channel_ids(
-        registry,  # type: ignore[arg-type]
+        # The double implements only list_channels_by_ids — the single member
+        # this path exercises — so it is asserted to the store Protocol at the
+        # boundary rather than inheriting it (which mypy would make abstract).
+        cast(ChannelRegistryStore, registry),
         member_ids=member_ids,
         content_owner_id=CONTENT_OWNER,
     )
@@ -848,7 +915,10 @@ def test_member_lookup_is_chunked_under_the_bind_parameter_cap() -> None:
     registry = _RecordingChannelRegistry(member_ids, content_owner_id=CONTENT_OWNER)
 
     known = _known_member_channel_ids(
-        registry,  # type: ignore[arg-type]
+        # The double implements only list_channels_by_ids — the single member
+        # this path exercises — so it is asserted to the store Protocol at the
+        # boundary rather than inheriting it (which mypy would make abstract).
+        cast(ChannelRegistryStore, registry),
         member_ids=member_ids,
         content_owner_id=CONTENT_OWNER,
     )

@@ -1987,3 +1987,212 @@ def test_derive_credential_health_state_failed_auth_returns_unknown():
         last_refresh_status="succeeded",
     )
     assert derive_credential_health_state(entry, as_of=as_of) == "unknown"
+
+
+# ============================================================================
+# GET /connectors/content-owners — least-privilege picker read for group sync.
+# The Groups sync UI is gated on MANAGE_GROUPS, but its owner picker used to
+# read GET /connectors/credentials (MANAGE_CONNECTORS-gated), which silently
+# blocked the whole flow for group managers without connector management
+# (Qodo PR #174 correctness finding). These tests pin the dedicated surface:
+# who may call it, which rows it returns, what it discloses, and how it fails.
+# ============================================================================
+
+
+def _seed_credential_row(
+    database_url: str,
+    *,
+    connector_key: str,
+    account_id: str,
+    status: str = "active",
+) -> None:
+    """Insert one tenant-scoped credential row with an exact key/account/status."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ApiConnectorCredentialORM(
+                id=uuid4(),
+                tenant_id=UUID(UMS_TENANT_ID),
+                connector_key=connector_key,
+                account_id=account_id,
+                encrypted_secret_ref=f"secret-manager://ums/yt/{account_id}",
+                status=status,
+                last_refresh_attempt_at=None,
+                token_expiry_at=None,
+                last_refresh_status=None,
+                last_refresh_error_class=None,
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+
+def test_content_owners_group_manager_without_manage_connectors_gets_200(tmp_path):
+    """The Qodo regression: MANAGE_GROUPS without MANAGE_CONNECTORS may load owners."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_credential_row(
+        database_url, connector_key="youtube-analytics", account_id="OwnerAaa"
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "youtube-analytics"},
+        headers=auth_headers("revenue_operations_admin"),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"items": [{"account_id": "OwnerAaa"}]}
+
+
+def test_content_owners_returns_only_active_rows_for_requested_connector(tmp_path):
+    """Revoked rows and other connector keys stay out of the picker payload."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_credential_row(
+        database_url, connector_key="youtube-analytics", account_id="OwnerActive"
+    )
+    _seed_credential_row(
+        database_url,
+        connector_key="youtube-analytics",
+        account_id="OwnerDisabled",
+        status="disabled",
+    )
+    _seed_credential_row(
+        database_url, connector_key="youtube_reporting", account_id="OwnerReporting"
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "youtube-analytics"},
+        headers=auth_headers("revenue_operations_admin"),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"items": [{"account_id": "OwnerActive"}]}
+
+
+def test_content_owners_discloses_only_account_id(tmp_path):
+    """No credential UUIDs, has_secret_ref, status, or telemetry leave the route."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_credential_row(
+        database_url, connector_key="youtube-analytics", account_id="OwnerAaa"
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "youtube-analytics"},
+        headers=auth_headers("corporate_admin"),
+    )
+
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert set(items[0]) == {"account_id"}
+
+
+def test_content_owners_forbids_finance_admin(tmp_path):
+    """A role without MANAGE_GROUPS is a fail-closed 403."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "youtube-analytics"},
+        headers=auth_headers("finance_admin"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: registry.manage_groups"
+
+
+def test_content_owners_forbids_connector_admin_without_manage_groups(tmp_path):
+    """Managing credentials does not imply governing groups: 403 by design."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "youtube-analytics"},
+        headers=auth_headers("connector_admin"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: registry.manage_groups"
+
+
+def test_content_owners_forbids_company_scoped_group_manager(tmp_path):
+    """MANAGE_GROUPS is evaluated at global scope; a company-scoped steward 403s."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "youtube-analytics"},
+        headers=auth_headers(
+            "data_steward", "company", "00000000-0000-0000-0000-000000003201"
+        ),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: registry.manage_groups"
+
+
+def test_content_owners_rejects_unknown_connector_key(tmp_path):
+    """An unregistered connector key is a 422, mirroring the jobs route detail."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "not-a-connector"},
+        headers=auth_headers("revenue_operations_admin"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Unknown connector key"
+
+
+def test_content_owners_requires_gateway_token(tmp_path):
+    """Missing or wrong trusted-gateway token is a 401 before any permission logic."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    headers = auth_headers("revenue_operations_admin")
+    del headers["x-ums-trusted-gateway-token"]
+    missing = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "youtube-analytics"},
+        headers=headers,
+    )
+    wrong = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "youtube-analytics"},
+        headers={**headers, "x-ums-trusted-gateway-token": "wrong-token"},
+    )
+
+    assert missing.status_code == 401
+    assert wrong.status_code == 401
+
+
+def test_content_owners_fails_closed_without_database():
+    """No configured database session is a 503, never an empty-owner 200."""
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/connectors/content-owners",
+        params={"connector_key": "youtube-analytics"},
+        headers=auth_headers("corporate_admin"),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "database session not configured"

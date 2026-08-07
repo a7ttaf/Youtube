@@ -1,4 +1,19 @@
 """GET /session/me — return the authenticated principal's identity + capabilities."""
+# ============================================================================
+# Purpose: Public session-hydration route. Reads the trusted-gateway-loaded
+#   principal and derives the SPA's render-hint capabilities (camelCase wire
+#   keys) from its in-memory permission grants. No finance/auth write surface;
+#   the underlying routes re-check each grant per requested scope, so the
+#   capability flags here stay conservative render hints, never the boundary.
+# Database/ORM: None — pure policy evaluation over the already-loaded principal.
+# Standards: Thin route handler; capability derivation is a single sourced helper
+#   (_derive_capabilities) that mirrors the same Permission checks each guarded
+#   route enforces. No client-side authorization is invented.
+# Blast Radius: Authorization read surface only. No write, no broadening.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/policy.py -> has_permission.
+#   - File: backend/ums_smart_revenue/auth/permissions.py -> Permission enum.
+# ============================================================================
 
 from __future__ import annotations
 
@@ -72,6 +87,7 @@ class SessionCapabilities(BaseModel):
     can_export_revenue: bool
     can_export_analytics_reports: bool
     can_manage_registry: bool
+    can_manage_groups: bool
     can_manage_connectors: bool
     can_view_connector_health: bool
     can_run_connector_jobs: bool
@@ -155,6 +171,11 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         # a principal with MANAGE_CHANNELS but not MANAGE_ORG_MAPPING would see
         # live Map/Assign controls that silently 403 on every write.
         can_manage_registry=_can(Permission.MANAGE_ORG_MAPPING),
+        # Gates the Groups view's sync/clear/archive controls (frontend): a
+        # principal without MANAGE_GROUPS would see live controls that
+        # silently 403 on every write, mirroring the can_manage_registry
+        # rationale above.
+        can_manage_groups=_can(Permission.MANAGE_GROUPS),
         can_manage_connectors=_can(Permission.MANAGE_CONNECTORS),
         # Read-only run-history / health visibility — gates the ConnectorsView
         # run-history panel; mirrors GET /connectors/runs. This one capability

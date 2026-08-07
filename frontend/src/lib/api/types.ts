@@ -65,6 +65,7 @@ export type SessionCapabilities = {
   canExportRevenue: boolean;
   canExportAnalyticsReports: boolean;
   canManageRegistry: boolean;
+  canManageGroups: boolean;
   canManageConnectors: boolean;
   canViewConnectorHealth: boolean;
   canRunConnectorJobs: boolean;
@@ -627,6 +628,21 @@ export type ConnectorCredentialListResponse = {
   pagination: PaginationMeta;
 };
 
+// One pickable content owner: an ACTIVE credential's account_id, nothing else.
+// Source: ContentOwnerEntry (connectors.py, list_content_owners). The backend's
+// least-privilege picker surface deliberately discloses no credential UUID,
+// has_secret_ref, status, or telemetry — do not widen this type.
+export type ContentOwnerEntry = {
+  account_id: string;
+};
+
+// GET /connectors/content-owners?connector_key=… — MANAGE_GROUPS-gated (NOT
+// MANAGE_CONNECTORS): the group-sync picker read for principals who manage
+// groups but not connectors. Source: ContentOwnersResponse (connectors.py).
+export type ContentOwnersResponse = {
+  items: ContentOwnerEntry[];
+};
+
 // POST /connectors/jobs request body. Source: ConnectorJobRequest (connectors.py:46-49).
 // reason is REQUIRED (min_length=1) — recorded on the CONNECTOR_JOB_RUN audit event.
 // report_month is REQUIRED on the executing path (the month the pull targets);
@@ -1061,6 +1077,138 @@ export type ChannelIssuesResponse = {
     // Per-issue-type counts keyed by ChannelIssueType value (counts are ints).
     issue_type_counts: Record<string, number>;
   };
+};
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend channel-GROUP JSON contracts
+//   consumed by the Groups view: the group list (GET /groups), the CMS
+//   group-sync preview/apply cycle (POST /channels/groups/sync), the
+//   content-owner-stamp eraser (DELETE /groups/{id}/content-owner), and the
+//   rename/active-toggle route (PATCH /groups/{id}). Fields are matched 1:1
+//   against the backend models (not guessed); nullable fields serialize as
+//   null. WIRE CASING NOTE: unlike SessionCapabilities, these backend models
+//   have NO alias generator, so payloads stay snake_case on the wire and
+//   these types keep snake_case field names.
+// Standards: Read-only typed boundary at the API surface; no logic here. The
+//   sync response is a PREVIEW when dry_run is true and an APPLIED result when
+//   false — the view must read the flag rather than assume either. The
+//   clear-stamp response is a DECLARED Pydantic model on the backend
+//   (ClearContentOwnerResponse), so its audit_event sub-shape is mirrored
+//   precisely (GroupAuditEventResponse); the PATCH response is NOT a declared
+//   model (a plain dict merge), so its audit_event stays a loosely typed
+//   Record like ChannelMappingResponse's — see GroupUpdateResponse below.
+// Connections:
+//   - File: backend/ums_smart_revenue/org/channel_groups.py
+//       ChannelGroupEntry.to_api()   (lines 107-116) -> ChannelGroupApiEntry
+//   - File: backend/ums_smart_revenue/api/groups.py
+//       GroupAuditEventResponse      (lines 114-128) -> GroupAuditEventResponse
+//       _audit_event_response()      (lines 131-147) -> GroupAuditEventResponse
+//       ClearContentOwnerResponse    (lines 150-165) -> ClearOwnerStampResponse
+//       list_groups()                (lines 185-202) -> GET /groups
+//       update_group()               (lines 245-279) -> GroupUpdateResponse
+//         (PATCH /groups/{id}: response = updated.to_api(); response
+//         ["audit_event"] = audit_record_to_api(record) — same wrap pattern
+//         as ChannelMappingResponse, not a declared response model)
+//       clear_group_content_owner()  (lines 395-444) -> ClearOwnerStampResponse
+//         (DELETE /groups/{id}/content-owner)
+//   - File: backend/ums_smart_revenue/api/channels.py
+//       GroupSyncGroupResult         (lines 200-227) -> GroupSyncGroupResult
+//       GroupSyncResult              (lines 230-245) -> GroupSyncResult
+//       audit_record_to_api()        (lines 320-329) -> GroupUpdateResponse.audit_event
+//       sync_channel_groups()        (lines 926-1064) -> POST /channels/groups/sync
+//   - File: backend/ums_smart_revenue/org/channel_group_sync.py
+//       GroupSyncOutcome             (lines 27-41) -> GroupSyncGroupResult.outcome
+//         literal set (the Pydantic field itself is a plain str; the enum is
+//         the actual source of truth for the 7 values).
+// ============================================================================
+
+// One row of GET /groups (backend ChannelGroupEntry.to_api,
+// org/channel_groups.py:107 — content_owner_id added 2026-08-07).
+export type ChannelGroupApiEntry = {
+  id: string;
+  name: string;
+  group_type: string;
+  active: boolean;
+  channel_ids: string[];
+  cms_group_id: string | null;
+  content_owner_id: string | null;
+};
+
+// POST /channels/groups/sync per-group result
+// (backend GroupSyncGroupResult, api/channels.py:200).
+export type GroupSyncGroupResult = {
+  cms_group_id: string;
+  outcome:
+    | "CREATE"
+    | "RENAME"
+    | "MEMBERS_CHANGED"
+    | "DEACTIVATE"
+    | "REACTIVATE"
+    | "UNCHANGED"
+    | "CONFLICT";
+  title: string | null;
+  local_group_id: string | null;
+  name_change: [string, string] | null;
+  active_change: [boolean, boolean] | null;
+  members_added: string[];
+  members_removed: string[];
+  unknown_channel_ids: string[];
+  unknown_channel_count: number;
+  will_adopt_content_owner: boolean;
+};
+
+// POST /channels/groups/sync response
+// (backend GroupSyncResult, api/channels.py:230).
+export type GroupSyncResult = {
+  dry_run: boolean;
+  content_owner_id: string;
+  counts: Record<string, number>;
+  unknown_channel_total: number;
+  non_channel_member_count: number;
+  groups: GroupSyncGroupResult[];
+};
+
+// The audit-event shape the group routes disclose. Source: GroupAuditEventResponse
+// / _audit_event_response() (api/groups.py:114-147) — a DECLARED Pydantic model,
+// built field-by-field from the AuditRecord so the omission of user_id/details/
+// permission is a checked decision. Distinct from NetRevenueAuditEvent:
+// entity_type/entity_id are nullable here (the finance audit echo declares them
+// non-null; this one does not).
+export type GroupAuditEventResponse = {
+  event_type: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  scope_type: string | null;
+  scope_id: string | null;
+  reason: string | null;
+  sensitive: boolean;
+};
+
+// DELETE /groups/{group_id}/content-owner response: the group after its
+// content-owner stamp is cleared, plus the audit event recorded for the clear.
+// Source: ClearContentOwnerResponse (api/groups.py:150-165), a declared
+// response model, returned by clear_group_content_owner() (api/groups.py:395-444).
+export type ClearOwnerStampResponse = {
+  id: string;
+  name: string;
+  group_type: string;
+  active: boolean;
+  channel_ids: string[];
+  cms_group_id: string | null;
+  content_owner_id: string | null;
+  audit_event: GroupAuditEventResponse;
+};
+
+// PATCH /groups/{group_id} response. NOT a declared Pydantic response model —
+// update_group() (api/groups.py:245-279) returns `updated.to_api()` (the same
+// fields as ChannelGroupApiEntry) with `response["audit_event"] =
+// audit_record_to_api(record)` merged in as a plain dict, the same wrap
+// pattern ChannelMappingResponse already mirrors for /channels/{id}/mapping.
+// Kept intersected with the precise ChannelGroupApiEntry (rather than a bare
+// Record like ChannelMappingResponse) because to_api()'s fields are already
+// typed exactly; audit_event stays a loose Record since no schema enforces it.
+export type GroupUpdateResponse = ChannelGroupApiEntry & {
+  audit_event: Record<string, unknown>;
 };
 
 // ============================================================================

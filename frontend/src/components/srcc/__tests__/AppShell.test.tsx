@@ -1,5 +1,5 @@
 // frontend/src/components/srcc/__tests__/AppShell.test.tsx
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -31,6 +31,7 @@ const FULL_SESSION: SessionMe = {
     canExportRevenue: true,
     canExportAnalyticsReports: true,
     canManageRegistry: true,
+    canManageGroups: true,
     canManageConnectors: true,
     canViewConnectorHealth: true,
     canRunConnectorJobs: true,
@@ -47,12 +48,12 @@ afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
 });
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
 // Minimal real-shaped net-revenue body so the wired CommandView can render
 // without errors while these tests focus on the tenant bootstrap behavior.
@@ -77,36 +78,36 @@ const NET_REVENUE_BODY = {
   audit_events: [],
 };
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
 
-function isTenantCall(input: unknown): boolean { // skipcq: JS-0067
+const isTenantCall = (input: unknown): boolean => {
   return urlOf(input).includes("/tenants/me");
-}
+};
 
-function isSessionCall(input: unknown): boolean { // skipcq: JS-0067
+const isSessionCall = (input: unknown): boolean => {
   return urlOf(input).includes("/session/me");
-}
+};
 
 // Route fetch by URL: /session/me -> a ready full-capability session (so the
 // dashboard renders), /tenants/me -> the provided tenant responder, everything
 // else (the wired CommandView net-revenue call) -> a neutral net-revenue body.
-function routeFetch(tenantResponder: () => Response) { // skipcq: JS-0067
+const routeFetch = (tenantResponder: () => Response) => {
   return (input: unknown) => {
     if (isSessionCall(input)) return Promise.resolve(jsonResponse(FULL_SESSION));
     if (isTenantCall(input)) return Promise.resolve(tenantResponder());
     return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
   };
-}
+};
 
-function tenantFetchCalls() { // skipcq: JS-0067
+const tenantFetchCalls = () => {
   const mock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
   return mock.mock.calls.filter(([input]) => isTenantCall(input));
-}
+};
 
 describe("AppShell tenant proof tag", () => {
   it("hydrates the tenant and shows UMS (ums) on the dev-only tag", async () => {
@@ -304,10 +305,10 @@ describe("AppShell tenant proof tag", () => {
 
 // Build a /session/me body from a capability override + flags. Defaults to all
 // capabilities false so each test opts INTO exactly the capabilities it asserts.
-function sessionBody( // skipcq: JS-0067
+const sessionBody = (
   capabilities: Partial<SessionMe["capabilities"]> = {},
   overrides: Partial<SessionMe> = {},
-): SessionMe {
+): SessionMe => {
   return {
     ...FULL_SESSION,
     capabilities: {
@@ -321,6 +322,7 @@ function sessionBody( // skipcq: JS-0067
       canExportRevenue: false,
       canExportAnalyticsReports: false,
       canManageRegistry: false,
+      canManageGroups: false,
       canManageConnectors: false,
       canViewConnectorHealth: false,
       canRunConnectorJobs: false,
@@ -330,7 +332,7 @@ function sessionBody( // skipcq: JS-0067
     },
     ...overrides,
   };
-}
+};
 
 // Empty-but-real connector + AdSense list shapes so the Connectors view renders
 // its always-visible controls without a malformed body.
@@ -347,6 +349,14 @@ const EMPTY_EXPORTS = {
   items: [],
   pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
 };
+// GET /groups returns a bare array (see useGroups.ts) — unlike the paginated
+// wrapper shapes above. The Groups view fetches it unconditionally on mount.
+const EMPTY_GROUPS: unknown[] = [];
+
+// GET /connectors/content-owners returns the least-privilege picker payload
+// ({items: [{account_id}]} — no pagination wrapper, see useContentOwners.ts);
+// the manage-groups sync header fetches it on mount.
+const EMPTY_CONTENT_OWNERS = { items: [] };
 
 type FetchRouteMap = ReadonlyMap<string, () => Response>;
 
@@ -356,8 +366,10 @@ const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRou
   ["/session/me", sessionResponder],
   ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
   ["/connectors/credentials", () => jsonResponse(EMPTY_CONNECTOR_CREDENTIALS)],
+  ["/connectors/content-owners", () => jsonResponse(EMPTY_CONTENT_OWNERS)],
   ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
   ["/exports", () => jsonResponse(EMPTY_EXPORTS)],
+  ["/groups", () => jsonResponse(EMPTY_GROUPS)],
 ]);
 
 const requestPathOf = (input: unknown) =>
@@ -376,7 +388,7 @@ const routeFetchWithSession = (sessionResponder: () => Response) => {
   };
 };
 
-function renderShell() { // skipcq: JS-0067
+const renderShell = () => {
   return render(
     <SessionProvider>
       <TenantProvider initialSlug="ums">
@@ -384,7 +396,7 @@ function renderShell() { // skipcq: JS-0067
       </TenantProvider>
     </SessionProvider>,
   );
-}
+};
 
 describe("AppShell production session hydration", () => {
   afterEach(() => {
@@ -628,5 +640,54 @@ describe("AppShell production session hydration", () => {
       name: /run pull/i,
     })) as HTMLButtonElement;
     expect(runPull).toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------- groups nav
+
+describe("AppShell groups navigation", () => {
+  it("GROUPS NAV: CMS Groups sits after Channel Registry in the Workspace group and renders the Groups view", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
+    );
+    renderShell();
+
+    // Nav order: the Workspace group lists CMS Groups after Channel Registry.
+    const workspaceNav = await screen.findByRole("navigation", { name: "Workspace" });
+    const itemLabels = within(workspaceNav)
+      .getAllByRole("button")
+      .map((button) => button.textContent ?? "");
+    const registryIndex = itemLabels.findIndex((text) => text.includes("Channel Registry"));
+    const groupsIndex = itemLabels.findIndex((text) => text.includes("CMS Groups"));
+    expect(registryIndex).toBeGreaterThanOrEqual(0);
+    expect(groupsIndex).toBeGreaterThan(registryIndex);
+
+    // Clicking it renders the Groups view via its VIEW_COPY title as the page heading.
+    fireEvent.click(await screen.findByText("CMS Groups"));
+    expect(
+      await screen.findByRole("heading", { name: "CMS Groups", level: 1 }),
+    ).toBeInTheDocument();
+  });
+
+  it("GROUPS NAV: shows the manage-groups sync surface when canManageGroups is granted", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canManageGroups: true }))),
+    );
+    renderShell();
+
+    fireEvent.click(await screen.findByText("CMS Groups"));
+    expect(await screen.findByRole("button", { name: /sync/i })).toBeInTheDocument();
+  });
+
+  it("GROUPS NAV: hides the manage-groups sync surface with the default all-false session", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody())),
+    );
+    renderShell();
+
+    fireEvent.click(await screen.findByText("CMS Groups"));
+    // Settle on the Groups view's loaded (empty) state before asserting absence.
+    await screen.findByRole("heading", { name: "CMS Groups", level: 1 });
+    expect(screen.queryByRole("button", { name: /sync/i })).not.toBeInTheDocument();
   });
 });

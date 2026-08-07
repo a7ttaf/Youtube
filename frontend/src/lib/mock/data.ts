@@ -6,6 +6,7 @@ export type WorkflowTone = Severity | "primary";
 export type ViewKey =
   | "command"
   | "registry"
+  | "groups"
   | "close"
   | "trace"
   | "exports"
@@ -22,6 +23,10 @@ export const VIEW_COPY: Record<ViewKey, { title: string; subtitle: string }> = {
   registry: {
     title: "Channel Registry",
     subtitle: "Ownership, CMS status, company scope, and SQL lineage controls",
+  },
+  groups: {
+    title: "CMS Groups",
+    subtitle: "Content-owner group mirror, ownership stamps, and sync",
   },
   close: {
     title: "Month Close Workbench",
@@ -55,6 +60,7 @@ export const NAV_GROUPS: Array<{
     items: [
       { key: "command", label: "Command Center", count: "Live", icon: "command" },
       { key: "registry", label: "Channel Registry", count: "318", icon: "registry" },
+      { key: "groups", label: "CMS Groups", count: "CMS", icon: "groups" },
       { key: "close", label: "Month Close", count: "5", icon: "close" },
       { key: "trace", label: "Trace Explorer", count: "SQL", icon: "trace" },
     ],

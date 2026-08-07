@@ -212,6 +212,28 @@ def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(
     assert caps["canManageRegistry"] is True
 
 
+def test_session_me_header_mode_revenue_ops_admin_can_manage_groups(client_headers_mode):
+    """revenue_operations_admin holds MANAGE_GROUPS: canManageGroups true."""
+    response = client_headers_mode.get(
+        "/session/me",
+        headers=_header_principal(role="revenue_operations_admin", user_id=CONNECTOR_OPS_ID),
+    )
+    assert response.status_code == 200, response.text
+    caps = response.json()["capabilities"]
+    assert caps["canManageGroups"] is True
+
+
+def test_session_me_header_mode_finance_admin_cannot_manage_groups(client_headers_mode):
+    """finance_admin lacks MANAGE_GROUPS: canManageGroups false."""
+    response = client_headers_mode.get(
+        "/session/me",
+        headers=_header_principal(role="finance_admin"),
+    )
+    assert response.status_code == 200, response.text
+    caps = response.json()["capabilities"]
+    assert caps["canManageGroups"] is False
+
+
 def test_session_me_header_mode_finance_approver_analytics_false_revenue_true(
     client_headers_mode,
 ):

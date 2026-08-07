@@ -249,6 +249,37 @@ class SqlAlchemyConnectorCredentialRepository:
             has_more=len(rows) > limit,
         )
 
+    # ============================================================================
+    # Purpose: Least-privilege read for the group-sync content-owner picker —
+    #   return ONLY the account_id strings of ACTIVE credentials for one
+    #   connector key, tenant-scoped. The Groups sync UI needs exactly this to
+    #   populate its picker; anything more (credential UUIDs, has_secret_ref,
+    #   telemetry) would broaden disclosure beyond the picker's need.
+    # Database/ORM: ApiConnectorCredentialORM (read only, tenant-scoped,
+    #   parameterized connector_key/status predicates).
+    # Standards: Database access stays repository-owned; the route supplies the
+    #   authorization gate. Status literal "active" mirrors the orchestrator's
+    #   own acceptance rule (orchestrator.py:684 only runs status == "active"),
+    #   so the picker can never offer an owner whose credential would fail.
+    # Blast Radius: None detected — additive read method; no write, no finance,
+    #   no audit, no change to existing query behavior.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/connectors.py -> the
+    #     /connectors/content-owners route (MANAGE_GROUPS-gated) calls this.
+    #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+    #     owns the "active" acceptance rule this predicate mirrors.
+    # ============================================================================
+    def list_active_account_ids(self, *, connector_key: str) -> list[str]:
+        """Return ACTIVE credential account ids for one connector key, sorted."""
+        statement = (
+            select(ApiConnectorCredentialORM.account_id)
+            .where(ApiConnectorCredentialORM.tenant_id == self._tenant_id)
+            .where(ApiConnectorCredentialORM.connector_key == connector_key)
+            .where(ApiConnectorCredentialORM.status == "active")
+            .order_by(ApiConnectorCredentialORM.account_id)
+        )
+        return list(self._session.scalars(statement).all())
+
     def create_credential(
         self,
         *,

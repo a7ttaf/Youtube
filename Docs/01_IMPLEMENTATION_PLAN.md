@@ -452,8 +452,13 @@ on real ingestion (Phase 2) and the inventory load workflow.
   sync core in the background — per ACTIVE tenant, per active
   `youtube-analytics` credential, every `UMS_GROUP_SYNC_INTERVAL_HOURS` — OFF
   by default (`UMS_GROUP_SYNC_SCHEDULE_ENABLED`); the manual route above is
-  unchanged and stays the only HTTP path. Company/sector (org-unit) mapping
-  remains the Registry Map UI's job.
+  unchanged and stays the only HTTP path. **Groups UI shipped 2026-08-07**
+  (`feat/groups-view-ui`, PR-A of the import/sync UI arc): a CMS Groups nav
+  view — group table with owner stamps, credential-fed owner picker, sync
+  dry-run→apply stepper (CONFLICT blocks apply, remedy named), clear-stamp +
+  archive actions — gated by the new `can_manage_groups` capability; PR-B
+  (CSV-import stepper in Registry) is the arc's remaining half.
+  Company/sector (org-unit) mapping remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to
   `GET /channels/outside-cms` + `GET /channels/issues` (PR #98,

@@ -112,6 +112,7 @@ class ChannelGroupEntry:
             "active": self.active,
             "channel_ids": list(self.channel_ids),
             "cms_group_id": self.cms_group_id,
+            "content_owner_id": self.content_owner_id,
         }
 
 

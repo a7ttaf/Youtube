@@ -24,6 +24,12 @@ export const NAV_ICONS: Record<string, JSX.Element> = {
       <path d="M4 17h10" />
     </>,
   ),
+  groups: wrap(
+    <>
+      <path d="M3 6h4l2 2h8v5H3V6Z" />
+      <path d="M7 10h4l2 2h6v5H7V10Z" />
+    </>,
+  ),
   close: wrap(
     <>
       <path d="M4 18V6" />
