@@ -83,42 +83,13 @@ const resolveGatewayHeaders = (env: Record<string, string>): [string, string][] 
   return resolved.filter(([, value]) => value !== "");
 };
 
-export default defineConfig(({ mode }) => {
-  // ============================================================================
-  // Purpose: Load env from the repository root in Node only. VITE_-prefixed
-  //          names are EXPOSED to the client bundle via import.meta.env, so
-  //          secrets must use non-VITE_ names (UMS_TRUSTED_GATEWAY_TOKEN).
-  //          Non-secret dev defaults (user id/email/role/scope_type) keep the
-  //          VITE_DEV_ prefix only because they are intentionally non-secret.
-  // Standards: Server-only secret read from process env; never embedded in code.
-  //            envDir is pinned to REPO_ROOT so root `.env.example` documents
-  //            the canonical location and `cd frontend && npm run dev` cannot
-  //            silently load a different env file.
-  // Blast Radius: Frontend dev proxy only — no production bundle exposure.
-  // ============================================================================
-  const { env, backendTarget, gatewayHeaders, gatewayToken } = loadDevEnv(mode);
-
-  return {
-    plugins: [react(), tailwindcss()],
-    envDir: REPO_ROOT,
-    resolve: {
-      alias: {
-        "@": fileURLToPath(new URL("./src", import.meta.url)),
-      },
-    },
-    server: {
-      proxy: buildTenantScopedProxy(TENANT_SCOPED_ROUTES, backendTarget, gatewayHeaders),
-    },
-  };
-});
-
 /**
- * Load repo-root env and derive the dev-proxy inputs (backend target, injected
- * trusted-principal headers, gateway token) plus emit the missing-token
- * startup hint. Extracted from defineConfig to keep its body under the
- * cyclomatic-complexity threshold.
+ * Load repo-root env and derive the dev-proxy inputs (backend target +
+ * injected trusted-principal headers), emitting the missing-token startup
+ * hint when the gateway secret is absent. Extracted from defineConfig to keep
+ * its body under the cyclomatic-complexity threshold.
  */
-const loadDevEnv = (mode: string) => {
+const loadDevProxy = (mode: string) => {
   const env = loadEnv(mode, REPO_ROOT, "");
   const backendTarget = env.VITE_DEV_BACKEND_URL ?? "http://127.0.0.1:8000";
   const gatewayHeaders = resolveGatewayHeaders(env);
@@ -130,7 +101,7 @@ const loadDevEnv = (mode: string) => {
         `proxied routes (${TENANT_SCOPED_ROUTES.join(", ")}) will 401.`,
     );
   }
-  return { env, backendTarget, gatewayHeaders, gatewayToken };
+  return { backendTarget, gatewayHeaders };
 };
 
 /**
@@ -159,3 +130,32 @@ const buildTenantScopedProxy = (
       },
     ]),
   );
+
+export default defineConfig(({ mode }) => {
+  // ============================================================================
+  // Purpose: Load env from the repository root in Node only. VITE_-prefixed
+  //          names are EXPOSED to the client bundle via import.meta.env, so
+  //          secrets must use non-VITE_ names (UMS_TRUSTED_GATEWAY_TOKEN).
+  //          Non-secret dev defaults (user id/email/role/scope_type) keep the
+  //          VITE_DEV_ prefix only because they are intentionally non-secret.
+  // Standards: Server-only secret read from process env; never embedded in code.
+  //            envDir is pinned to REPO_ROOT so root `.env.example` documents
+  //            the canonical location and `cd frontend && npm run dev` cannot
+  //            silently load a different env file.
+  // Blast Radius: Frontend dev proxy only — no production bundle exposure.
+  // ============================================================================
+  const { backendTarget, gatewayHeaders } = loadDevProxy(mode);
+
+  return {
+    plugins: [react(), tailwindcss()],
+    envDir: REPO_ROOT,
+    resolve: {
+      alias: {
+        "@": fileURLToPath(new URL("./src", import.meta.url)),
+      },
+    },
+    server: {
+      proxy: buildTenantScopedProxy(TENANT_SCOPED_ROUTES, backendTarget, gatewayHeaders),
+    },
+  };
+});
