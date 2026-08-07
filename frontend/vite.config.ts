@@ -96,30 +96,10 @@ export default defineConfig(({ mode }) => {
   //            silently load a different env file.
   // Blast Radius: Frontend dev proxy only — no production bundle exposure.
   // ============================================================================
-  const env = loadEnv(mode, REPO_ROOT, "");
-  const backendTarget = env.VITE_DEV_BACKEND_URL ?? "http://127.0.0.1:8000";
-  // The frontend bootstraps with an empty tenant slug and discovers its real
-  // tenant from /tenants/me; the injected header set (see
-  // GATEWAY_HEADER_SOURCES) is the dev stand-in for the production gateway.
-  const gatewayHeaders = resolveGatewayHeaders(env);
-  // SECURITY: read separately for the startup hint only — same non-VITE_ name,
-  // so the token still never reaches the browser bundle.
-  const gatewayToken = env.UMS_TRUSTED_GATEWAY_TOKEN ?? "";
-
-  if (mode === "development" && !gatewayToken) {
-    // Surface a single startup hint so missing trusted-gateway secrets do not
-    // silently 401 every proxied tenant-scoped call during local development.
-    console.warn(
-      "[vite] UMS_TRUSTED_GATEWAY_TOKEN is empty; " +
-        `proxied routes (${TENANT_SCOPED_ROUTES.join(", ")}) will 401.`,
-    );
-  }
+  const { env, backendTarget, gatewayHeaders, gatewayToken } = loadDevEnv(mode);
 
   return {
     plugins: [react(), tailwindcss()],
-    // envDir must mirror the loadEnv() lookup above so Vite's own runtime
-    // env handling (e.g. import.meta.env) reads from the same repo-root
-    // .env files as the dev proxy code.
     envDir: REPO_ROOT,
     resolve: {
       alias: {
@@ -127,25 +107,55 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
-      proxy: Object.fromEntries(
-        TENANT_SCOPED_ROUTES.map((route) => [
-          route,
-          {
-            target: backendTarget,
-            changeOrigin: true,
-            configure(proxy) {
-              proxy.on("proxyReq", (proxyReq) => {
-                // Inject the resolved trusted-principal header set (blank
-                // values were already dropped) so the backend's
-                // current_principal_from_headers dependency succeeds.
-                for (const [header, value] of gatewayHeaders) {
-                  proxyReq.setHeader(header, value);
-                }
-              });
-            },
-          },
-        ]),
-      ),
+      proxy: buildTenantScopedProxy(TENANT_SCOPED_ROUTES, backendTarget, gatewayHeaders),
     },
   };
 });
+
+/**
+ * Load repo-root env and derive the dev-proxy inputs (backend target, injected
+ * trusted-principal headers, gateway token) plus emit the missing-token
+ * startup hint. Extracted from defineConfig to keep its body under the
+ * cyclomatic-complexity threshold.
+ */
+const loadDevEnv = (mode: string) => {
+  const env = loadEnv(mode, REPO_ROOT, "");
+  const backendTarget = env.VITE_DEV_BACKEND_URL ?? "http://127.0.0.1:8000";
+  const gatewayHeaders = resolveGatewayHeaders(env);
+  const gatewayToken = env.UMS_TRUSTED_GATEWAY_TOKEN ?? "";
+
+  if (mode === "development" && !gatewayToken) {
+    console.warn(
+      "[vite] UMS_TRUSTED_GATEWAY_TOKEN is empty; " +
+        `proxied routes (${TENANT_SCOPED_ROUTES.join(", ")}) will 401.`,
+    );
+  }
+  return { env, backendTarget, gatewayHeaders, gatewayToken };
+};
+
+/**
+ * Build the Vite proxy config for every tenant-scoped route, injecting the
+ * resolved trusted-principal headers on each proxyReq so the backend's
+ * current_principal_from_headers dependency succeeds in dev.
+ */
+const buildTenantScopedProxy = (
+  routes: readonly string[],
+  backendTarget: string,
+  gatewayHeaders: [string, string][],
+): Record<string, object> =>
+  Object.fromEntries(
+    routes.map((route) => [
+      route,
+      {
+        target: backendTarget,
+        changeOrigin: true,
+        configure(proxy: { on: (event: string, fn: (req: unknown) => void) => void }) {
+          proxy.on("proxyReq", (proxyReq: unknown) => {
+            for (const [header, value] of gatewayHeaders) {
+              (proxyReq as { setHeader: (h: string, v: string) => void }).setHeader(header, value);
+            }
+          });
+        },
+      },
+    ]),
+  );

@@ -72,13 +72,12 @@ const OutcomeTableEmptyRow = ({ columnCount, emptyLabel }: {
 };
 
 /**
- * A single data row: the caller's cells in order, with data-tone when set. A
- * cell's key combines the row's stable identity with its column index, so a
- * reordered/filtered `rows` array never reuses a cell across columns AND a row
- * whose `cells` length drifts from `columns` (a caller contract violation)
- * still gets unique keys instead of `undefined`. The header-vs-cell count is
- * asserted first so a misaligned row renders one diagnostic empty trailing
- * cell (visible in tests) rather than silently misaligning the whole table.
+ * A single data row: the caller's cells in order, with data-tone when set.
+ * Each cell is keyed by its column label (the stable, unique-per-row identity
+ * declared in `columns`), falling back to a row-scoped label when a row's
+ * `cells` length drifts past `columns` (a caller contract violation). The
+ * count is clamped to `columns` so a misaligned row renders at most the
+ * declared columns instead of silently misaligning the whole table.
  */
 const OutcomeTableRowView = ({ columns, row }: {
   columns: string[];
@@ -88,7 +87,7 @@ const OutcomeTableRowView = ({ columns, row }: {
   return (
     <tr data-tone={row.tone}>
       {row.cells.slice(0, cellCount).map((cell, index) => (
-        <td key={`${row.key}:${index}`}>{cell}</td>
+        <td key={columns[index] ?? `${row.key}-extra-${index}`}>{cell}</td>
       ))}
     </tr>
   );
