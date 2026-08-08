@@ -44,11 +44,13 @@ SEED_SQL = REPO_ROOT / "backend" / "ums_smart_revenue" / "db" / "security_seed.s
 
 @pytest.fixture
 def postgres_url() -> str:
+    """Return the fail-closed PostgreSQL URL required for this suite."""
     return require_postgres_url()
 
 
 @pytest.fixture
 def alembic_config(postgres_url: str) -> Config:
+    """Build an Alembic config bound to the disposable test database."""
     cfg = Config()
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     cfg.set_main_option(
@@ -60,6 +62,7 @@ def alembic_config(postgres_url: str) -> Config:
 
 @pytest.fixture
 def fresh_engine(postgres_url: str, alembic_config: Config) -> object:
+    """Reset the schema and yield an engine, restoring versioned head after."""
     reset_public_schema(postgres_url)
     engine = create_engine(postgres_url)
     try:
@@ -109,6 +112,7 @@ def _execute_script(engine: object, script_path: Path) -> None:
 def test_prior_head_still_uses_keyword_column_names(
     alembic_config: Config, fresh_engine: object
 ) -> None:
+    """Verify the prior head still exposes the original keyword column names."""
     command.upgrade(alembic_config, PRIOR_HEAD)
 
     assert "key" in _column_names(fresh_engine, "roles")
@@ -123,6 +127,7 @@ def test_prior_head_still_uses_keyword_column_names(
 def test_upgrade_renames_columns_preserves_rows_and_fk_enforcement(
     alembic_config: Config, fresh_engine: object
 ) -> None:
+    """Verify the upgrade renames columns, keeps rows, and keeps FK checks."""
     command.upgrade(alembic_config, PRIOR_HEAD)
 
     with fresh_engine.begin() as conn:
@@ -189,6 +194,7 @@ def test_upgrade_renames_columns_preserves_rows_and_fk_enforcement(
 def test_downgrade_restores_keyword_column_names(
     alembic_config: Config, fresh_engine: object
 ) -> None:
+    """Verify the downgrade restores the original keyword column names."""
     command.upgrade(alembic_config, RENAME_HEAD)
     command.downgrade(alembic_config, PRIOR_HEAD)
 
@@ -199,6 +205,7 @@ def test_downgrade_restores_keyword_column_names(
 
 
 def test_bootstrap_mirror_and_seed_apply_with_renamed_columns(fresh_engine: object) -> None:
+    """Verify the renamed bootstrap mirror and seed apply to a scratch schema."""
     # The fresh_engine teardown restores the versioned head afterwards: the
     # bootstrap application leaves tables but no alembic_version row, and
     # PG-tier neighbours that upgrade without a schema reset (session hook,
