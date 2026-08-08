@@ -48,7 +48,7 @@ import { describeError } from "./CommandView";
 //   - File: frontend/src/lib/api/useExports.ts -> the list fetch hook.
 //   - File: frontend/src/lib/api/useExportActions.ts -> the create POST hook.
 //   - File: frontend/src/lib/api/types.ts -> ExportJob / ExportRequestBody.
-//   - File: backend/ums_smart_revenue/api/exports.py:173 request_export / :287 list.
+//   - File: backend/ums_smart_revenue/api/exports.py:241 request_export / :361 list_exports.
 // ============================================================================
 
 // FIX: USD only — the backend rejects every non-USD export currency
@@ -267,11 +267,30 @@ const scopeLabel = (job: ExportJob): string => {
   return job.scope_type;
 };
 
-// Whether the Generate button may fire: every gate must hold — creation
-// permission, at least one offered report type, the audit reason present, the
-// scope id present when required, and no request already in flight. Extracted
-// from ExportsView so the component's cyclomatic complexity stays below the
-// DeepSource medium-risk threshold.
+// ============================================================================
+// Purpose: Decide whether the Generate button may fire. Every gate must hold —
+//   creation permission, at least one offered report type, the audit reason
+//   present, the scope id present when the scope is not global, and no request
+//   already in flight. Extracted from ExportsView so the component's cyclomatic
+//   complexity stays below the DeepSource medium-risk threshold.
+// Database/ORM: None (frontend) — pure predicate over already-resolved form
+//   state; issues no request and reads no store.
+// Standards: No client-side export authorization is invented. `canCreateExport`
+//   is the capability the backend already derived, so this gates the affordance
+//   only; the backend's own permission + scope check stays authoritative and a
+//   403 still surfaces as no-permission copy. Side-effect free and total — it
+//   returns false rather than throwing on any incomplete form.
+// Blast Radius: Export create (audited write) — this predicate is what keeps a
+//   blank audit reason or a missing non-global scope id from ever reaching
+//   POST /exports, and the `submitting` gate is what stops a double-click
+//   filing a duplicate audited job. It is a usability gate, not the
+//   authorization boundary.
+// Connections:
+//   - File: frontend/src/lib/api/useExportActions.ts -> the create POST hook
+//     whose `loading` flag feeds the in-flight gate.
+//   - File: backend/ums_smart_revenue/api/exports.py:241 request_export -> the
+//     authoritative permission/scope gate and the audited insert.
+// ============================================================================
 const canSubmitExportRequest = (form: {
   canCreateExport: boolean;
   hasCreatableType: boolean;
