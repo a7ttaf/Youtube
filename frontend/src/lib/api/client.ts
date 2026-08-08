@@ -129,11 +129,17 @@ const parseBody = async (
   res: Response,
   options: ParseBodyOptions = {},
 ): Promise<unknown> => {
-  if (isBodylessStatus(res.status)) return undefined;
+  if (isBodylessStatus(res.status)) {
+    return undefined;
+  }
   const contentType = res.headers.get("Content-Type") ?? "";
   const text = await res.text();
-  if (!contentType.includes("application/json")) return text;
-  if (text.length === 0) return undefined;
+  if (!contentType.includes("application/json")) {
+    return text;
+  }
+  if (text.length === 0) {
+    return undefined;
+  }
   return parseJsonText(text, options.strictJson);
 };
 
@@ -219,14 +225,26 @@ export const useApiClient = () => {
     }
 
     /**
-     * GET a non-JSON (binary/text) response as a Blob, applying the SAME
-     * tenant/auth header conventions the JSON client uses, and returning both
-     * the blob and the raw Headers so callers can read response headers (e.g.
-     * the audit CSV export's X-Truncated). Kept separate from request<T>
-     * because that path strict-parses JSON and would mangle a CSV body. Same
-     * fail-closed ApiError boundary on non-2xx; no Accept override is forced
-     * so the server may honor its own content type. Read-only download
-     * surface — no finance math, no mutation.
+     * Purpose: GET a non-JSON (binary/text) response as a Blob, applying the
+     *   SAME tenant/auth header conventions the JSON client uses, and returning
+     *   both the blob and the raw Headers so callers can read response headers
+     *   (e.g. the audit CSV export's X-Truncated). Kept separate from request<T>
+     *   because that path strict-parses JSON and would mangle a CSV body.
+     * Database/ORM: None (frontend) — no client-side persistence; the named
+     *   route is served entirely by the backend.
+     * Standards: Same fail-closed ApiError boundary as request<T> — a non-2xx
+     *   throws before any body reaches the caller. X-UMS-Tenant is injected by
+     *   buildHeaders from the resolved tenant slug, never from the caller. No
+     *   Accept override is forced, so the server may honor its own content type.
+     * Blast Radius: Authorization — this is the only tenant-scoped download
+     *   path in the client, so the header injection and the non-2xx throw are
+     *   what keep a cross-tenant or unauthorized artifact from being handed
+     *   back. Read-only: no finance math, no mutation.
+     * Connections:
+     *   - File: frontend/src/components/srcc/views/AuditLogPanelHeader.tsx ->
+     *     sole caller; saves the CSV blob and reads the truncation header.
+     *   - File: frontend/src/lib/api/client.ts -> buildHeaders supplies the
+     *     tenant/auth headers; ApiError is the shared failure boundary.
      */
     async function getBlob(
       path: string,

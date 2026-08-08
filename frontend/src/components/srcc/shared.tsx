@@ -71,10 +71,16 @@ export const formatMoney = (
   options: { currency?: string; placeholder?: string } = {},
 ): string => {
   const { currency, placeholder = "—" } = options;
-  if (isAbsentMoney(value)) return placeholder;
+  if (isAbsentMoney(value)) {
+    return placeholder;
+  }
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return value;
-  if (isNonUsdCurrency(currency)) return formatNonUsdMoney(parsed, currency);
+  if (!Number.isFinite(parsed)) {
+    return value;
+  }
+  if (isNonUsdCurrency(currency)) {
+    return formatNonUsdMoney(parsed, currency);
+  }
   return USD_FORMATTER.format(parsed);
 };
 
