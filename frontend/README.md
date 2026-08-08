@@ -38,10 +38,18 @@ random output:
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Keep that value in `.env` and nowhere else. Steps 3 and 4 below run in separate
-terminals, and the dev proxy only ever reads `.env` — so a token exported in the
-backend's shell alone leaves the dashboard sending the shipped placeholder, and
-every protected route returns 401. Both steps below load `.env` instead.
+Keep that value in `.env` and let both steps below read it from there. Steps 3
+and 4 run in separate terminals, so a token exported in the backend's shell alone
+leaves the dashboard sending the shipped placeholder and every protected route
+returns 401.
+
+`.env` is where the value belongs, but it is not the only source Vite consults:
+`vite.config.ts` calls `loadEnv(mode, REPO_ROOT, "")`, which also reads
+`.env.local` and `.env.development` from the repo root and then overlays the
+dashboard shell's own environment — in that order of increasing precedence. If a
+protected route still 401s after following these steps, a stale
+`UMS_TRUSTED_GATEWAY_TOKEN` in one of those higher-precedence sources is why;
+clear it there rather than editing `.env` again.
 
 ```dotenv
 # repo-root .env — copy from .env.example and fill in your values
@@ -103,8 +111,11 @@ python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
 ```bash
-# From the repo root (bash) — same .env, same token.
-set -a; . ./.env; set +a
+# From the repo root (bash) — same .env, same token. Read only the token line:
+# `source`-ing the file would run it as shell, and .env.example's
+# postgresql+psycopg://<user>:<password>@... placeholder makes `<user>` an input
+# redirection, which both errors and truncates the value.
+export UMS_TRUSTED_GATEWAY_TOKEN=$(grep -E '^UMS_TRUSTED_GATEWAY_TOKEN=' .env | head -n1 | cut -d= -f2-)
 UMS_DATABASE_URL="sqlite+pysqlite:///./demo.db" \
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
