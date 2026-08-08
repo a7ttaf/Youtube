@@ -52,10 +52,13 @@ def guarded_call(  # noqa: UP047 - DeepSource/Pylint does not parse PEP 695 synt
 ) -> T:
     """Run ``guard`` against ``context``, then return the result of ``handler()``.
 
-    Fail-closed: the guard runs first and raises :class:`AccessDeniedError` when
-    the principal lacks the required permission, so ``handler`` is never invoked
-    on a denied call. Any other exception raised by the guard propagates
-    unchanged; ``handler`` exceptions are likewise left to the caller.
+    Fail-closed: the guard runs first and, when it denies, raises
+    :class:`AccessDeniedError` before ``handler`` is invoked, so no guarded work
+    runs on a denied call. What counts as a denial is the guard's to decide --
+    :func:`require_permission` denies a missing permission, while
+    :func:`require_predicate` denies whenever the caller's predicate is false.
+    Any other exception raised by the guard propagates unchanged; ``handler``
+    exceptions are likewise left to the caller.
     """
     guard(context)
     return handler()
