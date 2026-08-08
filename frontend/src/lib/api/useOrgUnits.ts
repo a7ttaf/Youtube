@@ -23,11 +23,11 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 //   - File: frontend/src/lib/api/types.ts -> OrgUnit.
 //   - File: backend/ums_smart_revenue/api/org_units.py -> GET /org-units.
 // ============================================================================
-export function useOrgUnits(): AsyncState<OrgUnit[]> { // skipcq: JS-0067
+export const useOrgUnits = (): AsyncState<OrgUnit[]> => {
   const client = useApiClient();
   const run = useCallback(
     () => client.get<OrgUnit[]>("/org-units"),
     [client],
   );
   return useAsync(run);
-}
+};

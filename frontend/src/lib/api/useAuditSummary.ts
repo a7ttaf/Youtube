@@ -38,7 +38,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
 //   - File: frontend/src/lib/api/types.ts -> AuditSummaryResponse.
 //   - File: backend/ums_smart_revenue/api/audit.py:123 get_audit_summary.
 // ==========================================================================
-export function useAuditSummary(): AsyncState<AuditSummaryResponse> { // skipcq: JS-0067
+export const useAuditSummary = (): AsyncState<AuditSummaryResponse> => {
   const client = useApiClient();
   // FIX: Do not abort from an unmount cleanup here. React StrictMode replays
   // effect cleanup/setup on the same hook instance, and aborting during that
@@ -74,4 +74,4 @@ export function useAuditSummary(): AsyncState<AuditSummaryResponse> { // skipcq:
   }, [client]);
 
   return useAsync(run);
-}
+};

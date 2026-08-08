@@ -37,9 +37,9 @@ export type AccountLinkProposalInput = {
 //   - File: frontend/src/lib/api/types.ts -> AccountLinkProposalResponse.
 //   - File: backend/ums_smart_revenue/api/channel_account_links.py -> propose route.
 // ============================================================================
-export function useProposeAccountLinkAction(): ( // skipcq: JS-0067
+export const useProposeAccountLinkAction = (): ((
   input: AccountLinkProposalInput,
-) => Promise<AccountLinkProposalResponse> {
+) => Promise<AccountLinkProposalResponse>) => {
   const client = useApiClient();
 
   return useCallback(
@@ -58,4 +58,4 @@ export function useProposeAccountLinkAction(): ( // skipcq: JS-0067
       ),
     [client],
   );
-}
+};

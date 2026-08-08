@@ -3,7 +3,13 @@ import { useMemo } from "react";
 
 import { useTenant } from "@/contexts/TenantContext";
 
-export class ApiError extends Error { // skipcq: JS-D1001
+/**
+ * Typed error thrown by the API client for any non-2xx response (and for a 2xx
+ * response whose declared-JSON body fails to parse). Carries the HTTP status,
+ * the parsed (or raw-text) response body, and the resolved request URL so
+ * callers can branch on `instanceof ApiError` + status (e.g. 403 scope guards).
+ */
+export class ApiError extends Error {
   readonly name = "ApiError";
   constructor(
     message: string,
@@ -25,19 +31,25 @@ export class ApiError extends Error { // skipcq: JS-D1001
  * (e.g. binary download anchors) can target the same API origin the JSON client
  * uses instead of hard-coding a relative href against the frontend origin.
  */
-export function resolveUrl(path: string): string { // skipcq: JS-0067
+export const resolveUrl = (path: string): string => {
   if (/^https?:\/\//i.test(path)) return path;
   const raw = import.meta.env.VITE_API_BASE_URL ?? "";
   const base = raw.replace(/\/+$/, "");
   const normalisedPath = path.startsWith("/") ? path : `/${path}`;
   return `${base}${normalisedPath}`;
-}
+};
 
-function buildHeaders( // skipcq: JS-0067, JS-D1001
+/**
+ * Build the Headers for an API request: defaults Accept to application/json,
+ * sets Content-Type only when the body is JSON-encoded, and injects
+ * X-UMS-Tenant from the resolved tenant slug — never from the caller (see
+ * inline comment on the pre-hydration window).
+ */
+const buildHeaders = (
   init: HeadersInit | undefined,
   tenantSlug: string,
   hasJsonBody: boolean,
-): Headers {
+): Headers => {
   const headers = new Headers(init);
   if (!headers.has("Accept")) {
     headers.set("Accept", "application/json");
@@ -58,7 +70,7 @@ function buildHeaders( // skipcq: JS-0067, JS-D1001
     headers.delete("X-UMS-Tenant");
   }
   return headers;
-}
+};
 
 type ParseBodyOptions = {
   // When true, a malformed `application/json` body REJECTS via JsonParseError.
@@ -70,7 +82,12 @@ type ParseBodyOptions = {
   strictJson?: boolean;
 };
 
-class JsonParseError extends Error { // skipcq: JS-D1001
+/**
+ * Internal error carrying the raw response text when a declared-JSON body
+ * fails to parse under strict mode; request<T> converts it into an ApiError so
+ * callers keep a single error boundary.
+ */
+class JsonParseError extends Error {
   readonly name = "JsonParseError";
   constructor(
     message: string,
@@ -80,53 +97,95 @@ class JsonParseError extends Error { // skipcq: JS-D1001
   }
 }
 
-async function parseBody( // skipcq: JS-0067, JS-D1001, JS-R1005
-  res: Response,
-  options: ParseBodyOptions = {},
-): Promise<unknown> {
-  if (res.status === 204 || res.status === 205 || res.status === 304) {
-    return undefined;
-  }
-  const contentType = res.headers.get("Content-Type") ?? "";
-  const text = await res.text();
-  if (!contentType.includes("application/json")) return text;
-  if (text.length === 0) return undefined;
+/** True for statuses that never carry a body (204 No Content, 205 Reset Content, 304 Not Modified). */
+const isBodylessStatus = (status: number): boolean =>
+  status === 204 || status === 205 || status === 304;
+
+/**
+ * Parse response text that was declared as JSON. On malformed input: throws
+ * JsonParseError (preserving the raw text) when `strictJson` is set, otherwise
+ * returns the raw text so ApiError.body keeps the payload for diagnostics.
+ */
+const parseJsonText = (text: string, strictJson?: boolean): unknown => {
   try {
     return JSON.parse(text);
   } catch (parseError) {
-    if (options.strictJson) {
+    if (strictJson) {
       const reason = parseError instanceof Error ? parseError.message : "parse failed";
       throw new JsonParseError(reason, text);
     }
     return text;
   }
-}
+};
+
+/**
+ * Read a Response body: undefined for body-less statuses and empty JSON
+ * bodies, raw text for non-JSON content types, parsed JSON otherwise.
+ * `strictJson` controls whether a malformed declared-JSON body rejects
+ * (success path) or falls back to raw text (error path) — see
+ * ParseBodyOptions.
+ */
+const parseBody = async (
+  res: Response,
+  options: ParseBodyOptions = {},
+): Promise<unknown> => {
+  if (isBodylessStatus(res.status)) return undefined;
+  const contentType = res.headers.get("Content-Type") ?? "";
+  const text = await res.text();
+  if (!contentType.includes("application/json")) return text;
+  if (text.length === 0) return undefined;
+  return parseJsonText(text, options.strictJson);
+};
 
 type RequestOptions = RequestInit & { bodyIsJson?: boolean };
 
-function withJsonBody( // skipcq: JS-0067, JS-D1001, JS-R1005
+/** True when `body` is a binary payload fetch accepts natively (Blob, ArrayBuffer, or a typed-array view). */
+const isBinaryBody = (body: unknown): boolean =>
+  body instanceof Blob || body instanceof ArrayBuffer || ArrayBuffer.isView(body);
+
+/**
+ * Type guard for payloads fetch already accepts as BodyInit verbatim (string,
+ * FormData, URLSearchParams, or binary); these must NOT be JSON.stringify'd.
+ */
+const isRawBodyInit = (body: unknown): body is BodyInit =>
+  typeof body === "string" ||
+  body instanceof FormData ||
+  body instanceof URLSearchParams ||
+  isBinaryBody(body);
+
+/**
+ * Normalise an optional request body into RequestOptions: an undefined body
+ * leaves `init` untouched, a raw BodyInit payload passes through verbatim, and
+ * anything else is JSON.stringify'd with `bodyIsJson: true` so buildHeaders
+ * sets the JSON Content-Type.
+ */
+const withJsonBody = (
   body: unknown,
   init: RequestInit = {},
-): RequestOptions {
+): RequestOptions => {
   if (body === undefined) return init;
-  if (
-    typeof body === "string" ||
-    body instanceof FormData ||
-    body instanceof URLSearchParams ||
-    body instanceof Blob ||
-    body instanceof ArrayBuffer ||
-    ArrayBuffer.isView(body)
-  ) {
-    return { ...init, body: body as BodyInit, bodyIsJson: false };
+  if (isRawBodyInit(body)) {
+    return { ...init, body, bodyIsJson: false };
   }
   return { ...init, body: JSON.stringify(body), bodyIsJson: true };
-}
+};
 
-export function useApiClient() { // skipcq: JS-0067, JS-D1001
+/**
+ * Tenant-scoped API client hook. Returns a memoised {get, getBlob, post, put,
+ * patch, delete} surface bound to the current tenant slug; every request
+ * resolves against the configured API origin, injects X-UMS-Tenant, and
+ * surfaces non-2xx (or malformed-JSON 2xx) responses as a typed ApiError.
+ */
+export const useApiClient = () => {
   const { tenantSlug } = useTenant();
 
   return useMemo(() => {
-    async function request<T>( // skipcq: JS-D1001
+    /**
+     * Core JSON request path: resolves the URL, applies tenant/JSON headers,
+     * throws ApiError on non-2xx, and strict-parses the success body so raw
+     * non-JSON text can never masquerade as a typed `T`.
+     */
+    async function request<T>(
       method: string,
       path: string,
       init: RequestOptions = {},
@@ -159,18 +218,17 @@ export function useApiClient() { // skipcq: JS-0067, JS-D1001
       }
     }
 
-    // ========================================================================
-    // Purpose: GET a non-JSON (binary/text) response as a Blob, applying the SAME
-    //   tenant/auth header conventions the JSON client uses, and returning both the
-    //   blob and the raw Headers so callers can read response headers (e.g. the
-    //   audit CSV export's X-Truncated). Kept separate from request<T> because that
-    //   path strict-parses JSON and would mangle a CSV body.
-    // Standards: Same fail-closed ApiError boundary on non-2xx; same X-UMS-Tenant
-    //   injection via buildHeaders. No Accept override is forced so the server may
-    //   honor its own content type.
-    // Blast Radius: Read-only download surface. No finance math, no mutation.
-    // ========================================================================
-    async function getBlob( // skipcq: JS-D1001
+    /**
+     * GET a non-JSON (binary/text) response as a Blob, applying the SAME
+     * tenant/auth header conventions the JSON client uses, and returning both
+     * the blob and the raw Headers so callers can read response headers (e.g.
+     * the audit CSV export's X-Truncated). Kept separate from request<T>
+     * because that path strict-parses JSON and would mangle a CSV body. Same
+     * fail-closed ApiError boundary on non-2xx; no Accept override is forced
+     * so the server may honor its own content type. Read-only download
+     * surface — no finance math, no mutation.
+     */
+    async function getBlob(
       path: string,
       init: RequestInit = {},
     ): Promise<{ blob: Blob; headers: Headers }> {
@@ -199,4 +257,4 @@ export function useApiClient() { // skipcq: JS-0067, JS-D1001
         request<T>("DELETE", path, init),
     };
   }, [tenantSlug]);
-}
+};
