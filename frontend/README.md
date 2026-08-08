@@ -43,11 +43,18 @@ and 4 run in separate terminals, so a token exported in the backend's shell alon
 leaves the dashboard sending the shipped placeholder and every protected route
 returns 401.
 
-`.env` is where the value belongs, but it is not the only source Vite consults:
-`vite.config.ts` calls `loadEnv(mode, REPO_ROOT, "")`, which also reads
-`.env.local` and `.env.development` from the repo root and then overlays the
-dashboard shell's own environment — in that order of increasing precedence. If a
-protected route still 401s after following these steps, a stale
+`.env` is where the value belongs, but it is not the only source Vite consults.
+`vite.config.ts` calls `loadEnv(mode, REPO_ROOT, "")`, which reads these repo-root
+files in **increasing** order of precedence, then overlays the dashboard shell's
+own environment on top of all of them:
+
+1. `.env`
+2. `.env.local`
+3. `.env.development` (the `mode`, so `.env.[mode]` in general)
+4. `.env.development.local` (`.env.[mode].local`)
+5. the dashboard terminal's exported environment — highest
+
+If a protected route still 401s after following these steps, a stale
 `UMS_TRUSTED_GATEWAY_TOKEN` in one of those higher-precedence sources is why;
 clear it there rather than editing `.env` again.
 
@@ -116,6 +123,11 @@ python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 # postgresql+psycopg://<user>:<password>@... placeholder makes `<user>` an input
 # redirection, which both errors and truncates the value.
 export UMS_TRUSTED_GATEWAY_TOKEN=$(grep -E '^UMS_TRUSTED_GATEWAY_TOKEN=' .env | head -n1 | cut -d= -f2-)
+# UMS_AUTHZ_SOURCE is pinned here too: the backend reads os.environ directly, so
+# a `database` value already exported in this shell would otherwise win over the
+# `headers` line in .env, and the seed provisions no database principal for the
+# proxy's default user id — the demo would 401 on every request.
+UMS_AUTHZ_SOURCE=headers \
 UMS_DATABASE_URL="sqlite+pysqlite:///./demo.db" \
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
