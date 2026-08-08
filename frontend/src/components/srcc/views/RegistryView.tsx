@@ -671,7 +671,31 @@ const currentMonth = (): string => {
 const canActOnProposal = (canManageRegistry: boolean, busy: boolean): boolean =>
   canManageRegistry && !busy;
 
-/** Guard + field check for the proposal submission; extracted to keep AccountLinkProposalPanel CC low. */
+// ============================================================================
+// Purpose: Guard + field check for the account-link proposal submission — the
+//   operator holds the registry capability, no submit is in flight, and the
+//   AdSense account id, content-owner id, effective month, and audited reason
+//   are all non-blank. Extracted to keep AccountLinkProposalPanel's cyclomatic
+//   complexity below the DeepSource medium-risk threshold.
+// Database/ORM: None (frontend) — a pure predicate over resolved form state.
+// Standards: No client-side authorization is invented. `canManageRegistry` is a
+//   backend-derived capability, so this gates the affordance only and the
+//   backend's MANAGE_ORG_MAPPING@global check stays authoritative. Ids and
+//   reason are checked after trimming, so whitespace never passes as supplied.
+//   Side-effect free and total.
+// Blast Radius: Finance map write + audit — a proposal inserts an UNVERIFIED
+//   AdSense-account to content-owner link. This predicate is what keeps a blank
+//   audited reason or a whitespace-only identifier from reaching
+//   POST /revenue/channel-account-links, and the busy half of canActOnProposal
+//   is what stops a double-click filing a duplicate proposal. It cannot create
+//   a VERIFIED link — verification is a separate dual-gated admin flow.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/channel_account_links.py:275
+//     propose_channel_account_link -> the authoritative permission gate and the
+//     audited insert.
+//   - File: frontend/src/components/srcc/views/RegistryView.tsx ->
+//     canActOnProposal supplies the capability + in-flight half.
+// ============================================================================
 const isProposalSubmittable = (
   canManageRegistry: boolean,
   busy: boolean,

@@ -173,10 +173,31 @@ const canOfferReportType = (
 const defaultReportType = (options: ReportTypeOption[]): ExportType =>
   options[0]?.value ?? "FINANCE_EXCEL";
 
-// Keep the selection valid when the allowed set excludes the current choice
-// (e.g. permissions change such that the selected type is no longer offered).
-// Extracted from ExportsView so the component's cyclomatic complexity stays
-// below the DeepSource medium-risk threshold.
+// ============================================================================
+// Purpose: Keep the report-type selection valid when the offered set no longer
+//   contains the current choice — e.g. the viewer's permissions change so the
+//   selected type stops being offered. Returns the selection when it is still
+//   offered, otherwise the caller's fallback. Extracted from ExportsView so the
+//   component's cyclomatic complexity stays below the DeepSource medium-risk
+//   threshold.
+// Database/ORM: None (frontend) — a pure lookup over the already-filtered
+//   option list.
+// Standards: `options` is the permission-filtered list canOfferReportType
+//   produced, so membership is checked against what the viewer may actually
+//   create rather than against the full enum. Side-effect free and total.
+// Blast Radius: Export create — this is the value that ends up in the
+//   export_type field of POST /exports, so it decides what is actually
+//   submitted when the visible selection has gone stale. Because the candidate
+//   set is already permission-filtered, a stale selection degrades to an
+//   offered type instead of silently submitting one the viewer may not create;
+//   the backend's per-type gate remains authoritative either way.
+// Connections:
+//   - File: frontend/src/components/srcc/views/ExportsView.tsx ->
+//     canOfferReportType builds `options`; defaultReportType supplies the
+//     fallback; canSubmitExportRequest gates the submit itself.
+//   - File: backend/ums_smart_revenue/api/exports.py:241 request_export -> the
+//     authoritative export_type + permission validation.
+// ============================================================================
 const effectiveReportType = (
   options: ReportTypeOption[],
   selected: ExportType,

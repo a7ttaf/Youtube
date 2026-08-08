@@ -106,11 +106,26 @@ const describeLockBlockerDetail = (lockDetail: FinanceCloseLockErrorDetail): str
     : base;
 };
 
-/**
- * Pull the conflict copy out of a 409 body: a non-empty plain-string detail wins,
- * a structured lock detail formats via its blocker count, and anything else gets
- * the generic wrong-state copy.
- */
+// ============================================================================
+// Purpose: Pull the operator-facing copy out of a finance-close 409 body. A
+//   non-empty plain-string detail wins; a structured lock detail formats via its
+//   blocker count; anything else falls back to generic wrong-state copy.
+// Database/ORM: None (frontend) — reads an already-parsed ApiError.body.
+// Standards: Total and defensive. `body` is typed `unknown` because a 409 body
+//   is not guaranteed to match the schema, so every branch is shape-checked
+//   before use and the final return is the fail-safe. No throw, so an unexpected
+//   payload degrades to generic copy instead of blanking the panel.
+// Blast Radius: Finance close — this is the only place a rejected lock/unlock
+//   becomes words the operator reads. Getting it wrong hides a real readiness
+//   blocker behind generic text, which is what makes the month look
+//   inexplicably stuck. It reports the refusal; it never suppresses one.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/finance_close.py:142
+//     lock_finance_month / :179 unlock_finance_month -> raise the 409 whose
+//     body shape this reads.
+//   - File: frontend/src/components/srcc/views/CloseView.tsx ->
+//     describeLockBlockerDetail formats the structured branch.
+// ============================================================================
 const describeConflictBody = (body: unknown): string => {
   const detail = isNonNullObject(body) ? body.detail : null;
   if (typeof detail === "string" && detail.trim().length > 0) {
@@ -203,11 +218,29 @@ const lockActionPermitted = (
 const lockActionStateBlocked = (kind: LockAction, isLocked: boolean): boolean =>
   kind === "unlock" ? !isLocked : isLocked;
 
-/**
- * Derive whether a lock/unlock action button is disabled. Both actions share the
- * no-permission / busy / empty-reason guards; lock additionally requires the
- * month to be OPEN and unlock requires it LOCKED.
- */
+// ============================================================================
+// Purpose: Derive whether a lock/unlock action button is disabled. Both actions
+//   share the no-permission / busy / empty-reason guards; lock additionally
+//   requires an OPEN month and unlock a LOCKED one.
+// Database/ORM: None (frontend) — a pure predicate over resolved props.
+// Standards: No client-side authorization is invented. `canCloseMonth` and
+//   `canUnlockMonth` are capabilities the backend already derived; this gates
+//   the affordance only, and the backend's LOCK_FINANCE_MONTH /
+//   UNLOCK_FINANCE_MONTH check plus its readiness recheck stay authoritative.
+//   Side-effect free and total.
+// Blast Radius: Finance close — locking a month makes its facts immutable and
+//   unlocking reopens them, so both are audited writes. This predicate is what
+//   keeps a blank audit reason from reaching the endpoint and what stops the
+//   button firing the wrong transition for the month's current state; the
+//   `busy` guard stops a double-click filing a duplicate audited action. It is
+//   a usability gate, not the authorization or readiness boundary.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/finance_close.py:142
+//     lock_finance_month / :179 unlock_finance_month -> the authoritative
+//     permission gate, readiness recheck, and audited state change.
+//   - File: frontend/src/components/srcc/views/CloseView.tsx ->
+//     lockActionPermitted and lockActionStateBlocked supply the two halves.
+// ============================================================================
 const lockActionDisabled = (
   kind: LockAction,
   canCloseMonth: boolean,

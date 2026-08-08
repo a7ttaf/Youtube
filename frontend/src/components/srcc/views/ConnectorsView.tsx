@@ -344,11 +344,27 @@ const ConnectorCredentialsTableHead = () => {
   );
 };
 
-/**
- * True while the per-row "Run pull" button must stay disabled: the viewer
- * cannot run connectors, no sync reason has been typed, or another request is
- * already in flight.
- */
+// ============================================================================
+// Purpose: True while the per-row "Run pull" button must stay disabled — the
+//   viewer cannot run connectors, no sync reason has been typed, or another
+//   request is already in flight.
+// Database/ORM: None (frontend) — a pure predicate over resolved props.
+// Standards: No client-side authorization is invented. `canRunConnectors` is a
+//   capability the backend already derived; this gates the affordance only, and
+//   the backend's RUN_CONNECTOR_JOBS @connector check stays authoritative (a 403
+//   surfaces as no-permission copy). Side-effect free and total.
+// Blast Radius: Connector execution — a pull submits an audited connector job
+//   that ingests source rows and feeds the finance projection. This predicate is
+//   what keeps a blank audit reason from reaching POST /connectors/jobs, and the
+//   in-flight guard is what stops a double-click submitting the same run twice.
+//   It is a usability gate, not the authorization boundary.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/connectors.py:710
+//     request_connector_job -> the authoritative permission gate and the
+//     audited job submission.
+//   - File: frontend/src/lib/api/useConnectors.ts -> useConnectorJobActions
+//     owns the POST and the in-flight flag passed in here.
+// ============================================================================
 const runPullDisabled = (
   canRunConnectors: boolean,
   reason: string,
@@ -825,11 +841,27 @@ const SyncSuccess = ({ count }: { count: number }) => {
   );
 };
 
-/**
- * True when the AdSense payment-sync form may submit: the viewer can run
- * connectors, no sync request is in flight, and every required field value
- * (including the audited reason) is non-blank after trimming.
- */
+// ============================================================================
+// Purpose: True when the AdSense payment-sync form may submit — the viewer can
+//   run connectors, no sync request is in flight, and every required field
+//   (including the audited reason) is non-blank after trimming.
+// Database/ORM: None (frontend) — a pure predicate over resolved form values.
+// Standards: No client-side authorization is invented. `canRunConnectors` is a
+//   backend-derived capability, so this gates the affordance only and the
+//   backend's RUN_CONNECTOR_JOBS check stays authoritative. Required fields are
+//   checked after trimming, so whitespace never passes as a supplied value.
+//   Side-effect free and total.
+// Blast Radius: Finance write — the sync upserts AdSense payment rows into the
+//   finance source, so this predicate is what keeps a blank audit reason or a
+//   whitespace-only payment field from reaching POST /adsense/sync-payments,
+//   and the in-flight guard is what stops a double-click upserting twice. It is
+//   a usability gate, not the authorization boundary.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/adsense.py:133 sync_adsense_payments
+//     -> the authoritative permission gate and the audited payment upsert.
+//   - File: frontend/src/lib/api/useAdsense.ts -> useAdsenseSyncActions owns
+//     the POST and the loading flag passed in here.
+// ============================================================================
 const adsenseSyncCanSubmit = (
   canRunConnectors: boolean,
   loading: boolean,
