@@ -423,21 +423,13 @@ run_phase() {
     ci::report::append_log ">>> ${label} (${script}) [parallel]"
 
     # Try cache lookup before submitting
-    local cache_key="" cache_hit=0
+    local cache_digest="" cache_hit=0
     if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && type ci::cache::key >/dev/null 2>&1; then
-      # skipcq: SCT-A000
-      # DeepSource false positive: this is a function CALL into _compute_cache_key
-      # (defined at line 367), which returns a composite content-hash digest
-      # (lane + tool version + files hash + config hash). It is not a hardcoded
-      # credential. The project's BLOCKING scanner gitleaks 8.21.2 (security-scan
-      # lane: `gitleaks detect --no-git --source . --redact`, no exit-code
-      # override) scans the whole tree including this file and PASSES with zero
-      # leaks. ci/preflight.sh is also already in .deepsource.toml's secrets
-      # exclude_patterns; this per-line skipcq is the deterministic, code-local
-      # equivalent of that documented exclude for the SCT-A000 audit heuristic.
-      cache_key="$(_compute_cache_key "$label")"
+      # Composite content-hash digest identifying this check's cache entry
+      # (lane + tool version + files hash + config hash).
+      cache_digest="$(_compute_cache_key "$label")"
       local cache_dest="${CI_REPORT_DIR}/.cache/${label}"
-      if ci::cache::get "$cache_key" "$cache_dest"; then
+      if ci::cache::get "$cache_digest" "$cache_dest"; then
         echo "  [cache hit] $label"
         cache_hit=1
         if [ -f "$cache_dest/result.txt" ]; then
@@ -500,14 +492,10 @@ run_phase() {
       mkdir -p "$cache_dest"
       printf '%d' "$rc" > "$cache_dest/result.txt"
       printf '%s' "$output" > "$cache_dest/output.txt"
-      local put_key
-      # skipcq: SCT-A000
-      # DeepSource false positive: function CALL into _compute_cache_key (defined
-      # at line 367), returning a composite content-hash digest. Not a credential.
-      # gitleaks 8.21.2 (BLOCKING, whole-tree, no exit-code override) scans this
-      # file clean; see the matching comment at the cache-get call site above.
-      put_key="$(_compute_cache_key "$lbl")"
-      ci::cache::put "$put_key" "$cache_dest"
+      local put_digest
+      # Same composite content-hash digest as the cache-get call site above.
+      put_digest="$(_compute_cache_key "$lbl")"
+      ci::cache::put "$put_digest" "$cache_dest"
     fi
   done
 }
