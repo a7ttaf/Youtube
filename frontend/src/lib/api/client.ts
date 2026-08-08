@@ -40,10 +40,26 @@ export const resolveUrl = (path: string): string => {
 };
 
 /**
- * Build the Headers for an API request: defaults Accept to application/json,
- * sets Content-Type only when the body is JSON-encoded, and injects
- * X-UMS-Tenant from the resolved tenant slug — never from the caller (see
- * inline comment on the pre-hydration window).
+ * Purpose: Build the Headers for one API request — default Accept to
+ *   application/json, set Content-Type only when the body is JSON-encoded, and
+ *   resolve X-UMS-Tenant from the provider's tenant slug.
+ * Database/ORM: None (frontend) — header construction only.
+ * Standards: Typed HeadersInit boundary; no request is issued here and no error
+ *   is swallowed. Tenant identity comes from the resolved slug argument only: a
+ *   caller-supplied X-UMS-Tenant is overwritten when a slug is resolved and
+ *   deleted when it is not — it is never merged through.
+ * Blast Radius: Authorization / tenancy — this is the single choke point where
+ *   every request in this client acquires its tenant scope, so the overwrite-
+ *   or-delete rule is what stops the browser bundle forging a tenant, and the empty
+ *   slug case is what stops a hardcoded fallback pinning every principal to
+ *   "ums" during the pre-hydration window (see the inline note below).
+ * Connections:
+ *   - File: frontend/src/contexts/TenantContext.tsx -> useTenant supplies the
+ *     resolved slug; an empty value means bootstrap is still in flight.
+ *   - File: frontend/src/lib/api/client.ts -> sole consumers are request<T> and
+ *     getBlob, so both the JSON and download paths share these headers.
+ *   - File: frontend/vite.config.ts -> the dev proxy injects the trusted-gateway
+ *     token and may override X-UMS-Tenant, mirroring the production gateway.
  */
 const buildHeaders = (
   init: HeadersInit | undefined,
