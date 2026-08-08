@@ -41,6 +41,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Rename the four keyword-shaped security columns to descriptive names."""
     op.alter_column("roles", "key", new_column_name="role_key")
     op.alter_column("permissions", "key", new_column_name="permission_key")
     op.alter_column("permissions", "sensitive", new_column_name="is_sensitive")
@@ -48,6 +49,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Restore the original keyword-shaped security column names."""
     op.alter_column("audit_logs", "is_sensitive", new_column_name="sensitive")
     op.alter_column("permissions", "is_sensitive", new_column_name="sensitive")
     op.alter_column("permissions", "permission_key", new_column_name="key")

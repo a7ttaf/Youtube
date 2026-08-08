@@ -59,13 +59,21 @@ def alembic_config(postgres_url: str) -> Config:
 
 
 @pytest.fixture
-def fresh_engine(postgres_url: str) -> object:
+def fresh_engine(postgres_url: str, alembic_config: Config) -> object:
     reset_public_schema(postgres_url)
     engine = create_engine(postgres_url)
     try:
         yield engine
     finally:
         engine.dispose()
+        # Restore a clean versioned head after every test: a test that stops
+        # at PRIOR_HEAD (or one that leaves bootstrap tables with no
+        # alembic_version row) would otherwise leak stale schema state to
+        # PG-tier neighbours that upgrade without a schema reset (session
+        # hook, tenant RLS), including early-stop `-x` runs. Same "leave the
+        # DB at head" convention as test_tenant_rls_migration.py.
+        reset_public_schema(postgres_url)
+        command.upgrade(alembic_config, "head")
 
 
 def _column_names(engine: object, table: str) -> set[str]:
@@ -190,37 +198,30 @@ def test_downgrade_restores_keyword_column_names(
     assert "sensitive" in _column_names(fresh_engine, "audit_logs")
 
 
-def test_bootstrap_mirror_and_seed_apply_with_renamed_columns(
-    postgres_url: str, alembic_config: Config, fresh_engine: object
-) -> None:
-    # Restore the versioned head state afterwards: the bootstrap application
-    # leaves tables but no alembic_version row, and PG-tier neighbours that
-    # upgrade without a schema reset (session hook, tenant RLS) would then
-    # replay revision 0001 into existing tables. Same "leave the DB at head"
-    # convention as test_tenant_rls_migration.py.
-    try:
-        _execute_script(fresh_engine, SCHEMA_SQL)
-        _execute_script(fresh_engine, SEED_SQL)
+def test_bootstrap_mirror_and_seed_apply_with_renamed_columns(fresh_engine: object) -> None:
+    # The fresh_engine teardown restores the versioned head afterwards: the
+    # bootstrap application leaves tables but no alembic_version row, and
+    # PG-tier neighbours that upgrade without a schema reset (session hook,
+    # tenant RLS) would then replay revision 0001 into existing tables.
+    _execute_script(fresh_engine, SCHEMA_SQL)
+    _execute_script(fresh_engine, SEED_SQL)
 
-        with fresh_engine.begin() as conn:
-            roles_count = conn.execute(text("SELECT count(*) FROM roles")).scalar_one()
-            permissions_count = conn.execute(
-                text("SELECT count(*) FROM permissions")
-            ).scalar_one()
-            assignments_count = conn.execute(
-                text("SELECT count(*) FROM role_permission_assignments")
-            ).scalar_one()
-            sensitive_column = conn.execute(
-                text(
-                    "SELECT count(*) FROM information_schema.columns "
-                    "WHERE table_name = 'permissions' AND column_name = 'is_sensitive'"
-                )
-            ).scalar_one()
+    with fresh_engine.begin() as conn:
+        roles_count = conn.execute(text("SELECT count(*) FROM roles")).scalar_one()
+        permissions_count = conn.execute(
+            text("SELECT count(*) FROM permissions")
+        ).scalar_one()
+        assignments_count = conn.execute(
+            text("SELECT count(*) FROM role_permission_assignments")
+        ).scalar_one()
+        sensitive_column = conn.execute(
+            text(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name = 'permissions' AND column_name = 'is_sensitive'"
+            )
+        ).scalar_one()
 
-        assert roles_count == 16
-        assert permissions_count == 26
-        assert assignments_count > 0
-        assert sensitive_column == 1
-    finally:
-        reset_public_schema(postgres_url)
-        command.upgrade(alembic_config, "head")
+    assert roles_count == 16
+    assert permissions_count == 26
+    assert assignments_count > 0
+    assert sensitive_column == 1
