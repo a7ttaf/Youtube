@@ -50,5 +50,12 @@ def guarded_call(  # noqa: UP047 - DeepSource/Pylint does not parse PEP 695 synt
     context: GuardContext,
     handler: Callable[[], T],
 ) -> T:
+    """Run ``guard`` against ``context``, then return the result of ``handler()``.
+
+    Fail-closed: the guard runs first and raises :class:`AccessDeniedError` when
+    the principal lacks the required permission, so ``handler`` is never invoked
+    on a denied call. Any other exception raised by the guard propagates
+    unchanged; ``handler`` exceptions are likewise left to the caller.
+    """
     guard(context)
     return handler()
