@@ -121,9 +121,15 @@ const csvResponse = (body: string, extraHeaders: Record<string, string> = {}) =>
 };
 
 const urlOf = (input: unknown): string => {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.toString();
-  if (input instanceof Request) return input.url;
+  if (typeof input === "string") {
+    return input;
+  }
+  if (input instanceof URL) {
+    return input.toString();
+  }
+  if (input instanceof Request) {
+    return input.url;
+  }
   return String(input);
 };
 
@@ -158,7 +164,9 @@ const routeEvents = (
   return (input: unknown) => {
     const url = urlOf(input);
     const custom = responder(url);
-    if (custom) return Promise.resolve(custom);
+    if (custom) {
+      return Promise.resolve(custom);
+    }
     if (url.startsWith("/audit/summary")) {
       return Promise.resolve(jsonResponse(SUMMARY));
     }

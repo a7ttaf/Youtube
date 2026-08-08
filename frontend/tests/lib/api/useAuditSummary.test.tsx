@@ -84,9 +84,15 @@ const requireFetchArgs = () => {
 };
 
 const urlOf = (input: unknown): string => {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.toString();
-  if (input instanceof Request) return input.url;
+  if (typeof input === "string") {
+    return input;
+  }
+  if (input instanceof URL) {
+    return input.toString();
+  }
+  if (input instanceof Request) {
+    return input.url;
+  }
   return String(input);
 };
 
