@@ -84,14 +84,16 @@ Point the backend at the same database you seeded and set the same token:
 ```bash
 # From the repo root (PowerShell)
 $env:UMS_DATABASE_URL = "sqlite+pysqlite:///./demo.db"
-$env:UMS_TRUSTED_GATEWAY_TOKEN = "dev-only-token" # required for protected routes
+# Generate a random token once; the dev proxy (repo-root .env) must send the same value.
+$env:UMS_TRUSTED_GATEWAY_TOKEN = [guid]::NewGuid().ToString()
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
 ```bash
 # From the repo root (bash)
+# Generate a random token once; the dev proxy (repo-root .env) must send the same value.
+export UMS_TRUSTED_GATEWAY_TOKEN=$(openssl rand -hex 16)
 UMS_DATABASE_URL="sqlite+pysqlite:///./demo.db" \
-UMS_TRUSTED_GATEWAY_TOKEN="dev-only-token" \
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
