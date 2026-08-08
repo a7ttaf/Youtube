@@ -135,7 +135,7 @@ def test_connector_admin_purges_raw_report_file_with_audit(app_env):
     assert row.file_url == ""
     assert row.checksum == "sha256:83f8b7d92d8a"
     assert purge_log.reason == "Operator-requested deletion"
-    assert purge_log.sensitive is True
+    assert purge_log.is_sensitive is True
 
 
 def test_purge_conflict_returns_409(app_env, monkeypatch):

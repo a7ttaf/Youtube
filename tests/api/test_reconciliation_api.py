@@ -400,7 +400,7 @@ def test_get_reconciliation_returns_persisted_explanation(tmp_path):
     assert audit_by_type["PAYMENT_VIEWED"].scope_id == MONTH
     assert audit_by_type["BANK_RECONCILIATION_VIEWED"].scope_type == "finance-month"
     assert audit_by_type["BANK_RECONCILIATION_VIEWED"].scope_id == MONTH
-    assert all(log.sensitive is True for log in audit_logs)
+    assert all(log.is_sensitive is True for log in audit_logs)
 
 
 def test_get_reconciliation_missing_is_not_found(tmp_path):

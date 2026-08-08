@@ -205,7 +205,7 @@ def seed_security_catalog(session: Session) -> AccessScopeORM:
     for definition in ROLE_DEFINITIONS.values():
         session.add(
             RoleORM(
-                key=definition.role.value,
+                role_key=definition.role.value,
                 label=definition.label,
                 description=definition.description,
                 service_only=definition.service_only,
@@ -214,9 +214,9 @@ def seed_security_catalog(session: Session) -> AccessScopeORM:
     for definition in PERMISSION_DEFINITIONS.values():
         session.add(
             PermissionORM(
-                key=definition.permission.value,
+                permission_key=definition.permission.value,
                 label=definition.label,
-                sensitive=definition.sensitive,
+                is_sensitive=definition.sensitive,
                 audit_on_use=definition.audit_on_use,
             )
         )
@@ -404,7 +404,7 @@ def test_database_principal_loads_direct_permission_grants(tmp_path):
                 entity_id="channel-1",
                 scope_type="global",
                 details={"field": "company_id"},
-                sensitive=True,
+                is_sensitive=True,
             )
         )
         session.commit()

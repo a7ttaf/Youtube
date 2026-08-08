@@ -255,15 +255,15 @@ def _seed_access_profile_rows(session: Session) -> None:
     session.add_all(
         [
             RoleORM(
-                key="company_manager",
+                role_key="company_manager",
                 label="Company Manager",
                 description="Manage company access",
                 service_only=False,
             ),
             PermissionORM(
-                key="analytics.view_confidence",
+                permission_key="analytics.view_confidence",
                 label="View confidence",
-                sensitive=False,
+                is_sensitive=False,
                 audit_on_use=False,
             ),
             AccessScopeORM(

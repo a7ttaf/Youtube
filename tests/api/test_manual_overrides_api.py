@@ -133,7 +133,7 @@ def test_finance_admin_creates_pending_manual_override_with_audit(tmp_path):
     assert override.adjustment_revenue_usd == Decimal("125.50")
     assert audit_log.event_type == "MANUAL_OVERRIDE_CREATED"
     assert audit_log.reason == "Correct CMS transfer-fee allocation"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_finance_approver_approves_pending_manual_override(tmp_path):
@@ -348,5 +348,5 @@ def test_finance_viewer_reads_adjusted_revenue_summary_with_approved_overrides_o
     assert response.json()["adjusted_gross_revenue_usd"] == "1125.5"
     assert response.json()["pending_manual_override_count"] == 1
     assert any(
-        log.entity_type == "adjusted_revenue_summary" and log.sensitive for log in audit_logs
+        log.entity_type == "adjusted_revenue_summary" and log.is_sensitive for log in audit_logs
     )

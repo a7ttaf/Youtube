@@ -39,12 +39,12 @@ DELETE FROM role_permission_assignments
 WHERE permission_key IN ('graph.view', 'graph.view_finance');
 
 DELETE FROM permissions
-WHERE key IN ('graph.view', 'graph.view_finance');
+WHERE permission_key IN ('graph.view', 'graph.view_finance');
 
 DELETE FROM access_scopes
 WHERE scope_type = 'graph-read';
 
-INSERT INTO roles (key, label, description, service_only)
+INSERT INTO roles (role_key, label, description, service_only)
 VALUES
     ('super_owner', 'Super Owner', 'Global break-glass owner with every platform and finance permission.', false),
     ('corporate_admin', 'Corporate Admin', 'Global platform administrator without default finance visibility.', false),
@@ -62,12 +62,12 @@ VALUES
     ('system_integration_user', 'System Integration User', 'Non-human role for scheduled connector jobs and backend service flows.', true),
     ('connector_admin', 'Connector Admin', 'Technical owner for Google/API connector credential configuration.', false),
     ('data_steward', 'Data Steward', 'Scoped owner for channel registry, groups, and organization mapping.', false)
-ON CONFLICT (key) DO UPDATE
+ON CONFLICT (role_key) DO UPDATE
 SET label = EXCLUDED.label,
     description = EXCLUDED.description,
     service_only = EXCLUDED.service_only;
 
-INSERT INTO permissions (key, label, sensitive, audit_on_use)
+INSERT INTO permissions (permission_key, label, is_sensitive, audit_on_use)
 VALUES
     ('analytics.view', 'View performance analytics', false, false),
     ('analytics.view_confidence', 'View confidence labels and issue flags', false, false),
@@ -95,13 +95,13 @@ VALUES
     ('users.manage', 'Manage users', true, true),
     ('roles.assign', 'Assign roles', true, true),
     ('platform.manage_settings', 'Manage platform settings', true, true)
-ON CONFLICT (key) DO UPDATE
+ON CONFLICT (permission_key) DO UPDATE
 SET label = EXCLUDED.label,
-    sensitive = EXCLUDED.sensitive,
+    is_sensitive = EXCLUDED.is_sensitive,
     audit_on_use = EXCLUDED.audit_on_use;
 
 INSERT INTO role_permission_assignments (role_key, permission_key)
-SELECT 'super_owner' AS role_key, key AS permission_key FROM permissions
+SELECT 'super_owner' AS role_key, permission_key FROM permissions
 ON CONFLICT DO NOTHING;
 
 INSERT INTO role_permission_assignments (role_key, permission_key)

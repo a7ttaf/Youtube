@@ -51,7 +51,7 @@ def seed_database(database_url: str) -> None:
                     scope_id="channel-a",
                     reason=None,
                     details={"gross_revenue_usd": "1000", "source": "YOUTUBE_CMS"},
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=created_at,
                 ),
                 AuditLogORM(
@@ -64,7 +64,7 @@ def seed_database(database_url: str) -> None:
                     scope_id=None,
                     reason=None,
                     details={"ip": "127.0.0.1"},
-                    sensitive=False,
+                    is_sensitive=False,
                     created_at=created_at - timedelta(minutes=5),
                 ),
             ]
@@ -134,7 +134,7 @@ def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path
                     scope_id="youtube_reporting",
                     reason=None,
                     details={},
-                    sensitive=False,
+                    is_sensitive=False,
                     created_at=datetime.now(UTC).replace(microsecond=0),
                 )
             )
@@ -401,7 +401,7 @@ def test_audit_events_export_guards_formula_injection(tmp_path):
                 scope_id=None,
                 reason="=cmd|'/C calc'!A1",
                 details={},
-                sensitive=False,
+                is_sensitive=False,
                 created_at=datetime.now(UTC).replace(microsecond=0),
             )
         )
@@ -451,7 +451,7 @@ def _add_audit_row(
             scope_id=None,
             reason=None,
             details={},
-            sensitive=sensitive,
+            is_sensitive=sensitive,
             created_at=created_at or datetime.now(UTC).replace(microsecond=0),
         )
         if tenant_id is not None:

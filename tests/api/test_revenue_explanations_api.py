@@ -203,7 +203,7 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
     assert explanation.value == Decimal("1125.50")
     assert explanation.metric == "adjusted_gross_revenue_usd"
     assert audit_log.event_type == "REVENUE_VIEWED"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_assistant_cannot_get_revenue_explanation(tmp_path):

@@ -204,7 +204,7 @@ class SqlAlchemyAuditLogRepository:
             select(
                 func.count().label("total_events"),
                 func.coalesce(
-                    func.sum(case((AuditLogORM.sensitive.is_(True), 1), else_=0)),
+                    func.sum(case((AuditLogORM.is_sensitive.is_(True), 1), else_=0)),
                     0,
                 ).label("sensitive_events"),
                 func.coalesce(
@@ -315,7 +315,7 @@ class SqlAlchemyAuditLogRepository:
             request_id=row.request_id,
             reason=row.reason,
             details=row.details or {},
-            sensitive=row.sensitive,
+            sensitive=row.is_sensitive,
             created_at=row.created_at,
         )
 

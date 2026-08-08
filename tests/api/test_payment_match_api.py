@@ -192,7 +192,7 @@ def test_finance_viewer_reads_payment_match_with_revenue_and_payment_audits(
         "finance-month",
         "2026-03",
     )
-    assert all(log.sensitive is True for log in audit_logs)
+    assert all(log.is_sensitive is True for log in audit_logs)
 
 
 def test_payment_match_maps_adsense_payment_validation_to_422():

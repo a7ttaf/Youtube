@@ -79,7 +79,7 @@ class SqlAlchemyAuditSink:
                 request_id=record.request_id,
                 reason=record.reason,
                 details=details,
-                sensitive=record.sensitive,
+                is_sensitive=record.sensitive,
                 created_at=record.created_at,
             )
         )

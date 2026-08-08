@@ -288,7 +288,7 @@ def _seed_skipped_source_row_audit_edge(session) -> None:
                 "skipped_count": 4,
                 "skipped_by_reason": {"missing_channel_id": 4},
             },
-            sensitive=True,
+            is_sensitive=True,
             created_at=datetime(2026, 4, 2, tzinfo=UTC),
         )
     )
@@ -316,7 +316,7 @@ def _seed_failed_connector_run_audit_edge(session) -> None:
                 "status": "PARTIAL",
                 "counts": {"reports_failed": 1, "reports_succeeded": 2},
             },
-            sensitive=True,
+            is_sensitive=True,
             created_at=datetime(2026, 4, 3, tzinfo=UTC),
         )
     )

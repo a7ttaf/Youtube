@@ -74,7 +74,7 @@ def test_corporate_admin_creates_human_user_with_audit(tmp_path):
     assert user.is_service_account is False
     assert audit_log.event_type == "USER_ACCOUNT_CHANGED"
     assert audit_log.reason == "Create analyst account for onboarding"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_assistant_cannot_create_user_accounts(tmp_path):

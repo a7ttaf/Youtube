@@ -219,7 +219,7 @@ def test_finance_close_read_records_audit_event(tmp_path):
     assert response.status_code == 200
     assert response.json()["status"] == "LOCKED"
     assert audit_log.event_type == "MONTH_CLOSE_VIEWED"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
     assert audit_log.details["read_type"] == "summary"
 
 
@@ -554,7 +554,7 @@ def test_finance_close_readiness_ignores_performance_only_channels(tmp_path):
     assert readiness.status_code == 200
     assert readiness.json() == {"month": "2026-03", "ready": True, "blockers": []}
     assert audit_log.event_type == "MONTH_CLOSE_VIEWED"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
     assert audit_log.details["read_type"] == "readiness"
 
 

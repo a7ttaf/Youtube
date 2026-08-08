@@ -361,7 +361,7 @@ audit_logs (
   request_id text null,
   reason text null,
   details jsonb not null default '{}',
-  sensitive boolean not null default false,
+  is_sensitive boolean not null default false,
   created_at timestamptz not null default now(),
   tenant_id uuid not null references tenants(id)
 );

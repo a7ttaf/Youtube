@@ -113,7 +113,7 @@ def test_system_integration_user_syncs_adsense_payment_with_audit(tmp_path):
     assert audit_log.event_type == "ADSENSE_PAYMENT_SYNCED"
     assert audit_log.scope_type == "connector"
     assert audit_log.scope_id == "adsense"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_system_integration_user_sync_accepts_non_uuid_gateway_actor(tmp_path):
@@ -237,7 +237,7 @@ def test_finance_viewer_lists_adsense_payments_with_audit(tmp_path):
     ]
     assert audit_logs[-1].scope_type == "finance-month"
     assert audit_logs[-1].scope_id == "2026-03"
-    assert audit_logs[-1].sensitive is True
+    assert audit_logs[-1].is_sensitive is True
 
 
 def test_finance_month_scoped_viewer_lists_matching_adsense_payments(tmp_path):

@@ -163,7 +163,7 @@ def test_finance_viewer_reads_payment_status_breakdown_with_audit(tmp_path):
         "finance-month",
         MONTH,
     )
-    assert audit_logs[0].sensitive is True
+    assert audit_logs[0].is_sensitive is True
 
 
 def test_cancelled_amount_present_but_excluded_from_outstanding_via_api(tmp_path):

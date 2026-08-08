@@ -57,7 +57,7 @@ def test_sql_audit_sink_persists_sensitive_audit_record():
     assert audit_log.user_id == USER_ID
     assert audit_log.event_type == "CHANNEL_UPDATED"
     assert audit_log.reason == "Correct ownership mapping"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
     assert audit_log.details["old_primary_company_id"] == "company-old"
 
 

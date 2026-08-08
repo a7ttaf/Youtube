@@ -135,7 +135,7 @@ def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
     assert bank_row["bank_received_amount_usd"] == Decimal("928.500000")
     assert audit_log.event_type == "BANK_RECONCILIATION_RECORDED"
     assert audit_log.reason == "Record bank receipt for March AdSense payment"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_bank_reconciliation_record_is_idempotent_for_same_month_reference(tmp_path):
@@ -236,7 +236,7 @@ def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
         "BANK_RECONCILIATION_VIEWED",
         "PAYMENT_VIEWED",
     ]
-    assert all(log.sensitive is True for log in audit_logs)
+    assert all(log.is_sensitive is True for log in audit_logs)
 
 
 def test_finance_month_scoped_admin_records_matching_month(tmp_path):

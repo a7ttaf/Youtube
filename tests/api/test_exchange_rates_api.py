@@ -89,7 +89,7 @@ def test_system_integration_user_syncs_exchange_rate_with_audit(tmp_path):
     assert audit_log.event_type == "EXCHANGE_RATE_SYNCED"
     assert audit_log.scope_type == "connector"
     assert audit_log.scope_id == "ecb"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_system_integration_user_syncs_exchange_rate_with_non_uuid_actor(tmp_path):
@@ -181,7 +181,7 @@ def test_finance_viewer_reads_latest_exchange_rate(tmp_path):
     assert audit_log.entity_type == "currency_exchange_rate"
     assert audit_log.entity_id == response.json()["id"]
     assert audit_log.scope_type == "global"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_finance_viewer_cannot_sync_exchange_rates(tmp_path):

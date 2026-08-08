@@ -51,7 +51,7 @@ def seed_database(database_url: str, *, target_is_service_account: bool = False)
         for definition in ROLE_DEFINITIONS.values():
             session.add(
                 RoleORM(
-                    key=definition.role.value,
+                    role_key=definition.role.value,
                     label=definition.label,
                     description=definition.description,
                     service_only=definition.service_only,
@@ -89,7 +89,7 @@ def test_corporate_admin_assigns_scoped_assistant_role_with_audit(tmp_path):
     assert assignment.active is True
     assert audit_log.event_type == "USER_ROLE_CHANGED"
     assert audit_log.reason == "Grant analytics support access"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_assign_role_rejects_unknown_actor_before_assignment_write(tmp_path):

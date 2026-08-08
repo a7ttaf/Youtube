@@ -86,7 +86,7 @@ class RoleORM(SecurityBase):
 
     __tablename__ = "roles"
 
-    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    role_key: Mapped[str] = mapped_column(Text, primary_key=True)
     label: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     service_only: Mapped[bool] = mapped_column(
@@ -105,9 +105,11 @@ class PermissionORM(SecurityBase):
 
     __tablename__ = "permissions"
 
-    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    permission_key: Mapped[str] = mapped_column(Text, primary_key=True)
     label: Mapped[str] = mapped_column(Text, nullable=False)
-    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    is_sensitive: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     audit_on_use: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
@@ -183,10 +185,10 @@ class RolePermissionAssignmentORM(SecurityBase):
     __tablename__ = "role_permission_assignments"
 
     role_key: Mapped[str] = mapped_column(
-        ForeignKey("roles.key", ondelete="CASCADE"), primary_key=True
+        ForeignKey("roles.role_key", ondelete="CASCADE"), primary_key=True
     )
     permission_key: Mapped[str] = mapped_column(
-        ForeignKey("permissions.key", ondelete="CASCADE"), primary_key=True
+        ForeignKey("permissions.permission_key", ondelete="CASCADE"), primary_key=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -203,7 +205,7 @@ class UserRoleAssignmentORM(SecurityBase):
     )
     user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     role_key: Mapped[str] = mapped_column(
-        ForeignKey("roles.key", ondelete="RESTRICT"), nullable=False
+        ForeignKey("roles.role_key", ondelete="RESTRICT"), nullable=False
     )
     scope_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     assigned_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
@@ -275,7 +277,7 @@ class UserPermissionGrantORM(SecurityBase):
     )
     user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     permission_key: Mapped[str] = mapped_column(
-        ForeignKey("permissions.key", ondelete="RESTRICT"), nullable=False
+        ForeignKey("permissions.permission_key", ondelete="RESTRICT"), nullable=False
     )
     scope_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     granted_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
@@ -360,7 +362,9 @@ class AuditLogORM(SecurityBase):
         default=dict,
         server_default=text("'{}'"),
     )
-    sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    is_sensitive: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

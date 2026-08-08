@@ -234,7 +234,7 @@ def test_finance_admin_requests_recalculation_preview_with_audit(tmp_path):
     assert audit_log.reason == "Preview March transfer-fee allocation before close"
     assert audit_log.scope_type == "finance-month"
     assert audit_log.scope_id == "2026-03"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_recalculation_preview_supports_group_scope(tmp_path):

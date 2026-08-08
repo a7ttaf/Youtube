@@ -115,7 +115,7 @@ def _seed_enabled_user(session: Session) -> None:
     """
     now = datetime.now(UTC)
     role = RoleORM(
-        key=ROLE_KEY,
+        role_key=ROLE_KEY,
         label="Assistant Analyst",
         description="Assigned-scope analyst for analytics without default finance access.",
         service_only=False,

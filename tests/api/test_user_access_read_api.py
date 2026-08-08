@@ -72,7 +72,7 @@ def seed_database(database_url: str) -> None:
         for definition in ROLE_DEFINITIONS.values():
             session.add(
                 RoleORM(
-                    key=definition.role.value,
+                    role_key=definition.role.value,
                     label=definition.label,
                     description=definition.description,
                     service_only=definition.service_only,
@@ -81,9 +81,9 @@ def seed_database(database_url: str) -> None:
         for definition in PERMISSION_DEFINITIONS.values():
             session.add(
                 PermissionORM(
-                    key=definition.permission.value,
+                    permission_key=definition.permission.value,
                     label=definition.label,
-                    sensitive=definition.sensitive,
+                    is_sensitive=definition.sensitive,
                     audit_on_use=definition.audit_on_use,
                 )
             )

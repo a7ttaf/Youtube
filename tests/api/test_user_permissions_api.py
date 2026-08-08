@@ -48,7 +48,7 @@ def seed_database(database_url: str) -> None:
         for definition in ROLE_DEFINITIONS.values():
             session.add(
                 RoleORM(
-                    key=definition.role.value,
+                    role_key=definition.role.value,
                     label=definition.label,
                     description=definition.description,
                     service_only=definition.service_only,
@@ -57,9 +57,9 @@ def seed_database(database_url: str) -> None:
         for definition in PERMISSION_DEFINITIONS.values():
             session.add(
                 PermissionORM(
-                    key=definition.permission.value,
+                    permission_key=definition.permission.value,
                     label=definition.label,
-                    sensitive=definition.sensitive,
+                    is_sensitive=definition.sensitive,
                     audit_on_use=definition.audit_on_use,
                 )
             )
@@ -96,7 +96,7 @@ def test_finance_admin_grants_scoped_revenue_permission_with_audit(tmp_path):
     assert grant.active is True
     assert audit_log.event_type == "USER_PERMISSION_CHANGED"
     assert audit_log.reason == "Temporary finance support for month-end checks"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_corporate_admin_can_grant_non_finance_permission(tmp_path):

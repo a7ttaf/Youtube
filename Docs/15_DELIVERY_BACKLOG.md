@@ -54,6 +54,19 @@ carries a stray fully-migrated schema whose grants block the migration tests'
 pointed at that container — a live instance of the 2026-06-11 fresh-cluster rule
 above); cleanup of the stray objects is an operator decision.
 
+**Security-schema rename wave (2026-08-08, branch `refactor/security-keyword-column-rename`):**
+supersedes the wave-1 "quoted, not renamed" stopgap. Operator authorized renaming
+the keyword-shaped security columns in the live schema while the data is still
+disposable pre-alpha: migration `20260808_0001` renames `roles.key`→`role_key`,
+`permissions.key`→`permission_key`, `permissions.sensitive`→`is_sensitive`,
+`audit_logs.sensitive`→`is_sensitive` (metadata-only RENAME COLUMN; FK constraints
+re-point automatically, rows preserved, fully reversible downgrade). ORM models,
+the two audit consumers, the bootstrap mirror (now unquoted — resolves the Qodo
+quoted-identifiers insight without re-tripping SQL-L029), the seed SQL, 41 test
+constructor kwargs, and Docs/13 move in lockstep. Public API/CSV/JSON field names
+(`sensitive`) are unchanged by design. PG round-trip proof:
+`tests/db/test_security_keyword_column_rename_migration_postgres.py`.
+
 **Repo-visibility note (2026-08-04, branch `chore/public-repo-hygiene`):** the
 repository is public as of 2026-08. Hygiene pass: `.gitignore` now blocks the
 workstation-only session artifacts (`.tmp*`, `.worktrees/`, `.cursor/`,

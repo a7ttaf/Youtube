@@ -237,7 +237,7 @@ def test_finance_viewer_reads_components_grouped_with_audit(tmp_path):
         "PAYMENT_VIEWED",
         "BANK_RECONCILIATION_VIEWED",
     }
-    assert all(log.sensitive is True for log in logs)
+    assert all(log.is_sensitive is True for log in logs)
 
 
 def test_component_kind_filter(tmp_path):

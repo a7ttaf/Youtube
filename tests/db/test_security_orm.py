@@ -57,7 +57,7 @@ def test_postgresql_ddl_contains_sensitive_audit_and_connector_tables():
     )
 
     assert "audit_logs" in ddl
-    assert "sensitive BOOLEAN" in ddl
+    assert "is_sensitive BOOLEAN" in ddl
     assert "api_connector_credentials" in ddl
     assert "encrypted_secret_ref" in ddl
     assert "graph-read" not in ddl
@@ -65,9 +65,11 @@ def test_postgresql_ddl_contains_sensitive_audit_and_connector_tables():
 
 def test_sqlite_global_access_scope_singleton_index_is_partial():
     table = SecurityBase.metadata.tables["access_scopes"]
-    index = next(  # skipcq: PTC-W0063
-        index for index in table.indexes if index.name == "uq_access_scopes_global_singleton"
+    index = next(
+        (index for index in table.indexes if index.name == "uq_access_scopes_global_singleton"),
+        None,
     )
+    assert index is not None, "uq_access_scopes_global_singleton missing"
 
     ddl = str(CreateIndex(index).compile(dialect=sqlite.dialect()))
 

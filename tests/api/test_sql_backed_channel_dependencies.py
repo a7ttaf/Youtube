@@ -141,7 +141,7 @@ def test_database_backed_channel_mapping_persists_audit_log(tmp_path):
     assert audit_log.user_id == USER_ID
     assert audit_log.entity_id == "sql-channel-tv-a"
     assert audit_log.reason == "Validate persistent audit trail"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_app_uses_database_url_from_environment(tmp_path, monkeypatch):

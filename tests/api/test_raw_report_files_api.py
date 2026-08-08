@@ -74,7 +74,7 @@ def test_system_integration_user_registers_raw_report_file_metadata_with_audit(t
     assert audit_log.event_type == "REPORT_IMPORTED"
     assert audit_log.scope_type == "connector"
     assert audit_log.scope_id == "youtube_reporting"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_connector_admin_reads_raw_report_file_metadata_with_audit(tmp_path):

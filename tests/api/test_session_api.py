@@ -384,7 +384,7 @@ def _seed_role(session: Session, key: str, label: str) -> None:
     """Seed a RoleORM row with *key* and *label* into *session*."""
     session.add(
         RoleORM(
-            key=key,
+            role_key=key,
             label=label,
             description=label,
             service_only=False,

@@ -52,7 +52,7 @@ def seed_audit_rows(session: Session) -> None:
                 scope_id=None,
                 reason=None,
                 details={},
-                sensitive=False,
+                is_sensitive=False,
                 created_at=CREATED_AT,
             ),
             AuditLogORM(
@@ -66,7 +66,7 @@ def seed_audit_rows(session: Session) -> None:
                 scope_id=None,
                 reason=None,
                 details={},
-                sensitive=False,
+                is_sensitive=False,
                 created_at=CREATED_AT,
             ),
         ]

@@ -139,7 +139,7 @@ def test_system_integration_user_imports_monthly_revenue_fact_with_audit(tmp_pat
     assert fact.subscription_revenue_usd == Decimal("50.00")
     assert audit_log.entity_id == "channel-tv-a:2026-03:YOUTUBE_CMS"
     assert audit_log.details["shorts_revenue_usd"] == "234.56"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_import_rejects_connector_source_kind_mismatch(tmp_path):
@@ -205,7 +205,7 @@ def test_finance_viewer_reads_channel_month_facts_with_revenue_audit(tmp_path):
     assert response.json()["facts"][0]["shorts_revenue_usd"] is None
     assert response.json()["audit_event"]["event_type"] == "REVENUE_VIEWED"
     assert audit_log.event_type == "REVENUE_VIEWED"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_import_rejects_revenue_breakdown_above_gross(tmp_path):
@@ -398,7 +398,7 @@ def test_finance_viewer_reads_month_reconciliation_issue_queue_for_allowed_compa
         "has_more": False,
     }
     assert audit_log.entity_type == "revenue_reconciliation_issue_queue"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_finance_viewer_pages_month_reconciliation_issue_queue_by_channel(tmp_path):

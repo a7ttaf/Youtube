@@ -74,7 +74,7 @@ def _connector_run_audit_edge(
         scope_id=scope_id,
         reason="connector finished",
         details=details,
-        sensitive=True,
+        is_sensitive=True,
         created_at=created_at,
     )
 
@@ -97,7 +97,7 @@ def _superseded_connector_run_audit_edge(
         scope_id="youtube-reporting",
         reason="orphaned RUNNING run superseded by new job",
         details=details,
-        sensitive=True,
+        is_sensitive=True,
         created_at=created_at,
     )
 
@@ -297,7 +297,7 @@ def test_finance_viewer_reads_month_smart_alerts_with_sensitive_audits(tmp_path)
         "PAYMENT_VIEWED",
         "REVENUE_VIEWED",
     ]
-    assert all(log.sensitive is True for log in audit_logs)
+    assert all(log.is_sensitive is True for log in audit_logs)
 
 
 def test_month_smart_alerts_reject_non_padded_month(tmp_path):
@@ -444,7 +444,7 @@ def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
                         "skipped_count": 2,
                         "skipped_by_reason": {"unknown_channel": 2},
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 1, tzinfo=UTC),
                 ),
                 AuditLogORM(
@@ -462,7 +462,7 @@ def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
                         "skipped_count": 1,
                         "skipped_by_reason": {"missing_channel_id": 1},
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 2, tzinfo=UTC),
                 ),
                 AuditLogORM(
@@ -480,7 +480,7 @@ def test_month_smart_alerts_surface_skipped_source_row_audit_edges(tmp_path):
                         "skipped_count": 9,
                         "skipped_by_reason": {"stale_month": 9},
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 3, tzinfo=UTC),
                 ),
             ]
@@ -542,7 +542,7 @@ def test_month_smart_alerts_clear_stale_skipped_source_after_clean_rerun(tmp_pat
                         "skipped_count": 3,
                         "skipped_by_reason": {"unknown_channel": 3},
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 1, tzinfo=UTC),
                 ),
                 AuditLogORM(
@@ -556,7 +556,7 @@ def test_month_smart_alerts_clear_stale_skipped_source_after_clean_rerun(tmp_pat
                     scope_id="2026-03",
                     reason="connector finished",
                     details={"lifecycle": "FINISHED", "status": "SUCCEEDED"},
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 2, tzinfo=UTC),
                 ),
             ]
@@ -705,7 +705,7 @@ def test_month_smart_alerts_normalize_connector_aliases_before_latest_edge(
                         "report_month": "2026-03",
                         "status": "FAILED",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 1, tzinfo=UTC),
                 ),
                 AuditLogORM(
@@ -725,7 +725,7 @@ def test_month_smart_alerts_normalize_connector_aliases_before_latest_edge(
                         "report_month": "2026-03",
                         "status": "SUCCEEDED",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 2, tzinfo=UTC),
                 ),
             ]
@@ -778,7 +778,7 @@ def test_month_smart_alerts_normalize_adsense_resource_account_before_latest_edg
                         "report_month": "2026-03",
                         "status": "FAILED",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 1, tzinfo=UTC),
                 ),
                 AuditLogORM(
@@ -798,7 +798,7 @@ def test_month_smart_alerts_normalize_adsense_resource_account_before_latest_edg
                         "report_month": "2026-03",
                         "status": "SUCCEEDED",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 2, tzinfo=UTC),
                 ),
             ]
@@ -893,7 +893,7 @@ def test_month_smart_alerts_include_projection_failed_connector_run(tmp_path):
                         "report_month": "2026-03",
                         "status": "SUCCEEDED",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 1, tzinfo=UTC),
                 ),
                 AuditLogORM(
@@ -913,7 +913,7 @@ def test_month_smart_alerts_include_projection_failed_connector_run(tmp_path):
                         "report_month": "2026-03",
                         "error_summary_present": True,
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 2, tzinfo=UTC),
                 ),
             ]
@@ -968,7 +968,7 @@ def test_month_smart_alerts_clear_stale_failed_connector_on_malformed_latest_edg
                         "report_month": "2026-03",
                         "status": "FAILED",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 1, tzinfo=UTC),
                 ),
                 AuditLogORM(
@@ -988,7 +988,7 @@ def test_month_smart_alerts_clear_stale_failed_connector_on_malformed_latest_edg
                         "report_month": "2026-03",
                         "status": "UNKNOWN",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 2, tzinfo=UTC),
                 ),
             ]
@@ -1042,7 +1042,7 @@ def test_month_smart_alerts_clear_failed_connector_when_latest_edges_tie_with_su
                         "report_month": "2026-03",
                         "status": "FAILED",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=tied_created_at,
                 ),
                 AuditLogORM(
@@ -1062,7 +1062,7 @@ def test_month_smart_alerts_clear_failed_connector_when_latest_edges_tie_with_su
                         "report_month": "2026-03",
                         "status": "SUCCEEDED",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=tied_created_at,
                 ),
             ]
@@ -1113,7 +1113,7 @@ def test_month_smart_alerts_omit_skipped_source_alert_without_audit_permission(
                         "skipped_count": 5,
                         "skipped_by_reason": {"unknown_channel": 5},
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 2, tzinfo=UTC),
                 ),
                 AuditLogORM(
@@ -1133,7 +1133,7 @@ def test_month_smart_alerts_omit_skipped_source_alert_without_audit_permission(
                         "report_month": "2026-03",
                         "status": "FAILED",
                     },
-                    sensitive=True,
+                    is_sensitive=True,
                     created_at=datetime(2026, 4, 3, tzinfo=UTC),
                 ),
             ]
@@ -1185,7 +1185,7 @@ def test_month_smart_alerts_audit_viewer_redacts_reason_breakdown(tmp_path):
                     "skipped_count": 5,
                     "skipped_by_reason": {"unknown_channel": 5},
                 },
-                sensitive=True,
+                is_sensitive=True,
                 created_at=datetime(2026, 4, 2, tzinfo=UTC),
             )
         )

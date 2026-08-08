@@ -223,7 +223,7 @@ def test_data_steward_can_create_group_inside_scope_and_audit(tmp_path):
     assert response.json()["channel_ids"] == ["group-channel-tv"]
     assert audit_log.event_type == "GROUP_UPDATED"
     assert audit_log.reason == "Create monthly finance review group"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_create_group_rejects_unknown_channel_id(tmp_path):

@@ -279,7 +279,7 @@ def test_finance_admin_previews_finance_workbook_with_sensitive_audit(tmp_path):
         "PAYMENT_VIEWED",
         "REVENUE_VIEWED",
     }
-    assert all(event.sensitive for event in audit_events)
+    assert all(event.is_sensitive for event in audit_events)
 
 
 def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_path):
@@ -533,7 +533,7 @@ def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path)
         "PAYMENT_VIEWED",
         "REVENUE_VIEWED",
     }
-    assert all(event.sensitive for event in audit_events)
+    assert all(event.is_sensitive for event in audit_events)
 
 
 def test_finance_workbook_download_persists_artifact_and_completes_job(
@@ -971,7 +971,7 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(
         "PAYMENT_VIEWED",
         "REVENUE_VIEWED",
     }
-    assert all(event.sensitive for event in audit_events)
+    assert all(event.is_sensitive for event in audit_events)
     _assert_persisted_export_artifact(
         database_url=database_url,
         artifact_dir=artifact_dir,
@@ -1041,7 +1041,7 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
         "PAYMENT_VIEWED",
         "REVENUE_VIEWED",
     }
-    assert all(event.sensitive for event in audit_events)
+    assert all(event.is_sensitive for event in audit_events)
     _assert_persisted_export_artifact(
         database_url=database_url,
         artifact_dir=artifact_dir,

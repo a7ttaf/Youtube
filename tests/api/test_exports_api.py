@@ -264,7 +264,7 @@ def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_
     assert export_job.scope_channel_ids == ["channel-a"]
     assert export_job.month_lock_status == "LOCKED"
     assert audit_log.event_type == "EXPORT_CREATED"
-    assert audit_log.sensitive is True
+    assert audit_log.is_sensitive is True
 
 
 def test_corporate_admin_manages_export_template_lifecycle_with_audit(tmp_path):
@@ -340,7 +340,7 @@ def test_corporate_admin_manages_export_template_lifecycle_with_audit(tmp_path):
         "EXPORT_TEMPLATE_CHANGED",
         "EXPORT_TEMPLATE_CHANGED",
     ]
-    assert all(event.sensitive is True for event in audit_events)
+    assert all(event.is_sensitive is True for event in audit_events)
 
 
 def test_export_template_update_rejects_null_only_noop(tmp_path):
@@ -1872,7 +1872,7 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
     revenue_event = revenue_events[0]
     assert revenue_event.scope_type == "channel"
     assert revenue_event.scope_id == "channel-a"
-    assert revenue_event.sensitive is True
+    assert revenue_event.is_sensitive is True
     assert revenue_event.details["export_type"] == "ANALYTICS_SUMMARY_CSV"
     assert revenue_event.details["artifact_type"] == "analytics_summary_csv"
     downloaded_events = [event for event in audit_events if event.event_type == "EXPORT_DOWNLOADED"]
@@ -1880,7 +1880,7 @@ def test_finance_admin_downloads_scoped_analytics_summary_csv(tmp_path, monkeypa
     downloaded_event = downloaded_events[0]
     assert downloaded_event.scope_type == "export"
     assert downloaded_event.scope_id == export_id
-    assert downloaded_event.sensitive is True
+    assert downloaded_event.is_sensitive is True
     assert downloaded_event.details["export_type"] == "ANALYTICS_SUMMARY_CSV"
     assert downloaded_event.details["artifact_type"] == "analytics_summary_csv"
     assert downloaded_event.details["artifact_metadata_complete"] is True
