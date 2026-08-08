@@ -34,14 +34,22 @@ uv sync --extra dev --extra test --extra lint
 # 2) Start PostgreSQL outside this repo.
 #    Verify the database accepts connections before running migrations.
 
-# 3) Configure environment (see below for the full env-var matrix)
+# 3) Configure environment (see below for the full env-var matrix).
+#    Start from .env — it is the one place the dev gateway secret should live,
+#    because the dashboard's Vite dev proxy reads that same file from its own
+#    terminal. Generate a fresh value and paste it over the placeholder on the
+#    gateway-token line of .env BEFORE loading the file; a value set only in
+#    this shell leaves the dashboard on the placeholder and 401s every
+#    protected route.
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+Get-Content .env | Where-Object { $_ -notmatch '^\s*(#|$)' } | ForEach-Object {
+  $name, $value = $_ -split '=', 2
+  Set-Item -Path "env:$name" -Value $value
+}
 $env:PYTHONPATH = (Resolve-Path "backend").Path
 $env:UMS_DATABASE_URL = "postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
 $env:UMS_AUTHZ_SOURCE = "headers"
-# Generate a random token once; protected routes require it, and every client
-# (e.g. the frontend dev proxy via the repo-root .env) must present the same value.
-$gatewayToken = [guid]::NewGuid().ToString()
-$env:UMS_TRUSTED_GATEWAY_TOKEN = $gatewayToken
 
 # 4) Run migrations
 uv run alembic upgrade head
@@ -71,7 +79,7 @@ uv run pytest -q tests/api
 |---|---|---|---|
 | `UMS_DATABASE_URL` | yes (prod) | none | SQLAlchemy URL for PostgreSQL. Use `postgresql+psycopg://…` (psycopg3 binary driver). Update `.env.example` to match. |
 | `UMS_AUTHZ_SOURCE` | no | `headers` | `headers` for dev/bootstrap, `database` for production (loads principal + roles from SQL). |
-| `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. Also read by `frontend/vite.config.ts` in Node to inject the dev proxy `X-UMS-Trusted-Gateway-Token` header. **Never use a `VITE_*` alias** — any `VITE_*` env is embedded in the client bundle. |
+| `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. Also read by `frontend/vite.config.ts` in Node to inject the dev proxy `X-UMS-Trusted-Gateway-Token` header. Keep the value in the repo-root `.env` and load it from there: the API and the dashboard normally run in separate terminals, and the dev proxy only ever reads that file, so a value exported in one shell alone makes the two disagree and every protected route 401s. **Never use a `VITE_*` alias** — any `VITE_*` env is embedded in the client bundle. |
 | `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` | required for Google connector runs | none | UUID used as the connector service principal for audit events. Optional at process boot so non-connector workloads can start; connector execution fails closed at runtime when unset, and malformed values fail settings load. |
 | `VITE_DEV_BACKEND_URL` | no (dev) | `http://127.0.0.1:8000` | Backend origin the frontend dev proxy forwards `/tenants/*` to. Dev-only; read by `frontend/vite.config.ts`. |
 | `VITE_DEV_GATEWAY_USER_ID` | no (dev) | `00000000-0000-0000-0000-0000000000aa` | Dev `X-User-ID` injected by the Vite proxy on tenant-scoped routes. Non-secret. |

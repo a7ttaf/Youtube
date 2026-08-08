@@ -31,7 +31,17 @@ backend running, (3) the dev proxy injecting trusted-gateway headers.
 
 The backend's header-auth path requires `UMS_TRUSTED_GATEWAY_TOKEN` to be set
 and to match the token the dev proxy injects. Copy `.env.example` to `.env` in
-the repo root and set a local value:
+the repo root, then replace its placeholder gateway-token value with fresh
+random output:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Keep that value in `.env` and nowhere else. Steps 3 and 4 below run in separate
+terminals, and the dev proxy only ever reads `.env` — so a token exported in the
+backend's shell alone leaves the dashboard sending the shipped placeholder, and
+every protected route returns 401. Both steps below load `.env` instead.
 
 ```dotenv
 # repo-root .env — copy from .env.example and fill in your values
@@ -82,18 +92,19 @@ to).
 Point the backend at the same database you seeded and set the same token:
 
 ```bash
-# From the repo root (PowerShell)
+# From the repo root (PowerShell) — load the .env from step 1 so this shell and
+# the dev proxy present the SAME gateway token.
+Get-Content .env | Where-Object { $_ -notmatch '^\s*(#|$)' } | ForEach-Object {
+  $name, $value = $_ -split '=', 2
+  Set-Item -Path "env:$name" -Value $value
+}
 $env:UMS_DATABASE_URL = "sqlite+pysqlite:///./demo.db"
-# Generate a random token once; the dev proxy (repo-root .env) must send the same value.
-$gatewayToken = [guid]::NewGuid().ToString()
-$env:UMS_TRUSTED_GATEWAY_TOKEN = $gatewayToken
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
 ```bash
-# From the repo root (bash)
-# Generate a random token once; the dev proxy (repo-root .env) must send the same value.
-export UMS_TRUSTED_GATEWAY_TOKEN=$(openssl rand -hex 16)
+# From the repo root (bash) — same .env, same token.
+set -a; . ./.env; set +a
 UMS_DATABASE_URL="sqlite+pysqlite:///./demo.db" \
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
