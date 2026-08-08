@@ -224,11 +224,28 @@ def test_bootstrap_mirror_and_seed_apply_with_renamed_columns(fresh_engine: obje
         sensitive_column = conn.execute(
             text(
                 "SELECT count(*) FROM information_schema.columns "
-                "WHERE table_name = 'permissions' AND column_name = 'is_sensitive'"
+                "WHERE table_schema = 'public' "
+                "AND table_name = 'permissions' AND column_name = 'is_sensitive'"
             )
         ).scalar_one()
+        super_owner_role = conn.execute(
+            text("SELECT count(*) FROM roles WHERE role_key = 'super_owner'")
+        ).scalar_one()
+        sensitive_flags = dict(
+            conn.execute(
+                text(
+                    "SELECT permission_key, is_sensitive FROM permissions "
+                    "WHERE permission_key IN ('analytics.view', 'finance.view_revenue')"
+                )
+            ).all()
+        )
 
-    assert roles_count == 16
-    assert permissions_count == 26
+    # Catalog-size-agnostic proof: assert the seed's semantic anchors (known
+    # role key, known sensitive/insensitive permission flags) rather than
+    # exact row counts, so routine seed catalog changes do not break it.
+    assert roles_count > 0
+    assert permissions_count > 0
     assert assignments_count > 0
+    assert super_owner_role == 1
+    assert sensitive_flags == {"analytics.view": False, "finance.view_revenue": True}
     assert sensitive_column == 1
