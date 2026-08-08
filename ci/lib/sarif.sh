@@ -90,7 +90,9 @@ ci::sarif::add_result() {
   level="$(_ci_sarif_severity_to_level "$severity")"
 
   # Clamp line to a positive integer
-  [[ "$line" =~ ^[0-9]+$ ]] || line=1
+  case "$line" in
+    ''|*[!0-9]*) line=1 ;;
+  esac
   [ "$line" -lt 1 ] && line=1
 
   local result_obj

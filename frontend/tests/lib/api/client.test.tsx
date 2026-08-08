@@ -1,17 +1,17 @@
-// frontend/src/lib/api/__tests__/client.test.ts
+// frontend/tests/lib/api/client.test.tsx
 import { renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) {
+const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-}
+};
 
-function bootstrapWrapper({ children }: { children: React.ReactNode }) {
+const bootstrapWrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider>{children}</TenantProvider>;
-}
+};
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -24,25 +24,34 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function jsonResponse(body: unknown, init: ResponseInit = {}) {
+const jsonResponse = (body: unknown, init: ResponseInit = {}) => {
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: { "Content-Type": "application/json" },
     ...init,
   });
-}
+};
 
-function textResponse(body: string, init: ResponseInit = {}) {
+const textResponse = (body: string, init: ResponseInit = {}) => {
   return new Response(body, {
     status: 200,
     headers: { "Content-Type": "text/plain" },
     ...init,
   });
-}
+};
 
-function lastFetchArgs() {
+const lastFetchArgs = () => {
   return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1);
-}
+};
+
+/** Narrow the last fetch args away from `undefined`, failing the test if none. */
+const requireFetchArgs = () => {
+  const args = lastFetchArgs();
+  if (!args) {
+    throw new Error("expected fetch to have been called");
+  }
+  return args;
+};
 
 describe("useApiClient header injection", () => {
   it("injects X-UMS-Tenant: ums when caller passes no headers", async () => {
@@ -51,7 +60,7 @@ describe("useApiClient header injection", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("/x");
-    const [, init] = lastFetchArgs()!;
+    const [, init] = requireFetchArgs();
     const headers = new Headers(init?.headers);
     expect(headers.get("X-UMS-Tenant")).toBe("ums");
   });
@@ -62,7 +71,7 @@ describe("useApiClient header injection", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("/x", { headers: { "X-UMS-Tenant": "evil" } });
-    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.get("X-UMS-Tenant")).toBe("ums");
   });
 
@@ -76,7 +85,7 @@ describe("useApiClient header injection", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("/x", { headers: headersInit });
-    const sent = new Headers(lastFetchArgs()![1]?.headers);
+    const sent = new Headers(requireFetchArgs()[1]?.headers);
     expect(sent.get("X-UMS-Tenant")).toBe("ums");
     expect(sent.get("X-Other")).toBe("1");
   });
@@ -91,7 +100,7 @@ describe("useApiClient bootstrap (empty slug) behavior", () => {
       wrapper: bootstrapWrapper,
     });
     await result.current.get("/tenants/me");
-    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.has("X-UMS-Tenant")).toBe(false);
   });
 
@@ -105,7 +114,7 @@ describe("useApiClient bootstrap (empty slug) behavior", () => {
     await result.current.get("/tenants/me", {
       headers: { "X-UMS-Tenant": "evil" },
     });
-    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.has("X-UMS-Tenant")).toBe(false);
   });
 });
@@ -118,7 +127,7 @@ describe("useApiClient URL resolution", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("/tenants/me");
-    expect(lastFetchArgs()![0]).toBe("/tenants/me");
+    expect(requireFetchArgs()[0]).toBe("/tenants/me");
   });
 
   it("strips trailing slash from VITE_API_BASE_URL", async () => {
@@ -128,7 +137,7 @@ describe("useApiClient URL resolution", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("/tenants/me");
-    expect(lastFetchArgs()![0]).toBe("https://api.example.com/tenants/me");
+    expect(requireFetchArgs()[0]).toBe("https://api.example.com/tenants/me");
   });
 
   it("passes through an absolute https:// path without prepending the base", async () => {
@@ -138,7 +147,7 @@ describe("useApiClient URL resolution", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("https://other.example.com/tenants/me");
-    expect(lastFetchArgs()![0]).toBe("https://other.example.com/tenants/me");
+    expect(requireFetchArgs()[0]).toBe("https://other.example.com/tenants/me");
   });
 
   it("passes through an absolute http:// path without prepending the base", async () => {
@@ -148,7 +157,7 @@ describe("useApiClient URL resolution", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("http://127.0.0.1:8000/tenants/me");
-    expect(lastFetchArgs()![0]).toBe("http://127.0.0.1:8000/tenants/me");
+    expect(requireFetchArgs()[0]).toBe("http://127.0.0.1:8000/tenants/me");
   });
 });
 
@@ -159,7 +168,7 @@ describe("useApiClient Accept header default", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("/x");
-    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.get("Accept")).toBe("application/json");
   });
 
@@ -169,7 +178,7 @@ describe("useApiClient Accept header default", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("/x", { headers: { Accept: "text/csv" } });
-    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.get("Accept")).toBe("text/csv");
   });
 });
@@ -181,7 +190,7 @@ describe("useApiClient Content-Type handling", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.get("/x");
-    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.has("Content-Type")).toBe(false);
   });
 
@@ -191,9 +200,9 @@ describe("useApiClient Content-Type handling", () => {
     );
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await result.current.post("/x", { foo: 1 });
-    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.get("Content-Type")).toBe("application/json");
-    expect(lastFetchArgs()![1]?.body).toBe(JSON.stringify({ foo: 1 }));
+    expect(requireFetchArgs()[1]?.body).toBe(JSON.stringify({ foo: 1 }));
   });
 
   it("does not set Content-Type on POST with FormData (lets browser set multipart)", async () => {
@@ -204,7 +213,7 @@ describe("useApiClient Content-Type handling", () => {
     const fd = new FormData();
     fd.append("k", "v");
     await result.current.post("/x", fd);
-    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    const headers = new Headers(requireFetchArgs()[1]?.headers);
     expect(headers.has("Content-Type")).toBe(false);
   });
 });

@@ -18,7 +18,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower
     ON users(lower(email));
 
 CREATE TABLE IF NOT EXISTS roles (
-    key text PRIMARY KEY,
+    "key" text PRIMARY KEY,
     label text NOT NULL,
     description text NOT NULL,
     service_only boolean NOT NULL DEFAULT false,
@@ -26,9 +26,9 @@ CREATE TABLE IF NOT EXISTS roles (
 );
 
 CREATE TABLE IF NOT EXISTS permissions (
-    key text PRIMARY KEY,
+    "key" text PRIMARY KEY,
     label text NOT NULL,
-    sensitive boolean NOT NULL DEFAULT false,
+    "sensitive" boolean NOT NULL DEFAULT false,
     audit_on_use boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -64,8 +64,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_access_scopes_global_singleton
     WHERE scope_type = 'global' AND scope_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS role_permission_assignments (
-    role_key text NOT NULL REFERENCES roles(key) ON DELETE CASCADE,
-    permission_key text NOT NULL REFERENCES permissions(key) ON DELETE CASCADE,
+    role_key text NOT NULL REFERENCES roles("key") ON DELETE CASCADE,
+    permission_key text NOT NULL REFERENCES permissions("key") ON DELETE CASCADE,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (role_key, permission_key)
 );
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS role_permission_assignments (
 CREATE TABLE IF NOT EXISTS user_role_assignments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role_key text NOT NULL REFERENCES roles(key) ON DELETE RESTRICT,
+    role_key text NOT NULL REFERENCES roles("key") ON DELETE RESTRICT,
     scope_id uuid NOT NULL REFERENCES access_scopes(id) ON DELETE RESTRICT,
     assigned_by uuid NULL REFERENCES users(id) ON DELETE SET NULL,
     assigned_at timestamptz NOT NULL DEFAULT now(),
@@ -97,7 +97,7 @@ CREATE INDEX IF NOT EXISTS ix_user_role_assignments_user_id
 CREATE TABLE IF NOT EXISTS user_permission_grants (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    permission_key text NOT NULL REFERENCES permissions(key) ON DELETE RESTRICT,
+    permission_key text NOT NULL REFERENCES permissions("key") ON DELETE RESTRICT,
     scope_id uuid NOT NULL REFERENCES access_scopes(id) ON DELETE RESTRICT,
     granted_by uuid NULL REFERENCES users(id) ON DELETE SET NULL,
     granted_at timestamptz NOT NULL DEFAULT now(),
@@ -129,7 +129,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     request_id text NULL,
     reason text NULL,
     details jsonb NOT NULL DEFAULT '{}'::jsonb,
-    sensitive boolean NOT NULL DEFAULT false,
+    "sensitive" boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 

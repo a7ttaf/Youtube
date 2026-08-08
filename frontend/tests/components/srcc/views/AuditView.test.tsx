@@ -106,85 +106,96 @@ const SUMMARY: AuditSummaryResponse = {
   window_hours: 24,
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function csvResponse(body: string, extraHeaders: Record<string, string> = {}) { // skipcq: JS-0067
+const csvResponse = (body: string, extraHeaders: Record<string, string> = {}) => {
   return new Response(body, {
     status: 200,
     headers: { "Content-Type": "text/csv", ...extraHeaders },
   });
-}
+};
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.toString();
-  if (input instanceof Request) return input.url;
+const urlOf = (input: unknown): string => {
+  if (typeof input === "string") {
+    return input;
+  }
+  if (input instanceof URL) {
+    return input.toString();
+  }
+  if (input instanceof Request) {
+    return input.url;
+  }
   return String(input);
-}
+};
 
-function fetchMock() { // skipcq: JS-0067
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
+
+// Pick the /audit/events fixture page matching the query-string variant.
+const eventsResponse = (url: string) => {
+  if (url.includes("cursor_created_at=")) {
+    return jsonResponse(PAGED_EVENTS_SECOND);
+  }
+  if (url.includes("event_type=CHANNEL_UPDATED")) {
+    return jsonResponse({
+      ...EVENTS,
+      items: [
+        {
+          ...EVENTS.items[0],
+          event_type: "CHANNEL_UPDATED",
+          id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        },
+      ],
+    });
+  }
+  return jsonResponse(EVENTS);
+};
 
 // Route the auto-fetch GET /audit/events to a fixed body; let callers override.
-function routeEvents( // skipcq: JS-0067
+const routeEvents = (
   responder: (url: string) => Response | null,
-) {
+) => {
   return (input: unknown) => {
     const url = urlOf(input);
     const custom = responder(url);
-    if (custom) return Promise.resolve(custom);
+    if (custom) {
+      return Promise.resolve(custom);
+    }
     if (url.startsWith("/audit/summary")) {
       return Promise.resolve(jsonResponse(SUMMARY));
     }
     if (url.startsWith("/audit/events")) {
-      if (url.includes("cursor_created_at=")) {
-        return Promise.resolve(jsonResponse(PAGED_EVENTS_SECOND));
-      }
-      if (url.includes("event_type=CHANNEL_UPDATED")) {
-        return Promise.resolve(
-          jsonResponse({
-            ...EVENTS,
-            items: [
-              {
-                ...EVENTS.items[0],
-                event_type: "CHANNEL_UPDATED",
-                id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
-              },
-            ],
-          }),
-        );
-      }
-      return Promise.resolve(jsonResponse(EVENTS));
+      return Promise.resolve(eventsResponse(url));
     }
     return Promise.resolve(jsonResponse({}, 200));
   };
-}
+};
 
-function renderAuditView(canViewAudit = true, canViewFinance = true) { // skipcq: JS-0067
+const renderAuditView = (canViewAudit = true, canViewFinance = true) => {
   return render(
     <TenantProvider initialSlug="ums">
       <AuditView canViewAudit={canViewAudit} canViewFinance={canViewFinance} />
     </TenantProvider>,
   );
-}
+};
 
-function auditCalls() { // skipcq: JS-0067
+const auditCalls = () => {
   return fetchMock().mock.calls.filter(([input]) =>
     urlOf(input).startsWith("/audit/events"),
   );
-}
+};
 
-function summaryCalls() { // skipcq: JS-0067
+const summaryCalls = () => {
   return fetchMock().mock.calls.filter(([input]) =>
     urlOf(input).startsWith("/audit/summary"),
   );
-}
+};
 
 describe("AuditView wired to GET /audit/events", () => {
   it("renders live audit events from the API (title + sub from real fields)", async () => {

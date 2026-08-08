@@ -38,6 +38,22 @@ enforced in `20260608_0001`/`20260612_0002` (no `platform_audit_logs`, no `20260
 payment_name)`; the `audit_logs` DDL has 13 columns; the explain confidence wire shape is
 `{label, score}`; and the audit-event (38) and role (16) catalogs are complete.
 
+**DeepSource-baseline note (2026-08-08, branch `fix/deepsource-baseline-wave1`):**
+wave 1 of the repo-baseline cleanup (the 214-issue default-branch backlog, distinct
+from the per-PR checks): the two CRITICAL `PTC-W0063` unguarded-`next()` sites and
+the mechanical MAJOR/MINOR classes — `PTC-W0043` ×2, `SH-3014` ×15, `SH-3015` ×6,
+`SH-3012` ×1, `JS-0339` ×15, `JS-0067` ×11, `JS-R1005` ×1, `SQL-L029` ×3 (56 findings,
+22 files) — all fixed by conforming code, zero suppressions. `security_schema.sql`
+keyword-named columns (`key`, `sensitive`) are quoted, not renamed: they mirror the
+live alembic-managed schema. Still open in the baseline: `SCT-A000` secret-shaped
+strings ×158 (per-string triage: rotate vs reshape) and the de-suppression wave for
+files still carrying `skipcq` markers (those findings are invisible to the 214 count).
+Container note: the standing `ums-mig-pg-test` container's default `postgres` DB
+carries a stray fully-migrated schema whose grants block the migration tests'
+`DROP ROLE` teardown (10 pre-existing PG-tier failures on unmodified `main` when
+pointed at that container — a live instance of the 2026-06-11 fresh-cluster rule
+above); cleanup of the stray objects is an operator decision.
+
 **Repo-visibility note (2026-08-04, branch `chore/public-repo-hygiene`):** the
 repository is public as of 2026-08. Hygiene pass: `.gitignore` now blocks the
 workstation-only session artifacts (`.tmp*`, `.worktrees/`, `.cursor/`,

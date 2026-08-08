@@ -43,13 +43,13 @@ const TenantContext = createContext<TenantContextValue | null>(null);
 //   - File: frontend/vite.config.ts -> dev proxy injects X-UMS-Tenant from
 //     VITE_DEV_GATEWAY_TENANT_SLUG so the bootstrap call resolves correctly.
 // ============================================================================
-export function TenantProvider({
+export const TenantProvider = ({
   children,
   initialSlug = "",
 }: {
   children: ReactNode;
   initialSlug?: string;
-}) {
+}) => {
   const [state, setState] = useState<TenantState>({
     tenantSlug: initialSlug,
     id: null,
@@ -73,12 +73,12 @@ export function TenantProvider({
   return (
     <TenantContext.Provider value={value}>{children}</TenantContext.Provider>
   );
-}
+};
 
-export function useTenant(): TenantContextValue {
+export const useTenant = (): TenantContextValue => {
   const value = useContext(TenantContext);
   if (value === null) {
     throw new Error("useTenant must be used within <TenantProvider>");
   }
   return value;
-}
+};

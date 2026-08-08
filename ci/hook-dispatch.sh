@@ -62,8 +62,10 @@ case "$HOOK_NAME" in
       case "$first_line" in
         *"$ticket"*) ;;
         *)
-          if [[ "$first_line" =~ $conventional_subject_re ]]; then
-            printf '%s: %s %s\n' "${BASH_REMATCH[1]}" "$ticket" "${BASH_REMATCH[3]}" > "${COMMIT_MSG_FILE}.tmp"
+          if printf '%s\n' "$first_line" | grep -qE "$conventional_subject_re"; then
+            subject_type="$(printf '%s\n' "$first_line" | sed -E "s/$conventional_subject_re/\\1/")"
+            subject_text="$(printf '%s\n' "$first_line" | sed -E "s/$conventional_subject_re/\\3/")"
+            printf '%s: %s %s\n' "$subject_type" "$ticket" "$subject_text" > "${COMMIT_MSG_FILE}.tmp"
             tail -n +2 "$COMMIT_MSG_FILE" >> "${COMMIT_MSG_FILE}.tmp"
             mv "${COMMIT_MSG_FILE}.tmp" "$COMMIT_MSG_FILE"
           fi

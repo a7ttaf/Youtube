@@ -6,17 +6,17 @@ import type { AuditSummaryResponse } from "@/lib/api/types";
 import { useAuditSummary } from "@/lib/api/useAuditSummary";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: ReactNode }) { // skipcq: JS-0067
+const wrapper = ({ children }: { children: ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-}
+};
 
-function strictWrapper({ children }: { children: ReactNode }): ReactElement {
+const strictWrapper = ({ children }: { children: ReactNode }): ReactElement => {
   return (
     <StrictMode>
       <TenantProvider initialSlug="ums">{children}</TenantProvider>
     </StrictMode>
   );
-}
+};
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -37,18 +37,18 @@ const SUMMARY: AuditSummaryResponse = {
   window_hours: 24,
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function abortError(): Error {
+const abortError = (): Error => {
   const err = new Error("aborted");
   err.name = "AbortError";
   return err;
-}
+};
 
 type DeferredFetch = {
   promise: Promise<Response>;
@@ -56,7 +56,7 @@ type DeferredFetch = {
   reject: (reason?: unknown) => void;
 };
 
-function deferredResponse(): DeferredFetch {
+const deferredResponse = (): DeferredFetch => {
   let resolve!: (value: Response) => void;
   let reject!: (reason?: unknown) => void;
   const promise = new Promise<Response>((promiseResolve, promiseReject) => {
@@ -64,29 +64,37 @@ function deferredResponse(): DeferredFetch {
     reject = promiseReject;
   });
   return { promise, resolve, reject };
-}
+};
 
-function fetchMock() { // skipcq: JS-0067
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
-function lastFetchArgs() { // skipcq: JS-0067
+const lastFetchArgs = () => {
   return fetchMock().mock.calls.at(-1);
-}
+};
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-function requireFetchArgs() { // skipcq: JS-0067
+const requireFetchArgs = () => {
   const args = lastFetchArgs();
-  if (!args) throw new Error("expected fetch to have been called");
+  if (!args) {
+    throw new Error("expected fetch to have been called");
+  }
   return args;
-}
+};
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return input.toString();
-  if (input instanceof Request) return input.url;
+const urlOf = (input: unknown): string => {
+  if (typeof input === "string") {
+    return input;
+  }
+  if (input instanceof URL) {
+    return input.toString();
+  }
+  if (input instanceof Request) {
+    return input.url;
+  }
   return String(input);
-}
+};
 
 describe("useAuditSummary", () => {
   it("auto-fetches GET /audit/summary on mount and returns {data, loading, error, reload}", async () => {

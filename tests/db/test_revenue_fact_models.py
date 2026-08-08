@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: SQLite-backed persistence and FK-declaration tests for
+#          MonthlyChannelRevenueFactORM (canonical monthly revenue facts),
+#          including the tenant+channel composite FK contract.
+# Database/ORM: FinanceBase metadata, MonthlyChannelRevenueFactORM under test,
+#               YouTubeChannelORM as the FK parent; in-memory SQLite with
+#               PRAGMA foreign_keys=ON installed via a connect listener.
+# Standards: Fail-closed assertions — a missing FK constraint fails as a named
+#            AssertionError, never a bare StopIteration. No skips, no xfail.
+# Blast Radius: Test harness only. No runtime finance, authz, or export impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/finance_models.py -> ORM under test.
+#   - File: backend/ums_smart_revenue/db/org_models.py -> FK parent model.
+# ============================================================================
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -18,8 +32,7 @@ def build_engine():
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, connection_record):
-        del connection_record
+    def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     FinanceBase.metadata.create_all(engine)
@@ -76,10 +89,14 @@ def test_monthly_channel_revenue_fact_model_persists_canonical_values():
 
 def test_monthly_channel_revenue_fact_model_declares_channel_foreign_key():
     foreign_key = next(
-        constraint
-        for constraint in MonthlyChannelRevenueFactORM.__table__.foreign_key_constraints
-        if constraint.name == "fk_monthly_channel_revenue_facts_tenant_channel"
+        (
+            constraint
+            for constraint in MonthlyChannelRevenueFactORM.__table__.foreign_key_constraints
+            if constraint.name == "fk_monthly_channel_revenue_facts_tenant_channel"
+        ),
+        None,
     )
+    assert foreign_key is not None, "fk_monthly_channel_revenue_facts_tenant_channel missing"
 
     assert [column.name for column in foreign_key.columns] == [
         "tenant_id",
