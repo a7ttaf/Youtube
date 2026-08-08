@@ -1,3 +1,17 @@
+# ============================================================================
+# Purpose: SQLite-backed persistence and FK-declaration tests for
+#          MonthlyChannelRevenueFactORM (canonical monthly revenue facts),
+#          including the tenant+channel composite FK contract.
+# Database/ORM: FinanceBase metadata, MonthlyChannelRevenueFactORM under test,
+#               YouTubeChannelORM as the FK parent; in-memory SQLite with
+#               PRAGMA foreign_keys=ON installed via a connect listener.
+# Standards: Fail-closed assertions — a missing FK constraint fails as a named
+#            AssertionError, never a bare StopIteration. No skips, no xfail.
+# Blast Radius: Test harness only. No runtime finance, authz, or export impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/finance_models.py -> ORM under test.
+#   - File: backend/ums_smart_revenue/db/org_models.py -> FK parent model.
+# ============================================================================
 from decimal import Decimal
 from uuid import UUID, uuid4
 

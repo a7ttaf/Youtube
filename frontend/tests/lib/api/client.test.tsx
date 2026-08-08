@@ -1,4 +1,4 @@
-// frontend/src/lib/api/__tests__/client.test.ts
+// frontend/tests/lib/api/client.test.tsx
 import { renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
