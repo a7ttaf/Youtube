@@ -84,22 +84,22 @@ def _column_names(engine: object, table: str) -> set[str]:
 
 
 def _execute_script(engine: object, script_path: Path) -> None:
-# ============================================================================
-# Purpose: Apply a multi-statement bootstrap SQL file to the scratch
-# schema, statement by statement, so the bootstrap mirror + seed pair is
-# executed exactly as a fresh operator psql run would execute it.
-# Database/ORM: Raw DDL/DML via exec_driver_sql; no ORM involvement.
-# Standards: Splits on the statement terminator at line ends; comment-only
-# and empty fragments are skipped. No parameter binding (file is static).
-# search_path is pinned to public for the transaction: the reset helper only
-# recreates the public schema, so unqualified DDL must land there
-# deterministically instead of following an ambient search_path (e.g. a
-# $user schema preceding public on a shared cluster).
-# Blast Radius: None detected — scratch-schema test helper only.
-# Connections:
-#   - File: backend/ums_smart_revenue/db/security_schema.sql -> DDL input.
-#   - File: backend/ums_smart_revenue/db/security_seed.sql -> DML input.
-# ============================================================================
+    # ============================================================================
+    # Purpose: Apply a multi-statement bootstrap SQL file to the scratch
+    # schema, statement by statement, so the bootstrap mirror + seed pair is
+    # executed exactly as a fresh operator psql run would execute it.
+    # Database/ORM: Raw DDL/DML via exec_driver_sql; no ORM involvement.
+    # Standards: Splits on the statement terminator at line ends; comment-only
+    # and empty fragments are skipped. No parameter binding (file is static).
+    # search_path is pinned to public for the transaction: the reset helper only
+    # recreates the public schema, so unqualified DDL must land there
+    # deterministically instead of following an ambient search_path (e.g. a
+    # $user schema preceding public on a shared cluster).
+    # Blast Radius: None detected — scratch-schema test helper only.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/db/security_schema.sql -> DDL input.
+    #   - File: backend/ums_smart_revenue/db/security_seed.sql -> DML input.
+    # ============================================================================
     raw = script_path.read_text(encoding="utf-8")
     statements = [
         chunk.strip()
