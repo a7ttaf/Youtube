@@ -48,7 +48,7 @@ def require_predicate(
 def guarded_call(  # noqa: UP047 - DeepSource/Pylint does not parse PEP 695 syntax yet.
     guard: Callable[[GuardContext], None],
     context: GuardContext,
-    handler: Callable[[], T],  # skipcq: PYL-E0602
-) -> T:  # skipcq: PYL-E0602
+    handler: Callable[[], T],
+) -> T:
     guard(context)
     return handler()

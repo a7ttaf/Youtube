@@ -2270,9 +2270,7 @@ class YouTubeReportingRunner:
     replace what the runner actually uses.
     """
 
-    # DeepSource keeps historical findings anchored here after report iteration
-    # moved to helpers; self is used for test-injected client type selection.
-    def produce_reports(  # skipcq: PYL-R0201, PY-R1000
+    def produce_reports(
         self,
         *,
         session: Session,
@@ -3302,8 +3300,8 @@ class YouTubeAnalyticsRunner:
     replace what the runner actually uses.
     """
 
-    def produce_reports(  # skipcq: PYL-R0201
-        self,
+    @staticmethod
+    def produce_reports(
         *,
         session: Session,
         run: ConnectorRunEntry | None,
@@ -3488,8 +3486,8 @@ class AdSenseManagementRunner:
     ``SkipReason.MISSING_CHANNEL_ID`` until a future allocation/mapping spec.
     """
 
-    def produce_reports(  # skipcq: PYL-R0201
-        self,
+    @staticmethod
+    def produce_reports(
         *,
         session: Session,
         run: ConnectorRunEntry | None,
