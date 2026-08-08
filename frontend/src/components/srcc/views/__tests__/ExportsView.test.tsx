@@ -93,29 +93,29 @@ const POPULATED_LIST: ExportListResponse = {
   pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
 
-function methodOf(init: unknown): string { // skipcq: JS-0067
+const methodOf = (init: unknown): string => {
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
-}
+};
 
-function fetchMock() { // skipcq: JS-0067
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
-function renderExportsView( // skipcq: JS-0067
+const renderExportsView = (
   canCreateExport = true,
   {
     canExportFinance = true,
@@ -126,7 +126,7 @@ function renderExportsView( // skipcq: JS-0067
     canExportAnalytics?: boolean;
     canViewRevenue?: boolean;
   } = {},
-) {
+) => {
   return render(
     <TenantProvider initialSlug="ums">
       <ExportsView
@@ -137,7 +137,7 @@ function renderExportsView( // skipcq: JS-0067
       />
     </TenantProvider>,
   );
-}
+};
 
 describe("ExportsView wired to the exports endpoint", () => {
   it("renders the empty state when no export jobs exist", async () => {

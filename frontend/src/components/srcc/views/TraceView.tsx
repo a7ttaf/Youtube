@@ -61,17 +61,17 @@ const METRIC_OPTIONS: Array<{ value: ExplanationMetric; label: string }> = [
  * and Trace stay tone-consistent; behavior is unchanged from the prior local
  * switch (its ConfidenceTone union is a subset of Severity).
  */
-function confidenceTone(label: string | undefined): Severity { // skipcq: JS-0067
+const confidenceTone = (label: string | undefined): Severity => {
   return confidenceDisplay("", label).tone;
-}
+};
 
 // Component breakdown tone: the value row (positive contribution) is green,
 // deductions/overrides amber/blue; falls back to blue for unknown keys.
-function componentTone(key: string): Severity { // skipcq: JS-0067
+const componentTone = (key: string): Severity => {
   if (key.includes("deduction")) return "amber";
   if (key.includes("override")) return "blue";
   return "green";
-}
+};
 
 /**
  * Static role -> permission-filter detail rows shown in the side panel. A closed
@@ -101,23 +101,379 @@ const PERMISSION_DETAILS: Record<Role, Array<{ label: string; value: string }>> 
 };
 
 /** Resolve which channel to explain: the current selection if present, else the first channel. */
-function resolveEffectiveChannelId( // skipcq: JS-0067
+const resolveEffectiveChannelId = (
   selectedChannelId: string,
   channels: Array<{ youtube_channel_id: string }>,
-): string {
+): string => {
   return (
     channels.find((c) => c.youtube_channel_id === selectedChannelId)
       ?.youtube_channel_id ??
     channels[0]?.youtube_channel_id ??
     ""
   );
-}
+};
+
+/** Title block for the Explain Number panel. */
+const TraceHeader = () => {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id="traceViewTitle">Explain Number</strong>
+        <span>
+          Generate the source-linked breakdown of a channel-month metric from
+          SQL-backed finance data
+        </span>
+      </div>
+      <Badge tone="violet">Audited read</Badge>
+    </div>
+  );
+};
+
+/** Option list for the channel selector: a placeholder when empty, otherwise rows. */
+const ChannelOptions = ({
+  channels,
+  channelsLoading,
+}: {
+  channels: ChannelNetRevenue[];
+  channelsLoading: boolean;
+}) => {
+  if (channels.length === 0) {
+    return (
+      <option value="">
+        {channelsLoading ? "Loading channels…" : "No channels"}
+      </option>
+    );
+  }
+  return (
+    <>
+      {channels.map((c) => (
+        <option key={c.youtube_channel_id} value={c.youtube_channel_id}>
+          {c.youtube_channel_id}
+        </option>
+      ))}
+    </>
+  );
+};
+
+/** Month / channel / metric selectors plus the Explain trigger for the trace screen. */
+const ExplanationFilters = ({
+  month,
+  onMonthChange,
+  effectiveChannelId,
+  channels,
+  channelsLoading,
+  onChannelChange,
+  metric,
+  onMetricChange,
+  explaining,
+  onExplain,
+}: {
+  month: string;
+  onMonthChange: (value: string) => void;
+  effectiveChannelId: string;
+  channels: ChannelNetRevenue[];
+  channelsLoading: boolean;
+  onChannelChange: (value: string) => void;
+  metric: ExplanationMetric;
+  onMetricChange: (value: ExplanationMetric) => void;
+  explaining: boolean;
+  onExplain: () => void;
+}) => {
+  return (
+    <div
+      className="control-row"
+      aria-label="Explanation filters"
+      style={{ margin: 13 }}
+    >
+      <select
+        className="control"
+        aria-label="Month"
+        value={month}
+        onChange={(e) => onMonthChange(e.target.value)}
+      >
+        {MONTH_OPTIONS.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
+      <select
+        className="control"
+        aria-label="Channel"
+        value={effectiveChannelId}
+        disabled={channelsLoading || channels.length === 0}
+        onChange={(e) => onChannelChange(e.target.value)}
+      >
+        <ChannelOptions channels={channels} channelsLoading={channelsLoading} />
+      </select>
+      <select
+        className="control"
+        aria-label="Metric"
+        value={metric}
+        onChange={(e) => onMetricChange(e.target.value as ExplanationMetric)}
+      >
+        {METRIC_OPTIONS.map((m) => (
+          <option key={m.value} value={m.value}>
+            {m.label}
+          </option>
+        ))}
+      </select>
+      <button
+        className="primary-button"
+        type="button"
+        disabled={!effectiveChannelId || explaining}
+        onClick={onExplain}
+      >
+        {explaining ? "Explaining…" : "Explain"}
+      </button>
+    </div>
+  );
+};
+
+/** Title block for the permission-filter side panel. */
+const PermissionFilterHeader = () => {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong>Permission Filter</strong>
+        <span>Applied before the explanation query is authorized</span>
+      </div>
+      <Badge tone="violet">Scoped trace</Badge>
+    </div>
+  );
+};
+
+/** A single label/value cell in the permission-filter detail grid. */
+const PermissionDetailCell = ({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) => {
+  return (
+    <div className="detail-cell">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+};
+
+/** Static role-context side panel describing the scope applied before authorization. */
+const PermissionFilterPanel = ({
+  details,
+}: {
+  details: Array<{ label: string; value: string }>;
+}) => {
+  return (
+    <aside className="view-stack">
+      <section className="panel">
+        <PermissionFilterHeader />
+        <div className="detail-grid">
+          {details.map((d) => (
+            <PermissionDetailCell key={d.label} label={d.label} value={d.value} />
+          ))}
+        </div>
+      </section>
+    </aside>
+  );
+};
+
+/** Error band shown when the channel directory (net-revenue summary) fails to load. */
+const ChannelLoadError = ({ error }: { error: ApiError | Error }) => {
+  const { title, detail } = describeError(error);
+  return (
+    <div
+      className="permission-band"
+      role="alert"
+      style={{ margin: 13 }}
+    >
+      <Dot tone="red" />
+      <span>
+        <strong>{title}</strong>
+        <span>{`Channel list unavailable — ${detail}`}</span>
+      </span>
+      <Badge tone="red">No channels</Badge>
+    </div>
+  );
+};
+
+/** Build a component row subtitle from its source kind/report, item count, or key. */
+const componentSubtitle = (component: ExplanationComponent): string => {
+  if (component.source_kind) {
+    return component.source_report_id
+      ? `${component.source_kind} · ${component.source_report_id}`
+      : component.source_kind;
+  }
+  if (typeof component.count === "number") {
+    const items = component.count === 1 ? "item" : "items";
+    return `${component.count} ${items}`;
+  }
+  return component.key;
+};
+
+/** One explanation component row with a permission-gated money cell. */
+const ComponentRow = ({
+  component,
+  canViewFinance,
+  currency,
+}: {
+  component: ExplanationComponent;
+  canViewFinance: boolean;
+  currency: string;
+}) => {
+  return (
+    <ItemRow
+      tone={componentTone(component.key)}
+      title={component.label}
+      sub={componentSubtitle(component)}
+      className="explain-row"
+      trailing={
+        <span className="money finance-data">
+          {financeDisplay(component.value, canViewFinance, { currency })}
+        </span>
+      }
+    />
+  );
+};
+
+/** Render a returned explanation: value, confidence, formula, components, warnings. */
+const ExplanationResult = ({
+  explanation,
+  canViewFinance,
+  currency,
+}: {
+  explanation: NumberExplanation;
+  canViewFinance: boolean;
+  currency: string;
+}) => {
+  const displayCurrency = explanation.currency || currency;
+
+  return (
+    <div style={{ padding: 13 }}>
+      <div className="explain-head">
+        <div>
+          <h2>{explanation.entity_id}</h2>
+          <p>
+            {explanation.metric} · {explanation.month}
+          </p>
+        </div>
+        <Badge tone={confidenceTone(explanation.confidence?.label)}>
+          {explanation.confidence?.label ?? "—"}
+        </Badge>
+      </div>
+
+      <div className="detail-grid" style={{ marginBottom: 13 }}>
+        <div className="detail-cell">
+          <span>Value</span>
+          <strong className="finance-data">
+            {financeDisplay(explanation.value, canViewFinance, {
+              currency: displayCurrency,
+            })}
+          </strong>
+        </div>
+        <div className="detail-cell">
+          <span>Confidence score</span>
+          <strong>{explanation.confidence?.score ?? "—"}</strong>
+        </div>
+      </div>
+
+      <div className="formula" role="text" aria-label="Metric formula">
+        {explanation.formula}
+      </div>
+
+      <div className="explain-list" role="list" aria-label="Explanation components">
+        {explanation.components.map((component) => (
+          <ComponentRow
+            key={component.key}
+            component={component}
+            canViewFinance={canViewFinance}
+            currency={displayCurrency}
+          />
+        ))}
+      </div>
+
+      {explanation.warnings.length > 0 ? (
+        <div
+          className="issue-list"
+          role="list"
+          aria-label="Explanation warnings"
+          style={{ marginTop: 13 }}
+        >
+          {explanation.warnings.map((warning) => (
+            <ItemRow
+              key={`${warning.code}:${warning.message}`}
+              tone="amber"
+              title={warning.message || warning.code}
+              sub={warning.code}
+              trailing={<Badge tone="amber">Warning</Badge>}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+/** Render the explain hook's state: error, loading, idle prompt, or the result. */
+const ExplanationPanel = ({
+  state,
+  canViewFinance,
+  currency,
+}: {
+  state: ReturnType<typeof useExplanation>;
+  canViewFinance: boolean;
+  currency: string;
+}) => {
+  const { data, loading, error } = state;
+
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="table-wrap" role="alert">
+        <div style={{ padding: 16 }}>
+          <strong>{title}</strong>
+          <p className="item-sub">{detail}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="table-wrap" aria-busy="true">
+        <div style={{ padding: 16 }} className="item-sub">
+          Generating explanation…
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="table-wrap">
+        <div style={{ padding: 16 }} className="item-sub">
+          Pick a month, channel, and metric, then select Explain to generate the
+          source-linked breakdown.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <ExplanationResult
+      explanation={data}
+      canViewFinance={canViewFinance}
+      currency={currency}
+    />
+  );
+};
 
 /**
  * Trace / Explain-Number screen: pick month + channel + metric, then POST to the
  * guarded explain endpoint and render the source-linked, permission-gated breakdown.
  */
-export default function TraceView({ // skipcq: JS-0067
+const TraceView = ({
   canViewFinance,
   role,
   presetChannelId,
@@ -125,7 +481,7 @@ export default function TraceView({ // skipcq: JS-0067
   canViewFinance: boolean;
   role: Role;
   presetChannelId?: string;
-}) {
+}) => {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   const [metric, setMetric] = useState<ExplanationMetric>(
     "adjusted_gross_revenue_usd",
@@ -220,360 +576,6 @@ export default function TraceView({ // skipcq: JS-0067
       </div>
     </section>
   );
-}
+};
 
-/** Title block for the Explain Number panel. */
-function TraceHeader() { // skipcq: JS-0067
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong id="traceViewTitle">Explain Number</strong>
-        <span>
-          Generate the source-linked breakdown of a channel-month metric from
-          SQL-backed finance data
-        </span>
-      </div>
-      <Badge tone="violet">Audited read</Badge>
-    </div>
-  );
-}
-
-/** Month / channel / metric selectors plus the Explain trigger for the trace screen. */
-function ExplanationFilters({ // skipcq: JS-0067
-  month,
-  onMonthChange,
-  effectiveChannelId,
-  channels,
-  channelsLoading,
-  onChannelChange,
-  metric,
-  onMetricChange,
-  explaining,
-  onExplain,
-}: {
-  month: string;
-  onMonthChange: (value: string) => void;
-  effectiveChannelId: string;
-  channels: ChannelNetRevenue[];
-  channelsLoading: boolean;
-  onChannelChange: (value: string) => void;
-  metric: ExplanationMetric;
-  onMetricChange: (value: ExplanationMetric) => void;
-  explaining: boolean;
-  onExplain: () => void;
-}) {
-  return (
-    <div
-      className="control-row"
-      aria-label="Explanation filters"
-      style={{ margin: 13 }}
-    >
-      <select
-        className="control"
-        aria-label="Month"
-        value={month}
-        onChange={(e) => onMonthChange(e.target.value)}
-      >
-        {MONTH_OPTIONS.map((m) => (
-          <option key={m} value={m}>
-            {m}
-          </option>
-        ))}
-      </select>
-      <select
-        className="control"
-        aria-label="Channel"
-        value={effectiveChannelId}
-        disabled={channelsLoading || channels.length === 0}
-        onChange={(e) => onChannelChange(e.target.value)}
-      >
-        <ChannelOptions channels={channels} channelsLoading={channelsLoading} />
-      </select>
-      <select
-        className="control"
-        aria-label="Metric"
-        value={metric}
-        onChange={(e) => onMetricChange(e.target.value as ExplanationMetric)}
-      >
-        {METRIC_OPTIONS.map((m) => (
-          <option key={m.value} value={m.value}>
-            {m.label}
-          </option>
-        ))}
-      </select>
-      <button
-        className="primary-button"
-        type="button"
-        disabled={!effectiveChannelId || explaining}
-        onClick={onExplain}
-      >
-        {explaining ? "Explaining…" : "Explain"}
-      </button>
-    </div>
-  );
-}
-
-/** Option list for the channel selector: a placeholder when empty, otherwise rows. */
-function ChannelOptions({ // skipcq: JS-0067
-  channels,
-  channelsLoading,
-}: {
-  channels: ChannelNetRevenue[];
-  channelsLoading: boolean;
-}) {
-  if (channels.length === 0) {
-    return (
-      <option value="">
-        {channelsLoading ? "Loading channels…" : "No channels"}
-      </option>
-    );
-  }
-  return (
-    <>
-      {channels.map((c) => (
-        <option key={c.youtube_channel_id} value={c.youtube_channel_id}>
-          {c.youtube_channel_id}
-        </option>
-      ))}
-    </>
-  );
-}
-
-/** Static role-context side panel describing the scope applied before authorization. */
-function PermissionFilterPanel({ // skipcq: JS-0067
-  details,
-}: {
-  details: Array<{ label: string; value: string }>;
-}) {
-  return (
-    <aside className="view-stack">
-      <section className="panel">
-        <PermissionFilterHeader />
-        <div className="detail-grid">
-          {details.map((d) => (
-            <PermissionDetailCell key={d.label} label={d.label} value={d.value} />
-          ))}
-        </div>
-      </section>
-    </aside>
-  );
-}
-
-/** Title block for the permission-filter side panel. */
-function PermissionFilterHeader() { // skipcq: JS-0067
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong>Permission Filter</strong>
-        <span>Applied before the explanation query is authorized</span>
-      </div>
-      <Badge tone="violet">Scoped trace</Badge>
-    </div>
-  );
-}
-
-/** A single label/value cell in the permission-filter detail grid. */
-function PermissionDetailCell({ // skipcq: JS-0067
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="detail-cell">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-/** Error band shown when the channel directory (net-revenue summary) fails to load. */
-function ChannelLoadError({ error }: { error: ApiError | Error }) { // skipcq: JS-0067
-  const { title, detail } = describeError(error);
-  return (
-    <div
-      className="permission-band"
-      role="alert"
-      style={{ margin: 13 }}
-    >
-      <Dot tone="red" />
-      <span>
-        <strong>{title}</strong>
-        <span>{`Channel list unavailable — ${detail}`}</span>
-      </span>
-      <Badge tone="red">No channels</Badge>
-    </div>
-  );
-}
-
-/** Render the explain hook's state: error, loading, idle prompt, or the result. */
-function ExplanationPanel({ // skipcq: JS-0067
-  state,
-  canViewFinance,
-  currency,
-}: {
-  state: ReturnType<typeof useExplanation>;
-  canViewFinance: boolean;
-  currency: string;
-}) {
-  const { data, loading, error } = state;
-
-  if (error) {
-    const { title, detail } = describeError(error);
-    return (
-      <div className="table-wrap" role="alert">
-        <div style={{ padding: 16 }}>
-          <strong>{title}</strong>
-          <p className="item-sub">{detail}</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className="table-wrap" aria-busy="true">
-        <div style={{ padding: 16 }} className="item-sub">
-          Generating explanation…
-        </div>
-      </div>
-    );
-  }
-
-  if (!data) {
-    return (
-      <div className="table-wrap">
-        <div style={{ padding: 16 }} className="item-sub">
-          Pick a month, channel, and metric, then select Explain to generate the
-          source-linked breakdown.
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <ExplanationResult
-      explanation={data}
-      canViewFinance={canViewFinance}
-      currency={currency}
-    />
-  );
-}
-
-/** Render a returned explanation: value, confidence, formula, components, warnings. */
-function ExplanationResult({ // skipcq: JS-0067
-  explanation,
-  canViewFinance,
-  currency,
-}: {
-  explanation: NumberExplanation;
-  canViewFinance: boolean;
-  currency: string;
-}) {
-  const displayCurrency = explanation.currency || currency;
-
-  return (
-    <div style={{ padding: 13 }}>
-      <div className="explain-head">
-        <div>
-          <h2>{explanation.entity_id}</h2>
-          <p>
-            {explanation.metric} · {explanation.month}
-          </p>
-        </div>
-        <Badge tone={confidenceTone(explanation.confidence?.label)}>
-          {explanation.confidence?.label ?? "—"}
-        </Badge>
-      </div>
-
-      <div className="detail-grid" style={{ marginBottom: 13 }}>
-        <div className="detail-cell">
-          <span>Value</span>
-          <strong className="finance-data">
-            {financeDisplay(explanation.value, canViewFinance, {
-              currency: displayCurrency,
-            })}
-          </strong>
-        </div>
-        <div className="detail-cell">
-          <span>Confidence score</span>
-          <strong>{explanation.confidence?.score ?? "—"}</strong>
-        </div>
-      </div>
-
-      <div className="formula" role="text" aria-label="Metric formula">
-        {explanation.formula}
-      </div>
-
-      <div className="explain-list" role="list" aria-label="Explanation components">
-        {explanation.components.map((component) => (
-          <ComponentRow
-            key={component.key}
-            component={component}
-            canViewFinance={canViewFinance}
-            currency={displayCurrency}
-          />
-        ))}
-      </div>
-
-      {explanation.warnings.length > 0 ? (
-        <div
-          className="issue-list"
-          role="list"
-          aria-label="Explanation warnings"
-          style={{ marginTop: 13 }}
-        >
-          {explanation.warnings.map((warning) => (
-            <ItemRow
-              key={`${warning.code}:${warning.message}`}
-              tone="amber"
-              title={warning.message || warning.code}
-              sub={warning.code}
-              trailing={<Badge tone="amber">Warning</Badge>}
-            />
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/** Build a component row subtitle from its source kind/report, item count, or key. */
-function componentSubtitle(component: ExplanationComponent): string { // skipcq: JS-0067
-  if (component.source_kind) {
-    return component.source_report_id
-      ? `${component.source_kind} · ${component.source_report_id}`
-      : component.source_kind;
-  }
-  if (typeof component.count === "number") {
-    const items = component.count === 1 ? "item" : "items";
-    return `${component.count} ${items}`;
-  }
-  return component.key;
-}
-
-/** One explanation component row with a permission-gated money cell. */
-function ComponentRow({ // skipcq: JS-0067
-  component,
-  canViewFinance,
-  currency,
-}: {
-  component: ExplanationComponent;
-  canViewFinance: boolean;
-  currency: string;
-}) {
-  return (
-    <ItemRow
-      tone={componentTone(component.key)}
-      title={component.label}
-      sub={componentSubtitle(component)}
-      className="explain-row"
-      trailing={
-        <span className="money finance-data">
-          {financeDisplay(component.value, canViewFinance, { currency })}
-        </span>
-      }
-    />
-  );
-}
+export default TraceView;

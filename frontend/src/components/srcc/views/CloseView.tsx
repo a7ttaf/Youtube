@@ -77,15 +77,50 @@ type LockState = {
 type LockAction = "lock" | "unlock";
 
 /** Map a close status to a badge tone: green when LOCKED, amber when open, blue when unknown. */
-function statusTone(status: string | undefined): Severity { // skipcq: JS-0067
+const statusTone = (status: string | undefined): Severity => {
   if (!status) return "blue";
   return status.toUpperCase() === "LOCKED" ? "green" : "amber";
-}
+};
 
 /** Map a blocker severity to a badge tone: red for HIGH, amber otherwise. */
-function blockerTone(severity: string): Severity { // skipcq: JS-0067
+const blockerTone = (severity: string): Severity => {
   return severity.toUpperCase() === "HIGH" ? "red" : "amber";
-}
+};
+
+/** Narrow an unknown to a non-null object so its fields can be probed. */
+const isNonNullObject = (value: unknown): value is Record<string, unknown> => {
+  return typeof value === "object" && value !== null;
+};
+
+/** Format the structured 409 lock detail: its message plus a blocker-count suffix. */
+const describeLockBlockerDetail = (lockDetail: FinanceCloseLockErrorDetail): string => {
+  const blockerCount = Array.isArray(lockDetail.blockers)
+    ? lockDetail.blockers.length
+    : 0;
+  const base =
+    typeof lockDetail.message === "string"
+      ? lockDetail.message
+      : "Finance month cannot be locked in its current state.";
+  return blockerCount > 0
+    ? `${base} (${blockerCount} blocker${blockerCount === 1 ? "" : "s"})`
+    : base;
+};
+
+/**
+ * Pull the conflict copy out of a 409 body: a non-empty plain-string detail wins,
+ * a structured lock detail formats via its blocker count, and anything else gets
+ * the generic wrong-state copy.
+ */
+const describeConflictBody = (body: unknown): string => {
+  const detail = isNonNullObject(body) ? body.detail : null;
+  if (typeof detail === "string" && detail.trim().length > 0) {
+    return detail;
+  }
+  if (isNonNullObject(detail)) {
+    return describeLockBlockerDetail(detail as FinanceCloseLockErrorDetail);
+  }
+  return "Finance month cannot change state right now.";
+};
 
 // ============================================================================
 // Purpose: Translate a lock/unlock failure into clear inline copy. A 409 carries
@@ -93,50 +128,546 @@ function blockerTone(severity: string): Severity { // skipcq: JS-0067
 //   a 403 means the backend denied the permission; anything else reuses the
 //   shared describeError contract so the message matches the rest of the shell.
 // ============================================================================
-function describeActionError(error: unknown): string { // skipcq: JS-0067, JS-R1005
-  if (error instanceof ApiError) {
-    if (error.status === 409) {
-      const body = error.body;
-      if (typeof body === "object" && body !== null) {
-        const detail = (body as { detail?: unknown }).detail;
-        if (typeof detail === "string" && detail.trim().length > 0) {
-          return detail;
-        }
-        if (typeof detail === "object" && detail !== null) {
-          const lockDetail = detail as FinanceCloseLockErrorDetail;
-          const blockerCount = Array.isArray(lockDetail.blockers)
-            ? lockDetail.blockers.length
-            : 0;
-          const base =
-            typeof lockDetail.message === "string"
-              ? lockDetail.message
-              : "Finance month cannot be locked in its current state.";
-          return blockerCount > 0
-            ? `${base} (${blockerCount} blocker${blockerCount === 1 ? "" : "s"})`
-            : base;
-        }
-      }
-      return "Finance month cannot change state right now.";
-    }
-    if (error.status === 403) {
-      return "Your role cannot lock or unlock this finance month.";
-    }
-    const { detail } = describeError(error);
-    return detail;
+/** Map a typed finance-close ApiError (409 conflict / 403 denial / other) to inline copy. */
+const describeApiActionError = (error: ApiError): string => {
+  if (error.status === 409) {
+    return describeConflictBody(error.body);
   }
+  if (error.status === 403) {
+    return "Your role cannot lock or unlock this finance month.";
+  }
+  const { detail } = describeError(error);
+  return detail;
+};
+
+/**
+ * Translate any lock/unlock failure into inline copy: typed ApiErrors go through
+ * the 409/403 mapping above, plain Errors surface their message, and anything
+ * else falls back to the generic network-failure copy.
+ */
+const describeActionError = (error: unknown): string => {
+  if (error instanceof ApiError) return describeApiActionError(error);
   if (error instanceof Error) return error.message;
   return "Could not reach the finance-close service.";
-}
+};
+
+/**
+ * Inline "Action failed" alert band that surfaces a typed lock/unlock error.
+ * Extracted so the Lock Controls tree stays shallow (JSX nesting).
+ */
+const ActionFailedBand = ({ message }: { message: string }) => {
+  return (
+    <div className="permission-band" role="alert" style={{ marginTop: 8 }}>
+      <Dot tone="red" />
+      <span>
+        <strong>Action failed</strong>
+        <span>{message}</span>
+      </span>
+      <Badge tone="red">Blocked</Badge>
+    </div>
+  );
+};
+
+/** The pre-arm verb label for one lock/unlock action button. */
+const lockActionIdleLabel = (kind: LockAction): string =>
+  kind === "unlock" ? "Unlock Month" : "Lock Month";
+
+/** The armed confirm label for one action button, naming the month it executes against. */
+const lockActionConfirmLabel = (kind: LockAction, month: string): string =>
+  kind === "unlock" ? `Confirm unlock ${month}` : `Confirm lock ${month}`;
+
+/**
+ * Compute the label for one lock/unlock action button: "Working…" while that
+ * action is in flight, "Confirm lock/unlock {month}" once armed, otherwise the
+ * default verb label. Behaviour-identical to the previous inline ternary chain.
+ */
+const lockActionLabel = (
+  kind: LockAction,
+  month: string,
+  busy: boolean,
+  isArmed: boolean,
+): string => {
+  if (busy && isArmed) return "Working…";
+  if (isArmed) return lockActionConfirmLabel(kind, month);
+  return lockActionIdleLabel(kind);
+};
+
+/** Which permission gates one action: unlock needs canUnlockMonth, lock canCloseMonth. */
+const lockActionPermitted = (
+  kind: LockAction,
+  canCloseMonth: boolean,
+  canUnlockMonth: boolean,
+): boolean => (kind === "unlock" ? canUnlockMonth : canCloseMonth);
+
+/** The per-action month-state guard: unlock requires a LOCKED month, lock an OPEN one. */
+const lockActionStateBlocked = (kind: LockAction, isLocked: boolean): boolean =>
+  kind === "unlock" ? !isLocked : isLocked;
+
+/**
+ * Derive whether a lock/unlock action button is disabled. Both actions share the
+ * no-permission / busy / empty-reason guards; lock additionally requires the
+ * month to be OPEN and unlock requires it LOCKED.
+ */
+const lockActionDisabled = (
+  kind: LockAction,
+  canCloseMonth: boolean,
+  canUnlockMonth: boolean,
+  busy: boolean,
+  isLocked: boolean,
+  reasonEmpty: boolean,
+): boolean => {
+  const canAct = lockActionPermitted(kind, canCloseMonth, canUnlockMonth);
+  return !canAct || busy || reasonEmpty || lockActionStateBlocked(kind, isLocked);
+};
+
+/**
+ * One arm/confirm lock or unlock button. Owns its own label + disabled derivation
+ * so the parent panel stays low-complexity; calls back with its action kind on click.
+ */
+const LockActionButton = ({
+  kind,
+  month,
+  canCloseMonth,
+  canUnlockMonth,
+  isLocked,
+  busy,
+  reasonEmpty,
+  isArmed,
+  onActionClick,
+}: {
+  kind: LockAction;
+  month: string;
+  canCloseMonth: boolean;
+  canUnlockMonth: boolean;
+  isLocked: boolean;
+  busy: boolean;
+  reasonEmpty: boolean;
+  isArmed: boolean;
+  onActionClick: (kind: LockAction) => void;
+}) => {
+  const className = kind === "unlock" ? "danger-button" : "primary-button";
+  return (
+    <button
+      className={className}
+      type="button"
+      disabled={lockActionDisabled(kind, canCloseMonth, canUnlockMonth, busy, isLocked, reasonEmpty)}
+      onClick={() => onActionClick(kind)}
+    >
+      {lockActionLabel(kind, month, busy, isArmed)}
+    </button>
+  );
+};
+
+/**
+ * The lock/unlock actor + timestamp detail grid. Extracted so the Lock Controls
+ * panel stays low-complexity and its JSX tree stays shallow.
+ */
+const LockDetailGrid = ({ status }: { status: FinanceMonthCloseStatus | null }) => {
+  return (
+    <div className="detail-grid">
+      <div className="detail-cell">
+        <span>Locked by</span>
+        <strong>{status?.locked_by ?? "—"}</strong>
+      </div>
+      <div className="detail-cell">
+        <span>Locked at</span>
+        <strong>{formatCloseTimestamp(status?.locked_at)}</strong>
+      </div>
+      <div className="detail-cell">
+        <span>Unlocked by</span>
+        <strong>{status?.unlocked_by ?? "—"}</strong>
+      </div>
+      <div className="detail-cell">
+        <span>Unlocked at</span>
+        <strong>{formatCloseTimestamp(status?.unlocked_at)}</strong>
+      </div>
+    </div>
+  );
+};
+
+/** The audited-reason input is editable only for a role that can lock or unlock,
+ * and never while an action is in flight. */
+const lockReasonDisabled = (
+  canCloseMonth: boolean,
+  canUnlockMonth: boolean,
+  busy: boolean,
+): boolean => (!canCloseMonth && !canUnlockMonth) || busy;
+
+/**
+ * Lock Controls panel: status badge, lock/unlock actor + timestamp grid, the
+ * audited reason input, and the two-step arm/confirm lock & unlock buttons. The
+ * parent owns all state; this component is presentational and calls back on intent.
+ */
+const LockControlsPanel = ({
+  status,
+  month,
+  canCloseMonth,
+  canUnlockMonth,
+  isLocked,
+  lockState,
+  reason,
+  armed,
+  onReasonChange,
+  onActionClick,
+  onCancel,
+}: {
+  status: FinanceMonthCloseStatus | null;
+  month: string;
+  canCloseMonth: boolean;
+  canUnlockMonth: boolean;
+  isLocked: boolean;
+  lockState: LockState;
+  reason: string;
+  armed: LockAction | null;
+  onReasonChange: (value: string) => void;
+  onActionClick: (kind: LockAction) => void;
+  onCancel: () => void;
+}) => {
+  const reasonEmpty = reason.trim().length === 0;
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>Lock Controls</strong>
+          <span>The backend rejects a lock until blockers are cleared</span>
+        </div>
+        <Badge tone={statusTone(status?.status)}>{status?.status ?? "—"}</Badge>
+      </div>
+      <LockDetailGrid status={status} />
+      <div className="control-row" style={{ marginTop: 8 }}>
+        <label className="field-label" htmlFor="closeReason">
+          Reason (required, audited)
+        </label>
+        <input
+          id="closeReason"
+          className="control"
+          type="text"
+          value={reason}
+          placeholder="Why is this month being locked or unlocked?"
+          disabled={lockReasonDisabled(canCloseMonth, canUnlockMonth, lockState.busy)}
+          onChange={(e) => onReasonChange(e.target.value)}
+        />
+      </div>
+      {lockState.error ? <ActionFailedBand message={lockState.error} /> : null}
+      <div className="action-row">
+        <LockActionButton
+          kind="unlock"
+          month={month}
+          canCloseMonth={canCloseMonth}
+          canUnlockMonth={canUnlockMonth}
+          isLocked={isLocked}
+          busy={lockState.busy}
+          reasonEmpty={reasonEmpty}
+          isArmed={armed === "unlock"}
+          onActionClick={onActionClick}
+        />
+        <LockActionButton
+          kind="lock"
+          month={month}
+          canCloseMonth={canCloseMonth}
+          canUnlockMonth={canUnlockMonth}
+          isLocked={isLocked}
+          busy={lockState.busy}
+          reasonEmpty={reasonEmpty}
+          isArmed={armed === "lock"}
+          onActionClick={onActionClick}
+        />
+        {armed ? (
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={lockState.busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
+};
+
+/**
+ * Static Reconciliation Equation reference panel. Still on mock data and labelled
+ * as such — not part of the close API.
+ */
+const ReconciliationPanel = () => {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>Reconciliation Equation</strong>
+          <span>Sample data — not yet wired to the API</span>
+        </div>
+        <Badge tone="amber">Mock</Badge>
+      </div>
+      <div className="formula" style={{ margin: 13 }}>
+        gross_reported - official_tax - payment_fees - allocation_gap + approved_overrides = locked_net
+      </div>
+      <div className="issue-list" role="list">
+        {RECON_NOTES.map((n) => (
+          <ItemRow
+            key={n.title}
+            tone={n.tone}
+            title={n.title}
+            sub={n.sub}
+            trailing={<Badge tone={n.badge.tone}>{n.badge.text}</Badge>}
+          />
+        ))}
+      </div>
+    </section>
+  );
+};
+
+/** The Status tile's footnote: LOCKED allows exports, anything else is open for edits. */
+const closeStatusNote = (statusValue: string | undefined): string =>
+  statusValue === "LOCKED" ? "Exports allowed" : "Open for edits";
+
+/** The Readiness tile value: Ready/Blocked once readiness has loaded, an em dash before. */
+const readinessTileValue = (readiness: FinanceCloseReadinessResponse | null): string => {
+  if (!readiness) return "—";
+  return readiness.ready ? "Ready" : "Blocked";
+};
+
+/** The Readiness tile footnote: the blocker count, pluralised, or "No blockers". */
+const blockerCountLabel = (blockerCount: number): string =>
+  blockerCount > 0
+    ? `${blockerCount} blocker${blockerCount === 1 ? "" : "s"}`
+    : "No blockers";
+
+/** The loaded month/status/readiness/allocation summary tiles. */
+const CloseSummaryTiles = ({
+  status,
+  readiness,
+}: {
+  status: FinanceMonthCloseStatus | null;
+  readiness: FinanceCloseReadinessResponse | null;
+}) => {
+  const blockerCount = readiness?.blockers.length ?? 0;
+  return (
+    <div className="view-summary" aria-label="Month close summary">
+      <article className="summary-tile">
+        <span>Month</span>
+        <strong>{status?.month ?? "—"}</strong>
+        <small>Finance close control</small>
+      </article>
+      <article className="summary-tile">
+        <span>Status</span>
+        <strong>{status?.status ?? "—"}</strong>
+        <small>{closeStatusNote(status?.status)}</small>
+      </article>
+      <article className="summary-tile">
+        <span>Readiness</span>
+        <strong>{readinessTileValue(readiness)}</strong>
+        <small>{blockerCountLabel(blockerCount)}</small>
+      </article>
+      <article className="summary-tile">
+        <span>Allocation method</span>
+        <strong>{status?.allocation_method ?? "Not set"}</strong>
+        <small>Recorded on this close row</small>
+      </article>
+    </div>
+  );
+};
+
+/**
+ * Top summary tiles for the close screen: month, status, readiness, and allocation
+ * method, with explicit error and initial-loading states mirroring CommandView.
+ */
+const CloseStatusSummary = ({
+  status,
+  loading,
+  error,
+  readiness,
+}: {
+  status: FinanceMonthCloseStatus | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+  readiness: FinanceCloseReadinessResponse | null;
+}) => {
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="view-summary" aria-label="Month close summary" role="alert">
+        <article className="summary-tile">
+          <span>{title}</span>
+          <strong>—</strong>
+          <small>{detail}</small>
+        </article>
+      </div>
+    );
+  }
+
+  if (loading && !status) {
+    return (
+      <div className="view-summary" aria-label="Month close summary" aria-busy="true">
+        <article className="summary-tile">
+          <span>Status</span>
+          <strong>…</strong>
+          <small>Loading month close</small>
+        </article>
+      </div>
+    );
+  }
+
+  return <CloseSummaryTiles status={status} readiness={readiness} />;
+};
+
+/** True while the readiness fetch is in flight with nothing loaded yet. */
+const isInitialReadinessLoad = (
+  loading: boolean,
+  readiness: FinanceCloseReadinessResponse | null,
+): boolean => loading && !readiness;
+
+/**
+ * The close readiness checklist: a ready banner when clear, otherwise one row per
+ * blocker, with explicit error, loading, and no-data states.
+ */
+const ReadinessChecklist = ({
+  readiness,
+  loading,
+  error,
+}: {
+  readiness: FinanceCloseReadinessResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) => {
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="table-wrap" role="alert">
+        <div style={{ padding: 16 }}>
+          <strong>{title}</strong>
+          <p className="item-sub">{detail}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (isInitialReadinessLoad(loading, readiness)) {
+    return (
+      <div className="table-wrap" aria-busy="true">
+        <div style={{ padding: 16 }} className="item-sub">
+          Loading readiness…
+        </div>
+      </div>
+    );
+  }
+
+  if (!readiness) {
+    return (
+      <div className="table-wrap">
+        <div style={{ padding: 16 }} className="item-sub">
+          No readiness data for this month.
+        </div>
+      </div>
+    );
+  }
+
+  if (readiness.ready) {
+    return (
+      <div className="permission-band">
+        <Dot tone="green" />
+        <span>
+          <strong>Month is ready to lock</strong>
+          <span>No unresolved close blockers for {readiness.month}.</span>
+        </span>
+        <Badge tone="green">Ready</Badge>
+      </div>
+    );
+  }
+
+  return (
+    <div className="issue-list" role="list" aria-label="Close blockers">
+      {readiness.blockers.map((blocker: FinanceCloseBlocker) => (
+        <ItemRow
+          key={blocker.blocker_type}
+          tone={blockerTone(blocker.severity)}
+          title={blocker.message}
+          sub={`${blocker.blocker_type} · ${blocker.severity}`}
+          trailing={<Badge tone={blockerTone(blocker.severity)}>{`${blocker.count}`}</Badge>}
+        />
+      ))}
+    </div>
+  );
+};
+
+/**
+ * Left workbench panel: title, the month selector + refresh control, and the
+ * readiness checklist. Extracted so the parent CloseView tree stays shallow.
+ */
+const MonthCloseWorkbench = ({
+  month,
+  canCloseMonth,
+  readiness,
+  readinessLoading,
+  readinessError,
+  onMonthChange,
+  onRefresh,
+}: {
+  month: string;
+  canCloseMonth: boolean;
+  readiness: FinanceCloseReadinessResponse | null;
+  readinessLoading: boolean;
+  readinessError: ApiError | Error | null;
+  onMonthChange: (value: string) => void;
+  onRefresh: () => void;
+}) => {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="closeViewTitle">Month Close Workbench</strong>
+          <span>Deterministic workflow from report ingestion to locked exports</span>
+        </div>
+        <Badge tone={canCloseMonth ? "amber" : "red"}>
+          {canCloseMonth ? "Finance Admin" : "Restricted"}
+        </Badge>
+      </div>
+
+      <div className="control-row" aria-label="Month close filters" style={{ marginBottom: 13 }}>
+        <select
+          className="control"
+          aria-label="Month"
+          value={month}
+          onChange={(e) => onMonthChange(e.target.value)}
+        >
+          {MONTH_OPTIONS.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Refresh month close"
+          title="Refresh month close"
+          onClick={onRefresh}
+        >
+          ↻
+        </button>
+      </div>
+
+      <ReadinessChecklist
+        readiness={readiness}
+        loading={readinessLoading}
+        error={readinessError}
+      />
+    </section>
+  );
+};
 
 /**
  * The real-data Month-Close screen: status summary, readiness checklist, and the
  * inline reason + arm/confirm lock/unlock workflow wired to the finance-close API.
  */
-export default function CloseView({ // skipcq: JS-0067
+const CloseView = ({
   permissions,
 }: {
   permissions: AccessPermissions;
-}) {
+}) => {
   const { canCloseMonth, canUnlockMonth } = permissions;
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   const [lockState, setLockState] = useState<LockState>({
@@ -287,467 +818,8 @@ export default function CloseView({ // skipcq: JS-0067
       </div>
     </section>
   );
-}
+};
 
-/**
- * Left workbench panel: title, the month selector + refresh control, and the
- * readiness checklist. Extracted so the parent CloseView tree stays shallow.
- */
-function MonthCloseWorkbench({ // skipcq: JS-0067
-  month,
-  canCloseMonth,
-  readiness,
-  readinessLoading,
-  readinessError,
-  onMonthChange,
-  onRefresh,
-}: {
-  month: string;
-  canCloseMonth: boolean;
-  readiness: FinanceCloseReadinessResponse | null;
-  readinessLoading: boolean;
-  readinessError: ApiError | Error | null;
-  onMonthChange: (value: string) => void;
-  onRefresh: () => void;
-}) {
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong id="closeViewTitle">Month Close Workbench</strong>
-          <span>Deterministic workflow from report ingestion to locked exports</span>
-        </div>
-        <Badge tone={canCloseMonth ? "amber" : "red"}>
-          {canCloseMonth ? "Finance Admin" : "Restricted"}
-        </Badge>
-      </div>
-
-      <div className="control-row" aria-label="Month close filters" style={{ marginBottom: 13 }}>
-        <select
-          className="control"
-          aria-label="Month"
-          value={month}
-          onChange={(e) => onMonthChange(e.target.value)}
-        >
-          {MONTH_OPTIONS.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="Refresh month close"
-          title="Refresh month close"
-          onClick={onRefresh}
-        >
-          ↻
-        </button>
-      </div>
-
-      <ReadinessChecklist
-        readiness={readiness}
-        loading={readinessLoading}
-        error={readinessError}
-      />
-    </section>
-  );
-}
-
-/**
- * Inline "Action failed" alert band that surfaces a typed lock/unlock error.
- * Extracted so the Lock Controls tree stays shallow (JSX nesting).
- */
-function ActionFailedBand({ message }: { message: string }) { // skipcq: JS-0067
-  return (
-    <div className="permission-band" role="alert" style={{ marginTop: 8 }}>
-      <Dot tone="red" />
-      <span>
-        <strong>Action failed</strong>
-        <span>{message}</span>
-      </span>
-      <Badge tone="red">Blocked</Badge>
-    </div>
-  );
-}
-
-/**
- * Compute the label for one lock/unlock action button: "Working…" while that
- * action is in flight, "Confirm lock/unlock {month}" once armed, otherwise the
- * default verb label. Behaviour-identical to the previous inline ternary chain.
- */
-function lockActionLabel( // skipcq: JS-0067, JS-R1005
-  kind: LockAction,
-  month: string,
-  busy: boolean,
-  isArmed: boolean,
-): string {
-  if (busy && isArmed) return "Working…";
-  if (isArmed) {
-    return kind === "unlock" ? `Confirm unlock ${month}` : `Confirm lock ${month}`;
-  }
-  return kind === "unlock" ? "Unlock Month" : "Lock Month";
-}
-
-/**
- * Derive whether a lock/unlock action button is disabled. Both actions share the
- * no-permission / busy / empty-reason guards; lock additionally requires the
- * month to be OPEN and unlock requires it LOCKED.
- */
-function lockActionDisabled( // skipcq: JS-0067, JS-R1005
-  kind: LockAction,
-  canCloseMonth: boolean,
-  canUnlockMonth: boolean,
-  busy: boolean,
-  isLocked: boolean,
-  reasonEmpty: boolean,
-): boolean {
-  const canAct = kind === "unlock" ? canUnlockMonth : canCloseMonth;
-  const shared = !canAct || busy || reasonEmpty;
-  return kind === "unlock" ? shared || !isLocked : shared || isLocked;
-}
-
-/**
- * One arm/confirm lock or unlock button. Owns its own label + disabled derivation
- * so the parent panel stays low-complexity; calls back with its action kind on click.
- */
-function LockActionButton({ // skipcq: JS-0067
-  kind,
-  month,
-  canCloseMonth,
-  canUnlockMonth,
-  isLocked,
-  busy,
-  reasonEmpty,
-  isArmed,
-  onActionClick,
-}: {
-  kind: LockAction;
-  month: string;
-  canCloseMonth: boolean;
-  canUnlockMonth: boolean;
-  isLocked: boolean;
-  busy: boolean;
-  reasonEmpty: boolean;
-  isArmed: boolean;
-  onActionClick: (kind: LockAction) => void;
-}) {
-  const className = kind === "unlock" ? "danger-button" : "primary-button";
-  return (
-    <button
-      className={className}
-      type="button"
-      disabled={lockActionDisabled(kind, canCloseMonth, canUnlockMonth, busy, isLocked, reasonEmpty)}
-      onClick={() => onActionClick(kind)}
-    >
-      {lockActionLabel(kind, month, busy, isArmed)}
-    </button>
-  );
-}
-
-/**
- * The lock/unlock actor + timestamp detail grid. Extracted so the Lock Controls
- * panel stays low-complexity and its JSX tree stays shallow.
- */
-function LockDetailGrid({ status }: { status: FinanceMonthCloseStatus | null }) { // skipcq: JS-0067
-  return (
-    <div className="detail-grid">
-      <div className="detail-cell">
-        <span>Locked by</span>
-        <strong>{status?.locked_by ?? "—"}</strong>
-      </div>
-      <div className="detail-cell">
-        <span>Locked at</span>
-        <strong>{formatCloseTimestamp(status?.locked_at)}</strong>
-      </div>
-      <div className="detail-cell">
-        <span>Unlocked by</span>
-        <strong>{status?.unlocked_by ?? "—"}</strong>
-      </div>
-      <div className="detail-cell">
-        <span>Unlocked at</span>
-        <strong>{formatCloseTimestamp(status?.unlocked_at)}</strong>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Lock Controls panel: status badge, lock/unlock actor + timestamp grid, the
- * audited reason input, and the two-step arm/confirm lock & unlock buttons. The
- * parent owns all state; this component is presentational and calls back on intent.
- */
-function LockControlsPanel({ // skipcq: JS-0067, JS-R1005
-  status,
-  month,
-  canCloseMonth,
-  canUnlockMonth,
-  isLocked,
-  lockState,
-  reason,
-  armed,
-  onReasonChange,
-  onActionClick,
-  onCancel,
-}: {
-  status: FinanceMonthCloseStatus | null;
-  month: string;
-  canCloseMonth: boolean;
-  canUnlockMonth: boolean;
-  isLocked: boolean;
-  lockState: LockState;
-  reason: string;
-  armed: LockAction | null;
-  onReasonChange: (value: string) => void;
-  onActionClick: (kind: LockAction) => void;
-  onCancel: () => void;
-}) {
-  const reasonEmpty = reason.trim().length === 0;
-
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong>Lock Controls</strong>
-          <span>The backend rejects a lock until blockers are cleared</span>
-        </div>
-        <Badge tone={statusTone(status?.status)}>{status?.status ?? "—"}</Badge>
-      </div>
-      <LockDetailGrid status={status} />
-      <div className="control-row" style={{ marginTop: 8 }}>
-        <label className="field-label" htmlFor="closeReason">
-          Reason (required, audited)
-        </label>
-        <input
-          id="closeReason"
-          className="control"
-          type="text"
-          value={reason}
-          placeholder="Why is this month being locked or unlocked?"
-          disabled={(!canCloseMonth && !canUnlockMonth) || lockState.busy}
-          onChange={(e) => onReasonChange(e.target.value)}
-        />
-      </div>
-      {lockState.error ? <ActionFailedBand message={lockState.error} /> : null}
-      <div className="action-row">
-        <LockActionButton
-          kind="unlock"
-          month={month}
-          canCloseMonth={canCloseMonth}
-          canUnlockMonth={canUnlockMonth}
-          isLocked={isLocked}
-          busy={lockState.busy}
-          reasonEmpty={reasonEmpty}
-          isArmed={armed === "unlock"}
-          onActionClick={onActionClick}
-        />
-        <LockActionButton
-          kind="lock"
-          month={month}
-          canCloseMonth={canCloseMonth}
-          canUnlockMonth={canUnlockMonth}
-          isLocked={isLocked}
-          busy={lockState.busy}
-          reasonEmpty={reasonEmpty}
-          isArmed={armed === "lock"}
-          onActionClick={onActionClick}
-        />
-        {armed ? (
-          <button
-            className="ghost-button"
-            type="button"
-            disabled={lockState.busy}
-            onClick={onCancel}
-          >
-            Cancel
-          </button>
-        ) : null}
-      </div>
-    </section>
-  );
-}
-
-/**
- * Static Reconciliation Equation reference panel. Still on mock data and labelled
- * as such — not part of the close API.
- */
-function ReconciliationPanel() { // skipcq: JS-0067
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong>Reconciliation Equation</strong>
-          <span>Sample data — not yet wired to the API</span>
-        </div>
-        <Badge tone="amber">Mock</Badge>
-      </div>
-      <div className="formula" style={{ margin: 13 }}>
-        gross_reported - official_tax - payment_fees - allocation_gap + approved_overrides = locked_net
-      </div>
-      <div className="issue-list" role="list">
-        {RECON_NOTES.map((n) => (
-          <ItemRow
-            key={n.title}
-            tone={n.tone}
-            title={n.title}
-            sub={n.sub}
-            trailing={<Badge tone={n.badge.tone}>{n.badge.text}</Badge>}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-/**
- * Top summary tiles for the close screen: month, status, readiness, and allocation
- * method, with explicit error and initial-loading states mirroring CommandView.
- */
-function CloseStatusSummary({ // skipcq: JS-0067, JS-R1005
-  status,
-  loading,
-  error,
-  readiness,
-}: {
-  status: FinanceMonthCloseStatus | null;
-  loading: boolean;
-  error: ApiError | Error | null;
-  readiness: FinanceCloseReadinessResponse | null;
-}) {
-  if (error) {
-    const { title, detail } = describeError(error);
-    return (
-      <div className="view-summary" aria-label="Month close summary" role="alert">
-        <article className="summary-tile">
-          <span>{title}</span>
-          <strong>—</strong>
-          <small>{detail}</small>
-        </article>
-      </div>
-    );
-  }
-
-  if (loading && !status) {
-    return (
-      <div className="view-summary" aria-label="Month close summary" aria-busy="true">
-        <article className="summary-tile">
-          <span>Status</span>
-          <strong>…</strong>
-          <small>Loading month close</small>
-        </article>
-      </div>
-    );
-  }
-
-  const blockerCount = readiness?.blockers.length ?? 0;
-  const readyValue = readiness
-    ? readiness.ready
-      ? "Ready"
-      : "Blocked"
-    : "—";
-
-  return (
-    <div className="view-summary" aria-label="Month close summary">
-      <article className="summary-tile">
-        <span>Month</span>
-        <strong>{status?.month ?? "—"}</strong>
-        <small>Finance close control</small>
-      </article>
-      <article className="summary-tile">
-        <span>Status</span>
-        <strong>{status?.status ?? "—"}</strong>
-        <small>{status?.status === "LOCKED" ? "Exports allowed" : "Open for edits"}</small>
-      </article>
-      <article className="summary-tile">
-        <span>Readiness</span>
-        <strong>{readyValue}</strong>
-        <small>
-          {blockerCount > 0
-            ? `${blockerCount} blocker${blockerCount === 1 ? "" : "s"}`
-            : "No blockers"}
-        </small>
-      </article>
-      <article className="summary-tile">
-        <span>Allocation method</span>
-        <strong>{status?.allocation_method ?? "Not set"}</strong>
-        <small>Recorded on this close row</small>
-      </article>
-    </div>
-  );
-}
-
-/**
- * The close readiness checklist: a ready banner when clear, otherwise one row per
- * blocker, with explicit error, loading, and no-data states.
- */
-function ReadinessChecklist({ // skipcq: JS-0067, JS-R1005
-  readiness,
-  loading,
-  error,
-}: {
-  readiness: FinanceCloseReadinessResponse | null;
-  loading: boolean;
-  error: ApiError | Error | null;
-}) {
-  if (error) {
-    const { title, detail } = describeError(error);
-    return (
-      <div className="table-wrap" role="alert">
-        <div style={{ padding: 16 }}>
-          <strong>{title}</strong>
-          <p className="item-sub">{detail}</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (loading && !readiness) {
-    return (
-      <div className="table-wrap" aria-busy="true">
-        <div style={{ padding: 16 }} className="item-sub">
-          Loading readiness…
-        </div>
-      </div>
-    );
-  }
-
-  if (!readiness) {
-    return (
-      <div className="table-wrap">
-        <div style={{ padding: 16 }} className="item-sub">
-          No readiness data for this month.
-        </div>
-      </div>
-    );
-  }
-
-  if (readiness.ready) {
-    return (
-      <div className="permission-band">
-        <Dot tone="green" />
-        <span>
-          <strong>Month is ready to lock</strong>
-          <span>No unresolved close blockers for {readiness.month}.</span>
-        </span>
-        <Badge tone="green">Ready</Badge>
-      </div>
-    );
-  }
-
-  return (
-    <div className="issue-list" role="list" aria-label="Close blockers">
-      {readiness.blockers.map((blocker: FinanceCloseBlocker) => (
-        <ItemRow
-          key={blocker.blocker_type}
-          tone={blockerTone(blocker.severity)}
-          title={blocker.message}
-          sub={`${blocker.blocker_type} · ${blocker.severity}`}
-          trailing={<Badge tone={blockerTone(blocker.severity)}>{`${blocker.count}`}</Badge>}
-        />
-      ))}
-    </div>
-  );
-}
+export default CloseView;
 
 export { describeActionError };
