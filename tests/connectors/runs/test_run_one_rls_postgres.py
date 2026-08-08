@@ -281,9 +281,8 @@ def test_run_without_tenant_context_fails_closed_at_credential(
     factory = build_session_factory(pg_url)
     # No connector_tenant_context: TENANT_CTX is unset, the hook pins app_tenant
     # with no trusted context row, and the credential SELECT returns nothing.
-    with factory() as session:  # skipcq: PTC-W0062
-        with pytest.raises(CredentialNotFoundError):
-            _run_yt_reporting(session, fresh_tenant)
+    with factory() as session, pytest.raises(CredentialNotFoundError):
+        _run_yt_reporting(session, fresh_tenant)
 
 
 def test_run_with_tenant_context_resolves_credential_and_succeeds(
@@ -292,9 +291,8 @@ def test_run_with_tenant_context_resolves_credential_and_succeeds(
     """With connector_tenant_context the credential resolves and the run runs."""
     _seed_owner(pg_url, tenant_id=fresh_tenant)
     factory = build_session_factory(pg_url)
-    with factory() as session:  # skipcq: PTC-W0062
-        with connector_tenant_context(fresh_tenant, session=session):
-            outcome = _run_yt_reporting(session, fresh_tenant)
+    with factory() as session, connector_tenant_context(fresh_tenant, session=session):
+        outcome = _run_yt_reporting(session, fresh_tenant)
     assert outcome.run is not None
     assert outcome.run.status == "SUCCEEDED"
 
@@ -320,9 +318,8 @@ def test_run_one_persists_lifecycle_facts_and_audit_on_postgres(
 
     _seed_owner(pg_url, tenant_id=fresh_tenant)
     factory = build_session_factory(pg_url)
-    with factory() as session:  # skipcq: PTC-W0062
-        with connector_tenant_context(fresh_tenant, session=session):
-            outcome = _run_yt_reporting(session, fresh_tenant)
+    with factory() as session, connector_tenant_context(fresh_tenant, session=session):
+        outcome = _run_yt_reporting(session, fresh_tenant)
     assert outcome.run is not None
     assert outcome.run.status == "SUCCEEDED"
 
@@ -396,20 +393,19 @@ def test_cross_tenant_isolation_under_run_context(pg_url: str, _stub_secret_reso
     _seed_owner(pg_url, tenant_id=tenant_a)
     _seed_owner(pg_url, tenant_id=tenant_b)
     factory = build_session_factory(pg_url)
-    with factory() as session:  # skipcq: PTC-W0062
-        with connector_tenant_context(tenant_a, session=session):
-            outcome = _run_yt_reporting(session, tenant_a)
-            # While in tenant A's context, tenant B's credential is invisible.
-            from ums_smart_revenue.db.security_models import (
-                ApiConnectorCredentialORM,
-            )
+    with factory() as session, connector_tenant_context(tenant_a, session=session):
+        outcome = _run_yt_reporting(session, tenant_a)
+        # While in tenant A's context, tenant B's credential is invisible.
+        from ums_smart_revenue.db.security_models import (
+            ApiConnectorCredentialORM,
+        )
 
-            visible_b = session.scalar(
-                select(sa.func.count())
-                .select_from(ApiConnectorCredentialORM)
-                .where(ApiConnectorCredentialORM.tenant_id == tenant_b)
-            )
-            assert visible_b == 0
+        visible_b = session.scalar(
+            select(sa.func.count())
+            .select_from(ApiConnectorCredentialORM)
+            .where(ApiConnectorCredentialORM.tenant_id == tenant_b)
+        )
+        assert visible_b == 0
     assert outcome.run is not None and outcome.run.status == "SUCCEEDED"
 
     # Tenant A produced exactly one run row; tenant B produced none.
@@ -459,32 +455,33 @@ def test_cross_tenant_platform_write_denied_under_elevation(
     )
 
     # (a) cross-tenant write under tenant-A context is rejected by WITH CHECK.
-    with factory() as session:  # skipcq: PTC-W0062
-        with connector_tenant_context(tenant_a, session=session):
-            with platform_lane(session):
-                with pytest.raises(Exception) as cross_tenant_exc:
-                    session.execute(
-                        insert_close,
-                        {"tid": tenant_b, "month": "2026-05"},
-                    )
-                    session.flush()
-                # Roll the aborted txn back inside the block so the lane's
-                # clean-exit restore sees no active transaction.
-                session.rollback()
+    with (
+        factory() as session,
+        connector_tenant_context(tenant_a, session=session),
+        platform_lane(session),
+    ):
+        with pytest.raises(Exception) as cross_tenant_exc:
+            session.execute(
+                insert_close,
+                {"tid": tenant_b, "month": "2026-05"},
+            )
+            session.flush()
+        # Roll the aborted txn back inside the block so the lane's
+        # clean-exit restore sees no active transaction.
+        session.rollback()
     assert "row-level security" in str(
         getattr(cross_tenant_exc.value, "orig", cross_tenant_exc.value)
     )
 
     # (b) with NO tenant context the same elevated INSERT is also rejected.
-    with factory() as session:  # skipcq: PTC-W0062
-        with platform_lane(session):
-            with pytest.raises(Exception) as no_context_exc:
-                session.execute(
-                    insert_close,
-                    {"tid": tenant_a, "month": "2026-06"},
-                )
-                session.flush()
-            session.rollback()
+    with factory() as session, platform_lane(session):
+        with pytest.raises(Exception) as no_context_exc:
+            session.execute(
+                insert_close,
+                {"tid": tenant_a, "month": "2026-06"},
+            )
+            session.flush()
+        session.rollback()
     assert "row-level security" in str(getattr(no_context_exc.value, "orig", no_context_exc.value))
 
     # Neither rejected INSERT left a durable row (read back via the owner login).
@@ -530,17 +527,16 @@ def test_projection_failure_rewrites_run_failed_and_persists_audit(
     class _BoomError(RuntimeError):
         pass
 
-    with factory() as session:  # skipcq: PTC-W0062
-        with connector_tenant_context(fresh_tenant, session=session):
-            with patch.object(
-                normalization,
-                "GoogleSourceNormalizer",
-            ) as normalizer_cls:
-                normalizer_cls.return_value.normalize_month.side_effect = _BoomError(
-                    "forced normalize failure"
-                )
-                with pytest.raises(_BoomError, match="forced normalize failure"):
-                    _run_yt_reporting(session, fresh_tenant)
+    with (
+        factory() as session,
+        connector_tenant_context(fresh_tenant, session=session),
+        patch.object(normalization, "GoogleSourceNormalizer") as normalizer_cls,
+    ):
+        normalizer_cls.return_value.normalize_month.side_effect = _BoomError(
+            "forced normalize failure"
+        )
+        with pytest.raises(_BoomError, match="forced normalize failure"):
+            _run_yt_reporting(session, fresh_tenant)
 
     engine = sa.create_engine(pg_url)
     try:
@@ -668,9 +664,8 @@ def test_per_report_failure_persists_failed_raw_file_and_audit_on_postgres(
 
     _seed_owner(pg_url, tenant_id=fresh_tenant, with_channel=True)
     factory = build_session_factory(pg_url)
-    with factory() as session:  # skipcq: PTC-W0062
-        with connector_tenant_context(fresh_tenant, session=session):
-            outcome = _run_yt_reporting_two_reports_second_parse_fails(session, fresh_tenant)
+    with factory() as session, connector_tenant_context(fresh_tenant, session=session):
+        outcome = _run_yt_reporting_two_reports_second_parse_fails(session, fresh_tenant)
     assert outcome.run is not None
     assert outcome.run.status == "PARTIAL"
     assert outcome.counts["reports_failed"] == 1

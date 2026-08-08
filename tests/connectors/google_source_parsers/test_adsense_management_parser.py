@@ -189,13 +189,12 @@ def test_unpaid_amount_is_classified_as_estimated() -> None:
 def test_rejects_non_finite_amount() -> None:
     """NaN Decimal strings must fail at the parser, not downstream."""
     payload = _load("sample_earnings_report_2026_04.json")
-    bad = {**payload}
     # headers order is [PRODUCT_CODE, COUNTRY_CODE, ESTIMATED_EARNINGS];
     # mutate the first row's metric cell (index 2) value to NaN.
-    first_row = {**bad["rows"][0]}  # skipcq: PY-W0072
-    first_row["cells"] = [*bad["rows"][0]["cells"]]
-    first_row["cells"][2] = {**first_row["cells"][2], "value": "NaN"}
-    bad["rows"] = [first_row, *bad["rows"][1:]]
+    cells = [*payload["rows"][0]["cells"]]
+    cells[2] = {**cells[2], "value": "NaN"}
+    first_row = {**payload["rows"][0], "cells": cells}
+    bad = {**payload, "rows": [first_row, *payload["rows"][1:]]}
     with pytest.raises(ParserError):
         list(AdSenseManagementParser().parse(bad, tenant_id=TENANT_ID))
 

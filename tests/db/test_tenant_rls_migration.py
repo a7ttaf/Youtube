@@ -102,37 +102,36 @@ def _assert_app_platform_cross_backend_delete_rejected(url: str) -> None:
     import psycopg
 
     libpq_url = url.replace("postgresql+psycopg://", "postgresql://")
-    with psycopg.connect(libpq_url, autocommit=True) as raw_conn:  # skipcq: PTC-W0062
-        with raw_conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO app_tenant_context "
-                "(backend_pid, tenant_id) VALUES (%s, gen_random_uuid())",
-                (_FAKE_CROSS_BACKEND_PID,),
-            )
+    with psycopg.connect(libpq_url, autocommit=True) as raw_conn, raw_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO app_tenant_context "
+            "(backend_pid, tenant_id) VALUES (%s, gen_random_uuid())",
+            (_FAKE_CROSS_BACKEND_PID,),
+        )
+        try:
+            cur.execute("SET ROLE app_platform")
             try:
-                cur.execute("SET ROLE app_platform")
-                try:
-                    cur.execute(
-                        "DELETE FROM app_tenant_context WHERE backend_pid = %s",
-                        (_FAKE_CROSS_BACKEND_PID,),
-                    )
-                except psycopg.errors.RaiseException as exc:
-                    assert "app_tenant_context DELETE restricted" in str(exc), (
-                        f"unexpected error: {exc}"
-                    )
-                else:
-                    raise AssertionError("guard trigger should reject cross-backend DELETE")
-                finally:
-                    cur.execute("RESET ROLE")
-            finally:
-                # Disable user-defined triggers only for test cleanup. The
-                # migration runner is a superuser in the disposable PG DB.
-                cur.execute("SET session_replication_role = replica")
                 cur.execute(
                     "DELETE FROM app_tenant_context WHERE backend_pid = %s",
                     (_FAKE_CROSS_BACKEND_PID,),
                 )
-                cur.execute("SET session_replication_role = origin")
+            except psycopg.errors.RaiseException as exc:
+                assert "app_tenant_context DELETE restricted" in str(exc), (
+                    f"unexpected error: {exc}"
+                )
+            else:
+                raise AssertionError("guard trigger should reject cross-backend DELETE")
+            finally:
+                cur.execute("RESET ROLE")
+        finally:
+            # Disable user-defined triggers only for test cleanup. The
+            # migration runner is a superuser in the disposable PG DB.
+            cur.execute("SET session_replication_role = replica")
+            cur.execute(
+                "DELETE FROM app_tenant_context WHERE backend_pid = %s",
+                (_FAKE_CROSS_BACKEND_PID,),
+            )
+            cur.execute("SET session_replication_role = origin")
 
 
 def test_rls_migration_creates_roles_policies_and_grants():

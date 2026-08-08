@@ -110,12 +110,11 @@ def test_last_refresh_status_check_positive_and_negative(
             {"id": credential_id},
         ).scalar()
     assert value == "failed"
-    with pytest.raises(DatabaseError):  # skipcq: PTC-W0062
-        with fresh_engine.begin() as conn:
-            conn.execute(
-                text(
-                    "UPDATE api_connector_credentials "
-                    "SET last_refresh_status = 'bogus' WHERE id = :id"
-                ),
-                {"id": credential_id},
-            )
+    with pytest.raises(DatabaseError), fresh_engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE api_connector_credentials "
+                "SET last_refresh_status = 'bogus' WHERE id = :id"
+            ),
+            {"id": credential_id},
+        )
