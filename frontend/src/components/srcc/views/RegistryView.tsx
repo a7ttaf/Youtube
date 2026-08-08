@@ -663,6 +663,10 @@ const currentMonth = (): string => {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 };
 
+/** May the operator act on the proposal form at all (permission held, no submit in flight)? */
+const canActOnProposal = (canManageRegistry: boolean, busy: boolean): boolean =>
+  canManageRegistry && !busy;
+
 /** Guard + field check for the proposal submission; extracted to keep AccountLinkProposalPanel CC low. */
 const isProposalSubmittable = (
   canManageRegistry: boolean,
@@ -673,7 +677,7 @@ const isProposalSubmittable = (
   reason: string,
 ): boolean => {
   return (
-    canManageRegistry && !busy && adsenseAccountId.trim() !== "" &&
+    canActOnProposal(canManageRegistry, busy) && adsenseAccountId.trim() !== "" &&
     contentOwnerId.trim() !== "" && effectiveMonthStart !== "" &&
     reason.trim() !== ""
   );
