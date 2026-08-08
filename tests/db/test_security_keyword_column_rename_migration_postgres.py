@@ -84,18 +84,22 @@ def _column_names(engine: object, table: str) -> set[str]:
 
 
 def _execute_script(engine: object, script_path: Path) -> None:
-    # ============================================================================
-    # Purpose: Apply a multi-statement bootstrap SQL file to the scratch
-    # schema, statement by statement, so the bootstrap mirror + seed pair is
-    # executed exactly as a fresh operator psql run would execute it.
-    # Database/ORM: Raw DDL/DML via exec_driver_sql; no ORM involvement.
-    # Standards: Splits on the statement terminator at line ends; comment-only
-    # and empty fragments are skipped. No parameter binding (file is static).
-    # Blast Radius: None detected — scratch-schema test helper only.
-    # Connections:
-    #   - File: backend/ums_smart_revenue/db/security_schema.sql -> DDL input.
-    #   - File: backend/ums_smart_revenue/db/security_seed.sql -> DML input.
-    # ============================================================================
+# ============================================================================
+# Purpose: Apply a multi-statement bootstrap SQL file to the scratch
+# schema, statement by statement, so the bootstrap mirror + seed pair is
+# executed exactly as a fresh operator psql run would execute it.
+# Database/ORM: Raw DDL/DML via exec_driver_sql; no ORM involvement.
+# Standards: Splits on the statement terminator at line ends; comment-only
+# and empty fragments are skipped. No parameter binding (file is static).
+# search_path is pinned to public for the transaction: the reset helper only
+# recreates the public schema, so unqualified DDL must land there
+# deterministically instead of following an ambient search_path (e.g. a
+# $user schema preceding public on a shared cluster).
+# Blast Radius: None detected — scratch-schema test helper only.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/security_schema.sql -> DDL input.
+#   - File: backend/ums_smart_revenue/db/security_seed.sql -> DML input.
+# ============================================================================
     raw = script_path.read_text(encoding="utf-8")
     statements = [
         chunk.strip()
@@ -105,6 +109,7 @@ def _execute_script(engine: object, script_path: Path) -> None:
         )
     ]
     with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL search_path TO public")
         for statement in statements:
             conn.exec_driver_sql(statement)
 
@@ -214,6 +219,11 @@ def test_bootstrap_mirror_and_seed_apply_with_renamed_columns(fresh_engine: obje
     _execute_script(fresh_engine, SEED_SQL)
 
     with fresh_engine.begin() as conn:
+        # Pin resolution to the reset schema for this transaction, then key
+        # the catalog check off current_schema() so it always inspects the
+        # same schema the unqualified bootstrap DDL applied into — never a
+        # hard-coded name that could disagree with ambient search_path.
+        conn.execute(text("SET LOCAL search_path TO public"))
         roles_count = conn.execute(text("SELECT count(*) FROM roles")).scalar_one()
         permissions_count = conn.execute(
             text("SELECT count(*) FROM permissions")
@@ -224,7 +234,7 @@ def test_bootstrap_mirror_and_seed_apply_with_renamed_columns(fresh_engine: obje
         sensitive_column = conn.execute(
             text(
                 "SELECT count(*) FROM information_schema.columns "
-                "WHERE table_schema = 'public' "
+                "WHERE table_schema = current_schema() "
                 "AND table_name = 'permissions' AND column_name = 'is_sensitive'"
             )
         ).scalar_one()
