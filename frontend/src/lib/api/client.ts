@@ -193,10 +193,31 @@ const withJsonBody = (
 };
 
 /**
- * Tenant-scoped API client hook. Returns a memoised {get, getBlob, post, put,
- * patch, delete} surface bound to the current tenant slug; every request
- * resolves against the configured API origin, injects X-UMS-Tenant, and
- * surfaces non-2xx (or malformed-JSON 2xx) responses as a typed ApiError.
+ * Purpose: The tenant-scoped API client hook — the single entry point every
+ *   screen uses to reach the backend. Returns a memoised
+ *   {get, getBlob, post, put, patch, delete} surface bound to the current
+ *   tenant slug, where each request resolves against the configured API origin,
+ *   carries the headers buildHeaders produces, and surfaces failures as ApiError.
+ * Database/ORM: None (frontend) — no client-side persistence or cache; each
+ *   call is a fetch against the backend's own guarded routes.
+ * Standards: Typed boundary throughout — request<T> strict-parses success
+ *   bodies so raw non-JSON text can never masquerade as a typed `T`, and no
+ *   error is swallowed: every non-2xx and every malformed-JSON 2xx throws.
+ *   The memo is keyed on tenantSlug so the bound identity cannot go stale.
+ * Blast Radius: Authorization / tenancy — binding happens here, so a wrong
+ *   tenantSlug would mis-scope every request the app makes. The fail-closed
+ *   ApiError boundary is what lets callers branch on status (e.g. 403 scope
+ *   guards) instead of silently rendering an error body as data. No finance
+ *   value is computed or mutated client-side; the backend stays authoritative
+ *   for every permission decision.
+ * Connections:
+ *   - File: frontend/src/contexts/TenantContext.tsx -> useTenant supplies the
+ *     slug this client is bound to.
+ *   - File: frontend/src/lib/api/client.ts -> buildHeaders injects the
+ *     tenant/auth headers; ApiError is the shared failure boundary; getBlob is
+ *     the non-JSON download path.
+ *   - File: frontend/vite.config.ts -> the dev proxy adds the trusted-gateway
+ *     token in Node, so the browser bundle never holds the secret.
  */
 export const useApiClient = () => {
   const { tenantSlug } = useTenant();

@@ -62,9 +62,24 @@ const formatNonUsdMoney = (amount: number, currency: string): string =>
 //   doing float math on it for any business purpose. We parse only to drive the
 //   display formatter; if the string is missing or unparsable we fall back to a
 //   safe placeholder rather than rendering "NaN".
+// Database/ORM: None (frontend) — formats an already-serialized API string; it
+//   reads no store and issues no request.
 // Standards: Backend serializes finance decimals as strings (decimal_to_api);
 //   null means "unknown". Display-only — never feed the parsed number back into
-//   a calculation that affects a stored/exported number.
+//   a calculation that affects a stored/exported number. Total by construction:
+//   an absent value returns the placeholder and an unparsable one echoes the raw
+//   string, so a money cell never renders "NaN" and never throws.
+// Blast Radius: Finance display. The Number() parse here exists ONLY to drive
+//   Intl formatting — routing it back into a stored or exported figure would put
+//   float math on a value the backend deliberately serialized as a decimal
+//   string. Permission gating is NOT done here: callers must go through
+//   financeDisplay, which substitutes RESTRICTED_FINANCE_VALUE, so calling
+//   formatMoney directly on a money value would bypass that gate.
+// Connections:
+//   - File: frontend/src/components/srcc/shared.tsx -> financeDisplay wraps this
+//     with the canViewFinance gate; views call that wrapper, not this.
+//   - File: backend/ums_smart_revenue/finance/decimal_formatting.py ->
+//     decimal_to_api produces the decimal-as-string inputs formatted here.
 // ============================================================================
 export const formatMoney = (
   value: string | null | undefined,
