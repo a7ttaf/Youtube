@@ -15,7 +15,7 @@ def build_engine():
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, _connection_record):
+    def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     FinanceBase.metadata.create_all(engine)

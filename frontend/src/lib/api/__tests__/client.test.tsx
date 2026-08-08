@@ -47,7 +47,9 @@ const lastFetchArgs = () => {
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
 const requireFetchArgs = () => {
   const args = lastFetchArgs();
-  if (!args) throw new Error("expected fetch to have been called");
+  if (!args) {
+    throw new Error("expected fetch to have been called");
+  }
   return args;
 };
 
