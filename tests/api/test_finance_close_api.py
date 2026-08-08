@@ -497,13 +497,12 @@ def test_finance_lock_requests_pessimistic_readiness_recheck(
     observed_for_update: list[bool] = []
 
     def recording_check_month(
-        self: SqlAlchemyFinanceCloseReadinessService,
+        _self: SqlAlchemyFinanceCloseReadinessService,
         month: str,
         *,
         for_update: bool = False,
     ) -> FinanceCloseReadiness:
         """Capture whether the lock path requested row-lock mode."""
-        del self  # skipcq: PTC-W0043
         observed_for_update.append(for_update)
         return FinanceCloseReadiness(month=month, blockers=[])
 
