@@ -327,9 +327,13 @@ const RegistryRow = ({
   const disabled = isWriteAction ? !canManageRegistry : !hasTraceNav;
   /** Route the row click to the Map, Assign, or Review handler for this channel. */
   const onClick = () => {
-    if (action === "Map") onMap(ch);
-    else if (action === "Assign") onAssign(ch);
-    else onReview(ch);
+    if (action === "Map") {
+      onMap(ch);
+    } else if (action === "Assign") {
+      onAssign(ch);
+    } else {
+      onReview(ch);
+    }
   };
 
   return (

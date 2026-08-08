@@ -785,7 +785,9 @@ const ExportsView = ({
    * avoid an unhandled promise rejection.
    */
   const onGenerate = () => {
-    if (!canSubmit) return;
+    if (!canSubmit) {
+      return;
+    }
     const body: ExportRequestBody = {
       export_type: effectiveExportType,
       scope_type: scopeType,

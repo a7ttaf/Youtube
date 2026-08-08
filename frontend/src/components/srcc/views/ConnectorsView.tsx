@@ -226,7 +226,9 @@ const ConnectorTestCell = ({
    * may manage connectors and the row is idle.
    */
   const onTest = () => {
-    if (!canManageConnectors || pending) return;
+    if (!canManageConnectors || pending) {
+      return;
+    }
     connectorTest.test(credential.connector_key, credential.account_id).catch(() => {
       // The hook already captured the typed error in connectorTest.errors;
       // the cell renders it below. Nothing more to do here.

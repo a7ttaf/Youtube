@@ -514,7 +514,9 @@ const TraceView = ({
 
   /** Generate the explanation for the selected channel-month-metric. */
   const runExplain = () => {
-    if (!effectiveChannelId) return;
+    if (!effectiveChannelId) {
+      return;
+    }
     // The hook captures its own error state; swallow the rejection here so an
     // un-actioned promise does not surface as an unhandled rejection.
     // FIX: dropped the `void` operator and let .catch() be the fire-and-forget
