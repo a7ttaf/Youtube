@@ -87,10 +87,17 @@ def _execute_script(engine: object, script_path: Path) -> None:
     # ============================================================================
     # Purpose: Apply a multi-statement bootstrap SQL file to the scratch
     # schema, statement by statement, so the bootstrap mirror + seed pair is
-    # executed exactly as a fresh operator psql run would execute it.
+    # exercised against the same driver the application uses.
     # Database/ORM: Raw DDL/DML via exec_driver_sql; no ORM involvement.
-    # Standards: Splits on the statement terminator at line ends; comment-only
-    # and empty fragments are skipped. No parameter binding (file is static).
+    # Standards: Splits on the statement terminator at line ends (";\n");
+    # comment-only and empty fragments are skipped. No parameter binding (file
+    # is static). This naive split is NOT a full psql-equivalent parser: it
+    # does not handle semicolons inside string literals, dollar-quoted bodies
+    # (DO $$...$$), or PL/pgSQL blocks. It is sufficient for the current
+    # bootstrap/seed files (which contain no such constructs); if a future
+    # edit adds dollar-quoted or string-embedded semicolons, switch this
+    # helper to a real statement splitter (e.g. psycopg2.sql, pglast) or shell
+    # out to psql rather than relying on the split.
     # search_path is pinned to public for the transaction: the reset helper only
     # recreates the public schema, so unqualified DDL must land there
     # deterministically instead of following an ambient search_path (e.g. a
