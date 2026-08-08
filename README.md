@@ -40,7 +40,8 @@ $env:UMS_DATABASE_URL = "postgresql+psycopg://ums:ums@localhost:5432/ums_smart_r
 $env:UMS_AUTHZ_SOURCE = "headers"
 # Generate a random token once; protected routes require it, and every client
 # (e.g. the frontend dev proxy via the repo-root .env) must present the same value.
-$env:UMS_TRUSTED_GATEWAY_TOKEN = [guid]::NewGuid().ToString()
+$gatewayToken = [guid]::NewGuid().ToString()
+$env:UMS_TRUSTED_GATEWAY_TOKEN = $gatewayToken
 
 # 4) Run migrations
 uv run alembic upgrade head

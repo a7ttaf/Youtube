@@ -85,7 +85,8 @@ Point the backend at the same database you seeded and set the same token:
 # From the repo root (PowerShell)
 $env:UMS_DATABASE_URL = "sqlite+pysqlite:///./demo.db"
 # Generate a random token once; the dev proxy (repo-root .env) must send the same value.
-$env:UMS_TRUSTED_GATEWAY_TOKEN = [guid]::NewGuid().ToString()
+$gatewayToken = [guid]::NewGuid().ToString()
+$env:UMS_TRUSTED_GATEWAY_TOKEN = $gatewayToken
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
