@@ -191,7 +191,8 @@ const defaultReportType = (options: ReportTypeOption[]): ExportType =>
 //   set is already permission-filtered, a stale selection degrades to an
 //   offered type instead of silently submitting one the viewer may not create;
 //   the backend's per-type gate remains authoritative either way.
-// Connections:
+// Connections: canOfferReportType + defaultReportType + canSubmitExportRequest
+//   (local), exports.py request_export (authoritative validation).
 //   - File: frontend/src/components/srcc/views/ExportsView.tsx ->
 //     canOfferReportType builds `options`; defaultReportType supplies the
 //     fallback; canSubmitExportRequest gates the submit itself.
@@ -306,7 +307,8 @@ const scopeLabel = (job: ExportJob): string => {
 //   POST /exports, and the `submitting` gate is what stops a double-click
 //   filing a duplicate audited job. It is a usability gate, not the
 //   authorization boundary.
-// Connections:
+// Connections: useExportActions.ts (create POST + in-flight flag),
+//   exports.py request_export (authoritative permission/scope gate).
 //   - File: frontend/src/lib/api/useExportActions.ts -> the create POST hook
 //     whose `loading` flag feeds the in-flight gate.
 //   - File: backend/ums_smart_revenue/api/exports.py:241 request_export -> the

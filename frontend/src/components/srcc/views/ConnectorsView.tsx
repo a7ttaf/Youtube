@@ -358,7 +358,8 @@ const ConnectorCredentialsTableHead = () => {
 //   what keeps a blank audit reason from reaching POST /connectors/jobs, and the
 //   in-flight guard is what stops a double-click submitting the same run twice.
 //   It is a usability gate, not the authorization boundary.
-// Connections:
+// Connections: connectors.py request_connector_job (authoritative gate +
+//   audited submit), useConnectors.ts useConnectorJobActions (POST + in-flight).
 //   - File: backend/ums_smart_revenue/api/connectors.py:710
 //     request_connector_job -> the authoritative permission gate and the
 //     audited job submission.
@@ -856,7 +857,8 @@ const SyncSuccess = ({ count }: { count: number }) => {
 //   whitespace-only payment field from reaching POST /adsense/sync-payments,
 //   and the in-flight guard is what stops a double-click upserting twice. It is
 //   a usability gate, not the authorization boundary.
-// Connections:
+// Connections: adsense.py sync_adsense_payments (authoritative gate + audited
+//   upsert), useAdsense.ts useAdsenseSyncActions (POST + loading flag).
 //   - File: backend/ums_smart_revenue/api/adsense.py:133 sync_adsense_payments
 //     -> the authoritative permission gate and the audited payment upsert.
 //   - File: frontend/src/lib/api/useAdsense.ts -> useAdsenseSyncActions owns

@@ -119,7 +119,8 @@ const describeLockBlockerDetail = (lockDetail: FinanceCloseLockErrorDetail): str
 //   becomes words the operator reads. Getting it wrong hides a real readiness
 //   blocker behind generic text, which is what makes the month look
 //   inexplicably stuck. It reports the refusal; it never suppresses one.
-// Connections:
+// Connections: finance_close.py lock/unlock (raise the 409 this reads),
+//   describeLockBlockerDetail (formats the structured branch).
 //   - File: backend/ums_smart_revenue/api/finance_close.py:142
 //     lock_finance_month / :179 unlock_finance_month -> raise the 409 whose
 //     body shape this reads.
@@ -234,7 +235,8 @@ const lockActionStateBlocked = (kind: LockAction, isLocked: boolean): boolean =>
 //   button firing the wrong transition for the month's current state; the
 //   `busy` guard stops a double-click filing a duplicate audited action. It is
 //   a usability gate, not the authorization or readiness boundary.
-// Connections:
+// Connections: finance_close.py lock/unlock (authoritative gate),
+//   lockActionPermitted + lockActionStateBlocked (the two local halves).
 //   - File: backend/ums_smart_revenue/api/finance_close.py:142
 //     lock_finance_month / :179 unlock_finance_month -> the authoritative
 //     permission gate, readiness recheck, and audited state change.

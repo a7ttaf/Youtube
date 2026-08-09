@@ -689,7 +689,8 @@ const canActOnProposal = (canManageRegistry: boolean, busy: boolean): boolean =>
 //   POST /revenue/channel-account-links, and the busy half of canActOnProposal
 //   is what stops a double-click filing a duplicate proposal. It cannot create
 //   a VERIFIED link — verification is a separate dual-gated admin flow.
-// Connections:
+// Connections: channel_account_links.py propose_channel_account_link
+//   (authoritative gate + audited insert), canActOnProposal (local half).
 //   - File: backend/ums_smart_revenue/api/channel_account_links.py:275
 //     propose_channel_account_link -> the authoritative permission gate and the
 //     audited insert.

@@ -518,9 +518,10 @@ const TraceView = ({
       return;
     }
     // The hook captures its own error state; swallow the rejection here so an
-    // un-actioned promise does not surface as an unhandled rejection.
-    // FIX: dropped the `void` operator and let .catch() be the fire-and-forget
-    // sink, satisfying JS-0098 without changing behavior.
+    // un-actioned promise does not surface as an unhandled rejection. The
+    // `void` operator is deliberately absent: .catch() is already the
+    // fire-and-forget sink, which conforms to JS-0098 without a marker. That
+    // was a lint-conformance change, not a bug fix, so it carries no FIX: tag.
     explanation
       .run({
         channelId: effectiveChannelId,
