@@ -74,7 +74,7 @@ committed allocation snapshot) — idempotent, safe to re-run:
 
 ```bash
 # From the repo root. Default DB is UMS_DATABASE_URL; for a throwaway SQLite:
-python scripts/seed_demo_month.py \
+uv run python scripts/seed_demo_month.py \
   --database-url "sqlite+pysqlite:///./demo.db" \
   --create-schema --month 2026-03
 ```
@@ -88,7 +88,7 @@ production gate would reject. To force the demo LOCKED state on a disposable
 database, add `--demo-lock-bypass`:
 
 ```bash
-python scripts/seed_demo_month.py \
+uv run python scripts/seed_demo_month.py \
   --database-url "sqlite+pysqlite:///./demo.db" \
   --create-schema --month 2026-03 --demo-lock-bypass
 ```
@@ -106,14 +106,14 @@ to).
 
 Point the backend at the same database you seeded and set the same token:
 
-```bash
+```powershell
 # From the repo root (PowerShell). First load the .env from step 1 with the
 # loader in the root README's Quickstart step 3 — that snippet is the single
 # canonical copy (see ../README.md#quickstart), kept in one place so a future
 # fix to it cannot land in only one of the two runbooks. Then point the backend
 # at the database you seeded, overriding the URL that .env just set:
 $env:UMS_DATABASE_URL = "sqlite+pysqlite:///./demo.db"
-python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
+uv run python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
 ```bash
@@ -134,7 +134,7 @@ export UMS_TRUSTED_GATEWAY_TOKEN=$(
 # proxy's default user id — the demo would 401 on every request.
 UMS_AUTHZ_SOURCE=headers \
 UMS_DATABASE_URL="sqlite+pysqlite:///./demo.db" \
-python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
+uv run python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
 ### 4. Run the dashboard
@@ -238,8 +238,8 @@ server (in-process FastAPI `TestClient` behind the real trusted-gateway header
 auth), run from the repo root:
 
 ```bash
-python scripts/smoke_mvp.py            # default month 2026-03
-python scripts/smoke_mvp.py --month 2026-03
+uv run python scripts/smoke_mvp.py            # default month 2026-03
+uv run python scripts/smoke_mvp.py --month 2026-03
 ```
 
 It seeds a throwaway SQLite db, asserts HTTP 200 + the key contract fields for
