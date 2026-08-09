@@ -45,10 +45,13 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 $fresh = python -c "import secrets; print(secrets.token_urlsafe(32))"
 #    Replace the line when .env already has the key, APPEND it when it does not.
 #    An in-place replace alone silently no-ops on an existing .env that never
-#    carried the key (or carries it commented out), and the failure is remote
-#    from the cause: the backend 503s on protected routes with the token unset,
-#    and the dev proxy sends no header at all, so every proxied route 401s.
-#    Writing the whole line also sidesteps `$1`-vs-`${1}` backreference parsing.
+#    carried the key (or carries it commented out), and the failure then lands
+#    far from its cause. In THIS block the loader below sources the token from
+#    .env, so a no-op leaves the backend unconfigured and
+#    _require_trusted_gateway_token returns 503 on protected routes before it
+#    ever inspects the request header — a 401 is the different, configured-but-
+#    mismatched case. Writing the whole line also sidesteps the `$1`-vs-`${1}`
+#    backreference parsing rule.
 $line  = "UMS_TRUSTED_GATEWAY_TOKEN=$fresh"
 $lines = @(Get-Content .env)
 $lines = if ($lines -match '^UMS_TRUSTED_GATEWAY_TOKEN=') {
@@ -88,7 +91,8 @@ commands in either shell:
 fresh=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
 #    Replace the line when .env already has the key, APPEND it when it does not —
 #    an in-place replace alone silently no-ops on an existing .env that never
-#    carried it, leaving the backend to 503 and the dev proxy to send no header.
+#    carried it, the export below would then pick up nothing, and the backend
+#    would 503 on protected routes rather than reporting anything about .env.
 #    `-i.bak` + `rm` is the in-place form that works on both GNU and BSD sed.
 if grep -q '^UMS_TRUSTED_GATEWAY_TOKEN=' .env; then
   sed -i.bak "s|^UMS_TRUSTED_GATEWAY_TOKEN=.*|UMS_TRUSTED_GATEWAY_TOKEN=$fresh|" .env
@@ -99,10 +103,11 @@ else
   if [ -n "$(tail -c1 .env)" ]; then echo >> .env; fi
   echo "UMS_TRUSTED_GATEWAY_TOKEN=$fresh" >> .env
 fi
-#    Export the value already in hand rather than reading it back: the backend
-#    reads os.environ directly and never parses .env itself, and skipping the
-#    round-trip avoids the CRLF/quote handling a re-read would need.
-export UMS_TRUSTED_GATEWAY_TOKEN="$fresh"
+#    Read the value back out of .env rather than exporting $fresh directly, so
+#    this shell provably holds the same value the dev proxy will read from the
+#    file in its own terminal — the write above is confirmed, not assumed.
+#    `tr -d '\r'` drops the CR a CRLF-saved .env would leave on the value.
+export UMS_TRUSTED_GATEWAY_TOKEN=$(sed -n 's/^UMS_TRUSTED_GATEWAY_TOKEN=//p' .env | head -n1 | tr -d '\r')
 export PYTHONPATH="$PWD/backend"
 export UMS_DATABASE_URL="postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
 export UMS_AUTHZ_SOURCE=headers
