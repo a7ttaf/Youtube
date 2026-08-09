@@ -786,10 +786,22 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     setError(describeImportError(caught));
   };
 
+  /**
+   * Refuse a second apply dispatch. A FUNCTION, not a render-time value: the
+   * `inFlightRef` read has to happen at call time, since beating a same-tick
+   * double click is exactly what the ref is for and a value captured during
+   * render would already be stale. `indeterminate` joins it because a blind
+   * retry after a lost response could double-submit a roster that already
+   * committed.
+   */
+  const applyDispatchBlocked = (): boolean => {
+    return busy || inFlightRef.current || indeterminate;
+  };
+
   /** Commit the plan; refuse while any row errors (the API 422s it anyway). */
   const apply = async () => {
-    if (busy || inFlightRef.current) return;
-    if (!canApplyImport(file, preview) || indeterminate) return;
+    if (applyDispatchBlocked()) return;
+    if (!canApplyImport(file, preview)) return;
     inFlightRef.current = true;
     setBusy(true);
     setApplying(true);
