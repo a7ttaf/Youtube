@@ -24,11 +24,11 @@ import type { ChannelMappingResponse } from "@/lib/api/types";
 //   - File: frontend/src/lib/api/types.ts -> ChannelMappingResponse.
 //   - File: backend/ums_smart_revenue/api/channels.py:368 update_channel_mapping.
 // ============================================================================
-export function useChannelMappingAction(): ( // skipcq: JS-0067
+export const useChannelMappingAction = (): ((
   channelId: string,
   primaryCompanyId: string,
   reason: string,
-) => Promise<ChannelMappingResponse> {
+) => Promise<ChannelMappingResponse>) => {
   const client = useApiClient();
 
   return useCallback(
@@ -39,4 +39,4 @@ export function useChannelMappingAction(): ( // skipcq: JS-0067
       ),
     [client],
   );
-}
+};

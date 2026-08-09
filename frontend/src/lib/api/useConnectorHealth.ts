@@ -64,9 +64,9 @@ export const buildConnectorCredentialHealthUrl = ({
  * @param query - Optional pagination: limit (1..100) and offset (>=0).
  * @returns Shared async state with the credential health array.
  */
-export function useConnectorCredentialHealth( // skipcq: JS-0067
+export const useConnectorCredentialHealth = (
   query: ConnectorCredentialHealthQuery = {},
-): AsyncState<ConnectorCredentialHealth[]> {
+): AsyncState<ConnectorCredentialHealth[]> => {
   const client = useApiClient();
   const { limit, offset } = query;
 
@@ -77,4 +77,4 @@ export function useConnectorCredentialHealth( // skipcq: JS-0067
   }, [client, limit, offset]);
 
   return useAsync(run);
-}
+};
