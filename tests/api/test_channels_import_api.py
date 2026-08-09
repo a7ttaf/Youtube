@@ -893,6 +893,39 @@ def test_plan_bound_apply_refuses_drift_in_a_field_the_preview_showed_unchanged(
     assert audit_sink.records == []
 
 
+def test_bound_apply_does_not_409_a_channel_repeated_across_groups():
+    """The guard must not read the import's OWN first write as concurrent drift.
+
+    A roster may list one channel once per group, and the extra copies plan as
+    UNCHANGED with an empty diff. The apply writes the channel once per copy,
+    so by the second copy the locked pre-state is what copy 1 just wrote. A
+    guard that compared an empty diff against the ORIGINAL stored state would
+    fire on the plan doing exactly what the operator approved — the same shape
+    of self-inflicted 409 the group ledger had to fix (review #184).
+    """
+    client, registry, groups, _sink = create_import_app()
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    # Copy 1 renames (a real UPDATE); copy 2 is membership-only (UNCHANGED).
+    body = import_csv(
+        f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+        f"{CHANNEL_ID},Alpha News,cms-radio,Yes",
+        header=header,
+    )
+    seed = post_import(client, import_csv(f"{CHANNEL_ID},Old Name,Yes"))
+    assert seed.status_code == 200
+
+    preview = post_import(client, body, dry_run="true").json()
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 200, response.text
+    stored = registry.get_channel(CHANNEL_ID)
+    assert stored is not None and stored.channel_name == "Alpha News"
+    # Both memberships landed, so the second copy really was executed.
+    for key in ("cms-tv", "cms-radio"):
+        group = groups.get_group_by_cms_id(key)
+        assert group is not None and group.channel_ids == (CHANNEL_ID,)
+
+
 def test_plan_bound_apply_proceeds_when_nothing_drifted():
     """Anti-vacuity: the opt-in guard must not reject the ordinary bound apply."""
     client, registry, _groups, _sink = create_import_app(_seeded_registry("Old Name"))
