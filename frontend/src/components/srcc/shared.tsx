@@ -75,7 +75,8 @@ const formatNonUsdMoney = (amount: number, currency: string): string =>
 //   string. Permission gating is NOT done here: callers must go through
 //   financeDisplay, which substitutes RESTRICTED_FINANCE_VALUE, so calling
 //   formatMoney directly on a money value would bypass that gate.
-// Connections:
+// Connections: financeDisplay (the permission-gated wrapper callers must use),
+//   backend decimal_formatting.decimal_to_api (produces the input strings).
 //   - File: frontend/src/components/srcc/shared.tsx -> financeDisplay wraps this
 //     with the canViewFinance gate; views call that wrapper, not this.
 //   - File: backend/ums_smart_revenue/finance/decimal_formatting.py ->

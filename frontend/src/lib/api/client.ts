@@ -9,6 +9,11 @@ import { useTenant } from "@/contexts/TenantContext";
  * the parsed (or raw-text) response body, and the resolved request URL so
  * callers can branch on `instanceof ApiError` + status (e.g. 403 scope guards).
  */
+// The JSON media type this client both requests and detects. Named once so the
+// Accept header, the Content-Type it sets on JSON bodies, and the response
+// content-type sniff in parseBody can never drift apart.
+const JSON_MEDIA_TYPE = "application/json";
+
 export class ApiError extends Error {
   readonly name = "ApiError";
   constructor(
@@ -53,7 +58,8 @@ export const resolveUrl = (path: string): string => {
  *   or-delete rule is what stops the browser bundle forging a tenant, and the empty
  *   slug case is what stops a hardcoded fallback pinning every principal to
  *   "ums" during the pre-hydration window (see the inline note below).
- * Connections:
+ * Connections: TenantContext (slug source), request<T> + getBlob (consumers),
+ *   vite.config.ts (dev-proxy counterpart).
  *   - File: frontend/src/contexts/TenantContext.tsx -> useTenant supplies the
  *     resolved slug; an empty value means bootstrap is still in flight.
  *   - File: frontend/src/lib/api/client.ts -> sole consumers are request<T> and
@@ -68,10 +74,10 @@ const buildHeaders = (
 ): Headers => {
   const headers = new Headers(init);
   if (!headers.has("Accept")) {
-    headers.set("Accept", "application/json");
+    headers.set("Accept", JSON_MEDIA_TYPE);
   }
   if (hasJsonBody && !headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
+    headers.set("Content-Type", JSON_MEDIA_TYPE);
   }
   // Only inject X-UMS-Tenant when the provider has a resolved slug. An empty
   // sentinel means we are still in the pre-hydration bootstrap window — the
@@ -150,7 +156,7 @@ const parseBody = async (
   }
   const contentType = res.headers.get("Content-Type") ?? "";
   const text = await res.text();
-  if (!contentType.includes("application/json")) {
+  if (!contentType.includes(JSON_MEDIA_TYPE)) {
     return text;
   }
   if (text.length === 0) {
@@ -210,7 +216,8 @@ const withJsonBody = (
  *   guards) instead of silently rendering an error body as data. No finance
  *   value is computed or mutated client-side; the backend stays authoritative
  *   for every permission decision.
- * Connections:
+ * Connections: TenantContext (slug binding), buildHeaders + ApiError + getBlob
+ *   (internals), vite.config.ts (dev-proxy token injection).
  *   - File: frontend/src/contexts/TenantContext.tsx -> useTenant supplies the
  *     slug this client is bound to.
  *   - File: frontend/src/lib/api/client.ts -> buildHeaders injects the
@@ -277,7 +284,8 @@ export const useApiClient = () => {
      *   path in the client, so the header injection and the non-2xx throw are
      *   what keep a cross-tenant or unauthorized artifact from being handed
      *   back. Read-only: no finance math, no mutation.
-     * Connections:
+     * Connections: AuditLogPanelHeader.tsx (sole caller), buildHeaders +
+     *   ApiError (shared header/failure boundary).
      *   - File: frontend/src/components/srcc/views/AuditLogPanelHeader.tsx ->
      *     sole caller; saves the CSV blob and reads the truncation header.
      *   - File: frontend/src/lib/api/client.ts -> buildHeaders supplies the
