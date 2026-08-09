@@ -34,7 +34,9 @@ and to match the token the dev proxy injects. Create `.env` with a fresh secret
 using the [root README's Quickstart step 3](../README.md#quickstart) — that
 snippet is the canonical copy and it **writes** the generated value over the
 placeholder `.env.example` ships, rather than printing it for a manual edit that
-is easy to skip.
+is easy to skip. Step 3 is given twice there, once in PowerShell and once in
+bash, so the Linux/macOS backend path in step 3 below has a shell-native way to
+create `.env` and persist the token.
 
 Keep that value in `.env` and let both steps below read it from there. Steps 3
 and 4 run in separate terminals, so a token exported in the backend's shell alone

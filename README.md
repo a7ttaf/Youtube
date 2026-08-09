@@ -43,7 +43,11 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 #    the backend and the dev proxy would both keep using it and this whole step
 #    would be decorative.
 $fresh = python -c "import secrets; print(secrets.token_urlsafe(32))"
-(Get-Content .env) -replace '^(UMS_TRUSTED_GATEWAY_TOKEN=).*', "`$1$fresh" | Set-Content .env
+#    Brace the backreference as ${1}: a bare `$1 followed by a token that starts
+#    with a digit reads as capture group 17, 19, ... which does not exist, so the
+#    `UMS_TRUSTED_GATEWAY_TOKEN=` prefix would be dropped and .env left with an
+#    unparseable line. token_urlsafe starts with a digit often enough to matter.
+(Get-Content .env) -replace '^(UMS_TRUSTED_GATEWAY_TOKEN=).*', "`${1}$fresh" | Set-Content .env
 Get-Content .env | Where-Object { $_ -notmatch '^\s*(#|$)' } | ForEach-Object {
   $name, $value = $_ -split '=', 2
   # Strip a matching pair of surrounding quotes; a quoted .env value would
@@ -60,6 +64,28 @@ uv run alembic upgrade head
 
 # 5) Run the API
 uv run uvicorn ums_smart_revenue.app:app --reload --host 0.0.0.0 --port 8000
+```
+
+On Linux/macOS, run step 3 in bash instead — steps 1, 2, 4, and 5 are the same
+commands in either shell:
+
+```bash
+# 3) Configure environment. Same effect as the PowerShell block above: seed .env
+#    from the template, then write a fresh secret OVER the placeholder
+#    .env.example ships so the backend and the dev proxy agree on one value.
+[ -f .env ] || cp .env.example .env
+fresh=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+#    `-i.bak` + `rm` is the in-place form that works on both GNU and BSD sed, and
+#    the `\1` backreference restores the assignment prefix so a token starting
+#    with a digit still lands as a parseable line.
+sed -i.bak "s|^\(UMS_TRUSTED_GATEWAY_TOKEN=\).*|\1$fresh|" .env && rm -f .env.bak
+#    Export the value already in hand rather than reading it back: the backend
+#    reads os.environ directly and never parses .env itself, and skipping the
+#    round-trip avoids the CRLF/quote handling a re-read would need.
+export UMS_TRUSTED_GATEWAY_TOKEN="$fresh"
+export PYTHONPATH="$PWD/backend"
+export UMS_DATABASE_URL="postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
+export UMS_AUTHZ_SOURCE=headers
 ```
 
 ### Run the tests
