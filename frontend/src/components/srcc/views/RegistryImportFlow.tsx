@@ -97,10 +97,10 @@ const describeImportError = (err: unknown): string => {
 };
 
 /**
- * Structural check that an unknown rejection `detail` is the refreshed import
- * plan (channels.py raises the full payload as `detail`).
+ * The fields a refreshed plan must carry, each with the check it must pass.
+ * A table rather than a chain of `if`s so the guard below stays one
+ * expression: each entry is a field the flow would otherwise use unguarded.
  *
- * Every field this checks is one the flow would otherwise use unguarded:
  *   `rows`    — replaces the preview table.
  *   `counts`  — CountsStrip calls Object.entries on it, so a rows-only
  *               payload would pass and then crash the step it was meant to
@@ -112,29 +112,32 @@ const describeImportError = (err: unknown): string => {
  *               one: no fingerprint compare, and the backend's pre-state
  *               guard is off, so drift is overwritten under "the file wins"
  *               by a request the operator believed was still bound to the
- *               plan on screen. Failing closed here means the malformed
- *               payload is shown as an error instead (review #184).
+ *               plan on screen (review #184).
  *
- * A `detail` that is not the whole plan falls through to the ordinary error
- * banner, which leaves the previous approved preview — and its fingerprint —
- * intact.
+ * Adding a field here is how a newly-relied-upon part of the payload gets
+ * covered — the guard needs no edit.
+ */
+const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
+  ["rows", (value) => Array.isArray(value)],
+  ["counts", (value) => typeof value === "object" && value !== null],
+  ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
+];
+
+/**
+ * Structural check that an unknown rejection `detail` is the refreshed import
+ * plan (channels.py raises the full payload as `detail`).
+ *
+ * Fails CLOSED: a `detail` that is not the whole plan falls through to the
+ * ordinary error banner, which leaves the previously approved preview — and
+ * its fingerprint — intact, so the next Apply is still bound to what the
+ * operator reviewed.
  */
 const isImportResultPayload = (detail: unknown): detail is ChannelImportResult => {
   if (typeof detail !== "object" || detail === null) {
     return false;
   }
-  const candidate = detail as {
-    rows?: unknown;
-    counts?: unknown;
-    plan_fingerprint?: unknown;
-  };
-  if (!Array.isArray(candidate.rows)) {
-    return false;
-  }
-  if (typeof candidate.counts !== "object" || candidate.counts === null) {
-    return false;
-  }
-  return typeof candidate.plan_fingerprint === "string" && candidate.plan_fingerprint !== "";
+  const candidate = detail as Record<string, unknown>;
+  return PLAN_PAYLOAD_FIELDS.every(([field, isValid]) => isValid(candidate[field]));
 };
 
 /**
