@@ -780,6 +780,30 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
+- ✅ Import stepper UI — PR-B of the import/sync UI arc (2026-08-09, branch
+  `feat/import-stepper-ui`) — closes the arc PR-A opened: the Registry
+  header's disabled Bulk Import placeholder becomes a live **Import CSV**
+  action that swaps the main panel for a three-step **Upload → Preview →
+  Applied** stepper over `POST /channels/import`, reusing PR-A's
+  `ActionStepper`/`OutcomeTable` primitives and the credential-fed
+  content-owner picker (empty state points at Connectors). Upload collects
+  the roster CSV + content owner + required audited reason and always fires
+  the read-only dry-run first; Preview renders per-row outcome chips
+  (CREATE/UPDATE/UNCHANGED/ERROR), the field-level `changes` diff, group
+  effect, the revenue flag (spec-mandated — on CREATE rows the diff is
+  empty by design, so the column is the only preview surface for the
+  default-true `revenue_required` before the all-or-nothing apply), and
+  non-zero counts, with **ERROR rows blocking Apply** (the API
+  422s the whole file — all-or-nothing; remedy named inline) and the 422
+  apply race (concurrent editor between preview and apply) replacing the
+  stale plan with the refreshed payload the backend ships as `detail`;
+  Applied echoes counts + reason, and leaving the flow reloads the table
+  (Cancel restores it untouched — no refetch unless an apply committed).
+  Backend touch (1, additive): a `can_import_channels` session capability
+  derived from MANAGE_CHANNELS **and** MANAGE_GROUPS (both-permission
+  render hint — a group-bearing roster needs both, so a channels-only
+  principal never sees a control that 403s mid-flow) gating the header
+  action — hidden, not disabled, without it. No new endpoint; no migration.
 - ✅ Groups view UI — PR-A of the import/sync UI arc (2026-08-07, branch
   `feat/groups-view-ui`) — the grouping loop gets its first operator surface:
   a new **CMS Groups** nav view (table-first: name · CMS id · owner stamp ·

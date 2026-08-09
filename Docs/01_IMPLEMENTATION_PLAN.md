@@ -456,8 +456,14 @@ on real ingestion (Phase 2) and the inventory load workflow.
   (`feat/groups-view-ui`, PR-A of the import/sync UI arc): a CMS Groups nav
   view — group table with owner stamps, credential-fed owner picker, sync
   dry-run→apply stepper (CONFLICT blocks apply, remedy named), clear-stamp +
-  archive actions — gated by the new `can_manage_groups` capability; PR-B
-  (CSV-import stepper in Registry) is the arc's remaining half.
+  archive actions — gated by the new `can_manage_groups` capability.
+  **Import stepper UI shipped 2026-08-09** (`feat/import-stepper-ui`, PR-B,
+  the arc's other half): the Registry header's live Import CSV control opens
+  an Upload → Preview → Applied stepper over `POST /channels/import`
+  (read-only dry-run always first; ERROR rows block Apply per the
+  all-or-nothing 422), gated by the new `canImportChannels` capability —
+  derived from MANAGE_CHANNELS **and** MANAGE_GROUPS, since a group-bearing
+  roster needs both. The import/sync UI arc is complete.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to

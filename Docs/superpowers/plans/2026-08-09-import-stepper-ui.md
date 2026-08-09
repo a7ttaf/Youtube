@@ -85,7 +85,13 @@ leaf-first ordering — the analyzer rules are now enforced repo-wide):
 - **Preview:** `OutcomeTable` — one row per CSV row: outcome chip
   (`Badge` tones: CREATE green, UPDATE blue, UNCHANGED muted, ERROR red
   via `tone: "warn"` row + verbatim backend `reason` text), changes
-  summary (joined `field: from → to`), group effect. Counts strip above.
+  summary (joined `field: from → to`), group effect, and the
+  **revenue flag** (`row.revenue_required` — spec-mandated; on CREATE
+  rows the changes mapping is empty by design, so this column is the
+  only preview surface for the finance-sensitive default-true flag
+  before the all-or-nothing apply; plan correction 2026-08-09 — the
+  first draft dropped it and adversarial review caught the deviation).
+  Counts strip above.
   **Apply disabled while any ERROR row exists** with the inline
   explanation that the API is all-or-nothing (it would 422). Apply fires
   `dryRun: false`.

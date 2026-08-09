@@ -61,7 +61,12 @@ limited to `INSIDE_CMS`/`OUTSIDE_CMS`/`UNKNOWN`). Authorization is
 `registry.manage_channels` at GLOBAL scope (a roster is not scoped to one
 company); a roster carrying any `group_id` additionally requires
 `registry.manage_groups` at global scope because imports must not bypass the
-group API's checks. The response (`dry_run` and apply alike) is the declared
+group API's checks. `GET /session/me` mirrors this pairing as the additive
+`canImportChannels` capability — true only when the principal holds BOTH
+permissions at global scope, so the SPA renders its Import CSV control only
+for principals whose group-bearing rosters cannot 403 mid-flow; the route's
+own checks stay the authority. The response (`dry_run` and apply alike) is
+the declared
 `ChannelImportResult` model: `counts` by outcome plus per-row entries carrying
 `row_number`, `youtube_channel_id`, `outcome` (`CREATE`/`UPDATE`/`UNCHANGED`/
 `ERROR`), the planned `channel_name`/`group_id`/`revenue_required`, the
