@@ -73,8 +73,7 @@ def build_session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, connection_record) -> None:
-        del connection_record  # skipcq: PTC-W0043
+    def _enable_foreign_keys(dbapi_connection, _connection_record) -> None:
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     OrgBase.metadata.create_all(engine)

@@ -94,9 +94,8 @@ class _StubConnection:
             has_driver_connection=has_driver_connection,
         )
 
-    def exec_driver_sql(self, sql: str, parameters=None):  # skipcq: PYL-R1711
+    def exec_driver_sql(self, sql: str, parameters=None):
         self.calls.append(sql)
-        return None
 
 
 class _StubBind:
@@ -304,9 +303,8 @@ def test_platform_lane_skips_role_restore_on_exception() -> None:
     successful child write). The active-lane flag is still cleared.
     """
     session = _StubSession(role=APP_TENANT_ROLE, dialect_name="postgresql")
-    with pytest.raises(ValueError, match="boom"):  # skipcq: PTC-W0062
-        with platform_lane(_stub_as_session(session)):
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), platform_lane(_stub_as_session(session)):
+        raise ValueError("boom")
     # Only the elevation was issued; no restore statement on the failure path.
     assert session._connection.calls == [f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"']
 
@@ -314,9 +312,8 @@ def test_platform_lane_skips_role_restore_on_exception() -> None:
 def test_platform_lane_noop_off_postgres_on_exception() -> None:
     """An exception on SQLite still emits no role statements."""
     session = _StubSession(role=APP_TENANT_ROLE, dialect_name="sqlite")
-    with pytest.raises(ValueError, match="boom"):  # skipcq: PTC-W0062
-        with platform_lane(_stub_as_session(session)):
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), platform_lane(_stub_as_session(session)):
+        raise ValueError("boom")
     assert session._connection.calls == []
 
 
@@ -333,8 +330,7 @@ def test_platform_lane_sets_active_flag_inside_and_clears_after() -> None:
         assert session.info.get(_PLATFORM_LANE_ACTIVE_KEY) is True
     assert _PLATFORM_LANE_ACTIVE_KEY not in session.info
 
-    with pytest.raises(ValueError, match="boom"):  # skipcq: PTC-W0062
-        with platform_lane(_stub_as_session(session)):
-            assert session.info.get(_PLATFORM_LANE_ACTIVE_KEY) is True
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), platform_lane(_stub_as_session(session)):
+        assert session.info.get(_PLATFORM_LANE_ACTIVE_KEY) is True
+        raise ValueError("boom")
     assert _PLATFORM_LANE_ACTIVE_KEY not in session.info

@@ -48,10 +48,9 @@ def test_sets_current_tenant_id_inside_block() -> None:
 def test_resets_context_on_exception() -> None:
     """An exception inside the block still resets ``TENANT_CTX`` to its prior value."""
     assert get_current_tenant() is None
-    with pytest.raises(ValueError, match="boom"):  # skipcq: PTC-W0062
-        with connector_tenant_context(_TENANT_ID):
-            assert get_current_tenant() is not None
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), connector_tenant_context(_TENANT_ID):
+        assert get_current_tenant() is not None
+        raise ValueError("boom")
     assert get_current_tenant() is None
 
 
@@ -135,9 +134,11 @@ def test_session_path_rejects_suspended_tenant() -> None:
     tenant_id = uuid4()
     session = _build_sqlite_session(rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.SUSPENDED)])
     try:
-        with pytest.raises(TenantLifecycleError) as exc_info:  # skipcq: PTC-W0062
-            with connector_tenant_context(tenant_id, session=session):
-                pytest.fail("block body must not run for a SUSPENDED tenant")
+        with (
+            pytest.raises(TenantLifecycleError) as exc_info,
+            connector_tenant_context(tenant_id, session=session),
+        ):
+            pytest.fail("block body must not run for a SUSPENDED tenant")
         assert exc_info.value.tenant_id == tenant_id
         assert exc_info.value.status == TenantStatus.SUSPENDED.value
         # The contextvar is NOT set when the lookup rejects.
@@ -159,9 +160,11 @@ def test_session_path_rejects_archived_tenant() -> None:
     tenant_id = uuid4()
     session = _build_sqlite_session(rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ARCHIVED)])
     try:
-        with pytest.raises(TenantLifecycleError) as exc_info:  # skipcq: PTC-W0062
-            with connector_tenant_context(tenant_id, session=session):
-                pytest.fail("block body must not run for an ARCHIVED tenant")
+        with (
+            pytest.raises(TenantLifecycleError) as exc_info,
+            connector_tenant_context(tenant_id, session=session),
+        ):
+            pytest.fail("block body must not run for an ARCHIVED tenant")
         assert exc_info.value.tenant_id == tenant_id
         assert exc_info.value.status == TenantStatus.ARCHIVED.value
         assert get_current_tenant() is None
@@ -174,9 +177,11 @@ def test_session_path_rejects_missing_tenant() -> None:
     tenant_id = uuid4()
     session = _build_sqlite_session(rows=[])  # no tenants seeded
     try:
-        with pytest.raises(TenantLifecycleError) as exc_info:  # skipcq: PTC-W0062
-            with connector_tenant_context(tenant_id, session=session):
-                pytest.fail("block body must not run for a missing tenant")
+        with (
+            pytest.raises(TenantLifecycleError) as exc_info,
+            connector_tenant_context(tenant_id, session=session),
+        ):
+            pytest.fail("block body must not run for a missing tenant")
         assert exc_info.value.tenant_id == tenant_id
         assert exc_info.value.status is None
         assert get_current_tenant() is None
@@ -196,9 +201,11 @@ def test_session_path_resets_context_on_lookup_failure() -> None:
     try:
         prior = get_current_tenant()
         assert prior is None
-        with pytest.raises(TenantLifecycleError):  # skipcq: PTC-W0062
-            with connector_tenant_context(tenant_id, session=session):
-                pass
+        with (
+            pytest.raises(TenantLifecycleError),
+            connector_tenant_context(tenant_id, session=session),
+        ):
+            pass
         assert get_current_tenant() is prior
     finally:
         session.close()

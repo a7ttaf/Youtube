@@ -38,7 +38,7 @@ from sqlalchemy import (
     inspect,
     text,
 )
-from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.engine import Connection, Engine, Inspector
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Skipped unsupported reflection of expression-based index "
@@ -55,9 +55,15 @@ UMS_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 # Duplicated from the migration module so accidental drift between the
 # two raises an assertion at test time rather than silently corrupting
 # a real schema.
+# The one operational table whose composite (tenant_id, id) key is referenced
+# by other tables' foreign keys, so its name appears in table, index,
+# unique-constraint, and referred_table assertions alike. Named once here so a
+# rename cannot leave some assertions pointing at the old table.
+ACCESS_SCOPES_TABLE = "access_scopes"
+
 EXPECTED_TABLES: tuple[str, ...] = (
     "users",
-    "access_scopes",
+    ACCESS_SCOPES_TABLE,
     "user_role_assignments",
     "user_permission_grants",
     "audit_logs",
@@ -163,7 +169,7 @@ def test_new_inserts_without_tenant_id_get_ums_default():
     assert _strip_uuid(str(row.tenant_id)) == _strip_uuid(UMS_TENANT_ID)
 
 
-def test_tenant_scoped_constraints_are_rewritten():  # skipcq: PY-R1000
+def test_tenant_scoped_constraints_are_rewritten():
     """Tenant-scoped uniqueness, keys, and FKs include tenant_id."""
     engine = _build_engine()
     with engine.begin() as connection:
@@ -176,293 +182,312 @@ def test_tenant_scoped_constraints_are_rewritten():  # skipcq: PY-R1000
 
         inspector = inspect(connection)
 
-        # Pre-existing row must still exist and carry the UMS tenant default.
-        pre_row = connection.execute(
-            text("SELECT tenant_id FROM access_scopes WHERE id = 'as-pre'")
-        ).one()
-        assert _strip_uuid(str(pre_row.tenant_id)) == _strip_uuid(UMS_TENANT_ID), (
-            "access_scopes pre-existing row must be backfilled to UMS tenant_id"
+        _assert_access_scopes_rewritten(connection, inspector)
+        _assert_role_assignment_scope_rewrites(inspector)
+        _assert_permission_grant_scope_rewrites(inspector)
+        _assert_user_and_connector_uniques(connection, inspector)
+        _assert_business_table_uniques(inspector)
+        _assert_youtube_channel_rewrites(inspector)
+        _assert_channel_group_member_fks(inspector)
+        _assert_org_unit_rewrites(inspector)
+        _assert_actor_fks_rewritten(inspector)
+
+
+def _assert_access_scopes_rewritten(connection: Connection, inspector: Inspector) -> None:
+    """Verify access_scopes keeps its seed row plus tenant-qualified uniques/partials."""
+    # Pre-existing row must still exist and carry the UMS tenant default.
+    pre_row = connection.execute(
+        text("SELECT tenant_id FROM access_scopes WHERE id = 'as-pre'")
+    ).one()
+    assert _strip_uuid(str(pre_row.tenant_id)) == _strip_uuid(UMS_TENANT_ID), (
+        "access_scopes pre-existing row must be backfilled to UMS tenant_id"
+    )
+
+    access_scope_indexes = {
+        index["name"]: index["column_names"] for index in inspector.get_indexes(ACCESS_SCOPES_TABLE)
+    }
+    assert access_scope_indexes["uq_access_scopes_scope_type_scope_id"] == [
+        "tenant_id",
+        "scope_type",
+        "scope_id",
+    ]
+    assert access_scope_indexes["uq_access_scopes_global_singleton"] == [
+        "tenant_id",
+        "scope_type",
+    ]
+    access_scope_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints(ACCESS_SCOPES_TABLE)
+    }
+    assert access_scope_uniques["uq_access_scopes_tenant_id_id"] == [
+        "tenant_id",
+        "id",
+    ]
+    # Verify partial index WHERE predicates survived the migration.
+    for idx_name, expected_where in (
+        (
+            "uq_access_scopes_scope_type_scope_id",
+            "scope_id IS NOT NULL",
+        ),
+        (
+            "uq_access_scopes_global_singleton",
+            "scope_type = 'global' AND scope_id IS NULL",
+        ),
+    ):
+        idx_sql = connection.execute(
+            text("SELECT sql FROM sqlite_master WHERE type='index' AND name=:n"),
+            {"n": idx_name},
+        ).scalar_one()
+        assert expected_where in idx_sql, (
+            f"{idx_name} partial WHERE clause not preserved after migration"
         )
 
-        access_scope_indexes = {
-            index["name"]: index["column_names"] for index in inspector.get_indexes("access_scopes")
-        }
-        assert access_scope_indexes["uq_access_scopes_scope_type_scope_id"] == [
-            "tenant_id",
-            "scope_type",
-            "scope_id",
-        ]
-        assert access_scope_indexes["uq_access_scopes_global_singleton"] == [
-            "tenant_id",
-            "scope_type",
-        ]
-        access_scope_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("access_scopes")
-        }
-        assert access_scope_uniques["uq_access_scopes_tenant_id_id"] == [
-            "tenant_id",
-            "id",
-        ]
-        # Verify partial index WHERE predicates survived the migration.
-        for idx_name, expected_where in (
-            (
-                "uq_access_scopes_scope_type_scope_id",
-                "scope_id IS NOT NULL",
-            ),
-            (
-                "uq_access_scopes_global_singleton",
-                "scope_type = 'global' AND scope_id IS NULL",
-            ),
-        ):
-            idx_sql = connection.execute(
-                text("SELECT sql FROM sqlite_master WHERE type='index' AND name=:n"),
-                {"n": idx_name},
-            ).scalar_one()
-            assert expected_where in idx_sql, (
-                f"{idx_name} partial WHERE clause not preserved after migration"
-            )
 
-        role_assignment_indexes = {
-            index["name"]: index["column_names"]
-            for index in inspector.get_indexes("user_role_assignments")
-        }
-        assert role_assignment_indexes["uq_active_user_role_scope"] == [
-            "tenant_id",
-            "user_id",
-            "role_key",
-            "scope_id",
-        ]
-        role_assignment_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")
-        }
-        role_scope_fk = role_assignment_fks["fk_user_role_assignments_tenant_scope"]
-        assert role_scope_fk["constrained_columns"] == ["tenant_id", "scope_id"]
-        assert role_scope_fk["referred_table"] == "access_scopes"
-        assert role_scope_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (role_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
+def _assert_role_assignment_scope_rewrites(inspector: Inspector) -> None:
+    """Verify user_role_assignments' active unique and scope FK include tenant_id."""
+    role_assignment_indexes = {
+        index["name"]: index["column_names"]
+        for index in inspector.get_indexes("user_role_assignments")
+    }
+    assert role_assignment_indexes["uq_active_user_role_scope"] == [
+        "tenant_id",
+        "user_id",
+        "role_key",
+        "scope_id",
+    ]
+    role_assignment_fks = {
+        fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")
+    }
+    role_scope_fk = role_assignment_fks["fk_user_role_assignments_tenant_scope"]
+    assert role_scope_fk["constrained_columns"] == ["tenant_id", "scope_id"]
+    assert role_scope_fk["referred_table"] == ACCESS_SCOPES_TABLE
+    assert role_scope_fk["referred_columns"] == ["tenant_id", "id"]
+    assert (role_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
-        permission_grant_indexes = {
-            index["name"]: index["column_names"]
-            for index in inspector.get_indexes("user_permission_grants")
-        }
-        assert permission_grant_indexes["uq_active_user_permission_scope"] == [
-            "tenant_id",
-            "user_id",
-            "permission_key",
-            "scope_id",
-        ]
-        permission_grant_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("user_permission_grants")
-        }
-        permission_scope_fk = permission_grant_fks["fk_user_permission_grants_tenant_scope"]
-        assert permission_scope_fk["constrained_columns"] == [
-            "tenant_id",
-            "scope_id",
-        ]
-        assert permission_scope_fk["referred_table"] == "access_scopes"
-        assert permission_scope_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (permission_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
-        user_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("users")
-        }
-        assert user_uniques["uq_users_tenant_id_id"] == ["tenant_id", "id"]
+def _assert_permission_grant_scope_rewrites(inspector: Inspector) -> None:
+    """Verify user_permission_grants' active unique and scope FK include tenant_id."""
+    permission_grant_indexes = {
+        index["name"]: index["column_names"]
+        for index in inspector.get_indexes("user_permission_grants")
+    }
+    assert permission_grant_indexes["uq_active_user_permission_scope"] == [
+        "tenant_id",
+        "user_id",
+        "permission_key",
+        "scope_id",
+    ]
+    permission_grant_fks = {
+        fk["name"]: fk for fk in inspector.get_foreign_keys("user_permission_grants")
+    }
+    permission_scope_fk = permission_grant_fks["fk_user_permission_grants_tenant_scope"]
+    assert permission_scope_fk["constrained_columns"] == [
+        "tenant_id",
+        "scope_id",
+    ]
+    assert permission_scope_fk["referred_table"] == ACCESS_SCOPES_TABLE
+    assert permission_scope_fk["referred_columns"] == ["tenant_id", "id"]
+    assert (permission_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
-        user_email_index_sql = connection.execute(
-            text(
-                "SELECT sql FROM sqlite_master "
-                "WHERE type = 'index' AND name = 'uq_users_email_lower'"
-            )
-        ).scalar_one()
-        assert "tenant_id" in user_email_index_sql
-        assert "lower(email)" in user_email_index_sql
 
-        api_connector_indexes = {
-            index["name"]: index["column_names"]
-            for index in inspector.get_indexes("api_connector_credentials")
-        }
-        assert api_connector_indexes["uq_api_connector_credentials_connector_account"] == [
-            "tenant_id",
-            "connector_key",
-            "account_id",
-        ]
+def _assert_user_and_connector_uniques(connection: Connection, inspector: Inspector) -> None:
+    """Verify users and api_connector_credentials uniques include tenant_id."""
+    user_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("users")
+    }
+    assert user_uniques["uq_users_tenant_id_id"] == ["tenant_id", "id"]
 
-        monthly_revenue_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("monthly_channel_revenue_facts")
-        }
-        assert monthly_revenue_uniques["uq_monthly_channel_revenue_source"] == [
-            "tenant_id",
-            "month",
-            "youtube_channel_id",
-            "source_kind",
-        ]
+    user_email_index_sql = connection.execute(
+        text("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'uq_users_email_lower'")
+    ).scalar_one()
+    assert "tenant_id" in user_email_index_sql
+    assert "lower(email)" in user_email_index_sql
 
-        bank_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("bank_reconciliation_entries")
-        }
-        assert bank_uniques["uq_bank_reconciliation_month_reference"] == [
-            "tenant_id",
-            "month",
-            "bank_reference",
-        ]
+    api_connector_indexes = {
+        index["name"]: index["column_names"]
+        for index in inspector.get_indexes("api_connector_credentials")
+    }
+    assert api_connector_indexes["uq_api_connector_credentials_connector_account"] == [
+        "tenant_id",
+        "connector_key",
+        "account_id",
+    ]
 
-        raw_report_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("raw_report_files")
-        }
-        assert raw_report_uniques["uq_raw_report_files_source_type_month_checksum"] == [
-            "tenant_id",
-            "source",
-            "report_type",
-            "report_month",
-            "checksum",
-        ]
 
-        explanation_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("number_explanations")
-        }
-        assert explanation_uniques["uq_number_explanations_entity_metric_month"] == [
-            "tenant_id",
-            "month",
-            "entity_type",
-            "entity_id",
-            "metric",
-        ]
+def _assert_business_table_uniques(inspector: Inspector) -> None:
+    """Verify finance/report table uniques and the month-close PK include tenant_id."""
+    monthly_revenue_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("monthly_channel_revenue_facts")
+    }
+    assert monthly_revenue_uniques["uq_monthly_channel_revenue_source"] == [
+        "tenant_id",
+        "month",
+        "youtube_channel_id",
+        "source_kind",
+    ]
 
-        finance_pk = inspector.get_pk_constraint("finance_month_close")
-        assert finance_pk["constrained_columns"] == ["tenant_id", "month"]
+    bank_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("bank_reconciliation_entries")
+    }
+    assert bank_uniques["uq_bank_reconciliation_month_reference"] == [
+        "tenant_id",
+        "month",
+        "bank_reference",
+    ]
 
-        adsense_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("adsense_payments")
-        }
-        assert adsense_uniques["uq_adsense_payments_month_name"] == [
-            "tenant_id",
-            "month",
-            "payment_name",
-        ]
+    raw_report_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("raw_report_files")
+    }
+    assert raw_report_uniques["uq_raw_report_files_source_type_month_checksum"] == [
+        "tenant_id",
+        "source",
+        "report_type",
+        "report_month",
+        "checksum",
+    ]
 
-        yt_channel_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("youtube_channels")}
-        yt_org_fk = yt_channel_fks["fk_youtube_channels_tenant_org_unit"]
-        assert yt_org_fk["constrained_columns"] == [
-            "tenant_id",
-            "primary_org_unit_id",
-        ]
-        assert yt_org_fk["referred_table"] == "org_units"
-        assert yt_org_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (yt_org_fk.get("options") or {}).get("ondelete") == "RESTRICT"
+    explanation_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("number_explanations")
+    }
+    assert explanation_uniques["uq_number_explanations_entity_metric_month"] == [
+        "tenant_id",
+        "month",
+        "entity_type",
+        "entity_id",
+        "metric",
+    ]
 
-        youtube_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("youtube_channels")
-        }
-        channel_group_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("channel_groups")
-        }
-        assert youtube_uniques["uq_youtube_channels_tenant_id_id"] == [
-            "tenant_id",
-            "id",
-        ]
-        assert channel_group_uniques["uq_channel_groups_tenant_id_id"] == [
-            "tenant_id",
-            "id",
-        ]
+    finance_pk = inspector.get_pk_constraint("finance_month_close")
+    assert finance_pk["constrained_columns"] == ["tenant_id", "month"]
 
-        group_member_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("channel_group_members")
-        }
-        tenant_group_fk = group_member_fks["fk_channel_group_members_tenant_group"]
-        assert tenant_group_fk["constrained_columns"] == ["tenant_id", "group_id"]
-        assert tenant_group_fk["referred_table"] == "channel_groups"
-        assert tenant_group_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (tenant_group_fk.get("options") or {}).get("ondelete") == "CASCADE"
+    adsense_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("adsense_payments")
+    }
+    assert adsense_uniques["uq_adsense_payments_month_name"] == [
+        "tenant_id",
+        "month",
+        "payment_name",
+    ]
 
-        tenant_channel_fk = group_member_fks["fk_channel_group_members_tenant_channel"]
-        assert tenant_channel_fk["constrained_columns"] == [
-            "tenant_id",
-            "channel_id",
-        ]
-        assert tenant_channel_fk["referred_table"] == "youtube_channels"
-        assert tenant_channel_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (tenant_channel_fk.get("options") or {}).get("ondelete") == "CASCADE"
 
-        org_units_uniques = {
-            constraint["name"]: constraint["column_names"]
-            for constraint in inspector.get_unique_constraints("org_units")
-        }
-        assert org_units_uniques["uq_org_units_tenant_id_id"] == ["tenant_id", "id"]
+def _assert_youtube_channel_rewrites(inspector: Inspector) -> None:
+    """Verify youtube_channels org FK and channel-table uniques include tenant_id."""
+    yt_channel_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("youtube_channels")}
+    yt_org_fk = yt_channel_fks["fk_youtube_channels_tenant_org_unit"]
+    assert yt_org_fk["constrained_columns"] == [
+        "tenant_id",
+        "primary_org_unit_id",
+    ]
+    assert yt_org_fk["referred_table"] == "org_units"
+    assert yt_org_fk["referred_columns"] == ["tenant_id", "id"]
+    assert (yt_org_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
-        org_units_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("org_units")}
-        parent_fk = org_units_fks["fk_org_units_tenant_parent"]
-        assert parent_fk["constrained_columns"] == ["tenant_id", "parent_id"]
-        assert parent_fk["referred_table"] == "org_units"
-        assert parent_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (parent_fk.get("options") or {}).get("ondelete") == "RESTRICT"
+    youtube_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("youtube_channels")
+    }
+    channel_group_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("channel_groups")
+    }
+    assert youtube_uniques["uq_youtube_channels_tenant_id_id"] == [
+        "tenant_id",
+        "id",
+    ]
+    assert channel_group_uniques["uq_channel_groups_tenant_id_id"] == [
+        "tenant_id",
+        "id",
+    ]
 
-        role_assign_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")
-        }
-        ura_user_fk = role_assign_fks["fk_user_role_assignments_tenant_user"]
-        assert ura_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
-        assert ura_user_fk["referred_table"] == "users"
-        assert ura_user_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (ura_user_fk.get("options") or {}).get("ondelete") == "CASCADE"
-        ura_ab_fk = role_assign_fks["fk_user_role_assignments_tenant_assigned_by"]
-        assert ura_ab_fk["constrained_columns"] == ["tenant_id", "assigned_by"]
-        assert ura_ab_fk["referred_table"] == "users"
-        assert ura_ab_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (ura_ab_fk.get("options") or {}).get("ondelete") == "RESTRICT"
-        ura_rb_fk = role_assign_fks["fk_user_role_assignments_tenant_revoked_by"]
-        assert ura_rb_fk["constrained_columns"] == ["tenant_id", "revoked_by"]
-        assert ura_rb_fk["referred_table"] == "users"
-        assert ura_rb_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (ura_rb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
-        perm_grant_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("user_permission_grants")
-        }
-        upg_user_fk = perm_grant_fks["fk_user_permission_grants_tenant_user"]
-        assert upg_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
-        assert upg_user_fk["referred_table"] == "users"
-        assert upg_user_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (upg_user_fk.get("options") or {}).get("ondelete") == "CASCADE"
-        upg_gb_fk = perm_grant_fks["fk_user_permission_grants_tenant_granted_by"]
-        assert upg_gb_fk["constrained_columns"] == ["tenant_id", "granted_by"]
-        assert upg_gb_fk["referred_table"] == "users"
-        assert upg_gb_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (upg_gb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
-        upg_rb_fk = perm_grant_fks["fk_user_permission_grants_tenant_revoked_by"]
-        assert upg_rb_fk["constrained_columns"] == ["tenant_id", "revoked_by"]
-        assert upg_rb_fk["referred_table"] == "users"
-        assert upg_rb_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (upg_rb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
+def _assert_channel_group_member_fks(inspector: Inspector) -> None:
+    """Verify channel_group_members FKs are tenant-qualified composite CASCADEs."""
+    group_member_fks = {
+        fk["name"]: fk for fk in inspector.get_foreign_keys("channel_group_members")
+    }
+    tenant_group_fk = group_member_fks["fk_channel_group_members_tenant_group"]
+    assert tenant_group_fk["constrained_columns"] == ["tenant_id", "group_id"]
+    assert tenant_group_fk["referred_table"] == "channel_groups"
+    assert tenant_group_fk["referred_columns"] == ["tenant_id", "id"]
+    assert (tenant_group_fk.get("options") or {}).get("ondelete") == "CASCADE"
 
-        audit_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")}
-        al_user_fk = audit_fks["fk_audit_logs_tenant_user"]
-        assert al_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
-        assert al_user_fk["referred_table"] == "users"
-        assert al_user_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (al_user_fk.get("options") or {}).get("ondelete") == "RESTRICT"
+    tenant_channel_fk = group_member_fks["fk_channel_group_members_tenant_channel"]
+    assert tenant_channel_fk["constrained_columns"] == [
+        "tenant_id",
+        "channel_id",
+    ]
+    assert tenant_channel_fk["referred_table"] == "youtube_channels"
+    assert tenant_channel_fk["referred_columns"] == ["tenant_id", "id"]
+    assert (tenant_channel_fk.get("options") or {}).get("ondelete") == "CASCADE"
 
-        connector_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("api_connector_credentials")
-        }
-        acc_cb_fk = connector_fks["fk_api_connector_credentials_tenant_created_by"]
-        assert acc_cb_fk["constrained_columns"] == ["tenant_id", "created_by"]
-        assert acc_cb_fk["referred_table"] == "users"
-        assert acc_cb_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (acc_cb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
-        acc_ub_fk = connector_fks["fk_api_connector_credentials_tenant_updated_by"]
-        assert acc_ub_fk["constrained_columns"] == ["tenant_id", "updated_by"]
-        assert acc_ub_fk["referred_table"] == "users"
-        assert acc_ub_fk["referred_columns"] == ["tenant_id", "id"]
-        assert (acc_ub_fk.get("options") or {}).get("ondelete") == "RESTRICT"
+
+def _assert_org_unit_rewrites(inspector: Inspector) -> None:
+    """Verify org_units unique and parent FK include tenant_id."""
+    org_units_uniques = {
+        constraint["name"]: constraint["column_names"]
+        for constraint in inspector.get_unique_constraints("org_units")
+    }
+    assert org_units_uniques["uq_org_units_tenant_id_id"] == ["tenant_id", "id"]
+
+    org_units_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("org_units")}
+    parent_fk = org_units_fks["fk_org_units_tenant_parent"]
+    assert parent_fk["constrained_columns"] == ["tenant_id", "parent_id"]
+    assert parent_fk["referred_table"] == "org_units"
+    assert parent_fk["referred_columns"] == ["tenant_id", "id"]
+    assert (parent_fk.get("options") or {}).get("ondelete") == "RESTRICT"
+
+
+def _assert_actor_fks_rewritten(inspector: Inspector) -> None:
+    """Verify every actor FK into users is a composite (tenant_id, actor) FK."""
+    role_assign_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")}
+    _assert_tenant_user_fk(
+        role_assign_fks, "fk_user_role_assignments_tenant_user", "user_id", "CASCADE"
+    )
+    _assert_tenant_user_fk(
+        role_assign_fks, "fk_user_role_assignments_tenant_assigned_by", "assigned_by", "RESTRICT"
+    )
+    _assert_tenant_user_fk(
+        role_assign_fks, "fk_user_role_assignments_tenant_revoked_by", "revoked_by", "RESTRICT"
+    )
+
+    perm_grant_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("user_permission_grants")}
+    _assert_tenant_user_fk(
+        perm_grant_fks, "fk_user_permission_grants_tenant_user", "user_id", "CASCADE"
+    )
+    _assert_tenant_user_fk(
+        perm_grant_fks, "fk_user_permission_grants_tenant_granted_by", "granted_by", "RESTRICT"
+    )
+    _assert_tenant_user_fk(
+        perm_grant_fks, "fk_user_permission_grants_tenant_revoked_by", "revoked_by", "RESTRICT"
+    )
+
+    audit_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")}
+    _assert_tenant_user_fk(audit_fks, "fk_audit_logs_tenant_user", "user_id", "RESTRICT")
+
+    connector_fks = {
+        fk["name"]: fk for fk in inspector.get_foreign_keys("api_connector_credentials")
+    }
+    _assert_tenant_user_fk(
+        connector_fks, "fk_api_connector_credentials_tenant_created_by", "created_by", "RESTRICT"
+    )
+    _assert_tenant_user_fk(
+        connector_fks, "fk_api_connector_credentials_tenant_updated_by", "updated_by", "RESTRICT"
+    )
+
+
+def _assert_tenant_user_fk(fks: dict, fk_name: str, actor_column: str, ondelete: str) -> None:
+    """Verify one composite FK into users(tenant_id, id) with the given ON DELETE."""
+    fk = fks[fk_name]
+    assert fk["constrained_columns"] == ["tenant_id", actor_column]
+    assert fk["referred_table"] == "users"
+    assert fk["referred_columns"] == ["tenant_id", "id"]
+    assert (fk.get("options") or {}).get("ondelete") == ondelete
 
 
 def test_downgrade_removes_tenant_id_from_every_table():
@@ -485,7 +510,7 @@ def test_downgrade_removes_tenant_id_from_every_table():
 
         # access_scopes partial indexes must not include tenant_id after downgrade.
         access_scope_idx = {
-            idx["name"]: idx["column_names"] for idx in inspector.get_indexes("access_scopes")
+            idx["name"]: idx["column_names"] for idx in inspector.get_indexes(ACCESS_SCOPES_TABLE)
         }
         assert "tenant_id" not in access_scope_idx.get("uq_access_scopes_scope_type_scope_id", [])
         assert "tenant_id" not in access_scope_idx.get("uq_access_scopes_global_singleton", [])
@@ -537,7 +562,7 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
     )
     Index("uq_users_email_lower", func.lower(users.c.email), unique=True)
     access_scopes = Table(
-        "access_scopes",
+        ACCESS_SCOPES_TABLE,
         metadata,
         Column("id", Text(), primary_key=True),
         Column("scope_type", Text(), nullable=False),
@@ -669,7 +694,7 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         api_connector_credentials.c.account_id,
         unique=True,
     )
-    org_units = Table(
+    Table(
         "org_units",
         metadata,
         Column("id", Text(), primary_key=True),
@@ -681,7 +706,6 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
             ondelete="RESTRICT",
         ),
     )
-    del org_units  # referenced only to register with metadata  # skipcq: PTC-W0043
     Table(
         "youtube_channels",
         metadata,
@@ -807,7 +831,7 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         ),
     )
     special_tables = {
-        "access_scopes",
+        ACCESS_SCOPES_TABLE,
         "api_connector_credentials",
         "adsense_payments",
         "audit_logs",

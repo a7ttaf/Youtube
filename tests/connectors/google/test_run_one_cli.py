@@ -542,10 +542,7 @@ def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
     def _build_fake_session_factory(_url: str):
         return _fake_factory
 
-    import contextlib
-
-    @contextlib.contextmanager
-    def _raise_on_enter(*_args, **_kwargs):
+    class _RaiseOnEnter:
         """Stand-in for the real helper that raises on every __enter__.
 
         Pins that the CLI catches the typed ``TenantLifecycleError`` raised
@@ -558,12 +555,19 @@ def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
         the try block, so the existing ``except GoogleConnectorError``
         translates the typed error to exit 2.
         """
-        raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
-        yield  # pragma: no cover -- unreachable  # skipcq: PYL-W0101
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Accept and ignore the production helper's call signature."""
+
+        def __enter__(self) -> None:
+            raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
+
+        def __exit__(self, *_exc_info: object) -> None:
+            return None  # pragma: no cover -- __enter__ always raises
 
     monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
     monkeypatch.setattr(module, "build_session_factory", _build_fake_session_factory)
-    monkeypatch.setattr(module, "connector_tenant_context", _raise_on_enter)
+    monkeypatch.setattr(module, "connector_tenant_context", _RaiseOnEnter)
 
     captured_err = io.StringIO()
     monkeypatch.setattr(sys, "stderr", captured_err)

@@ -695,21 +695,21 @@ def test_failed_facts_txn_is_rolled_back_before_run_rewrite() -> None:
     session = MagicMock(name="session")
     normalizer_cls = MagicMock(name="GoogleSourceNormalizer")
     normalizer_cls.return_value = normalizer
-    with (  # skipcq: PTC-W0062
+    with (
         patch.object(normalization, "get_month_close_status", return_value="OPEN"),
         patch.object(normalization, "GoogleSourceNormalizer", normalizer_cls),
         patch.object(normalization, "record_projection_failure", record_failure),
         patch.object(normalization, "SqlAlchemyAuditSink", return_value=MagicMock()),
+        pytest.raises(ValueError, match="unknown channel"),
     ):
-        with pytest.raises(ValueError, match="unknown channel"):
-            orchestrator._normalize_ingested_source_rows(
-                session=session,
-                tenant_id=TENANT_ID,
-                report_month=REPORT_MONTH,
-                dry_run=False,
-                triggered_by_user_id=TRIGGERED_BY,
-                outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
-            )
+        orchestrator._normalize_ingested_source_rows(
+            session=session,
+            tenant_id=TENANT_ID,
+            report_month=REPORT_MONTH,
+            dry_run=False,
+            triggered_by_user_id=TRIGGERED_BY,
+            outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
+        )
     # The session must be rolled back at least once: once for the failed
     # facts transaction, and at least once inside the rewrite helper. We
     # assert the rewrite path was entered (record_failure was called) and
