@@ -474,7 +474,33 @@ const RegistryMainPanel = ({
   );
 };
 
-/** Guard + field check for the mapping submission; extracted to keep MappingChangeRequestPanel CC low. */
+// ============================================================================
+// Purpose: Guard + field check for the channel-mapping submission — the
+//   operator holds the registry capability, no submit is in flight, and the
+//   channel id, company id, and audited reason are all non-blank. Extracted to
+//   keep MappingChangeRequestPanel's cyclomatic complexity below the DeepSource
+//   medium-risk threshold.
+// Database/ORM: None (frontend) — a pure predicate over resolved form state.
+// Standards: No client-side authorization is invented. `canManageRegistry` is a
+//   backend-derived capability, so this gates the affordance only and the
+//   backend's dual MANAGE_ORG_MAPPING check stays authoritative. The reason
+//   arrives already trimmed, so whitespace cannot pass as a supplied value.
+//   Side-effect free and total.
+// Blast Radius: Registry write + audit — a submit PATCHes a channel's org
+//   mapping, which moves the channel between company/sector rollups and so
+//   changes which principals can see its revenue downstream. This predicate is
+//   what keeps a blank audited reason or an unset channel/company from reaching
+//   PATCH /channels/{id}/mapping, and the `busy` flag is what stops a
+//   double-click filing a duplicate audited change. It is a usability gate, not
+//   the authorization boundary.
+// Connections: channels.py update_channel_mapping (authoritative gate + audited
+//   write), useChannelMapping.ts useChannelMappingAction (the PATCH + in-flight).
+//   - File: backend/ums_smart_revenue/api/channels.py:1123
+//     update_channel_mapping -> the authoritative permission check and the
+//     audited mapping write.
+//   - File: frontend/src/lib/api/useChannelMapping.ts:27
+//     useChannelMappingAction -> owns the PATCH and the busy flag passed here.
+// ============================================================================
 const isMappingSubmittable = (
   canManageRegistry: boolean,
   busy: boolean,
