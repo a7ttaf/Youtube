@@ -55,9 +55,15 @@ UMS_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 # Duplicated from the migration module so accidental drift between the
 # two raises an assertion at test time rather than silently corrupting
 # a real schema.
+# The one operational table whose composite (tenant_id, id) key is referenced
+# by other tables' foreign keys, so its name appears in table, index,
+# unique-constraint, and referred_table assertions alike. Named once here so a
+# rename cannot leave some assertions pointing at the old table.
+ACCESS_SCOPES_TABLE = "access_scopes"
+
 EXPECTED_TABLES: tuple[str, ...] = (
     "users",
-    "access_scopes",
+    ACCESS_SCOPES_TABLE,
     "user_role_assignments",
     "user_permission_grants",
     "audit_logs",
@@ -198,7 +204,7 @@ def _assert_access_scopes_rewritten(connection: Connection, inspector: Inspector
     )
 
     access_scope_indexes = {
-        index["name"]: index["column_names"] for index in inspector.get_indexes("access_scopes")
+        index["name"]: index["column_names"] for index in inspector.get_indexes(ACCESS_SCOPES_TABLE)
     }
     assert access_scope_indexes["uq_access_scopes_scope_type_scope_id"] == [
         "tenant_id",
@@ -211,7 +217,7 @@ def _assert_access_scopes_rewritten(connection: Connection, inspector: Inspector
     ]
     access_scope_uniques = {
         constraint["name"]: constraint["column_names"]
-        for constraint in inspector.get_unique_constraints("access_scopes")
+        for constraint in inspector.get_unique_constraints(ACCESS_SCOPES_TABLE)
     }
     assert access_scope_uniques["uq_access_scopes_tenant_id_id"] == [
         "tenant_id",
@@ -254,7 +260,7 @@ def _assert_role_assignment_scope_rewrites(inspector: Inspector) -> None:
     }
     role_scope_fk = role_assignment_fks["fk_user_role_assignments_tenant_scope"]
     assert role_scope_fk["constrained_columns"] == ["tenant_id", "scope_id"]
-    assert role_scope_fk["referred_table"] == "access_scopes"
+    assert role_scope_fk["referred_table"] == ACCESS_SCOPES_TABLE
     assert role_scope_fk["referred_columns"] == ["tenant_id", "id"]
     assert (role_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
@@ -279,7 +285,7 @@ def _assert_permission_grant_scope_rewrites(inspector: Inspector) -> None:
         "tenant_id",
         "scope_id",
     ]
-    assert permission_scope_fk["referred_table"] == "access_scopes"
+    assert permission_scope_fk["referred_table"] == ACCESS_SCOPES_TABLE
     assert permission_scope_fk["referred_columns"] == ["tenant_id", "id"]
     assert (permission_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
@@ -293,10 +299,7 @@ def _assert_user_and_connector_uniques(connection: Connection, inspector: Inspec
     assert user_uniques["uq_users_tenant_id_id"] == ["tenant_id", "id"]
 
     user_email_index_sql = connection.execute(
-        text(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type = 'index' AND name = 'uq_users_email_lower'"
-        )
+        text("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'uq_users_email_lower'")
     ).scalar_one()
     assert "tenant_id" in user_email_index_sql
     assert "lower(email)" in user_email_index_sql
@@ -442,9 +445,7 @@ def _assert_org_unit_rewrites(inspector: Inspector) -> None:
 
 def _assert_actor_fks_rewritten(inspector: Inspector) -> None:
     """Verify every actor FK into users is a composite (tenant_id, actor) FK."""
-    role_assign_fks = {
-        fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")
-    }
+    role_assign_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")}
     _assert_tenant_user_fk(
         role_assign_fks, "fk_user_role_assignments_tenant_user", "user_id", "CASCADE"
     )
@@ -455,9 +456,7 @@ def _assert_actor_fks_rewritten(inspector: Inspector) -> None:
         role_assign_fks, "fk_user_role_assignments_tenant_revoked_by", "revoked_by", "RESTRICT"
     )
 
-    perm_grant_fks = {
-        fk["name"]: fk for fk in inspector.get_foreign_keys("user_permission_grants")
-    }
+    perm_grant_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("user_permission_grants")}
     _assert_tenant_user_fk(
         perm_grant_fks, "fk_user_permission_grants_tenant_user", "user_id", "CASCADE"
     )
@@ -511,7 +510,7 @@ def test_downgrade_removes_tenant_id_from_every_table():
 
         # access_scopes partial indexes must not include tenant_id after downgrade.
         access_scope_idx = {
-            idx["name"]: idx["column_names"] for idx in inspector.get_indexes("access_scopes")
+            idx["name"]: idx["column_names"] for idx in inspector.get_indexes(ACCESS_SCOPES_TABLE)
         }
         assert "tenant_id" not in access_scope_idx.get("uq_access_scopes_scope_type_scope_id", [])
         assert "tenant_id" not in access_scope_idx.get("uq_access_scopes_global_singleton", [])
@@ -563,7 +562,7 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
     )
     Index("uq_users_email_lower", func.lower(users.c.email), unique=True)
     access_scopes = Table(
-        "access_scopes",
+        ACCESS_SCOPES_TABLE,
         metadata,
         Column("id", Text(), primary_key=True),
         Column("scope_type", Text(), nullable=False),
@@ -832,7 +831,7 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         ),
     )
     special_tables = {
-        "access_scopes",
+        ACCESS_SCOPES_TABLE,
         "api_connector_credentials",
         "adsense_payments",
         "audit_logs",

@@ -3315,7 +3315,8 @@ def _synthesise_analytics_channel_dimension(
 #               holding an elevated one across the blob upload where a slow
 #               backend can trip ``idle_in_transaction_session_timeout``. The
 #               nested-transaction check keeps the dry-run SAVEPOINT intact.
-# Connections:
+# Connections: youtube_analytics_client.py (client + channel list),
+#              google_source_parsers/youtube_analytics.py (parser), spec §5.5.
 #   - File: backend/ums_smart_revenue/connectors/google/youtube_analytics_client.py
 #     -> YouTubeAnalyticsClient.fetch_channel_report and list_target_channels.
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py
