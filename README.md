@@ -43,11 +43,22 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 #    the backend and the dev proxy would both keep using it and this whole step
 #    would be decorative.
 $fresh = python -c "import secrets; print(secrets.token_urlsafe(32))"
-#    Brace the backreference as ${1}: a bare `$1 followed by a token that starts
-#    with a digit reads as capture group 17, 19, ... which does not exist, so the
-#    `UMS_TRUSTED_GATEWAY_TOKEN=` prefix would be dropped and .env left with an
-#    unparseable line. token_urlsafe starts with a digit often enough to matter.
-(Get-Content .env) -replace '^(UMS_TRUSTED_GATEWAY_TOKEN=).*', "`${1}$fresh" | Set-Content .env
+#    Replace the line when .env already has the key, APPEND it when it does not.
+#    An in-place replace alone silently no-ops on an existing .env that never
+#    carried the key (or carries it commented out), and the failure is remote
+#    from the cause: the backend 503s on protected routes with the token unset,
+#    and the dev proxy sends no header at all, so every proxied route 401s.
+#    Writing the whole line also sidesteps `$1`-vs-`${1}` backreference parsing.
+$line  = "UMS_TRUSTED_GATEWAY_TOKEN=$fresh"
+$lines = @(Get-Content .env)
+$lines = if ($lines -match '^UMS_TRUSTED_GATEWAY_TOKEN=') {
+  $lines -replace '^UMS_TRUSTED_GATEWAY_TOKEN=.*', $line
+} else { $lines + $line }
+#    WriteAllLines writes UTF-8 with no BOM on both Windows PowerShell 5.1 and
+#    PowerShell 7+. Set-Content's default encoding differs between them (ANSI on
+#    5.1), and a silently re-encoded .env is one Vite's loader can mis-parse —
+#    which shows up as the same 401 as a wrong token.
+[System.IO.File]::WriteAllLines((Get-Item .env).FullName, [string[]]$lines)
 Get-Content .env | Where-Object { $_ -notmatch '^\s*(#|$)' } | ForEach-Object {
   $name, $value = $_ -split '=', 2
   # Strip a matching pair of surrounding quotes; a quoted .env value would
@@ -75,10 +86,19 @@ commands in either shell:
 #    .env.example ships so the backend and the dev proxy agree on one value.
 [ -f .env ] || cp .env.example .env
 fresh=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
-#    `-i.bak` + `rm` is the in-place form that works on both GNU and BSD sed, and
-#    the `\1` backreference restores the assignment prefix so a token starting
-#    with a digit still lands as a parseable line.
-sed -i.bak "s|^\(UMS_TRUSTED_GATEWAY_TOKEN=\).*|\1$fresh|" .env && rm -f .env.bak
+#    Replace the line when .env already has the key, APPEND it when it does not —
+#    an in-place replace alone silently no-ops on an existing .env that never
+#    carried it, leaving the backend to 503 and the dev proxy to send no header.
+#    `-i.bak` + `rm` is the in-place form that works on both GNU and BSD sed.
+if grep -q '^UMS_TRUSTED_GATEWAY_TOKEN=' .env; then
+  sed -i.bak "s|^UMS_TRUSTED_GATEWAY_TOKEN=.*|UMS_TRUSTED_GATEWAY_TOKEN=$fresh|" .env
+  rm -f .env.bak
+else
+  #  Add the newline first if .env's last line lacks one, or the append would
+  #  land on the end of that line instead of on a line of its own.
+  if [ -n "$(tail -c1 .env)" ]; then echo >> .env; fi
+  echo "UMS_TRUSTED_GATEWAY_TOKEN=$fresh" >> .env
+fi
 #    Export the value already in hand rather than reading it back: the backend
 #    reads os.environ directly and never parses .env itself, and skipping the
 #    round-trip avoids the CRLF/quote handling a re-read would need.
