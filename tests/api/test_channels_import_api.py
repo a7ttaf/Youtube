@@ -915,6 +915,17 @@ def test_bound_apply_does_not_409_a_channel_repeated_across_groups():
     assert seed.status_code == 200
 
     preview = post_import(client, body, dry_run="true").json()
+    # Pin the SCENARIO, not just the outcome: this only exercises the guard if
+    # copy 2 really is the empty-diff UNCHANGED row whose expected pre-state
+    # has to resolve to what copy 1 wrote. Without these, a planning change
+    # (say, duplicates becoming ERROR rows) could quietly stop covering it
+    # while the final-state assertions below still passed.
+    first, second = preview["rows"]
+    assert (first["outcome"], first["group_id"]) == ("UPDATE", "cms-tv")
+    assert first["changes"] == {"channel_name": {"from": "Old Name", "to": "Alpha News"}}
+    assert (second["outcome"], second["group_id"]) == ("UNCHANGED", "cms-radio")
+    assert second["changes"] == {}
+
     response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
 
     assert response.status_code == 200, response.text
