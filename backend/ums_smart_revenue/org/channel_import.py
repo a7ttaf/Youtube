@@ -658,6 +658,28 @@ def plan_channel_import(
     return ChannelImportPlan(entries=tuple(entries), counts=MappingProxyType(counts))
 
 
+# ============================================================================
+# Purpose: Report the revenue_source_status a CREATE row will be born with, so
+#   the preview promises the classification the write actually persists.
+# Database/ORM: None — pure function. Mirrors the literal both registry stores
+#   stamp on insert (ChannelRegistry.create_channel and
+#   SqlAlchemyChannelRegistry.create_channel), which is the coupling to keep:
+#   if either store's initial value changes, this must change with it or the
+#   preview starts promising something the write does not do.
+# Standards: Pure and total — no I/O, no store access, defined for both flag
+#   values. It DISCLOSES rather than decides: the stores remain the authority
+#   on what is written.
+# Blast Radius: What the operator is shown before approving a roster. The
+#   value feeds missing_official_revenue and the registry's recommended
+#   action once persisted, so a wrong disclosure misinforms a finance
+#   decision — but this function itself writes nothing.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_registry.py ->
+#     create_channel (the in-memory store's initial stamp).
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+#     create_channel (the SQL store's initial stamp).
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the disclosed row field.
+# ============================================================================
 def _created_revenue_source_status(revenue_required: bool) -> str:
     """The source status a CREATE will be born with.
 
@@ -668,6 +690,27 @@ def _created_revenue_source_status(revenue_required: bool) -> str:
     return "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
 
 
+# ============================================================================
+# Purpose: Report the revenue_source_status transition an UPDATE/UNCHANGED
+#   row's write will perform, or None when it leaves the classification alone.
+# Database/ORM: None — pure function over the ChannelRegistryEntry the caller
+#   already loaded. No lookups of its own.
+# Standards: Delegates to derive_revenue_source_status rather than
+#   re-implementing the rule, so the preview cannot drift from the write.
+#   Returns None on a no-op ON PURPOSE: the status is re-derived only when
+#   revenue_required flips, and announcing a reclassification on every roster
+#   re-import would be worse than silence — it would train operators to
+#   ignore the one disclosure that matters.
+# Blast Radius: What the operator is shown before approving a roster, and —
+#   because the write-boundary pre-state guard compares the disclosed `from`
+#   against the locked row — whether a plan-bound apply is refused as 409.
+#   Writes nothing itself.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_registry.py ->
+#     derive_revenue_source_status (the shared rule).
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _require_reviewed_source_status, which enforces the disclosed `from`.
+# ============================================================================
 def _planned_revenue_source_status(
     current: ChannelRegistryEntry, revenue_required: bool
 ) -> tuple[str | None, str] | None:
