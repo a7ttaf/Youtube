@@ -122,7 +122,10 @@ const isProposePost = (url: string, init?: RequestInit) =>
   url === "/revenue/channel-account-links" && init?.method === "POST";
 
 /** Resolve the registry's GET reads (channels, org-units, owner picker), or null. */
-const readRouteResponse = (url: string, overrides: RouteOverrides): Response | null => {
+const readRouteResponse = (
+  url: string,
+  overrides: RouteOverrides,
+): Response | Promise<Response> | null => {
   if (url === "/channels") {
     return channelsResponse(overrides);
   }
