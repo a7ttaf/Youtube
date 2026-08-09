@@ -1,0 +1,205 @@
+#!/usr/bin/env bats
+#
+# The layout guard is the only thing standing between a misplaced frontend test
+# and a green build that never ran it, so these tests assert the two ways it can
+# fail open: a test file the scan does not reach, and an include the drift check
+# accepts without vitest ever seeing it.
+
+setup() {
+  REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+  cd "$REPO_ROOT"
+
+  # Sandbox with the real script and libs, but a synthetic frontend/ tree, so a
+  # case can be built without touching the repository's own layout.
+  SANDBOX="$(mktemp -d)"
+  mkdir -p "$SANDBOX/ci/checks" "$SANDBOX/ci/lib"
+  cp "$REPO_ROOT/ci/checks/test-layout.sh" "$SANDBOX/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$SANDBOX/ci/lib/"
+
+  mkdir -p "$SANDBOX/frontend/src" "$SANDBOX/frontend/tests"
+  printf 'export const ok = true;\n' > "$SANDBOX/frontend/src/app.ts"
+  printf 'it("runs", () => {});\n' > "$SANDBOX/frontend/tests/app.test.ts"
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+}
+
+teardown() {
+  [ -n "${SANDBOX:-}" ] && rm -rf "$SANDBOX"
+}
+
+run_guard() {
+  run bash "$SANDBOX/ci/checks/test-layout.sh"
+}
+
+@test "test-layout: syntax check passes" {
+  bash -n ci/checks/test-layout.sh
+}
+
+@test "test-layout: passes on a conforming tree" {
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: passes on this repository as committed" {
+  run bash ci/checks/test-layout.sh
+  [ "$status" -eq 0 ]
+}
+
+# --- outside-tree scan --------------------------------------------------------
+
+@test "test-layout: catches a test under frontend/src" {
+  printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/src/app.test.ts"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/src/app.test.ts"* ]]
+}
+
+@test "test-layout: catches a test in a frontend subdirectory that is neither src nor tests" {
+  mkdir -p "$SANDBOX/frontend/e2e"
+  printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/e2e/checkout.test.ts"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/e2e/checkout.test.ts"* ]]
+}
+
+@test "test-layout: catches a test at the frontend root" {
+  printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/smoke.test.tsx"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/smoke.test.tsx"* ]]
+}
+
+@test "test-layout: ignores vendored and built output" {
+  mkdir -p "$SANDBOX/frontend/node_modules/pkg" "$SANDBOX/frontend/dist"
+  printf 'it("vendored", () => {});\n' > "$SANDBOX/frontend/node_modules/pkg/index.test.js"
+  printf 'it("built", () => {});\n' > "$SANDBOX/frontend/dist/bundle.test.js"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: catches a retired __tests__ directory outside src" {
+  mkdir -p "$SANDBOX/frontend/features/__tests__"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/features/__tests__"* ]]
+}
+
+@test "test-layout: catches a .spec file inside tests/ that the include never collects" {
+  printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/tests/app.spec.ts"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/tests/app.spec.ts"* ]]
+}
+
+# --- drift guard --------------------------------------------------------------
+
+@test "test-layout: catches a dropped include" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {},
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active include"* ]]
+}
+
+@test "test-layout: catches an include commented out with //" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    // include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active include"* ]]
+}
+
+@test "test-layout: catches an include commented out with a block comment" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    /*
+    include: ["tests/**/*.test.{ts,tsx}"],
+    */
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active include"* ]]
+}
+
+@test "test-layout: catches the glob surviving only in prose" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+// Tests used to live at tests/**/*.test.{ts,tsx}; now they do not.
+export default defineConfig({
+  test: {},
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active include"* ]]
+}
+
+@test "test-layout: accepts an active include carrying a trailing comment" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"], // keep in lockstep with test-layout.sh
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: catches a missing vitest config" {
+  rm "$SANDBOX/frontend/vitest.config.ts"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot confirm the test layout is declared"* ]]
+}
+
+# --- wiring -------------------------------------------------------------------
+#
+# Registering the check in manifest.yml documents it; only preflight.sh and
+# lanes.conf execute it. A guard nobody runs is the failure mode this whole
+# check exists to prevent, so assert the wiring rather than the registration.
+
+@test "test-layout: scheduled by preflight quick mode" {
+  run bash -c "sed -n '/^run_common_checks()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test-layout:./ci/checks/test-layout.sh"* ]]
+}
+
+@test "test-layout: scheduled by preflight full and ship modes" {
+  run bash -c "sed -n '/^run_full_or_ship_checks()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test-layout:./ci/checks/test-layout.sh"* ]]
+}
+
+@test "test-layout: registered as a blocking lane" {
+  run grep -E '^test-layout\|' ci/config/lanes.conf
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"./ci/checks/test-layout.sh|yes|"* ]]
+}

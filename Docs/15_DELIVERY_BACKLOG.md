@@ -694,10 +694,21 @@ single P-tier above.
   `1 === 2` was added and the suite still reported 314 passed. So the layout is
   enforced by a new **`ci/checks/test-layout.sh`** (manifest `test-layout`,
   blocker/hygiene/pre-commit, `languages: []` so it cannot be skipped by
-  language detection) which fails on four conditions: a test outside
-  `frontend/tests/`, a lingering `__tests__/` dir, a file in the right tree with
-  a suffix the glob misses (`*.spec.tsx`), and the `include` being removed from
-  the config. Each of the four was exercised and observed to exit 20.
+  language detection) which fails on four conditions: a test anywhere under
+  `frontend/` outside `frontend/tests/`, a lingering `__tests__/` dir, a file in
+  the right tree with a suffix the glob misses (`*.spec.tsx`), and the `include`
+  no longer being *live* config. Each of the four was exercised and observed to
+  exit 20. Two review findings hardened it before merge: the outside-tree scan
+  originally walked only `frontend/src`, so a `frontend/e2e/x.test.ts` was
+  excluded by `include` yet passed the guard; and the drift check was an
+  unanchored `grep -F`, which a commented-out `include:` satisfied while vitest
+  had already fallen back to its default glob. The manifest entry is
+  documentation — `ci/scripts/gen-checks-doc.sh` is its only consumer — so the
+  check is also scheduled in `ci/preflight.sh` (`run_common_checks` for
+  pre-commit `quick`, `run_full_or_ship_checks` for `full`/`ship`) and in
+  `ci/config/lanes.conf`; registered-but-never-run is the exact failure mode
+  this guard exists to prevent. `ci/tests/test_test_layout.bats` (18 cases)
+  pins all of it, including that the pre-fix script exits 0 on both evasions.
   **Rode along — the JS lanes were dead.** `ci/checks/tests.sh`,
   `ci/checks/typecheck.sh` and `ci/checks/node.sh` all `cd` to the repo root and
   bail on a missing root `package.json`/`tsconfig.json`; this repo keeps both in

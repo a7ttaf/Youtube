@@ -15,7 +15,6 @@ ci::common::section "Check: frontend test layout"
 
 FRONTEND_DIR="frontend"
 TESTS_DIR="$FRONTEND_DIR/tests"
-SRC_DIR="$FRONTEND_DIR/src"
 VITEST_CONFIG="$FRONTEND_DIR/vitest.config.ts"
 
 # The single declared layout. Kept in lockstep with test.include in
@@ -34,18 +33,32 @@ fail() {
   ci::log::error "$1"
 }
 
+# Everything under frontend/ except the declared tests/ tree is outside-tree, so
+# the walk below starts at frontend/ rather than frontend/src — a test dropped in
+# any other subdirectory is just as invisible to test.include. These prunes are
+# the directories that hold no first-party source: vendored packages and build
+# output. Anything else, including new top-level directories, is scanned.
+PRUNE=(
+  '(' -path "$TESTS_DIR"
+  -o -name 'node_modules'
+  -o -name 'dist'
+  -o -name 'build'
+  -o -name 'coverage'
+  -o -name '.next'
+  -o -name '.turbo'
+  -o -name '.vite'
+  ')' -prune -o
+)
+
 # ---------------------------------------------------------------------------
 # 1. No test files may live outside the declared tests/ tree.
 #    These would be silently skipped by test.include rather than run.
 # ---------------------------------------------------------------------------
-STRAY=""
-if [ -d "$SRC_DIR" ]; then
-  STRAY="$(find "$SRC_DIR" -type f \
-    \( -name '*.test.ts' -o -name '*.test.tsx' \
-    -o -name '*.test.js' -o -name '*.test.jsx' \
-    -o -name '*.spec.ts' -o -name '*.spec.tsx' \
-    -o -name '*.spec.js' -o -name '*.spec.jsx' \) 2>/dev/null | sort || true)"
-fi
+STRAY="$(find "$FRONTEND_DIR" "${PRUNE[@]}" -type f \
+  \( -name '*.test.ts' -o -name '*.test.tsx' \
+  -o -name '*.test.js' -o -name '*.test.jsx' \
+  -o -name '*.spec.ts' -o -name '*.spec.tsx' \
+  -o -name '*.spec.js' -o -name '*.spec.jsx' \) -print 2>/dev/null | sort || true)"
 
 if [ -n "$STRAY" ]; then
   fail "Test files found outside ${TESTS_DIR}/. vitest include is '${DECLARED_GLOB}', so these would NEVER RUN:"
@@ -60,15 +73,12 @@ if [ -n "$STRAY" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. No lingering __tests__ directories under src/ (the retired convention).
+# 2. No lingering __tests__ directories outside tests/ (the retired convention).
 # ---------------------------------------------------------------------------
-LEGACY_DIRS=""
-if [ -d "$SRC_DIR" ]; then
-  LEGACY_DIRS="$(find "$SRC_DIR" -type d -name '__tests__' 2>/dev/null | sort || true)"
-fi
+LEGACY_DIRS="$(find "$FRONTEND_DIR" "${PRUNE[@]}" -type d -name '__tests__' -print 2>/dev/null | sort || true)"
 
 if [ -n "$LEGACY_DIRS" ]; then
-  fail "Retired __tests__ directories still present under ${SRC_DIR}/:"
+  fail "Retired __tests__ directories still present under ${FRONTEND_DIR}/:"
   while IFS= read -r d; do
     [ -z "$d" ] && continue
     echo "  $d"
@@ -104,12 +114,59 @@ fi
 #    include is dropped, vitest silently falls back to its default glob and
 #    this whole check stops meaning anything.
 # ---------------------------------------------------------------------------
+
+# Drops // and /* */ comments so a commented-out include cannot satisfy the
+# guard. A bare substring search would accept an include that vitest never sees,
+# which is precisely the drift this section exists to catch.
+#
+# String literals are tracked because the declared glob contains "/*" itself
+# (tests/**/*.test...), which a naive scanner reads as a block-comment opener.
+strip_ts_comments() {
+  awk '
+    {
+      line = $0
+      out = ""
+      i = 1
+      n = length(line)
+      while (i <= n) {
+        c = substr(line, i, 1)
+        two = substr(line, i, 2)
+        if (in_block) {
+          if (two == "*/") { in_block = 0; i += 2 } else { i++ }
+          continue
+        }
+        if (in_str != "") {
+          out = out c
+          if (c == "\\") { out = out substr(line, i + 1, 1); i += 2; continue }
+          if (c == in_str) { in_str = "" }
+          i++
+          continue
+        }
+        if (two == "//") { break }
+        if (two == "/*") { in_block = 1; i += 2; continue }
+        if (c == "\"" || c == "'"'"'" || c == "`") { in_str = c }
+        out = out c
+        i++
+      }
+      print out
+    }
+  ' "$1"
+}
+
 if [ ! -f "$VITEST_CONFIG" ]; then
   fail "Missing ${VITEST_CONFIG}; cannot confirm the test layout is declared."
-elif ! grep -qF "$DECLARED_GLOB" "$VITEST_CONFIG"; then
-  fail "${VITEST_CONFIG} no longer declares include '${DECLARED_GLOB}'."
-  echo "  The layout must be declared in config, not left to vitest's default glob."
-  echo "  Restore the include, or update DECLARED_GLOB in this script to match."
+else
+  # The include must be live config on a single line: an active `include: [...]`
+  # carrying the declared glob. Fail closed on anything else — a reformat that
+  # this cannot read is drift the guard must surface rather than wave through.
+  ACTIVE_INCLUDE="$(strip_ts_comments "$VITEST_CONFIG" | grep -E '^[[:space:]]*include:[[:space:]]*\[' || true)"
+  if [ -z "$ACTIVE_INCLUDE" ] || ! printf '%s\n' "$ACTIVE_INCLUDE" | grep -qF "$DECLARED_GLOB"; then
+    fail "${VITEST_CONFIG} no longer declares an active include '${DECLARED_GLOB}'."
+    echo "  The layout must be declared in config, not left to vitest's default glob,"
+    echo "  and it must be live code — a commented-out include does not count."
+    echo "  Restore a single-line 'include: [...]' carrying the glob, or update"
+    echo "  DECLARED_GLOB in this script to match."
+  fi
 fi
 
 # ---------------------------------------------------------------------------

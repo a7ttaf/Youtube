@@ -502,12 +502,12 @@ run_phase() {
 
 # ---- Mode check groups ----
 run_common_checks() {
-  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"
+  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "test-layout:./ci/checks/test-layout.sh"
   run_phase     "node:./ci/checks/node.sh"     "python:./ci/checks/python.sh"
 }
 
 run_full_or_ship_checks() {
-  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "branch-protection:./ci/checks/branch-protection.sh"
+  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "branch-protection:./ci/checks/branch-protection.sh"     "test-layout:./ci/checks/test-layout.sh"
   run_phase     "security:./ci/checks/security.sh"
   run_phase     "node:./ci/checks/node.sh"     "python:./ci/checks/python.sh"     "build:./ci/checks/build.sh"
   run_phase     "debt:./ci/checks/debt.sh"
