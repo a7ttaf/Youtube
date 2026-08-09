@@ -472,7 +472,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /applying…/i })).toBeInTheDocument(),
+      // `u` flag: the busy label carries a non-ASCII ellipsis, so the pattern
+      // must be parsed as Unicode rather than as UTF-16 code units.
+      expect(screen.getByRole("button", { name: /applying…/iu })).toBeInTheDocument(),
     );
 
     // Mid-apply: both exits are disabled and each says why.

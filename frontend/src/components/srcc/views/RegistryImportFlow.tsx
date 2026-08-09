@@ -491,6 +491,51 @@ const APPLY_IN_FLIGHT_NOTE =
   "Wait for the request to finish — it cannot be aborted, and leaving now " +
   "would hide an import that still commits.";
 
+type PreviewActionsProps = {
+  hasErrors: boolean;
+  onBack: () => void;
+  onApply: () => void;
+  busy: boolean;
+};
+
+/**
+ * Preview's action row: Back and Apply, each with its own refusal rule. Split
+ * out of PreviewStep because both buttons are conditional twice over (disabled
+ * state plus the title explaining it), and carrying four such branches
+ * alongside the panel's layout pushed the step's cyclomatic complexity past
+ * the analyzer's medium-risk threshold.
+ *
+ * Back is refused while an apply is in flight. Leaving would neither abort nor
+ * invalidate the POST: a late success would commit the OLD roster while the
+ * operator, already back on Upload, believes the attempt was abandoned — and
+ * its setState would land on the Preview step it had left. `busy` clears in
+ * the apply's `finally` on success AND failure, so this never traps anyone.
+ */
+const PreviewActions = ({ hasErrors, onBack, onApply, busy }: PreviewActionsProps) => {
+  return (
+    <div className="action-row">
+      <button
+        className="ghost-button"
+        type="button"
+        disabled={busy}
+        title={busy ? APPLY_IN_FLIGHT_NOTE : undefined}
+        onClick={onBack}
+      >
+        Back
+      </button>
+      <button
+        className="primary-button"
+        type="button"
+        disabled={hasErrors || busy}
+        title={hasErrors ? "The API refuses plans with error rows (422)" : undefined}
+        onClick={onApply}
+      >
+        {busy ? "Applying…" : "Apply"}
+      </button>
+    </div>
+  );
+};
+
 type PreviewStepProps = {
   result: ChannelImportResult;
   onBack: () => void;
@@ -521,32 +566,12 @@ const PreviewStep = ({ result, onBack, onApply, busy, error }: PreviewStepProps)
       />
       <ErrorRowsNote show={hasErrors} />
       {error ? <ImportErrorBanner title="Apply failed" detail={error} /> : null}
-      <div className="action-row">
-        {/* Back is refused while an apply is in flight. Leaving would neither
-            abort nor invalidate the POST: a late success would commit the OLD
-            roster while the operator, already back on Upload, believes the
-            attempt was abandoned — and its setState would land on the
-            Preview step it had left. `busy` clears in the apply's `finally`
-            on success AND failure, so this never traps the operator. */}
-        <button
-          className="ghost-button"
-          type="button"
-          disabled={busy}
-          title={busy ? APPLY_IN_FLIGHT_NOTE : undefined}
-          onClick={onBack}
-        >
-          Back
-        </button>
-        <button
-          className="primary-button"
-          type="button"
-          disabled={hasErrors || busy}
-          title={hasErrors ? "The API refuses plans with error rows (422)" : undefined}
-          onClick={onApply}
-        >
-          {busy ? "Applying…" : "Apply"}
-        </button>
-      </div>
+      <PreviewActions
+        hasErrors={hasErrors}
+        onBack={onBack}
+        onApply={onApply}
+        busy={busy}
+      />
     </div>
   );
 };
