@@ -286,6 +286,12 @@ def apply_channel_import(
     same channels in opposite file order would otherwise each hold what the
     other waits for and PostgreSQL would abort one as a deadlock. The response
     payload and per-row numbering still follow the operator's file.
+
+    The two passes live in ``_apply_inventory_writes`` and
+    ``_apply_group_memberships``. The split is load-bearing for the lock order
+    described above — ALL channel locks are taken before ANY group lock — so
+    the passes must stay separate and in this sequence, not be interleaved
+    back into one loop over the plan.
     """
     # Counted at the WRITE BOUNDARY, never from plan.counts. The plan's
     # outcome came from a possibly-stale snapshot: a row planned UPDATE whose
@@ -295,54 +301,81 @@ def apply_channel_import(
     # import that recorded no channel update at all — the summary and the
     # per-row CHANNEL_UPDATED events would disagree in the same trail (review
     # #159 r3715617737). Same rule the per-row audit already follows.
+    applied_counts = _apply_inventory_writes(
+        plan,
+        registry=registry,
+        audit_sink=audit_sink,
+        actor=actor,
+        scope=scope,
+        content_owner_id=content_owner_id,
+        cms_status=cms_status,
+        reason=reason,
+        enforce_reviewed_pre_state=enforce_reviewed_pre_state,
+    )
+    _apply_group_memberships(
+        plan,
+        groups=groups,
+        audit_sink=audit_sink,
+        actor=actor,
+        scope=scope,
+        content_owner_id=content_owner_id,
+        reason=reason,
+    )
+    record_audit_event(
+        sink=audit_sink,
+        actor=actor,
+        event_type=AuditEventType.CHANNEL_IMPORTED,
+        entity_type="youtube_channel_import",
+        entity_id=content_owner_id,
+        scope=scope,
+        reason=reason,
+        details={
+            # The multipart filename is attacker-controlled and lands in
+            # audit_logs.details (JSONB); PostgreSQL rejects U+0000 inside a
+            # JSON string, so an unsanitized name would roll an otherwise
+            # valid import back as an unhandled 500 on this final append.
+            "filename": _safe_audit_filename(filename),
+            "content_owner_id": content_owner_id,
+            "cms_status": cms_status,
+            "counts": applied_counts,
+        },
+    )
+
+
+def _apply_inventory_writes(
+    plan: ChannelImportPlan,
+    *,
+    registry: ChannelRegistryStore,
+    audit_sink: AuditSink,
+    actor: UserPrincipal,
+    scope: AccessScope,
+    content_owner_id: str,
+    cms_status: str,
+    reason: str,
+    enforce_reviewed_pre_state: bool,
+) -> dict[str, int]:
+    """Run the FIRST pass — every channel row write and its audit event.
+
+    Returns the write-boundary tally the CHANNEL_IMPORTED summary must carry.
+    Split out of ``apply_channel_import`` with the group pass so neither the
+    caller nor either pass carries all three phases' branching at once; see
+    those functions for the ordering and audit rules this implements.
+    """
     applied_counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
     for entry in _channel_write_order(plan.entries):
         channel_id = entry.youtube_channel_id
         if channel_id is None or entry.channel_name is None:
             continue
-        event_type: AuditEventType | None = None
-        applied_changes: dict[str, tuple[object, object]] = {}
-        if entry.outcome is ChannelImportOutcome.CREATE:
-            registry.create_channel(
-                youtube_channel_id=channel_id,
-                channel_name=entry.channel_name,
-                primary_company_id=None,
-                cms_status=cms_status,
-                revenue_required=bool(entry.revenue_required),
-                content_owner_id=content_owner_id,
-            )
-            event_type = AuditEventType.CHANNEL_CREATED
-            applied_counts[ChannelImportOutcome.CREATE.value] += 1
-        elif entry.outcome in (ChannelImportOutcome.UPDATE, ChannelImportOutcome.UNCHANGED):
-            # The registry re-reads the row under a lock at the write boundary
-            # and returns what it actually replaced; the durable diff below is
-            # built from THAT, not the plan's possibly-stale snapshot, so a
-            # concurrent committed change cannot be hidden from the trail —
-            # and an UNCHANGED classification cannot preserve a concurrent
-            # writer's value over the roster's (review #159 r3713841231).
-            previous, updated = registry.update_inventory(
-                youtube_channel_id=channel_id,
-                channel_name=entry.channel_name,
-                cms_status=cms_status,
-                content_owner_id=content_owner_id,
-                revenue_required=bool(entry.revenue_required),
-            )
-            # Only for a plan-bound apply: the pre-state the operator
-            # reviewed must still be the stored one, or the diff on their
-            # screen is not the diff this write performs.
-            if enforce_reviewed_pre_state:
-                _require_reviewed_pre_state(entry, previous)
-            applied_changes = _entry_changes(previous, updated)
-            # The audit rule is the same for planned UPDATE and UNCHANGED:
-            # record CHANNEL_UPDATED only when the write-boundary diff is
-            # non-empty. A planned UPDATE whose target values a concurrent
-            # writer already committed replaces nothing — auditing it would
-            # claim a mutation that did not occur (review #159 r3713966806).
-            if applied_changes:
-                event_type = AuditEventType.CHANNEL_UPDATED
-                applied_counts[ChannelImportOutcome.UPDATE.value] += 1
-            else:
-                applied_counts[ChannelImportOutcome.UNCHANGED.value] += 1
+        event_type, applied_changes = _write_inventory_row(
+            entry,
+            registry=registry,
+            channel_id=channel_id,
+            channel_name=entry.channel_name,
+            content_owner_id=content_owner_id,
+            cms_status=cms_status,
+            enforce_reviewed_pre_state=enforce_reviewed_pre_state,
+            applied_counts=applied_counts,
+        )
         if event_type is not None:
             record_audit_event(
                 sink=audit_sink,
@@ -366,10 +399,91 @@ def apply_channel_import(
                     applied_changes=applied_changes,
                 ),
             )
-    # Group membership runs as a SECOND pass, ordered by (group key, channel
-    # id): every channel row lock is taken before any group row lock, and both
-    # resource classes are visited in a stable order, so overlapping imports
-    # can never hold one class while waiting on the other's.
+    return applied_counts
+
+
+def _write_inventory_row(
+    entry: ChannelImportPlanEntry,
+    *,
+    registry: ChannelRegistryStore,
+    channel_id: str,
+    channel_name: str,
+    content_owner_id: str,
+    cms_status: str,
+    enforce_reviewed_pre_state: bool,
+    applied_counts: dict[str, int],
+) -> tuple[AuditEventType | None, dict[str, tuple[object, object]]]:
+    """Write ONE row and report what to audit, tallying ``applied_counts``.
+
+    Returns ``(event_type, applied_changes)`` where a ``None`` event means the
+    write recorded nothing worth auditing. The tally is mutated here rather
+    than returned because it accumulates across rows and must count what the
+    write boundary did, not what the plan predicted.
+
+    ``channel_id`` and ``channel_name`` come in already narrowed to non-None by
+    the caller's skip check, so this never has to invent a fallback name.
+    """
+    if entry.outcome is ChannelImportOutcome.CREATE:
+        registry.create_channel(
+            youtube_channel_id=channel_id,
+            channel_name=channel_name,
+            primary_company_id=None,
+            cms_status=cms_status,
+            revenue_required=bool(entry.revenue_required),
+            content_owner_id=content_owner_id,
+        )
+        applied_counts[ChannelImportOutcome.CREATE.value] += 1
+        return AuditEventType.CHANNEL_CREATED, {}
+    if entry.outcome not in (ChannelImportOutcome.UPDATE, ChannelImportOutcome.UNCHANGED):
+        return None, {}
+    # The registry re-reads the row under a lock at the write boundary and
+    # returns what it actually replaced; the durable diff below is built from
+    # THAT, not the plan's possibly-stale snapshot, so a concurrent committed
+    # change cannot be hidden from the trail — and an UNCHANGED classification
+    # cannot preserve a concurrent writer's value over the roster's (review
+    # #159 r3713841231).
+    previous, updated = registry.update_inventory(
+        youtube_channel_id=channel_id,
+        channel_name=channel_name,
+        cms_status=cms_status,
+        content_owner_id=content_owner_id,
+        revenue_required=bool(entry.revenue_required),
+    )
+    # Only for a plan-bound apply: the pre-state the operator reviewed must
+    # still be the stored one, or the diff on their screen is not the diff
+    # this write performs.
+    if enforce_reviewed_pre_state:
+        _require_reviewed_pre_state(entry, previous)
+    applied_changes = _entry_changes(previous, updated)
+    # The audit rule is the same for planned UPDATE and UNCHANGED: record
+    # CHANNEL_UPDATED only when the write-boundary diff is non-empty. A planned
+    # UPDATE whose target values a concurrent writer already committed replaces
+    # nothing — auditing it would claim a mutation that did not occur (review
+    # #159 r3713966806).
+    if not applied_changes:
+        applied_counts[ChannelImportOutcome.UNCHANGED.value] += 1
+        return None, applied_changes
+    applied_counts[ChannelImportOutcome.UPDATE.value] += 1
+    return AuditEventType.CHANNEL_UPDATED, applied_changes
+
+
+def _apply_group_memberships(
+    plan: ChannelImportPlan,
+    *,
+    groups: ChannelGroupRegistryStore,
+    audit_sink: AuditSink,
+    actor: UserPrincipal,
+    scope: AccessScope,
+    content_owner_id: str,
+    reason: str,
+) -> None:
+    """Run the SECOND pass — group resolution, membership, and its audit.
+
+    Ordered by (group key, channel id): every channel row lock is taken in the
+    first pass before any group row lock here, and both resource classes are
+    visited in a stable order, so overlapping imports can never hold one class
+    while waiting on the other's.
+    """
     # CMS keys this run has already created. A roster legitimately lists
     # several channels under one NEW group key, and planning labels every such
     # row CREATE because the group was absent for all of them; the first row
@@ -390,49 +504,31 @@ def apply_channel_import(
             planned_action=entry.group_action,
             created_in_this_run=entry.group_id in groups_created_here,
         )
-        # A group creation or membership addition is a finance-scope
-        # mutation; without its own GROUP_UPDATED record an inventory-
-        # UNCHANGED row's group change would be invisible in the audit
-        # trail (the summary event carries only counts).
-        if group_change is not None:
-            group_action, group = group_change
-            if group_action == AUDIT_GROUP_ACTION_CREATED:
-                groups_created_here.add(entry.group_id)
-            record_audit_event(
-                sink=audit_sink,
-                actor=actor,
-                event_type=AuditEventType.GROUP_UPDATED,
-                entity_type="channel_group",
-                entity_id=group.id,
-                scope=scope,
-                reason=reason,
-                details={
-                    "action": group_action,
-                    "cms_group_id": entry.group_id,
-                    "group_type": group.group_type,
-                    "channel_id": channel_id,
-                    "source": AUDIT_SOURCE_BULK_IMPORT,
-                },
-            )
-    record_audit_event(
-        sink=audit_sink,
-        actor=actor,
-        event_type=AuditEventType.CHANNEL_IMPORTED,
-        entity_type="youtube_channel_import",
-        entity_id=content_owner_id,
-        scope=scope,
-        reason=reason,
-        details={
-            # The multipart filename is attacker-controlled and lands in
-            # audit_logs.details (JSONB); PostgreSQL rejects U+0000 inside a
-            # JSON string, so an unsanitized name would roll an otherwise
-            # valid import back as an unhandled 500 on this final append.
-            "filename": _safe_audit_filename(filename),
-            "content_owner_id": content_owner_id,
-            "cms_status": cms_status,
-            "counts": applied_counts,
-        },
-    )
+        # A group creation or membership addition is a finance-scope mutation;
+        # without its own GROUP_UPDATED record an inventory-UNCHANGED row's
+        # group change would be invisible in the audit trail (the summary
+        # event carries only counts).
+        if group_change is None:
+            continue
+        group_action, group = group_change
+        if group_action == AUDIT_GROUP_ACTION_CREATED:
+            groups_created_here.add(entry.group_id)
+        record_audit_event(
+            sink=audit_sink,
+            actor=actor,
+            event_type=AuditEventType.GROUP_UPDATED,
+            entity_type="channel_group",
+            entity_id=group.id,
+            scope=scope,
+            reason=reason,
+            details={
+                "action": group_action,
+                "cms_group_id": entry.group_id,
+                "group_type": group.group_type,
+                "channel_id": channel_id,
+                "source": AUDIT_SOURCE_BULK_IMPORT,
+            },
+        )
 
 
 def _safe_audit_filename(filename: str | None) -> str | None:
