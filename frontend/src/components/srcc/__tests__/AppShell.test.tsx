@@ -726,11 +726,16 @@ const IMPORT_CHANNELS = [
   },
 ];
 
+// A COMPLETE plan payload: useChannelImport structurally validates every 2xx
+// (a body missing plan_fingerprint would reach the next Apply as `undefined`
+// and silently unbind the write), so a shorthand fixture would be rejected
+// before these nav-latch tests ever reached Preview.
 const IMPORT_PLAN = {
   dry_run: true,
   content_owner_id: "OWNERaaa",
   cms_status: "INSIDE_CMS",
   counts: { CREATE: 1 },
+  plan_fingerprint: "plan-appshell-v1",
   rows: [
     {
       row_number: 1,
@@ -740,6 +745,7 @@ const IMPORT_PLAN = {
       group_id: null,
       group_action: null,
       revenue_required: true,
+      revenue_source_status: null,
       changes: {},
       reason: null,
     },

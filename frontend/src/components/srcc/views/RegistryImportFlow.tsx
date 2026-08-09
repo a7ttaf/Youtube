@@ -8,7 +8,7 @@ import type {
   ChannelImportResult,
   ChannelImportRowResult,
 } from "@/lib/api/types";
-import { useChannelImport } from "@/lib/api/useChannelImport";
+import { isChannelImportResult, useChannelImport } from "@/lib/api/useChannelImport";
 import { useContentOwners } from "@/lib/api/useContentOwners";
 import type { Severity } from "@/lib/mock/data";
 import { ActionStepper } from "../ActionStepper";
@@ -106,81 +106,6 @@ const describeImportError = (err: unknown): string => {
 };
 
 /**
- * The per-ROW fields the preview table indexes into rather than merely
- * renders. `Array.isArray(rows)` is not enough on its own: a payload like
- * `{rows: [{}], counts: {}, plan_fingerprint: "x"}` would satisfy the outer
- * guard, replace the approved preview, and then crash ChangesCell on
- * `Object.entries(undefined)` — the same failure the `counts` check was added
- * for, one level down (review #184).
- *
- *   `row_number` — the React key; a missing one collides across rows.
- *   `outcome`    — selects the chip and the ERROR row tone.
- *   `changes`    — ChangesCell calls Object.entries on it. The crash.
- *
- * The remaining wire fields are rendered through null-tolerant helpers
- * (`orMutedDash`, `GroupCell`'s explicit null branch), so a missing one
- * degrades to an em-dash rather than throwing, and is not worth failing an
- * otherwise-usable refreshed plan over.
- */
-const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
-  ["row_number", (value) => typeof value === "number"],
-  ["outcome", (value) => typeof value === "string"],
-  ["changes", (value) => typeof value === "object" && value !== null],
-];
-
-const isPlanRow = (row: unknown): boolean => {
-  if (typeof row !== "object" || row === null) {
-    return false;
-  }
-  const candidate = row as Record<string, unknown>;
-  return PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(candidate[field]));
-};
-
-/**
- * The fields a refreshed plan must carry, each with the check it must pass.
- * A table rather than a chain of `if`s so the guard below stays one
- * expression: each entry is a field the flow would otherwise use unguarded.
- *
- *   `rows`    — replaces the preview table.
- *   `counts`  — CountsStrip calls Object.entries on it, so a rows-only
- *               payload would pass and then crash the step it was meant to
- *               repair.
- *   `plan_fingerprint` — the SECURITY one. The next Apply sends it, and a
- *               missing value would reach useChannelImport as `undefined`,
- *               which omits `expected_plan_fingerprint` from the form. That
- *               silently DOWNGRADES the operator's bound apply to an unbound
- *               one: no fingerprint compare, and the backend's pre-state
- *               guard is off, so drift is overwritten under "the file wins"
- *               by a request the operator believed was still bound to the
- *               plan on screen (review #184).
- *
- * Adding a field here is how a newly-relied-upon part of the payload gets
- * covered — the guard needs no edit.
- */
-const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
-  ["rows", (value) => Array.isArray(value) && value.every(isPlanRow)],
-  ["counts", (value) => typeof value === "object" && value !== null],
-  ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
-];
-
-/**
- * Structural check that an unknown rejection `detail` is the refreshed import
- * plan (channels.py raises the full payload as `detail`).
- *
- * Fails CLOSED: a `detail` that is not the whole plan falls through to the
- * ordinary error banner, which leaves the previously approved preview — and
- * its fingerprint — intact, so the next Apply is still bound to what the
- * operator reviewed.
- */
-const isImportResultPayload = (detail: unknown): detail is ChannelImportResult => {
-  if (typeof detail !== "object" || detail === null) {
-    return false;
-  }
-  const candidate = detail as Record<string, unknown>;
-  return PLAN_PAYLOAD_FIELDS.every(([field, isValid]) => isValid(candidate[field]));
-};
-
-/**
  * Extract the refreshed plan an apply rejection carries, or null for every
  * other failure. TWO statuses ship the full plan as their `detail`, and both
  * mean "the plan you saw is not the plan we would execute":
@@ -204,7 +129,7 @@ const applyRaceDetail = (err: unknown): ChannelImportResult | null => {
   }
   const body = err.body as { detail?: unknown } | null;
   const detail = body?.detail;
-  if (isImportResultPayload(detail)) {
+  if (isChannelImportResult(detail)) {
     return detail;
   }
   return null;

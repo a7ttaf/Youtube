@@ -36,6 +36,70 @@ import type { ChannelImportResult } from "@/lib/api/types";
 //       -> POST /channels/import.
 // ============================================================================
 
+/**
+ * The per-ROW fields any consumer of a plan INDEXES into rather than merely
+ * renders, each with the check it must pass.
+ *
+ *   `row_number` — the preview's React key; a missing one collides.
+ *   `outcome`    — selects the row chip and the ERROR tone.
+ *   `changes`    — rendered with Object.entries, so a missing one throws.
+ */
+const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
+  ["row_number", (value) => typeof value === "number"],
+  ["outcome", (value) => typeof value === "string"],
+  ["changes", (value) => typeof value === "object" && value !== null],
+];
+
+const isPlanRow = (row: unknown): boolean => {
+  if (typeof row !== "object" || row === null) {
+    return false;
+  }
+  const candidate = row as Record<string, unknown>;
+  return PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(candidate[field]));
+};
+
+/**
+ * The fields a plan payload must carry. `plan_fingerprint` is the SECURITY
+ * one: a plan accepted without it reaches the next Apply as `undefined`,
+ * which omits `expected_plan_fingerprint` from the form and silently
+ * DOWNGRADES the write to the backend's unbound, file-wins path — no
+ * fingerprint compare and no write-boundary pre-state guard, under a request
+ * the operator believes is still bound to the plan on screen (review #184).
+ */
+const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
+  ["rows", (value) => Array.isArray(value) && value.every(isPlanRow)],
+  ["counts", (value) => typeof value === "object" && value !== null],
+  ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
+];
+
+/**
+ * Structural check that an unknown payload is a usable import plan.
+ *
+ * Shared by BOTH directions on purpose: the rejection `detail` a 409/422
+ * carries, and — since `client.post` only CASTS the body to its type
+ * parameter — every successful 200 as well. A legacy or malformed success
+ * body is not a smaller version of a plan; trusting one is what lets an
+ * unbound apply through the front door.
+ */
+export const isChannelImportResult = (payload: unknown): payload is ChannelImportResult => {
+  if (typeof payload !== "object" || payload === null) {
+    return false;
+  }
+  const candidate = payload as Record<string, unknown>;
+  return PLAN_PAYLOAD_FIELDS.every(([field, isValid]) => isValid(candidate[field]));
+};
+
+/** Thrown when the backend answers 2xx with something that is not a plan. */
+export class ChannelImportShapeError extends Error {
+  constructor() {
+    super(
+      "The import responded with an unrecognised result, so the plan could " +
+        "not be read.",
+    );
+    this.name = "ChannelImportShapeError";
+  }
+}
+
 export const useChannelImport = (): ((
   args: {
     file: File;
@@ -62,7 +126,20 @@ export const useChannelImport = (): ((
       if (expectedPlanFingerprint !== undefined) {
         form.append("expected_plan_fingerprint", expectedPlanFingerprint);
       }
-      return client.post<ChannelImportResult>("/channels/import", form);
+      return client
+        .post<ChannelImportResult>("/channels/import", form)
+        .then((result) => {
+          // A 2xx is not a promise about SHAPE — client.post casts, it does
+          // not validate. Rejecting here keeps a malformed dry run a
+          // read-only failure, and routes a malformed apply into the flow's
+          // INDETERMINATE path (this is not an ApiError, so it is not on the
+          // definite-rejection list) — which is right: the write may well
+          // have committed, only the body was unusable.
+          if (!isChannelImportResult(result)) {
+            throw new ChannelImportShapeError();
+          }
+          return result;
+        });
     },
     [client],
   );

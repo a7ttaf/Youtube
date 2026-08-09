@@ -198,4 +198,42 @@ describe("useChannelImport", () => {
       body: { detail: BLOCKED_APPLY_DETAIL },
     });
   });
+  it("rejects a 2xx whose body is not a usable plan", async () => {
+    // client.post CASTS the body to its type parameter; it does not validate.
+    // A legacy or malformed 200 missing plan_fingerprint would otherwise be
+    // accepted as a preview, and the next Apply would send NO
+    // expected_plan_fingerprint — silently downgrading the write to the
+    // backend's unbound, file-wins path (review #184).
+    const noFingerprint = { ...DRY_RUN_RESULT } as Record<string, unknown>;
+    delete noFingerprint.plan_fingerprint;
+    fetchMock().mockResolvedValue(jsonResponse(noFingerprint));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("rejects a 2xx carrying an empty JSON body", async () => {
+    // The apply case: an empty object would advance the flow with no usable
+    // result AFTER the write may have committed. Rejecting sends it down the
+    // indeterminate path instead — this is not an ApiError, so it is not on
+    // the flow's definite-rejection list.
+    fetchMock().mockResolvedValue(jsonResponse({}));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
 });
