@@ -107,15 +107,11 @@ to).
 Point the backend at the same database you seeded and set the same token:
 
 ```bash
-# From the repo root (PowerShell) — load the .env from step 1 so this shell and
-# the dev proxy present the SAME gateway token.
-Get-Content .env | Where-Object { $_ -notmatch '^\s*(#|$)' } | ForEach-Object {
-  $name, $value = $_ -split '=', 2
-  # Strip a matching pair of surrounding quotes; a quoted .env value would
-  # otherwise reach the backend with the quotes still attached.
-  $value = $value -replace '^"(.*)"$', '$1' -replace "^'(.*)'$", '$1'
-  Set-Item -Path "env:$name" -Value $value
-}
+# From the repo root (PowerShell). First load the .env from step 1 with the
+# loader in the root README's Quickstart step 3 — that snippet is the single
+# canonical copy (see ../README.md#quickstart), kept in one place so a future
+# fix to it cannot land in only one of the two runbooks. Then point the backend
+# at the database you seeded, overriding the URL that .env just set:
 $env:UMS_DATABASE_URL = "sqlite+pysqlite:///./demo.db"
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
