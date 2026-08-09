@@ -1,6 +1,6 @@
 import { type ReactNode, useRef, useState } from "react";
 
-import { useBlockNavigationWhile } from "@/contexts/WriteInFlightContext";
+import { useWriteInFlightControl } from "@/contexts/WriteInFlightContext";
 import { ApiError } from "@/lib/api/client";
 import { describeApiError } from "@/lib/api/errors";
 import type {
@@ -498,12 +498,37 @@ const APPLY_IN_FLIGHT_NOTE =
   "Wait for the request to finish — it cannot be aborted, and leaving now " +
   "would hide an import that still commits.";
 
+/**
+ * Why Apply is refused after an apply whose response never arrived. Retrying
+ * blind would submit the roster a second time and append a second
+ * unconditional CHANNEL_IMPORTED audit event for what may already have
+ * committed; only a reload can establish which.
+ */
+const APPLY_INDETERMINATE_NOTE =
+  "This import may already have committed — reload the registry and check " +
+  "before importing again.";
+
+/** Apply's disabled title: why the button is refused, or undefined when live. */
+const applyBlockedTitle = (
+  hasErrors: boolean,
+  indeterminate: boolean,
+): string | undefined => {
+  if (indeterminate) {
+    return APPLY_INDETERMINATE_NOTE;
+  }
+  if (hasErrors) {
+    return "The API refuses plans with error rows (422)";
+  }
+  return undefined;
+};
+
 type PreviewActionsProps = {
   hasErrors: boolean;
   onBack: () => void;
   onApply: () => void;
   busy: boolean;
   applying: boolean;
+  indeterminate: boolean;
 };
 
 /**
@@ -527,6 +552,7 @@ const PreviewActions = ({
   onApply,
   busy,
   applying,
+  indeterminate,
 }: PreviewActionsProps) => {
   return (
     <div className="action-row">
@@ -542,8 +568,8 @@ const PreviewActions = ({
       <button
         className="primary-button"
         type="button"
-        disabled={hasErrors || busy}
-        title={hasErrors ? "The API refuses plans with error rows (422)" : undefined}
+        disabled={hasErrors || busy || indeterminate}
+        title={applyBlockedTitle(hasErrors, indeterminate)}
         onClick={onApply}
       >
         {busy ? "Applying…" : "Apply"}
@@ -558,6 +584,7 @@ type PreviewStepProps = {
   onApply: () => void;
   busy: boolean;
   applying: boolean;
+  indeterminate: boolean;
   error: string | null;
 };
 
@@ -572,6 +599,7 @@ const PreviewStep = ({
   onApply,
   busy,
   applying,
+  indeterminate,
   error,
 }: PreviewStepProps) => {
   const hasErrors = hasErrorRows(result);
@@ -596,6 +624,7 @@ const PreviewStep = ({
         onApply={onApply}
         busy={busy}
         applying={applying}
+        indeterminate={indeterminate}
       />
     </div>
   );
@@ -680,14 +709,21 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   // step, so a slow (or never-settling) preview must not lock the operator in.
   // Only the apply commits, and only the apply cannot be taken back.
   const [applying, setApplying] = useState(false);
+  // An apply whose outcome is UNKNOWN: the request was dispatched but no
+  // response came back (transport failure), so the roster may well have
+  // committed. Distinct from `error`, which reports a definite refusal the
+  // backend actually answered with.
+  const [indeterminate, setIndeterminate] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
 
   // The exits this component renders are only half the story: the shell's
   // sidebar sits outside this tree and would unmount the flow regardless
-  // (review #184). The latch releases on deactivation AND on unmount, so a
-  // teardown mid-request cannot strand the shell with navigation disabled.
-  useBlockNavigationWhile(applying, APPLY_IN_FLIGHT_NOTE);
+  // (review #184). Armed IMPERATIVELY from the apply handler rather than from
+  // an effect — an effect arms a commit late, leaving a window in which the
+  // request is already running but the nav is still live. It also releases on
+  // unmount, so a teardown mid-request cannot strand the shell.
+  const navLatch = useWriteInFlightControl();
 
   const trimmedReason = reason.trim();
 
@@ -732,16 +768,35 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       );
       return;
     }
+    // The client only raises ApiError once an HTTP response exists, so
+    // anything else means the POST was dispatched and never answered — the
+    // roster may already be committed, audit event and all. Treating that as
+    // a plain failure would re-arm Apply (a second unconditional
+    // CHANNEL_IMPORTED) and let Cancel take the no-reload path over a changed
+    // registry. It is INDETERMINATE, and only a reload can settle it.
+    if (!(caught instanceof ApiError)) {
+      setIndeterminate(true);
+      setError(
+        "The import request was sent but no response came back, so it may " +
+          "have committed. Reload the registry to see the actual state " +
+          "before importing again.",
+      );
+      return;
+    }
     setError(describeImportError(caught));
   };
 
   /** Commit the plan; refuse while any row errors (the API 422s it anyway). */
   const apply = async () => {
     if (busy || inFlightRef.current) return;
-    if (!canApplyImport(file, preview)) return;
+    if (!canApplyImport(file, preview) || indeterminate) return;
     inFlightRef.current = true;
     setBusy(true);
     setApplying(true);
+    // Same event handler, so this batches with setApplying: the shell's nav
+    // and this flow's exits disable in ONE commit, leaving no window in which
+    // the request is running but navigation is still live.
+    navLatch.arm(APPLY_IN_FLIGHT_NOTE);
     setError(null);
     try {
       const result = await importChannels({
@@ -758,6 +813,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     } finally {
       setBusy(false);
       setApplying(false);
+      navLatch.release();
       inFlightRef.current = false;
     }
   };
@@ -774,7 +830,10 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   // Cancel fired mid-apply would take the no-reload path even though the
   // request goes on to commit, and the parent would restore a stale registry.
   const handleCancel = () => {
-    if (applied) onDone();
+    // `indeterminate` joins `applied` on the reloading path: an apply whose
+    // response was lost may have committed, and leaving without a refetch
+    // would restore a registry that no longer matches the database.
+    if (applied || indeterminate) onDone();
     else onCancel();
   };
 
@@ -809,6 +868,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
           onApply={apply}
           busy={busy}
           applying={applying}
+          indeterminate={indeterminate}
           error={error}
         />
       ) : null;
@@ -824,6 +884,12 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       activeIndex={STEP_INDEX[step]}
       onCancel={handleCancel}
       cancelDisabledReason={applying ? APPLY_IN_FLIGHT_NOTE : undefined}
+      // On Applied the write has COMMITTED: channel, group-membership and
+      // audit rows are durable and nothing here can roll them back. A button
+      // labelled Cancel would misstate that outcome — it only reloads an
+      // already-mutated registry — so the step's own "Back to Registry"
+      // action is the only exit offered.
+      cancelHidden={step === "applied"}
     >
       {renderStepBody()}
     </ActionStepper>

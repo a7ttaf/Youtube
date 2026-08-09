@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -70,31 +71,46 @@ export const WriteInFlightProvider = ({
   );
 };
 
-/** Read the latch: the blocking reason, or null when navigation is free. */
-export const useWriteInFlightReason = (): string | null => {
-  return useContext(WriteInFlightContext)?.reason ?? null;
+export type WriteInFlightControl = {
+  /** Latch navigation with this operator reason. */
+  arm: (reason: string) => void;
+  /** Release the latch. */
+  release: () => void;
 };
 
 /**
- * Hold the latch for as long as `active` is true, then release it.
+ * Imperative latch control for a flow that is about to start a write.
  *
- * The cleanup is the load-bearing half: it runs on deactivation AND on
- * unmount, so a flow that is torn down while its request is still pending
- * cannot strand the shell with navigation disabled forever.
+ * Deliberately NOT an effect-driven `useBlockNavigationWhile(active, reason)`.
+ * A passive effect arms one commit LATE: the click handler that starts the
+ * request returns, React commits with navigation still enabled, and only then
+ * do effects run — a real window in which an operator who clicks Apply and
+ * immediately picks a sidebar destination unmounts the flow while the write
+ * proceeds, which is precisely what the latch exists to prevent (review #184,
+ * reported independently by greptile, qodo and codex).
+ *
+ * Calling `arm()` inside the same event handler that sets the flow's own
+ * in-flight state puts both updates in one batch, so the shell's nav and the
+ * flow's buttons disable in the SAME commit. `release()` in the request's
+ * `finally` frees them together too.
  *
  * Only `setReason` is pulled out of the context, never the whole value: the
- * value object is re-memoized on every reason change, so depending on it here
- * would re-run this effect each time it armed the latch — arm, cleanup,
- * re-arm, forever. The setter comes from useState and is identity-stable, so
- * the dependency list is too.
+ * value object is re-memoized on every reason change, so depending on it
+ * would give these callbacks — and the unmount guard below — a new identity
+ * each time the latch armed. The setter comes from useState and is
+ * identity-stable, so everything derived from it is too.
  */
-export const useBlockNavigationWhile = (active: boolean, reason: string): void => {
+export const useWriteInFlightControl = (): WriteInFlightControl => {
   const setReason = useContext(WriteInFlightContext)?.setReason;
-  useEffect(() => {
-    if (!active || setReason === undefined) {
-      return undefined;
-    }
-    setReason(reason);
-    return () => setReason(null);
-  }, [active, reason, setReason]);
+  const arm = useCallback(
+    (reason: string) => setReason?.(reason),
+    [setReason],
+  );
+  const release = useCallback(() => setReason?.(null), [setReason]);
+  // Unmount guard, and the reason `release` must stay identity-stable: a flow
+  // torn down while its request is still pending would otherwise strand the
+  // shell with navigation dead forever. Nothing else can clear the latch,
+  // because the component that armed it is gone.
+  useEffect(() => release, [release]);
+  return useMemo(() => ({ arm, release }), [arm, release]);
 };

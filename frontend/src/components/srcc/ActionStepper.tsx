@@ -44,6 +44,13 @@ export type ActionStepperProps = {
    * Omitted (the default) leaves Cancel enabled, the pre-existing behaviour.
    */
   cancelDisabledReason?: string;
+  /**
+   * Hide the Cancel action entirely. For a terminal step whose work has
+   * already COMMITTED: a control labelled Cancel there cannot undo anything,
+   * and offering it misstates the outcome. Such a step supplies its own close
+   * action ("Back to Registry"), so nothing is lost by hiding this one.
+   */
+  cancelHidden?: boolean;
   /** The active step's body content, rendered below the step row. */
   children: ReactNode;
 };
@@ -94,6 +101,7 @@ export const ActionStepper = ({
   activeIndex,
   onCancel,
   cancelDisabledReason,
+  cancelHidden = false,
   children,
 }: ActionStepperProps) => {
   return (
@@ -108,17 +116,19 @@ export const ActionStepper = ({
         ))}
       </div>
       {children}
-      <div className="action-row">
-        <button
-          type="button"
-          className="ghost-button"
-          disabled={cancelDisabledReason !== undefined}
-          title={cancelDisabledReason}
-          onClick={onCancel}
-        >
-          Cancel
-        </button>
-      </div>
+      {cancelHidden ? null : (
+        <div className="action-row">
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={cancelDisabledReason !== undefined}
+            title={cancelDisabledReason}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
     </div>
   );
 };

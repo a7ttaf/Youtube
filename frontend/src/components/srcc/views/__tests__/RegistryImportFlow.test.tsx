@@ -8,6 +8,7 @@ import type {
   ContentOwnersResponse,
 } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
+import { WriteInFlightProvider } from "@/contexts/WriteInFlightContext";
 
 // RegistryImportFlow is exercised THROUGH RegistryView (the GroupsView.test.tsx
 // idiom for GroupsSyncFlow): the capability gate, the table swap, and the
@@ -168,13 +169,17 @@ type RouteOverrides = {
   importPost?: (form: FormData) => Response | Promise<Response>;
 };
 
-/** A pending Response plus its resolver, for holding a request in flight. */
+/** A pending Response plus its settlers, for holding a request in flight.
+ * `reject` models a TRANSPORT failure — a fetch that never produced a
+ * response, which is a different outcome from an HTTP error status. */
 const deferredResponse = () => {
   let release!: (response: Response) => void;
-  const pending = new Promise<Response>((resolve) => {
+  let reject!: (error: Error) => void;
+  const pending = new Promise<Response>((resolve, fail) => {
     release = resolve;
+    reject = fail;
   });
-  return { pending, release };
+  return { pending, release, reject };
 };
 
 type Route = {
@@ -260,10 +265,17 @@ const importPosts = (): FormData[] => {
   ).map(([, init]) => requireFormDataBody(init));
 };
 
-const renderRegistry = () => {
+const renderRegistry = (
+  writeLatch: { reason: string | null; setReason: (reason: string | null) => void } = {
+    reason: null,
+    setReason: () => undefined,
+  },
+) => {
   return render(
     <TenantProvider initialSlug="ums">
-      <RegistryView canManageRegistry canImportChannels canViewFinance />
+      <WriteInFlightProvider value={writeLatch}>
+        <RegistryView canManageRegistry canImportChannels canViewFinance />
+      </WriteInFlightProvider>
     </TenantProvider>,
   );
 };
@@ -492,13 +504,97 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(screen.queryByText("UMS Drama")).not.toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "Import upload" })).not.toBeInTheDocument();
 
-    // Once the write lands, the flow advances and Cancel is live again — the
-    // guard is tied to the request, so it can never trap the operator.
+    // Once the write lands the flow advances — and on Applied the stepper's
+    // Cancel is GONE, not merely re-enabled: the import has committed, so a
+    // control labelled Cancel would misstate the outcome. The step's own
+    // "Back to Registry" is the exit, and it reloads.
     applyGate.release(jsonResponse(APPLY_RESULT));
     await waitFor(() =>
       expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
     );
-    expect(cancelButton()).toBeEnabled();
+    expect(screen.queryByRole("button", { name: /^cancel$/i })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /back to registry/i }),
+    ).toBeInTheDocument();
+    expect(importPosts()).toHaveLength(2);
+  });
+
+  it("arms the shell nav latch BEFORE the apply request is dispatched", async () => {
+    // The ordering property, not the rendered result. A DOM assertion cannot
+    // prove this: fireEvent wraps the click in act(), which flushes effects,
+    // so an effect-armed latch also looks armed by the time the test can
+    // query the DOM. The real question is whether any moment exists in which
+    // the request is running and the latch is not yet held — so this observes
+    // the latch AT DISPATCH, inside the fetch mock, before React re-renders.
+    const setReason = vi.fn();
+    const armedAtDispatch: boolean[] = [];
+
+    routeFetch({
+      importPost: (form) => {
+        if (form.get("dry_run") === "false") {
+          armedAtDispatch.push(setReason.mock.calls.length > 0);
+        }
+        return jsonResponse(form.get("dry_run") === "true" ? DRY_RUN_PLAN : APPLY_RESULT);
+      },
+    });
+    renderRegistry({ reason: null, setReason });
+    await openImport();
+    await fillUpload();
+    fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+    );
+
+    // A read-only dry-run must NOT have latched anything.
+    expect(setReason).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
+
+    expect(armedAtDispatch).toEqual([true]);
+    expect(setReason.mock.calls[0][0]).toMatch(/cannot be aborted/iu);
+    // And it is released once the request settles.
+    expect(setReason).toHaveBeenLastCalledWith(null);
+  });
+
+  it("treats a LOST apply response as indeterminate, not as a failure", async () => {
+    // The client raises ApiError only once an HTTP response exists, so a
+    // rejected fetch means the POST was dispatched and never answered — the
+    // roster may already be committed, audit event and all. Re-arming Apply
+    // would submit it a second time (a second unconditional CHANNEL_IMPORTED)
+    // and a no-reload Cancel would restore a registry that no longer matches
+    // the database.
+    const applyGate = deferredResponse();
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : applyGate.pending,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeDisabled(),
+    );
+    applyGate.reject(new TypeError("Failed to fetch"));
+
+    await waitFor(() =>
+      expect(screen.getByText(/may have committed/i)).toBeInTheDocument(),
+    );
+
+    // Retry is refused, and says why.
+    const applyButton = screen.getByRole("button", { name: /^apply$/i });
+    expect(applyButton).toBeDisabled();
+    expect(applyButton.getAttribute("title")).toMatch(/may already have committed/iu);
+
+    // The exit is live again, but it now takes the RELOADING path even though
+    // `applied` is still null — the registry must be re-read to settle what
+    // actually happened.
+    const cancelButton = screen.getByRole("button", { name: /^cancel$/i });
+    expect(cancelButton).toBeEnabled();
+    fireEvent.click(cancelButton);
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    await waitFor(() => expect(channelGetCount()).toBe(2));
+    // Exactly two POSTs: the dry run and the one apply. No blind retry.
     expect(importPosts()).toHaveLength(2);
   });
 

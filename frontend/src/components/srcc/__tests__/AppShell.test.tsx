@@ -827,7 +827,13 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     expect(navButton("CMS Groups")).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
-    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    // This asserts the WIRING — the latch reaches the sidebar — not the
+    // timing. fireEvent wraps the click in act(), which flushes effects, so
+    // an effect-armed latch would look armed here too. The timing property
+    // (armed BEFORE the request is dispatched, so no window exists in which
+    // the write is running and nav is live) is proven in
+    // RegistryImportFlow.test.tsx, which observes the latch at dispatch.
+    expect(navButton("CMS Groups")).toBeDisabled();
 
     // Every nav item is latched, and each says why.
     expect(navButton("Command Center")).toBeDisabled();
@@ -839,15 +845,14 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     fireEvent.click(navButton("CMS Groups"));
     expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
 
-    // The latch releases with the request, so nav cannot stay stuck. Awaited
-    // rather than asserted inline: the release runs in the effect CLEANUP for
-    // `applying`, which React commits one render after the step advances, so
-    // "Import applied" is on screen a tick before the nav frees.
+    // The latch releases with the request, so nav cannot stay stuck — and it
+    // releases in the same `finally` batch that advances the step, so the
+    // Applied panel and the freed nav land together.
     applyGate.release(jsonResponse({ ...IMPORT_PLAN, dry_run: false }));
     await waitFor(() =>
       expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
     );
-    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+    expect(navButton("CMS Groups")).toBeEnabled();
   });
 
   it("NAV LATCH: leaves navigation free during the read-only dry run", async () => {
@@ -875,8 +880,6 @@ describe("AppShell navigation latch during an un-abortable write", () => {
 
     applyGate.release(jsonResponse({ detail: "boom" }, 500));
     await waitFor(() => expect(screen.getByText("Apply failed")).toBeInTheDocument());
-    // Same one-commit lag as the success path: the latch frees in the effect
-    // cleanup, not in the request's `finally`.
-    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+    expect(navButton("CMS Groups")).toBeEnabled();
   });
 });
