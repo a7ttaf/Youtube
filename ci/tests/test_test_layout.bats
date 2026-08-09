@@ -192,7 +192,7 @@ export default defineConfig({
 EOF
   run_guard
   [ "$status" -eq 20 ]
-  [[ "$output" == *"no longer declares an active include"* ]]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
 }
 
 @test "test-layout: catches an include commented out with //" {
@@ -207,7 +207,7 @@ export default defineConfig({
 EOF
   run_guard
   [ "$status" -eq 20 ]
-  [[ "$output" == *"no longer declares an active include"* ]]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
 }
 
 @test "test-layout: catches an include commented out with a block comment" {
@@ -224,7 +224,7 @@ export default defineConfig({
 EOF
   run_guard
   [ "$status" -eq 20 ]
-  [[ "$output" == *"no longer declares an active include"* ]]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
 }
 
 @test "test-layout: catches the glob surviving only in prose" {
@@ -238,7 +238,7 @@ export default defineConfig({
 EOF
   run_guard
   [ "$status" -eq 20 ]
-  [[ "$output" == *"no longer declares an active include"* ]]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
 }
 
 @test "test-layout: accepts an active include carrying a trailing comment" {
@@ -248,6 +248,74 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["tests/**/*.test.{ts,tsx}"], // keep in lockstep with test-layout.sh
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: rejects the glob living in a non-test include" {
+  # optimizeDeps.include carrying the glob must not satisfy the guard while
+  # test.include has been narrowed to a single file — vitest would run one test.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  optimizeDeps: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  test: {
+    include: ["tests/only-this-one.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"active test.include"* ]]
+}
+
+@test "test-layout: accepts the glob in test.include alongside other include fields" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  optimizeDeps: {
+    include: ["react", "react-dom"],
+  },
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: catches a config with no test block at all" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  optimizeDeps: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"test: { ... }"* ]]
+}
+
+@test "test-layout: reads a test block that nests other objects" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    coverage: { provider: "v8", thresholds: { lines: 80 } },
+    include: ["tests/**/*.test.{ts,tsx}"],
+    environment: "jsdom",
   },
 });
 EOF

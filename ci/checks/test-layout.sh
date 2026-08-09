@@ -167,19 +167,69 @@ strip_ts_comments() {
   ' "$1"
 }
 
+# Extracts the body of the `test: { ... }` object by brace matching. The glob
+# has to be bound to *that* include: an `optimizeDeps.include` carrying it would
+# satisfy a file-wide search while test.include was narrowed to a single file,
+# and vitest would silently run one test.
+extract_test_block() {
+  awk '
+    { all = all $0 "\n" }
+    END {
+      n = length(all)
+      pos = 0
+      while ((i = index(substr(all, pos + 1), "test")) > 0) {
+        start = pos + i
+        pos = start
+        if (start > 1) {
+          before = substr(all, start - 1, 1)
+          if (before ~ /[A-Za-z0-9_$]/) continue
+        }
+        rest = substr(all, start + 4)
+        if (rest !~ /^[[:space:]]*:[[:space:]]*\{/) continue
+        p = start + 4 + index(rest, "{")
+        depth = 1
+        out = ""
+        while (p <= n) {
+          ch = substr(all, p, 1)
+          if (ch == "{") depth++
+          else if (ch == "}") { depth--; if (depth == 0) break }
+          out = out ch
+          p++
+        }
+        print out
+        exit 0
+      }
+      # No test block at all. Signalled by status, because an empty block is a
+      # different failure from a missing one and both print nothing.
+      exit 1
+    }
+  '
+}
+
 if [ ! -f "$VITEST_CONFIG" ]; then
   fail "Missing ${VITEST_CONFIG}; cannot confirm the test layout is declared."
 else
-  # The include must be live config on a single line: an active `include: [...]`
-  # carrying the declared glob. Fail closed on anything else — a reformat that
-  # this cannot read is drift the guard must surface rather than wave through.
-  ACTIVE_INCLUDE="$(strip_ts_comments "$VITEST_CONFIG" | grep -E '^[[:space:]]*include:[[:space:]]*\[' || true)"
-  if [ -z "$ACTIVE_INCLUDE" ] || ! printf '%s\n' "$ACTIVE_INCLUDE" | grep -qF "$DECLARED_GLOB"; then
-    fail "${VITEST_CONFIG} no longer declares an active include '${DECLARED_GLOB}'."
-    echo "  The layout must be declared in config, not left to vitest's default glob,"
-    echo "  and it must be live code — a commented-out include does not count."
-    echo "  Restore a single-line 'include: [...]' carrying the glob, or update"
-    echo "  DECLARED_GLOB in this script to match."
+  # The include must be live config inside the test block, on a single line:
+  # an active `include: [...]` carrying the declared glob. Fail closed on
+  # anything else — a reformat this cannot read is drift the guard must surface
+  # rather than wave through.
+  TEST_BLOCK=""
+  HAVE_TEST_BLOCK=1
+  TEST_BLOCK="$(strip_ts_comments "$VITEST_CONFIG" | extract_test_block)" || HAVE_TEST_BLOCK=0
+  ACTIVE_INCLUDE=""
+  if [ -n "$TEST_BLOCK" ]; then
+    ACTIVE_INCLUDE="$(printf '%s\n' "$TEST_BLOCK" | grep -E '^[[:space:]]*include:[[:space:]]*\[' || true)"
+  fi
+  if [ "$HAVE_TEST_BLOCK" = "0" ]; then
+    fail "${VITEST_CONFIG} has no readable 'test: { ... }' block; cannot confirm the layout is declared."
+    echo "  The layout must be declared under test.include, where vitest reads it."
+  elif [ -z "$ACTIVE_INCLUDE" ] || ! printf '%s\n' "$ACTIVE_INCLUDE" | grep -qF "$DECLARED_GLOB"; then
+    fail "${VITEST_CONFIG} no longer declares an active test.include '${DECLARED_GLOB}'."
+    echo "  The layout must be declared in config, not left to vitest's default glob;"
+    echo "  it must be live code — a commented-out include does not count; and it"
+    echo "  must sit inside test: { }, not another section that happens to have an"
+    echo "  include field. Restore a single-line 'include: [...]' carrying the glob,"
+    echo "  or update DECLARED_GLOB in this script to match."
   fi
 fi
 

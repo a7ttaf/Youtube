@@ -46,6 +46,12 @@ rules:
     tests: "frontend/tests/**/*.test.ts"
   - source: "frontend/tests/**/*.tsx"
     tests: "frontend/tests/**/*.test.tsx"
+  # Same "**" collapse as under src/: the declared vitest glob permits a
+  # root-level frontend/tests/App.test.tsx, which the rules above cannot match.
+  - source: "frontend/tests/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/tests/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
   - source: "frontend/*.ts"
     tests: "frontend/tests/**/*.test.ts"
   - source: "frontend/package.json"

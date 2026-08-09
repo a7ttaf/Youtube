@@ -100,6 +100,22 @@ _enabled_value() {
   [[ "$output" == *"frontend/tests/"* ]]
 }
 
+@test "affected: a root-level frontend test maps to frontend test patterns" {
+  # The declared vitest glob permits frontend/tests/App.test.tsx, but
+  # "frontend/tests/**/*.tsx" cannot match it once ** collapses to *.
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/tests/App.test.tsx
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: a root-level frontend test in a mixed changeset still yields js patterns" {
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests backend/app/main.py frontend/tests/App.test.tsx
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
 @test "affected: a change to the vitest config runs the suite" {
   source ci/lib/affected.sh
   run ci::affected::get_affected_tests frontend/vitest.config.ts
@@ -253,6 +269,25 @@ ws_run() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"up to date"* ]]
   rm -rf "$NODE_SB"
+}
+
+# --- the JS test runner must be the pinned one --------------------------------
+
+@test "tests lane: no PATH fallback to a global jest or vitest" {
+  # An unpinned runner against a different Vite produced ~160 phantom failures
+  # in this checkout. Reporting the runner unavailable is recoverable; a green
+  # run of the wrong binary is not.
+  run grep -nE '^[[:space:]]*(jest|vitest)[[:space:]]' ci/checks/tests.sh
+  [ "$status" -ne 0 ]
+  run grep -nE 'command_exists (jest|vitest)$' ci/checks/tests.sh
+  [ "$status" -ne 0 ]
+}
+
+@test "tests lane: the JS runner resolves only inside the workspace" {
+  # Every invocation must come from node_modules/.bin of the workspace.
+  run grep -c 'node_modules/.bin/' ci/checks/tests.sh
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 2 ]
 }
 
 # --- package metadata triggers the lane ---------------------------------------

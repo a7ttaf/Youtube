@@ -109,21 +109,12 @@ _tests_js_workspace() {
     fi
   done
 
-  if ci::common::command_exists jest; then
-    if ci::common::command_exists node && node -e "require.resolve('jest-junit')" >/dev/null 2>&1; then
-      JEST_JUNIT_OUTPUT_FILE="$junit_out" \
-        jest --ci --reporters=default --reporters=jest-junit ${jest_pattern:+$jest_pattern}
-      return $?
-    fi
-    jest --ci ${jest_pattern:+$jest_pattern}
-    return $?
-  fi
-
-  if ci::common::command_exists vitest; then
-    vitest run --reporter=junit --outputFile="$junit_out"
-    return $?
-  fi
-
+  # Deliberately no PATH fallback. A global runner is not the version this
+  # workspace pins, and the comment above this function is the evidence: an
+  # unpinned Vitest against a different Vite produced ~160 phantom failures in
+  # this very checkout, indistinguishable from real breakage. Reporting the
+  # runner as unavailable is recoverable; a green run of the wrong binary, or a
+  # red one nobody can reproduce, is not.
   return 127
 }
 
@@ -177,7 +168,7 @@ tests::run_js() {
     ( _tests_js_workspace "$ws" "$junit_out" "$jest_pattern" ) || rc=$?
 
     if [ "$rc" -eq 127 ]; then
-      ci::log::info "skipped: no JS test runner (jest/vitest) found in ${ws}"
+      ci::log::info "skipped: no workspace-local JS test runner in ${ws}/node_modules/.bin (a global jest/vitest is deliberately not used)"
       continue
     fi
 
