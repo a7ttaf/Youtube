@@ -73,6 +73,7 @@ const DRY_RUN_RESULT: ChannelImportResult = {
       group_id: null,
       group_action: null,
       revenue_required: true,
+      revenue_source_status: null,
       changes: {},
       reason: null,
     },
@@ -84,6 +85,7 @@ const DRY_RUN_RESULT: ChannelImportResult = {
       group_id: "g1",
       group_action: "CREATE",
       revenue_required: false,
+      revenue_source_status: null,
       changes: {
         channel_name: { from: "Old Beta", to: "Beta Channel" },
         revenue_required: { from: true, to: false },
@@ -113,6 +115,7 @@ const BLOCKED_APPLY_DETAIL: ChannelImportResult = {
       group_id: null,
       group_action: null,
       revenue_required: null,
+      revenue_source_status: null,
       changes: {},
       reason: "missing youtube_channel_id",
     },

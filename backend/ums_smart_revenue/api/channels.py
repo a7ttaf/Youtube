@@ -171,6 +171,20 @@ class ChannelImportFieldChange(BaseModel):
     to_value: str | bool | None = Field(alias="to")
 
 
+class ChannelImportSourceStatusChange(BaseModel):
+    """The revenue_source_status transition a row's write will perform.
+
+    Separate from ChannelImportFieldChange because ``from`` is genuinely
+    absent for a CREATE — the channel has no prior classification — where the
+    inventory diff's pairs always have both sides.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_value: str | None = Field(alias="from")
+    to_value: str = Field(alias="to")
+
+
 class ChannelImportRowResult(BaseModel):
     """One CSV row's planned or applied outcome.
 
@@ -196,6 +210,16 @@ class ChannelImportRowResult(BaseModel):
     group_action: str | None
     revenue_required: bool | None
     changes: dict[str, ChannelImportFieldChange]
+    # The revenue_source_status this row's write will leave on the channel,
+    # when it changes it. Kept OUT of `changes` deliberately: that map holds
+    # the operator's own field edits and is what the write-boundary pre-state
+    # guard compares against, whereas this value is DERIVED by the registry
+    # from the revenue_required flip. Disclosed because it drives
+    # `missing_official_revenue` and the registry's recommended action, so a
+    # preview omitting it asks the operator to approve a finance-source
+    # mutation the diff never mentions (review #184). `from` is null for a
+    # CREATE; the whole field is null when the write leaves the status alone.
+    revenue_source_status: ChannelImportSourceStatusChange | None
     reason: str | None
 
 
@@ -909,6 +933,20 @@ def _import_plan_to_api(
             "changes": {
                 name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
             },
+            # Disclosed separately from `changes` on purpose: the source status
+            # is DERIVED by the write, not carried by the CSV, and `changes`
+            # holds the operator's own field edits (it is also what the
+            # write-boundary pre-state guard compares against). Folding a
+            # derived value in there would make the guard police a field the
+            # roster never asserted. Null when the write leaves it alone.
+            "revenue_source_status": (
+                {
+                    "from": entry.revenue_source_status[0],
+                    "to": entry.revenue_source_status[1],
+                }
+                if entry.revenue_source_status is not None
+                else None
+            ),
             "reason": entry.reason,
         }
         for entry in plan.entries

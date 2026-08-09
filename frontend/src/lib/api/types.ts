@@ -1274,6 +1274,19 @@ export type ChannelImportRowResult = {
   group_action: "CREATE" | "JOIN" | null;
   revenue_required: boolean | null;
   changes: Record<string, ChannelImportFieldChange>;
+  // The revenue_source_status the write will leave on the channel, when it
+  // changes it. DERIVED by the backend rather than carried by the CSV — the
+  // registry re-classifies the source whenever revenue_required flips — and
+  // it feeds `missing_official_revenue` and the registry's recommended
+  // action, so the preview must disclose it: `changes` never mentions it, and
+  // the operator would otherwise approve a finance-source mutation blind
+  // (review #184). `from` is null for a CREATE, which has no prior status.
+  // Null when the write leaves the classification alone, which is every row
+  // whose revenue_required is unchanged.
+  revenue_source_status: {
+    from: string | null;
+    to: string;
+  } | null;
   reason: string | null;
 };
 

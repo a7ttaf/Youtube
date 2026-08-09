@@ -25,7 +25,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 
-from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
+from ums_smart_revenue.org.channel_registry import (
+    ChannelRegistryEntry,
+    derive_revenue_source_status,
+)
 
 CHANNEL_ID_PATTERN = re.compile(r"^UC[A-Za-z0-9_-]{22}$")
 # Generous bound for CMS group keys; real ids are short, and the value lands
@@ -367,6 +370,15 @@ class ChannelImportPlanEntry:
     revenue_required: bool | None = None
     view_revenue_raw: str | None = None
     changes: Mapping[str, tuple[object, object]] = MappingProxyType({})
+    # The revenue_source_status this row's write will leave on the channel,
+    # as (from, to) — `from` is None for a CREATE, which has no prior status.
+    # DISCLOSED rather than merely derived: the write re-classifies the source
+    # whenever revenue_required flips, and that classification feeds the
+    # registry's missing-official-revenue state and recommended action, so an
+    # operator approving the plan is approving a finance-source mutation the
+    # inventory diff never mentions (review #184). None for an ERROR row and
+    # for any row whose write leaves the status untouched.
+    revenue_source_status: tuple[str | None, str] | None = None
     reason: str | None = None
 
 
@@ -610,6 +622,10 @@ def plan_channel_import(
         if current is None:
             outcome = ChannelImportOutcome.CREATE
             changes: dict[str, tuple[object, object]] = {}
+            source_status: tuple[str | None, str] | None = (
+                None,
+                _created_revenue_source_status(revenue_required),
+            )
         else:
             changes = _inventory_changes(
                 current,
@@ -619,6 +635,7 @@ def plan_channel_import(
                 revenue_required=revenue_required,
             )
             outcome = ChannelImportOutcome.UPDATE if changes else ChannelImportOutcome.UNCHANGED
+            source_status = _planned_revenue_source_status(current, revenue_required)
         entries.append(
             ChannelImportPlanEntry(
                 row_number=row.row_number,
@@ -630,6 +647,7 @@ def plan_channel_import(
                 revenue_required=revenue_required,
                 view_revenue_raw=row.view_revenue_raw,
                 changes=MappingProxyType(dict(changes)),
+                revenue_source_status=source_status,
             )
         )
 
@@ -638,6 +656,38 @@ def plan_channel_import(
     for entry in entries:
         counts[entry.outcome.value] += 1
     return ChannelImportPlan(entries=tuple(entries), counts=MappingProxyType(counts))
+
+
+def _created_revenue_source_status(revenue_required: bool) -> str:
+    """The source status a CREATE will be born with.
+
+    Mirrors what BOTH registry stores stamp on create (in-memory
+    ``create_channel`` and ``SqlAlchemyChannelRegistry.create_channel``), so
+    the preview promises the value the write actually persists.
+    """
+    return "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
+
+
+def _planned_revenue_source_status(
+    current: ChannelRegistryEntry, revenue_required: bool
+) -> tuple[str | None, str] | None:
+    """The (from, to) source status an UPDATE/UNCHANGED row's write will leave.
+
+    Returns None when the write leaves the classification alone, which is the
+    common case: ``derive_revenue_source_status`` re-derives ONLY when
+    ``revenue_required`` flips, precisely so an inventory refresh cannot
+    downgrade an established OFFICIAL_CMS_REVENUE / OFFICIAL_MANUAL_IMPORT.
+    Disclosing a no-op would make every roster re-import look like a finance
+    reclassification.
+    """
+    planned = derive_revenue_source_status(
+        current_status=current.revenue_source_status,
+        current_revenue_required=current.revenue_required,
+        revenue_required=revenue_required,
+    )
+    if planned == current.revenue_source_status:
+        return None
+    return (current.revenue_source_status, planned)
 
 
 def _inventory_changes(

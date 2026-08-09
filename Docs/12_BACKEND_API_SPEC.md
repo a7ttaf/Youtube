@@ -85,6 +85,18 @@ under its write-boundary lock and records what it actually wrote in the
 `CHANNEL_IMPORTED` audit event, so a concurrent writer can turn a planned
 UPDATE into a no-op. Present these counts as the approved plan, not as the
 committed result; the SPA's Applied step labels them that way.
+Each row also discloses `revenue_source_status` — `{from, to}` when the write
+will re-classify the channel's revenue source, `null` when it leaves it alone.
+This is DERIVED, not carried by the CSV: the registry re-derives the status
+only when `revenue_required` flips (to `MISSING_REVENUE_SOURCE` when enabled,
+`PERFORMANCE_ONLY` when disabled), so an established `OFFICIAL_CMS_REVENUE` /
+`OFFICIAL_MANUAL_IMPORT` survives an ordinary inventory refresh. It is
+disclosed because it drives `missing_official_revenue` and the registry's
+recommended action, and `changes` never mentions it — that map holds the
+operator's own field edits and is what the write-boundary pre-state guard
+compares against, so a derived value does not belong in it. `from` is null for
+a CREATE, which has no prior classification (review #184).
+
 `plan_fingerprint` (added 2026-08-09, review #184) is a SHA-256 over
 everything the operator reviews: `content_owner_id`, `cms_status`, `counts`
 and `rows`. Only `dry_run` is excluded, and that exclusion is load-bearing — a

@@ -33,6 +33,8 @@ from ums_smart_revenue.org.channel_registry import (
 )
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
+# A second valid channel id, for rows that must differ from CHANNEL_ID.
+SECOND_CHANNEL_ID = "UC3Dci3BzZXDo4jw4dU8KqWg"
 CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 DEFAULT_HEADER = "youtube_channel_id,channel_name,view_revenue"
 
@@ -1207,6 +1209,83 @@ def test_group_mutations_performed_by_import_are_audited():
         assert record.details["cms_group_id"] == "cms-tv"
         assert record.details["source"] == "bulk_import"
         assert record.reason == "Quarterly CMS roster load"
+
+
+def test_preview_discloses_the_derived_revenue_source_status():
+    """The write re-classifies the revenue SOURCE; the plan must say so.
+
+    ``changes`` carries the operator's own field edits, and never this — the
+    registry derives it from the revenue_required flip. It feeds
+    ``missing_official_revenue`` and the registry's recommended action, so a
+    preview that omits it asks the operator to approve a finance-source
+    mutation nothing on screen mentions (review #184).
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Alpha News",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+                revenue_source_status="OFFICIAL_CMS_REVENUE",
+            )
+        ]
+    )
+    client, _registry, _groups, _sink = create_import_app(registry)
+
+    # Row 1 flips revenue OFF, replacing a proven official classification.
+    # Row 2 is a CREATE, which has no prior status at all.
+    payload = post_import(
+        client,
+        import_csv(f"{CHANNEL_ID},Alpha News,No", f"{SECOND_CHANNEL_ID},Beta News,Yes"),
+        dry_run="true",
+    ).json()
+
+    by_id = {row["youtube_channel_id"]: row for row in payload["rows"]}
+    assert by_id[CHANNEL_ID]["revenue_source_status"] == {
+        "from": "OFFICIAL_CMS_REVENUE",
+        "to": "PERFORMANCE_ONLY",
+    }
+    # The diff itself still says nothing about it — that is the whole gap.
+    assert "revenue_source_status" not in by_id[CHANNEL_ID]["changes"]
+    assert by_id[SECOND_CHANNEL_ID]["revenue_source_status"] == {
+        "from": None,
+        "to": "MISSING_REVENUE_SOURCE",
+    }
+
+
+def test_preview_claims_no_source_change_when_the_flag_holds():
+    """Anti-noise: only a revenue_required FLIP re-derives the source status.
+
+    A roster refreshing names must not read as a finance reclassification —
+    and must not downgrade an OFFICIAL_* classification either, which is
+    exactly what derive_revenue_source_status protects.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Old Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+                revenue_source_status="OFFICIAL_CMS_REVENUE",
+            )
+        ]
+    )
+    client, registry_ref, _groups, _sink = create_import_app(registry)
+
+    payload = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"), dry_run="true").json()
+
+    assert payload["rows"][0]["outcome"] == "UPDATE"
+    assert payload["rows"][0]["revenue_source_status"] is None
+    # And the apply really does leave the classification alone.
+    assert post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes")).status_code == 200
+    stored = registry_ref.get_channel(CHANNEL_ID)
+    assert stored is not None and stored.revenue_source_status == "OFFICIAL_CMS_REVENUE"
 
 
 class _CountingGroupStore(ChannelGroupRegistry):
