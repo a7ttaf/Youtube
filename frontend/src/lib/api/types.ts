@@ -17,12 +17,12 @@ export type TenantRead = {
 //   the session did not grant.
 // Connections:
 //   - File: backend/ums_smart_revenue/api/session.py
-//       SessionTenant            (lines 21-26) -> SessionTenantRef
-//       SessionScopeAssignment   (lines 29-34) -> SessionRoleAssignment
-//       SessionPermissionGrant   (lines 37-42) -> SessionPermissionGrant
-//       SessionCapabilities      (lines 45-64) -> SessionCapabilities
-//       SessionMe                (lines 67-77) -> SessionMe
-//       get_current_session_endpoint (lines 163-199) -> GET /session/me
+//       SessionTenant                -> SessionTenantRef
+//       SessionScopeAssignment       -> SessionRoleAssignment
+//       SessionPermissionGrant       -> SessionPermissionGrant
+//       SessionCapabilities          -> SessionCapabilities
+//       SessionMe                    -> SessionMe
+//       get_current_session_endpoint -> GET /session/me
 //   - File: frontend/src/contexts/SessionContext.tsx -> hydrates from this shape.
 // ============================================================================
 
@@ -100,13 +100,13 @@ export type SessionMe = {
 // Standards: Read-only typed boundary at the API surface; no logic here.
 // Connections:
 //   - File: backend/ums_smart_revenue/finance/net_revenue.py
-//       MonthNetRevenueSummary.to_api()  (lines 103-130) -> NetRevenueResponse
-//       ChannelNetRevenueSummary.to_api() (lines 46-81)  -> ChannelNetRevenue
+//       MonthNetRevenueSummary.to_api()   -> NetRevenueResponse
+//       ChannelNetRevenueSummary.to_api() -> ChannelNetRevenue
 //   - File: backend/ums_smart_revenue/finance/account_allocation_read.py
-//       allocation_provenance_to_api()    (lines 178-189) -> allocation_source/committed_run
+//       allocation_provenance_to_api() -> allocation_source/committed_run
 //   - File: backend/ums_smart_revenue/api/revenue.py
-//       get_month_net_revenue()           (lines 1088-1225) -> adds currency + audit_events
-//       audit_record_to_api()             (lines 1850-1860) -> AuditEvent
+//       get_month_net_revenue() -> adds currency + audit_events
+//       audit_record_to_api()   -> AuditEvent
 // ============================================================================
 
 // Decimal money values arrive as strings from the backend (decimal_to_api).
@@ -271,15 +271,15 @@ export type MonthBankReconciliationSummary = {
 //   render it).
 // Connections:
 //   - File: backend/ums_smart_revenue/finance/month_close.py
-//       FinanceMonthCloseEntry.to_api()        (lines 31-42) -> FinanceMonthCloseStatus
+//       FinanceMonthCloseEntry.to_api() -> FinanceMonthCloseStatus
 //   - File: backend/ums_smart_revenue/finance/month_close_readiness.py
-//       FinanceCloseReadiness.to_api()          (lines 56-62) -> FinanceCloseReadinessResponse
-//       FinanceCloseBlocker.to_api()            (lines 34-41) -> FinanceCloseBlocker
-//       FinanceCloseReadiness.to_lock_error_detail() (lines 64-69) -> FinanceCloseLockErrorDetail
+//       FinanceCloseReadiness.to_api()               -> FinanceCloseReadinessResponse
+//       FinanceCloseBlocker.to_api()                 -> FinanceCloseBlocker
+//       FinanceCloseReadiness.to_lock_error_detail() -> FinanceCloseLockErrorDetail
 //   - File: backend/ums_smart_revenue/api/finance_close.py
-//       get_finance_month_close()               (lines 75-98)   -> GET /finance-close/{month}
-//       get_finance_close_readiness()           (lines 101-129) -> GET /finance-close/{month}/readiness
-//       lock_finance_month()/unlock_finance_month() (lines 132-194) -> POST lock/unlock (+ audit_event)
+//       get_finance_month_close()                   -> GET /finance-close/{month}
+//       get_finance_close_readiness()               -> GET /finance-close/{month}/readiness
+//       lock_finance_month()/unlock_finance_month() -> POST lock/unlock (+ audit_event)
 // ============================================================================
 
 // GET /finance-close/{month}
@@ -338,14 +338,14 @@ export type FinanceMonthCloseMutationResponse = FinanceMonthCloseStatus & {
 // Standards: Read-only typed boundary at the API surface; no logic here.
 // Connections:
 //   - File: backend/ums_smart_revenue/finance/explanations.py
-//       NumberExplanationEntry.to_api()              (lines 71-84)   -> NumberExplanation
-//       SUPPORTED_METRICS                            (lines 29-31)   -> ExplanationMetric
-//       build_channel_month_revenue_explanation()    (lines 144-232) -> gross components
-//       _build_net_revenue_explanation()             (lines 235-400) -> net components
+//       NumberExplanationEntry.to_api()           -> NumberExplanation
+//       SUPPORTED_METRICS                         -> ExplanationMetric
+//       build_channel_month_revenue_explanation() -> gross components
+//       _build_net_revenue_explanation()          -> net components
 //   - File: backend/ums_smart_revenue/api/revenue.py
-//       explain_channel_month_revenue_metric()       (lines 1358-1510) -> POST endpoint;
+//       explain_channel_month_revenue_metric() -> POST endpoint;
 //         adds audit_event (gross) or audit_events[] (net) to to_api().
-//       audit_record_to_api()                        (lines 1850-1860) -> NetRevenueAuditEvent
+//       audit_record_to_api()                  -> NetRevenueAuditEvent
 // ============================================================================
 
 // The two metrics the explain endpoint accepts (SUPPORTED_METRICS). The query
@@ -450,17 +450,17 @@ export type NumberExplanation = {
 //   amounts); artifact_byte_size is an integer.
 // Connections:
 //   - File: backend/ums_smart_revenue/reports/exports.py
-//       ExportJobEntry.to_api()        (lines 59-87)   -> ExportJob
-//       ALLOWED_EXPORT_TYPES           (lines 16-20)   -> ExportType
-//       request_export() status="QUEUED" (line 175)    -> initial status
+//       ExportJobEntry.to_api()          -> ExportJob
+//       ALLOWED_EXPORT_TYPES             -> ExportType
+//       request_export() status="QUEUED" -> initial status
 //   - File: backend/ums_smart_revenue/api/exports.py
-//       request_export()               (lines 173-284) -> POST /exports (202) + audit_event
-//       list_exports()                 (lines 287-324) -> GET /exports {items, pagination}
-//       get_export()                   (lines 327-396) -> GET /exports/{id} + audit_event
-//       download_finance_workbook()    (line 479)      -> /exports/{id}/finance-workbook.xlsx
-//       download_executive_pdf()       (line 593)      -> /exports/{id}/executive.pdf
-//       download_branded_slide_pack()  (line 715)      -> /exports/{id}/branded-slide-pack.pptx
-//       preview_finance_workbook()     (line 399)      -> /exports/{id}/finance-workbook-preview
+//       request_export()              -> POST /exports (202) + audit_event
+//       list_exports()                -> GET /exports {items, pagination}
+//       get_export()                  -> GET /exports/{id} + audit_event
+//       download_finance_workbook()   -> /exports/{id}/finance-workbook.xlsx
+//       download_executive_pdf()      -> /exports/{id}/executive.pdf
+//       download_branded_slide_pack() -> /exports/{id}/branded-slide-pack.pptx
+//       preview_finance_workbook()    -> /exports/{id}/finance-workbook-preview
 // ============================================================================
 
 // The four accepted export_type enum values (ALLOWED_EXPORT_TYPES). The first
@@ -556,15 +556,15 @@ export type ExportRequestBody = {
 // Standards: Read-only typed boundary at the API surface; no logic here.
 // Connections:
 //   - File: backend/ums_smart_revenue/connectors/credentials.py
-//       ConnectorCredentialEntry.to_api()  (lines 35-42) -> ConnectorCredential
+//       ConnectorCredentialEntry.to_api() -> ConnectorCredential
 //   - File: backend/ums_smart_revenue/api/connectors.py
-//       list_connector_credentials()       (lines 58-81) -> ConnectorCredentialListResponse
-//       request_connector_job()            (lines 122-144) -> ConnectorJobRequestBody / ConnectorJobResponse
+//       list_connector_credentials() -> ConnectorCredentialListResponse
+//       request_connector_job()      -> ConnectorJobRequestBody / ConnectorJobResponse
 //   - File: backend/ums_smart_revenue/finance/adsense_payments.py
-//       AdSensePaymentEntry.to_api()       (lines 60-74) -> AdsensePayment
+//       AdSensePaymentEntry.to_api() -> AdsensePayment
 //   - File: backend/ums_smart_revenue/api/adsense.py
-//       list_adsense_payments()            (lines 204-264) -> AdsensePaymentListResponse
-//       sync_adsense_payments()            (lines 133-201) -> AdsenseSyncRequestBody / AdsenseSyncResponse
+//       list_adsense_payments() -> AdsensePaymentListResponse
+//       sync_adsense_payments() -> AdsenseSyncRequestBody / AdsenseSyncResponse
 // ============================================================================
 
 // Shared pagination envelope returned by the connector + AdSense list routes
@@ -816,12 +816,12 @@ export type AdsenseSyncResponse = {
 //   depend on details shape.
 // Connections:
 //   - File: backend/ums_smart_revenue/finance/smart_alerts.py
-//       MonthlySmartAlert.to_api()         (lines 30-39) -> SmartAlert
-//       MonthlySmartAlertSummary.to_api()  (lines 51-59) -> SmartAlertsSummary
+//       MonthlySmartAlert.to_api()        -> SmartAlert
+//       MonthlySmartAlertSummary.to_api() -> SmartAlertsSummary
 //   - File: backend/ums_smart_revenue/api/revenue.py
-//       get_month_smart_alerts()           (lines 844-955) -> GET endpoint;
+//       get_month_smart_alerts() -> GET endpoint;
 //         four-permission finance-month auth; adds audit_events[] to to_api().
-//       audit_record_to_api()              (lines 1850-1860) -> NetRevenueAuditEvent
+//       audit_record_to_api()    -> NetRevenueAuditEvent
 // ============================================================================
 
 // Overall status of the smart-alert summary.
@@ -872,11 +872,11 @@ export type SmartAlertsSummary = {
 //   authoritative.
 // Connections:
 //   - File: backend/ums_smart_revenue/auth/audit_log.py
-//       AuditLogEntry.to_api()  (lines 35-52) -> AuditLogEntry
-//       AuditLogPage             (lines 55-62) -> AuditEventPagination
-//       _next_cursor()           (lines 207-215) -> AuditEventCursor
+//       AuditLogEntry.to_api() -> AuditLogEntry
+//       AuditLogPage           -> AuditEventPagination
+//       _next_cursor()         -> AuditEventCursor
 //   - File: backend/ums_smart_revenue/api/audit.py
-//       list_audit_events()      (lines 85-97) -> AuditEventListResponse
+//       list_audit_events() -> AuditEventListResponse
 // ============================================================================
 
 // GET /audit/events item. Source: AuditLogEntry.to_api() (auth/audit_log.py:35-52).
@@ -937,9 +937,9 @@ export type AuditSummaryResponse = {
 // Standards: Read-only typed boundary at the API surface; no logic here.
 // Connections:
 //   - File: backend/ums_smart_revenue/org/channel_registry.py
-//       ChannelRegistryEntry.to_api() (lines 19-29) -> ChannelRegistryEntry
+//       ChannelRegistryEntry.to_api() -> ChannelRegistryEntry
 //   - File: backend/ums_smart_revenue/api/channels.py
-//       list_channels() (lines 116-130) -> GET /channels
+//       list_channels() -> GET /channels
 // ============================================================================
 
 // GET /channels item. Source: ChannelRegistryEntry.to_api() (channel_registry.py:19-29).
@@ -1008,8 +1008,8 @@ export type AccountLinkProposalResponse = {
 // Standards: Read-only typed boundary at the API surface; no logic here.
 // Connections:
 //   - File: backend/ums_smart_revenue/api/channels.py
-//       _outside_cms_channel_to_api() (lines 230-249) -> OutsideCmsItem
-//       list_outside_cms_channels()   (lines 135-163) -> OutsideCmsResponse
+//       _outside_cms_channel_to_api() -> OutsideCmsItem
+//       list_outside_cms_channels()   -> OutsideCmsResponse
 // ============================================================================
 
 // One outside-CMS channel row. Source: _outside_cms_channel_to_api()
@@ -1047,10 +1047,10 @@ export type OutsideCmsResponse = {
 // Standards: Read-only typed boundary at the API surface; no logic here.
 // Connections:
 //   - File: backend/ums_smart_revenue/org/channel_issues.py
-//       ChannelRegistryIssue.to_api()        (lines 26-35) -> ChannelIssue
-//       summarize_channel_registry_issues()  (lines 62-76) -> ChannelIssuesSummary
+//       ChannelRegistryIssue.to_api()       -> ChannelIssue
+//       summarize_channel_registry_issues() -> ChannelIssuesSummary
 //   - File: backend/ums_smart_revenue/api/channels.py
-//       list_channel_issues()                (lines 166-188) -> ChannelIssuesResponse
+//       list_channel_issues() -> ChannelIssuesResponse
 // ============================================================================
 
 // One channel registry issue row. Source: ChannelRegistryIssue.to_api()
@@ -1099,25 +1099,25 @@ export type ChannelIssuesResponse = {
 //   Record like ChannelMappingResponse's — see GroupUpdateResponse below.
 // Connections:
 //   - File: backend/ums_smart_revenue/org/channel_groups.py
-//       ChannelGroupEntry.to_api()   (lines 107-116) -> ChannelGroupApiEntry
+//       ChannelGroupEntry.to_api() -> ChannelGroupApiEntry
 //   - File: backend/ums_smart_revenue/api/groups.py
-//       GroupAuditEventResponse      (lines 114-128) -> GroupAuditEventResponse
-//       _audit_event_response()      (lines 131-147) -> GroupAuditEventResponse
-//       ClearContentOwnerResponse    (lines 150-165) -> ClearOwnerStampResponse
-//       list_groups()                (lines 185-202) -> GET /groups
-//       update_group()               (lines 245-279) -> GroupUpdateResponse
+//       GroupAuditEventResponse   -> GroupAuditEventResponse
+//       _audit_event_response()   -> GroupAuditEventResponse
+//       ClearContentOwnerResponse -> ClearOwnerStampResponse
+//       list_groups()             -> GET /groups
+//       update_group()            -> GroupUpdateResponse
 //         (PATCH /groups/{id}: response = updated.to_api(); response
 //         ["audit_event"] = audit_record_to_api(record) — same wrap pattern
 //         as ChannelMappingResponse, not a declared response model)
-//       clear_group_content_owner()  (lines 395-444) -> ClearOwnerStampResponse
+//       clear_group_content_owner() -> ClearOwnerStampResponse
 //         (DELETE /groups/{id}/content-owner)
 //   - File: backend/ums_smart_revenue/api/channels.py
-//       GroupSyncGroupResult         (lines 200-227) -> GroupSyncGroupResult
-//       GroupSyncResult              (lines 230-245) -> GroupSyncResult
-//       audit_record_to_api()        (lines 320-329) -> GroupUpdateResponse.audit_event
-//       sync_channel_groups()        (lines 926-1064) -> POST /channels/groups/sync
+//       GroupSyncGroupResult  -> GroupSyncGroupResult
+//       GroupSyncResult       -> GroupSyncResult
+//       audit_record_to_api() -> GroupUpdateResponse.audit_event
+//       sync_channel_groups() -> POST /channels/groups/sync
 //   - File: backend/ums_smart_revenue/org/channel_group_sync.py
-//       GroupSyncOutcome             (lines 27-41) -> GroupSyncGroupResult.outcome
+//       GroupSyncOutcome -> GroupSyncGroupResult.outcome
 //         literal set (the Pydantic field itself is a plain str; the enum is
 //         the actual source of truth for the 7 values).
 // ============================================================================

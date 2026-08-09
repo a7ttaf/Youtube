@@ -18,7 +18,7 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> ChannelIssuesResponse.
-//   - File: backend/ums_smart_revenue/api/channels.py:166 list_channel_issues.
+//   - File: backend/ums_smart_revenue/api/channels.py -> list_channel_issues.
 // ============================================================================
 export const useChannelIssues = (): AsyncState<ChannelIssuesResponse> => {
   const client = useApiClient();

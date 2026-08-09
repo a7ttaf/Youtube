@@ -111,7 +111,7 @@ export const buildAuditEventsExportUrl = (
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> AuditEventListResponse.
-//   - File: backend/ums_smart_revenue/api/audit.py:85 list_audit_events.
+//   - File: backend/ums_smart_revenue/api/audit.py -> list_audit_events.
 // ============================================================================
 export const useAuditEvents = (
   query: AuditEventsQuery = {},

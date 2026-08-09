@@ -25,7 +25,7 @@ export type SmartAlertsQuery = {
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
-//   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
+//   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_smart_alerts.
 // ============================================================================
 export const useSmartAlerts = (
   query: SmartAlertsQuery,

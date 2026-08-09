@@ -47,7 +47,7 @@ export type UseExportActionsState = {
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> ExportRequestBody / ExportJobCreated.
-//   - File: backend/ums_smart_revenue/api/exports.py:173 request_export.
+//   - File: backend/ums_smart_revenue/api/exports.py -> request_export.
 // ============================================================================
 export const useExportActions = (): UseExportActionsState => {
   const client = useApiClient();

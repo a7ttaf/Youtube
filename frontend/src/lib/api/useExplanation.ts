@@ -71,7 +71,8 @@ export type UseExplanationState = {
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> NumberExplanation contract.
-//   - File: backend/ums_smart_revenue/api/revenue.py:1358 explain endpoint.
+//   - File: backend/ums_smart_revenue/api/revenue.py ->
+//       explain_channel_month_revenue_metric.
 // ============================================================================
 export const useExplanation = (): UseExplanationState => {
   const client = useApiClient();

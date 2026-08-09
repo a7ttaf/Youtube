@@ -22,7 +22,7 @@ import type { ChannelMappingResponse } from "@/lib/api/types";
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() PATCH + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> ChannelMappingResponse.
-//   - File: backend/ums_smart_revenue/api/channels.py:368 update_channel_mapping.
+//   - File: backend/ums_smart_revenue/api/channels.py -> update_channel_mapping.
 // ============================================================================
 export const useChannelMappingAction = (): ((
   channelId: string,

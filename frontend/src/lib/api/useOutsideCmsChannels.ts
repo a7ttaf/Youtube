@@ -18,7 +18,7 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> OutsideCmsResponse.
-//   - File: backend/ums_smart_revenue/api/channels.py:135 list_outside_cms_channels.
+//   - File: backend/ums_smart_revenue/api/channels.py -> list_outside_cms_channels.
 // ============================================================================
 export const useOutsideCmsChannels = (): AsyncState<OutsideCmsResponse> => {
   const client = useApiClient();

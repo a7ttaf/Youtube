@@ -23,7 +23,7 @@ export type MonthCloseQuery = {
 // Blast Radius: None detected (read-only finance close display).
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
-//   - File: backend/ums_smart_revenue/api/finance_close.py:75 get_finance_month_close.
+//   - File: backend/ums_smart_revenue/api/finance_close.py -> get_finance_month_close.
 // ============================================================================
 export const useMonthClose = (
   query: MonthCloseQuery,
@@ -53,7 +53,7 @@ export const useMonthClose = (
 // Blast Radius: None detected (read-only finance close display).
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
-//   - File: backend/ums_smart_revenue/api/finance_close.py:101 get_finance_close_readiness.
+//   - File: backend/ums_smart_revenue/api/finance_close.py -> get_finance_close_readiness.
 // ============================================================================
 export const useMonthCloseReadiness = (
   query: MonthCloseQuery,
@@ -86,8 +86,8 @@ export const useMonthCloseReadiness = (
 //   authorization and never mutates finance numbers directly.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
-//   - File: backend/ums_smart_revenue/api/finance_close.py:132 lock_finance_month.
-//   - File: backend/ums_smart_revenue/api/finance_close.py:167 unlock_finance_month.
+//   - File: backend/ums_smart_revenue/api/finance_close.py -> lock_finance_month.
+//   - File: backend/ums_smart_revenue/api/finance_close.py -> unlock_finance_month.
 // ============================================================================
 export const useMonthCloseActions = (query: MonthCloseQuery) => {
   const client = useApiClient();
