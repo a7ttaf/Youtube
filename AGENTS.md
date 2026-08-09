@@ -110,10 +110,14 @@ When writing code:
 Codex must run validation locally before uploading files, pushing commits,
 opening PRs, or claiming the branch is ready.
 
-Required baseline for code changes:
+Required baseline for code changes. Sync the toolchain first — without the
+extras `uv run pytest` is not installed, and `uv run ruff` silently falls
+through to whatever `ruff` happens to be on `PATH` instead of the pinned
+version:
 
-- `python -m ruff check backend tests scripts`
-- `pytest -q`
+- `uv sync --extra dev --extra test --extra lint`
+- `uv run ruff check backend tests scripts`
+- `uv run pytest -q`
 - `git diff --check`
 
 Changed-scope additions:

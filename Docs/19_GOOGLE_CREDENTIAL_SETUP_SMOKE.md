@@ -126,7 +126,7 @@ Expected result:
 
 ```powershell
 $env:UMS_DATABASE_URL = "<operator-approved-database-url>"
-python scripts/check_google_connector_credential.py --tenant <tenant-uuid> --connector youtube-reporting --account <content-owner-id>
+uv run python scripts/check_google_connector_credential.py --tenant <tenant-uuid> --connector youtube-reporting --account <content-owner-id>
 ```
 
 Expected result:
@@ -180,7 +180,7 @@ Preferred smoke path:
 
 ```powershell
 $env:UMS_DATABASE_URL = "<operator-approved-database-url>"
-python scripts/run_google_connector.py --tenant <tenant-uuid> --connector youtube-reporting --account <content-owner-id> --month <YYYY-MM> --dry-run
+uv run python scripts/run_google_connector.py --tenant <tenant-uuid> --connector youtube-reporting --account <content-owner-id> --month <YYYY-MM> --dry-run
 ```
 
 Expected result:
