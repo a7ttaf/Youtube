@@ -108,9 +108,19 @@ if [ -z "$MANAGER" ]; then
   exit "$CI_RESULT_FAIL_INFRA"
 fi
 
+# The fingerprint covers the manifest as well as the lockfile. Keyed on the
+# lockfile alone, a package.json edited without a matching lockfile update looks
+# cached, the frozen install that would have caught the mismatch is skipped, and
+# tests pass as long as they do not touch the changed dependency.
+_deps_fingerprint() {
+  printf '%s %s\n' \
+    "$(ci::common::hash_file "$LOCKFILE")" \
+    "$(ci::common::hash_file package.json)"
+}
+
 SKIP_INSTALL=0
 if [ -n "$LOCKFILE" ] && [ -d "node_modules" ] && [ -f "$NODE_HASH_FILE" ]; then
-  CURRENT_HASH="$(ci::common::hash_file "$LOCKFILE")"
+  CURRENT_HASH="$(_deps_fingerprint)"
   CACHED_HASH="$(cat "$NODE_HASH_FILE")"
   if [ "$CURRENT_HASH" = "$CACHED_HASH" ]; then
     echo "node_modules up to date. Skipping install."
@@ -154,7 +164,7 @@ if [ "$SKIP_INSTALL" = "0" ]; then
   esac
 
   mkdir -p "$(dirname "$NODE_HASH_FILE")"
-  ci::common::hash_file "$LOCKFILE" > "$NODE_HASH_FILE"
+  _deps_fingerprint > "$NODE_HASH_FILE"
 fi
 
 case "$MANAGER" in
@@ -189,6 +199,24 @@ run_script() {
     echo "Skipping missing script: $script_name"
   fi
 }
+
+# A workspace that ships tests must be able to run them. run_script only logs
+# "Skipping missing script", so deleting or renaming `test` would remove the
+# whole suite from the gate while the lane still exits 0 — the suite passing by
+# never running, which is the failure this gate exists to catch. Keyed on the
+# presence of test files rather than on checks.yml, so the rule travels with the
+# workspace and a genuinely test-free workspace is unaffected.
+if ! script_exists "test" && ! script_exists "test:unit"; then
+  ORPHAN_TESTS="$(find . \( -name 'node_modules' -o -name 'dist' -o -name 'build' \) -prune -o \
+    -type f \( -name '*.test.*' -o -name '*.spec.*' \) -print 2>/dev/null | head -5 || true)"
+  if [ -n "$ORPHAN_TESTS" ]; then
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} ships tests but defines no 'test' or 'test:unit' script."
+    echo "  These would never run:"
+    printf '    %s\n' $ORPHAN_TESTS
+    echo "  Restore the script in package.json, or remove the tests."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
+fi
 
 run_script "format:check"
 run_script "lint"

@@ -148,6 +148,101 @@ _enabled_value() {
   done
 }
 
+# --- the node lane cannot lose its own suite ----------------------------------
+#
+# These drive ci/checks/node.sh against a synthetic workspace. The install is
+# short-circuited by pre-seeding the dependency fingerprint, so the cases
+# exercise the lane's decisions rather than a package manager.
+
+ws_setup() {
+  NODE_SB="$(mktemp -d)"
+  mkdir -p "$NODE_SB/ci/checks" "$NODE_SB/ci/lib" \
+           "$NODE_SB/ws/tests" "$NODE_SB/ws/node_modules" "$NODE_SB/.ci-gate"
+  cp "$REPO_ROOT/ci/checks/node.sh" "$NODE_SB/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$NODE_SB/ci/lib/"
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/tests/a.test.ts"
+  printf '{}\n' > "$NODE_SB/ws/bun.lock"
+}
+
+ws_manifest() {
+  printf '%s\n' "$1" > "$NODE_SB/ws/package.json"
+}
+
+ws_seed_fingerprint() {
+  # Mirrors _deps_fingerprint in node.sh: lockfile hash, then manifest hash.
+  ( cd "$NODE_SB/ws" && printf '%s %s\n' \
+      "$(sha256sum bun.lock | cut -d' ' -f1)" \
+      "$(sha256sum package.json | cut -d' ' -f1)" \
+      > "$NODE_SB/.ci-gate/node_modules-ws.hash" )
+}
+
+ws_run() {
+  ( cd "$NODE_SB" && CI_GATE_NODE_WORKSPACE=ws bash ci/checks/node.sh 2>&1 )
+}
+
+@test "node lane: a workspace shipping tests without a test script fails closed" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ships tests but defines no"* ]]
+  [[ "$output" == *"a.test.ts"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a test script satisfies the requirement" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: test:unit also satisfies the requirement" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test:unit": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace with no tests at all is unaffected" {
+  ws_setup
+  rm -rf "$NODE_SB/ws/tests"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an edited manifest invalidates the install cache" {
+  # Fingerprinting the lockfile alone lets a package.json/lockfile mismatch
+  # reuse a stale node_modules, so the frozen install that would catch it never
+  # runs.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" }, "dependencies": { "x": "1.0.0" } }'
+  run ws_run
+  [[ "$output" != *"up to date"* ]]
+  [[ "$output" == *"Installing dependencies"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unchanged workspace still skips the install" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up to date"* ]]
+  rm -rf "$NODE_SB"
+}
+
 # --- package metadata triggers the lane ---------------------------------------
 #
 # preflight filters lanes by ci/lib/changeset.sh check ids, not affected.yml. A

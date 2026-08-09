@@ -762,8 +762,23 @@ single P-tier above.
   because the matcher collapses `**` to `*` and then requires a path segment;
   that file was covered only incidentally by the `frontend/*.ts` rule, so the
   direct children are now spelled out. (9) `ci/UMS_INTEGRATION.md` still
-  advertised all four JS checks as disabled. Combined suite:
-  `test_test_layout.bats` (23) + `test_js_lane.bats` (18) = 41 cases.
+  advertised all four JS checks as disabled.
+  A third round found three more. (10) The prune list used unanchored
+  `-name 'build'`/`'dist'`/`'coverage'`, which prunes a *first-party*
+  `frontend/e2e/build/` at any depth — a test under it is neither collected by
+  vitest nor reported by the guard. Build-output prunes are now exact paths at
+  the workspace root; `node_modules` stays unanchored because nested copies are
+  real and never first-party. (11) The install cache was fingerprinted on the
+  lockfile alone, so a `package.json` edited without a matching lockfile update
+  looked cached and the frozen install that would have caught the mismatch was
+  skipped; the fingerprint now covers both. (12) Deleting the `test` script
+  removed the entire frontend suite while the lane still exited 0 —
+  `run_script` only logs `Skipping missing script`. The lane now fails closed
+  when a workspace ships test files but defines neither `test` nor
+  `test:unit`, keyed on the files rather than on `checks.yml` so the rule
+  travels with the workspace. Combined suite: `test_test_layout.bats` (27) +
+  `test_js_lane.bats` (24) = 51 cases, and the node lane was run end to end
+  against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Also fixed: the Python-convention `lib/` rule in `.gitignore` was swallowing
   **new** files under `frontend/tests/lib/` (17 of the moved tests live there;
   the moved ones survived only because `git mv` tracks explicitly), so a

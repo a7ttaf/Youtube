@@ -84,6 +84,46 @@ run_guard() {
   [ "$status" -eq 0 ]
 }
 
+@test "test-layout: ignores a nested node_modules" {
+  # Nested copies are real and never first-party, so this prune stays by name.
+  mkdir -p "$SANDBOX/frontend/src/feature/node_modules/pkg"
+  printf 'it("vendored", () => {});\n' > "$SANDBOX/frontend/src/feature/node_modules/pkg/index.test.js"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: catches a test under a first-party directory named build" {
+  # An unanchored -name 'build' prune would hide this: neither collected by
+  # vitest nor reported by the guard.
+  mkdir -p "$SANDBOX/frontend/e2e/build"
+  printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/e2e/build/checkout.test.ts"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/e2e/build/checkout.test.ts"* ]]
+}
+
+@test "test-layout: catches tests under every build-output name when nested" {
+  local dir
+  for dir in build dist coverage .next .turbo .vite; do
+    rm -rf "$SANDBOX/frontend/feature"
+    mkdir -p "$SANDBOX/frontend/feature/$dir"
+    printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/feature/$dir/x.test.ts"
+    run_guard
+    [ "$status" -eq 20 ] || { echo "nested $dir/ evaded the guard" >&2; return 1; }
+  done
+  rm -rf "$SANDBOX/frontend/feature"
+}
+
+@test "test-layout: still ignores build output at the workspace root" {
+  local dir
+  for dir in build dist coverage .next .turbo .vite; do
+    mkdir -p "$SANDBOX/frontend/$dir"
+    printf 'it("built", () => {});\n' > "$SANDBOX/frontend/$dir/x.test.ts"
+  done
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
 @test "test-layout: catches a retired __tests__ directory outside src" {
   mkdir -p "$SANDBOX/frontend/features/__tests__"
   run_guard

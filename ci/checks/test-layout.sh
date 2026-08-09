@@ -36,17 +36,22 @@ fail() {
 # Everything under frontend/ except the declared tests/ tree is outside-tree, so
 # the walk below starts at frontend/ rather than frontend/src — a test dropped in
 # any other subdirectory is just as invisible to test.include. These prunes are
-# the directories that hold no first-party source: vendored packages and build
-# output. Anything else, including new top-level directories, is scanned.
+# the directories that hold no first-party source.
+#
+# Build output is pruned by exact path, not by name. An unanchored -name 'build'
+# also prunes a first-party frontend/e2e/build/, and a test under it would be
+# neither collected by vitest nor reported here — the precise hole this guard
+# exists to close. node_modules stays unanchored because nested copies are real
+# and are never first-party.
 PRUNE=(
   '(' -path "$TESTS_DIR"
   -o -name 'node_modules'
-  -o -name 'dist'
-  -o -name 'build'
-  -o -name 'coverage'
-  -o -name '.next'
-  -o -name '.turbo'
-  -o -name '.vite'
+  -o -path "$FRONTEND_DIR/dist"
+  -o -path "$FRONTEND_DIR/build"
+  -o -path "$FRONTEND_DIR/coverage"
+  -o -path "$FRONTEND_DIR/.next"
+  -o -path "$FRONTEND_DIR/.turbo"
+  -o -path "$FRONTEND_DIR/.vite"
   ')' -prune -o
 )
 
