@@ -204,6 +204,24 @@ class ChannelGroupRegistryStore(Protocol):
         an ownership claim the request already carries.
         """
 
+    # ========================================================================
+    # Purpose: Bulk-classify a roster's CMS group keys by "this owner already
+    #   holds it", so planning can label each row CREATE or JOIN without a
+    #   lookup-per-group query storm.
+    # Database/ORM: ChannelGroupORM (read-only; cms_group_id + content_owner_id
+    #   under the per-tenant unique key). No membership loading, no writes.
+    # Standards: One bounded SELECT for the whole key set, tenant-scoped, and
+    #   the only one of the four bulk key lookups that REPORTS rather than
+    #   refuses — its three siblings (archived, cross-owner, adoptable) all
+    #   exist to fail rows closed. That difference is the point: without a
+    #   non-refusing lookup, "exists and is mine" was unrepresentable, and the
+    #   preview could not tell CREATE from JOIN (review #184).
+    # Blast Radius: The preview's group-effect claim and the write-boundary
+    #   recheck built on it. Read-only.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import.py ->
+    #     _planned_group_action consumes this set.
+    # ========================================================================
     def list_owned_cms_group_ids(
         self, cms_group_ids: set[str], *, content_owner_id: str
     ) -> set[str]:

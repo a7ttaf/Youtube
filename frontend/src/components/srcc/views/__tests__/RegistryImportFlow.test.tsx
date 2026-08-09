@@ -669,6 +669,76 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(importPosts()).toHaveLength(2);
   });
 
+  it("carries an unsettled import out of the flow and blocks a duplicate", async () => {
+    // The exit reloads, but that GET races the POST it is trying to observe,
+    // so the restored table can be PRE-write while looking authoritative. The
+    // harm is the next step: reopening the importer off that table and
+    // submitting the same roster again, appending a second unconditional
+    // CHANNEL_IMPORTED. Leaving the flow must therefore keep saying the
+    // outcome is unknown — and must not re-arm "Import CSV" until the operator
+    // says they have checked. Blocking the exit instead is not an option: a
+    // group-bearing roster never auto-settles, so that operator would be
+    // trapped with no way out at all.
+    const applyGate = deferredResponse();
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : applyGate.pending,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeDisabled(),
+    );
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText(/may have committed/i)).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+
+    // The warning outlives the flow that raised it.
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent(/may still be committing/i);
+    expect(notice).toHaveTextContent(/audit trail/i);
+
+    // And the duplicate is unreachable while it stands.
+    const importButton = screen.getByRole("button", { name: /import csv/i });
+    expect(importButton).toBeDisabled();
+    expect(importButton.getAttribute("title")).toMatch(/not been accounted for/iu);
+
+    // Reloading does NOT clear it — a fresh GET still cannot prove the write
+    // landed, so only an explicit acknowledgement retires the notice.
+    fireEvent.click(within(notice).getByRole("button", { name: /reload registry/i }));
+    await waitFor(() => expect(channelGetCount()).toBe(3));
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /import csv/i })).toBeDisabled();
+
+    fireEvent.click(
+      within(screen.getByRole("status")).getByRole("button", {
+        name: /checked the audit trail/i,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("status")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /import csv/i })).toBeEnabled();
+
+    // Still exactly two POSTs — nothing here re-submitted the roster.
+    expect(importPosts()).toHaveLength(2);
+  });
+
+  it("does not raise the unsettled notice after a normal applied exit", async () => {
+    // The complement: a 2xx apply is settled, so leaving Applied must NOT
+    // leave the registry wearing a warning or lock the importer.
+    await runDryRunToPreview(() => jsonResponse(DRY_RUN_PLAN));
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await screen.findByRole("button", { name: /back to registry/i });
+    fireEvent.click(screen.getByRole("button", { name: /back to registry/i }));
+
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /import csv/i })).toBeEnabled();
+  });
+
   it("locks the Upload inputs while the dry run is in flight", async () => {
     // The owner picker staying live during the preview was a real hole: an
     // operator could start a dry run for owner A, switch to B before it

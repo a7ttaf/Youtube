@@ -461,6 +461,26 @@ def _blocked_group_reason(
     return None
 
 
+# ============================================================================
+# Purpose: Label the group EFFECT a row's group_id implies — mint a new SECTOR
+#   group (CREATE) or attach to one this owner already holds (JOIN) — so the
+#   preview can promise which, and the write boundary can re-check it.
+# Database/ORM: None — pure decision over the group-key sets the caller
+#   already loaded (ChannelGroupORM keys, read in bulk during planning).
+# Standards: Returns None for rows that write no group at all (no key, or an
+#   ERROR row), so a null label never means "unknown" — it means "no effect".
+#   The label is a PLAN-TIME observation and can be raced, which is exactly
+#   why the write boundary re-checks it under the group row lock rather than
+#   trusting it; the two together are the disclosure and its enforcement.
+# Blast Radius: The preview's "new group" / "adds to existing" claim, and —
+#   via the write-boundary recheck — whether a diverged effect 409s the whole
+#   import. No writes of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _require_planned_group_action enforces this label under the row lock.
+#   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+#     GroupCell renders it.
+# ============================================================================
 def _planned_group_action(
     group_id: str | None, *, owned_group_ids: frozenset[str] | None
 ) -> ChannelImportGroupAction | None:

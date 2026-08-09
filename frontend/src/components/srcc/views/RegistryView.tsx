@@ -15,7 +15,7 @@ import {
   RESTRICTED_FINANCE_VALUE,
   SummaryTile,
 } from "../shared";
-import { RegistryImportFlow } from "./RegistryImportFlow";
+import { RegistryImportFlow, type ImportExitOutcome } from "./RegistryImportFlow";
 
 // ============================================================================
 // Purpose: The REAL-data Channel Registry screen (Phase 2). The table is wired
@@ -218,10 +218,12 @@ type RowActions = {
 const RegistryPanelHeader = ({
   canImportChannels,
   importOpen,
+  importUnsettled,
   onStartImport,
 }: {
   canImportChannels: boolean;
   importOpen: boolean;
+  importUnsettled: boolean;
   onStartImport: () => void;
 }) => {
   return (
@@ -235,7 +237,12 @@ const RegistryPanelHeader = ({
           <button
             className="primary-button"
             type="button"
-            disabled={importOpen}
+            disabled={importOpen || importUnsettled}
+            title={
+              importUnsettled
+                ? "An earlier import has not been accounted for — resolve the notice below before importing again"
+                : undefined
+            }
             onClick={onStartImport}
           >
             Import CSV
@@ -478,6 +485,60 @@ const RegistryTable = ({
   );
 };
 
+// ============================================================================
+// Purpose: Carry an UNSETTLED import out of the stepper and keep saying so.
+//   When an apply's response never arrives, the flow's exit still reloads the
+//   registry — but that GET races the original POST and can return PRE-write
+//   rows, so the table below it may be stale while looking authoritative.
+// Database/ORM: None (frontend) — the reload button re-issues the existing
+//   GET /channels via the shared channel state; nothing here writes.
+// Standards: The uncertainty leaves WITH the operator instead of trapping them
+//   in the stepper. Blocking both of the flow's exits until reconciliation
+//   settles is not an option: a roster whose rows carry group keys can never
+//   auto-settle, because `outcome` is computed from channel inventory and the
+//   planner never loads memberships — that operator would have no way out at
+//   all. So the exit is left open and the hazard is made loud and PERSISTENT:
+//   it survives reloads, and only an explicit acknowledgement clears it.
+//   "Import CSV" stays disabled throughout, which is the actual harm this
+//   closes — a second import launched off a stale table would append a second
+//   unconditional CHANNEL_IMPORTED for a write that already committed.
+// Blast Radius: Whether an operator can start a duplicate audited bulk import
+//   after an import of unknown outcome. No requests beyond the registry GET,
+//   no authorization meaning.
+// Connections:
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       exits with ImportExitOutcome "unknown", which raises this notice.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> the dry run is the reconciliation
+//       tool for an apply whose response was lost.
+// ============================================================================
+const UnsettledImportNotice = ({
+  onReload,
+  onAcknowledge,
+}: {
+  onReload: () => void;
+  onAcknowledge: () => void;
+}) => {
+  return (
+    <div className="callout warning" role="status">
+      <strong>An import may still be committing.</strong>{" "}
+      <span>
+        Its response never arrived, so the rows below may predate it. Reload
+        before judging the registry, and check the audit trail for a
+        CHANNEL_IMPORTED entry rather than re-importing — a second import would
+        record the same roster twice.
+      </span>
+      <div className="view-actions">
+        <button className="ghost-button" type="button" onClick={onReload}>
+          Reload registry
+        </button>
+        <button className="ghost-button" type="button" onClick={onAcknowledge}>
+          I have checked the audit trail
+        </button>
+      </div>
+    </div>
+  );
+};
+
 /**
  * The registry main panel: header + either the import stepper (importOpen) or
  * the steady-state mapping band + registry table. importOpen can only ever
@@ -490,9 +551,11 @@ const RegistryMainPanel = ({
   channelState,
   unitsById,
   importOpen,
+  importUnsettled,
   onStartImport,
   onCancelImport,
   onImportDone,
+  onAcknowledgeUnsettled,
   ...rowActions
 }: {
   canManageRegistry: boolean;
@@ -500,21 +563,30 @@ const RegistryMainPanel = ({
   channelState: ChannelAsyncState;
   unitsById: Map<string, OrgUnit>;
   importOpen: boolean;
+  importUnsettled: boolean;
   onStartImport: () => void;
   onCancelImport: () => void;
-  onImportDone: () => void;
+  onImportDone: (outcome: ImportExitOutcome) => void;
+  onAcknowledgeUnsettled: () => void;
 } & RowActions) => {
   return (
     <section className="panel">
       <RegistryPanelHeader
         canImportChannels={canImportChannels}
         importOpen={importOpen}
+        importUnsettled={importUnsettled}
         onStartImport={onStartImport}
       />
       {importOpen ? (
         <RegistryImportFlow onCancel={onCancelImport} onDone={onImportDone} />
       ) : (
         <>
+          {importUnsettled ? (
+            <UnsettledImportNotice
+              onReload={channelState.reload}
+              onAcknowledge={onAcknowledgeUnsettled}
+            />
+          ) : null}
           <RegistryMappingBand canManageRegistry={canManageRegistry} />
           <RegistryTable
             canManageRegistry={canManageRegistry}
@@ -1050,6 +1122,10 @@ const RegistryView = ({
   const [assignContext, setAssignContext] =
     useState<{ channel: ChannelRegistryEntry } | null>(null);
   const [importing, setImporting] = useState(false);
+  // Raised when the stepper exits with an apply whose outcome it never learned.
+  // Held in the VIEW, not the flow: the flow unmounts on exit, and the whole
+  // point is that the warning outlives it.
+  const [importUnsettled, setImportUnsettled] = useState(false);
 
   const unitsById = useMemo(
     () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
@@ -1096,12 +1172,20 @@ const RegistryView = ({
           channelState={channelState}
           unitsById={unitsById}
           importOpen={importing}
+          importUnsettled={importUnsettled}
           onStartImport={() => setImporting(true)}
           onCancelImport={() => setImporting(false)}
-          onImportDone={() => {
+          onImportDone={(outcome) => {
             setImporting(false);
             channelState.reload();
+            // The reload above may race the original POST, so an "unknown"
+            // exit raises a notice that survives it. "applied" needs none —
+            // that response arrived, so the reload follows a committed write.
+            if (outcome === "unknown") {
+              setImportUnsettled(true);
+            }
           }}
+          onAcknowledgeUnsettled={() => setImportUnsettled(false)}
           hasTraceNav={Boolean(onOpenTrace)}
           onMap={onMap}
           onAssign={onAssign}

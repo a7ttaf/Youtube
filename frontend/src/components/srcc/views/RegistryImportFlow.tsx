@@ -53,13 +53,18 @@ import { isValidAuditReason } from "./GroupsSyncFlow";
 //   traps the operator or strands the shell.
 //   An apply whose response never arrived is INDETERMINATE, not failed: Apply
 //   is disabled (a blind retry would append a second unconditional
-//   CHANNEL_IMPORTED) and the flow offers "Check whether it landed", which
-//   RE-PLANS the same roster via the dry run. That settles it without any new
-//   API surface, because the apply is one all-or-nothing transaction: an
-//   all-UNCHANGED re-plan means the write committed. The control is
-//   operator-triggered and repeatable on purpose — the original POST may
-//   still be executing, and one automatic shot would race it and report a
-//   false "did not commit".
+//   CHANNEL_IMPORTED), Back is frozen (Upload owns the inputs the check
+//   re-plans), and the flow offers "Check whether it landed", which RE-PLANS
+//   the same roster via the dry run. That reports the END STATE — "the
+//   registry now matches this roster" — and deliberately NOT authorship:
+//   inventory equality cannot establish that THIS request committed, since
+//   another writer may have landed the same values, so the flow never
+//   advances to Applied on that evidence and points at the audit trail
+//   instead. Rows carrying group keys are excluded from even that claim,
+//   because `outcome` is computed from channel inventory and the planner
+//   never loads memberships. The control is operator-triggered and repeatable
+//   on purpose — the original POST may still be executing, and one automatic
+//   shot would race it and report a false "did not commit".
 //   The reason obeys the shared required + no-NUL audit contract via
 //   isValidAuditReason (imported from GroupsSyncFlow, not copied). Backend
 //   detail is shown only on canned-copy statuses (describeApiError). The 422
@@ -652,8 +657,9 @@ const hasUnverifiableGroupEffects = (plan: ChannelImportResult): boolean => {
 /** Copy for a re-plan that still shows work the registry has not taken. */
 const RECONCILE_PENDING_NOTE =
   "Still not committed: the refreshed plan below shows changes the registry " +
-  "does not have yet. The original request may still be running — check " +
-  "again in a moment, or apply the refreshed plan.";
+  "does not have yet. The original request may still be running, so check " +
+  "again in a moment. Do not re-import until this settles — a second apply " +
+  "while the first is still running would record it twice.";
 
 /**
  * Copy for a re-plan whose channels all match but whose rows carry group
@@ -910,12 +916,23 @@ const AppliedStep = ({ result, reason, onDone }: AppliedStepProps) => {
   );
 };
 
+/**
+ * What the flow knows about the write when it hands control back.
+ *
+ * "applied" = the apply returned 2xx; the registry definitely changed.
+ * "unknown" = the response never arrived. The write may still be executing, so
+ * a reload issued now can return PRE-write rows and look authoritative. The
+ * parent is told which of the two it is because the two demand different
+ * treatment, and a bare `onDone()` cannot carry that distinction.
+ */
+export type ImportExitOutcome = "applied" | "unknown";
+
 export type RegistryImportFlowProps = {
   /** Close the flow WITHOUT reloading the registry (no apply committed). */
   onCancel: () => void;
   /** Close the flow AND reload the registry (an apply committed, or leaving
-   * Applied). */
-  onDone: () => void;
+   * Applied), carrying whether that reload can be trusted as settled. */
+  onDone: (outcome: ImportExitOutcome) => void;
 };
 
 type ImportStep = "upload" | "preview" | "applied";
@@ -992,18 +1009,14 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   };
 
   /**
-   * Settle an indeterminate apply by RE-PLANNING the same roster.
+   * Turn a refreshed plan into the strongest claim it actually supports.
    *
-   * The apply is all-or-nothing in one transaction, so the refreshed plan is
-   * decisive rather than suggestive: every row UNCHANGED means the write
-   * committed, and any remaining CREATE/UPDATE means it did not. That answer
-   * comes from the dry-run endpoint the flow already uses — no new API
-   * surface, no idempotency key, no import-status resource.
-   *
-   * Operator-triggered and repeatable ON PURPOSE. The original POST may still
-   * be executing, and an automatic single shot would race it and report "did
-   * not commit" for a write that lands a moment later. Leaving the control in
-   * place lets the operator check again instead of being told once, wrongly.
+   * All-UNCHANGED means the registry matches the roster — the operationally
+   * important fact — but NOT that this request is what made it match, so the
+   * flow stays on Preview instead of advancing to Applied and points at the
+   * audit trail for authorship. Anything still CREATE/UPDATE means the write
+   * has not landed (yet); the original POST may still be executing, so the
+   * note says "check again", never "it failed".
    */
   const settleFromReplan = (refreshed: ChannelImportResult) => {
     setPreview(refreshed);
@@ -1015,15 +1028,32 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       );
       return;
     }
-    // The registry matches the roster — the operationally important fact, and
-    // the strongest one available here. The flow deliberately does NOT
-    // advance to Applied: that step reports "your import was applied", and
-    // inventory equality cannot establish that THIS request is what did it.
-    // Apply stays disabled, so a duplicate CHANNEL_IMPORTED is still
-    // impossible, and Cancel reloads the registry.
     setError(RECONCILE_MATCHES_NOTE);
   };
 
+  /**
+   * ============================================================================
+   * Purpose: Settle an INDETERMINATE apply by re-planning the same roster, and
+   *   report only what that evidence supports.
+   * Database/ORM: None (frontend) — one READ-ONLY dry run via useChannelImport.
+   *   It writes nothing, so checking costs the registry nothing.
+   * Standards: Reports the END STATE, never authorship. The apply is one
+   *   all-or-nothing transaction, so an all-UNCHANGED re-plan proves the
+   *   registry matches the roster — but not that THIS request is what made it
+   *   match, which is why the flow stays on Preview rather than advancing to
+   *   Applied. Operator-triggered and REPEATABLE by design: the original POST
+   *   may still be running, and a single automatic shot would race it into a
+   *   false "did not commit". Fails closed when the roster file is gone rather
+   *   than re-planning a different roster and calling the answer decisive.
+   * Blast Radius: What the operator is told about an import whose outcome is
+   *   unknown, and whether the flow leaves the indeterminate state. Apply stays
+   *   disabled throughout, so no duplicate CHANNEL_IMPORTED is reachable here.
+   * Connections:
+   *   - File: frontend/src/lib/api/useChannelImport.ts -> the dry-run POST.
+   *   - File: Docs/12_BACKEND_API_SPEC.md -> records the dry run as the
+   *       reconciliation tool for a lost apply response.
+   * ============================================================================
+   */
   const reconcileIndeterminate = async () => {
     if (busy || inFlightRef.current) {
       return;
@@ -1154,9 +1184,14 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   const handleCancel = () => {
     // `indeterminate` joins `applied` on the reloading path: an apply whose
     // response was lost may have committed, and leaving without a refetch
-    // would restore a registry that no longer matches the database.
-    if (applied || indeterminate) {
-      onDone();
+    // would restore a registry that no longer matches the database. It exits
+    // as "unknown", NOT "applied": the reload it triggers races the original
+    // POST and can return pre-write rows, so the parent must keep saying so
+    // rather than present that table as settled (review #184, codex P2).
+    if (applied) {
+      onDone("applied");
+    } else if (indeterminate) {
+      onDone("unknown");
     } else {
       onCancel();
     }
@@ -1200,7 +1235,11 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       ) : null;
     }
     return applied ? (
-      <AppliedStep result={applied} reason={trimmedReason} onDone={onDone} />
+      <AppliedStep
+        result={applied}
+        reason={trimmedReason}
+        onDone={() => onDone("applied")}
+      />
     ) : null;
   };
 

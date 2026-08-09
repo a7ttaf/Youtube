@@ -820,6 +820,28 @@ def _require_reviewed_pre_state(
         )
 
 
+# ============================================================================
+# Purpose: Enforce, for a plan-bound apply only, that the revenue SOURCE
+#   classification the preview disclosed is still the stored one.
+# Database/ORM: None directly — reads the row-locked ``previous`` the
+#   registry's write already returned (YouTubeChannelORM).
+# Standards: Exists because _INVENTORY_FIELDS is not sufficient once the plan
+#   DISCLOSES the transition. Two concurrent imports can flip
+#   revenue_required off and back on between the route's re-plan and the row
+#   lock, returning all four inventory fields to their reviewed values while
+#   the classification underneath moves — so the apply would perform a
+#   different finance-source mutation than the one on screen. Fails closed and
+#   fails WHOLE (raising aborts the single import transaction). Scoped to what
+#   was promised: a None disclosure means the write leaves the status alone,
+#   and a CREATE's ``from`` is None because no prior status could have moved.
+# Blast Radius: Turns an accepted import into a 409 for the whole file. No
+#   writes, no audit rows.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     _planned_revenue_source_status, which produces the disclosure enforced.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps
+#     ChannelImportRowStateDivergedError to 409.
+# ============================================================================
 def _require_reviewed_source_status(
     entry: ChannelImportPlanEntry, previous: ChannelRegistryEntry
 ) -> None:

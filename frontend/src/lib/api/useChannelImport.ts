@@ -65,10 +65,37 @@ const isChangeMap = (value: unknown): boolean => {
   return Object.values(value).every(isFieldChange);
 };
 
+const isNullableString = (value: unknown): boolean => {
+  return value === null || typeof value === "string";
+};
+
+/**
+ * EVERY field the preview renders, not just the ones it indexes into. A
+ * nullable field carrying an OBJECT is the case an allowlist of the indexed
+ * three still let through: `group_id: {}` is not null, so GroupCell falls past
+ * its null branch and renders the object as a React child, which throws
+ * (review #184). Nullable is about ABSENCE, not "anything goes".
+ */
 const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
   ["row_number", (value) => typeof value === "number"],
   ["outcome", (value) => typeof value === "string"],
   ["changes", isChangeMap],
+  ["youtube_channel_id", isNullableString],
+  ["channel_name", isNullableString],
+  ["group_id", isNullableString],
+  ["group_action", isNullableString],
+  ["reason", isNullableString],
+  ["revenue_required", (value) => value === null || typeof value === "boolean"],
+  [
+    "revenue_source_status",
+    (value) =>
+      value === null ||
+      (typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value) &&
+        isNullableString((value as Record<string, unknown>).from) &&
+        typeof (value as Record<string, unknown>).to === "string"),
+  ],
 ];
 
 const isPlanRow = (row: unknown): boolean => {
