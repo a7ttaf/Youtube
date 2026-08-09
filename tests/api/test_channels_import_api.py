@@ -1256,6 +1256,86 @@ def test_preview_discloses_the_derived_revenue_source_status():
     }
 
 
+class _SourceStatusDriftsAtWriteBoundary(ChannelRegistry):
+    """Move ONLY the source classification, leaving the four fields alone.
+
+    Models two concurrent imports flipping revenue_required off and back on
+    between the route's re-plan and the row lock: the inventory fields return
+    to their reviewed values while the classification underneath does not.
+    """
+
+    def __init__(self, entries: list[ChannelRegistryEntry], *, drift_to: str) -> None:
+        super().__init__(entries)
+        self._drift_to = drift_to
+        self._drifted = False
+
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
+        """Rewrite the stored classification once, just before the locked write."""
+        if not self._drifted:
+            self._drifted = True
+            current = super().get_channel(youtube_channel_id)
+            assert current is not None
+            self._channels[youtube_channel_id] = dataclasses.replace(
+                current, revenue_source_status=self._drift_to
+            )
+        return super().update_inventory(
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+        )
+
+
+def test_plan_bound_apply_refuses_a_drifted_revenue_source_pre_state():
+    """The DISCLOSED source transition is reviewed, so it is enforced too.
+
+    All four inventory fields can return to their reviewed values while the
+    classification beneath them moves. The apply would then perform
+    MISSING_REVENUE_SOURCE -> PERFORMANCE_ONLY where the operator approved
+    OFFICIAL_CMS_REVENUE -> PERFORMANCE_ONLY: the same end state, reached from
+    a different one, which is a different finance-source mutation.
+    """
+    drifting = _SourceStatusDriftsAtWriteBoundary(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Alpha News",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+                revenue_source_status="OFFICIAL_CMS_REVENUE",
+            )
+        ],
+        drift_to="MISSING_REVENUE_SOURCE",
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},Alpha News,No")
+
+    preview = post_import(client, body, dry_run="true").json()
+    assert preview["rows"][0]["revenue_source_status"] == {
+        "from": "OFFICIAL_CMS_REVENUE",
+        "to": "PERFORMANCE_ONLY",
+    }
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "revenue_source_status" in detail
+    assert "OFFICIAL_CMS_REVENUE" in detail
+    assert audit_sink.records == []
+
+
 def test_preview_claims_no_source_change_when_the_flag_holds():
     """Anti-noise: only a revenue_required FLIP re-derives the source status.
 

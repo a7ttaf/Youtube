@@ -753,6 +753,7 @@ def _require_reviewed_pre_state(
     "heal the drift silently" is exactly the outcome that caller declined. The
     unbound path still heals and audits it.
     """
+    _require_reviewed_source_status(entry, previous)
     for field in _INVENTORY_FIELDS:
         reviewed = entry.changes.get(field)
         expected = reviewed[0] if reviewed is not None else getattr(updated, field)
@@ -769,6 +770,40 @@ def _require_reviewed_pre_state(
             f"the preview showed {shown}, but the stored value is now "
             f"{actual!r}; re-run the preview and review the change"
         )
+
+
+def _require_reviewed_source_status(
+    entry: ChannelImportPlanEntry, previous: ChannelRegistryEntry
+) -> None:
+    """Fail closed when the reviewed source classification is not the stored one.
+
+    ``_INVENTORY_FIELDS`` is not enough once the plan DISCLOSES the
+    revenue_source_status transition. Two concurrent imports can flip
+    ``revenue_required`` off and back on between the route's re-plan and this
+    row lock, returning all four inventory fields to their reviewed values
+    while the classification underneath moves from OFFICIAL_CMS_REVENUE to
+    MISSING_REVENUE_SOURCE. The bound apply would then perform
+    ``MISSING_REVENUE_SOURCE -> PERFORMANCE_ONLY`` while the operator approved
+    ``OFFICIAL_CMS_REVENUE -> PERFORMANCE_ONLY`` — a different finance-source
+    mutation than the one on screen (review #184).
+
+    Only checks rows whose plan actually promised a transition: a None
+    disclosure means the write leaves the classification alone, and a CREATE's
+    ``from`` is None because there is no prior status to have moved.
+    """
+    disclosed = entry.revenue_source_status
+    if disclosed is None:
+        return
+    reviewed_from = disclosed[0]
+    if reviewed_from is None or reviewed_from == previous.revenue_source_status:
+        return
+    raise ChannelImportRowStateDivergedError(
+        f"channel {entry.youtube_channel_id} changed during the import: the "
+        f"preview showed revenue_source_status {reviewed_from!r} -> "
+        f"{disclosed[1]!r}, but the stored value is now "
+        f"{previous.revenue_source_status!r}; re-run the preview and review "
+        "the change"
+    )
 
 
 def _entry_changes(
