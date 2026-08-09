@@ -94,9 +94,12 @@ class ChannelImportRowStateDivergedError(ChannelImportError):
     "apply the diff I reviewed, or none of it", and this honours that without
     reversing the default.
 
-    Rows whose reviewed diff is EMPTY are exempt either way: an UNCHANGED row
-    carries no reviewed pre-state to contradict, and healing drift is exactly
-    its documented job. The route maps this to HTTP 409.
+    An UNCHANGED row is NOT exempt under a bound apply. "The preview showed no
+    change to this field" is a reviewed claim as strong as a listed diff, and
+    silent healing is precisely the outcome a caller who bound its plan
+    declined — so all four inventory fields are compared. Healing drift stays
+    the UNCHANGED row's documented job for UNBOUND callers only. The route
+    maps this to HTTP 409.
     """
 
 
@@ -757,6 +760,32 @@ def _entry_changes(
     }
 
 
+# ============================================================================
+# Purpose: Enforce that the group EFFECT the operator reviewed — mint a new
+#   CMS group, or join one that already exists — is still the effect this
+#   write would have, checked under the group row lock it runs inside.
+# Database/ORM: None directly. Judges the ChannelGroupORM existence its caller
+#   already observed under `FOR NO KEY UPDATE`, so the check cannot be raced
+#   between observation and decision.
+# Standards: Fail closed and fail WHOLE — raising aborts the single import
+#   transaction. Unlike the channel pre-state guard this applies to EVERY
+#   caller, bound or not, because a CREATE becoming a JOIN is a different KIND
+#   of write (a different finance scope and a different audit event), not a
+#   different value, so no "the file wins" decision covers it. `planned` is
+#   None for a caller that disclosed no action, and then nothing is asserted.
+#   `created_in_this_run` is load-bearing: a roster may list several channels
+#   under one NEW group key and planning labels every such row CREATE, so the
+#   run's own first creation must not read as a concurrent one (review #184).
+# Blast Radius: Turns an accepted import into a 409 for the whole file. No
+#   writes, no audit rows, no finance effect of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     _planned_group_action, which assigns the CREATE/JOIN label at plan time.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps
+#     ChannelImportGroupActionDivergedError to 409.
+#   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> the
+#     "new group" / "adds to existing" cell this label drives.
+# ============================================================================
 def _require_planned_group_action(
     planned: ChannelImportGroupAction | None,
     *,

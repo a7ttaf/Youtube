@@ -100,21 +100,41 @@ const describeImportError = (err: unknown): string => {
  * Structural check that an unknown rejection `detail` is the refreshed import
  * plan (channels.py raises the full payload as `detail`).
  *
- * Checks BOTH halves the preview renders, not just `rows`: the plan replaces
- * the on-screen preview, and CountsStrip calls Object.entries on `counts`, so
- * a rows-only payload would pass this guard and then crash the step it was
- * meant to repair. A `detail` that is not the whole plan falls through to the
- * ordinary error banner instead.
+ * Every field this checks is one the flow would otherwise use unguarded:
+ *   `rows`    — replaces the preview table.
+ *   `counts`  — CountsStrip calls Object.entries on it, so a rows-only
+ *               payload would pass and then crash the step it was meant to
+ *               repair.
+ *   `plan_fingerprint` — the SECURITY one. The next Apply sends it, and a
+ *               missing value would reach useChannelImport as `undefined`,
+ *               which omits `expected_plan_fingerprint` from the form. That
+ *               silently DOWNGRADES the operator's bound apply to an unbound
+ *               one: no fingerprint compare, and the backend's pre-state
+ *               guard is off, so drift is overwritten under "the file wins"
+ *               by a request the operator believed was still bound to the
+ *               plan on screen. Failing closed here means the malformed
+ *               payload is shown as an error instead (review #184).
+ *
+ * A `detail` that is not the whole plan falls through to the ordinary error
+ * banner, which leaves the previous approved preview — and its fingerprint —
+ * intact.
  */
 const isImportResultPayload = (detail: unknown): detail is ChannelImportResult => {
   if (typeof detail !== "object" || detail === null) {
     return false;
   }
-  const candidate = detail as { rows?: unknown; counts?: unknown };
+  const candidate = detail as {
+    rows?: unknown;
+    counts?: unknown;
+    plan_fingerprint?: unknown;
+  };
   if (!Array.isArray(candidate.rows)) {
     return false;
   }
-  return typeof candidate.counts === "object" && candidate.counts !== null;
+  if (typeof candidate.counts !== "object" || candidate.counts === null) {
+    return false;
+  }
+  return typeof candidate.plan_fingerprint === "string" && candidate.plan_fingerprint !== "";
 };
 
 /**

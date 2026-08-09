@@ -869,6 +869,33 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(screen.getByRole("button", { name: /^back$/i })).toBeEnabled();
   });
 
+  it("refuses a refreshed plan with no fingerprint rather than unbinding the apply", async () => {
+    // The dangerous shape: rows and counts present, plan_fingerprint missing.
+    // Accepting it would replace the preview with a plan carrying no digest,
+    // and the next Apply would send NO expected_plan_fingerprint — silently
+    // turning the operator's bound apply into an unbound, file-wins one with
+    // the backend's pre-state guard switched off. Fail closed instead.
+    const noFingerprint = { ...DRY_RUN_PLAN } as Record<string, unknown>;
+    delete noFingerprint.plan_fingerprint;
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true"
+        ? jsonResponse(DRY_RUN_PLAN)
+        : jsonResponse({ detail: noFingerprint }, 409),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(screen.getByText("Apply failed")).toBeInTheDocument());
+
+    // The approved preview — and its fingerprint — survive untouched.
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+    expect(screen.getByText("CREATE: 1 · UPDATE: 1")).toBeInTheDocument();
+
+    // The decisive assertion: a retry is still BOUND to the plan on screen.
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(importPosts()).toHaveLength(3));
+    expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-clean-v1");
+  });
+
   it("distinguishes a group JOIN from a group CREATE, and claims neither without one", async () => {
     // Same key, opposite effects: the operator must be able to tell "this
     // adds a channel to a group you already own" from "this mints a new

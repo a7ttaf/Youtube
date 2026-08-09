@@ -1286,10 +1286,19 @@ export type ChannelImportResult = {
   cms_status: string;
   counts: Record<string, number>;
   rows: ChannelImportRowResult[];
-  // Digest of exactly this plan's content (counts + rows), excluding `dry_run`
-  // and the echoed form fields. Echo a dry run's value back as
-  // `expected_plan_fingerprint` on the apply and the backend 409s if the plan
-  // it would execute is no longer the one that was reviewed.
+  // Digest of everything the operator reviews: `counts`, `rows`, AND the
+  // target — `content_owner_id` and `cms_status`. Those two are IN the digest
+  // deliberately: an all-CREATE roster's rows carry no owner (a CREATE's
+  // `changes` is empty by design), so leaving them out let a preview of owner
+  // A apply against owner B with an identical digest. Only `dry_run` is
+  // excluded, because a preview and its apply differ in it by definition.
+  //
+  // Echo a dry run's value back as `expected_plan_fingerprint` on the apply:
+  // the backend 409s if the plan it would execute is no longer the one that
+  // was reviewed, AND treats the field's presence as opting in to strict
+  // write-boundary pre-state enforcement. Omitting it is not a smaller
+  // version of the same request — it is an UNBOUND apply under which the
+  // roster overwrites concurrent drift ("the file wins").
   plan_fingerprint: string;
 };
 
