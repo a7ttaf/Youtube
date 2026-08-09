@@ -1,0 +1,193 @@
+import { renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { ChannelImportResult } from "@/lib/api/types";
+import { useChannelImport } from "@/lib/api/useChannelImport";
+import { TenantProvider } from "@/contexts/TenantContext";
+
+const wrapper = ({ children }: { children: React.ReactNode }) => {
+  return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
+};
+
+const ORIGINAL_FETCH = globalThis.fetch;
+
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn());
+});
+
+afterEach(() => {
+  globalThis.fetch = ORIGINAL_FETCH;
+  vi.restoreAllMocks();
+});
+
+const jsonResponse = (body: unknown, status = 200) => {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+};
+
+const fetchMock = () => {
+  return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+};
+
+const urlOf = (input: unknown): string => {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (input instanceof Request) return input.url;
+  return String(input);
+};
+
+const requireFetchArgs = () => {
+  const args = fetchMock().mock.calls.at(-1);
+  if (!args) throw new Error("expected fetch to have been called");
+  return args;
+};
+
+const requireFormDataBody = (init: unknown): FormData => {
+  const body = (init as RequestInit).body;
+  if (!(body instanceof FormData)) {
+    throw new Error("expected the request body to be FormData");
+  }
+  return body;
+};
+
+const CSV_TEXT = "youtube_channel_id,channel_name\nUCa,Alpha Channel\n";
+
+const rosterFile = () => {
+  return new File([CSV_TEXT], "roster.csv", { type: "text/csv" });
+};
+
+const DRY_RUN_RESULT: ChannelImportResult = {
+  dry_run: true,
+  content_owner_id: "COabc",
+  cms_status: "INSIDE_CMS",
+  counts: { CREATE: 1, UPDATE: 1 },
+  rows: [
+    {
+      row_number: 1,
+      youtube_channel_id: "UCa",
+      outcome: "CREATE",
+      channel_name: "Alpha Channel",
+      group_id: null,
+      revenue_required: true,
+      changes: {},
+      reason: null,
+    },
+    {
+      row_number: 2,
+      youtube_channel_id: "UCb",
+      outcome: "UPDATE",
+      channel_name: "Beta Channel",
+      group_id: "g1",
+      revenue_required: false,
+      changes: {
+        channel_name: { from: "Old Beta", to: "Beta Channel" },
+        revenue_required: { from: true, to: false },
+      },
+      reason: null,
+    },
+  ],
+};
+
+const APPLY_RESULT: ChannelImportResult = { ...DRY_RUN_RESULT, dry_run: false };
+
+// The all-or-nothing apply rejection: a 422 whose `detail` is the full
+// ChannelImportResult payload (channels.py:688-689), here with the ERROR row
+// that blocked the apply.
+const BLOCKED_APPLY_DETAIL: ChannelImportResult = {
+  dry_run: false,
+  content_owner_id: "COabc",
+  cms_status: "INSIDE_CMS",
+  counts: { ERROR: 1 },
+  rows: [
+    {
+      row_number: 1,
+      youtube_channel_id: null,
+      outcome: "ERROR",
+      channel_name: null,
+      group_id: null,
+      revenue_required: null,
+      changes: {},
+      reason: "missing youtube_channel_id",
+    },
+  ],
+};
+
+describe("useChannelImport", () => {
+  it("POSTs /channels/import as multipart FormData with the mapped fields", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(DRY_RUN_RESULT));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+    const file = rosterFile();
+
+    const response = await result.current({
+      file,
+      contentOwnerId: "COabc",
+      dryRun: true,
+      reason: "monthly roster import",
+    });
+
+    const [url, init] = requireFetchArgs();
+    expect(urlOf(url)).toBe("/channels/import");
+    expect((init as RequestInit).method).toBe("POST");
+    const form = requireFormDataBody(init);
+    // Exactly the four wire fields — cms_status is omitted so the backend
+    // default (INSIDE_CMS) applies.
+    expect([...form.keys()].sort()).toEqual([
+      "content_owner_id",
+      "dry_run",
+      "file",
+      "reason",
+    ]);
+    expect(form.get("content_owner_id")).toBe("COabc");
+    expect(form.get("dry_run")).toBe("true");
+    expect(form.get("reason")).toBe("monthly roster import");
+    // The file part must be the caller's File object appended verbatim (same
+    // identity — so its name and CSV bytes reach the wire untouched).
+    const filePart = form.get("file");
+    expect(filePart).toBeInstanceOf(File);
+    expect(filePart).toBe(file);
+    expect((filePart as File).name).toBe("roster.csv");
+    // No JSON Content-Type: the FormData must pass through verbatim so fetch
+    // sets the multipart boundary itself.
+    const headers = new Headers((init as RequestInit).headers);
+    expect(headers.get("Content-Type")).toBeNull();
+    expect(response).toEqual(DRY_RUN_RESULT);
+  });
+
+  it("round-trips dryRun: false as the apply flag", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(APPLY_RESULT));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    const response = await result.current({
+      file: rosterFile(),
+      contentOwnerId: "COabc",
+      dryRun: false,
+      reason: "monthly roster import",
+    });
+
+    const form = requireFormDataBody(requireFetchArgs()[1]);
+    expect(form.get("dry_run")).toBe("false");
+    expect(response).toEqual(APPLY_RESULT);
+  });
+
+  it("propagates the 422 blocked-apply ApiError carrying the full plan payload", async () => {
+    fetchMock().mockResolvedValue(
+      jsonResponse({ detail: BLOCKED_APPLY_DETAIL }, 422),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({
+      name: "ApiError",
+      status: 422,
+      body: { detail: BLOCKED_APPLY_DETAIL },
+    });
+  });
+});

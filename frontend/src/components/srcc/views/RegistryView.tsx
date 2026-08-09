@@ -15,6 +15,7 @@ import {
   RESTRICTED_FINANCE_VALUE,
   SummaryTile,
 } from "../shared";
+import { RegistryImportFlow } from "./RegistryImportFlow";
 
 // ============================================================================
 // Purpose: The REAL-data Channel Registry screen (Phase 2). The table is wired
@@ -24,23 +25,31 @@ import {
 //   live: "Map" opens the mapping-change panel (PATCH /channels/{id}/mapping),
 //   "Assign" opens the account-link proposal panel (POST
 //   /revenue/channel-account-links, proposes an UNVERIFIED link), "Review"
-//   navigates to the Trace view preselected on the channel. Bulk import stays
-//   disabled (no route; format undefined — spec non-goal).
+//   navigates to the Trace view preselected on the channel. The header's
+//   Import CSV action (PR-B) opens RegistryImportFlow, which swaps the main
+//   panel's content (band + table) for the three-step import stepper; cancel
+//   restores the table untouched, done restores it and reloads the channels.
 // Database/ORM: None (frontend) — consumes GET /channels + GET /org-units
 //   (VIEW_ANALYTICS gates), PATCH /channels/{id}/mapping (dual
 //   MANAGE_ORG_MAPPING), POST /revenue/channel-account-links
-//   (MANAGE_ORG_MAPPING@global).
+//   (MANAGE_ORG_MAPPING@global); POST /channels/import stays inside
+//   RegistryImportFlow.
 // Standards: No client-side authorization is invented. canManageRegistry gates
 //   the write affordances and trace-key visibility (fail-closed); the backend
 //   permission checks remain the authority and scoped 403s surface inline.
-//   Mutations use the synchronous in-flight ref latch (one request per click
-//   burst -> one audit event) and reload the channel list on success.
-// Blast Radius: Registry reads + two audited registry write paths. No finance
+//   canImportChannels (a backend-derived both-permission render hint) gates
+//   the Import CSV control — hidden, not disabled, per the fail-closed house
+//   rule. Mutations use the synchronous in-flight ref latch (one request per
+//   click burst -> one audit event) and reload the channel list on success.
+// Blast Radius: Registry reads + two audited registry write paths, plus the
+//   audited bulk-import write path behind RegistryImportFlow. No finance
 //   number computation; no source-of-truth mutation outside the wired routes.
 // Connections:
 //   - File: frontend/src/lib/api/useOrgUnits.ts -> org-unit name directory.
 //   - File: frontend/src/lib/api/useChannelMapping.ts -> PATCH mapping action.
 //   - File: frontend/src/lib/api/useChannelAccountLinks.ts -> propose action.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> the
+//     import stepper the main panel swaps in behind canImportChannels.
 //   - File: backend/ums_smart_revenue/api/org_units.py -> GET /org-units.
 //   - File: Docs/superpowers/specs/2026-06-07-registry-phase2-design.md -> spec.
 // ============================================================================
@@ -199,20 +208,40 @@ type RowActions = {
   onReview: (ch: ChannelRegistryEntry) => void;
 };
 
-/** Registry panel header: title/subtitle and the bulk-import action. */
-const RegistryPanelHeader = () => {
+/**
+ * Registry panel header: title/subtitle and, for import-capable operators, the
+ * live Import CSV action (PR-B — POST /channels/import behind the flow). Per
+ * the fail-closed house rule the button renders only when canImportChannels is
+ * held (hidden, not disabled); it disables only while the stepper is already
+ * open, mirroring the Groups header's sync control.
+ */
+const RegistryPanelHeader = ({
+  canImportChannels,
+  importOpen,
+  onStartImport,
+}: {
+  canImportChannels: boolean;
+  importOpen: boolean;
+  onStartImport: () => void;
+}) => {
   return (
     <div className="panel-header">
       <div className="panel-title">
         <strong id="registryTitle">Channel Registry</strong>
         <span>Ownership, CMS status, revenue scope, and SQL lineage identity</span>
       </div>
-      <div className="view-actions">
-        {/* Spec non-goal: no bulk-import route exists (format undefined) — disabled. */}
-        <button className="ghost-button" type="button" disabled>
-          Bulk Import
-        </button>
-      </div>
+      {canImportChannels ? (
+        <div className="view-actions">
+          <button
+            className="primary-button"
+            type="button"
+            disabled={importOpen}
+            onClick={onStartImport}
+          >
+            Import CSV
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -449,27 +478,52 @@ const RegistryTable = ({
   );
 };
 
-/** The registry main panel: header + mapping band + registry table. */
+/**
+ * The registry main panel: header + either the import stepper (importOpen) or
+ * the steady-state mapping band + registry table. importOpen can only ever
+ * become true for an import-capable operator — the header renders the opening
+ * control only behind canImportChannels.
+ */
 const RegistryMainPanel = ({
   canManageRegistry,
+  canImportChannels,
   channelState,
   unitsById,
+  importOpen,
+  onStartImport,
+  onCancelImport,
+  onImportDone,
   ...rowActions
 }: {
   canManageRegistry: boolean;
+  canImportChannels: boolean;
   channelState: ChannelAsyncState;
   unitsById: Map<string, OrgUnit>;
+  importOpen: boolean;
+  onStartImport: () => void;
+  onCancelImport: () => void;
+  onImportDone: () => void;
 } & RowActions) => {
   return (
     <section className="panel">
-      <RegistryPanelHeader />
-      <RegistryMappingBand canManageRegistry={canManageRegistry} />
-      <RegistryTable
-        canManageRegistry={canManageRegistry}
-        channelState={channelState}
-        unitsById={unitsById}
-        {...rowActions}
+      <RegistryPanelHeader
+        canImportChannels={canImportChannels}
+        importOpen={importOpen}
+        onStartImport={onStartImport}
       />
+      {importOpen ? (
+        <RegistryImportFlow onCancel={onCancelImport} onDone={onImportDone} />
+      ) : (
+        <>
+          <RegistryMappingBand canManageRegistry={canManageRegistry} />
+          <RegistryTable
+            canManageRegistry={canManageRegistry}
+            channelState={channelState}
+            unitsById={unitsById}
+            {...rowActions}
+          />
+        </>
+      )}
     </section>
   );
 };
@@ -972,14 +1026,18 @@ const RegistrySidePanels = ({
  * The real-data channel registry view. useChannels() and useOrgUnits() are each
  * called ONCE here and threaded down — a second hook call in a child would
  * duplicate the GET. Row actions set the side-panel targets (Map/Assign) or
- * navigate to Trace (Review).
+ * navigate to Trace (Review). The importing flag swaps the main panel's
+ * content for RegistryImportFlow: cancel restores the table untouched, done
+ * restores it and reloads the channel list.
  */
 const RegistryView = ({
   canManageRegistry,
+  canImportChannels,
   canViewFinance,
   onOpenTrace,
 }: {
   canManageRegistry: boolean;
+  canImportChannels: boolean;
   canViewFinance: boolean;
   onOpenTrace?: (channelId: string) => void;
 }) => {
@@ -991,6 +1049,7 @@ const RegistryView = ({
   const [mapPreset, setMapPreset] = useState<{ channelId: string } | null>(null);
   const [assignContext, setAssignContext] =
     useState<{ channel: ChannelRegistryEntry } | null>(null);
+  const [importing, setImporting] = useState(false);
 
   const unitsById = useMemo(
     () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
@@ -1033,8 +1092,16 @@ const RegistryView = ({
       <div className="view-grid wide-side">
         <RegistryMainPanel
           canManageRegistry={canManageRegistry}
+          canImportChannels={canImportChannels}
           channelState={channelState}
           unitsById={unitsById}
+          importOpen={importing}
+          onStartImport={() => setImporting(true)}
+          onCancelImport={() => setImporting(false)}
+          onImportDone={() => {
+            setImporting(false);
+            channelState.reload();
+          }}
           hasTraceNav={Boolean(onOpenTrace)}
           onMap={onMap}
           onAssign={onAssign}

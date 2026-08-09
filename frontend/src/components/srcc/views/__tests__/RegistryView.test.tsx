@@ -121,7 +121,7 @@ const isMappingPatch = (url: string, init?: RequestInit) =>
 const isProposePost = (url: string, init?: RequestInit) =>
   url === "/revenue/channel-account-links" && init?.method === "POST";
 
-/** Route the registry's four endpoints; unrouted URLs fail loudly (404 + []). */
+/** Route the registry's endpoints; unrouted URLs fail loudly (404 + []). */
 const routeRegistry = (overrides: RouteOverrides = {}) => {
   return (input: unknown, init?: RequestInit) => {
     const url = urlOf(input);
@@ -130,6 +130,11 @@ const routeRegistry = (overrides: RouteOverrides = {}) => {
     }
     if (url === "/org-units") {
       return Promise.resolve(orgUnitsResponse(overrides));
+    }
+    // The import stepper's owner picker (PR-B): no credentials seeded, so the
+    // picker renders its empty state with the Connectors pointer.
+    if (url === "/connectors/content-owners?connector_key=youtube-analytics") {
+      return Promise.resolve(jsonResponse({ items: [] }));
     }
     if (isMappingPatch(url, init)) {
       return Promise.resolve(mappingResponse(overrides, init));
@@ -150,11 +155,13 @@ const renderRegistry = (
   canManageRegistry = true,
   canViewFinance = true,
   onOpenTrace?: (channelId: string) => void,
+  canImportChannels = false,
 ) => {
   return render(
     <TenantProvider initialSlug="ums">
       <RegistryView
         canManageRegistry={canManageRegistry}
+        canImportChannels={canImportChannels}
         canViewFinance={canViewFinance}
         onOpenTrace={onOpenTrace}
       />
@@ -242,7 +249,11 @@ describe("RegistryView wired to GET /channels", () => {
 
     rerender(
       <TenantProvider initialSlug="ums">
-        <RegistryView canManageRegistry={false} canViewFinance />
+        <RegistryView
+          canManageRegistry={false}
+          canImportChannels={false}
+          canViewFinance
+        />
       </TenantProvider>,
     );
     expect(screen.queryByText("channel:UC-DRAMA-01")).not.toBeInTheDocument();
@@ -606,17 +617,42 @@ describe("RegistryView Phase 2: Review action + gating", () => {
     expect(screen.getByRole("button", { name: /^review$/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: /^submit mapping change$/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^propose link$/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /bulk import/i })).toBeDisabled();
+    // Import CSV is hidden (not disabled) without the capability — fail-closed.
+    expect(screen.queryByRole("button", { name: /import csv/i })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Channel")).toBeDisabled();
     expect(screen.getByLabelText("AdSense account ID")).toBeDisabled();
   });
 
-  it("keeps Bulk Import disabled even for registry managers (spec non-goal)", async () => {
+  it("hides Import CSV even for registry managers without canImportChannels (PR-B gate)", async () => {
     fetchMock().mockImplementation(routeRegistry());
     renderRegistry(true);
     await waitFor(() =>
       expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
     );
-    expect(screen.getByRole("button", { name: /bulk import/i })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /import csv/i })).not.toBeInTheDocument();
+  });
+
+  it("opens the import stepper via Import CSV and Cancel restores the table untouched", async () => {
+    fetchMock().mockImplementation(routeRegistry());
+    renderRegistry(true, true, undefined, true);
+    await waitFor(() =>
+      expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /import csv/i }));
+    // The stepper's Upload step replaces the main panel's table content.
+    expect(screen.getByRole("group", { name: "Import upload" })).toBeInTheDocument();
+    expect(screen.queryByText("UMS Drama")).not.toBeInTheDocument();
+    // No credentials are seeded, so the picker points the operator at Connectors.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Register a youtube-analytics credential in Connectors first/i),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    // Cancel restores the table with NO refetch: still exactly one GET /channels.
+    expect(screen.getByText("UMS Drama")).toBeInTheDocument();
+    expect(channelCalls()).toHaveLength(1);
   });
 });

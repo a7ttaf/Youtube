@@ -53,7 +53,7 @@ export type SessionPermissionGrant = {
 // Derived global-scope capability booleans the SPA uses to render UI. Every key
 // is camelCase (backend alias generator). These are AUTHORITATIVE — the UI gates
 // every surface on them and never fabricates one the backend did not grant.
-// Source: SessionCapabilities (session.py:45-64).
+// Source: SessionCapabilities (session.py:67-95).
 export type SessionCapabilities = {
   canViewRevenue: boolean;
   canViewConfidence: boolean;
@@ -66,6 +66,11 @@ export type SessionCapabilities = {
   canExportAnalyticsReports: boolean;
   canManageRegistry: boolean;
   canManageGroups: boolean;
+  // Both-permission render hint (MANAGE_CHANNELS AND MANAGE_GROUPS, never
+  // either-of): POST /channels/import always requires the former and
+  // additionally requires the latter when the roster carries Group_ID values.
+  // Source: SessionCapabilities.can_import_channels.
+  canImportChannels: boolean;
   canManageConnectors: boolean;
   canViewConnectorHealth: boolean;
   canRunConnectorJobs: boolean;
@@ -1209,6 +1214,70 @@ export type ClearOwnerStampResponse = {
 // typed exactly; audit_event stays a loose Record since no schema enforces it.
 export type GroupUpdateResponse = ChannelGroupApiEntry & {
   audit_event: Record<string, unknown>;
+};
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend channel-import JSON contract
+//   consumed by the Registry import stepper: POST /channels/import takes a
+//   multipart CSV roster form and returns ONE shape for both modes — a PREVIEW
+//   when dry_run is true, an APPLIED result when false — so the view must read
+//   the flag rather than assume either. Fields are matched 1:1 against the
+//   DECLARED backend Pydantic models (not guessed); nullable fields serialize
+//   as null. WIRE CASING NOTE: these models have NO alias generator, so
+//   payloads stay snake_case on the wire — except ChannelImportFieldChange,
+//   whose `from`/`to` keys are explicit backend Field aliases.
+// Standards: Read-only typed boundary at the API surface; no logic here. An
+//   apply attempted while the plan holds any ERROR row is rejected as a 422
+//   whose `detail` is this same ChannelImportResult payload
+//   (channels.py:688-689) — the all-or-nothing contract the import stepper
+//   mirrors by blocking Apply client-side while an ERROR row exists.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/channels.py
+//       ChannelImportFieldChange -> ChannelImportFieldChange
+//       ChannelImportRowResult   -> ChannelImportRowResult
+//       ChannelImportResult      -> ChannelImportResult
+//       import_channels()        -> POST /channels/import (channels.py:639)
+//   - File: backend/ums_smart_revenue/org/channel_import.py
+//       ChannelImportOutcome -> ChannelImportRowResult.outcome literal set
+//         (channel_import.py:322; the Pydantic field itself is a plain str;
+//         the enum is the actual source of truth for the 4 values).
+//   - File: frontend/src/lib/api/useChannelImport.ts -> the mutation hook
+//       posting the multipart form this contract answers.
+// ============================================================================
+
+// One field's before/after pair in an import row's diff. The wire keys are
+// literally `from`/`to` (backend Field aliases, api/channels.py:161); values
+// are `str | bool | None` on the backend, mirrored exactly here.
+export type ChannelImportFieldChange = {
+  from: string | boolean | null;
+  to: string | boolean | null;
+};
+
+// One CSV row's planned or applied outcome (backend ChannelImportRowResult,
+// api/channels.py:170). Row fields echo the planned inventory values, not just
+// the diff — a CREATE row has an EMPTY `changes` mapping by design. `reason`
+// is the backend's row-level explanation (ERROR rows name the failure
+// verbatim) and null when the row needs none.
+export type ChannelImportRowResult = {
+  row_number: number;
+  youtube_channel_id: string | null;
+  outcome: "CREATE" | "UPDATE" | "UNCHANGED" | "ERROR";
+  channel_name: string | null;
+  group_id: string | null;
+  revenue_required: boolean | null;
+  changes: Record<string, ChannelImportFieldChange>;
+  reason: string | null;
+};
+
+// POST /channels/import response, identical in shape for dry run and apply
+// (backend ChannelImportResult, api/channels.py:190). `counts` is keyed by
+// outcome literal; `content_owner_id` and `cms_status` echo the request form.
+export type ChannelImportResult = {
+  dry_run: boolean;
+  content_owner_id: string;
+  cms_status: string;
+  counts: Record<string, number>;
+  rows: ChannelImportRowResult[];
 };
 
 // ============================================================================

@@ -45,6 +45,7 @@ type AccessPermissions = {
   canViewBankReconciliation: boolean;
   canManageRegistry: boolean;
   canManageGroups: boolean;
+  canImportChannels: boolean;
   canManageConnectors: boolean;
   canCloseMonth: boolean;
   canUnlockMonth: boolean;
@@ -124,6 +125,11 @@ const capabilitiesToPermissions = (
     canViewBankReconciliation: capabilities.canViewBankReconciliation,
     canManageRegistry: capabilities.canManageRegistry,
     canManageGroups: capabilities.canManageGroups,
+    // Import CSV render hint: the backend derives this as MANAGE_CHANNELS AND
+    // MANAGE_GROUPS (never either-of) — the import route always needs the
+    // former and additionally the latter for Group_ID-bearing rosters, so a
+    // channels-only principal never sees a control that would 403 mid-flow.
+    canImportChannels: capabilities.canImportChannels,
     canManageConnectors: capabilities.canManageConnectors,
     canCloseMonth: capabilities.canCloseMonth,
     canUnlockMonth: capabilities.canUnlockMonth,
@@ -598,6 +604,7 @@ const ViewRouter = ({
     registry: () => (
       <RegistryView
         canManageRegistry={permissions.canManageRegistry}
+        canImportChannels={permissions.canImportChannels}
         canViewFinance={permissions.canViewFinance}
         onOpenTrace={onOpenTrace}
       />
