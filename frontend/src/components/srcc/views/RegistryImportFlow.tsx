@@ -689,16 +689,35 @@ const APPLY_INDETERMINATE_NOTE =
   "before importing again.";
 
 /**
- * Does this refreshed plan prove the earlier apply committed?
+ * Does this refreshed plan PROVE the earlier apply committed?
  *
- * Decisive because the apply is ONE all-or-nothing transaction: if every row
- * is now UNCHANGED then the roster IS the registry, which can only be true of
- * a committed write. A single remaining CREATE/UPDATE proves the opposite —
- * though only as of this instant, since the original request may still be
- * running, which is why the check stays repeatable.
+ * `outcome` is computed from channel INVENTORY only — the planner never loads
+ * group memberships — so all-UNCHANGED alone is not proof for a roster that
+ * carries group keys: the channels can already match while the membership
+ * attachments the same import owed are still missing, and calling that
+ * "applied" would report a half-written import as done (review #184).
+ *
+ * So the verdict is deliberately narrow: every row UNCHANGED **and** no row
+ * claiming a group effect at all. Within that shape the plan really is
+ * decisive, because the apply is ONE all-or-nothing transaction — the roster
+ * being the registry can only be true of a committed write.
+ *
+ * A group-bearing roster therefore never auto-settles here. That is the
+ * fail-closed answer, not a gap: `group_action` is derived from whether the
+ * GROUP exists, not from whether the MEMBERSHIP does, so it cannot
+ * distinguish "already attached" from "still owed" and any verdict built on
+ * it would be a guess.
  */
 const isAlreadyApplied = (plan: ChannelImportResult): boolean => {
-  return plan.rows.every((row) => row.outcome === "UNCHANGED");
+  return plan.rows.every((row) => row.outcome === "UNCHANGED" && row.group_id === null);
+};
+
+/** True when a re-plan is inconclusive BECAUSE the roster carries group keys. */
+const hasUnverifiableGroupEffects = (plan: ChannelImportResult): boolean => {
+  return (
+    plan.rows.every((row) => row.outcome === "UNCHANGED") &&
+    plan.rows.some((row) => row.group_id !== null)
+  );
 };
 
 /** Copy for a re-plan that still shows work the registry has not taken. */
@@ -707,6 +726,16 @@ const RECONCILE_PENDING_NOTE =
   "does not have yet. The original request may still be running — check " +
   "again in a moment, or apply the refreshed plan.";
 
+/**
+ * Copy for a re-plan whose channels all match but whose rows carry group
+ * keys. The plan cannot see membership, so this is honestly inconclusive
+ * rather than a "did not commit" — and it must not read as one.
+ */
+const RECONCILE_GROUPS_UNVERIFIABLE_NOTE =
+  "The channels in this roster already match the registry, but it also " +
+  "assigns groups, and a re-plan cannot tell whether those memberships were " +
+  "attached. Check the Groups view before importing again.";
+
 /** Copy for a reconciliation attempt with no roster left to re-plan. */
 const RECONCILE_NO_ROSTER_NOTE =
   "The roster is no longer loaded, so the earlier import's outcome cannot be " +
@@ -714,6 +743,30 @@ const RECONCILE_NO_ROSTER_NOTE =
 
 const RECONCILE_FAILED_PREFIX = "Could not check the registry: ";
 const RECONCILE_STILL_UNKNOWN = "The earlier import's outcome is still unknown.";
+
+/**
+ * Why Back is refused while an apply's outcome is unknown. Upload owns the
+ * file, owner and reason the reconciliation RE-PLANS, so letting the operator
+ * back out and change them would let "Check whether it landed" answer about a
+ * DIFFERENT roster and declare the earlier import applied on that evidence.
+ * The inputs stay frozen until the outcome is settled; Cancel is still open,
+ * and it forces a registry reload rather than pretending anything is known.
+ */
+const RECONCILE_FROZEN_NOTE =
+  "This import's outcome is still unknown — check whether it landed, or " +
+  "cancel to reload the registry. Changing the roster now would make that " +
+  "check answer about a different import.";
+
+/** Back's disabled title: why the exit is refused, or undefined when live. */
+const backBlockedTitle = (
+  applying: boolean,
+  indeterminate: boolean,
+): string | undefined => {
+  if (applying) {
+    return APPLY_IN_FLIGHT_NOTE;
+  }
+  return indeterminate ? RECONCILE_FROZEN_NOTE : undefined;
+};
 
 /** Apply's disabled title: why the button is refused, or undefined when live. */
 const applyBlockedTitle = (
@@ -767,8 +820,8 @@ const PreviewActions = ({
       <button
         className="ghost-button"
         type="button"
-        disabled={applying}
-        title={applying ? APPLY_IN_FLIGHT_NOTE : undefined}
+        disabled={applying || indeterminate}
+        title={backBlockedTitle(applying, indeterminate)}
         onClick={onBack}
       >
         Back
@@ -1015,7 +1068,11 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   const settleFromReplan = (refreshed: ChannelImportResult) => {
     setPreview(refreshed);
     if (!isAlreadyApplied(refreshed)) {
-      setError(RECONCILE_PENDING_NOTE);
+      setError(
+        hasUnverifiableGroupEffects(refreshed)
+          ? RECONCILE_GROUPS_UNVERIFIABLE_NOTE
+          : RECONCILE_PENDING_NOTE,
+      );
       return;
     }
     // Settled: the roster IS the registry, so this is no longer unknown.

@@ -730,9 +730,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     dryRunGate.release(jsonResponse(DRY_RUN_PLAN));
   });
 
-  it("re-enables the exits when an in-flight apply FAILS", async () => {
-    // The guard clears in the request's `finally`, not only on success — a
-    // failed apply must not leave the operator locked inside the stepper.
+  it("re-enables the exits when an in-flight apply is DEFINITELY rejected", async () => {
+    // The in-flight guard clears in the request's `finally`, not only on
+    // success — a rejected apply must not leave the operator locked in.
     const applyGate = deferredResponse();
     await runDryRunToPreview((form) =>
       form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : applyGate.pending,
@@ -743,14 +743,36 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       expect(screen.getByRole("button", { name: /^cancel$/i })).toBeDisabled(),
     );
 
-    // A 5xx does not establish that the write was rejected, so the banner
-    // says so rather than claiming failure — but the exits still free.
+    // 409 with a string detail ESTABLISHES rejection: nothing was written, so
+    // both exits free and the roster is safe to change.
+    applyGate.release(jsonResponse({ detail: "channel group was archived" }, 409));
+    await waitFor(() => expect(screen.getByText("Apply failed")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^back$/i })).toBeEnabled();
+  });
+
+  it("frees Cancel but holds Back when an in-flight apply ends INDETERMINATE", async () => {
+    // The in-flight guard still clears — the operator is not locked in, Cancel
+    // works and forces a registry reload. Back is held for a different reason:
+    // it leads to the Upload inputs that "Check whether it landed" re-plans,
+    // and changing them would make that check answer about another roster.
+    const applyGate = deferredResponse();
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : applyGate.pending,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeDisabled(),
+    );
+
+    // A 5xx does not establish that the write was rejected.
     applyGate.release(jsonResponse({ detail: "boom" }, 500));
     await waitFor(() =>
       expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
-    expect(screen.getByRole("button", { name: /^back$/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^back$/i })).toBeDisabled();
   });
 
   // The rule is "indeterminate unless rejection is ESTABLISHED". These pin the
@@ -893,11 +915,19 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // The way OUT of "unknown", using the endpoint the flow already has. The
     // apply is ONE all-or-nothing transaction, so an all-UNCHANGED re-plan is
     // decisive: the roster IS the registry, therefore the write committed.
+    // NO group keys: `outcome` is computed from channel inventory alone, so
+    // all-UNCHANGED is only proof for a roster that owes no group effects.
     const settled: ChannelImportResult = {
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-settled",
       counts: { UNCHANGED: 2 },
-      rows: DRY_RUN_PLAN.rows.map((row) => ({ ...row, outcome: "UNCHANGED", changes: {} })),
+      rows: DRY_RUN_PLAN.rows.map((row) => ({
+        ...row,
+        outcome: "UNCHANGED",
+        changes: {},
+        group_id: null,
+        group_action: null,
+      })),
     };
     await reachIndeterminate(() => jsonResponse(settled));
 
@@ -908,6 +938,44 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     );
     // The reconciliation used the DRY RUN, so nothing was written to find out.
     expect(importPosts()[2].get("dry_run")).toBe("true");
+  });
+
+  it("will not call a group-bearing roster applied on an all-UNCHANGED re-plan", async () => {
+    // The planner computes `outcome` from channel inventory and never loads
+    // memberships, so a roster whose channels already match can still owe the
+    // group attachments the lost apply was supposed to make. Declaring that
+    // "applied" would report a half-written import as done.
+    const channelsMatch: ChannelImportResult = {
+      ...DRY_RUN_PLAN,
+      plan_fingerprint: "plan-groups-pending",
+      counts: { UNCHANGED: 2 },
+      // row[1] keeps its group_id "g1" — the effect that cannot be verified.
+      rows: DRY_RUN_PLAN.rows.map((row) => ({ ...row, outcome: "UNCHANGED", changes: {} })),
+    };
+    await reachIndeterminate(() => jsonResponse(channelsMatch));
+
+    fireEvent.click(screen.getByRole("button", { name: /check whether it landed/iu }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/cannot tell whether those memberships/i)).toBeInTheDocument(),
+    );
+    // Explicitly NOT applied, and not falsely reported as "did not commit".
+    expect(screen.queryByRole("group", { name: "Import applied" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/still not committed/i)).not.toBeInTheDocument();
+  });
+
+  it("freezes the roster inputs while an apply's outcome is unknown", async () => {
+    // Upload owns the file, owner and reason that "Check whether it landed"
+    // re-plans. Backing out to change them would let the check answer about a
+    // DIFFERENT roster and declare the earlier import applied on that evidence.
+    await reachIndeterminate(() => jsonResponse(DRY_RUN_PLAN));
+
+    const back = screen.getByRole("button", { name: /^back$/i });
+    expect(back).toBeDisabled();
+    expect(back.getAttribute("title")).toMatch(/would make that check answer about a different/iu);
+    // Cancel stays open — it forces a registry reload rather than claiming
+    // anything is known, so the operator is never trapped.
+    expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
   });
 
   it("keeps an indeterminate apply unknown when the re-plan still shows changes", async () => {
