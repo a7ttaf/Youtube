@@ -127,7 +127,24 @@ registry at the apply boundary so a concurrent change committed after
 planning cannot survive the roster (the file wins); CHANNEL_UPDATED is
 recorded exactly when the write-boundary diff is non-empty, so healed drift
 is audited and a no-op write (truly unchanged, or a concurrent writer that
-already landed the roster values) stays audit-quiet. Malformed CSV structure
+already landed the roster values) stays audit-quiet.
+"The file wins" is a DELIBERATE decision (review #159, r3713841231 /
+r3713966806), not an oversight, and it has a known consequence worth stating
+because reviewers keep re-deriving it: a row the operator reviewed as
+`A -> B` can be applied as `C -> B` when another writer commits between the
+apply's re-plan and the channel row lock. The values written are the ones
+approved, on the channel approved, and the audit records the TRUE `C -> B`
+diff, so nothing is hidden from the trail — but the operator's screen showed
+`A -> B`. Drift landing BEFORE the apply re-plans is already refused by
+`plan_fingerprint` (409), so only that narrow window remains. The alternative
+— rolling back on pre-state divergence — would reverse #159 and is pinned
+against by `test_audit_diff_reflects_write_boundary_not_the_stale_plan` and
+`test_planned_update_that_became_a_noop_is_not_audited`; changing it is an
+owner decision, not a review-cleanup edit. Note the contrast with the GROUP
+half of the same window, which IS refused
+(`ChannelImportGroupActionDivergedError`): a reviewed group `CREATE` becoming
+a `JOIN` is a different KIND of write, not a different value, and no prior
+decision covered it. Malformed CSV structure
 (unterminated quotes, duplicate or unknown header columns, a header wider than
 16 columns, more blank records than the row cap, or a valid header carrying no
 data rows at all) rejects the whole file as 422; oversize payloads return 413. Flipping
