@@ -106,6 +106,37 @@ const describeImportError = (err: unknown): string => {
 };
 
 /**
+ * The per-ROW fields the preview table indexes into rather than merely
+ * renders. `Array.isArray(rows)` is not enough on its own: a payload like
+ * `{rows: [{}], counts: {}, plan_fingerprint: "x"}` would satisfy the outer
+ * guard, replace the approved preview, and then crash ChangesCell on
+ * `Object.entries(undefined)` — the same failure the `counts` check was added
+ * for, one level down (review #184).
+ *
+ *   `row_number` — the React key; a missing one collides across rows.
+ *   `outcome`    — selects the chip and the ERROR row tone.
+ *   `changes`    — ChangesCell calls Object.entries on it. The crash.
+ *
+ * The remaining wire fields are rendered through null-tolerant helpers
+ * (`orMutedDash`, `GroupCell`'s explicit null branch), so a missing one
+ * degrades to an em-dash rather than throwing, and is not worth failing an
+ * otherwise-usable refreshed plan over.
+ */
+const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
+  ["row_number", (value) => typeof value === "number"],
+  ["outcome", (value) => typeof value === "string"],
+  ["changes", (value) => typeof value === "object" && value !== null],
+];
+
+const isPlanRow = (row: unknown): boolean => {
+  if (typeof row !== "object" || row === null) {
+    return false;
+  }
+  const candidate = row as Record<string, unknown>;
+  return PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(candidate[field]));
+};
+
+/**
  * The fields a refreshed plan must carry, each with the check it must pass.
  * A table rather than a chain of `if`s so the guard below stays one
  * expression: each entry is a field the flow would otherwise use unguarded.
@@ -127,7 +158,7 @@ const describeImportError = (err: unknown): string => {
  * covered — the guard needs no edit.
  */
 const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
-  ["rows", (value) => Array.isArray(value)],
+  ["rows", (value) => Array.isArray(value) && value.every(isPlanRow)],
   ["counts", (value) => typeof value === "object" && value !== null],
   ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
 ];
@@ -395,6 +426,34 @@ const revenueFlagLabel = (revenue_required: boolean | null): ReactNode => {
   return revenue_required ? "Yes" : "No";
 };
 
+/**
+ * The Revenue cell: the flag the roster asserts, plus the source
+ * classification the write DERIVES from it when that changes.
+ *
+ * The second line is not decoration. The registry re-classifies
+ * `revenue_source_status` whenever `revenue_required` flips, and that status
+ * drives `missing_official_revenue` and the registry's recommended action —
+ * so flipping the flag off silently replaces a proven OFFICIAL_CMS_REVENUE
+ * with PERFORMANCE_ONLY. `changes` never carries it (it holds the operator's
+ * own field edits), so without this the operator approves a finance-source
+ * mutation nothing on screen mentions (review #184).
+ */
+const RevenueCell = ({ row }: { row: ChannelImportRowResult }) => {
+  const source = row.revenue_source_status;
+  return (
+    <>
+      <div>{revenueFlagLabel(row.revenue_required)}</div>
+      {source ? (
+        <div className="item-sub">
+          {source.from === null
+            ? `source: ${source.to}`
+            : `source: ${source.from} → ${source.to}`}
+        </div>
+      ) : null}
+    </>
+  );
+};
+
 /** Map one per-row import result to an OutcomeTable row (ERROR -> warn tone). */
 const importOutcomeRow = (row: ChannelImportRowResult): OutcomeTableRow => {
   return {
@@ -408,7 +467,7 @@ const importOutcomeRow = (row: ChannelImportRowResult): OutcomeTableRow => {
       outcomeChip(row.outcome),
       <ChangesCell key="changes" changes={row.changes} />,
       <GroupCell key="group" row={row} />,
-      revenueFlagLabel(row.revenue_required),
+      <RevenueCell key="revenue" row={row} />,
       // The backend's verbatim row note (ERROR rows name the failure).
       orMutedDash(row.reason),
     ],

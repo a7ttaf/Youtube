@@ -74,6 +74,7 @@ const DRY_RUN_PLAN: ChannelImportResult = {
       group_id: null,
       group_action: null,
       revenue_required: true,
+      revenue_source_status: null,
       changes: {},
       reason: null,
     },
@@ -85,6 +86,7 @@ const DRY_RUN_PLAN: ChannelImportResult = {
       group_id: "g1",
       group_action: "CREATE",
       revenue_required: false,
+      revenue_source_status: null,
       changes: {
         channel_name: { from: "Old Beta", to: "Beta Channel" },
         revenue_required: { from: true, to: false },
@@ -115,6 +117,7 @@ const DRY_RUN_ERRORS: ChannelImportResult = {
       group_id: null,
       group_action: null,
       revenue_required: null,
+      revenue_source_status: null,
       changes: {},
       reason: "missing youtube_channel_id",
     },
@@ -923,6 +926,27 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     ).toBeEnabled();
   });
 
+  it("refuses a refreshed plan whose rows are not renderable rows", async () => {
+    // Array.isArray(rows) alone let `[{}]` through, and ChangesCell then threw
+    // on Object.entries(undefined) — crashing the very step the refreshed plan
+    // was meant to repair. Fail closed to the banner instead.
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true"
+        ? jsonResponse(DRY_RUN_PLAN)
+        : jsonResponse(
+            { detail: { rows: [{}], counts: { UPDATE: 1 }, plan_fingerprint: "x" } },
+            409,
+          ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(screen.getByText("Apply failed")).toBeInTheDocument());
+
+    // The approved preview still stands, and still renders.
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+    expect(screen.getByText("CREATE: 1 · UPDATE: 1")).toBeInTheDocument();
+  });
+
   it("refuses a refreshed plan with no fingerprint rather than unbinding the apply", async () => {
     // The dangerous shape: rows and counts present, plan_fingerprint missing.
     // Accepting it would replace the preview with a plan carrying no digest,
@@ -948,6 +972,46 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
     await waitFor(() => expect(importPosts()).toHaveLength(3));
     expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-clean-v1");
+  });
+
+  it("discloses the revenue source status the write derives", async () => {
+    // The write re-classifies revenue_source_status whenever revenue_required
+    // flips, and that status drives missing_official_revenue and the
+    // registry's recommended action. `changes` never carries it — it holds the
+    // operator's own field edits — so without this cell the operator approves
+    // a finance-source mutation nothing on screen mentions.
+    const plan: ChannelImportResult = {
+      ...DRY_RUN_PLAN,
+      rows: [
+        // A flip OFF: a proven official classification is being replaced.
+        {
+          ...DRY_RUN_PLAN.rows[1],
+          revenue_source_status: {
+            from: "OFFICIAL_CMS_REVENUE",
+            to: "PERFORMANCE_ONLY",
+          },
+        },
+        // A CREATE has no prior status, so only the value it is born with.
+        {
+          ...DRY_RUN_PLAN.rows[0],
+          revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
+        },
+      ],
+    };
+    await runDryRunToPreview(() => jsonResponse(plan));
+
+    expect(
+      screen.getByText("source: OFFICIAL_CMS_REVENUE → PERFORMANCE_ONLY"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("source: MISSING_REVENUE_SOURCE")).toBeInTheDocument();
+  });
+
+  it("says nothing about the source status when the write leaves it alone", async () => {
+    // Anti-noise: the status is re-derived ONLY when revenue_required flips,
+    // so a roster refreshing names must not read as a finance reclassification.
+    await runDryRunToPreview(() => jsonResponse(DRY_RUN_PLAN));
+
+    expect(screen.queryByText(/^source:/)).not.toBeInTheDocument();
   });
 
   it("distinguishes a group JOIN from a group CREATE, and claims neither without one", async () => {
