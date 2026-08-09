@@ -953,6 +953,29 @@ def _attach_group_memberships(
     return _add_members(groups, group, [cid for cid in channel_ids if cid not in group.channel_ids])
 
 
+# ============================================================================
+# Purpose: Attach a batch of channels to ONE already-resolved group in a
+#   single write, and report one auditable attachment per channel.
+# Database/ORM: ChannelGroupMemberORM INSERTs via
+#   ChannelGroupRegistryStore.add_members, which re-locks the parent
+#   ChannelGroupORM row (FOR NO KEY UPDATE) as the membership serialization
+#   point. No channel or finance writes.
+# Standards: One call per group instead of one per channel — the per-channel
+#   shape made a shared-group roster quadratic in payload (review #184). The
+#   caller filters to channels not already members, so an EMPTY batch returns
+#   without touching the store at all: that is what keeps a re-imported
+#   roster audit-quiet rather than claiming attachments it did not make. Runs
+#   inside the import's single transaction, so a later failure rolls these
+#   memberships back with everything else.
+# Blast Radius: Channel-group membership, and therefore finance group-scope
+#   selection and rollups; one GROUP_UPDATED audit event per channel actually
+#   attached. No revenue totals, no allocation, no month-close.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> add_members
+#     (the locked parent row and the existing-membership filter).
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _attach_group_memberships, which resolves the group this writes into.
+# ============================================================================
 def _add_members(
     groups: ChannelGroupRegistryStore,
     group: ChannelGroupEntry,
