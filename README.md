@@ -42,7 +42,9 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 #    itself. Merely printing it would leave that public placeholder in .env —
 #    the backend and the dev proxy would both keep using it and this whole step
 #    would be decorative.
-$fresh = python -c "import secrets; print(secrets.token_urlsafe(32))"
+#    `uv run` so the generator uses the interpreter step 1 provisioned, the
+#    same way steps 4 and 5 invoke alembic and uvicorn.
+$fresh = uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
 #    Replace the line when .env already has the key, APPEND it when it does not.
 #    An in-place replace alone silently no-ops on an existing .env that never
 #    carried the key (or carries it commented out), and the failure then lands
@@ -88,7 +90,10 @@ commands in either shell:
 #    from the template, then write a fresh secret OVER the placeholder
 #    .env.example ships so the backend and the dev proxy agree on one value.
 [ -f .env ] || cp .env.example .env
-fresh=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+#    `uv run` so the generator uses the interpreter step 1 provisioned, the
+#    same way steps 4 and 5 invoke alembic and uvicorn. A bare `python` aborts
+#    this step on the many Linux distros that expose only `python3`.
+fresh=$(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
 #    The env var this step manages, named once so the presence test, the
 #    rewrite, and the read-back below cannot drift apart.
 var=UMS_TRUSTED_GATEWAY_TOKEN
