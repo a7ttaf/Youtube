@@ -20,11 +20,11 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 //   - File: frontend/src/lib/api/types.ts -> ChannelIssuesResponse.
 //   - File: backend/ums_smart_revenue/api/channels.py:166 list_channel_issues.
 // ============================================================================
-export function useChannelIssues(): AsyncState<ChannelIssuesResponse> { // skipcq: JS-0067
+export const useChannelIssues = (): AsyncState<ChannelIssuesResponse> => {
   const client = useApiClient();
   const run = useCallback(
     () => client.get<ChannelIssuesResponse>("/channels/issues"),
     [client],
   );
   return useAsync(run);
-}
+};

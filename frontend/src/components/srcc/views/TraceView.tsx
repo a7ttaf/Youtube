@@ -61,17 +61,17 @@ const METRIC_OPTIONS: Array<{ value: ExplanationMetric; label: string }> = [
  * and Trace stay tone-consistent; behavior is unchanged from the prior local
  * switch (its ConfidenceTone union is a subset of Severity).
  */
-function confidenceTone(label: string | undefined): Severity { // skipcq: JS-0067
+const confidenceTone = (label: string | undefined): Severity => {
   return confidenceDisplay("", label).tone;
-}
+};
 
 // Component breakdown tone: the value row (positive contribution) is green,
 // deductions/overrides amber/blue; falls back to blue for unknown keys.
-function componentTone(key: string): Severity { // skipcq: JS-0067
+const componentTone = (key: string): Severity => {
   if (key.includes("deduction")) return "amber";
   if (key.includes("override")) return "blue";
   return "green";
-}
+};
 
 /**
  * Static role -> permission-filter detail rows shown in the side panel. A closed
@@ -101,129 +101,20 @@ const PERMISSION_DETAILS: Record<Role, Array<{ label: string; value: string }>> 
 };
 
 /** Resolve which channel to explain: the current selection if present, else the first channel. */
-function resolveEffectiveChannelId( // skipcq: JS-0067
+const resolveEffectiveChannelId = (
   selectedChannelId: string,
   channels: Array<{ youtube_channel_id: string }>,
-): string {
+): string => {
   return (
     channels.find((c) => c.youtube_channel_id === selectedChannelId)
       ?.youtube_channel_id ??
     channels[0]?.youtube_channel_id ??
     ""
   );
-}
-
-/**
- * Trace / Explain-Number screen: pick month + channel + metric, then POST to the
- * guarded explain endpoint and render the source-linked, permission-gated breakdown.
- */
-export default function TraceView({ // skipcq: JS-0067
-  canViewFinance,
-  role,
-  presetChannelId,
-}: {
-  canViewFinance: boolean;
-  role: Role;
-  presetChannelId?: string;
-}) {
-  const [month, setMonth] = useState<string>(DEFAULT_MONTH);
-  const [metric, setMetric] = useState<ExplanationMetric>(
-    "adjusted_gross_revenue_usd",
-  );
-  // presetChannelId seeds the INITIAL selection only (Registry "Review" nav);
-  // the existing resolution below still falls back to the first channel when
-  // the preset is absent from the selected month's channel list.
-  const [selectedChannelId, setSelectedChannelId] = useState<string>(
-    presetChannelId ?? "",
-  );
-
-  // Reuse the net-revenue summary purely as the channel directory for the
-  // dropdown (global scope, matching CommandView's default).
-  const {
-    data: netRevenue,
-    loading: channelsLoading,
-    error: channelsError,
-  } = useNetRevenue({ month, scopeType: "global", scopeId: null });
-
-  const channels = useMemo(
-    () => netRevenue?.channels ?? [],
-    [netRevenue],
-  );
-
-  const explanation = useExplanation();
-
-  const effectiveChannelId = resolveEffectiveChannelId(selectedChannelId, channels);
-
-  const currency = netRevenue?.currency ?? "USD";
-
-  /** Generate the explanation for the selected channel-month-metric. */
-  const runExplain = () => {
-    if (!effectiveChannelId) return;
-    // The hook captures its own error state; swallow the rejection here so an
-    // un-actioned promise does not surface as an unhandled rejection.
-    // FIX: dropped the `void` operator and let .catch() be the fire-and-forget
-    // sink, satisfying JS-0098 without changing behavior.
-    explanation
-      .run({
-        channelId: effectiveChannelId,
-        month,
-        metric,
-      })
-      .catch(() => {
-        /* The hook stored the error in state; nothing else to do here. */
-      });
-  };
-
-  // Clear the rendered explanation whenever the explain inputs change so a
-  // result that was in flight under the previous channel/month/metric cannot
-  // commit and render under the new filters. reset() also abandons that in-flight
-  // request (token bump) so it is discarded when it settles. The first render is
-  // a no-op (state already empty); the latch clear keeps the next Explain free.
-  const explanationReset = explanation.reset;
-  useEffect(() => {
-    explanationReset();
-  }, [effectiveChannelId, month, metric, explanationReset]);
-
-  const permissionDetails = PERMISSION_DETAILS[role];
-
-  return (
-    <section className="view-page" aria-labelledby="traceViewTitle">
-      <div className="view-grid wide-side">
-        <section className="panel">
-          <TraceHeader />
-
-          <ExplanationFilters
-            month={month}
-            onMonthChange={setMonth}
-            effectiveChannelId={effectiveChannelId}
-            channels={channels}
-            channelsLoading={channelsLoading}
-            onChannelChange={setSelectedChannelId}
-            metric={metric}
-            onMetricChange={setMetric}
-            explaining={explanation.loading}
-            onExplain={runExplain}
-          />
-
-          {channelsError ? (
-            <ChannelLoadError error={channelsError} />
-          ) : null}
-
-          <ExplanationPanel
-            state={explanation}
-            canViewFinance={canViewFinance}
-            currency={currency}
-          />
-        </section>
-
-        <PermissionFilterPanel details={permissionDetails} />
-      </div>
-    </section>
-  );
-}
+};
 
 /** Title block for the Explain Number panel. */
-function TraceHeader() { // skipcq: JS-0067
+const TraceHeader = () => {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -236,10 +127,36 @@ function TraceHeader() { // skipcq: JS-0067
       <Badge tone="violet">Audited read</Badge>
     </div>
   );
-}
+};
+
+/** Option list for the channel selector: a placeholder when empty, otherwise rows. */
+const ChannelOptions = ({
+  channels,
+  channelsLoading,
+}: {
+  channels: ChannelNetRevenue[];
+  channelsLoading: boolean;
+}) => {
+  if (channels.length === 0) {
+    return (
+      <option value="">
+        {channelsLoading ? "Loading channels…" : "No channels"}
+      </option>
+    );
+  }
+  return (
+    <>
+      {channels.map((c) => (
+        <option key={c.youtube_channel_id} value={c.youtube_channel_id}>
+          {c.youtube_channel_id}
+        </option>
+      ))}
+    </>
+  );
+};
 
 /** Month / channel / metric selectors plus the Explain trigger for the trace screen. */
-function ExplanationFilters({ // skipcq: JS-0067
+const ExplanationFilters = ({
   month,
   onMonthChange,
   effectiveChannelId,
@@ -261,7 +178,7 @@ function ExplanationFilters({ // skipcq: JS-0067
   onMetricChange: (value: ExplanationMetric) => void;
   explaining: boolean;
   onExplain: () => void;
-}) {
+}) => {
   return (
     <div
       className="control-row"
@@ -311,40 +228,43 @@ function ExplanationFilters({ // skipcq: JS-0067
       </button>
     </div>
   );
-}
+};
 
-/** Option list for the channel selector: a placeholder when empty, otherwise rows. */
-function ChannelOptions({ // skipcq: JS-0067
-  channels,
-  channelsLoading,
-}: {
-  channels: ChannelNetRevenue[];
-  channelsLoading: boolean;
-}) {
-  if (channels.length === 0) {
-    return (
-      <option value="">
-        {channelsLoading ? "Loading channels…" : "No channels"}
-      </option>
-    );
-  }
+/** Title block for the permission-filter side panel. */
+const PermissionFilterHeader = () => {
   return (
-    <>
-      {channels.map((c) => (
-        <option key={c.youtube_channel_id} value={c.youtube_channel_id}>
-          {c.youtube_channel_id}
-        </option>
-      ))}
-    </>
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong>Permission Filter</strong>
+        <span>Applied before the explanation query is authorized</span>
+      </div>
+      <Badge tone="violet">Scoped trace</Badge>
+    </div>
   );
-}
+};
+
+/** A single label/value cell in the permission-filter detail grid. */
+const PermissionDetailCell = ({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) => {
+  return (
+    <div className="detail-cell">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+};
 
 /** Static role-context side panel describing the scope applied before authorization. */
-function PermissionFilterPanel({ // skipcq: JS-0067
+const PermissionFilterPanel = ({
   details,
 }: {
   details: Array<{ label: string; value: string }>;
-}) {
+}) => {
   return (
     <aside className="view-stack">
       <section className="panel">
@@ -357,39 +277,10 @@ function PermissionFilterPanel({ // skipcq: JS-0067
       </section>
     </aside>
   );
-}
-
-/** Title block for the permission-filter side panel. */
-function PermissionFilterHeader() { // skipcq: JS-0067
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong>Permission Filter</strong>
-        <span>Applied before the explanation query is authorized</span>
-      </div>
-      <Badge tone="violet">Scoped trace</Badge>
-    </div>
-  );
-}
-
-/** A single label/value cell in the permission-filter detail grid. */
-function PermissionDetailCell({ // skipcq: JS-0067
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="detail-cell">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
+};
 
 /** Error band shown when the channel directory (net-revenue summary) fails to load. */
-function ChannelLoadError({ error }: { error: ApiError | Error }) { // skipcq: JS-0067
+const ChannelLoadError = ({ error }: { error: ApiError | Error }) => {
   const { title, detail } = describeError(error);
   return (
     <div
@@ -405,64 +296,49 @@ function ChannelLoadError({ error }: { error: ApiError | Error }) { // skipcq: J
       <Badge tone="red">No channels</Badge>
     </div>
   );
-}
+};
 
-/** Render the explain hook's state: error, loading, idle prompt, or the result. */
-function ExplanationPanel({ // skipcq: JS-0067
-  state,
+/** Build a component row subtitle from its source kind/report, item count, or key. */
+const componentSubtitle = (component: ExplanationComponent): string => {
+  if (component.source_kind) {
+    return component.source_report_id
+      ? `${component.source_kind} · ${component.source_report_id}`
+      : component.source_kind;
+  }
+  if (typeof component.count === "number") {
+    const items = component.count === 1 ? "item" : "items";
+    return `${component.count} ${items}`;
+  }
+  return component.key;
+};
+
+/** One explanation component row with a permission-gated money cell. */
+const ComponentRow = ({
+  component,
   canViewFinance,
   currency,
 }: {
-  state: ReturnType<typeof useExplanation>;
+  component: ExplanationComponent;
   canViewFinance: boolean;
   currency: string;
-}) {
-  const { data, loading, error } = state;
-
-  if (error) {
-    const { title, detail } = describeError(error);
-    return (
-      <div className="table-wrap" role="alert">
-        <div style={{ padding: 16 }}>
-          <strong>{title}</strong>
-          <p className="item-sub">{detail}</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className="table-wrap" aria-busy="true">
-        <div style={{ padding: 16 }} className="item-sub">
-          Generating explanation…
-        </div>
-      </div>
-    );
-  }
-
-  if (!data) {
-    return (
-      <div className="table-wrap">
-        <div style={{ padding: 16 }} className="item-sub">
-          Pick a month, channel, and metric, then select Explain to generate the
-          source-linked breakdown.
-        </div>
-      </div>
-    );
-  }
-
+}) => {
   return (
-    <ExplanationResult
-      explanation={data}
-      canViewFinance={canViewFinance}
-      currency={currency}
+    <ItemRow
+      tone={componentTone(component.key)}
+      title={component.label}
+      sub={componentSubtitle(component)}
+      className="explain-row"
+      trailing={
+        <span className="money finance-data">
+          {financeDisplay(component.value, canViewFinance, { currency })}
+        </span>
+      }
     />
   );
-}
+};
 
 /** Render a returned explanation: value, confidence, formula, components, warnings. */
-function ExplanationResult({ // skipcq: JS-0067
+const ExplanationResult = ({
   explanation,
   canViewFinance,
   currency,
@@ -470,7 +346,7 @@ function ExplanationResult({ // skipcq: JS-0067
   explanation: NumberExplanation;
   canViewFinance: boolean;
   currency: string;
-}) {
+}) => {
   const displayCurrency = explanation.currency || currency;
 
   return (
@@ -537,43 +413,172 @@ function ExplanationResult({ // skipcq: JS-0067
       ) : null}
     </div>
   );
-}
+};
 
-/** Build a component row subtitle from its source kind/report, item count, or key. */
-function componentSubtitle(component: ExplanationComponent): string { // skipcq: JS-0067
-  if (component.source_kind) {
-    return component.source_report_id
-      ? `${component.source_kind} · ${component.source_report_id}`
-      : component.source_kind;
-  }
-  if (typeof component.count === "number") {
-    const items = component.count === 1 ? "item" : "items";
-    return `${component.count} ${items}`;
-  }
-  return component.key;
-}
-
-/** One explanation component row with a permission-gated money cell. */
-function ComponentRow({ // skipcq: JS-0067
-  component,
+/** Render the explain hook's state: error, loading, idle prompt, or the result. */
+const ExplanationPanel = ({
+  state,
   canViewFinance,
   currency,
 }: {
-  component: ExplanationComponent;
+  state: ReturnType<typeof useExplanation>;
   canViewFinance: boolean;
   currency: string;
-}) {
+}) => {
+  const { data, loading, error } = state;
+
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="table-wrap" role="alert">
+        <div style={{ padding: 16 }}>
+          <strong>{title}</strong>
+          <p className="item-sub">{detail}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div className="table-wrap" aria-busy="true">
+        <div style={{ padding: 16 }} className="item-sub">
+          Generating explanation…
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="table-wrap">
+        <div style={{ padding: 16 }} className="item-sub">
+          Pick a month, channel, and metric, then select Explain to generate the
+          source-linked breakdown.
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <ItemRow
-      tone={componentTone(component.key)}
-      title={component.label}
-      sub={componentSubtitle(component)}
-      className="explain-row"
-      trailing={
-        <span className="money finance-data">
-          {financeDisplay(component.value, canViewFinance, { currency })}
-        </span>
-      }
+    <ExplanationResult
+      explanation={data}
+      canViewFinance={canViewFinance}
+      currency={currency}
     />
   );
-}
+};
+
+/**
+ * Trace / Explain-Number screen: pick month + channel + metric, then POST to the
+ * guarded explain endpoint and render the source-linked, permission-gated breakdown.
+ */
+const TraceView = ({
+  canViewFinance,
+  role,
+  presetChannelId,
+}: {
+  canViewFinance: boolean;
+  role: Role;
+  presetChannelId?: string;
+}) => {
+  const [month, setMonth] = useState<string>(DEFAULT_MONTH);
+  const [metric, setMetric] = useState<ExplanationMetric>(
+    "adjusted_gross_revenue_usd",
+  );
+  // presetChannelId seeds the INITIAL selection only (Registry "Review" nav);
+  // the existing resolution below still falls back to the first channel when
+  // the preset is absent from the selected month's channel list.
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(
+    presetChannelId ?? "",
+  );
+
+  // Reuse the net-revenue summary purely as the channel directory for the
+  // dropdown (global scope, matching CommandView's default).
+  const {
+    data: netRevenue,
+    loading: channelsLoading,
+    error: channelsError,
+  } = useNetRevenue({ month, scopeType: "global", scopeId: null });
+
+  const channels = useMemo(
+    () => netRevenue?.channels ?? [],
+    [netRevenue],
+  );
+
+  const explanation = useExplanation();
+
+  const effectiveChannelId = resolveEffectiveChannelId(selectedChannelId, channels);
+
+  const currency = netRevenue?.currency ?? "USD";
+
+  /** Generate the explanation for the selected channel-month-metric. */
+  const runExplain = () => {
+    if (!effectiveChannelId) {
+      return;
+    }
+    // The hook captures its own error state; swallow the rejection here so an
+    // un-actioned promise does not surface as an unhandled rejection. The
+    // `void` operator is deliberately absent: .catch() is already the
+    // fire-and-forget sink, which conforms to JS-0098 without a marker. That
+    // was a lint-conformance change, not a bug fix, so it carries no FIX: tag.
+    explanation
+      .run({
+        channelId: effectiveChannelId,
+        month,
+        metric,
+      })
+      .catch(() => {
+        /* The hook stored the error in state; nothing else to do here. */
+      });
+  };
+
+  // Clear the rendered explanation whenever the explain inputs change so a
+  // result that was in flight under the previous channel/month/metric cannot
+  // commit and render under the new filters. reset() also abandons that in-flight
+  // request (token bump) so it is discarded when it settles. The first render is
+  // a no-op (state already empty); the latch clear keeps the next Explain free.
+  const explanationReset = explanation.reset;
+  useEffect(() => {
+    explanationReset();
+  }, [effectiveChannelId, month, metric, explanationReset]);
+
+  const permissionDetails = PERMISSION_DETAILS[role];
+
+  return (
+    <section className="view-page" aria-labelledby="traceViewTitle">
+      <div className="view-grid wide-side">
+        <section className="panel">
+          <TraceHeader />
+
+          <ExplanationFilters
+            month={month}
+            onMonthChange={setMonth}
+            effectiveChannelId={effectiveChannelId}
+            channels={channels}
+            channelsLoading={channelsLoading}
+            onChannelChange={setSelectedChannelId}
+            metric={metric}
+            onMetricChange={setMetric}
+            explaining={explanation.loading}
+            onExplain={runExplain}
+          />
+
+          {channelsError ? (
+            <ChannelLoadError error={channelsError} />
+          ) : null}
+
+          <ExplanationPanel
+            state={explanation}
+            canViewFinance={canViewFinance}
+            currency={currency}
+          />
+        </section>
+
+        <PermissionFilterPanel details={permissionDetails} />
+      </div>
+    </section>
+  );
+};
+
+export default TraceView;

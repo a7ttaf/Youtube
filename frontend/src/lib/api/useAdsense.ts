@@ -35,9 +35,9 @@ export type AdsensePaymentsQuery = {
 //   - File: frontend/src/lib/api/types.ts -> AdsensePaymentListResponse.
 //   - File: backend/ums_smart_revenue/api/adsense.py:204 list_adsense_payments.
 // ============================================================================
-export function useAdsensePayments( // skipcq: JS-0067
+export const useAdsensePayments = (
   query: AdsensePaymentsQuery = {},
-): AsyncState<AdsensePaymentListResponse> {
+): AsyncState<AdsensePaymentListResponse> => {
   const client = useApiClient();
   const { month, limit, offset } = query;
 
@@ -53,7 +53,7 @@ export function useAdsensePayments( // skipcq: JS-0067
   }, [client, month, limit, offset]);
 
   return useAsync(run);
-}
+};
 
 export type UseAdsenseSyncActionsState = {
   // The most recent sync result (cleared while a new sync is in flight).
@@ -104,7 +104,7 @@ export type UseAdsenseSyncActionsState = {
 //   - File: frontend/src/lib/api/types.ts -> AdsenseSyncRequestBody / AdsenseSyncResponse.
 //   - File: backend/ums_smart_revenue/api/adsense.py:133 sync_adsense_payments.
 // ============================================================================
-export function useAdsenseSyncActions(): UseAdsenseSyncActionsState { // skipcq: JS-0067
+export const useAdsenseSyncActions = (): UseAdsenseSyncActionsState => {
   const client = useApiClient();
   const [data, setData] = useState<AdsenseSyncResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -160,4 +160,4 @@ export function useAdsenseSyncActions(): UseAdsenseSyncActionsState { // skipcq:
   );
 
   return { data, loading, error, syncPayments };
-}
+};

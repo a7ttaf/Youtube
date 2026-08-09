@@ -74,7 +74,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # PYTHON_BASE_DIGEST, which pins the base image by sha256; the three packages
 # below (ca-certificates, curl, tini) receive Debian security updates, and
 # pinning exact versions breaks the build the moment an older version is dropped
-# from the archive. DL3008 is suppressed for both analyzers that lint this file:
+# from the archive. Evidence (checked 2026-08-08 UTC inside this exact base
+# digest; dates here are UTC to match the commit and PR timeline):
+# apt resolves curl to 8.14.1-2+deb13u4 — already the fourth trixie revision —
+# and the image's apt sources point at the live deb.debian.org index (the
+# snapshot.debian.org URLs in its sources file are comments only), so each
+# +deb13uN security release replaces the previous one at `apt-get update` time
+# and an exact pin goes stale on the next curl advisory.
+# DL3008 is therefore suppressed for both analyzers that lint this file:
 # skipcq for DeepSource (DOK-DL3008) and the hadolint ignore directive directly
 # below, because the repo's Dockerfile lane (ci/checks/lint.sh ->
 # lint::run_docker, tool=hadolint per ci/config/checks.yml) does not recognize

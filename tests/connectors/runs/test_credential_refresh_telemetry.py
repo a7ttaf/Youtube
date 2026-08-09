@@ -54,7 +54,7 @@ def test_success_stamp_persists_after_caller_commit(tmp_path) -> None:
 
     factory = _factory(tmp_path)
     expiry = datetime(2026, 6, 1, tzinfo=UTC)
-    with (  # skipcq: PTC-W0062
+    with (
         patch(
             "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
             return_value={},
@@ -65,15 +65,15 @@ def test_success_stamp_persists_after_caller_commit(tmp_path) -> None:
         ),
         patch("ums_smart_revenue.connectors.runs.orchestrator.ensure_default_resolvers"),
         patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"),
+        factory() as session,
     ):
-        with factory() as session:
-            resolve_connector_credentials(
-                session=session,
-                tenant_id=TENANT,
-                connector_key="youtube_reporting",
-                account_id="acct-1",
-            )
-            session.commit()
+        resolve_connector_credentials(
+            session=session,
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+        )
+        session.commit()
     with factory() as session:
         row = session.scalars(select(ApiConnectorCredentialORM)).one()
     assert row.last_refresh_status == "succeeded"
@@ -94,7 +94,7 @@ def test_failure_stamp_persists_and_reraises(tmp_path) -> None:
     def _boom(_creds):
         raise OAuthRefreshError(inner=RuntimeError("revoked"))
 
-    with (  # skipcq: PTC-W0062
+    with (
         patch(
             "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
             return_value={},
@@ -108,16 +108,16 @@ def test_failure_stamp_persists_and_reraises(tmp_path) -> None:
             "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials",
             _boom,
         ),
+        factory() as session,
+        pytest.raises(OAuthRefreshError),
     ):
-        with factory() as session:
-            with pytest.raises(OAuthRefreshError):
-                resolve_connector_credentials(
-                    session=session,
-                    tenant_id=TENANT,
-                    connector_key="youtube_reporting",
-                    account_id="acct-1",
-                )
-            # The caller never commits on the failure path.
+        resolve_connector_credentials(
+            session=session,
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+        )
+        # The caller never commits on the failure path.
     # A separate session sees the committed failure stamp.
     with factory() as session:
         row = session.scalars(select(ApiConnectorCredentialORM)).one()
@@ -133,14 +133,13 @@ def test_not_found_does_not_stamp(tmp_path) -> None:
     )
 
     factory = _factory(tmp_path)
-    with factory() as session:  # skipcq: PTC-W0062
-        with pytest.raises(CredentialNotFoundError):
-            resolve_connector_credentials(
-                session=session,
-                tenant_id=TENANT,
-                connector_key="youtube_reporting",
-                account_id="missing",
-            )
+    with factory() as session, pytest.raises(CredentialNotFoundError):
+        resolve_connector_credentials(
+            session=session,
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="missing",
+        )
     with factory() as session:
         row = session.scalars(select(ApiConnectorCredentialORM)).one()
     assert row.last_refresh_status is None
@@ -153,7 +152,7 @@ def test_dry_run_success_not_persisted_without_caller_commit(tmp_path) -> None:
 
     factory = _factory(tmp_path)
     expiry = datetime(2026, 6, 1, tzinfo=UTC)
-    with (  # skipcq: PTC-W0062
+    with (
         patch(
             "ums_smart_revenue.connectors.runs.orchestrator.resolve_secret",
             return_value={},
@@ -164,15 +163,15 @@ def test_dry_run_success_not_persisted_without_caller_commit(tmp_path) -> None:
         ),
         patch("ums_smart_revenue.connectors.runs.orchestrator.ensure_default_resolvers"),
         patch("ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"),
+        factory() as session,
     ):
-        with factory() as session:
-            resolve_connector_credentials(
-                session=session,
-                tenant_id=TENANT,
-                connector_key="youtube_reporting",
-                account_id="acct-1",
-            )
-            session.rollback()  # dry-run / CLI never commits the success stamp
+        resolve_connector_credentials(
+            session=session,
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+        )
+        session.rollback()  # dry-run / CLI never commits the success stamp
     with factory() as session:
         row = session.scalars(select(ApiConnectorCredentialORM)).one()
     assert row.last_refresh_status is None

@@ -2270,9 +2270,7 @@ class YouTubeReportingRunner:
     replace what the runner actually uses.
     """
 
-    # DeepSource keeps historical findings anchored here after report iteration
-    # moved to helpers; self is used for test-injected client type selection.
-    def produce_reports(  # skipcq: PYL-R0201, PY-R1000
+    def produce_reports(
         self,
         *,
         session: Session,
@@ -3285,6 +3283,48 @@ def _synthesise_analytics_channel_dimension(
     }
 
 
+# ============================================================================
+# Purpose: B2.5 adapter that fetches YouTube Analytics per-channel reports. One
+#          ``reports.query`` GET per eligible CMS channel for the run's month;
+#          each success is yielded as ``("youtube_analytics", payload, bytes)``
+#          with the ``channel`` dimension synthesised into the response, because
+#          the wire request uses ``dimensions=month`` only (content-owner
+#          reports need a multi-value channel filter to add ``channel``, and
+#          B2.5 issues one single-value request per channel).
+# Database/ORM: Reads the channel registry through ``list_target_channels``;
+#               writes nothing itself -- the orchestrator owns the blob,
+#               raw_file, and source-row writes. Parsed analytics rows persist
+#               to GoogleRevenueSourceRowORM with
+#               source_system == "youtube_analytics".
+# Standards: Typed keyword-only contract matching ``ConnectorRunner``; the class
+#            references ``YouTubeAnalyticsClient`` and ``list_target_channels``
+#            by bare name so tests that patch
+#            ``ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient``
+#            replace what the runner actually uses. ``OAuthRefreshError``
+#            escapes for run-level handling; any other ``GoogleConnectorError``
+#            raised per channel (including a query-request validation
+#            rejection) is yielded as a ``ProducedReportFailure`` so the run is
+#            marked PARTIAL and sibling channels still run.
+# Blast Radius: Finance ingestion -- these rows do feed the revenue projection,
+#               unlike the audit-only AdSense path. Tenancy is carried by
+#               ``run.tenant_id`` into ``list_target_channels``, so that value
+#               is what scopes which channels are fetched at all. The explicit
+#               top-level rollback after the channel-list SELECT is
+#               load-bearing: it leaves the orchestrator's per-report
+#               ``platform_lane`` block to open its own transaction, instead of
+#               holding an elevated one across the blob upload where a slow
+#               backend can trip ``idle_in_transaction_session_timeout``. The
+#               nested-transaction check keeps the dry-run SAVEPOINT intact.
+# Connections: youtube_analytics_client.py (client + channel list),
+#              google_source_parsers/youtube_analytics.py (parser), spec §5.5.
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_analytics_client.py
+#     -> YouTubeAnalyticsClient.fetch_channel_report and list_target_channels.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py
+#     -> YouTubeAnalyticsParser consumes the yielded triple and keys rows on
+#     (channel, month).
+#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+#     §5.5 -> targeted-channel ingestion contract.
+# ============================================================================
 class YouTubeAnalyticsRunner:
     """B2.5 adapter that fetches YouTube Analytics per-channel reports.
 
@@ -3302,8 +3342,8 @@ class YouTubeAnalyticsRunner:
     replace what the runner actually uses.
     """
 
-    def produce_reports(  # skipcq: PYL-R0201
-        self,
+    @staticmethod
+    def produce_reports(
         *,
         session: Session,
         run: ConnectorRunEntry | None,
@@ -3488,8 +3528,8 @@ class AdSenseManagementRunner:
     ``SkipReason.MISSING_CHANNEL_ID`` until a future allocation/mapping spec.
     """
 
-    def produce_reports(  # skipcq: PYL-R0201
-        self,
+    @staticmethod
+    def produce_reports(
         *,
         session: Session,
         run: ConnectorRunEntry | None,

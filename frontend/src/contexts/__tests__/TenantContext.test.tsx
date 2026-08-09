@@ -3,9 +3,9 @@ import type { ReactNode } from "react";
 
 import { TenantProvider, useTenant } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: ReactNode }) { // skipcq: JS-0067
+const wrapper = ({ children }: { children: ReactNode }) => {
   return <TenantProvider>{children}</TenantProvider>;
-}
+};
 
 describe("TenantContext", () => {
   it("seeds with an empty slug and null id/displayName so bootstrap is not pinned", () => {

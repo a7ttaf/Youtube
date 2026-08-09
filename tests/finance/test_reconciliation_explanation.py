@@ -83,15 +83,19 @@ def test_explanation_shape():
 
 def test_narrative_is_deterministic_prose():
     entry = build_reconciliation_explanation(month="2026-03", line=_line(), warnings=[])
-    narrative = next(  # skipcq: PTC-W0063
-        c for c in entry.components if c["key"] == "narrative"
-    )["text"]
+    narrative_component = next(
+        (c for c in entry.components if c["key"] == "narrative"), None
+    )
+    assert narrative_component is not None, "narrative component missing"
+    narrative = narrative_component["text"]
     assert "100" in narrative and "75" in narrative
     # Deterministic: same inputs => identical text.
     again = build_reconciliation_explanation(month="2026-03", line=_line(), warnings=[])
-    again_text = next(  # skipcq: PTC-W0063
-        c for c in again.components if c["key"] == "narrative"
-    )["text"]
+    again_component = next(
+        (c for c in again.components if c["key"] == "narrative"), None
+    )
+    assert again_component is not None, "rebuilt narrative component missing"
+    again_text = again_component["text"]
     assert narrative == again_text
 
 
@@ -112,9 +116,11 @@ def test_negative_fx_variance_renders_as_positive_benefit_not_double_negative():
         warnings=[],
     )
 
-    narrative = next(  # skipcq: PTC-W0063
-        component["text"] for component in entry.components if component["key"] == "narrative"
+    narrative = next(
+        (component["text"] for component in entry.components if component["key"] == "narrative"),
+        None,
     )
+    assert narrative is not None, "narrative component missing"
     assert "$-" not in narrative
     assert "+$5.00 FX" in narrative
 
