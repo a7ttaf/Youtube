@@ -490,16 +490,22 @@ const RegistryMainPanel = ({
 //   mapping, which moves the channel between company/sector rollups and so
 //   changes which principals can see its revenue downstream. This predicate is
 //   what keeps a blank audited reason or an unset channel/company from reaching
-//   PATCH /channels/{id}/mapping, and the `busy` flag is what stops a
-//   double-click filing a duplicate audited change. It is a usability gate, not
-//   the authorization boundary.
+//   PATCH /channels/{id}/mapping. It is a usability gate, not the authorization
+//   boundary — and not the double-submit guard either: `busy` is React state, so
+//   both clicks of a same-tick double-click read it as false off the same
+//   render. The synchronous inFlightRef latch in the panel's submit is what
+//   actually drops the second PATCH; `busy` only keeps the control disabled
+//   across the renders that follow.
 // Connections: channels.py update_channel_mapping (authoritative gate + audited
-//   write), useChannelMapping.ts useChannelMappingAction (the PATCH + in-flight).
+//   write), MappingChangeRequestPanel (owns `busy`, the reason, and the latch).
 //   - File: backend/ums_smart_revenue/api/channels.py:1123
 //     update_channel_mapping -> the authoritative permission check and the
 //     audited mapping write.
 //   - File: frontend/src/lib/api/useChannelMapping.ts:27
-//     useChannelMappingAction -> owns the PATCH and the busy flag passed here.
+//     useChannelMappingAction -> owns the PATCH this predicate gates.
+//   - File: frontend/src/components/srcc/views/RegistryView.tsx:559
+//     MappingChangeRequestPanel inFlightRef -> the real same-tick double-submit
+//     guard. `busy` is that panel's own useState, not something the hook owns.
 // ============================================================================
 const isMappingSubmittable = (
   canManageRegistry: boolean,
