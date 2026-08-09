@@ -111,6 +111,9 @@ Point the backend at the same database you seeded and set the same token:
 # the dev proxy present the SAME gateway token.
 Get-Content .env | Where-Object { $_ -notmatch '^\s*(#|$)' } | ForEach-Object {
   $name, $value = $_ -split '=', 2
+  # Strip a matching pair of surrounding quotes; a quoted .env value would
+  # otherwise reach the backend with the quotes still attached.
+  $value = $value -replace '^"(.*)"$', '$1' -replace "^'(.*)'$", '$1'
   Set-Item -Path "env:$name" -Value $value
 }
 $env:UMS_DATABASE_URL = "sqlite+pysqlite:///./demo.db"
@@ -122,7 +125,13 @@ python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 # `source`-ing the file would run it as shell, and .env.example's
 # postgresql+psycopg://<user>:<password>@... placeholder makes `<user>` an input
 # redirection, which both errors and truncates the value.
-export UMS_TRUSTED_GATEWAY_TOKEN=$(grep -E '^UMS_TRUSTED_GATEWAY_TOKEN=' .env | head -n1 | cut -d= -f2-)
+# `tr -d '\r'` drops the CR a CRLF-saved .env leaves on the value, and the sed
+# strips a matching pair of surrounding quotes. Without both, the exported token
+# silently differs from what the proxy injects and every protected route 401s.
+export UMS_TRUSTED_GATEWAY_TOKEN=$(
+  sed -n 's/^UMS_TRUSTED_GATEWAY_TOKEN=//p' .env \
+    | head -n1 | tr -d '\r' | sed -e 's/^\(["'\'']\)\(.*\)\1$/\2/'
+)
 # UMS_AUTHZ_SOURCE is pinned here too: the backend reads os.environ directly, so
 # a `database` value already exported in this shell would otherwise win over the
 # `headers` line in .env, and the seed provisions no database principal for the

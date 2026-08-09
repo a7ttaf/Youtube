@@ -45,6 +45,9 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 Get-Content .env | Where-Object { $_ -notmatch '^\s*(#|$)' } | ForEach-Object {
   $name, $value = $_ -split '=', 2
+  # Strip a matching pair of surrounding quotes; a quoted .env value would
+  # otherwise reach the backend with the quotes still attached.
+  $value = $value -replace '^"(.*)"$', '$1' -replace "^'(.*)'$", '$1'
   Set-Item -Path "env:$name" -Value $value
 }
 $env:PYTHONPATH = (Resolve-Path "backend").Path
