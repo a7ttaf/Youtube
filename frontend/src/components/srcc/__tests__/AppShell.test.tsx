@@ -756,25 +756,25 @@ const navButton = (label: string): HTMLElement => {
   return button;
 };
 
+// The reads this flow needs, keyed by pathname like routeFetchWithSessionRoutes.
+// Only /channels/import is answered per test, so it is the sole branch in the
+// router below rather than another entry here.
+const IMPORT_SHELL_ROUTES: FetchRouteMap = new Map([
+  ["/session/me", () => jsonResponse(FULL_SESSION)],
+  ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
+  ["/channels", () => jsonResponse(IMPORT_CHANNELS)],
+  ["/org-units", () => jsonResponse([])],
+  ["/connectors/content-owners", () => jsonResponse({ items: [{ account_id: "OWNERaaa" }] })],
+]);
+
 describe("AppShell navigation latch during an un-abortable write", () => {
   const routeImportShell = (applyResponder: () => Promise<Response> | Response) => {
-    return (input: unknown, init?: RequestInit) => {
-      const url = urlOf(input);
-      const path = new URL(url, "http://ums.local").pathname;
-      const method = (init?.method ?? "GET").toUpperCase();
-      if (path === "/channels/import" && method === "POST") {
+    return (input: unknown) => {
+      const path = requestPathOf(input);
+      if (path === "/channels/import") {
         return Promise.resolve(applyResponder());
       }
-      if (path === "/session/me") return Promise.resolve(jsonResponse(FULL_SESSION));
-      if (path === "/tenants/me") {
-        return Promise.resolve(jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }));
-      }
-      if (path === "/channels") return Promise.resolve(jsonResponse(IMPORT_CHANNELS));
-      if (path === "/org-units") return Promise.resolve(jsonResponse([]));
-      if (path === "/connectors/content-owners") {
-        return Promise.resolve(jsonResponse({ items: [{ account_id: "OWNERaaa" }] }));
-      }
-      return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+      return Promise.resolve((IMPORT_SHELL_ROUTES.get(path) ?? defaultSessionRouteResponse)());
     };
   };
 

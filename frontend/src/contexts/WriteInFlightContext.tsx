@@ -1,6 +1,5 @@
 import {
   createContext,
-  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -21,10 +20,12 @@ import {
 //   cannot drift out of sync with its explanation the way a separate
 //   boolean + message pair can. Arming is effect-driven and self-releasing —
 //   useBlockNavigationWhile clears on deactivation AND on unmount, so a flow
-//   torn down mid-request can never leave the shell permanently locked. The
-//   default context value is inert (reason null, arming a no-op) so a
-//   component rendered outside the provider — every existing unit test —
-//   behaves exactly as it did before.
+//   torn down mid-request can never leave the shell permanently locked.
+//   "No provider" is modelled as a null context rather than a stand-in object
+//   holding a do-nothing setter: absence is a real state worth naming, and
+//   both hooks read it as "make no claim, block nothing", so a component
+//   rendered outside the provider — every existing unit test — behaves
+//   exactly as it did before.
 // Blast Radius: Whether the sidebar's nav buttons are clickable. No
 //   authorization meaning, no data, no requests.
 // Connections:
@@ -41,9 +42,10 @@ type WriteInFlightValue = {
   setReason: (reason: string | null) => void;
 };
 
-const INERT: WriteInFlightValue = { reason: null, setReason: () => {} };
-
-const WriteInFlightContext = createContext<WriteInFlightValue>(INERT);
+// null = rendered outside any provider. Both hooks treat that as "nothing to
+// latch": no blocking reason, and arming is skipped rather than dispatched
+// into a placeholder.
+const WriteInFlightContext = createContext<WriteInFlightValue | null>(null);
 
 /**
  * Own the latch state. The SHELL calls this, because the shell both provides
@@ -70,7 +72,7 @@ export const WriteInFlightProvider = ({
 
 /** Read the latch: the blocking reason, or null when navigation is free. */
 export const useWriteInFlightReason = (): string | null => {
-  return useContext(WriteInFlightContext).reason;
+  return useContext(WriteInFlightContext)?.reason ?? null;
 };
 
 /**
@@ -79,15 +81,20 @@ export const useWriteInFlightReason = (): string | null => {
  * The cleanup is the load-bearing half: it runs on deactivation AND on
  * unmount, so a flow that is torn down while its request is still pending
  * cannot strand the shell with navigation disabled forever.
+ *
+ * Only `setReason` is pulled out of the context, never the whole value: the
+ * value object is re-memoized on every reason change, so depending on it here
+ * would re-run this effect each time it armed the latch — arm, cleanup,
+ * re-arm, forever. The setter comes from useState and is identity-stable, so
+ * the dependency list is too.
  */
 export const useBlockNavigationWhile = (active: boolean, reason: string): void => {
-  const { setReason } = useContext(WriteInFlightContext);
-  const release = useCallback(() => setReason(null), [setReason]);
+  const setReason = useContext(WriteInFlightContext)?.setReason;
   useEffect(() => {
-    if (!active) {
+    if (!active || setReason === undefined) {
       return undefined;
     }
     setReason(reason);
-    return release;
-  }, [active, reason, setReason, release]);
+    return () => setReason(null);
+  }, [active, reason, setReason]);
 };
