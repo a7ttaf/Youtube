@@ -102,7 +102,9 @@ reviewed as `CREATE` could otherwise commit as an `UPDATE` overwriting a
 channel created since the preview, or a group `CREATE` could become a `JOIN`,
 with the changed outcome never reviewed. The field is optional — a client that
 never previewed is not re-approving anything — but the SPA always sends it and
-re-binds to the refreshed plan on a 409.
+re-binds to the refreshed plan on a 409. Sending it also OPTS IN to strict
+pre-state enforcement at the write boundary (see "the file wins" below): it is
+the request's declaration that only the reviewed diff may be applied.
 The fingerprint closes the preview→re-plan window; a second, narrower window
 runs from the re-plan to the group row lock, and `group_action` is re-checked
 under that lock. If this owner's CMS sync creates (or removes) the row's group
@@ -136,12 +138,26 @@ apply's re-plan and the channel row lock. The values written are the ones
 approved, on the channel approved, and the audit records the TRUE `C -> B`
 diff, so nothing is hidden from the trail — but the operator's screen showed
 `A -> B`. Drift landing BEFORE the apply re-plans is already refused by
-`plan_fingerprint` (409), so only that narrow window remains. The alternative
-— rolling back on pre-state divergence — would reverse #159 and is pinned
-against by `test_audit_diff_reflects_write_boundary_not_the_stale_plan` and
-`test_planned_update_that_became_a_noop_is_not_audited`; changing it is an
-owner decision, not a review-cleanup edit. Note the contrast with the GROUP
-half of the same window, which IS refused
+`plan_fingerprint` (409), so only that narrow window remains.
+**A plan-bound apply now closes that window too** (review #184): when the
+request carries `expected_plan_fingerprint`, the caller has declared "the
+diff I reviewed, or none of it", so a row whose row-locked pre-state no
+longer matches its reviewed `changes` returns **409**
+(`channel … changed during the import`) and rolls the whole import back.
+The two behaviours are not in conflict, because they answer to different
+callers: an apply that bound no plan is re-approving nothing, so the roster
+stays authoritative and drift is healed and audited exactly as #159 decided.
+That default is what
+`test_audit_diff_reflects_write_boundary_not_the_stale_plan` and
+`test_planned_update_that_became_a_noop_is_not_audited` pin, and both pass
+unchanged; the opt-in half is pinned by
+`test_plan_bound_apply_refuses_a_row_whose_pre_state_drifted`,
+`test_unbound_apply_still_lets_the_file_win_over_drift`, and — for the
+durable rollback — `tests/api/test_channels_import_postgres.py::
+test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres`. Rows with an
+empty diff carry no reviewed pre-state and are exempt by construction, so an
+UNCHANGED row still heals drift even under a bound apply. Note the contrast
+with the GROUP half of the same window, which is refused for EVERY caller
 (`ChannelImportGroupActionDivergedError`): a reviewed group `CREATE` becoming
 a `JOIN` is a different KIND of write, not a different value, and no prior
 decision covered it. Malformed CSV structure

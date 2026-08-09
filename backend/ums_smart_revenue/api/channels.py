@@ -80,6 +80,7 @@ from ums_smart_revenue.org.channel_import_apply import (
     ChannelImportArchivedGroupError,
     ChannelImportGroupActionDivergedError,
     ChannelImportGroupOwnerMismatchError,
+    ChannelImportRowStateDivergedError,
     apply_channel_import,
     plan_channel_import_with_stores,
 )
@@ -734,6 +735,13 @@ def import_channels(
             cms_status=cms_status,
             reason=reason,
             filename=file.filename,
+            # A client that bound its apply to a reviewed plan is saying
+            # "apply the diff I reviewed, or none of it", so a row whose
+            # pre-state moved in the re-plan-to-row-lock window fails closed
+            # rather than overwriting a value the operator never saw. Off for
+            # unbound callers, who are re-approving nothing and keep the
+            # documented default (the file wins).
+            enforce_reviewed_pre_state=expected_plan_fingerprint is not None,
         )
     # A group whose owner stamp was cleared between the plan and the write is
     # the one plan-to-apply race the operator's preview cannot have shown: the
@@ -761,6 +769,7 @@ def import_channels(
         ChannelImportArchivedGroupError,
         ChannelImportGroupActionDivergedError,
         ChannelImportGroupOwnerMismatchError,
+        ChannelImportRowStateDivergedError,
         ChannelRegistryConflictError,
         ChannelRevenueRequirementLockedMonthError,
     ) as exc:

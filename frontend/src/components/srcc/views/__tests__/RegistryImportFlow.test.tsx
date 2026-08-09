@@ -832,6 +832,32 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(screen.getByText("CREATE: 1 · UPDATE: 1")).toBeInTheDocument();
   });
 
+  it("shows the pre-state 409 verbatim and keeps the preview to go back from", async () => {
+    // Sending expected_plan_fingerprint opts this flow in to the backend's
+    // strict pre-state check, whose 409 detail is a STRING (which row moved
+    // and to what) rather than a refreshed plan. That message names the
+    // channel and tells the operator what to do, so it must reach them word
+    // for word instead of collapsing to "The import request failed".
+    const detail =
+      "channel UCB6sc84dcg6VQGB_d89sx2g changed during the import: the preview " +
+      "showed channel_name 'Alpha Channel' -> 'Alpha News', but the stored value " +
+      "is now 'Someone Else'; re-run the preview and review the change";
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true"
+        ? jsonResponse(DRY_RUN_PLAN)
+        : jsonResponse({ detail }, 409),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(screen.getByText(detail)).toBeInTheDocument());
+
+    // Rejected, not indeterminate: 409 is a definite refusal, so the operator
+    // is offered Apply again rather than the "outcome unknown" dead end.
+    expect(screen.getByText("Apply failed")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^back$/i })).toBeEnabled();
+  });
+
   it("distinguishes a group JOIN from a group CREATE, and claims neither without one", async () => {
     // Same key, opposite effects: the operator must be able to tell "this
     // adds a channel to a group you already own" from "this mints a new

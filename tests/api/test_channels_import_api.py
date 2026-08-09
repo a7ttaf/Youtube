@@ -694,6 +694,124 @@ def test_group_created_after_the_apply_replans_is_rejected_at_the_write_boundary
     # proof against a real database.
 
 
+class _ChannelDriftsAtWriteBoundary(ChannelRegistry):
+    """Move a channel's stored name between the apply's re-plan and its lock.
+
+    Planning reads through ``list_channels_by_ids``; the write boundary calls
+    ``update_inventory``. Drifting the row inside that second call reproduces
+    the window the fingerprint cannot see, because the plan it digested was
+    already computed.
+    """
+
+    def __init__(self, entries, *, drift_to: str) -> None:
+        super().__init__(entries)
+        self._drift_to = drift_to
+        self._drifted = False
+
+    def update_inventory(self, **kwargs):
+        """Land a concurrent rename once, just before the locked write."""
+        if not self._drifted:
+            self._drifted = True
+            current = super().get_channel(kwargs["youtube_channel_id"])
+            super().update_inventory(
+                youtube_channel_id=current.youtube_channel_id,
+                channel_name=self._drift_to,
+                cms_status=current.cms_status,
+                content_owner_id=current.content_owner_id,
+                revenue_required=current.revenue_required,
+            )
+        return super().update_inventory(**kwargs)
+
+
+def _seeded_registry(channel_name: str) -> ChannelRegistry:
+    """One existing channel, so a roster rename plans as an UPDATE."""
+    return ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name=channel_name,
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+
+
+def test_plan_bound_apply_refuses_a_row_whose_pre_state_drifted():
+    """A bound apply means "the diff I reviewed, or none of it" (review #184).
+
+    The fingerprint compare happens before each channel row lock, so a writer
+    committing in that gap turns a reviewed "Old Name -> Alpha News" into an
+    unreviewed "Someone Else -> Alpha News". The values written would be the
+    approved ones, but the operator approved neither the other value nor the
+    decision to overwrite it.
+    """
+    drifting = _ChannelDriftsAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID})),
+        drift_to="Someone Else",
+    )
+    client, registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true").json()
+    assert preview["rows"][0]["changes"]["channel_name"] == {
+        "from": "Old Name",
+        "to": "Alpha News",
+    }
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    assert "changed during the import" in response.json()["detail"]
+    assert "Someone Else" in response.json()["detail"]
+    # No audit event claims a mutation the operator never approved. The row
+    # write itself is undone by the surrounding transaction, which this tier
+    # does not have (the in-memory registry commits as it goes) — the durable
+    # rollback proof is
+    # tests/api/test_channels_import_postgres.py::
+    # test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres.
+    assert audit_sink.records == []
+    assert registry is drifting
+
+
+def test_unbound_apply_still_lets_the_file_win_over_drift():
+    """The #159 default is untouched for a caller that bound no plan.
+
+    This is the whole reason the guard is opt-in: an API client that never
+    previewed is re-approving nothing, so the roster stays authoritative and
+    the audit records the REAL diff.
+    """
+    drifting = _ChannelDriftsAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID})),
+        drift_to="Someone Else",
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+    assert response.status_code == 200, response.text
+    assert drifting.get_channel(CHANNEL_ID).channel_name == "Alpha News"
+    updated = [r for r in audit_sink.records if r.event_type == "CHANNEL_UPDATED"]
+    assert len(updated) == 1
+    assert updated[0].details["changes"] == {
+        "channel_name": {"from": "Someone Else", "to": "Alpha News"}
+    }
+
+
+def test_plan_bound_apply_proceeds_when_nothing_drifted():
+    """Anti-vacuity: the opt-in guard must not reject the ordinary bound apply."""
+    client, registry, _groups, _sink = create_import_app(_seeded_registry("Old Name"))
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true").json()
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 200, response.text
+    assert registry.get_channel(CHANNEL_ID).channel_name == "Alpha News"
+
+
 def test_several_rows_can_populate_one_newly_created_group():
     """The common shape: N channels imported into a group that does not exist.
 

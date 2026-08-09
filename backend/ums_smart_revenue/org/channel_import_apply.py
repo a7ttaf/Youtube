@@ -75,6 +75,31 @@ class ChannelImportAdoptableGroupError(ChannelImportError):
     """
 
 
+class ChannelImportRowStateDivergedError(ChannelImportError):
+    """A row's pre-state moved between the plan the operator read and the lock.
+
+    The route's fingerprint check runs BEFORE ``apply_channel_import`` takes
+    each channel row lock, so a registry writer committing in that gap turns a
+    reviewed "channel_name: A -> B" into an unreviewed "C -> B". The values
+    written are the ones approved and the audit records the true C -> B diff,
+    but the operator approved neither C nor the decision to overwrite it
+    (review #184).
+
+    Raised ONLY for a caller that bound its apply to a reviewed plan by
+    sending ``expected_plan_fingerprint``. That opt-in is the whole point:
+    "the file wins" — an import overwriting concurrent drift, audited
+    truthfully — is a deliberate decision (review #159, r3713841231 /
+    r3713966806) and remains the behaviour for callers that never previewed
+    and are therefore re-approving nothing. Binding a plan is a client saying
+    "apply the diff I reviewed, or none of it", and this honours that without
+    reversing the default.
+
+    Rows whose reviewed diff is EMPTY are exempt either way: an UNCHANGED row
+    carries no reviewed pre-state to contradict, and healing drift is exactly
+    its documented job. The route maps this to HTTP 409.
+    """
+
+
 class ChannelImportGroupActionDivergedError(ChannelImportError):
     """A row's group would be JOINed where the plan said CREATE, or vice versa.
 
@@ -223,8 +248,18 @@ def apply_channel_import(
     cms_status: str,
     reason: str,
     filename: str | None,
+    enforce_reviewed_pre_state: bool = False,
 ) -> None:
     """Execute every CREATE/UPDATE row, reconcile groups, and audit everything.
+
+    ``enforce_reviewed_pre_state`` is the caller's opt-in to "apply the diff I
+    reviewed, or none of it": when set, a row whose locked pre-state no longer
+    matches its reviewed ``changes`` fails the whole import closed instead of
+    overwriting a value the operator never saw. The route sets it exactly when
+    the client bound its apply with ``expected_plan_fingerprint``. Left off,
+    the documented default stands — the file wins, and the audit records the
+    real diff — so a caller that never previewed is unaffected (review #184
+    for the opt-in; review #159 for the default).
 
     CREATE rows perform a registry create and an audit event. UPDATE and
     UNCHANGED rows BOTH write through the registry at the write boundary: the
@@ -292,6 +327,11 @@ def apply_channel_import(
                 content_owner_id=content_owner_id,
                 revenue_required=bool(entry.revenue_required),
             )
+            # Only for a plan-bound apply: the pre-state the operator
+            # reviewed must still be the stored one, or the diff on their
+            # screen is not the diff this write performs.
+            if enforce_reviewed_pre_state:
+                _require_reviewed_pre_state(entry, previous)
             applied_changes = _entry_changes(previous, updated)
             # The audit rule is the same for planned UPDATE and UNCHANGED:
             # record CHANNEL_UPDATED only when the write-boundary diff is
@@ -462,6 +502,32 @@ def _channel_audit_details(
         },
         "source": AUDIT_SOURCE_BULK_IMPORT,
     }
+
+
+def _require_reviewed_pre_state(
+    entry: ChannelImportPlanEntry, previous: ChannelRegistryEntry
+) -> None:
+    """Fail closed when the locked pre-state is not the one the operator read.
+
+    ``entry.changes`` holds the reviewed diff as ``field -> (from, to)``. The
+    ``from`` side is a claim about stored state at plan time; ``previous`` is
+    what the row-locked read actually found. A mismatch means a registry
+    writer committed in the plan-to-apply window, so the diff on the
+    operator's screen is not the diff this write would perform.
+
+    Rows with an EMPTY diff are exempt by construction — the loop is over
+    ``entry.changes`` — which preserves the UNCHANGED row's documented job of
+    healing drift: it carries no reviewed pre-state to contradict.
+    """
+    for field, (planned_from, planned_to) in entry.changes.items():
+        actual_from = getattr(previous, field, None)
+        if actual_from != planned_from:
+            raise ChannelImportRowStateDivergedError(
+                f"channel {entry.youtube_channel_id} changed during the import: "
+                f"the preview showed {field} {planned_from!r} -> {planned_to!r}, "
+                f"but the stored value is now {actual_from!r}; re-run the "
+                "preview and review the change"
+            )
 
 
 def _entry_changes(

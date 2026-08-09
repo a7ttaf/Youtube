@@ -51,6 +51,7 @@ from ums_smart_revenue.db.session import (
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
+from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
@@ -486,6 +487,87 @@ def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
     assert _channel_row(owner_engine, CHANNEL_ID) is None
     assert _channel_row(owner_engine, SECOND_ID) is None
     assert _audit_log_count(owner_engine) == before
+
+
+def test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres(
+    client: TestClient, owner_engine: sa.Engine
+) -> None:
+    """A plan-bound apply whose row drifted leaves the CONCURRENT value stored.
+
+    This is the durable half of the opt-in guard (review #184). The SQLite
+    tier can show the 409 and the missing audit event, but its in-memory
+    registry commits as it goes, so only here can "nothing was written" be
+    read back from the database.
+
+    The drift is a genuine committed write by another session: the patched
+    ``update_inventory`` runs the owner-engine UPDATE BEFORE delegating, so it
+    lands while the import holds no lock on the row, and the registry's own
+    ``FOR UPDATE`` re-read is what observes it. Asserting the stored name is
+    the OUTSIDE writer's — not the roster's — is what distinguishes a rollback
+    from "the import wrote its value anyway".
+    """
+    seed = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+    assert seed.status_code == 200, seed.text
+
+    body = import_csv(f"{CHANNEL_ID},Renamed By Import,Yes")
+    preview = post_import(client, body, dry_run="true").json()
+    assert preview["rows"][0]["changes"]["channel_name"] == {
+        "from": "Alpha News",
+        "to": "Renamed By Import",
+    }
+
+    original_update = SqlAlchemyChannelRegistry.update_inventory
+    drifted: list[str] = []
+
+    def drift_then_update(
+        registry: SqlAlchemyChannelRegistry, **kwargs: object
+    ) -> tuple[object, object]:
+        """Commit an outside rename once, then run the real locked write."""
+        if not drifted:
+            drifted.append(str(kwargs["youtube_channel_id"]))
+            with owner_engine.begin() as conn:
+                conn.execute(
+                    sa.text(
+                        "UPDATE youtube_channels SET channel_name = :name "
+                        "WHERE youtube_channel_id = :id"
+                    ),
+                    {"name": "Renamed Outside The Import", "id": drifted[0]},
+                )
+        return original_update(registry, **kwargs)
+
+    before = _audit_log_count(owner_engine)
+    with patch.object(SqlAlchemyChannelRegistry, "update_inventory", drift_then_update):
+        response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    assert drifted == [CHANNEL_ID], "the concurrent write must precede the locked read"
+    assert "changed during the import" in response.json()["detail"]
+    stored = _channel_row(owner_engine, CHANNEL_ID)
+    assert stored is not None
+    assert stored.channel_name == "Renamed Outside The Import"
+    assert _audit_log_count(owner_engine) == before
+
+
+def test_bound_apply_commits_when_the_pre_state_held_on_postgres(
+    client: TestClient, owner_engine: sa.Engine
+) -> None:
+    """Anti-vacuity for the guard: an undisturbed bound apply still commits.
+
+    Without this, the 409 above would also be produced by a guard that
+    rejected every plan-bound apply.
+    """
+    seed = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+    assert seed.status_code == 200, seed.text
+
+    body = import_csv(f"{CHANNEL_ID},Renamed By Import,Yes")
+    preview = post_import(client, body, dry_run="true").json()
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 200, response.text
+    stored = _channel_row(owner_engine, CHANNEL_ID)
+    assert stored is not None
+    assert stored.channel_name == "Renamed By Import"
 
 
 def test_locked_month_revenue_flip_is_rejected_409_on_postgres(

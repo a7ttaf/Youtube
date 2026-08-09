@@ -125,6 +125,13 @@ const isImportResultPayload = (detail: unknown): detail is ChannelImportResult =
  *   409 — the plan diverged from the fingerprint the operator approved, so a
  *         reviewed CREATE may now be an UPDATE over someone else's channel.
  * Both replace the stale preview so the operator re-approves against reality.
+ *
+ * NOT every 409 carries a plan: because this flow always sends
+ * expected_plan_fingerprint, it opts in to the backend's strict pre-state
+ * check, whose 409 detail is a STRING naming the row that moved. The guard
+ * above returns null for it and it lands in the ordinary banner verbatim
+ * (409 is on the canned-detail allowlist), which is the right treatment — it
+ * already tells the operator to re-run the preview.
  */
 const PLAN_BEARING_STATUSES = new Set([409, 422]);
 
