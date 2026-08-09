@@ -42,16 +42,26 @@ export const useChannelImport = (): ((
     contentOwnerId: string;
     dryRun: boolean;
     reason: string;
+    /**
+     * The `plan_fingerprint` of the dry run the operator approved. The apply
+     * re-plans from CURRENT state, so sending it binds the write to the plan
+     * that was actually reviewed: the backend 409s on divergence and returns
+     * the refreshed plan. Omitted on the dry run itself (nothing to bind to).
+     */
+    expectedPlanFingerprint?: string;
   },
 ) => Promise<ChannelImportResult>) => {
   const client = useApiClient();
   return useCallback(
-    ({ file, contentOwnerId, dryRun, reason }) => {
+    ({ file, contentOwnerId, dryRun, reason, expectedPlanFingerprint }) => {
       const form = new FormData();
       form.append("file", file);
       form.append("content_owner_id", contentOwnerId);
       form.append("dry_run", dryRun ? "true" : "false");
       form.append("reason", reason);
+      if (expectedPlanFingerprint !== undefined) {
+        form.append("expected_plan_fingerprint", expectedPlanFingerprint);
+      }
       return client.post<ChannelImportResult>("/channels/import", form);
     },
     [client],

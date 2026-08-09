@@ -106,12 +106,18 @@ const isImportResultPayload = (detail: unknown): detail is ChannelImportResult =
 };
 
 /**
- * Extract the refreshed plan from a 422 apply race, or null for every other
- * failure. The backend 422s an apply whose RE-PLANNED roster holds ERROR rows
- * and ships that full plan as the error `detail` — the one shape this reads.
+ * Extract the refreshed plan an apply rejection carries, or null for every
+ * other failure. TWO statuses ship the full plan as their `detail`, and both
+ * mean "the plan you saw is not the plan we would execute":
+ *   422 — the RE-PLANNED roster now holds ERROR rows (all-or-nothing).
+ *   409 — the plan diverged from the fingerprint the operator approved, so a
+ *         reviewed CREATE may now be an UPDATE over someone else's channel.
+ * Both replace the stale preview so the operator re-approves against reality.
  */
+const PLAN_BEARING_STATUSES = new Set([409, 422]);
+
 const applyRaceDetail = (err: unknown): ChannelImportResult | null => {
-  if (!(err instanceof ApiError) || err.status !== 422) {
+  if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
     return null;
   }
   const body = err.body as { detail?: unknown } | null;
@@ -120,6 +126,21 @@ const applyRaceDetail = (err: unknown): ChannelImportResult | null => {
     return detail;
   }
   return null;
+};
+
+/** The banner for a refreshed plan, worded for which rejection produced it. */
+const refreshedPlanMessage = (status: number): string => {
+  if (status === 409) {
+    return (
+      "The registry changed since this preview, so the import no longer does " +
+      "what you approved. The refreshed plan below is what would be written — " +
+      "review it and apply again."
+    );
+  }
+  return (
+    "The registry changed since this preview; the refreshed plan below " +
+    "shows the ERROR rows that blocked the apply."
+  );
 };
 
 /** True when any planned row is an ERROR (the API 422s an apply of such a plan). */
@@ -142,14 +163,19 @@ const canSubmitUpload = (
 
 /**
  * Apply guard: the roster file is still held and the previewed plan is free of
- * ERROR rows (the API 422s an erroring plan — all-or-nothing). A type
- * predicate on `file` so the apply closure gets the non-null File.
+ * ERROR rows (the API 422s an erroring plan — all-or-nothing). Returns the
+ * pair rather than a type predicate, because the apply needs BOTH narrowed —
+ * the File for the multipart body and the plan for its fingerprint — and a
+ * function may only declare a predicate on one parameter.
  */
-const canApplyImport = (
+const approvedApply = (
   file: File | null,
   preview: ChannelImportResult | null,
-): file is File => {
-  return file !== null && preview !== null && !hasErrorRows(preview);
+): { file: File; plan: ChannelImportResult } | null => {
+  if (file === null || preview === null || hasErrorRows(preview)) {
+    return null;
+  }
+  return { file, plan: preview };
 };
 
 /** Outcome chip tone: CREATE green, UPDATE blue, ERROR red — matching shared
@@ -761,11 +787,11 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   const handleApplyFailure = (caught: unknown) => {
     const race = applyRaceDetail(caught);
     if (race) {
+      // Replacing the preview also re-binds the fingerprint: the next Apply
+      // sends the refreshed plan's digest, so approval always tracks what the
+      // operator is actually looking at.
       setPreview(race);
-      setError(
-        "The registry changed since this preview; the refreshed plan below " +
-          "shows the ERROR rows that blocked the apply.",
-      );
+      setError(refreshedPlanMessage((caught as ApiError).status));
       return;
     }
     // The client only raises ApiError once an HTTP response exists, so
@@ -801,7 +827,8 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   /** Commit the plan; refuse while any row errors (the API 422s it anyway). */
   const apply = async () => {
     if (applyDispatchBlocked()) return;
-    if (!canApplyImport(file, preview)) return;
+    const approved = approvedApply(file, preview);
+    if (approved === null) return;
     inFlightRef.current = true;
     setBusy(true);
     setApplying(true);
@@ -812,10 +839,14 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     setError(null);
     try {
       const result = await importChannels({
-        file,
+        file: approved.file,
         contentOwnerId: ownerId,
         dryRun: false,
         reason: trimmedReason,
+        // Binds this write to the exact plan on screen. The route re-plans
+        // from current state, so without it a row reviewed as CREATE could
+        // commit as an UPDATE over a channel created since the preview.
+        expectedPlanFingerprint: approved.plan.plan_fingerprint,
       });
       setApplied(result);
       setStep("applied");

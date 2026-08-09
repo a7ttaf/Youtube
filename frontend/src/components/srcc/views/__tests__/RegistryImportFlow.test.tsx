@@ -64,6 +64,7 @@ const DRY_RUN_PLAN: ChannelImportResult = {
   content_owner_id: "OWNERaaa",
   cms_status: "INSIDE_CMS",
   counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0 },
+  plan_fingerprint: "plan-clean-v1",
   rows: [
     {
       row_number: 1,
@@ -103,6 +104,7 @@ const DRY_RUN_ERRORS: ChannelImportResult = {
   content_owner_id: "OWNERaaa",
   cms_status: "INSIDE_CMS",
   counts: { CREATE: 1, ERROR: 1 },
+  plan_fingerprint: "plan-errors-v1",
   rows: [
     DRY_RUN_PLAN.rows[0],
     {
@@ -517,6 +519,59 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       screen.getByRole("button", { name: /back to registry/i }),
     ).toBeInTheDocument();
     expect(importPosts()).toHaveLength(2);
+  });
+
+  it("binds the apply to the reviewed plan and re-approves on a 409 divergence", async () => {
+    // The route re-plans from CURRENT state, so a row reviewed as CREATE can
+    // become an UPDATE over a channel someone else created in the meantime.
+    // The apply therefore carries the approved plan's fingerprint, and a
+    // backend 409 replaces the preview so approval is re-sought against what
+    // would actually be written (review #184).
+    const refreshed: ChannelImportResult = {
+      ...DRY_RUN_PLAN,
+      plan_fingerprint: "plan-refreshed-v2",
+      counts: { UPDATE: 1 },
+      rows: [
+        {
+          ...DRY_RUN_PLAN.rows[0],
+          outcome: "UPDATE",
+          changes: { channel_name: { from: "Someone Else", to: "Alpha Channel" } },
+        },
+      ],
+    };
+    let applyCount = 0;
+    await runDryRunToPreview((form) => {
+      if (form.get("dry_run") === "true") return jsonResponse(DRY_RUN_PLAN);
+      applyCount += 1;
+      return applyCount === 1
+        ? jsonResponse({ detail: refreshed }, 409)
+        : jsonResponse(APPLY_RESULT);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/no longer does what you approved/i)).toBeInTheDocument(),
+    );
+
+    // The first apply carried the plan the operator had on screen.
+    expect(importPosts()[1].get("expected_plan_fingerprint")).toBe("plan-clean-v1");
+    // The dry run itself binds to nothing — there is no prior plan to honour.
+    expect(importPosts()[0].get("expected_plan_fingerprint")).toBeNull();
+
+    // The refreshed plan REPLACED the stale one: the row now reads UPDATE and
+    // its real diff is on screen, so the operator re-approves reality.
+    expect(screen.getByText("UPDATE")).toBeInTheDocument();
+    expect(
+      screen.getByText("channel_name: Someone Else → Alpha Channel"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+
+    // Re-approving now sends the REFRESHED fingerprint, not the stale one.
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
+    expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-refreshed-v2");
   });
 
   it("arms the shell nav latch BEFORE the apply request is dispatched", async () => {

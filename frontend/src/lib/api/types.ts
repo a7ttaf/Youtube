@@ -1286,6 +1286,11 @@ export type ChannelImportResult = {
   cms_status: string;
   counts: Record<string, number>;
   rows: ChannelImportRowResult[];
+  // Digest of exactly this plan's content (counts + rows), excluding `dry_run`
+  // and the echoed form fields. Echo a dry run's value back as
+  // `expected_plan_fingerprint` on the apply and the backend 409s if the plan
+  // it would execute is no longer the one that was reviewed.
+  plan_fingerprint: string;
 };
 
 // ============================================================================

@@ -84,7 +84,20 @@ planning deliberately does not load memberships for a 5000-row roster.
 under its write-boundary lock and records what it actually wrote in the
 `CHANNEL_IMPORTED` audit event, so a concurrent writer can turn a planned
 UPDATE into a no-op. Present these counts as the approved plan, not as the
-committed result; the SPA's Applied step labels them that way. A row whose
+committed result; the SPA's Applied step labels them that way.
+`plan_fingerprint` (added 2026-08-09, review #184) is a SHA-256 over exactly
+the plan content — `counts` + `rows` — and deliberately excludes `dry_run`
+and the echoed form fields, so a preview and its apply of an unchanged plan
+digest identically. An apply may send the approved dry run's value back as the
+optional `expected_plan_fingerprint` form field; if the plan the route would
+execute no longer matches, it returns **409** with that refreshed plan as
+`detail` (the same payload shape the 422 error-rows rejection carries) and
+writes nothing. This exists because the apply RE-PLANS from current state: a
+row an operator reviewed as `CREATE` could otherwise commit as an `UPDATE`
+overwriting a channel created since the preview, or a group `CREATE` could
+become a `JOIN`, with the changed outcome never reviewed. The field is
+optional — a client that never previewed is not re-approving anything — but
+the SPA always sends it and re-binds to the refreshed plan on a 409. A row whose
 `group_id` targets an existing group with a NULL `content_owner_id` is an
 `ERROR` row (Path A, 2026-08-06): the import never adopts an existing group —
 only the owner's own CMS sync (`POST /channels/groups/sync`) may claim one,

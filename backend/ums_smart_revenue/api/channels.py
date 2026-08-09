@@ -17,6 +17,8 @@
 # ============================================================================
 """Channel registry, bulk-import, and CMS group sync HTTP routes."""
 
+import hashlib
+import json
 from collections.abc import Callable
 from typing import Annotated
 from uuid import UUID
@@ -203,6 +205,12 @@ class ChannelImportResult(BaseModel):
     cms_status: str
     counts: dict[str, int]
     rows: list[ChannelImportRowResult]
+    # Digest of exactly the plan content above (counts + rows). A client echoes
+    # a dry run's value back as `expected_plan_fingerprint` on the apply, and a
+    # mismatch is a 409: the apply re-plans from CURRENT state, so without this
+    # a row reviewed as CREATE could silently commit as an UPDATE over a
+    # concurrently created channel (review #184).
+    plan_fingerprint: str
 
 
 class GroupSyncGroupResult(BaseModel):
@@ -656,6 +664,7 @@ def import_channels(
     dry_run: Annotated[bool, Form()],
     reason: Annotated[str, Form()],
     cms_status: Annotated[str, Form()] = "INSIDE_CMS",
+    expected_plan_fingerprint: Annotated[str | None, Form()] = None,
 ) -> ChannelImportResult:
     """Import a CMS channel roster CSV, previewing or applying every row."""
     target_scope = AccessScope.global_scope()
@@ -697,6 +706,20 @@ def import_channels(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=payload)
     if dry_run:
         return ChannelImportResult.model_validate(payload)
+
+    # The apply re-plans from CURRENT state, so the plan about to execute is
+    # not necessarily the one the operator reviewed: a concurrent writer can
+    # turn a reviewed CREATE into an UPDATE that overwrites their new channel,
+    # or a group CREATE into a JOIN. Binding the apply to the reviewed plan's
+    # fingerprint makes that divergence a retryable 409 carrying the REFRESHED
+    # plan, so approval is re-sought against reality instead of a stale
+    # preview (review #184). Optional for API clients that never previewed —
+    # they are not re-approving anything — but the SPA always sends it.
+    if (
+        expected_plan_fingerprint is not None
+        and expected_plan_fingerprint != payload["plan_fingerprint"]
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=payload)
 
     try:
         apply_channel_import(
@@ -859,30 +882,49 @@ def _import_plan_to_api(
     must present these counts as the approved plan, not as the committed
     result — the SPA's Applied step labels them exactly that way.
     """
+    counts = dict(plan.counts)
+    rows = [
+        {
+            "row_number": entry.row_number,
+            "youtube_channel_id": entry.youtube_channel_id,
+            "outcome": entry.outcome.value,
+            "channel_name": entry.channel_name,
+            "group_id": entry.group_id,
+            "group_action": (entry.group_action.value if entry.group_action is not None else None),
+            "revenue_required": entry.revenue_required,
+            "changes": {
+                name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
+            },
+            "reason": entry.reason,
+        }
+        for entry in plan.entries
+    ]
     return {
         "dry_run": dry_run,
         "content_owner_id": content_owner_id,
         "cms_status": cms_status,
-        "counts": dict(plan.counts),
-        "rows": [
-            {
-                "row_number": entry.row_number,
-                "youtube_channel_id": entry.youtube_channel_id,
-                "outcome": entry.outcome.value,
-                "channel_name": entry.channel_name,
-                "group_id": entry.group_id,
-                "group_action": (
-                    entry.group_action.value if entry.group_action is not None else None
-                ),
-                "revenue_required": entry.revenue_required,
-                "changes": {
-                    name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
-                },
-                "reason": entry.reason,
-            }
-            for entry in plan.entries
-        ],
+        "counts": counts,
+        "rows": rows,
+        "plan_fingerprint": _plan_fingerprint(counts, rows),
     }
+
+
+def _plan_fingerprint(counts: dict[str, int], rows: list[dict[str, object]]) -> str:
+    """Digest exactly the plan content an operator reviews: counts + rows.
+
+    Deliberately EXCLUDES ``dry_run``, ``content_owner_id`` and ``cms_status``:
+    the first differs between the preview and the apply by definition, and the
+    other two are echoes of form fields the apply re-sends anyway. What must
+    match is the plan itself — the outcome, diff, group effect and revenue flag
+    of every row.
+
+    ``sort_keys`` plus tight separators make this stable across dict ordering
+    and Python versions, so the same plan always digests the same way. It is an
+    equality token, never a secret and never an authorization input, so a plain
+    SHA-256 of the canonical JSON is the whole mechanism.
+    """
+    canonical = json.dumps({"counts": counts, "rows": rows}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class GroupSyncRequest(BaseModel):

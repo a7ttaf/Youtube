@@ -468,6 +468,112 @@ def test_dry_run_discloses_group_create_versus_join():
     assert [row["group_action"] for row in rows] == ["JOIN", "CREATE"]
 
 
+def test_apply_rejects_a_plan_that_changed_since_the_preview():
+    """The apply is bound to the plan the operator actually reviewed (#184).
+
+    The route re-plans from CURRENT state, so without this the roster row an
+    operator approved as a CREATE could commit as an UPDATE that overwrites a
+    channel someone else created in the meantime — a different write, never
+    reviewed. The 409 carries the REFRESHED plan so approval is re-sought
+    against reality.
+    """
+    client, registry, _groups, audit_sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true")
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["rows"][0]["outcome"] == "CREATE"
+    stale_fingerprint = preview.json()["plan_fingerprint"]
+
+    # A concurrent writer creates the very channel the roster planned to add.
+    registry.create_channel(
+        youtube_channel_id=CHANNEL_ID,
+        channel_name="Someone Else's Name",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+        content_owner_id=CONTENT_OWNER,
+    )
+
+    conflict = post_import(client, body, expected_plan_fingerprint=stale_fingerprint)
+
+    assert conflict.status_code == 409, conflict.text
+    refreshed = conflict.json()["detail"]
+    # The plan really did change under the operator: CREATE became UPDATE.
+    assert refreshed["rows"][0]["outcome"] == "UPDATE"
+    assert refreshed["plan_fingerprint"] != stale_fingerprint
+    # Nothing was written, and no audit event claims otherwise.
+    assert registry.get_channel(CHANNEL_ID).channel_name == "Someone Else's Name"
+    assert audit_sink.records == []
+
+
+def test_apply_proceeds_when_the_plan_still_matches_the_preview():
+    """A matching fingerprint is not a gate, only a guard: the apply runs."""
+    client, registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true")
+    fingerprint = preview.json()["plan_fingerprint"]
+
+    applied = post_import(client, body, expected_plan_fingerprint=fingerprint)
+
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["counts"]["CREATE"] == 1
+    assert registry.get_channel(CHANNEL_ID) is not None
+
+
+def test_apply_without_a_fingerprint_still_applies():
+    """The field is OPTIONAL: a client that never previewed re-approves nothing.
+
+    Pinned so the guard cannot quietly become a required field and break every
+    non-SPA caller of this route.
+    """
+    client, registry, _groups, _sink = create_import_app()
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+    assert response.status_code == 200, response.text
+    assert registry.get_channel(CHANNEL_ID) is not None
+
+
+def test_plan_fingerprint_ignores_dry_run_and_form_echoes():
+    """The digest covers the PLAN, not the request envelope.
+
+    A preview and its apply differ in `dry_run` by definition, so folding it
+    in would make every fingerprint mismatch and the guard would reject every
+    apply — a guard that always fires protects nothing.
+    """
+    client, _registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true")
+    applied = post_import(client, body, dry_run="false")
+
+    assert preview.json()["dry_run"] is True
+    assert applied.json()["dry_run"] is False
+    assert preview.json()["plan_fingerprint"] == applied.json()["plan_fingerprint"]
+
+
+def test_plan_fingerprint_changes_when_a_row_outcome_changes():
+    """Anti-vacuity: the digest must actually track plan content."""
+    client, registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    before = post_import(client, body, dry_run="true").json()["plan_fingerprint"]
+    registry.create_channel(
+        youtube_channel_id=CHANNEL_ID,
+        channel_name="Alpha News",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+        content_owner_id=CONTENT_OWNER,
+    )
+    after = post_import(client, body, dry_run="true").json()
+
+    assert after["rows"][0]["outcome"] == "UNCHANGED"
+    assert after["plan_fingerprint"] != before
+
+
 def test_rows_without_a_group_key_disclose_no_group_action():
     """No Group_ID, no group write — and therefore no claim about one."""
     client, _registry, _groups, _sink = create_import_app()

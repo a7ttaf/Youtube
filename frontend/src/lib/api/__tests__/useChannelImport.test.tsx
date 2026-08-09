@@ -63,6 +63,7 @@ const DRY_RUN_RESULT: ChannelImportResult = {
   content_owner_id: "COabc",
   cms_status: "INSIDE_CMS",
   counts: { CREATE: 1, UPDATE: 1 },
+  plan_fingerprint: "plan-abc",
   rows: [
     {
       row_number: 1,
@@ -102,6 +103,7 @@ const BLOCKED_APPLY_DETAIL: ChannelImportResult = {
   content_owner_id: "COabc",
   cms_status: "INSIDE_CMS",
   counts: { ERROR: 1 },
+  plan_fingerprint: "plan-blocked",
   rows: [
     {
       row_number: 1,
