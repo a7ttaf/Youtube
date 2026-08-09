@@ -49,7 +49,7 @@ export type UseExportActionsState = {
 //   - File: frontend/src/lib/api/types.ts -> ExportRequestBody / ExportJobCreated.
 //   - File: backend/ums_smart_revenue/api/exports.py:173 request_export.
 // ============================================================================
-export function useExportActions(): UseExportActionsState { // skipcq: JS-0067
+export const useExportActions = (): UseExportActionsState => {
   const client = useApiClient();
   const [data, setData] = useState<ExportJobCreated | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -105,4 +105,4 @@ export function useExportActions(): UseExportActionsState { // skipcq: JS-0067
   );
 
   return { data, loading, error, requestExport };
-}
+};

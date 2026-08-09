@@ -34,17 +34,94 @@ uv sync --extra dev --extra test --extra lint
 # 2) Start PostgreSQL outside this repo.
 #    Verify the database accepts connections before running migrations.
 
-# 3) Configure environment (see below for the full env-var matrix)
+# 3) Configure environment (see below for the full env-var matrix).
+#    .env is the one place the dev gateway secret should live, because the
+#    dashboard's Vite dev proxy reads that same file from its own terminal.
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+#    Write a fresh secret OVER the placeholder .env.example ships, in the file
+#    itself. Merely printing it would leave that public placeholder in .env —
+#    the backend and the dev proxy would both keep using it and this whole step
+#    would be decorative.
+#    `uv run` so the generator uses the interpreter step 1 provisioned, the
+#    same way steps 4 and 5 invoke alembic and uvicorn.
+$fresh = uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+#    Replace the line when .env already has the key, APPEND it when it does not.
+#    An in-place replace alone silently no-ops on an existing .env that never
+#    carried the key (or carries it commented out), and the failure then lands
+#    far from its cause. In THIS block the loader below sources the token from
+#    .env, so a no-op leaves the backend unconfigured and
+#    _require_trusted_gateway_token returns 503 on protected routes before it
+#    ever inspects the request header — a 401 is the different, configured-but-
+#    mismatched case. Writing the whole line also sidesteps the `$1`-vs-`${1}`
+#    backreference parsing rule.
+$line  = "UMS_TRUSTED_GATEWAY_TOKEN=$fresh"
+$lines = @(Get-Content .env)
+$lines = if ($lines -match '^UMS_TRUSTED_GATEWAY_TOKEN=') {
+  $lines -replace '^UMS_TRUSTED_GATEWAY_TOKEN=.*', $line
+} else { $lines + $line }
+#    WriteAllLines writes UTF-8 with no BOM on both Windows PowerShell 5.1 and
+#    PowerShell 7+. Set-Content's default encoding differs between them (ANSI on
+#    5.1), and a silently re-encoded .env is one Vite's loader can mis-parse —
+#    which shows up as the same 401 as a wrong token.
+[System.IO.File]::WriteAllLines((Get-Item .env).FullName, [string[]]$lines)
+Get-Content .env | Where-Object { $_ -notmatch '^\s*(#|$)' } | ForEach-Object {
+  $name, $value = $_ -split '=', 2
+  # Strip a matching pair of surrounding quotes; a quoted .env value would
+  # otherwise reach the backend with the quotes still attached.
+  $value = $value -replace '^"(.*)"$', '$1' -replace "^'(.*)'$", '$1'
+  Set-Item -Path "env:$name" -Value $value
+}
 $env:PYTHONPATH = (Resolve-Path "backend").Path
 $env:UMS_DATABASE_URL = "postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
 $env:UMS_AUTHZ_SOURCE = "headers"
-$env:UMS_TRUSTED_GATEWAY_TOKEN = "dev-only-token" # required for protected routes; set a real value
 
 # 4) Run migrations
 uv run alembic upgrade head
 
 # 5) Run the API
 uv run uvicorn ums_smart_revenue.app:app --reload --host 0.0.0.0 --port 8000
+```
+
+On Linux/macOS, run step 3 in bash instead — steps 1, 2, 4, and 5 are the same
+commands in either shell:
+
+```bash
+# 3) Configure environment. Same effect as the PowerShell block above: seed .env
+#    from the template, then write a fresh secret OVER the placeholder
+#    .env.example ships so the backend and the dev proxy agree on one value.
+[ -f .env ] || cp .env.example .env
+#    `uv run` so the generator uses the interpreter step 1 provisioned, the
+#    same way steps 4 and 5 invoke alembic and uvicorn. A bare `python` aborts
+#    this step on the many Linux distros that expose only `python3`.
+fresh=$(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
+#    The env var this step manages, named once so the presence test, the
+#    rewrite, and the read-back below cannot drift apart.
+var=UMS_TRUSTED_GATEWAY_TOKEN
+#    Replace the line when .env already has the key, APPEND it when it does not —
+#    an in-place replace alone silently no-ops on an existing .env that never
+#    carried it, the export below would then pick up nothing, and the backend
+#    would 503 on protected routes rather than reporting anything about .env.
+#    `-i.bak` + `rm` is the in-place form that works on both GNU and BSD sed.
+if grep -q "^$var=" .env; then
+  sed -i.bak "s|^$var=.*|$var=$fresh|" .env
+  rm -f .env.bak
+else
+  #  Add the newline first if .env's last line lacks one, or the append would
+  #  land on the end of that line instead of on a line of its own.
+  if [ -n "$(tail -c1 .env)" ]; then echo >> .env; fi
+  echo "$var=$fresh" >> .env
+fi
+#    Read the value back out of .env rather than exporting $fresh directly, so
+#    this shell provably holds the same value the dev proxy will read from the
+#    file in its own terminal — the write above is confirmed, not assumed.
+#    `tr -d '\r'` drops the CR a CRLF-saved .env would leave on the value.
+#    `export "$var=..."` so the exported name comes from $var too — hardcoding
+#    it here would let a future edit to $var export a name the backend does not
+#    read, leaving it unconfigured with nothing in the output to say so.
+export "$var=$(sed -n "s/^$var=//p" .env | head -n1 | tr -d '\r')"
+export PYTHONPATH="$PWD/backend"
+export UMS_DATABASE_URL="postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
+export UMS_AUTHZ_SOURCE=headers
 ```
 
 ### Run the tests
@@ -68,7 +145,7 @@ uv run pytest -q tests/api
 |---|---|---|---|
 | `UMS_DATABASE_URL` | yes (prod) | none | SQLAlchemy URL for PostgreSQL. Use `postgresql+psycopg://…` (psycopg3 binary driver). Update `.env.example` to match. |
 | `UMS_AUTHZ_SOURCE` | no | `headers` | `headers` for dev/bootstrap, `database` for production (loads principal + roles from SQL). |
-| `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. Also read by `frontend/vite.config.ts` in Node to inject the dev proxy `X-UMS-Trusted-Gateway-Token` header. **Never use a `VITE_*` alias** — any `VITE_*` env is embedded in the client bundle. |
+| `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. Also read by `frontend/vite.config.ts` in Node to inject the dev proxy `X-UMS-Trusted-Gateway-Token` header. Keep the value in the repo-root `.env` and load it from there: the API and the dashboard normally run in separate terminals, so a value exported in one shell alone makes the two disagree and every protected route 401s. Note that `.env` is the lowest-precedence source Vite reads — `loadEnv` also picks up `.env.local`, `.env.[mode]`, and `.env.[mode].local`, then overlays the dashboard shell's own environment, in that increasing order — so clear a stale token from those rather than re-editing `.env`. **Never use a `VITE_*` alias** — any `VITE_*` env is embedded in the client bundle. |
 | `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` | required for Google connector runs | none | UUID used as the connector service principal for audit events. Optional at process boot so non-connector workloads can start; connector execution fails closed at runtime when unset, and malformed values fail settings load. |
 | `VITE_DEV_BACKEND_URL` | no (dev) | `http://127.0.0.1:8000` | Backend origin the frontend dev proxy forwards `/tenants/*` to. Dev-only; read by `frontend/vite.config.ts`. |
 | `VITE_DEV_GATEWAY_USER_ID` | no (dev) | `00000000-0000-0000-0000-0000000000aa` | Dev `X-User-ID` injected by the Vite proxy on tenant-scoped routes. Non-secret. |

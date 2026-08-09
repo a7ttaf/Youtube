@@ -20,11 +20,11 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 //   - File: frontend/src/lib/api/types.ts -> OutsideCmsResponse.
 //   - File: backend/ums_smart_revenue/api/channels.py:135 list_outside_cms_channels.
 // ============================================================================
-export function useOutsideCmsChannels(): AsyncState<OutsideCmsResponse> { // skipcq: JS-0067
+export const useOutsideCmsChannels = (): AsyncState<OutsideCmsResponse> => {
   const client = useApiClient();
   const run = useCallback(
     () => client.get<OutsideCmsResponse>("/channels/outside-cms"),
     [client],
   );
   return useAsync(run);
-}
+};

@@ -25,9 +25,9 @@ export type MonthCloseQuery = {
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: backend/ums_smart_revenue/api/finance_close.py:75 get_finance_month_close.
 // ============================================================================
-export function useMonthClose( // skipcq: JS-0067
+export const useMonthClose = (
   query: MonthCloseQuery,
-): AsyncState<FinanceMonthCloseStatus> {
+): AsyncState<FinanceMonthCloseStatus> => {
   const client = useApiClient();
   const { month } = query;
 
@@ -40,7 +40,7 @@ export function useMonthClose( // skipcq: JS-0067
   );
 
   return useAsync(run);
-}
+};
 
 // ============================================================================
 // Purpose: Typed fetch hook for a finance month's close READINESS (ready flag +
@@ -55,9 +55,9 @@ export function useMonthClose( // skipcq: JS-0067
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: backend/ums_smart_revenue/api/finance_close.py:101 get_finance_close_readiness.
 // ============================================================================
-export function useMonthCloseReadiness( // skipcq: JS-0067
+export const useMonthCloseReadiness = (
   query: MonthCloseQuery,
-): AsyncState<FinanceCloseReadinessResponse> {
+): AsyncState<FinanceCloseReadinessResponse> => {
   const client = useApiClient();
   const { month } = query;
 
@@ -70,7 +70,7 @@ export function useMonthCloseReadiness( // skipcq: JS-0067
   );
 
   return useAsync(run);
-}
+};
 
 // ============================================================================
 // Purpose: Imperative lock/unlock actions for a finance month close. Each is a
@@ -89,7 +89,7 @@ export function useMonthCloseReadiness( // skipcq: JS-0067
 //   - File: backend/ums_smart_revenue/api/finance_close.py:132 lock_finance_month.
 //   - File: backend/ums_smart_revenue/api/finance_close.py:167 unlock_finance_month.
 // ============================================================================
-export function useMonthCloseActions(query: MonthCloseQuery) { // skipcq: JS-0067
+export const useMonthCloseActions = (query: MonthCloseQuery) => {
   const client = useApiClient();
   const { month } = query;
   const encoded = encodeURIComponent(month);
@@ -113,4 +113,4 @@ export function useMonthCloseActions(query: MonthCloseQuery) { // skipcq: JS-006
   );
 
   return useMemo(() => ({ lock, unlock }), [lock, unlock]);
-}
+};

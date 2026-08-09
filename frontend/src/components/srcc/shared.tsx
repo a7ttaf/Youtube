@@ -38,30 +38,67 @@ const USD_FORMATTER = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+/** True when a backend money string is absent: null, undefined, or empty. */
+const isAbsentMoney = (value: string | null | undefined): value is null | undefined | "" =>
+  value === null || value === undefined || value === "";
+
+/**
+ * True for an explicit currency code other than "USD"; an absent or empty code
+ * falls through to the USD formatter, matching the prior truthiness check.
+ */
+const isNonUsdCurrency = (currency: string | undefined): currency is string =>
+  currency !== undefined && currency !== "" && currency !== "USD";
+
+/**
+ * Format a non-USD amount as "<amount> <code>". Only USD is backend-supported
+ * today; showing the raw amount plus the code avoids mislabeling a non-USD
+ * value with a USD symbol.
+ */
+const formatNonUsdMoney = (amount: number, currency: string): string =>
+  `${amount.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${currency}`;
+
 // ============================================================================
 // Purpose: Format a backend decimal-as-string money value for display WITHOUT
 //   doing float math on it for any business purpose. We parse only to drive the
 //   display formatter; if the string is missing or unparsable we fall back to a
 //   safe placeholder rather than rendering "NaN".
+// Database/ORM: None (frontend) — formats an already-serialized API string; it
+//   reads no store and issues no request.
 // Standards: Backend serializes finance decimals as strings (decimal_to_api);
 //   null means "unknown". Display-only — never feed the parsed number back into
-//   a calculation that affects a stored/exported number.
+//   a calculation that affects a stored/exported number. Total by construction:
+//   an absent value returns the placeholder and an unparsable one echoes the raw
+//   string, so a money cell never renders "NaN" and never throws.
+// Blast Radius: Finance display. The Number() parse here exists ONLY to drive
+//   Intl formatting — routing it back into a stored or exported figure would put
+//   float math on a value the backend deliberately serialized as a decimal
+//   string. Permission gating is NOT done here: callers must go through
+//   financeDisplay, which substitutes RESTRICTED_FINANCE_VALUE, so calling
+//   formatMoney directly on a money value would bypass that gate.
+// Connections: financeDisplay (the permission-gated wrapper callers must use),
+//   backend decimal_formatting.decimal_to_api (produces the input strings).
+//   - File: frontend/src/components/srcc/shared.tsx -> financeDisplay wraps this
+//     with the canViewFinance gate; views call that wrapper, not this.
+//   - File: backend/ums_smart_revenue/finance/decimal_formatting.py ->
+//     decimal_to_api produces the decimal-as-string inputs formatted here.
 // ============================================================================
-export function formatMoney( // skipcq: JS-0067, JS-R1005
+export const formatMoney = (
   value: string | null | undefined,
   options: { currency?: string; placeholder?: string } = {},
-): string {
+): string => {
   const { currency, placeholder = "—" } = options;
-  if (value === null || value === undefined || value === "") return placeholder;
+  if (isAbsentMoney(value)) {
+    return placeholder;
+  }
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return value;
-  if (currency && currency !== "USD") {
-    // Only USD is backend-supported today; show the raw amount + code rather
-    // than mislabel a non-USD value with a USD symbol.
-    return `${parsed.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${currency}`;
+  if (!Number.isFinite(parsed)) {
+    return value;
+  }
+  if (isNonUsdCurrency(currency)) {
+    return formatNonUsdMoney(parsed, currency);
   }
   return USD_FORMATTER.format(parsed);
-}
+};
 
 // ============================================================================
 // Purpose: Render an ISO timestamp string for display WITHOUT float/epoch math
@@ -80,38 +117,38 @@ export function formatMoney( // skipcq: JS-0067, JS-R1005
  * unparsable, otherwise a locale string. With `options` the format is pinned to
  * "en-US" for determinism; without it the runtime default locale is used.
  */
-export function formatTimestamp( // skipcq: JS-0067
+export const formatTimestamp = (
   value: string | null | undefined,
   options?: Intl.DateTimeFormatOptions,
-): string {
+): string => {
   if (!value) return "—";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return options ? parsed.toLocaleString("en-US", options) : parsed.toLocaleString();
-}
+};
 
 /**
  * Format a money value for display, returning the RESTRICTED_FINANCE_VALUE
  * sentinel when the viewer lacks finance permission so no view leaks amounts.
  */
-export function financeDisplay( // skipcq: JS-0067
+export const financeDisplay = (
   value: string | null | undefined,
   canViewFinance: boolean,
   options?: { currency?: string; placeholder?: string },
-): string {
+): string => {
   if (!canViewFinance) return RESTRICTED_FINANCE_VALUE;
   return formatMoney(value, options);
-}
+};
 
 /** Render a tone-colored status badge wrapping its children. */
-export function Badge({ tone, children }: { tone: Severity; children: ReactNode }) { // skipcq: JS-0067
+export const Badge = ({ tone, children }: { tone: Severity; children: ReactNode }) => {
   return <span className={`badge ${tone}`}>{children}</span>;
-}
+};
 
 /** Render a small decorative status dot in the given tone. */
-export function Dot({ tone }: { tone?: Severity }) { // skipcq: JS-0067
+export const Dot = ({ tone }: { tone?: Severity }) => {
   return <span className={`dot${tone ? ` ${tone}` : ""}`} aria-hidden="true" />;
-}
+};
 
 // ============================================================================
 // Purpose: Render the repeated placeholder row used by audit timeline states.
@@ -144,12 +181,12 @@ export const TimelinePlaceholderRow = ({
 };
 
 /** Map a workflow tone to a Dot severity; "primary" renders an untoned dot. */
-export function workflowDotTone(tone: WorkflowTone): Severity | undefined { // skipcq: JS-0067
+export const workflowDotTone = (tone: WorkflowTone): Severity | undefined => {
   return tone === "primary" ? undefined : tone;
-}
+};
 
 /** Render a list row with a tone dot, title, subtitle, and trailing slot. */
-export function ItemRow({ // skipcq: JS-0067
+export const ItemRow = ({
   tone,
   title,
   sub,
@@ -161,7 +198,7 @@ export function ItemRow({ // skipcq: JS-0067
   sub: string;
   trailing: ReactNode;
   className?: string;
-}) {
+}) => {
   return (
     <div className={className} role="listitem">
       <Dot tone={tone} />
@@ -172,13 +209,13 @@ export function ItemRow({ // skipcq: JS-0067
       {trailing}
     </div>
   );
-}
+};
 
 /**
  * Render a labelled summary tile; finance tiles show RESTRICTED_FINANCE_VALUE
  * when the viewer lacks finance permission.
  */
-export function SummaryTile({ // skipcq: JS-0067
+export const SummaryTile = ({
   label,
   value,
   note,
@@ -190,7 +227,7 @@ export function SummaryTile({ // skipcq: JS-0067
   note: string;
   finance?: boolean;
   canViewFinance?: boolean;
-}) {
+}) => {
   const displayValue = finance && !canViewFinance ? RESTRICTED_FINANCE_VALUE : value;
   return (
     <article className="summary-tile">
@@ -199,4 +236,4 @@ export function SummaryTile({ // skipcq: JS-0067
       <small>{note}</small>
     </article>
   );
-}
+};

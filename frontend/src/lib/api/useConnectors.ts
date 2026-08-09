@@ -32,9 +32,9 @@ export type ConnectorCredentialsQuery = {
 //   - File: frontend/src/lib/api/types.ts -> ConnectorCredentialListResponse.
 //   - File: backend/ums_smart_revenue/api/connectors.py:58 list_connector_credentials.
 // ============================================================================
-export function useConnectorCredentials( // skipcq: JS-0067
+export const useConnectorCredentials = (
   query: ConnectorCredentialsQuery = {},
-): AsyncState<ConnectorCredentialListResponse> {
+): AsyncState<ConnectorCredentialListResponse> => {
   const client = useApiClient();
   const { limit, offset } = query;
 
@@ -49,7 +49,7 @@ export function useConnectorCredentials( // skipcq: JS-0067
   }, [client, limit, offset]);
 
   return useAsync(run);
-}
+};
 
 export type UseConnectorJobActionsState = {
   // The most recent job-request result (cleared while a new request is in flight).
@@ -99,7 +99,7 @@ export type UseConnectorJobActionsState = {
 //   - File: frontend/src/lib/api/types.ts -> ConnectorJobRequestBody / ConnectorJobResponse.
 //   - File: backend/ums_smart_revenue/api/connectors.py:122 request_connector_job.
 // ============================================================================
-export function useConnectorJobActions(): UseConnectorJobActionsState { // skipcq: JS-0067
+export const useConnectorJobActions = (): UseConnectorJobActionsState => {
   const client = useApiClient();
   const [data, setData] = useState<ConnectorJobResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -155,4 +155,4 @@ export function useConnectorJobActions(): UseConnectorJobActionsState { // skipc
   );
 
   return { data, loading, error, requestJob };
-}
+};

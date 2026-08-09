@@ -23,6 +23,19 @@ const omitRecordKey = <T extends Record<string, unknown>>(
   ) as T;
 };
 
+/** Pull a safe `detail` string off an ApiError body when present. */
+const extractDetail = (error: ApiError): string | null => {
+  const body = error.body;
+  if (
+    typeof body === "object" &&
+    body !== null &&
+    typeof (body as { detail?: unknown }).detail === "string"
+  ) {
+    return (body as { detail: string }).detail;
+  }
+  return null;
+};
+
 export type UseConnectorTestState = {
   // Per-row latest probe result, keyed by `${connector_key}::${account_id}`.
   results: Record<string, ConnectorTestResult>;
@@ -64,7 +77,7 @@ export type UseConnectorTestState = {
 //   - File: frontend/src/lib/api/types.ts -> ConnectorTestResult.
 //   - File: backend/ums_smart_revenue/api/connectors.py -> test_connector_connection.
 // ============================================================================
-export function useConnectorTest(): UseConnectorTestState { // skipcq: JS-0067
+export const useConnectorTest = (): UseConnectorTestState => {
   const client = useApiClient();
   const [results, setResults] = useState<Record<string, ConnectorTestResult>>({});
   const [errors, setErrors] = useState<Record<string, ApiError | Error>>({});
@@ -127,17 +140,4 @@ export function useConnectorTest(): UseConnectorTestState { // skipcq: JS-0067
   );
 
   return { results, errors, pending, test };
-}
-
-/** Pull a safe `detail` string off an ApiError body when present. */
-function extractDetail(error: ApiError): string | null { // skipcq: JS-0067
-  const body = error.body;
-  if (
-    typeof body === "object" &&
-    body !== null &&
-    typeof (body as { detail?: unknown }).detail === "string"
-  ) {
-    return (body as { detail: string }).detail;
-  }
-  return null;
-}
+};
