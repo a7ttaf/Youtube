@@ -5,9 +5,9 @@ import { useSmartAlerts } from "@/lib/api/useSmartAlerts";
 import type { SmartAlertsSummary } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) { // skipcq: JS-0067
+const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-}
+};
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -48,23 +48,23 @@ const SMART_ALERTS_BODY: SmartAlertsSummary = {
   audit_events: [],
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function lastFetchArgs() { // skipcq: JS-0067
+const lastFetchArgs = () => {
   return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1);
-}
+};
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-function requireFetchArgs() { // skipcq: JS-0067
+const requireFetchArgs = () => {
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;
-}
+};
 
 describe("useSmartAlerts", () => {
   it("requests the smart-alerts endpoint with the encoded month path", async () => {

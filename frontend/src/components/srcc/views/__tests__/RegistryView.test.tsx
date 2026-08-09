@@ -65,23 +65,23 @@ const ORG_UNITS: OrgUnit[] = [
   },
 ];
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function fetchMock() { // skipcq: JS-0067
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
 
 type RouteOverrides = {
   channels?: () => Promise<Response> | Response;
@@ -90,51 +90,67 @@ type RouteOverrides = {
   propose?: (init: RequestInit | undefined) => Promise<Response> | Response;
 };
 
+/** Resolve GET /channels: the override when provided, else the seeded CHANNELS. */
+const channelsResponse = (overrides: RouteOverrides) =>
+  (overrides.channels ? overrides.channels() : jsonResponse(CHANNELS));
+
+/** Resolve GET /org-units: the override when provided, else the seeded ORG_UNITS. */
+const orgUnitsResponse = (overrides: RouteOverrides) =>
+  (overrides.orgUnits ? overrides.orgUnits() : jsonResponse(ORG_UNITS));
+
+/** Resolve the mapping PATCH: the override when provided, else an audited success. */
+const mappingResponse = (overrides: RouteOverrides, init?: RequestInit) =>
+  (overrides.mapping
+    ? overrides.mapping(init)
+    : jsonResponse({ audit_event: { event_type: "CHANNEL_UPDATED" } }));
+
+/** Resolve the link-proposal POST: the override when provided, else a 201 proposal. */
+const proposeResponse = (overrides: RouteOverrides, init?: RequestInit) =>
+  (overrides.propose
+    ? overrides.propose(init)
+    : jsonResponse(
+        { link: {}, audit_event: { event_type: "CHANNEL_ACCOUNT_LINK_PROPOSED" } },
+        201,
+      ));
+
+/** True for a PATCH /channels/{id}/mapping request. */
+const isMappingPatch = (url: string, init?: RequestInit) =>
+  /^\/channels\/[^/]+\/mapping$/.test(url) && init?.method === "PATCH";
+
+/** True for a POST /revenue/channel-account-links request. */
+const isProposePost = (url: string, init?: RequestInit) =>
+  url === "/revenue/channel-account-links" && init?.method === "POST";
+
 /** Route the registry's four endpoints; unrouted URLs fail loudly (404 + []). */
-function routeRegistry(overrides: RouteOverrides = {}) { // skipcq: JS-0067, JS-R1005
-  return (input: unknown, init?: RequestInit) => { // skipcq: JS-R1005
+const routeRegistry = (overrides: RouteOverrides = {}) => {
+  return (input: unknown, init?: RequestInit) => {
     const url = urlOf(input);
     if (url === "/channels") {
-      return Promise.resolve(
-        overrides.channels ? overrides.channels() : jsonResponse(CHANNELS),
-      );
+      return Promise.resolve(channelsResponse(overrides));
     }
     if (url === "/org-units") {
-      return Promise.resolve(
-        overrides.orgUnits ? overrides.orgUnits() : jsonResponse(ORG_UNITS),
-      );
+      return Promise.resolve(orgUnitsResponse(overrides));
     }
-    if (/^\/channels\/[^/]+\/mapping$/.test(url) && init?.method === "PATCH") {
-      return Promise.resolve(
-        overrides.mapping
-          ? overrides.mapping(init)
-          : jsonResponse({ audit_event: { event_type: "CHANNEL_UPDATED" } }),
-      );
+    if (isMappingPatch(url, init)) {
+      return Promise.resolve(mappingResponse(overrides, init));
     }
-    if (url === "/revenue/channel-account-links" && init?.method === "POST") {
-      return Promise.resolve(
-        overrides.propose
-          ? overrides.propose(init)
-          : jsonResponse(
-              { link: {}, audit_event: { event_type: "CHANNEL_ACCOUNT_LINK_PROPOSED" } },
-              201,
-            ),
-      );
+    if (isProposePost(url, init)) {
+      return Promise.resolve(proposeResponse(overrides, init));
     }
     return Promise.resolve(jsonResponse([], 404));
   };
-}
+};
 
 /** Backwards-compatible channels-only router used by the Phase 1 read tests. */
-function routeChannels(body: ChannelRegistryEntry[] | null = CHANNELS, status = 200) { // skipcq: JS-0067
+const routeChannels = (body: ChannelRegistryEntry[] | null = CHANNELS, status = 200) => {
   return routeRegistry({ channels: () => jsonResponse(body, status) });
-}
+};
 
-function renderRegistry( // skipcq: JS-0067
+const renderRegistry = (
   canManageRegistry = true,
   canViewFinance = true,
   onOpenTrace?: (channelId: string) => void,
-) {
+) => {
   return render(
     <TenantProvider initialSlug="ums">
       <RegistryView
@@ -144,25 +160,25 @@ function renderRegistry( // skipcq: JS-0067
       />
     </TenantProvider>,
   );
-}
+};
 
-function callsTo(predicate: (url: string, init?: RequestInit) => boolean) { // skipcq: JS-0067
+const callsTo = (predicate: (url: string, init?: RequestInit) => boolean) => {
   return fetchMock().mock.calls.filter((args: unknown[]) =>
     predicate(urlOf(args[0]), args[1] as RequestInit | undefined),
   );
-}
+};
 
-function channelCalls() { // skipcq: JS-0067
+const channelCalls = () => {
   return callsTo((url) => url === "/channels");
-}
+};
 
-function deferred<T>() { // skipcq: JS-0067
+const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => {
     resolve = r;
   });
   return { promise, resolve };
-}
+};
 
 describe("RegistryView wired to GET /channels", () => {
   it("renders live channel names and IDs from the API", async () => {
@@ -329,7 +345,7 @@ describe("RegistryView Phase 2: org-unit names", () => {
 });
 
 describe("RegistryView Phase 2: Map action (PATCH /channels/{id}/mapping)", () => {
-  async function fillMappingForm() {
+  const fillMappingForm = async () => {
     await waitFor(() =>
       expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
     );
@@ -342,7 +358,7 @@ describe("RegistryView Phase 2: Map action (PATCH /channels/{id}/mapping)", () =
     fireEvent.change(screen.getByLabelText(/^Reason \(required, audited\)$/), {
       target: { value: "March source evidence received" },
     });
-  }
+  };
 
   it("submits the mapping change and reloads channels on success", async () => {
     fetchMock().mockImplementation(routeRegistry());

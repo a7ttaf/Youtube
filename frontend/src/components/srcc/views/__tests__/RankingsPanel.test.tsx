@@ -107,18 +107,18 @@ const RANKINGS_BODY: MonthRankingsResponse = {
   committed_run: null,
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
 const DEFAULT_RANKINGS: () => Response = () => jsonResponse(RANKINGS_BODY);
 
 // Route each fetch by URL. The rankings read is captured so the metric-toggle
 // test can assert the query param changed across renders.
-function routeFetch(opts: { rankings?: () => Response } = {}) { // skipcq: JS-0067
+const routeFetch = (opts: { rankings?: () => Response } = {}) => {
   const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
@@ -134,12 +134,12 @@ function routeFetch(opts: { rankings?: () => Response } = {}) { // skipcq: JS-00
     return Promise.resolve(jsonResponse({}, 404));
   });
   return fetchMock;
-}
+};
 
-function renderCommandView(opts: { // skipcq: JS-0067
+const renderCommandView = (opts: {
   canViewFinance?: boolean;
   canViewAnalytics?: boolean;
-} = {}) {
+} = {}) => {
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView
@@ -148,7 +148,7 @@ function renderCommandView(opts: { // skipcq: JS-0067
       />
     </TenantProvider>,
   );
-}
+};
 
 describe("RankingsPanel in CommandView", () => {
   it("loads ranked entities with formatted money when finance is visible", async () => {

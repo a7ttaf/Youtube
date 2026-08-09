@@ -66,57 +66,66 @@ const READINESS_BLOCKED: FinanceCloseReadinessResponse = {
   ],
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
+
+/** Pick the optional POST responder (lock/unlock) that matches `url`, if any. */
+const postResponderFor = (
+  url: string,
+  opts: { lock?: () => Response; unlock?: () => Response },
+): (() => Response) | undefined => {
+  if (url.endsWith("/lock")) return opts.lock;
+  if (url.endsWith("/unlock")) return opts.unlock;
+  return undefined;
+};
 
 // Route the two CloseView GETs (status vs /readiness) to separate responders.
-function routeFetch(opts: { // skipcq: JS-0067
+const routeFetch = (opts: {
   status: () => Response;
   readiness: () => Response;
   lock?: () => Response;
   unlock?: () => Response;
-}) {
-  return (input: unknown) => { // skipcq: JS-R1005
+}) => {
+  return (input: unknown) => {
     const url = urlOf(input);
     if (url.endsWith("/readiness")) return Promise.resolve(opts.readiness());
-    if (url.endsWith("/lock") && opts.lock) return Promise.resolve(opts.lock());
-    if (url.endsWith("/unlock") && opts.unlock)
-      return Promise.resolve(opts.unlock());
+    const post = postResponderFor(url, opts);
+    if (post) return Promise.resolve(post());
     return Promise.resolve(opts.status());
   };
-}
+};
 
-function fetchMock() { // skipcq: JS-0067
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
 /** Resolve a promise from outside via a deferred, to keep a fetch pending. */
-function deferred<T>() { // skipcq: JS-0067
+const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;
   });
   return { promise, resolve };
-}
+};
 
-function renderCloseView(canCloseMonth = true, canUnlockMonth = true) { // skipcq: JS-0067
+const renderCloseView = (canCloseMonth = true, canUnlockMonth = true) => {
   return render(
     <TenantProvider initialSlug="ums">
       <CloseView permissions={{ canCloseMonth, canUnlockMonth }} />
     </TenantProvider>,
   );
-}
+};
 
 describe("CloseView wired to finance-close", () => {
   it("shows a loading state before the responses resolve", () => {

@@ -126,25 +126,25 @@ const NET_EXPLANATION: NumberExplanation = {
   audit_events: [],
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function urlOf(input: unknown): string { // skipcq: JS-0067
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
 
 // Route the channel-list GET (net-revenue) vs the explain POST to responders.
-function routeFetch(opts: { // skipcq: JS-0067
+const routeFetch = (opts: {
   channels: () => Response;
   explain?: () => Response;
-}) {
+}) => {
   return (input: unknown) => {
     const url = urlOf(input);
     if (url.includes("/explain") && opts.explain) {
@@ -152,28 +152,28 @@ function routeFetch(opts: { // skipcq: JS-0067
     }
     return Promise.resolve(opts.channels());
   };
-}
+};
 
-function fetchMock() { // skipcq: JS-0067
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
 /** Resolve a Response from outside, so an explain POST can be held in flight. */
-function deferred<T>() { // skipcq: JS-0067
+const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;
   });
   return { promise, resolve };
-}
+};
 
-function renderTraceView(canViewFinance = true) { // skipcq: JS-0067
+const renderTraceView = (canViewFinance = true) => {
   return render(
     <TenantProvider initialSlug="ums">
       <TraceView canViewFinance={canViewFinance} role="finance" />
     </TenantProvider>,
   );
-}
+};
 
 describe("TraceView wired to the explain endpoint", () => {
   it("renders the idle prompt and does not POST before Explain is clicked", async () => {
