@@ -165,10 +165,17 @@ ci::changeset::classify_file() {
     # lane entirely — no install, tests, typecheck or build.
     package.json|package-lock.json|npm-shrinkwrap.json|pnpm-lock.yaml|yarn.lock|bun.lock|bun.lockb)
       printf 'javascript'; return 0 ;;
+    # tsconfig drives tsc directly; it is TypeScript configuration, not data.
+    tsconfig.json|tsconfig.*.json|jsconfig.json)
+      printf 'javascript'; return 0 ;;
   esac
 
   case "$ext" in
-    js|ts|tsx|jsx|mjs|cjs) printf 'javascript' ;;
+    js|ts|tsx|jsx|mjs|cjs)  printf 'javascript' ;;
+    # Web build inputs: the node lane is the only one that can validate these,
+    # so leaving them `unknown` means a change to the entry document or the
+    # stylesheet schedules nothing at all — no typecheck, no tests, no build.
+    html|htm|css|scss|sass|less|vue|svelte|astro) printf 'javascript' ;;
     py|pyi)                 printf 'python' ;;
     go)                     printf 'go' ;;
     rs)                     printf 'rust' ;;

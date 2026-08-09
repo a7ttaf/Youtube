@@ -56,6 +56,25 @@ rules:
     tests: "frontend/tests/**/*.test.ts"
   - source: "frontend/package.json"
     tests: "frontend/tests/**/*.test.ts"
+  # A lockfile change resolves different code into node_modules, so the suite
+  # has to run. Without these, a lockfile staged next to a Python change leaves
+  # the JavaScript slice of AFFECTED_TESTS empty and tests.sh skips the lane.
+  - source: "frontend/bun.lock"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/bun.lockb"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/package-lock.json"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/npm-shrinkwrap.json"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/pnpm-lock.yaml"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/yarn.lock"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/tsconfig.json"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/index.html"
+    tests: "frontend/tests/**/*.test.ts"
 
   # Python: module -> test file
   - source: "src/**/*.py"

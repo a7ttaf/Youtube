@@ -167,40 +167,63 @@ strip_ts_comments() {
   ' "$1"
 }
 
-# Extracts the body of the `test: { ... }` object by brace matching. The glob
-# has to be bound to *that* include: an `optimizeDeps.include` carrying it would
-# satisfy a file-wide search while test.include was narrowed to a single file,
-# and vitest would silently run one test.
+# Extracts the body of the exported config's `test: { ... }` object.
+#
+# Two things have to be true for the glob to mean anything, and each was a
+# separate way this guard failed open. It must be *this* property, not any
+# `include:` in the file — an optimizeDeps.include carrying the glob would
+# satisfy a file-wide search while test.include ran one file. And it must be the
+# *exported* config's property, not the first `test: {` token in the file — a
+# helper object declared above defineConfig would shadow the real one.
+#
+# So: anchor at `export default`, brace-match the object it exports (skipping a
+# defineConfig( wrapper), then take the `test` key at that object's top level.
 extract_test_block() {
   awk '
     { all = all $0 "\n" }
     END {
       n = length(all)
-      pos = 0
-      while ((i = index(substr(all, pos + 1), "test")) > 0) {
-        start = pos + i
-        pos = start
-        if (start > 1) {
-          before = substr(all, start - 1, 1)
-          if (before ~ /[A-Za-z0-9_$]/) continue
+
+      ed = index(all, "export default")
+      if (ed == 0) exit 1
+
+      # First brace after `export default`, which skips a defineConfig( wrapper.
+      p = ed + 14
+      while (p <= n && substr(all, p, 1) != "{") p++
+      if (p > n) exit 1
+      p++
+
+      depth = 1
+      while (p <= n && depth > 0) {
+        ch = substr(all, p, 1)
+        if (ch == "{") { depth++; p++; continue }
+        if (ch == "}") { depth--; p++; continue }
+
+        # Only a key at the exported object own level counts.
+        if (depth == 1 && substr(all, p, 4) == "test") {
+          before = (p > 1) ? substr(all, p - 1, 1) : " "
+          rest = substr(all, p + 4)
+          if (before !~ /[A-Za-z0-9_$]/ && rest ~ /^[[:space:]]*:[[:space:]]*\{/) {
+            q = p + 4 + index(rest, "{")
+            d2 = 1
+            out = ""
+            while (q <= n) {
+              c2 = substr(all, q, 1)
+              if (c2 == "{") d2++
+              else if (c2 == "}") { d2--; if (d2 == 0) break }
+              out = out c2
+              q++
+            }
+            print out
+            exit 0
+          }
         }
-        rest = substr(all, start + 4)
-        if (rest !~ /^[[:space:]]*:[[:space:]]*\{/) continue
-        p = start + 4 + index(rest, "{")
-        depth = 1
-        out = ""
-        while (p <= n) {
-          ch = substr(all, p, 1)
-          if (ch == "{") depth++
-          else if (ch == "}") { depth--; if (depth == 0) break }
-          out = out ch
-          p++
-        }
-        print out
-        exit 0
+        p++
       }
-      # No test block at all. Signalled by status, because an empty block is a
-      # different failure from a missing one and both print nothing.
+
+      # No test property on the exported config. Signalled by status, because an
+      # empty block is a different failure from a missing one and both print
+      # nothing.
       exit 1
     }
   '

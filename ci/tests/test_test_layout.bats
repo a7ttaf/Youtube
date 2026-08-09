@@ -354,6 +354,60 @@ EOF
   [[ "$output" != *"alias"* ]]
 }
 
+@test "test-layout: a helper object above defineConfig does not shadow the export" {
+  # The first `test: {` token in the file is not necessarily vitest's. Anchoring
+  # on `export default` is what makes the guard read the config that actually
+  # ships.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const base = {
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+};
+
+export default defineConfig({
+  test: {
+    include: ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
+}
+
+@test "test-layout: a plain exported object without defineConfig is read" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+export default {
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+};
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: a nested test key does not pass for the exported one" {
+  # `test` under coverage/ or another sub-object must not satisfy the guard —
+  # only the exported config's own property counts.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  server: {
+    test: {
+      include: ["tests/**/*.test.{ts,tsx}"],
+    },
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+}
+
 @test "test-layout: catches a config with no test block at all" {
   cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
 import { defineConfig } from "vitest/config";

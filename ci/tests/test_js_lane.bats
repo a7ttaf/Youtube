@@ -322,6 +322,38 @@ ws_run() {
   [[ "$output" == *"typecheck-js"* ]]
 }
 
+@test "changeset: frontend build inputs schedule the node lane" {
+  # These are the only lane that can validate them. Left `unknown`/`json` they
+  # schedule nothing at all — no typecheck, no tests, no vite build.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  local f
+  for f in frontend/src/styles.css frontend/index.html frontend/tsconfig.json; do
+    [ "$(ci::changeset::classify_file "$f")" = "javascript" ] \
+      || { echo "$f classified as $(ci::changeset::classify_file "$f"), not javascript" >&2; return 1; }
+  done
+}
+
+@test "affected: a lockfile change maps to the frontend suite" {
+  # A lockfile resolves different code into node_modules, so the suite has to
+  # run. Staged next to a Python change it otherwise leaves the JavaScript
+  # slice empty and tests.sh skips the lane.
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/bun.lock backend/app/main.py
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "typecheck lane: no PATH fallback to a global tsc" {
+  # Same reasoning as the JS test runner: an unpinned compiler gives a
+  # non-reproducible red or green.
+  run grep -nE 'bin="tsc"' ci/checks/typecheck.sh
+  [ "$status" -ne 0 ]
+  run grep -c 'node_modules/.bin/tsc' ci/checks/typecheck.sh
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
 @test "changeset: an unrelated json file is still json" {
   # The manifest rule must key on the basename, not on the extension.
   source ci/lib/common.sh

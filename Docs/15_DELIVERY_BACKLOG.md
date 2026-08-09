@@ -707,8 +707,8 @@ single P-tier above.
   check is also scheduled in `ci/preflight.sh` (`run_common_checks` for
   pre-commit `quick`, `run_full_or_ship_checks` for `full`/`ship`) and in
   `ci/config/lanes.conf`; registered-but-never-run is the exact failure mode
-  this guard exists to prevent. `ci/tests/test_test_layout.bats` (18 cases)
-  pins all of it, including that the pre-fix script exits 0 on both evasions.
+  this guard exists to prevent. `ci/tests/test_test_layout.bats` pins all of
+  it, including that the pre-fix script exits 0 on both evasions.
   **Rode along — the JS lanes were dead.** `ci/checks/tests.sh`,
   `ci/checks/typecheck.sh` and `ci/checks/node.sh` all `cd` to the repo root and
   bail on a missing root `package.json`/`tsconfig.json`; this repo keeps both in
@@ -776,9 +776,26 @@ single P-tier above.
   `run_script` only logs `Skipping missing script`. The lane now fails closed
   when a workspace ships test files but defines neither `test` nor
   `test:unit`, keyed on the files rather than on `checks.yml` so the rule
-  travels with the workspace. Combined suite: `test_test_layout.bats` (27) +
-  `test_js_lane.bats` (24) = 51 cases, and the node lane was run end to end
-  against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
+  travels with the workspace.
+  A fourth and fifth round closed the last of it. The drift guard was bound to
+  any active `include:` anywhere in the config, so an `optimizeDeps.include`
+  carrying the glob satisfied it while `test.include` ran one file; and once
+  that was fixed by brace-matching a `test: { }` block, the *first* such token
+  in the file still won, so a helper object declared above `defineConfig` could
+  shadow the exported config. The extractor now anchors on `export default`,
+  brace-matches the exported object, and takes the `test` key at that object's
+  own level. `ci/checks/tests.sh` and `ci/checks/typecheck.sh` both fell back to
+  a `jest`/`vitest`/`tsc` found on `PATH` — not the pinned version, and the
+  cause of the ~160 phantom failures recorded above; both fallbacks are gone.
+  `affected.yml` gained root-level `frontend/tests/*` rules and lockfile
+  mappings, and `changeset.sh` now classifies web build inputs (`html`, `css`,
+  `tsconfig.json`) as `javascript` so a change to the entry document or the
+  stylesheet still schedules the lane.
+  Combined suite: `test_test_layout.bats` (37) + `test_js_lane.bats` (32) = 69
+  cases, 80 including the hooks and changeset suites. The node lane was run end
+  to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
+  Counts here are the ones the files actually contain at this commit; an
+  earlier revision of this paragraph quoted stale ones.
   Also fixed: the Python-convention `lib/` rule in `.gitignore` was swallowing
   **new** files under `frontend/tests/lib/` (17 of the moved tests live there;
   the moved ones survived only because `git mv` tracks explicitly), so a

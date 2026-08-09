@@ -22,10 +22,10 @@ _tc_tool_missing() {
 # Per-language typecheck functions
 # ---------------------------------------------------------------------------
 
-# Prefer the workspace's own tsc over anything on PATH. A globally resolved
-# binary can be a different major version than the one the lockfile pins, and
-# npx in particular will walk out of the workspace to find one.
-# Returns 127 when no tsc is reachable at all.
+# Use the workspace's own tsc and nothing else. A globally resolved binary can
+# be a different major version than the one the lockfile pins, and npx in
+# particular will walk out of the workspace to find one.
+# Returns 127 when the workspace-local tsc is not available.
 _tc_js_workspace() {
   local ws="$1"
   cd "$ws" || return 30
@@ -38,11 +38,13 @@ _tc_js_workspace() {
     fi
   done
   if [ -z "$bin" ]; then
-    if ci::common::command_exists tsc; then
-      bin="tsc"
-    else
-      return 127
-    fi
+    # Deliberately no PATH fallback, for the same reason the JS test runner has
+    # none: a global tsc is not the version this workspace pins. An older one
+    # rejects supported syntax and a newer one accepts what the locked
+    # toolchain would refuse, so either way the result is not reproducible.
+    # Reporting the compiler unavailable is recoverable; a false red or a false
+    # green is not.
+    return 127
   fi
 
   "$bin" --noEmit
@@ -66,7 +68,7 @@ typecheck::run_js() {
     ( _tc_js_workspace "$ws" ) || rc=$?
 
     if [ "$rc" -eq 127 ]; then
-      _tc_tool_missing "tsc (${ws})"
+      _tc_tool_missing "workspace-local tsc in ${ws}/node_modules/.bin (a global tsc is deliberately not used)"
       continue
     fi
 
