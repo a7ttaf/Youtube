@@ -469,3 +469,13 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"./ci/checks/test-layout.sh|yes|"* ]]
 }
+
+@test "test-layout: the README does not overclaim which modes run it" {
+  # debt mode dispatches only git-safety and debt. Documenting "every mode"
+  # would tell an operator a green --mode debt means the layout is clean.
+  run grep -n "every mode" frontend/README.md
+  [ "$status" -ne 0 ]
+  run grep -c "debt" frontend/README.md
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}

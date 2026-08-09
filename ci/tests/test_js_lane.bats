@@ -344,6 +344,30 @@ ws_run() {
   [[ "$output" == *"frontend/tests/"* ]]
 }
 
+@test "affected: a stylesheet change maps to the frontend suite" {
+  # Kept in step with the `javascript` classification in changeset.sh: the lane
+  # being scheduled is useless if the affected filter then finds nothing.
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/src/styles.css backend/app/main.py
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: classifier and mapping agree on frontend build inputs" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  source ci/lib/affected.sh
+  local f
+  for f in frontend/src/styles.css frontend/index.html frontend/tsconfig.json frontend/bun.lock; do
+    [ "$(ci::changeset::classify_file "$f")" = "javascript" ] \
+      || { echo "$f not classified javascript" >&2; return 1; }
+    case "$(ci::affected::get_affected_tests "$f")" in
+      *frontend/tests/*) ;;
+      *) echo "$f classified javascript but maps to no frontend tests" >&2; return 1 ;;
+    esac
+  done
+}
+
 @test "typecheck lane: no PATH fallback to a global tsc" {
   # Same reasoning as the JS test runner: an unpinned compiler gives a
   # non-reproducible red or green.

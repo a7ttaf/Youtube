@@ -73,7 +73,20 @@ rules:
     tests: "frontend/tests/**/*.test.ts"
   - source: "frontend/tsconfig.json"
     tests: "frontend/tests/**/*.test.ts"
-  - source: "frontend/index.html"
+  # Stylesheets and the entry document, kept in step with the `javascript`
+  # classification in ci/lib/changeset.sh. The two paths decide the same thing —
+  # does the frontend suite need to run — and disagreeing means the lane is
+  # scheduled but then finds nothing affected.
+  #
+  # Single-star on purpose: the matcher collapses "**" to "*" and a "*" in a
+  # case pattern matches "/" too, so "frontend/*.css" already covers both
+  # frontend/app.css and frontend/src/styles.css. Spelling both forms would just
+  # emit the same pattern twice.
+  - source: "frontend/*.css"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.scss"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.html"
     tests: "frontend/tests/**/*.test.ts"
 
   # Python: module -> test file

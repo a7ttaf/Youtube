@@ -58,8 +58,10 @@ Rules:
 - Do not create `__tests__/` directories. That convention is retired.
 
 The layout is declared by `test.include` in `vitest.config.ts` and enforced by
-`ci/checks/test-layout.sh`, which the gate runs as a blocking lane in every mode
-(pre-commit `quick` through `ship`). The guard exists because `test.include` on
+`ci/checks/test-layout.sh`, which the gate runs as a blocking lane in `quick`
+(pre-commit), `full`, and `ship` (pre-push): the modes code lands through. It is
+not in `debt`, the known-debt ratchet invoked by `make`, which runs only
+`git-safety` and `debt`. The guard exists because `test.include` on
 its own *hides* mistakes: a test file outside the glob is silently not
 collected, so it passes by never running. The guard fails the build instead. It
 scans all of `frontend/` outside `tests/` — not just `src/` — because a test in
