@@ -110,7 +110,10 @@ fi
 #    this shell provably holds the same value the dev proxy will read from the
 #    file in its own terminal — the write above is confirmed, not assumed.
 #    `tr -d '\r'` drops the CR a CRLF-saved .env would leave on the value.
-export UMS_TRUSTED_GATEWAY_TOKEN=$(sed -n "s/^$var=//p" .env | head -n1 | tr -d '\r')
+#    `export "$var=..."` so the exported name comes from $var too — hardcoding
+#    it here would let a future edit to $var export a name the backend does not
+#    read, leaving it unconfigured with nothing in the output to say so.
+export "$var=$(sed -n "s/^$var=//p" .env | head -n1 | tr -d '\r')"
 export PYTHONPATH="$PWD/backend"
 export UMS_DATABASE_URL="postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
 export UMS_AUTHZ_SOURCE=headers
