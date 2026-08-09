@@ -653,6 +653,42 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(importPosts()).toHaveLength(2);
   });
 
+  it("locks the Upload inputs while the dry run is in flight", async () => {
+    // The owner picker staying live during the preview was a real hole: an
+    // operator could start a dry run for owner A, switch to B before it
+    // resolved, and then Apply against B while the screen still showed A's
+    // plan. The backend fingerprint now covers content_owner_id so such an
+    // apply is a 409, but the UI should not create the confusing state at all.
+    const dryRunGate = deferredResponse();
+    routeFetch({ importPost: () => dryRunGate.pending });
+    renderRegistry();
+    await openImport();
+    await fillUpload();
+
+    const panel = uploadPanel();
+    expect(within(panel).getByLabelText("Content owner")).toBeEnabled();
+
+    fireEvent.click(within(panel).getByRole("button", { name: /^preview$/i }));
+    await waitFor(() =>
+      expect(
+        within(uploadPanel()).getByRole("button", { name: /running…/iu }),
+      ).toBeInTheDocument(),
+    );
+
+    const busyPanel = uploadPanel();
+    expect(within(busyPanel).getByLabelText("Content owner")).toBeDisabled();
+    expect(within(busyPanel).getByLabelText("Roster CSV")).toBeDisabled();
+    expect(within(busyPanel).getByLabelText("Reason (required, audited)")).toBeDisabled();
+
+    // Freed again once the request settles — the lock tracks the request.
+    dryRunGate.release(jsonResponse(DRY_RUN_ERRORS));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^back$/i }));
+    expect(within(uploadPanel()).getByLabelText("Content owner")).toBeEnabled();
+  });
+
   it("keeps Cancel available while the READ-ONLY dry run is in flight", async () => {
     // The guard is scoped to the write, not to `busy`. A dry run commits
     // nothing, so abandoning one is safe and the flow's Cancel-at-any-step

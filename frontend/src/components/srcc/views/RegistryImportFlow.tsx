@@ -417,6 +417,8 @@ type OwnerFieldProps = {
   ownerState: ReturnType<typeof useContentOwners>;
   ownerId: string;
   onOwnerChange: (ownerId: string) => void;
+  /** Locked while a request is in flight — see UploadStep. */
+  locked: boolean;
 };
 
 /**
@@ -425,7 +427,7 @@ type OwnerFieldProps = {
  * MANAGE_GROUPS-gated — a permission every canImportChannels holder has).
  * Disabled with a Connectors pointer while empty, loading, or failed.
  */
-const OwnerField = ({ ownerState, ownerId, onOwnerChange }: OwnerFieldProps) => {
+const OwnerField = ({ ownerState, ownerId, onOwnerChange, locked }: OwnerFieldProps) => {
   const owners = ownerState.data?.items.map((item) => item.account_id) ?? [];
   const note = ownerPickerNote(ownerState, owners.length);
   return (
@@ -434,7 +436,7 @@ const OwnerField = ({ ownerState, ownerId, onOwnerChange }: OwnerFieldProps) => 
       <select
         id="importOwner"
         value={ownerId}
-        disabled={owners.length === 0}
+        disabled={locked || owners.length === 0}
         onChange={(event) => onOwnerChange(event.target.value)}
       >
         <option value="">Select a content owner…</option>
@@ -508,6 +510,7 @@ const UploadStep = ({
           id="importCsvFile"
           type="file"
           accept=".csv"
+          disabled={busy}
           onChange={(event) => onFileChange(event.target.files?.[0] ?? null)}
         />
         {file ? <span className="muted">Selected: {file.name}</span> : null}
@@ -516,12 +519,14 @@ const UploadStep = ({
         ownerState={ownerState}
         ownerId={ownerId}
         onOwnerChange={onOwnerChange}
+        locked={busy}
       />
       <div className="field-row">
         <label htmlFor="importReason">Reason (required, audited)</label>
         <input
           id="importReason"
           value={reason}
+          disabled={busy}
           onChange={(event) => onReasonChange(event.target.value)}
           placeholder="Why import this roster"
         />

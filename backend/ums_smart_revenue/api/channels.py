@@ -78,6 +78,7 @@ from ums_smart_revenue.org.channel_import import (
 from ums_smart_revenue.org.channel_import_apply import (
     ChannelImportAdoptableGroupError,
     ChannelImportArchivedGroupError,
+    ChannelImportGroupActionDivergedError,
     ChannelImportGroupOwnerMismatchError,
     apply_channel_import,
     plan_channel_import_with_stores,
@@ -758,6 +759,7 @@ def import_channels(
     except (
         ChannelGroupConflictError,
         ChannelImportArchivedGroupError,
+        ChannelImportGroupActionDivergedError,
         ChannelImportGroupOwnerMismatchError,
         ChannelRegistryConflictError,
         ChannelRevenueRequirementLockedMonthError,
@@ -908,25 +910,51 @@ def _import_plan_to_api(
         "cms_status": cms_status,
         "counts": counts,
         "rows": rows,
-        "plan_fingerprint": _plan_fingerprint(counts, rows),
+        "plan_fingerprint": _plan_fingerprint(
+            counts, rows, content_owner_id=content_owner_id, cms_status=cms_status
+        ),
     }
 
 
-def _plan_fingerprint(counts: dict[str, int], rows: list[dict[str, object]]) -> str:
-    """Digest exactly the plan content an operator reviews: counts + rows.
+def _plan_fingerprint(
+    counts: dict[str, int],
+    rows: list[dict[str, object]],
+    *,
+    content_owner_id: str,
+    cms_status: str,
+) -> str:
+    """Digest everything an operator reviews: the plan AND the target it targets.
 
-    Deliberately EXCLUDES ``dry_run``, ``content_owner_id`` and ``cms_status``:
-    the first differs between the preview and the apply by definition, and the
-    other two are echoes of form fields the apply re-sends anyway. What must
-    match is the plan itself — the outcome, diff, group effect and revenue flag
-    of every row.
+    ``content_owner_id`` and ``cms_status`` are IN the digest, not treated as
+    mere echoes of form fields the apply re-sends. They are reviewed values —
+    the preview step names the content owner on screen — and leaving them out
+    let an apply bind to a different target than the one reviewed: the SPA's
+    owner picker stayed live during the dry run, so an operator could preview
+    owner A, switch to B while the request was in flight, and apply against B.
+    On an all-CREATE roster the rows carry no owner (a CREATE's ``changes`` is
+    empty by design), so B's plan digested identically to A's and the guard
+    waved it through, committing channels and groups under the wrong content
+    owner (review #184).
+
+    ``dry_run`` stays out, and that exclusion is load-bearing: a preview and
+    its apply differ in it by definition, so folding it in would make every
+    fingerprint mismatch — and a guard that always fires protects nothing.
 
     ``sort_keys`` plus tight separators make this stable across dict ordering
     and Python versions, so the same plan always digests the same way. It is an
     equality token, never a secret and never an authorization input, so a plain
     SHA-256 of the canonical JSON is the whole mechanism.
     """
-    canonical = json.dumps({"counts": counts, "rows": rows}, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        {
+            "content_owner_id": content_owner_id,
+            "cms_status": cms_status,
+            "counts": counts,
+            "rows": rows,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

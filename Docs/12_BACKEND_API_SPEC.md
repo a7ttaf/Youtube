@@ -85,19 +85,30 @@ under its write-boundary lock and records what it actually wrote in the
 `CHANNEL_IMPORTED` audit event, so a concurrent writer can turn a planned
 UPDATE into a no-op. Present these counts as the approved plan, not as the
 committed result; the SPA's Applied step labels them that way.
-`plan_fingerprint` (added 2026-08-09, review #184) is a SHA-256 over exactly
-the plan content — `counts` + `rows` — and deliberately excludes `dry_run`
-and the echoed form fields, so a preview and its apply of an unchanged plan
-digest identically. An apply may send the approved dry run's value back as the
-optional `expected_plan_fingerprint` form field; if the plan the route would
-execute no longer matches, it returns **409** with that refreshed plan as
-`detail` (the same payload shape the 422 error-rows rejection carries) and
-writes nothing. This exists because the apply RE-PLANS from current state: a
-row an operator reviewed as `CREATE` could otherwise commit as an `UPDATE`
-overwriting a channel created since the preview, or a group `CREATE` could
-become a `JOIN`, with the changed outcome never reviewed. The field is
-optional — a client that never previewed is not re-approving anything — but
-the SPA always sends it and re-binds to the refreshed plan on a 409. A row whose
+`plan_fingerprint` (added 2026-08-09, review #184) is a SHA-256 over
+everything the operator reviews: `content_owner_id`, `cms_status`, `counts`
+and `rows`. Only `dry_run` is excluded, and that exclusion is load-bearing — a
+preview and its apply differ in it by definition, so folding it in would make
+every fingerprint mismatch. The owner and CMS status are IN the digest because
+an all-`CREATE` roster's rows carry neither (a CREATE's `changes` is empty by
+design), so two different content owners would otherwise produce identical
+digests and an apply could bind to a target that was never reviewed.
+An apply may send the approved dry run's value back as the optional
+`expected_plan_fingerprint` form field; if the plan the route would execute no
+longer matches, it returns **409** with that refreshed plan as `detail` (the
+same payload shape the 422 error-rows rejection carries) and writes nothing.
+This exists because the apply RE-PLANS from current state: a row an operator
+reviewed as `CREATE` could otherwise commit as an `UPDATE` overwriting a
+channel created since the preview, or a group `CREATE` could become a `JOIN`,
+with the changed outcome never reviewed. The field is optional — a client that
+never previewed is not re-approving anything — but the SPA always sends it and
+re-binds to the refreshed plan on a 409.
+The fingerprint closes the preview→re-plan window; a second, narrower window
+runs from the re-plan to the group row lock, and `group_action` is re-checked
+under that lock. If this owner's CMS sync creates (or removes) the row's group
+in between, the apply returns **409** rather than silently turning a reviewed
+group `CREATE` into a `JOIN` — the same fail-closed rule already applied to
+archived, owner-NULL and cross-owner groups at that boundary. A row whose
 `group_id` targets an existing group with a NULL `content_owner_id` is an
 `ERROR` row (Path A, 2026-08-06): the import never adopts an existing group —
 only the owner's own CMS sync (`POST /channels/groups/sync`) may claim one,

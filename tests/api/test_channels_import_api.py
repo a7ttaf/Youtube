@@ -536,12 +536,12 @@ def test_apply_without_a_fingerprint_still_applies():
     assert registry.get_channel(CHANNEL_ID) is not None
 
 
-def test_plan_fingerprint_ignores_dry_run_and_form_echoes():
-    """The digest covers the PLAN, not the request envelope.
+def test_plan_fingerprint_ignores_dry_run():
+    """`dry_run` is excluded, and that exclusion is load-bearing.
 
-    A preview and its apply differ in `dry_run` by definition, so folding it
-    in would make every fingerprint mismatch and the guard would reject every
-    apply — a guard that always fires protects nothing.
+    A preview and its apply differ in it by definition, so folding it in would
+    make every fingerprint mismatch and the guard would reject every apply — a
+    guard that always fires protects nothing.
     """
     client, _registry, _groups, _sink = create_import_app()
     body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
@@ -552,6 +552,174 @@ def test_plan_fingerprint_ignores_dry_run_and_form_echoes():
     assert preview.json()["dry_run"] is True
     assert applied.json()["dry_run"] is False
     assert preview.json()["plan_fingerprint"] == applied.json()["plan_fingerprint"]
+
+
+def test_plan_fingerprint_covers_the_content_owner_and_cms_status():
+    """The digest binds the TARGET too, not just the row plan (review #184).
+
+    An all-CREATE roster's rows carry no owner — a CREATE's `changes` is empty
+    by design — so without these fields two different content owners produce
+    byte-identical row plans. An operator who previewed owner A and applied
+    against B would then sail through the guard and commit channels and groups
+    under the wrong owner.
+    """
+    client, _registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    for_owner_a = post_import(client, body, dry_run="true").json()
+    for_owner_b = post_import(
+        client, body, dry_run="true", content_owner_id="OtherOwnerBBBBBBBBBBB"
+    ).json()
+    for_outside_cms = post_import(
+        client, body, dry_run="true", cms_status="OUTSIDE_CMS"
+    ).json()
+
+    # The row plans really are identical — the fingerprint is the only thing
+    # standing between them.
+    assert for_owner_a["counts"] == for_owner_b["counts"]
+    assert [row["outcome"] for row in for_owner_a["rows"]] == [
+        row["outcome"] for row in for_owner_b["rows"]
+    ]
+    assert for_owner_a["plan_fingerprint"] != for_owner_b["plan_fingerprint"]
+    assert for_owner_a["plan_fingerprint"] != for_outside_cms["plan_fingerprint"]
+
+
+def test_apply_under_a_swapped_content_owner_is_rejected():
+    """End to end: preview owner A, apply owner B -> 409, nothing written."""
+    client, registry, _groups, audit_sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    reviewed = post_import(client, body, dry_run="true").json()["plan_fingerprint"]
+    swapped = post_import(
+        client,
+        body,
+        content_owner_id="OtherOwnerBBBBBBBBBBB",
+        expected_plan_fingerprint=reviewed,
+    )
+
+    assert swapped.status_code == 409, swapped.text
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert audit_sink.records == []
+
+
+def test_group_created_before_the_apply_replans_is_caught_by_the_fingerprint():
+    """The FIRST of the two windows: preview -> the apply's own re-plan.
+
+    The apply re-plans from current state, so a group created here is already
+    visible to it and the row re-plans as JOIN. Nothing in the write path
+    would notice, but the fingerprint does: JOIN digests differently from the
+    reviewed CREATE, so the operator re-approves instead of silently joining a
+    group they never saw.
+    """
+    client, registry, groups, audit_sink = create_import_app()
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true").json()
+    assert preview["rows"][0]["group_action"] == "CREATE"
+
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+
+    response = post_import(
+        client, body, expected_plan_fingerprint=preview["plan_fingerprint"]
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["rows"][0]["group_action"] == "JOIN"
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert audit_sink.records == []
+
+
+class _GroupAppearsAtWriteBoundary(ChannelGroupRegistry):
+    """Create the group between the apply's re-plan and its locked read.
+
+    Planning reads group state through the bulk ``list_*`` lookups; only the
+    write boundary takes ``for_update``. Creating the group inside that locked
+    read reproduces the SECOND window exactly — the one the fingerprint cannot
+    see, because the plan it digested was already computed.
+    """
+
+    def __init__(self, *, cms_group_id: str, content_owner_id: str) -> None:
+        super().__init__()
+        self._race_key = cms_group_id
+        self._race_owner = content_owner_id
+        self._raced = False
+
+    def get_group_by_cms_id(self, cms_group_id, *, for_update=False):
+        """Race the group into existence once, just before the locked read."""
+        if for_update and not self._raced and cms_group_id == self._race_key:
+            self._raced = True
+            super().create_group(
+                name=self._race_key,
+                group_type="SECTOR",
+                channel_ids=[],
+                cms_group_id=self._race_key,
+                content_owner_id=self._race_owner,
+            )
+        return super().get_group_by_cms_id(cms_group_id, for_update=for_update)
+
+
+def test_group_created_after_the_apply_replans_is_rejected_at_the_write_boundary():
+    """The SECOND window: the apply's re-plan -> the group row lock.
+
+    The fingerprint compare happens before ``apply_channel_import`` takes any
+    group lock, so this owner's own CMS sync can still create the group in
+    between and turn a reviewed "creates a new SECTOR group" into a silent
+    join — a different finance-scope and audit effect, with no second 409 to
+    catch it. The reviewed action is therefore re-checked under the SAME lock
+    that performs the write.
+    """
+    client, registry, _groups, audit_sink = create_import_app()
+    racing = _GroupAppearsAtWriteBoundary(
+        cms_group_id="cms-tv", content_owner_id=CONTENT_OWNER
+    )
+    client.app.dependency_overrides[sql_group_registry_from_session] = lambda: racing
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true").json()
+    assert preview["rows"][0]["group_action"] == "CREATE"
+
+    response = post_import(
+        client, body, expected_plan_fingerprint=preview["plan_fingerprint"]
+    )
+
+    assert response.status_code == 409, response.text
+    assert "was created during the import" in response.json()["detail"]
+    # No GROUP write and no group audit event: the divergence is caught under
+    # the row lock, before either branch of _attach_group_membership runs.
+    assert racing.get_group_by_cms_id("cms-tv").channel_ids == ()
+    assert not [r for r in audit_sink.records if r.entity_type == "channel_group"]
+    # Rollback of the CHANNEL rows this row already wrote is the transaction's
+    # job, and the in-memory registry has no transaction — the raised error is
+    # what triggers it. tests/api/test_channels_import_postgres.py owns that
+    # proof against a real database.
+
+
+def test_group_join_still_applies_when_the_group_is_still_there():
+    """Anti-vacuity: the divergence guard must not reject the normal path."""
+    client, registry, groups, _sink = create_import_app()
+    groups.create_group(
+        name="Existing TV",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    assert post_import(client, body, dry_run="true").json()["rows"][0]["group_action"] == "JOIN"
+    response = post_import(client, body)
+
+    assert response.status_code == 200, response.text
+    assert registry.get_channel(CHANNEL_ID) is not None
 
 
 def test_plan_fingerprint_changes_when_a_row_outcome_changes():

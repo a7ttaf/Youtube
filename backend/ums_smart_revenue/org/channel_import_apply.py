@@ -33,6 +33,7 @@ from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistryStore
 from ums_smart_revenue.org.channel_import import (
     ChannelImportError,
+    ChannelImportGroupAction,
     ChannelImportOutcome,
     ChannelImportPlan,
     ChannelImportPlanEntry,
@@ -66,6 +67,26 @@ class ChannelImportAdoptableGroupError(ChannelImportError):
     one in the plan-to-apply window; the write boundary re-checks (under a row
     lock) and raises this rather than letting the apply mint an ownership
     claim from a CSV cell after all. The route maps it to HTTP 409.
+    """
+
+
+class ChannelImportGroupActionDivergedError(ChannelImportError):
+    """A row's group would be JOINed where the plan said CREATE, or vice versa.
+
+    The route's fingerprint check runs BEFORE ``apply_channel_import`` takes
+    any group row lock, so the plan-to-apply window is still open for group
+    existence specifically: this owner's CMS sync can create a previously
+    absent group after the comparison and before ``_attach_group_membership``
+    reaches it, turning a reviewed "creates a new SECTOR group" into a silent
+    join of a group the operator never saw — a different finance-scope and
+    audit effect, with no second 409 to catch it (review #184).
+
+    So the planned ``group_action`` is re-checked under the SAME row lock that
+    performs the write, and any divergence fails the whole import closed. That
+    is the identical rule its three sibling errors already follow for
+    archived, owner-NULL and cross-owner groups; this one closes the last gap
+    in the set. The route maps it to HTTP 409, and the operator's retry
+    previews the new reality.
     """
 
 
@@ -313,6 +334,7 @@ def apply_channel_import(
             cms_group_id=entry.group_id,
             channel_id=channel_id,
             content_owner_id=content_owner_id,
+            planned_action=entry.group_action,
         )
         # A group creation or membership addition is a finance-scope
         # mutation; without its own GROUP_UPDATED record an inventory-
@@ -465,12 +487,42 @@ def _entry_changes(
 #   - File: backend/ums_smart_revenue/api/channels.py -> maps the archived,
 #     unstamped, and cross-owner errors to 409.
 # ============================================================================
+def _require_planned_group_action(
+    planned: ChannelImportGroupAction | None,
+    *,
+    observed_exists: bool,
+    cms_group_id: str,
+) -> None:
+    """Fail closed when the locked read contradicts the reviewed group effect.
+
+    ``planned`` is ``None`` for a caller that never disclosed one, and then
+    nothing is asserted — the pre-existing behaviour. Otherwise CREATE demands
+    the group still be absent and JOIN demands it still be present, both read
+    under the row lock this runs inside, so the check cannot itself be raced.
+    """
+    if planned is None:
+        return
+    if planned is ChannelImportGroupAction.CREATE and observed_exists:
+        raise ChannelImportGroupActionDivergedError(
+            f"channel group {cms_group_id} was created during the import; the "
+            "preview approved creating it, not joining it — re-run the preview "
+            "and review the change"
+        )
+    if planned is ChannelImportGroupAction.JOIN and not observed_exists:
+        raise ChannelImportGroupActionDivergedError(
+            f"channel group {cms_group_id} disappeared during the import; the "
+            "preview approved joining it, not creating it — re-run the preview "
+            "and review the change"
+        )
+
+
 def _attach_group_membership(
     groups: ChannelGroupRegistryStore,
     *,
     cms_group_id: str,
     channel_id: str,
     content_owner_id: str,
+    planned_action: ChannelImportGroupAction | None = None,
 ) -> tuple[str, ChannelGroupEntry] | None:
     """Ensure the channel belongs to the group carrying this CMS key.
 
@@ -489,6 +541,11 @@ def _attach_group_membership(
     claim belongs to the owner's own sync, on YouTube's evidence.
     """
     group = groups.get_group_by_cms_id(cms_group_id, for_update=True)
+    # Under the row lock, before either branch writes: the reviewed effect and
+    # the observed state must still agree, or the whole import rolls back.
+    _require_planned_group_action(
+        planned_action, observed_exists=group is not None, cms_group_id=cms_group_id
+    )
     if group is None:
         created = groups.create_group(
             name=cms_group_id,
