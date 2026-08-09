@@ -379,6 +379,13 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       screen.getByText("channel_name: Old Beta → Beta Channel"),
     ).toBeInTheDocument();
     expect(screen.getByText("revenue_required: true → false")).toBeInTheDocument();
+    // The applied CMS status is on screen: the request omits the form field
+    // so the backend default lands, a CREATE row's empty `changes` shows it
+    // nowhere else, and it decides whether connector ingest targets the
+    // channel at all — so it must be visible before approval.
+    expect(
+      screen.getByText(/content owner OWNERaaa · CMS status INSIDE_CMS/i),
+    ).toBeInTheDocument();
     expect(screen.getByText("g1")).toBeInTheDocument();
     // The Group cell says WHICH group write the key implies. "g1" resolves to
     // no existing group here, so this row MINTS a new SECTOR group — a

@@ -570,9 +570,7 @@ def test_plan_fingerprint_covers_the_content_owner_and_cms_status():
     for_owner_b = post_import(
         client, body, dry_run="true", content_owner_id="OtherOwnerBBBBBBBBBBB"
     ).json()
-    for_outside_cms = post_import(
-        client, body, dry_run="true", cms_status="OUTSIDE_CMS"
-    ).json()
+    for_outside_cms = post_import(client, body, dry_run="true", cms_status="OUTSIDE_CMS").json()
 
     # The row plans really are identical — the fingerprint is the only thing
     # standing between them.
@@ -626,9 +624,7 @@ def test_group_created_before_the_apply_replans_is_caught_by_the_fingerprint():
         content_owner_id=CONTENT_OWNER,
     )
 
-    response = post_import(
-        client, body, expected_plan_fingerprint=preview["plan_fingerprint"]
-    )
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
 
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["rows"][0]["group_action"] == "JOIN"
@@ -675,10 +671,8 @@ def test_group_created_after_the_apply_replans_is_rejected_at_the_write_boundary
     catch it. The reviewed action is therefore re-checked under the SAME lock
     that performs the write.
     """
-    client, registry, _groups, audit_sink = create_import_app()
-    racing = _GroupAppearsAtWriteBoundary(
-        cms_group_id="cms-tv", content_owner_id=CONTENT_OWNER
-    )
+    client, _registry, _groups, audit_sink = create_import_app()
+    racing = _GroupAppearsAtWriteBoundary(cms_group_id="cms-tv", content_owner_id=CONTENT_OWNER)
     client.app.dependency_overrides[sql_group_registry_from_session] = lambda: racing
     header = "youtube_channel_id,channel_name,group_id,view_revenue"
     body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
@@ -686,9 +680,7 @@ def test_group_created_after_the_apply_replans_is_rejected_at_the_write_boundary
     preview = post_import(client, body, dry_run="true").json()
     assert preview["rows"][0]["group_action"] == "CREATE"
 
-    response = post_import(
-        client, body, expected_plan_fingerprint=preview["plan_fingerprint"]
-    )
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
 
     assert response.status_code == 409, response.text
     assert "was created during the import" in response.json()["detail"]
@@ -700,6 +692,39 @@ def test_group_created_after_the_apply_replans_is_rejected_at_the_write_boundary
     # job, and the in-memory registry has no transaction — the raised error is
     # what triggers it. tests/api/test_channels_import_postgres.py owns that
     # proof against a real database.
+
+
+def test_several_rows_can_populate_one_newly_created_group():
+    """The common shape: N channels imported into a group that does not exist.
+
+    Planning labels EVERY such row CREATE, because the group was absent for
+    all of them. The first row then creates it and the rest observe it inside
+    the same transaction — which the write-boundary action check must read as
+    the plan's own handiwork, not as a concurrent creation. Getting this wrong
+    409s a perfectly valid import.
+    """
+    client, registry, groups, _sink = create_import_app()
+    second_id = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(
+        f"{CHANNEL_ID},Alpha News,cms-new,Yes",
+        f"{second_id},Beta News,cms-new,Yes",
+        header=header,
+    )
+
+    preview = post_import(client, body, dry_run="true").json()
+    # Both rows really are planned as CREATE — that is what makes this a trap.
+    assert [row["group_action"] for row in preview["rows"]] == ["CREATE", "CREATE"]
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 200, response.text
+    assert registry.get_channel(CHANNEL_ID) is not None
+    assert registry.get_channel(second_id) is not None
+    # One group, both channels in it.
+    created = groups.get_group_by_cms_id("cms-new")
+    assert created is not None
+    assert sorted(created.channel_ids) == sorted([CHANNEL_ID, second_id])
 
 
 def test_group_join_still_applies_when_the_group_is_still_there():

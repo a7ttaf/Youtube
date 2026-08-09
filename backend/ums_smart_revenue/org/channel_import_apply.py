@@ -47,6 +47,11 @@ _INVENTORY_FIELDS = ("channel_name", "cms_status", "content_owner_id", "revenue_
 # auditor separates bulk-import changes from single-channel API edits, so both
 # call sites must emit the identical value.
 AUDIT_SOURCE_BULK_IMPORT = "bulk_import"
+# The `action` value _attach_group_membership reports for a group it minted,
+# as opposed to a membership it added to an existing one. Named because the
+# apply loop now branches on it (to remember which groups this run created)
+# as well as recording it on the GROUP_UPDATED audit event.
+AUDIT_GROUP_ACTION_CREATED = "group_created"
 
 
 class ChannelImportArchivedGroupError(ChannelImportError):
@@ -325,6 +330,14 @@ def apply_channel_import(
     # id): every channel row lock is taken before any group row lock, and both
     # resource classes are visited in a stable order, so overlapping imports
     # can never hold one class while waiting on the other's.
+    # CMS keys this run has already created. A roster legitimately lists
+    # several channels under one NEW group key, and planning labels every such
+    # row CREATE because the group was absent for all of them; the first row
+    # creates it and the rest then observe it inside this same transaction.
+    # Without this ledger the write-boundary action check would read the
+    # plan's own handiwork as a concurrent creation and 409 an import that is
+    # doing exactly what the operator approved (review #184).
+    groups_created_here: set[str] = set()
     for entry in _group_write_order(plan.entries):
         channel_id = entry.youtube_channel_id
         if channel_id is None or entry.channel_name is None or not entry.group_id:
@@ -335,6 +348,7 @@ def apply_channel_import(
             channel_id=channel_id,
             content_owner_id=content_owner_id,
             planned_action=entry.group_action,
+            created_in_this_run=entry.group_id in groups_created_here,
         )
         # A group creation or membership addition is a finance-scope
         # mutation; without its own GROUP_UPDATED record an inventory-
@@ -342,6 +356,8 @@ def apply_channel_import(
         # trail (the summary event carries only counts).
         if group_change is not None:
             group_action, group = group_change
+            if group_action == AUDIT_GROUP_ACTION_CREATED:
+                groups_created_here.add(entry.group_id)
             record_audit_event(
                 sink=audit_sink,
                 actor=actor,
@@ -491,6 +507,7 @@ def _require_planned_group_action(
     planned: ChannelImportGroupAction | None,
     *,
     observed_exists: bool,
+    created_in_this_run: bool,
     cms_group_id: str,
 ) -> None:
     """Fail closed when the locked read contradicts the reviewed group effect.
@@ -499,10 +516,18 @@ def _require_planned_group_action(
     nothing is asserted — the pre-existing behaviour. Otherwise CREATE demands
     the group still be absent and JOIN demands it still be present, both read
     under the row lock this runs inside, so the check cannot itself be raced.
+
+    ``created_in_this_run`` is what keeps the common case working: a roster
+    legitimately lists SEVERAL channels under one new group key, and planning
+    labels every such row CREATE because the group was absent for all of them.
+    The first row then creates it and the rest observe it — inside the same
+    transaction. That is the plan doing exactly what the operator approved,
+    not a concurrent writer, so it satisfies CREATE. Only an existence this
+    run did NOT produce is a divergence.
     """
     if planned is None:
         return
-    if planned is ChannelImportGroupAction.CREATE and observed_exists:
+    if planned is ChannelImportGroupAction.CREATE and observed_exists and not created_in_this_run:
         raise ChannelImportGroupActionDivergedError(
             f"channel group {cms_group_id} was created during the import; the "
             "preview approved creating it, not joining it — re-run the preview "
@@ -523,6 +548,7 @@ def _attach_group_membership(
     channel_id: str,
     content_owner_id: str,
     planned_action: ChannelImportGroupAction | None = None,
+    created_in_this_run: bool = False,
 ) -> tuple[str, ChannelGroupEntry] | None:
     """Ensure the channel belongs to the group carrying this CMS key.
 
@@ -544,7 +570,10 @@ def _attach_group_membership(
     # Under the row lock, before either branch writes: the reviewed effect and
     # the observed state must still agree, or the whole import rolls back.
     _require_planned_group_action(
-        planned_action, observed_exists=group is not None, cms_group_id=cms_group_id
+        planned_action,
+        observed_exists=group is not None,
+        created_in_this_run=created_in_this_run,
+        cms_group_id=cms_group_id,
     )
     if group is None:
         created = groups.create_group(
@@ -554,7 +583,7 @@ def _attach_group_membership(
             cms_group_id=cms_group_id,
             content_owner_id=content_owner_id,
         )
-        return ("group_created", created)
+        return (AUDIT_GROUP_ACTION_CREATED, created)
     if not group.active:
         raise ChannelImportArchivedGroupError(
             f"channel group was archived during the import: {cms_group_id}; "

@@ -683,7 +683,15 @@ const PreviewStep = ({
     <div className="confirm-panel" role="group" aria-label="Import preview">
       <div className="panel-title">
         <strong>Review the plan</strong>
-        <span>Roster plan for content owner {result.content_owner_id}.</span>
+        {/* The CMS status is echoed, not decorative: it decides whether the
+            connector's revenue pull targets a channel at all, the request
+            omits the form field so the backend default applies, and a CREATE
+            row's empty `changes` shows it nowhere else. An operator must not
+            approve a roster without seeing what every new channel gets. */}
+        <span>
+          Roster plan for content owner {result.content_owner_id} · CMS status{" "}
+          {result.cms_status}.
+        </span>
       </div>
       <CountsStrip counts={result.counts} />
       <OutcomeTable
