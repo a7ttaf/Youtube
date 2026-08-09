@@ -30,8 +30,33 @@ backend running, (3) the dev proxy injecting trusted-gateway headers.
 ### 1. Pick a trusted-gateway token
 
 The backend's header-auth path requires `UMS_TRUSTED_GATEWAY_TOKEN` to be set
-and to match the token the dev proxy injects. Copy `.env.example` to `.env` in
-the repo root and set a local value:
+and to match the token the dev proxy injects. Create `.env` with a fresh secret
+using the [root README's Quickstart step 3](../README.md#quickstart) — that
+snippet is the canonical copy and it **writes** the generated value over the
+placeholder `.env.example` ships, rather than printing it for a manual edit that
+is easy to skip. Step 3 is given twice there, once in PowerShell and once in
+bash, so the Linux/macOS backend path in step 3 below has a shell-native way to
+create `.env` and persist the token.
+
+Keep that value in `.env` and let both steps below read it from there. Steps 3
+and 4 run in separate terminals, so a token exported in the backend's shell alone
+leaves the dashboard sending the shipped placeholder and every protected route
+returns 401.
+
+`.env` is where the value belongs, but it is not the only source Vite consults.
+`vite.config.ts` calls `loadEnv(mode, REPO_ROOT, "")`, which reads these repo-root
+files in **increasing** order of precedence, then overlays the dashboard shell's
+own environment on top of all of them:
+
+1. `.env`
+2. `.env.local`
+3. `.env.development` (the `mode`, so `.env.[mode]` in general)
+4. `.env.development.local` (`.env.[mode].local`)
+5. the dashboard terminal's exported environment — highest
+
+If a protected route still 401s after following these steps, a stale
+`UMS_TRUSTED_GATEWAY_TOKEN` in one of those higher-precedence sources is why;
+clear it there rather than editing `.env` again.
 
 ```dotenv
 # repo-root .env — copy from .env.example and fill in your values
@@ -82,16 +107,33 @@ to).
 Point the backend at the same database you seeded and set the same token:
 
 ```bash
-# From the repo root (PowerShell)
+# From the repo root (PowerShell). First load the .env from step 1 with the
+# loader in the root README's Quickstart step 3 — that snippet is the single
+# canonical copy (see ../README.md#quickstart), kept in one place so a future
+# fix to it cannot land in only one of the two runbooks. Then point the backend
+# at the database you seeded, overriding the URL that .env just set:
 $env:UMS_DATABASE_URL = "sqlite+pysqlite:///./demo.db"
-$env:UMS_TRUSTED_GATEWAY_TOKEN = "dev-only-token" # required for protected routes
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
 ```bash
-# From the repo root (bash)
+# From the repo root (bash) — same .env, same token. Read only the token line:
+# `source`-ing the file would run it as shell, and .env.example's
+# postgresql+psycopg://<user>:<password>@... placeholder makes `<user>` an input
+# redirection, which both errors and truncates the value.
+# `tr -d '\r'` drops the CR a CRLF-saved .env leaves on the value, and the sed
+# strips a matching pair of surrounding quotes. Without both, the exported token
+# silently differs from what the proxy injects and every protected route 401s.
+export UMS_TRUSTED_GATEWAY_TOKEN=$(
+  sed -n 's/^UMS_TRUSTED_GATEWAY_TOKEN=//p' .env \
+    | head -n1 | tr -d '\r' | sed -e 's/^\(["'\'']\)\(.*\)\1$/\2/'
+)
+# UMS_AUTHZ_SOURCE is pinned here too: the backend reads os.environ directly, so
+# a `database` value already exported in this shell would otherwise win over the
+# `headers` line in .env, and the seed provisions no database principal for the
+# proxy's default user id — the demo would 401 on every request.
+UMS_AUTHZ_SOURCE=headers \
 UMS_DATABASE_URL="sqlite+pysqlite:///./demo.db" \
-UMS_TRUSTED_GATEWAY_TOKEN="dev-only-token" \
 python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 ```
 
