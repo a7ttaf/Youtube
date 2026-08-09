@@ -883,7 +883,10 @@ def _import_plan_to_api(
     result — the SPA's Applied step labels them exactly that way.
     """
     counts = dict(plan.counts)
-    rows = [
+    # Annotated rather than inferred: list is INVARIANT, so the literal's
+    # inferred list[dict[str, <union of cell types>]] is not a
+    # list[dict[str, object]] and would not satisfy _plan_fingerprint.
+    rows: list[dict[str, object]] = [
         {
             "row_number": entry.row_number,
             "youtube_channel_id": entry.youtube_channel_id,
