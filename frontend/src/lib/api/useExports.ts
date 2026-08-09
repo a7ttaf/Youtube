@@ -26,7 +26,7 @@ export type ExportsQuery = {
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> ExportListResponse contract.
-//   - File: backend/ums_smart_revenue/api/exports.py:287 list_exports.
+//   - File: backend/ums_smart_revenue/api/exports.py -> list_exports.
 // ============================================================================
 export const useExports = (
   query: ExportsQuery = {},

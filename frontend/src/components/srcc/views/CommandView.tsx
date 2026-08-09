@@ -58,7 +58,7 @@ import {
 // Connections:
 //   - File: frontend/src/lib/api/useNetRevenue.ts -> the fetch hook.
 //   - File: frontend/src/lib/api/types.ts -> NetRevenueResponse contract.
-//   - File: backend/ums_smart_revenue/api/revenue.py:1088 -> the endpoint.
+//   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_net_revenue.
 // ============================================================================
 
 type ScopeOption = {
@@ -479,7 +479,7 @@ const SmartAlertsBody = ({
 // Connections:
 //   - File: frontend/src/lib/api/useSmartAlerts.ts -> the fetch hook.
 //   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
-//   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
+//   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_smart_alerts.
 // ============================================================================
 const SmartAlertsPanel = ({ month }: { month: string }) => {
   const { data, loading, error, reload } = useSmartAlerts({ month });

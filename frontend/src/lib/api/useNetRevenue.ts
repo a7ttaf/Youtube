@@ -28,7 +28,7 @@ export type NetRevenueQuery = {
 // Blast Radius: None detected (read-only finance display).
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
-//   - File: backend/ums_smart_revenue/api/revenue.py:1088 get_month_net_revenue.
+//   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_net_revenue.
 // ============================================================================
 export const useNetRevenue = (query: NetRevenueQuery): AsyncState<NetRevenueResponse> => {
   const client = useApiClient();

@@ -30,7 +30,7 @@ export type ConnectorCredentialsQuery = {
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> ConnectorCredentialListResponse.
-//   - File: backend/ums_smart_revenue/api/connectors.py:58 list_connector_credentials.
+//   - File: backend/ums_smart_revenue/api/connectors.py -> list_connector_credentials.
 // ============================================================================
 export const useConnectorCredentials = (
   query: ConnectorCredentialsQuery = {},
@@ -97,7 +97,7 @@ export type UseConnectorJobActionsState = {
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> ConnectorJobRequestBody / ConnectorJobResponse.
-//   - File: backend/ums_smart_revenue/api/connectors.py:122 request_connector_job.
+//   - File: backend/ums_smart_revenue/api/connectors.py -> request_connector_job.
 // ============================================================================
 export const useConnectorJobActions = (): UseConnectorJobActionsState => {
   const client = useApiClient();
