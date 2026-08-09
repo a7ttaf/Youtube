@@ -74,7 +74,10 @@ const DRY_RUN_PLAN: ChannelImportResult = {
       group_id: null,
       group_action: null,
       revenue_required: true,
-      revenue_source_status: null,
+      // A CREATE is ALWAYS born with a classification, so the planner emits
+      // {from: null, to: ...} — never null. A null here would be a shape the
+      // backend cannot produce (review #184).
+      revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
       changes: {},
       reason: null,
     },
@@ -86,7 +89,9 @@ const DRY_RUN_PLAN: ChannelImportResult = {
       group_id: "g1",
       group_action: "CREATE",
       revenue_required: false,
-      revenue_source_status: null,
+      // This row FLIPS revenue_required (see `changes` below), and the write
+      // re-derives the source status on exactly that flip.
+      revenue_source_status: { from: "MISSING_REVENUE_SOURCE", to: "PERFORMANCE_ONLY" },
       changes: {
         channel_name: { from: "Old Beta", to: "Beta Channel" },
         revenue_required: { from: true, to: false },
@@ -1087,8 +1092,24 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
   it("says nothing about the source status when the write leaves it alone", async () => {
     // Anti-noise: the status is re-derived ONLY when revenue_required flips,
     // so a roster refreshing names must not read as a finance reclassification.
-    await runDryRunToPreview(() => jsonResponse(DRY_RUN_PLAN));
+    // Needs its own plan — DRY_RUN_PLAN's rows both DO move the classification
+    // (a CREATE is born with one, and its UPDATE row flips the flag), which is
+    // the shape the backend actually emits for them.
+    const nameOnly: ChannelImportResult = {
+      ...DRY_RUN_PLAN,
+      counts: { UPDATE: 1 },
+      rows: [
+        {
+          ...DRY_RUN_PLAN.rows[1],
+          revenue_required: true,
+          revenue_source_status: null,
+          changes: { channel_name: { from: "Old Beta", to: "Beta Channel" } },
+        },
+      ],
+    };
+    await runDryRunToPreview(() => jsonResponse(nameOnly));
 
+    expect(screen.getByText("channel_name: Old Beta → Beta Channel")).toBeInTheDocument();
     expect(screen.queryByText(/^source:/)).not.toBeInTheDocument();
   });
 

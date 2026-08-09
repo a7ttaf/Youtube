@@ -613,6 +613,11 @@ const APPLY_INDETERMINATE_NOTE =
   "This import may already have committed — reload the registry and check " +
   "before importing again.";
 
+// The outcome literal both reconciliation predicates key off. Named because
+// a typo in either one silently changes a verdict about whether a write
+// landed, and the two must always mean the same thing.
+const OUTCOME_UNCHANGED = "UNCHANGED";
+
 /**
  * Does the registry now MATCH this roster?
  *
@@ -631,13 +636,15 @@ const APPLY_INDETERMINATE_NOTE =
  * import owed are still missing.
  */
 const rosterMatchesRegistry = (plan: ChannelImportResult): boolean => {
-  return plan.rows.every((row) => row.outcome === "UNCHANGED" && row.group_id === null);
+  return plan.rows.every(
+    (row) => row.outcome === OUTCOME_UNCHANGED && row.group_id === null,
+  );
 };
 
 /** True when a re-plan is inconclusive BECAUSE the roster carries group keys. */
 const hasUnverifiableGroupEffects = (plan: ChannelImportResult): boolean => {
   return (
-    plan.rows.every((row) => row.outcome === "UNCHANGED") &&
+    plan.rows.every((row) => row.outcome === OUTCOME_UNCHANGED) &&
     plan.rows.some((row) => row.group_id !== null)
   );
 };
