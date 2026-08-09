@@ -143,6 +143,27 @@ const describeConflictBody = (body: unknown): string => {
 //   the readiness blocker detail (or an already-locked / wrong-state message);
 //   a 403 means the backend denied the permission; anything else reuses the
 //   shared describeError contract so the message matches the rest of the shell.
+// Database/ORM: None (frontend) — reads an already-parsed ApiError; issues no
+//   request and retries nothing.
+// Standards: Total over the three branches and side-effect free — every status
+//   yields copy, so a lock failure can never render blank. The 403 string is
+//   fixed UI copy; the 409 text comes from the backend body, and the default
+//   arm defers to the shared describeError so one screen cannot invent its own
+//   error vocabulary.
+// Blast Radius: Finance close — this is the only place a refused lock or unlock
+//   becomes words the operator reads. It REPORTS a refusal and must never
+//   soften or swallow one: collapsing the 409 arm would hide a real readiness
+//   blocker, and collapsing the 403 arm would present an authorization denial
+//   as a transient error and invite a pointless retry. It changes no state and
+//   grants nothing.
+// Connections: finance_close.py lock/unlock (raise the 409/403 this maps),
+//   describeConflictBody (409 body shapes), CommandView describeError (default).
+//   - File: backend/ums_smart_revenue/api/finance_close.py:142
+//     lock_finance_month / :179 unlock_finance_month -> the statuses mapped here.
+//   - File: frontend/src/components/srcc/views/CloseView.tsx ->
+//     describeConflictBody handles the 409 body shapes.
+//   - File: frontend/src/components/srcc/views/CommandView.tsx -> describeError
+//     supplies the shared fallback contract.
 // ============================================================================
 /** Map a typed finance-close ApiError (409 conflict / 403 denial / other) to inline copy. */
 const describeApiActionError = (error: ApiError): string => {
