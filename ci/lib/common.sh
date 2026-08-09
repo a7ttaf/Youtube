@@ -95,6 +95,22 @@ ci::common::result_severity() {
   esac
 }
 
+# Map a child process's exit code onto the result contract before merging it.
+# result_severity ranks anything it does not recognise at the FAIL_INFRA level,
+# so a command that failed on its own terms — a test runner exiting 1 — would
+# otherwise be reported as broken infrastructure rather than as a new issue.
+# The four contract codes pass through untouched.
+ci::common::normalize_result() {
+  case "${1:-$CI_RESULT_PASS}" in
+    "$CI_RESULT_PASS" | "$CI_RESULT_PASS_WITH_KNOWN_DEBT" | "$CI_RESULT_FAIL_NEW_ISSUE" | "$CI_RESULT_FAIL_INFRA")
+      printf '%s' "$1"
+      ;;
+    *)
+      printf '%s' "$CI_RESULT_FAIL_NEW_ISSUE"
+      ;;
+  esac
+}
+
 ci::common::merge_results() {
   local current="${1:-$CI_RESULT_PASS}"
   local next="${2:-$CI_RESULT_PASS}"

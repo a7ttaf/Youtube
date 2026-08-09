@@ -722,6 +722,23 @@ single P-tier above.
   this checkout it found a different Vitest major against a different Vite and
   produced ~160 phantom failures indistinguishable from real breakage. Lanes now
   green: 38 files / 314 tests via JUnit, `tsc --noEmit` clean, `vite build` ok.
+  Review caught that *making the lanes work* and *making them run* are two
+  different things, in three places. (1) `ci/config/checks.yml` had all four JS
+  checks `enabled: false`, and preflight drops a lane when every related check
+  is disabled — so the whole `node` lane was still skipped. `tests-js` and
+  `typecheck-js` are now `true`; `lint-js`/`format-js` stay off because the
+  workspace has neither eslint nor prettier configured, and their stale "no JS
+  in v1.0" comments now say so. (2) `ci/config/affected.yml` mapped only
+  root-relative `src/**`, so a frontend change produced no JavaScript patterns;
+  when a Python file changed alongside it, `AFFECTED_TESTS` was non-empty and
+  `tests.sh` logged "skipped: no affected JavaScript tests" while frontend code
+  had in fact changed. Frontend-prefixed rules added. (3) A failing package
+  script exits 1, which is not a gate result code — `result_severity` ranks it
+  with `FAIL_INFRA`, so a real regression was reported as broken infrastructure.
+  New `ci::common::normalize_result` maps off-contract codes onto
+  `FAIL_NEW_ISSUE`; `node.sh` normalizes each workspace result before merging.
+  `ci/tests/test_js_lane.bats` (12 cases) pins all three, and the pre-fix
+  config was re-run to confirm each assertion actually failed before.
   Also fixed: the Python-convention `lib/` rule in `.gitignore` was swallowing
   **new** files under `frontend/tests/lib/` (17 of the moved tests live there;
   the moved ones survived only because `git mv` tracks explicitly), so a

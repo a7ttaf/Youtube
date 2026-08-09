@@ -15,6 +15,30 @@ rules:
   - source: "src/**/*.jsx"
     tests: "tests/**/*.test.jsx"
 
+  # The frontend is a subdirectory workspace, so the root-relative rules above
+  # never match frontend/src/**. Without these, a frontend-only change yields no
+  # JavaScript patterns; if any other language contributed one, AFFECTED_TESTS
+  # is non-empty and ci/checks/tests.sh reports "skipped: no affected
+  # JavaScript tests" while frontend code did in fact change.
+  - source: "frontend/src/**/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/**/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/src/**/*.js"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/**/*.jsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  # A change to a test, or to the runner config the layout is declared in, must
+  # run the suite too.
+  - source: "frontend/tests/**/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/tests/**/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/package.json"
+    tests: "frontend/tests/**/*.test.ts"
+
   # Python: module -> test file
   - source: "src/**/*.py"
     tests: "tests/**/test_*.py"

@@ -30,6 +30,10 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     echo "--- Node lane workspace: ${_ws}"
     _ws_rc=0
     CI_GATE_NODE_WORKSPACE="$_ws" bash "$SCRIPT_DIR/node.sh" "$@" || _ws_rc=$?
+    # A failing package script exits 1, which is not a gate result code and
+    # would otherwise be merged in at the FAIL_INFRA level — a real test,
+    # typecheck or build regression reported as broken infrastructure.
+    _ws_rc="$(ci::common::normalize_result "$_ws_rc")"
     NODE_OVERALL="$(ci::common::merge_results "$NODE_OVERALL" "$_ws_rc")"
   done <<< "$NODE_WORKSPACES"
 
