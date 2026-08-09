@@ -878,8 +878,13 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
     await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
 
+    // A 5xx does not establish that the write was rejected, so the flow
+    // reports the outcome as unknown — but the latch still releases, because
+    // it is tied to the request settling, not to the request succeeding.
     applyGate.release(jsonResponse({ detail: "boom" }, 500));
-    await waitFor(() => expect(screen.getByText("Apply failed")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
     expect(navButton("CMS Groups")).toBeEnabled();
   });
 });

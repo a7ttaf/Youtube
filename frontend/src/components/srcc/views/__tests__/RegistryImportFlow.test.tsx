@@ -696,12 +696,97 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       expect(screen.getByRole("button", { name: /^cancel$/i })).toBeDisabled(),
     );
 
+    // A 5xx does not establish that the write was rejected, so the banner
+    // says so rather than claiming failure — but the exits still free.
     applyGate.release(jsonResponse({ detail: "boom" }, 500));
     await waitFor(() =>
-      expect(screen.getByText("Apply failed")).toBeInTheDocument(),
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: /^back$/i })).toBeEnabled();
+  });
+
+  // The rule is "indeterminate unless rejection is ESTABLISHED". These pin the
+  // two cases a naive `instanceof ApiError` check got backwards, plus the
+  // control that proves the guard is not simply always-on.
+  const applyOutcomeCases: Array<{
+    name: string;
+    respond: () => Response;
+    unknown: boolean;
+  }> = [
+    // The client raises ApiError carrying the ORIGINAL 2xx status for a
+    // malformed success body: the server said OK, so the import almost
+    // certainly committed and only the body was unreadable.
+    {
+      name: "a malformed 2xx body",
+      // The JSON content-type matters: it is what puts the client on its
+      // strict-parse path, so the unparseable body becomes an ApiError
+      // carrying status 200 rather than being handed back as text.
+      respond: () =>
+        new Response("not json", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      unknown: true,
+    },
+    // A gateway failure: the request may have reached the backend and
+    // committed, with the response lost on the way home.
+    {
+      name: "a gateway 502",
+      respond: () => jsonResponse({ detail: "bad gateway" }, 502),
+      unknown: true,
+    },
+    // Control: permissions are checked before any write, so a 403 really does
+    // establish that nothing was written.
+    {
+      name: "a 403 permission refusal",
+      respond: () => jsonResponse({ detail: "Missing permission" }, 403),
+      unknown: false,
+    },
+  ];
+
+  for (const testCase of applyOutcomeCases) {
+    const verdict = testCase.unknown ? "INDETERMINATE" : "a definite failure";
+    it(`treats ${testCase.name} as ${verdict}`, async () => {
+      await runDryRunToPreview((form) =>
+        form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : testCase.respond(),
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+      const title = testCase.unknown ? "Apply outcome unknown" : "Apply failed";
+      await waitFor(() => expect(screen.getByText(title)).toBeInTheDocument());
+
+      // Indeterminate blocks a blind retry (it would append a second
+      // unconditional CHANNEL_IMPORTED); a definite refusal stays retryable.
+      const applyButton = screen.getByRole("button", { name: /^apply$/i });
+      if (testCase.unknown) {
+        expect(screen.getByText(/may have committed/i)).toBeInTheDocument();
+        expect(applyButton).toBeDisabled();
+      } else {
+        expect(screen.queryByText(/may have committed/i)).not.toBeInTheDocument();
+        expect(applyButton).toBeEnabled();
+      }
+    });
+  }
+
+  it("ignores a rejection detail that is not a whole plan", async () => {
+    // The refreshed-plan guard checks BOTH halves the preview renders. A
+    // rows-only payload would otherwise pass, replace the preview, and crash
+    // CountsStrip on Object.entries(undefined) — the step it was meant to
+    // repair. It must fall through to the ordinary banner instead.
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true"
+        ? jsonResponse(DRY_RUN_PLAN)
+        : jsonResponse({ detail: { rows: [] } }, 409),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(screen.getByText("Apply failed")).toBeInTheDocument());
+
+    // The original preview is intact — not replaced by a half-formed payload.
+    // (Unlabelled here: only the Applied step prefixes its counts strip.)
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+    expect(screen.getByText("CREATE: 1 · UPDATE: 1")).toBeInTheDocument();
   });
 
   it("distinguishes a group JOIN from a group CREATE, and claims neither without one", async () => {

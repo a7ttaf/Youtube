@@ -96,13 +96,25 @@ const describeImportError = (err: unknown): string => {
   return describeApiError(err, "The import request failed");
 };
 
-/** Structural check that an unknown 422 `detail` is the refreshed import plan
- * the apply race returns (channels.py raises the full payload as `detail`). */
+/**
+ * Structural check that an unknown rejection `detail` is the refreshed import
+ * plan (channels.py raises the full payload as `detail`).
+ *
+ * Checks BOTH halves the preview renders, not just `rows`: the plan replaces
+ * the on-screen preview, and CountsStrip calls Object.entries on `counts`, so
+ * a rows-only payload would pass this guard and then crash the step it was
+ * meant to repair. A `detail` that is not the whole plan falls through to the
+ * ordinary error banner instead.
+ */
 const isImportResultPayload = (detail: unknown): detail is ChannelImportResult => {
   if (typeof detail !== "object" || detail === null) {
     return false;
   }
-  return Array.isArray((detail as { rows?: unknown }).rows);
+  const candidate = detail as { rows?: unknown; counts?: unknown };
+  if (!Array.isArray(candidate.rows)) {
+    return false;
+  }
+  return typeof candidate.counts === "object" && candidate.counts !== null;
 };
 
 /**
@@ -141,6 +153,38 @@ const refreshedPlanMessage = (status: number): string => {
     "The registry changed since this preview; the refreshed plan below " +
     "shows the ERROR rows that blocked the apply."
   );
+};
+
+/**
+ * Statuses on which the import route definitively wrote NOTHING. Every one is
+ * raised before `apply_channel_import` runs, or aborts the single transaction
+ * that wraps it: 400/401/403 authorization and form validation, 409 the
+ * plan-to-apply conflicts and the fingerprint mismatch, 413 the payload cap,
+ * 422 malformed uploads and ERROR-row plans.
+ *
+ * Everything ELSE is ambiguous and must be treated as such — the two cases
+ * that make this a set rather than a `status < 500` test:
+ *   - A 2xx carrying malformed JSON. The client raises ApiError with the
+ *     ORIGINAL 2xx status (client.ts), so the server said OK; the import
+ *     almost certainly committed and only the body was unreadable.
+ *   - A gateway 502/503/504. The request may have reached the backend and
+ *     committed with the response lost on the way home.
+ * Both were previously read as definite refusals purely because they arrived
+ * as an ApiError (review #184).
+ */
+const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 403, 409, 413, 422]);
+
+/**
+ * True when an apply failure leaves the outcome UNKNOWN: no response at all
+ * (a rejected fetch is never an ApiError), or a response that does not
+ * establish rejection. Fail-safe by construction — anything not on the
+ * definite-rejection list is indeterminate.
+ */
+const isIndeterminateApplyFailure = (caught: unknown): boolean => {
+  if (!(caught instanceof ApiError)) {
+    return true;
+  }
+  return !DEFINITE_REJECTION_STATUSES.has(caught.status);
 };
 
 /** True when any planned row is an ERROR (the API 422s an apply of such a plan). */
@@ -643,7 +687,14 @@ const PreviewStep = ({
         emptyLabel="No rows in this roster."
       />
       <ErrorRowsNote show={hasErrors} />
-      {error ? <ImportErrorBanner title="Apply failed" detail={error} /> : null}
+      {/* "failed" would be a claim the flow cannot make when the outcome is
+          unknown — the write may well have landed. */}
+      {error ? (
+        <ImportErrorBanner
+          title={indeterminate ? "Apply outcome unknown" : "Apply failed"}
+          detail={error}
+        />
+      ) : null}
       <PreviewActions
         hasErrors={hasErrors}
         onBack={onBack}
@@ -755,8 +806,12 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
 
   /** Fire the read-only dry-run; on success advance to Preview, else stay + show. */
   const runDryRun = async () => {
-    if (busy || inFlightRef.current) return;
-    if (!canSubmitUpload(file, ownerId, reason)) return;
+    if (busy || inFlightRef.current) {
+      return;
+    }
+    if (!canSubmitUpload(file, ownerId, reason)) {
+      return;
+    }
     inFlightRef.current = true;
     setBusy(true);
     setError(null);
@@ -794,18 +849,17 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       setError(refreshedPlanMessage((caught as ApiError).status));
       return;
     }
-    // The client only raises ApiError once an HTTP response exists, so
-    // anything else means the POST was dispatched and never answered — the
-    // roster may already be committed, audit event and all. Treating that as
-    // a plain failure would re-arm Apply (a second unconditional
-    // CHANNEL_IMPORTED) and let Cancel take the no-reload path over a changed
-    // registry. It is INDETERMINATE, and only a reload can settle it.
-    if (!(caught instanceof ApiError)) {
+    // Anything that does not ESTABLISH rejection leaves the roster possibly
+    // committed, audit event and all. Treating such a failure as definite
+    // would re-arm Apply (a second unconditional CHANNEL_IMPORTED) and let
+    // Cancel take the no-reload path over a changed registry. Only a reload
+    // can settle it.
+    if (isIndeterminateApplyFailure(caught)) {
       setIndeterminate(true);
       setError(
-        "The import request was sent but no response came back, so it may " +
-          "have committed. Reload the registry to see the actual state " +
-          "before importing again.",
+        "The import request did not return a usable result, so it may have " +
+          "committed. Reload the registry to see the actual state before " +
+          "importing again.",
       );
       return;
     }
@@ -826,9 +880,13 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
 
   /** Commit the plan; refuse while any row errors (the API 422s it anyway). */
   const apply = async () => {
-    if (applyDispatchBlocked()) return;
+    if (applyDispatchBlocked()) {
+      return;
+    }
     const approved = approvedApply(file, preview);
-    if (approved === null) return;
+    if (approved === null) {
+      return;
+    }
     inFlightRef.current = true;
     setBusy(true);
     setApplying(true);
@@ -876,8 +934,11 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     // `indeterminate` joins `applied` on the reloading path: an apply whose
     // response was lost may have committed, and leaving without a refetch
     // would restore a registry that no longer matches the database.
-    if (applied || indeterminate) onDone();
-    else onCancel();
+    if (applied || indeterminate) {
+      onDone();
+    } else {
+      onCancel();
+    }
   };
 
   /**
