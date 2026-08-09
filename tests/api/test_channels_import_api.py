@@ -53,11 +53,12 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
 
 def create_import_app(
     registry: ChannelRegistry | None = None,
+    groups: ChannelGroupRegistry | None = None,
 ) -> tuple[TestClient, object, ChannelGroupRegistry, InMemoryAuditSink]:
     """Build an import-ready client plus the registries and sink it writes to."""
     app = create_app()
     registry = registry if registry is not None else bootstrap_channel_registry()
-    groups = ChannelGroupRegistry()
+    groups = groups if groups is not None else ChannelGroupRegistry()
     audit_sink = InMemoryAuditSink()
     app.dependency_overrides[current_channel_registry] = lambda: registry
     app.dependency_overrides[sql_group_registry_from_session] = lambda: groups
@@ -1206,6 +1207,74 @@ def test_group_mutations_performed_by_import_are_audited():
         assert record.details["cms_group_id"] == "cms-tv"
         assert record.details["source"] == "bulk_import"
         assert record.reason == "Quarterly CMS roster load"
+
+
+class _CountingGroupStore(ChannelGroupRegistry):
+    """Count the two store calls whose COST scales with a group's membership.
+
+    Both `get_group_by_cms_id(for_update=True)` and `add_members` materialize
+    the group's full member set in the SQL store, so calling either once per
+    roster row is what made a shared-group import quadratic in payload.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.locked_lookups = 0
+        self.member_adds = 0
+        self.added_batch_sizes: list[int] = []
+
+    def get_group_by_cms_id(
+        self, cms_group_id: str, *, for_update: bool = False
+    ) -> ChannelGroupEntry | None:
+        """Count only the LOCKED reads — the write-boundary ones."""
+        if for_update:
+            self.locked_lookups += 1
+        return super().get_group_by_cms_id(cms_group_id, for_update=for_update)
+
+    def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
+        """Count each membership write and the size of the batch it carried."""
+        self.member_adds += 1
+        self.added_batch_sizes.append(len(channel_ids))
+        return super().add_members(group_id=group_id, channel_ids=channel_ids)
+
+
+def _roster_sharing_one_group(count: int, *, group_id: str = "cms-tv") -> str:
+    """A CSV whose `count` distinct channels all name the same group key."""
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+    rows = []
+    for index in range(count):
+        tail = "".join(alphabet[(index // len(alphabet) ** p) % len(alphabet)] for p in range(22))
+        rows.append(f"UC{tail},Channel {index},{group_id},Yes")
+    return import_csv(*rows, header="youtube_channel_id,channel_name,group_id,view_revenue")
+
+
+def test_shared_group_rows_resolve_the_group_once_regardless_of_roster_size():
+    """One lock and one membership write per GROUP, not per row (review #184).
+
+    Resolving per row made the payload quadratic: every locked lookup loaded
+    the group's whole membership and every single-channel add read it and
+    returned it again, so a 5000-row roster under one group moved tens of
+    millions of membership rows inside one transaction while holding every
+    channel lock. The fix is per-key batching, and the property that proves it
+    is that these counts do NOT grow with the roster.
+    """
+    counts = {}
+    for size in (3, 12):
+        store = _CountingGroupStore()
+        client, _registry, _groups, _sink = create_import_app(groups=store)
+
+        response = post_import(client, _roster_sharing_one_group(size))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["counts"]["CREATE"] == size
+        group = store.get_group_by_cms_id("cms-tv")
+        assert group is not None and len(group.channel_ids) == size
+        counts[size] = (store.locked_lookups, store.member_adds, store.added_batch_sizes)
+
+    # Identical for both roster sizes: one locked read, one bulk add carrying
+    # every channel but the one the create already attached.
+    assert counts[3] == (1, 1, [2])
+    assert counts[12] == (1, 1, [11])
 
 
 def test_unchanged_rows_do_not_emit_duplicate_group_audit():

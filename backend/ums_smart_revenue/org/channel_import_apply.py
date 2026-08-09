@@ -47,10 +47,10 @@ _INVENTORY_FIELDS = ("channel_name", "cms_status", "content_owner_id", "revenue_
 # auditor separates bulk-import changes from single-channel API edits, so both
 # call sites must emit the identical value.
 AUDIT_SOURCE_BULK_IMPORT = "bulk_import"
-# The `action` value _attach_group_membership reports for a group it minted,
-# as opposed to a membership it added to an existing one. Named because the
-# apply loop now branches on it (to remember which groups this run created)
-# as well as recording it on the GROUP_UPDATED audit event.
+# The `action` value _attach_group_memberships reports for a group it minted,
+# as opposed to a membership it added to an existing one. Recorded on the
+# GROUP_UPDATED audit event, where an auditor uses it to tell a new
+# finance-scope group apart from a channel joining one that already existed.
 AUDIT_GROUP_ACTION_CREATED = "group_created"
 
 
@@ -109,7 +109,7 @@ class ChannelImportGroupActionDivergedError(ChannelImportError):
     The route's fingerprint check runs BEFORE ``apply_channel_import`` takes
     any group row lock, so the plan-to-apply window is still open for group
     existence specifically: this owner's CMS sync can create a previously
-    absent group after the comparison and before ``_attach_group_membership``
+    absent group after the comparison and before ``_attach_group_memberships``
     reaches it, turning a reviewed "creates a new SECTOR group" into a silent
     join of a group the operator never saw — a different finance-scope and
     audit effect, with no second 409 to catch it (review #184).
@@ -556,52 +556,46 @@ def _apply_group_memberships(
     first pass before any group row lock here, and both resource classes are
     visited in a stable order, so overlapping imports can never hold one class
     while waiting on the other's.
+
+    Work is grouped BY KEY, so each CMS group is locked and resolved exactly
+    once no matter how many rows name it. Resolving per row made the cost
+    quadratic in the payload: every lookup materialized the group's whole
+    membership, and every single-channel add read it again and returned it
+    again, so a 5000-row roster under one group moved tens of millions of
+    membership rows inside one transaction while holding every channel lock
+    (review #184, measured). Per-key resolution also makes it structurally
+    impossible for the run to observe its own group creation, which is what
+    the removed ``groups_created_here`` ledger used to compensate for.
     """
-    # CMS keys this run has already created. A roster legitimately lists
-    # several channels under one NEW group key, and planning labels every such
-    # row CREATE because the group was absent for all of them; the first row
-    # creates it and the rest then observe it inside this same transaction.
-    # Without this ledger the write-boundary action check would read the
-    # plan's own handiwork as a concurrent creation and 409 an import that is
-    # doing exactly what the operator approved (review #184).
-    groups_created_here: set[str] = set()
-    for entry in _group_write_order(plan.entries):
-        channel_id = entry.youtube_channel_id
-        if channel_id is None or entry.channel_name is None or not entry.group_id:
-            continue
-        group_change = _attach_group_membership(
-            groups,
-            cms_group_id=entry.group_id,
-            channel_id=channel_id,
-            content_owner_id=content_owner_id,
-            planned_action=entry.group_action,
-            created_in_this_run=entry.group_id in groups_created_here,
-        )
+    for cms_group_id, entries in _group_write_batches(plan.entries):
         # A group creation or membership addition is a finance-scope mutation;
         # without its own GROUP_UPDATED record an inventory-UNCHANGED row's
         # group change would be invisible in the audit trail (the summary
-        # event carries only counts).
-        if group_change is None:
-            continue
-        group_action, group = group_change
-        if group_action == AUDIT_GROUP_ACTION_CREATED:
-            groups_created_here.add(entry.group_id)
-        record_audit_event(
-            sink=audit_sink,
-            actor=actor,
-            event_type=AuditEventType.GROUP_UPDATED,
-            entity_type="channel_group",
-            entity_id=group.id,
-            scope=scope,
-            reason=reason,
-            details={
-                "action": group_action,
-                "cms_group_id": entry.group_id,
-                "group_type": group.group_type,
-                "channel_id": channel_id,
-                "source": AUDIT_SOURCE_BULK_IMPORT,
-            },
-        )
+        # event carries only counts). One event per channel actually attached,
+        # exactly as the per-row pass emitted.
+        for group_action, group, channel_id in _attach_group_memberships(
+            groups,
+            cms_group_id=cms_group_id,
+            channel_ids=[entry.youtube_channel_id or "" for entry in entries],
+            content_owner_id=content_owner_id,
+            planned_action=entries[0].group_action,
+        ):
+            record_audit_event(
+                sink=audit_sink,
+                actor=actor,
+                event_type=AuditEventType.GROUP_UPDATED,
+                entity_type="channel_group",
+                entity_id=group.id,
+                scope=scope,
+                reason=reason,
+                details={
+                    "action": group_action,
+                    "cms_group_id": cms_group_id,
+                    "group_type": group.group_type,
+                    "channel_id": channel_id,
+                    "source": AUDIT_SOURCE_BULK_IMPORT,
+                },
+            )
 
 
 def _safe_audit_filename(filename: str | None) -> str | None:
@@ -626,6 +620,34 @@ def _channel_write_order(
         entries,
         key=lambda entry: (entry.youtube_channel_id or "", entry.row_number),
     )
+
+
+def _group_write_batches(
+    entries: tuple[ChannelImportPlanEntry, ...],
+) -> list[tuple[str, list[ChannelImportPlanEntry]]]:
+    """Group the membership work by CMS key, keys and rows in write order.
+
+    Built on ``_group_write_order`` so the lock order it establishes is
+    unchanged: keys are still visited ascending, and within a key the channels
+    keep their (group key, channel id) order, which is the order their audit
+    events are emitted in.
+
+    A channel repeated under the SAME key collapses to one entry. The per-row
+    pass got that for free — the second copy found itself already a member and
+    audited nothing — but a batch must not hand the same channel to
+    ``add_members`` twice and claim two attachments for one membership.
+    """
+    batches: dict[str, list[ChannelImportPlanEntry]] = {}
+    seen: set[tuple[str, str]] = set()
+    for entry in _group_write_order(entries):
+        channel_id = entry.youtube_channel_id
+        if channel_id is None or entry.channel_name is None or not entry.group_id:
+            continue
+        if (entry.group_id, channel_id) in seen:
+            continue
+        seen.add((entry.group_id, channel_id))
+        batches.setdefault(entry.group_id, []).append(entry)
+    return list(batches.items())
 
 
 def _group_write_order(
@@ -773,9 +795,9 @@ def _entry_changes(
 #   of write (a different finance scope and a different audit event), not a
 #   different value, so no "the file wins" decision covers it. `planned` is
 #   None for a caller that disclosed no action, and then nothing is asserted.
-#   `created_in_this_run` is load-bearing: a roster may list several channels
-#   under one NEW group key and planning labels every such row CREATE, so the
-#   run's own first creation must not read as a concurrent one (review #184).
+#   An observed existence is always a CONCURRENT one: the caller batches by
+#   key and resolves each group once, so this never runs after the import's
+#   own create and needs no ledger to tell the two apart (review #184).
 # Blast Radius: Turns an accepted import into a 409 for the whole file. No
 #   writes, no audit rows, no finance effect of its own.
 # Connections:
@@ -790,7 +812,6 @@ def _require_planned_group_action(
     planned: ChannelImportGroupAction | None,
     *,
     observed_exists: bool,
-    created_in_this_run: bool,
     cms_group_id: str,
 ) -> None:
     """Fail closed when the locked read contradicts the reviewed group effect.
@@ -800,17 +821,17 @@ def _require_planned_group_action(
     the group still be absent and JOIN demands it still be present, both read
     under the row lock this runs inside, so the check cannot itself be raced.
 
-    ``created_in_this_run`` is what keeps the common case working: a roster
-    legitimately lists SEVERAL channels under one new group key, and planning
-    labels every such row CREATE because the group was absent for all of them.
-    The first row then creates it and the rest observe it — inside the same
-    transaction. That is the plan doing exactly what the operator approved,
-    not a concurrent writer, so it satisfies CREATE. Only an existence this
-    run did NOT produce is a divergence.
+    An observed existence is therefore always someone ELSE's. This used to need
+    a ``created_in_this_run`` ledger, because a roster legitimately lists
+    several channels under one new group key, planning labels every such row
+    CREATE, and the per-row pass had rows 2..N observe the group row 1 had just
+    created — the plan's own handiwork reading as a concurrent creation.
+    Batching by key retired that: the group is resolved once per key, so this
+    check never runs after the run's own create (review #184).
     """
     if planned is None:
         return
-    if planned is ChannelImportGroupAction.CREATE and observed_exists and not created_in_this_run:
+    if planned is ChannelImportGroupAction.CREATE and observed_exists:
         raise ChannelImportGroupActionDivergedError(
             f"channel group {cms_group_id} was created during the import; the "
             "preview approved creating it, not joining it — re-run the preview "
@@ -852,23 +873,31 @@ def _require_planned_group_action(
 #   - File: backend/ums_smart_revenue/api/channels.py -> maps the archived,
 #     unstamped, and cross-owner errors to 409.
 # ============================================================================
-def _attach_group_membership(
+def _attach_group_memberships(
     groups: ChannelGroupRegistryStore,
     *,
     cms_group_id: str,
-    channel_id: str,
+    channel_ids: list[str],
     content_owner_id: str,
     planned_action: ChannelImportGroupAction | None = None,
-    created_in_this_run: bool = False,
-) -> tuple[str, ChannelGroupEntry] | None:
-    """Ensure the channel belongs to the group carrying this CMS key.
+) -> list[tuple[str, ChannelGroupEntry, str]]:
+    """Ensure every listed channel belongs to the group carrying this CMS key.
 
-    Returns ``(action, group)`` for the mutation performed — group creation or
-    membership addition — so the caller can audit it, or None when nothing at
-    all was written. Planning fails rows targeting archived, cross-owner, and
-    owner-NULL groups closed, and the write boundary RE-CHECKS all three under
-    a row lock so a state change in the plan-to-apply window fails the
-    transaction closed rather than springing a write the preview never showed.
+    Returns one ``(action, group, channel_id)`` per mutation performed — the
+    group creation and each membership addition — so the caller can audit each
+    one, and an EMPTY list when nothing at all was written. Planning fails rows
+    targeting archived, cross-owner, and owner-NULL groups closed, and the
+    write boundary RE-CHECKS all three under a row lock so a state change in
+    the plan-to-apply window fails the transaction closed rather than springing
+    a write the preview never showed.
+
+    Takes the whole batch for one key so the group is resolved and locked ONCE.
+    Resolving per channel made the payload quadratic: each lookup materialized
+    the full membership and each single-channel add read it and returned it
+    again (review #184). The audit trail is unchanged by that — a newly created
+    group still records ONE ``group_created`` for the first channel and a
+    ``member_added`` for each of the rest, which is why the create takes only
+    ``channel_ids[0]`` instead of the whole batch.
 
     The import's ``content_owner_id`` is stamped on any group CREATED here so
     CMS group sync — which scopes ``list_synced_groups`` to one owner — can
@@ -883,18 +912,18 @@ def _attach_group_membership(
     _require_planned_group_action(
         planned_action,
         observed_exists=group is not None,
-        created_in_this_run=created_in_this_run,
         cms_group_id=cms_group_id,
     )
     if group is None:
         created = groups.create_group(
             name=cms_group_id,
             group_type="SECTOR",
-            channel_ids=[channel_id],
+            channel_ids=channel_ids[:1],
             cms_group_id=cms_group_id,
             content_owner_id=content_owner_id,
         )
-        return (AUDIT_GROUP_ACTION_CREATED, created)
+        events = [(AUDIT_GROUP_ACTION_CREATED, created, channel_ids[0])]
+        return events + _add_members(groups, created, channel_ids[1:])
     if not group.active:
         raise ChannelImportArchivedGroupError(
             f"channel group was archived during the import: {cms_group_id}; "
@@ -921,7 +950,21 @@ def _attach_group_membership(
             f"{group.content_owner_id!r}, not {content_owner_id!r}; "
             "import that group's channels under its own content owner"
         )
-    if channel_id not in group.channel_ids:
-        updated = groups.add_members(group_id=group.id, channel_ids=[channel_id])
-        return ("member_added", updated)
-    return None
+    return _add_members(groups, group, [cid for cid in channel_ids if cid not in group.channel_ids])
+
+
+def _add_members(
+    groups: ChannelGroupRegistryStore,
+    group: ChannelGroupEntry,
+    channel_ids: list[str],
+) -> list[tuple[str, ChannelGroupEntry, str]]:
+    """Attach a batch of channels in ONE write, one audit event per channel.
+
+    Returns an empty list for an empty batch WITHOUT touching the store, which
+    is what keeps a re-imported roster audit-quiet: every channel was already a
+    member, so nothing was written and nothing is claimed.
+    """
+    if not channel_ids:
+        return []
+    updated = groups.add_members(group_id=group.id, channel_ids=channel_ids)
+    return [("member_added", updated, channel_id) for channel_id in channel_ids]
