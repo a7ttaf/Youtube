@@ -292,6 +292,68 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "test-layout: rejects a decoy include in a section AFTER the test block" {
+  # Ordering matters independently: an over-wide brace match would run past the
+  # test object's closing brace and swallow later sections. The real config has
+  # resolve: after test:, so post-test sections are not hypothetical.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {},
+  optimizeDeps: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
+}
+
+@test "test-layout: rejects a narrowed test.include with the glob in a later section" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/only-one.test.ts"],
+  },
+  optimizeDeps: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+}
+
+@test "test-layout: the extracted block stops at the test object's closing brace" {
+  # Asserts the brace match directly rather than only its consequence.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  resolve: {
+    alias: { "@": "./src" },
+  },
+});
+EOF
+  run bash -c "
+    cd '$SANDBOX'
+    sed -n '/^strip_ts_comments()/,/^}/p;/^extract_test_block()/,/^}/p' ci/checks/test-layout.sh > '$SANDBOX/fns.sh'
+    . '$SANDBOX/fns.sh'
+    strip_ts_comments frontend/vitest.config.ts | extract_test_block
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests/**/*.test.{ts,tsx}"* ]]
+  [[ "$output" != *"resolve"* ]]
+  [[ "$output" != *"alias"* ]]
+}
+
 @test "test-layout: catches a config with no test block at all" {
   cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
 import { defineConfig } from "vitest/config";
