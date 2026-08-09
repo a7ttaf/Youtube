@@ -629,6 +629,33 @@ const APPLY_INDETERMINATE_NOTE =
   "This import may already have committed — reload the registry and check " +
   "before importing again.";
 
+/**
+ * Does this refreshed plan prove the earlier apply committed?
+ *
+ * Decisive because the apply is ONE all-or-nothing transaction: if every row
+ * is now UNCHANGED then the roster IS the registry, which can only be true of
+ * a committed write. A single remaining CREATE/UPDATE proves the opposite —
+ * though only as of this instant, since the original request may still be
+ * running, which is why the check stays repeatable.
+ */
+const isAlreadyApplied = (plan: ChannelImportResult): boolean => {
+  return plan.rows.every((row) => row.outcome === "UNCHANGED");
+};
+
+/** Copy for a re-plan that still shows work the registry has not taken. */
+const RECONCILE_PENDING_NOTE =
+  "Still not committed: the refreshed plan below shows changes the registry " +
+  "does not have yet. The original request may still be running — check " +
+  "again in a moment, or apply the refreshed plan.";
+
+/** Copy for a reconciliation attempt with no roster left to re-plan. */
+const RECONCILE_NO_ROSTER_NOTE =
+  "The roster is no longer loaded, so the earlier import's outcome cannot be " +
+  "checked here. Reload the registry to see the actual state.";
+
+const RECONCILE_FAILED_PREFIX = "Could not check the registry: ";
+const RECONCILE_STILL_UNKNOWN = "The earlier import's outcome is still unknown.";
+
 /** Apply's disabled title: why the button is refused, or undefined when live. */
 const applyBlockedTitle = (
   hasErrors: boolean,
@@ -926,6 +953,20 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
    * not commit" for a write that lands a moment later. Leaving the control in
    * place lets the operator check again instead of being told once, wrongly.
    */
+  const settleFromReplan = (refreshed: ChannelImportResult) => {
+    setPreview(refreshed);
+    if (!isAlreadyApplied(refreshed)) {
+      setError(RECONCILE_PENDING_NOTE);
+      return;
+    }
+    // Settled: the roster IS the registry, so this is no longer unknown.
+    // Clearing `indeterminate` re-arms Apply, which is correct — a further
+    // apply would now be a no-op re-import, not a blind duplicate write.
+    setIndeterminate(false);
+    setApplied(refreshed);
+    setStep("applied");
+  };
+
   const reconcileIndeterminate = async () => {
     if (busy || inFlightRef.current) {
       return;
@@ -934,42 +975,22 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     // closure, so this only trips if a future edit clears it — fail closed
     // rather than re-plan a DIFFERENT roster and call the answer decisive.
     if (file === null) {
-      setError(
-        "The roster is no longer loaded, so the earlier import's outcome " +
-          "cannot be checked here. Reload the registry to see the actual state.",
-      );
+      setError(RECONCILE_NO_ROSTER_NOTE);
       return;
     }
     inFlightRef.current = true;
     setBusy(true);
     try {
-      const refreshed = await importChannels({
-        file,
-        contentOwnerId: ownerId,
-        dryRun: true,
-        reason: trimmedReason,
-      });
-      const committed = refreshed.rows.every((row) => row.outcome === "UNCHANGED");
-      setPreview(refreshed);
-      if (committed) {
-        // Settled: the roster IS the registry, so this is no longer unknown.
-        // Clearing `indeterminate` re-arms Apply, which is correct — a further
-        // apply would now be a no-op re-import, not a blind duplicate write.
-        setIndeterminate(false);
-        setApplied(refreshed);
-        setStep("applied");
-        return;
-      }
-      setError(
-        "Still not committed: the refreshed plan below shows changes the " +
-          "registry does not have yet. The original request may still be " +
-          "running — check again in a moment, or apply the refreshed plan.",
+      settleFromReplan(
+        await importChannels({
+          file,
+          contentOwnerId: ownerId,
+          dryRun: true,
+          reason: trimmedReason,
+        }),
       );
     } catch (caught) {
-      setError(
-        `Could not check the registry: ${describeImportError(caught)} ` +
-          "The earlier import's outcome is still unknown.",
-      );
+      setError(`${RECONCILE_FAILED_PREFIX}${describeImportError(caught)} ${RECONCILE_STILL_UNKNOWN}`);
     } finally {
       setBusy(false);
       inFlightRef.current = false;
