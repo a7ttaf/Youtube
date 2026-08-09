@@ -693,3 +693,190 @@ describe("AppShell groups navigation", () => {
     expect(screen.queryByRole("button", { name: /sync/i })).not.toBeInTheDocument();
   });
 });
+
+// ============================================================================
+// Shell navigation is the exit RegistryImportFlow cannot guard itself: the
+// sidebar lives outside that component's tree, so switching views unmounts the
+// flow no matter what its own Cancel and Back do. With an un-abortable apply
+// POST pending, that means the write still commits while its completion
+// handler is gone — no reload, no confirmation, and the operator left looking
+// at a stale registry (review #184, codex P1). AppShell latches nav off
+// WriteInFlightContext for exactly the duration of that write.
+// ============================================================================
+
+const IMPORT_CHANNELS = [
+  {
+    youtube_channel_id: "UC-DRAMA-01",
+    channel_name: "UMS Drama",
+    primary_company_id: "united-studios",
+    cms_status: "INSIDE_CMS",
+    content_owner_id: "OWNERaaa",
+    revenue_required: true,
+    revenue_source_status: "OFFICIAL_CMS_REVENUE",
+    active: true,
+  },
+];
+
+const IMPORT_PLAN = {
+  dry_run: true,
+  content_owner_id: "OWNERaaa",
+  cms_status: "INSIDE_CMS",
+  counts: { CREATE: 1 },
+  rows: [
+    {
+      row_number: 1,
+      youtube_channel_id: "UCa",
+      outcome: "CREATE",
+      channel_name: "Alpha Channel",
+      group_id: null,
+      group_action: null,
+      revenue_required: true,
+      changes: {},
+      reason: null,
+    },
+  ],
+};
+
+/** A pending Response plus its resolver, for holding the apply POST open. */
+const deferredImportResponse = () => {
+  let release!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => {
+    release = resolve;
+  });
+  return { pending, release };
+};
+
+/** The SIDEBAR button carrying this label (the button also holds an icon +
+ * count, and labels like "Channel Registry" also appear in the view itself,
+ * so the lookup is scoped to the sidebar landmark). */
+const navButton = (label: string): HTMLElement => {
+  const sidebar = screen.getByRole("complementary", { name: "Primary navigation" });
+  const button = within(sidebar).getByText(label).closest("button");
+  if (button === null) throw new Error(`no nav button for ${label}`);
+  return button;
+};
+
+describe("AppShell navigation latch during an un-abortable write", () => {
+  const routeImportShell = (applyResponder: () => Promise<Response> | Response) => {
+    return (input: unknown, init?: RequestInit) => {
+      const url = urlOf(input);
+      const path = new URL(url, "http://ums.local").pathname;
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (path === "/channels/import" && method === "POST") {
+        return Promise.resolve(applyResponder());
+      }
+      if (path === "/session/me") return Promise.resolve(jsonResponse(FULL_SESSION));
+      if (path === "/tenants/me") {
+        return Promise.resolve(jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }));
+      }
+      if (path === "/channels") return Promise.resolve(jsonResponse(IMPORT_CHANNELS));
+      if (path === "/org-units") return Promise.resolve(jsonResponse([]));
+      if (path === "/connectors/content-owners") {
+        return Promise.resolve(jsonResponse({ items: [{ account_id: "OWNERaaa" }] }));
+      }
+      return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+    };
+  };
+
+  /** Drive the shell to Preview with the apply POST answered by `applyResponder`. */
+  const openImportPreview = async (
+    applyResponder: () => Promise<Response> | Response,
+  ) => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeImportShell(applyResponder),
+    );
+    renderShell();
+
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /import csv/iu }));
+
+    const panel = screen.getByRole("group", { name: "Import upload" });
+    const picker = within(panel).getByLabelText("Content owner");
+    await waitFor(() =>
+      expect(within(picker).getByRole("option", { name: "OWNERaaa" })).toBeInTheDocument(),
+    );
+    fireEvent.change(picker, { target: { value: "OWNERaaa" } });
+    fireEvent.change(within(panel).getByLabelText("Roster CSV"), {
+      target: {
+        files: [new File(["youtube_channel_id,channel_name\nUCa,Alpha\n"], "r.csv")],
+      },
+    });
+    fireEvent.change(within(panel).getByLabelText("Reason (required, audited)"), {
+      target: { value: "monthly roster load" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: /^preview$/iu }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+    );
+  };
+
+  it("NAV LATCH: blocks sidebar navigation while an import apply is in flight", async () => {
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    // Baseline: nav is live while only a preview has run.
+    expect(navButton("CMS Groups")).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+
+    // Every nav item is latched, and each says why.
+    expect(navButton("Command Center")).toBeDisabled();
+    expect(navButton("Channel Registry")).toBeDisabled();
+    expect(navButton("CMS Groups").getAttribute("title")).toMatch(/cannot be aborted/iu);
+
+    // Clicking anyway does nothing: the flow is still mounted on Preview, so
+    // the pending write's completion handler is still there to run.
+    fireEvent.click(navButton("CMS Groups"));
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+
+    // The latch releases with the request, so nav cannot stay stuck. Awaited
+    // rather than asserted inline: the release runs in the effect CLEANUP for
+    // `applying`, which React commits one render after the step advances, so
+    // "Import applied" is on screen a tick before the nav frees.
+    applyGate.release(jsonResponse({ ...IMPORT_PLAN, dry_run: false }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+  });
+
+  it("NAV LATCH: leaves navigation free during the read-only dry run", async () => {
+    // Only the apply commits. A preview writes nothing, so latching the shell
+    // for it would strand the operator on a slow read for no safety gain.
+    await openImportPreview(() => jsonResponse(IMPORT_PLAN));
+
+    expect(navButton("CMS Groups")).toBeEnabled();
+    expect(navButton("CMS Groups").getAttribute("title")).toBeNull();
+  });
+
+  it("NAV LATCH: releases when a failed apply settles", async () => {
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+
+    applyGate.release(jsonResponse({ detail: "boom" }, 500));
+    await waitFor(() => expect(screen.getByText("Apply failed")).toBeInTheDocument());
+    // Same one-commit lag as the success path: the latch frees in the effect
+    // cleanup, not in the request's `finally`.
+    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+  });
+});

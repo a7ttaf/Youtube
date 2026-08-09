@@ -8,6 +8,10 @@ import {
 } from "@/contexts/SessionContext";
 import { useTenant } from "@/contexts/TenantContext";
 import {
+  WriteInFlightProvider,
+  useWriteInFlightLatch,
+} from "@/contexts/WriteInFlightContext";
+import {
   NAV_GROUPS,
   VIEW_COPY,
   WORKFLOW_STEPS,
@@ -348,15 +352,25 @@ const useTenantBootstrap = (
 
 /* ------------------------------------------------------------------ sidebar */
 
-/** Render a single labelled navigation group with its selectable items. */
+/**
+ * Render a single labelled navigation group with its selectable items.
+ *
+ * `blockedReason` is non-null while a flow below the shell holds an
+ * unabortable write in flight. Navigating then would unmount that flow
+ * without stopping its request: the write still commits, but its completion
+ * handler can no longer reload anything or tell the operator it landed. The
+ * reason doubles as each button's title, so a disabled nav always says why.
+ */
 const NavSection = ({
   group,
   view,
   onSelectView,
+  blockedReason,
 }: {
   group: (typeof NAV_GROUPS)[number];
   view: ViewKey;
   onSelectView: (key: ViewKey) => void;
+  blockedReason: string | null;
 }) => {
   return (
     <nav className="nav-section" aria-label={group.label}>
@@ -369,6 +383,8 @@ const NavSection = ({
             type="button"
             className={`nav-item${active ? " is-active" : ""}`}
             aria-current={active ? "page" : undefined}
+            disabled={blockedReason !== null}
+            title={blockedReason ?? undefined}
             onClick={() => onSelectView(item.key)}
           >
             {NAV_ICONS[item.icon]}
@@ -452,6 +468,7 @@ const Sidebar = ({
   onSelectPreviewRole,
   displayedRole,
   canViewFinance,
+  blockedReason,
 }: {
   view: ViewKey;
   onSelectView: (key: ViewKey) => void;
@@ -459,6 +476,7 @@ const Sidebar = ({
   onSelectPreviewRole: (role: Role) => void;
   displayedRole: Role;
   canViewFinance: boolean;
+  blockedReason: string | null;
 }) => {
   return (
     <aside className="sidebar" aria-label="Primary navigation">
@@ -478,6 +496,7 @@ const Sidebar = ({
           group={group}
           view={view}
           onSelectView={onSelectView}
+          blockedReason={blockedReason}
         />
       ))}
 
@@ -821,12 +840,22 @@ const AppShell = () => {
   // FIX: Clear the Registry→Trace navigation seed when leaving the trace view
   // so that a later manual click on the Trace nav item opens a blank view
   // instead of pre-selecting the last "Review" channel.
+  // Navigating away from a flow holding an unabortable write in flight would
+  // unmount it without stopping the request: the write still commits, but its
+  // completion handler can no longer reload the view or tell the operator it
+  // landed (review #184). NavSection disables its buttons off the same latch;
+  // this guard is the second half, so a keyboard or programmatic caller cannot
+  // route around the disabled control.
+  const writeInFlight = useWriteInFlightLatch();
+  const navBlockedReason = writeInFlight.reason;
+
   const handleViewChange = useCallback(
     (next: ViewKey) => {
+      if (navBlockedReason !== null) return;
       if (next !== "trace") setTraceChannelId(null);
       setView(next);
     },
-    [setView, setTraceChannelId],
+    [navBlockedReason, setView, setTraceChannelId],
   );
 
   if (sessionBootstrap.status === "loading") {
@@ -852,6 +881,7 @@ const AppShell = () => {
   const copy = VIEW_COPY[view];
 
   return (
+    <WriteInFlightProvider value={writeInFlight}>
     <div className="app">
       {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
       <Sidebar
@@ -861,6 +891,7 @@ const AppShell = () => {
         onSelectPreviewRole={setPreviewRole}
         displayedRole={displayedRole}
         canViewFinance={canViewFinance}
+        blockedReason={navBlockedReason}
       />
       <main className="main">
         <Topbar
@@ -883,6 +914,7 @@ const AppShell = () => {
         {view === "command" && <WorkflowRail />}
       </main>
     </div>
+    </WriteInFlightProvider>
   );
 };
 

@@ -502,6 +502,36 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(importPosts()).toHaveLength(2);
   });
 
+  it("keeps Cancel available while the READ-ONLY dry run is in flight", async () => {
+    // The guard is scoped to the write, not to `busy`. A dry run commits
+    // nothing, so abandoning one is safe and the flow's Cancel-at-any-step
+    // promise must hold — otherwise a slow or never-settling preview would
+    // lock the operator inside the stepper for no safety gain.
+    const dryRunGate = deferredResponse();
+    routeFetch({ importPost: () => dryRunGate.pending });
+    renderRegistry();
+    await openImport();
+    await fillUpload();
+
+    fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
+    await waitFor(() =>
+      expect(
+        within(uploadPanel()).getByRole("button", { name: /running…/iu }),
+      ).toBeInTheDocument(),
+    );
+
+    const cancelButton = screen.getByRole("button", { name: /^cancel$/i });
+    expect(cancelButton).toBeEnabled();
+    expect(cancelButton.getAttribute("title")).toBeNull();
+
+    // And it really works: Cancel restores the table without a refetch.
+    fireEvent.click(cancelButton);
+    expect(screen.getByText("UMS Drama")).toBeInTheDocument();
+    expect(channelGetCount()).toBe(1);
+
+    dryRunGate.release(jsonResponse(DRY_RUN_PLAN));
+  });
+
   it("re-enables the exits when an in-flight apply FAILS", async () => {
     // The guard clears in the request's `finally`, not only on success — a
     // failed apply must not leave the operator locked inside the stepper.

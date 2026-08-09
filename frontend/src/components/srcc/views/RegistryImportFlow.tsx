@@ -1,5 +1,6 @@
 import { type ReactNode, useRef, useState } from "react";
 
+import { useBlockNavigationWhile } from "@/contexts/WriteInFlightContext";
 import { ApiError } from "@/lib/api/client";
 import { describeApiError } from "@/lib/api/errors";
 import type {
@@ -27,11 +28,14 @@ import { isValidAuditReason } from "./GroupsSyncFlow";
 //   route answers an apply with its pre-write payload, and the durable tally
 //   lives in the CHANNEL_IMPORTED audit event). Cancel at any step restores
 //   the registry with NO refetch unless an apply already committed (then the
-//   parent reloads). BOTH exits (Cancel, Preview's Back) are disabled while a
-//   request is in flight: the hook exposes no abort, so leaving would neither
-//   stop nor invalidate a POST that still commits. The two close paths
-//   (onCancel / onDone) are supplied by RegistryView, which renders this only
-//   behind canImportChannels.
+//   parent reloads). Every exit is closed while the APPLY is in flight — the
+//   two this component renders (Cancel, Preview's Back) and the shell's own
+//   sidebar, via the WriteInFlightContext latch — because the hook exposes no
+//   abort, so leaving would neither stop nor invalidate a POST that still
+//   commits. The read-only dry-run is deliberately NOT guarded: abandoning a
+//   preview is safe, and the flow promises Cancel at any step. The two close
+//   paths (onCancel / onDone) are supplied by RegistryView, which renders this
+//   only behind canImportChannels.
 // Database/ORM: None (frontend) — POSTs /channels/import (preview + apply) via
 //   useChannelImport; authorization (MANAGE_CHANNELS always, MANAGE_GROUPS on
 //   Group_ID-bearing rosters) and every 409/422 failure stay the backend's
@@ -39,11 +43,14 @@ import { isValidAuditReason } from "./GroupsSyncFlow";
 // Standards: No client-side authorization is invented. Apply is fail-closed
 //   against plans with ERROR rows (the API 422s them) and against an in-flight
 //   request (synchronous in-flight ref latch -> one request per click burst).
-//   The flow is also fail-closed against UNMOUNTING mid-request: while `busy`
-//   neither exit is clickable, so the UI can never report a cancelled or
-//   abandoned import that the backend went on to commit. `busy` clears in the
-//   request's `finally` on success and failure alike, so nothing traps the
-//   operator.
+//   The flow is also fail-closed against UNMOUNTING mid-write: while
+//   `applying`, neither local exit is clickable AND the shell's nav is latched
+//   (WriteInFlightContext), so the UI can never report a cancelled or
+//   abandoned import that the backend went on to commit. The guard keys off
+//   `applying`, not `busy`: only the apply commits, so a read-only dry-run
+//   stays abandonable. `applying` clears in the request's `finally` on success
+//   and failure alike, and the latch also releases on unmount, so nothing
+//   traps the operator or strands the shell.
 //   The reason obeys the shared required + no-NUL audit contract via
 //   isValidAuditReason (imported from GroupsSyncFlow, not copied). Backend
 //   detail is shown only on canned-copy statuses (describeApiError). The 422
@@ -496,6 +503,7 @@ type PreviewActionsProps = {
   onBack: () => void;
   onApply: () => void;
   busy: boolean;
+  applying: boolean;
 };
 
 /**
@@ -505,20 +513,28 @@ type PreviewActionsProps = {
  * alongside the panel's layout pushed the step's cyclomatic complexity past
  * the analyzer's medium-risk threshold.
  *
- * Back is refused while an apply is in flight. Leaving would neither abort nor
- * invalidate the POST: a late success would commit the OLD roster while the
- * operator, already back on Upload, believes the attempt was abandoned — and
- * its setState would land on the Preview step it had left. `busy` clears in
- * the apply's `finally` on success AND failure, so this never traps anyone.
+ * Back is refused while the APPLY is in flight — `applying`, not `busy`.
+ * Leaving would neither abort nor invalidate that POST: a late success would
+ * commit the OLD roster while the operator, already back on Upload, believes
+ * the attempt was abandoned, and its setState would land on the Preview step
+ * it had left. A read-only dry-run carries none of that risk and stays
+ * abandonable. `applying` clears in the apply's `finally` on success AND
+ * failure, so this never traps anyone.
  */
-const PreviewActions = ({ hasErrors, onBack, onApply, busy }: PreviewActionsProps) => {
+const PreviewActions = ({
+  hasErrors,
+  onBack,
+  onApply,
+  busy,
+  applying,
+}: PreviewActionsProps) => {
   return (
     <div className="action-row">
       <button
         className="ghost-button"
         type="button"
-        disabled={busy}
-        title={busy ? APPLY_IN_FLIGHT_NOTE : undefined}
+        disabled={applying}
+        title={applying ? APPLY_IN_FLIGHT_NOTE : undefined}
         onClick={onBack}
       >
         Back
@@ -541,6 +557,7 @@ type PreviewStepProps = {
   onBack: () => void;
   onApply: () => void;
   busy: boolean;
+  applying: boolean;
   error: string | null;
 };
 
@@ -549,7 +566,14 @@ type PreviewStepProps = {
  * ERROR (the API 422s such a plan — all-or-nothing) or while an apply is in
  * flight. A counts strip above the table summarizes the plan's effect.
  */
-const PreviewStep = ({ result, onBack, onApply, busy, error }: PreviewStepProps) => {
+const PreviewStep = ({
+  result,
+  onBack,
+  onApply,
+  busy,
+  applying,
+  error,
+}: PreviewStepProps) => {
   const hasErrors = hasErrorRows(result);
   const rows = result.rows.map(importOutcomeRow);
   return (
@@ -571,6 +595,7 @@ const PreviewStep = ({ result, onBack, onApply, busy, error }: PreviewStepProps)
         onBack={onBack}
         onApply={onApply}
         busy={busy}
+        applying={applying}
       />
     </div>
   );
@@ -650,8 +675,19 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   const [preview, setPreview] = useState<ChannelImportResult | null>(null);
   const [applied, setApplied] = useState<ChannelImportResult | null>(null);
   const [busy, setBusy] = useState(false);
+  // The WRITE half of `busy`. The exits key off this, never off `busy`:
+  // abandoning a read-only dry-run is safe and the flow promises Cancel at any
+  // step, so a slow (or never-settling) preview must not lock the operator in.
+  // Only the apply commits, and only the apply cannot be taken back.
+  const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
+
+  // The exits this component renders are only half the story: the shell's
+  // sidebar sits outside this tree and would unmount the flow regardless
+  // (review #184). The latch releases on deactivation AND on unmount, so a
+  // teardown mid-request cannot strand the shell with navigation disabled.
+  useBlockNavigationWhile(applying, APPLY_IN_FLIGHT_NOTE);
 
   const trimmedReason = reason.trim();
 
@@ -705,6 +741,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     if (!canApplyImport(file, preview)) return;
     inFlightRef.current = true;
     setBusy(true);
+    setApplying(true);
     setError(null);
     try {
       const result = await importChannels({
@@ -720,6 +757,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       handleApplyFailure(caught);
     } finally {
       setBusy(false);
+      setApplying(false);
       inFlightRef.current = false;
     }
   };
@@ -731,10 +769,10 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
 
   // Cancel restores the registry WITHOUT a refetch — unless an apply already
   // committed, in which case the inventory changed and the parent must reload.
-  // It is unreachable while `busy` (ActionStepper disables the control), which
-  // is what keeps that `applied`-null test honest: without the guard, a Cancel
-  // fired mid-apply would take the no-reload path even though the request goes
-  // on to commit, and the parent would restore a stale registry.
+  // It is unreachable while `applying` (ActionStepper disables the control),
+  // which is what keeps that `applied`-null test honest: without the guard, a
+  // Cancel fired mid-apply would take the no-reload path even though the
+  // request goes on to commit, and the parent would restore a stale registry.
   const handleCancel = () => {
     if (applied) onDone();
     else onCancel();
@@ -770,6 +808,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
           onBack={backToUpload}
           onApply={apply}
           busy={busy}
+          applying={applying}
           error={error}
         />
       ) : null;
@@ -784,7 +823,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       steps={IMPORT_STEPS}
       activeIndex={STEP_INDEX[step]}
       onCancel={handleCancel}
-      cancelDisabledReason={busy ? APPLY_IN_FLIGHT_NOTE : undefined}
+      cancelDisabledReason={applying ? APPLY_IN_FLIGHT_NOTE : undefined}
     >
       {renderStepBody()}
     </ActionStepper>
