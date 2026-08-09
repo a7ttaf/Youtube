@@ -190,93 +190,6 @@ const buildSummaryTiles = (
   });
 };
 
-// ---- Root component ---------------------------------------------------------
-
-/**
- * The real-data channel registry view. useChannels() and useOrgUnits() are each
- * called ONCE here and threaded down — a second hook call in a child would
- * duplicate the GET. Row actions set the side-panel targets (Map/Assign) or
- * navigate to Trace (Review).
- */
-export default function RegistryView({ // skipcq: JS-0067
-  canManageRegistry,
-  canViewFinance,
-  onOpenTrace,
-}: {
-  canManageRegistry: boolean;
-  canViewFinance: boolean;
-  onOpenTrace?: (channelId: string) => void;
-}) {
-  const channelState = useChannels();
-  const orgUnitState = useOrgUnits();
-  // Fresh object per click (not a bare id): the panels' effects key on object
-  // identity, so re-clicking the SAME row still re-presets the form and clears
-  // any stale success/error note from a previous action.
-  const [mapPreset, setMapPreset] = useState<{ channelId: string } | null>(null);
-  const [assignContext, setAssignContext] =
-    useState<{ channel: ChannelRegistryEntry } | null>(null);
-
-  const unitsById = useMemo(
-    () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
-    [orgUnitState.data],
-  );
-  const companies = useMemo(
-    () =>
-      (orgUnitState.data ?? []).filter((unit) => unit.type === "COMPANY"),
-    [orgUnitState.data],
-  );
-
-  const summaryTiles = buildSummaryTiles(
-    channelState.data,
-    channelState.loading,
-    REGISTRY_SUMMARY,
-  );
-
-  const onMap = useCallback(
-    (ch: ChannelRegistryEntry) =>
-      setMapPreset({ channelId: ch.youtube_channel_id }),
-    [],
-  );
-  const onAssign = useCallback(
-    (ch: ChannelRegistryEntry) => setAssignContext({ channel: ch }),
-    [],
-  );
-  const onReview = useCallback(
-    (ch: ChannelRegistryEntry) => onOpenTrace?.(ch.youtube_channel_id),
-    [onOpenTrace],
-  );
-
-  return (
-    <section className="view-page" aria-labelledby="registryTitle">
-      <div className="view-summary" aria-label="Registry summary">
-        {summaryTiles.map((s) => (
-          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
-        ))}
-      </div>
-
-      <div className="view-grid wide-side">
-        <RegistryMainPanel
-          canManageRegistry={canManageRegistry}
-          channelState={channelState}
-          unitsById={unitsById}
-          hasTraceNav={Boolean(onOpenTrace)}
-          onMap={onMap}
-          onAssign={onAssign}
-          onReview={onReview}
-        />
-        <RegistrySidePanels
-          canManageRegistry={canManageRegistry}
-          channels={channelState.data ?? []}
-          companies={companies}
-          mapPreset={mapPreset}
-          assignContext={assignContext}
-          onMutated={channelState.reload}
-        />
-      </div>
-    </section>
-  );
-}
-
 type ChannelAsyncState = ReturnType<typeof useChannels>;
 
 type RowActions = {
@@ -286,33 +199,8 @@ type RowActions = {
   onReview: (ch: ChannelRegistryEntry) => void;
 };
 
-/** The registry main panel: header + mapping band + registry table. */
-function RegistryMainPanel({ // skipcq: JS-0067
-  canManageRegistry,
-  channelState,
-  unitsById,
-  ...rowActions
-}: {
-  canManageRegistry: boolean;
-  channelState: ChannelAsyncState;
-  unitsById: Map<string, OrgUnit>;
-} & RowActions) {
-  return (
-    <section className="panel">
-      <RegistryPanelHeader />
-      <RegistryMappingBand canManageRegistry={canManageRegistry} />
-      <RegistryTable
-        canManageRegistry={canManageRegistry}
-        channelState={channelState}
-        unitsById={unitsById}
-        {...rowActions}
-      />
-    </section>
-  );
-}
-
 /** Registry panel header: title/subtitle and the bulk-import action. */
-function RegistryPanelHeader() { // skipcq: JS-0067
+const RegistryPanelHeader = () => {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -327,10 +215,10 @@ function RegistryPanelHeader() { // skipcq: JS-0067
       </div>
     </div>
   );
-}
+};
 
 /** Finance-visible mapping band; the scope badge reflects registry-edit access. */
-function RegistryMappingBand({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
+const RegistryMappingBand = ({ canManageRegistry }: { canManageRegistry: boolean }) => {
   return (
     <div className="permission-band">
       <Dot tone="green" />
@@ -343,10 +231,10 @@ function RegistryMappingBand({ canManageRegistry }: { canManageRegistry: boolean
       </Badge>
     </div>
   );
-}
+};
 
 /** Column header row. Extracted to keep nesting shallow. */
-function RegistryTableHead() { // skipcq: JS-0067
+const RegistryTableHead = () => {
   return (
     <thead>
       <tr>
@@ -355,16 +243,16 @@ function RegistryTableHead() { // skipcq: JS-0067
       </tr>
     </thead>
   );
-}
+};
 
 /** Single-row message cell inside the registry table shell (loading, error, empty). */
-function RegistryTableMessageRow({ // skipcq: JS-0067
+const RegistryTableMessageRow = ({
   title,
   sub,
 }: {
   title: string;
   sub: string;
-}) {
+}) => {
   return (
     <tr>
       <td colSpan={8}>
@@ -373,10 +261,10 @@ function RegistryTableMessageRow({ // skipcq: JS-0067
       </td>
     </tr>
   );
-}
+};
 
 /** Error message row for the registry table; extracted to keep RegistryTable CC low. */
-function registryErrorRow(error: unknown) { // skipcq: JS-0067
+const registryErrorRow = (error: unknown) => {
   const is403 = error instanceof ApiError && error.status === 403;
   return (
     <RegistryTableMessageRow
@@ -388,7 +276,97 @@ function registryErrorRow(error: unknown) { // skipcq: JS-0067
       }
     />
   );
-}
+};
+
+/** Channel cell: avatar + name + channel ID stacked. */
+const RegistryChannelCell = ({
+  name,
+  code,
+  avatar,
+}: {
+  name: string;
+  code: string;
+  avatar: string;
+}) => {
+  return (
+    <td>
+      <span className="channel-cell">
+        <span className="avatar">{avatar}</span>
+        <span>
+          <span className="channel-name">{name}</span>
+          <span className="channel-id">{code}</span>
+        </span>
+      </span>
+    </td>
+  );
+};
+
+/** A single channel registry row; derives all display fields from the API shape. */
+const RegistryRow = ({
+  channel: ch,
+  canManageRegistry,
+  unitsById,
+  hasTraceNav,
+  onMap,
+  onAssign,
+  onReview,
+}: {
+  channel: ChannelRegistryEntry;
+  canManageRegistry: boolean;
+  unitsById: Map<string, OrgUnit>;
+} & RowActions) => {
+  const avatar = avatarFromName(ch.channel_name);
+  const cms = cmsBadge(ch.cms_status);
+  const state = deriveState(ch);
+  const action = deriveAction(state, ch);
+  const node = traceKey(ch);
+
+  // Map/Assign are write affordances (capability-gated; backend authorizes);
+  // Review is read-only navigation and stays enabled whenever nav is wired.
+  const isWriteAction = action !== "Review";
+  const disabled = isWriteAction ? !canManageRegistry : !hasTraceNav;
+  /** Route the row click to the Map, Assign, or Review handler for this channel. */
+  const onClick = () => {
+    if (action === "Map") {
+      onMap(ch);
+    } else if (action === "Assign") {
+      onAssign(ch);
+    } else {
+      onReview(ch);
+    }
+  };
+
+  return (
+    <tr>
+      <RegistryChannelCell
+        name={ch.channel_name}
+        code={ch.youtube_channel_id}
+        avatar={avatar}
+      />
+      {/* Company/Sector: org-unit display names with honest raw-id fallback. */}
+      <td>{companyLabel(ch, unitsById)}</td>
+      <td>{sectorLabel(ch, unitsById)}</td>
+      <td><Badge tone={cms.tone}>{cms.text}</Badge></td>
+      <td>{sourceLabel(ch.revenue_source_status)}</td>
+      <td>
+        <span className="code-chip">
+          {canManageRegistry ? node : RESTRICTED_FINANCE_VALUE}
+        </span>
+      </td>
+      <td><Badge tone={state.tone}>{state.text}</Badge></td>
+      <td>
+        <button
+          className="mini-button"
+          type="button"
+          disabled={disabled}
+          onClick={onClick}
+        >
+          {action}
+        </button>
+      </td>
+    </tr>
+  );
+};
 
 /**
  * Channel registry data table. Receives the shared channelState and org-unit
@@ -396,7 +374,7 @@ function registryErrorRow(error: unknown) { // skipcq: JS-0067
  * no-permission row), empty, and loaded states. Trace keys stay withheld from
  * non-registry viewers (fail-closed: RESTRICTED_FINANCE_VALUE).
  */
-function RegistryTable({ // skipcq: JS-0067
+const RegistryTable = ({
   canManageRegistry,
   channelState,
   unitsById,
@@ -405,7 +383,7 @@ function RegistryTable({ // skipcq: JS-0067
   canManageRegistry: boolean;
   channelState: ChannelAsyncState;
   unitsById: Map<string, OrgUnit>;
-} & RowActions) {
+} & RowActions) => {
   const { data: channels, error } = channelState;
 
   if (error) {
@@ -469,150 +447,89 @@ function RegistryTable({ // skipcq: JS-0067
       </table>
     </div>
   );
-}
+};
 
-/** A single channel registry row; derives all display fields from the API shape. */
-function RegistryRow({ // skipcq: JS-0067
-  channel: ch,
+/** The registry main panel: header + mapping band + registry table. */
+const RegistryMainPanel = ({
   canManageRegistry,
+  channelState,
   unitsById,
-  hasTraceNav,
-  onMap,
-  onAssign,
-  onReview,
+  ...rowActions
 }: {
-  channel: ChannelRegistryEntry;
   canManageRegistry: boolean;
+  channelState: ChannelAsyncState;
   unitsById: Map<string, OrgUnit>;
-} & RowActions) {
-  const avatar = avatarFromName(ch.channel_name);
-  const cms = cmsBadge(ch.cms_status);
-  const state = deriveState(ch);
-  const action = deriveAction(state, ch);
-  const node = traceKey(ch);
-
-  // Map/Assign are write affordances (capability-gated; backend authorizes);
-  // Review is read-only navigation and stays enabled whenever nav is wired.
-  const isWriteAction = action !== "Review";
-  const disabled = isWriteAction ? !canManageRegistry : !hasTraceNav;
-  /** Route the row click to the Map, Assign, or Review handler for this channel. */
-  const onClick = () => {
-    if (action === "Map") onMap(ch);
-    else if (action === "Assign") onAssign(ch);
-    else onReview(ch);
-  };
-
+} & RowActions) => {
   return (
-    <tr>
-      <RegistryChannelCell
-        name={ch.channel_name}
-        code={ch.youtube_channel_id}
-        avatar={avatar}
-      />
-      {/* Company/Sector: org-unit display names with honest raw-id fallback. */}
-      <td>{companyLabel(ch, unitsById)}</td>
-      <td>{sectorLabel(ch, unitsById)}</td>
-      <td><Badge tone={cms.tone}>{cms.text}</Badge></td>
-      <td>{sourceLabel(ch.revenue_source_status)}</td>
-      <td>
-        <span className="code-chip">
-          {canManageRegistry ? node : RESTRICTED_FINANCE_VALUE}
-        </span>
-      </td>
-      <td><Badge tone={state.tone}>{state.text}</Badge></td>
-      <td>
-        <button
-          className="mini-button"
-          type="button"
-          disabled={disabled}
-          onClick={onClick}
-        >
-          {action}
-        </button>
-      </td>
-    </tr>
-  );
-}
-
-/** Channel cell: avatar + name + channel ID stacked. */
-function RegistryChannelCell({ // skipcq: JS-0067
-  name,
-  code,
-  avatar,
-}: {
-  name: string;
-  code: string;
-  avatar: string;
-}) {
-  return (
-    <td>
-      <span className="channel-cell">
-        <span className="avatar">{avatar}</span>
-        <span>
-          <span className="channel-name">{name}</span>
-          <span className="channel-id">{code}</span>
-        </span>
-      </span>
-    </td>
-  );
-}
-
-/** Registry side panels: the live mapping-change form, the account-link proposal form, and registry controls. */
-function RegistrySidePanels({ // skipcq: JS-0067
-  canManageRegistry,
-  channels,
-  companies,
-  mapPreset,
-  assignContext,
-  onMutated,
-}: {
-  canManageRegistry: boolean;
-  channels: ChannelRegistryEntry[];
-  companies: OrgUnit[];
-  mapPreset: { channelId: string } | null;
-  assignContext: { channel: ChannelRegistryEntry } | null;
-  onMutated: () => void;
-}) {
-  return (
-    <aside className="view-stack" aria-label="Registry side panels">
-      <MappingChangeRequestPanel
+    <section className="panel">
+      <RegistryPanelHeader />
+      <RegistryMappingBand canManageRegistry={canManageRegistry} />
+      <RegistryTable
         canManageRegistry={canManageRegistry}
-        channels={channels}
-        companies={companies}
-        preset={mapPreset}
-        onMapped={onMutated}
+        channelState={channelState}
+        unitsById={unitsById}
+        {...rowActions}
       />
-      <AccountLinkProposalPanel
-        canManageRegistry={canManageRegistry}
-        context={assignContext}
-        onProposed={onMutated}
-      />
-      <RegistryControlsPanel />
-    </aside>
+    </section>
   );
-}
+};
 
-/** Guard + field check for the mapping submission; extracted to keep MappingChangeRequestPanel CC low. */
-function isMappingSubmittable( // skipcq: JS-0067
+// ============================================================================
+// Purpose: Guard + field check for the channel-mapping submission — the
+//   operator holds the registry capability, no submit is in flight, and the
+//   channel id, company id, and audited reason are all non-blank. Extracted to
+//   keep MappingChangeRequestPanel's cyclomatic complexity below the DeepSource
+//   medium-risk threshold.
+// Database/ORM: None (frontend) — a pure predicate over resolved form state.
+// Standards: No client-side authorization is invented. `canManageRegistry` is a
+//   backend-derived capability, so this gates the affordance only and the
+//   backend's dual MANAGE_ORG_MAPPING check stays authoritative. The reason
+//   arrives already trimmed, so whitespace cannot pass as a supplied value.
+//   Side-effect free and total.
+// Blast Radius: Registry write + audit — a submit PATCHes a channel's org
+//   mapping, which moves the channel between company/sector rollups and so
+//   changes which principals can see its revenue downstream. This predicate is
+//   what keeps a blank audited reason or an unset channel/company from reaching
+//   PATCH /channels/{id}/mapping. It is a usability gate, not the authorization
+//   boundary — and not the double-submit guard either: `busy` is React state, so
+//   both clicks of a same-tick double-click read it as false off the same
+//   render. The synchronous inFlightRef latch in the panel's submit is what
+//   actually drops the second PATCH; `busy` only keeps the control disabled
+//   across the renders that follow.
+// Connections: channels.py update_channel_mapping (authoritative gate + audited
+//   write), MappingChangeRequestPanel (owns `busy`, the reason, and the latch).
+//   - File: backend/ums_smart_revenue/api/channels.py:1123
+//     update_channel_mapping -> the authoritative permission check and the
+//     audited mapping write.
+//   - File: frontend/src/lib/api/useChannelMapping.ts:27
+//     useChannelMappingAction -> owns the PATCH this predicate gates.
+//   - File: frontend/src/components/srcc/views/RegistryView.tsx ->
+//     MappingChangeRequestPanel's inFlightRef (declared beside its useState
+//     block, latched in submit) is the real same-tick double-submit guard.
+//     `busy` is that panel's own useState, not something the hook owns. Named
+//     by symbol, not line: this pointer is into its own file, so any edit
+//     above it would silently invalidate a line number.
+// ============================================================================
+const isMappingSubmittable = (
   canManageRegistry: boolean,
   busy: boolean,
   channelId: string,
   companyId: string,
   trimmedReason: string,
-): boolean {
+): boolean => {
   return (
     canManageRegistry && !busy &&
     channelId !== "" && companyId !== "" && trimmedReason !== ""
   );
-}
+};
 
 /** True when the preset channelId is not present in the loaded channel list. */
-function isMissingSelectedChannel( // skipcq: JS-0067
+const isMissingSelectedChannel = (
   channelId: string,
   channels: ChannelRegistryEntry[],
-): boolean {
+): boolean => {
   return channelId !== "" && !channels.some((ch) => ch.youtube_channel_id === channelId);
-}
+};
 
 // ============================================================================
 // Purpose: LIVE mapping-change form — submits PATCH /channels/{id}/mapping
@@ -629,7 +546,7 @@ function isMissingSelectedChannel( // skipcq: JS-0067
 //   retry. canManageRegistry disables inputs; the backend dual
 //   MANAGE_ORG_MAPPING check stays the authority.
 // ============================================================================
-function MappingChangeRequestPanel({ // skipcq: JS-0067
+const MappingChangeRequestPanel = ({
   canManageRegistry,
   channels,
   companies,
@@ -641,7 +558,7 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067
   companies: OrgUnit[];
   preset: { channelId: string } | null;
   onMapped: () => void;
-}) {
+}) => {
   const [channelId, setChannelId] = useState("");
   const [companyId, setCompanyId] = useState("");
   const [reason, setReason] = useState("");
@@ -777,12 +694,57 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067
       </div>
     </section>
   );
-}
+};
 
 /** Current month as YYYY-MM for the proposal default (operator can change it). */
 const currentMonth = (): string => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+};
+
+/** May the operator act on the proposal form at all (permission held, no submit in flight)? */
+const canActOnProposal = (canManageRegistry: boolean, busy: boolean): boolean =>
+  canManageRegistry && !busy;
+
+// ============================================================================
+// Purpose: Guard + field check for the account-link proposal submission — the
+//   operator holds the registry capability, no submit is in flight, and the
+//   AdSense account id, content-owner id, effective month, and audited reason
+//   are all non-blank. Extracted to keep AccountLinkProposalPanel's cyclomatic
+//   complexity below the DeepSource medium-risk threshold.
+// Database/ORM: None (frontend) — a pure predicate over resolved form state.
+// Standards: No client-side authorization is invented. `canManageRegistry` is a
+//   backend-derived capability, so this gates the affordance only and the
+//   backend's MANAGE_ORG_MAPPING@global check stays authoritative. Ids and
+//   reason are checked after trimming, so whitespace never passes as supplied.
+//   Side-effect free and total.
+// Blast Radius: Finance map write + audit — a proposal inserts an UNVERIFIED
+//   AdSense-account to content-owner link. This predicate is what keeps a blank
+//   audited reason or a whitespace-only identifier from reaching
+//   POST /revenue/channel-account-links, and the busy half of canActOnProposal
+//   is what stops a double-click filing a duplicate proposal. It cannot create
+//   a VERIFIED link — verification is a separate dual-gated admin flow.
+// Connections: channel_account_links.py propose_channel_account_link
+//   (authoritative gate + audited insert), canActOnProposal (local half).
+//   - File: backend/ums_smart_revenue/api/channel_account_links.py:275
+//     propose_channel_account_link -> the authoritative permission gate and the
+//     audited insert.
+//   - File: frontend/src/components/srcc/views/RegistryView.tsx ->
+//     canActOnProposal supplies the capability + in-flight half.
+// ============================================================================
+const isProposalSubmittable = (
+  canManageRegistry: boolean,
+  busy: boolean,
+  adsenseAccountId: string,
+  contentOwnerId: string,
+  effectiveMonthStart: string,
+  reason: string,
+): boolean => {
+  return (
+    canActOnProposal(canManageRegistry, busy) && adsenseAccountId.trim() !== "" &&
+    contentOwnerId.trim() !== "" && effectiveMonthStart !== "" &&
+    reason.trim() !== ""
+  );
 };
 
 // ============================================================================
@@ -796,7 +758,7 @@ const currentMonth = (): string => {
 //   reason, in-flight ref latch, inline typed errors, reload on success).
 //   Backend gate: MANAGE_ORG_MAPPING@global.
 // ============================================================================
-function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
+const AccountLinkProposalPanel = ({
   canManageRegistry,
   context,
   onProposed,
@@ -804,7 +766,7 @@ function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
   canManageRegistry: boolean;
   context: { channel: ChannelRegistryEntry } | null;
   onProposed: () => void;
-}) {
+}) => {
   const [adsenseAccountId, setAdsenseAccountId] = useState("");
   const [contentOwnerId, setContentOwnerId] = useState("");
   const [effectiveMonthStart, setEffectiveMonthStart] = useState(currentMonth);
@@ -830,10 +792,10 @@ function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
     }
   }, [context]);
 
-  const canSubmit =
-    canManageRegistry && !busy && adsenseAccountId.trim() !== "" &&
-    contentOwnerId.trim() !== "" && effectiveMonthStart !== "" &&
-    reason.trim() !== "";
+  const canSubmit = isProposalSubmittable(
+    canManageRegistry, busy, adsenseAccountId, contentOwnerId,
+    effectiveMonthStart, reason,
+  );
 
   /** Submit the account-link proposal POST; latched against concurrent double-clicks. */
   const submit = async () => {
@@ -942,10 +904,10 @@ function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
       </div>
     </section>
   );
-}
+};
 
 /** The registry-controls panel listing the expected production behaviors. */
-function RegistryControlsPanel() { // skipcq: JS-0067
+const RegistryControlsPanel = () => {
   return (
     <section className="panel">
       <div className="panel-header">
@@ -967,4 +929,128 @@ function RegistryControlsPanel() { // skipcq: JS-0067
       </div>
     </section>
   );
-}
+};
+
+/** Registry side panels: the live mapping-change form, the account-link proposal form, and registry controls. */
+const RegistrySidePanels = ({
+  canManageRegistry,
+  channels,
+  companies,
+  mapPreset,
+  assignContext,
+  onMutated,
+}: {
+  canManageRegistry: boolean;
+  channels: ChannelRegistryEntry[];
+  companies: OrgUnit[];
+  mapPreset: { channelId: string } | null;
+  assignContext: { channel: ChannelRegistryEntry } | null;
+  onMutated: () => void;
+}) => {
+  return (
+    <aside className="view-stack" aria-label="Registry side panels">
+      <MappingChangeRequestPanel
+        canManageRegistry={canManageRegistry}
+        channels={channels}
+        companies={companies}
+        preset={mapPreset}
+        onMapped={onMutated}
+      />
+      <AccountLinkProposalPanel
+        canManageRegistry={canManageRegistry}
+        context={assignContext}
+        onProposed={onMutated}
+      />
+      <RegistryControlsPanel />
+    </aside>
+  );
+};
+
+// ---- Root component ---------------------------------------------------------
+
+/**
+ * The real-data channel registry view. useChannels() and useOrgUnits() are each
+ * called ONCE here and threaded down — a second hook call in a child would
+ * duplicate the GET. Row actions set the side-panel targets (Map/Assign) or
+ * navigate to Trace (Review).
+ */
+const RegistryView = ({
+  canManageRegistry,
+  canViewFinance,
+  onOpenTrace,
+}: {
+  canManageRegistry: boolean;
+  canViewFinance: boolean;
+  onOpenTrace?: (channelId: string) => void;
+}) => {
+  const channelState = useChannels();
+  const orgUnitState = useOrgUnits();
+  // Fresh object per click (not a bare id): the panels' effects key on object
+  // identity, so re-clicking the SAME row still re-presets the form and clears
+  // any stale success/error note from a previous action.
+  const [mapPreset, setMapPreset] = useState<{ channelId: string } | null>(null);
+  const [assignContext, setAssignContext] =
+    useState<{ channel: ChannelRegistryEntry } | null>(null);
+
+  const unitsById = useMemo(
+    () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
+    [orgUnitState.data],
+  );
+  const companies = useMemo(
+    () =>
+      (orgUnitState.data ?? []).filter((unit) => unit.type === "COMPANY"),
+    [orgUnitState.data],
+  );
+
+  const summaryTiles = buildSummaryTiles(
+    channelState.data,
+    channelState.loading,
+    REGISTRY_SUMMARY,
+  );
+
+  const onMap = useCallback(
+    (ch: ChannelRegistryEntry) =>
+      setMapPreset({ channelId: ch.youtube_channel_id }),
+    [],
+  );
+  const onAssign = useCallback(
+    (ch: ChannelRegistryEntry) => setAssignContext({ channel: ch }),
+    [],
+  );
+  const onReview = useCallback(
+    (ch: ChannelRegistryEntry) => onOpenTrace?.(ch.youtube_channel_id),
+    [onOpenTrace],
+  );
+
+  return (
+    <section className="view-page" aria-labelledby="registryTitle">
+      <div className="view-summary" aria-label="Registry summary">
+        {summaryTiles.map((s) => (
+          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
+        ))}
+      </div>
+
+      <div className="view-grid wide-side">
+        <RegistryMainPanel
+          canManageRegistry={canManageRegistry}
+          channelState={channelState}
+          unitsById={unitsById}
+          hasTraceNav={Boolean(onOpenTrace)}
+          onMap={onMap}
+          onAssign={onAssign}
+          onReview={onReview}
+        />
+        <RegistrySidePanels
+          canManageRegistry={canManageRegistry}
+          channels={channelState.data ?? []}
+          companies={companies}
+          mapPreset={mapPreset}
+          assignContext={assignContext}
+          onMutated={channelState.reload}
+        />
+      </div>
+    </section>
+  );
+};
+
+export default RegistryView;
