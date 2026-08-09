@@ -911,7 +911,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     );
   };
 
-  it("settles an indeterminate apply by re-planning: all-UNCHANGED means it landed", async () => {
+  it("settles an indeterminate apply by re-planning: reports the state it can prove", async () => {
     // The way OUT of "unknown", using the endpoint the flow already has. The
     // apply is ONE all-or-nothing transaction, so an all-UNCHANGED re-plan is
     // decisive: the roster IS the registry, therefore the write committed.
@@ -934,10 +934,20 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     fireEvent.click(screen.getByRole("button", { name: /check whether it landed/iu }));
 
     await waitFor(() =>
-      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+      expect(screen.getByText(/registry now matches this roster/i)).toBeInTheDocument(),
     );
     // The reconciliation used the DRY RUN, so nothing was written to find out.
     expect(importPosts()[2].get("dry_run")).toBe("true");
+
+    // It reports the STATE, not authorship: inventory equality cannot prove
+    // that THIS request committed (the apply may never have reached the
+    // backend while another writer landed the same values), so the flow does
+    // not advance to a step that claims "your import was applied", and it
+    // points at the audit trail instead.
+    expect(screen.queryByRole("group", { name: "Import applied" })).not.toBeInTheDocument();
+    expect(screen.getByText(/check the Audit view/i)).toBeInTheDocument();
+    // Apply stays refused, so no duplicate CHANNEL_IMPORTED is possible.
+    expect(screen.getByRole("button", { name: /^apply$/i })).toBeDisabled();
   });
 
   it("will not call a group-bearing roster applied on an all-UNCHANGED re-plan", async () => {

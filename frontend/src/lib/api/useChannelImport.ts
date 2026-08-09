@@ -42,12 +42,33 @@ import type { ChannelImportResult } from "@/lib/api/types";
  *
  *   `row_number` — the preview's React key; a missing one collides.
  *   `outcome`    — selects the row chip and the ERROR tone.
- *   `changes`    — rendered with Object.entries, so a missing one throws.
+ *   `changes`    — a RECORD of from/to pairs; the renderer reads both
+ *                  sides of every value, so an array or a null entry
+ *                  throws just as surely as a missing map.
  */
+const isFieldChange = (value: unknown): boolean => {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  return "from" in value && "to" in value;
+};
+
+/**
+ * `changes` must be a RECORD of from/to pairs, not merely a non-null object.
+ * An array, or `{cms_status: null}`, satisfies `typeof === "object"` and then
+ * throws downstream where the renderer reads `change.from` (review #184).
+ */
+const isChangeMap = (value: unknown): boolean => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  return Object.values(value).every(isFieldChange);
+};
+
 const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
   ["row_number", (value) => typeof value === "number"],
   ["outcome", (value) => typeof value === "string"],
-  ["changes", (value) => typeof value === "object" && value !== null],
+  ["changes", isChangeMap],
 ];
 
 const isPlanRow = (row: unknown): boolean => {

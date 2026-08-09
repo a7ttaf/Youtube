@@ -614,26 +614,23 @@ const APPLY_INDETERMINATE_NOTE =
   "before importing again.";
 
 /**
- * Does this refreshed plan PROVE the earlier apply committed?
+ * Does the registry now MATCH this roster?
  *
+ * Note what this is not: proof that the operator's own apply committed.
+ * Inventory equality cannot establish authorship — the request may never have
+ * reached the backend while another writer landed the same values, and a
+ * roster can even preview as all-UNCHANGED before any apply at all. Nothing
+ * reachable from this endpoint carries a durable import identity, so the flow
+ * reports the STATE it can prove and points at the audit trail for the event.
+ * (A `CHANNEL_IMPORTED` identity to reconcile against is the open API-surface
+ * question flagged to the owner on this PR.)
+ *
+ * Rows carrying group keys are excluded from even that weaker claim, because
  * `outcome` is computed from channel INVENTORY only — the planner never loads
- * group memberships — so all-UNCHANGED alone is not proof for a roster that
- * carries group keys: the channels can already match while the membership
- * attachments the same import owed are still missing, and calling that
- * "applied" would report a half-written import as done (review #184).
- *
- * So the verdict is deliberately narrow: every row UNCHANGED **and** no row
- * claiming a group effect at all. Within that shape the plan really is
- * decisive, because the apply is ONE all-or-nothing transaction — the roster
- * being the registry can only be true of a committed write.
- *
- * A group-bearing roster therefore never auto-settles here. That is the
- * fail-closed answer, not a gap: `group_action` is derived from whether the
- * GROUP exists, not from whether the MEMBERSHIP does, so it cannot
- * distinguish "already attached" from "still owed" and any verdict built on
- * it would be a guess.
+ * memberships — so the channels can match while the attachments the same
+ * import owed are still missing.
  */
-const isAlreadyApplied = (plan: ChannelImportResult): boolean => {
+const rosterMatchesRegistry = (plan: ChannelImportResult): boolean => {
   return plan.rows.every((row) => row.outcome === "UNCHANGED" && row.group_id === null);
 };
 
@@ -660,6 +657,17 @@ const RECONCILE_GROUPS_UNVERIFIABLE_NOTE =
   "The channels in this roster already match the registry, but it also " +
   "assigns groups, and a re-plan cannot tell whether those memberships were " +
   "attached. Check the Groups view before importing again.";
+
+/**
+ * Copy for a re-plan showing the registry already matches the roster. Says
+ * what is proven (the end state) and where the answer to "was it MY import"
+ * actually lives (the audit trail) — rather than claiming an authorship this
+ * check cannot establish.
+ */
+const RECONCILE_MATCHES_NOTE =
+  "The registry now matches this roster, so there is nothing left to apply. " +
+  "This shows the end state, not which request produced it — check the Audit " +
+  "view for the import event if you need to confirm yours was recorded.";
 
 /** Copy for a reconciliation attempt with no roster left to re-plan. */
 const RECONCILE_NO_ROSTER_NOTE =
@@ -992,7 +1000,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
    */
   const settleFromReplan = (refreshed: ChannelImportResult) => {
     setPreview(refreshed);
-    if (!isAlreadyApplied(refreshed)) {
+    if (!rosterMatchesRegistry(refreshed)) {
       setError(
         hasUnverifiableGroupEffects(refreshed)
           ? RECONCILE_GROUPS_UNVERIFIABLE_NOTE
@@ -1000,12 +1008,13 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       );
       return;
     }
-    // Settled: the roster IS the registry, so this is no longer unknown.
-    // Clearing `indeterminate` re-arms Apply, which is correct — a further
-    // apply would now be a no-op re-import, not a blind duplicate write.
-    setIndeterminate(false);
-    setApplied(refreshed);
-    setStep("applied");
+    // The registry matches the roster — the operationally important fact, and
+    // the strongest one available here. The flow deliberately does NOT
+    // advance to Applied: that step reports "your import was applied", and
+    // inventory equality cannot establish that THIS request is what did it.
+    // Apply stays disabled, so a duplicate CHANNEL_IMPORTED is still
+    // impossible, and Cancel reloads the registry.
+    setError(RECONCILE_MATCHES_NOTE);
   };
 
   const reconcileIndeterminate = async () => {

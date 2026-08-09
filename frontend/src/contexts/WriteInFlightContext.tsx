@@ -19,9 +19,14 @@ import {
 // Standards: The latch stores the operator REASON, not a boolean: whatever
 //   blocks navigation must be able to say why, and a null/non-null string
 //   cannot drift out of sync with its explanation the way a separate
-//   boolean + message pair can. Arming is effect-driven and self-releasing —
-//   useBlockNavigationWhile clears on deactivation AND on unmount, so a flow
-//   torn down mid-request can never leave the shell permanently locked.
+//   boolean + message pair can. Arming is IMPERATIVE, not effect-driven:
+//   useWriteInFlightControl exposes arm()/release() that a flow calls on the
+//   same tick it dispatches its request. An effect would arm one commit LATE,
+//   leaving a window in which the POST is running and the sidebar is still
+//   clickable — the exact hole this latch exists to close, so do not "tidy"
+//   it back into a declarative hook. Effects are used only for UNMOUNT
+//   cleanup, which releases a flow torn down mid-request so the shell can
+//   never be left permanently locked.
 //   "No provider" is modelled as a null context rather than a stand-in object
 //   holding a do-nothing setter: absence is a real state worth naming, and
 //   both hooks read it as "make no claim, block nothing", so a component
