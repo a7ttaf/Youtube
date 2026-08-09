@@ -212,7 +212,11 @@ if ! script_exists "test" && ! script_exists "test:unit"; then
   if [ -n "$ORPHAN_TESTS" ]; then
     echo "Workspace ${CI_GATE_NODE_WORKSPACE} ships tests but defines no 'test' or 'test:unit' script."
     echo "  These would never run:"
-    printf '    %s\n' $ORPHAN_TESTS
+    # Read line by line: a path with a space is one file, not two.
+    while IFS= read -r _orphan; do
+      [ -n "$_orphan" ] || continue
+      echo "    $_orphan"
+    done <<< "$ORPHAN_TESTS"
     echo "  Restore the script in package.json, or remove the tests."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
   fi

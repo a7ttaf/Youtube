@@ -191,6 +191,18 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "node lane: an orphaned test path with a space is reported as one file" {
+  ws_setup
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/tests/my component.test.ts"
+  rm -f "$NODE_SB/ws/tests/a.test.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"my component.test.ts"* ]]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: a test script satisfies the requirement" {
   ws_setup
   ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
