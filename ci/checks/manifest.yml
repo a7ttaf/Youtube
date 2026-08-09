@@ -41,6 +41,19 @@ checks:
     pre_commit: false
     timeout_sec: 30
 
+  # languages: [] on purpose. A test file in the wrong place is silently
+  # skipped by vitest's include rather than failing, so this must not be
+  # gated behind language detection. The scan is a filesystem walk of two
+  # directories and costs milliseconds.
+  - id: test-layout
+    script: ci/checks/test-layout.sh
+    description: "Frontend test files live under frontend/tests/ and match the declared vitest include"
+    languages: []
+    severity: blocker
+    phase: hygiene
+    pre_commit: true
+    timeout_sec: 30
+
   - id: secrets
     script: ci/checks/secrets.sh
     description: "Secret/credential scanning with gitleaks + regex fallback"

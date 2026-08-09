@@ -165,7 +165,17 @@ desktop.ini
 # The Python-convention lib/ rule above must not suppress frontend source.
 !frontend/src/lib/
 !frontend/src/lib/**
+# ...nor frontend tests, which mirror src/ and so also have a lib/ segment.
+# Without this a new frontend/tests/lib/*.test.ts is silently untracked:
+# never committed, never run, with nothing on screen to say so.
+# The directory must be re-included before its contents; git cannot
+# re-include a path whose parent directory is still excluded.
+!frontend/tests/lib/
+!frontend/tests/lib/**
 node_modules/
+# Generated dependency-cache fingerprints written by ci/checks/node.sh
+# and ci/checks/python.sh.
+.ci-gate/
 .next/
 out/
 build/

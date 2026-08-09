@@ -679,6 +679,45 @@ single P-tier above.
   surviving automation:** the vendored `ci/` gate, Dependabot, and a single
   Claude Code (`@claude`) GitHub Action workflow (PR #107) — the only file in
   `.github/workflows/` today.
+- ✅ Frontend test layout unified + the JS gate lanes switched on (2026-08-09,
+  branch `opus/peaceful-gauss-2bf1e6`) — the suite had been split between 35
+  co-located `src/**/__tests__/` files and 3 under `frontend/tests/`, and Qodo
+  compliance rule 1052070 ("place all automated test files under the top-level
+  `tests/` directory") fired on every PR touching a co-located one. **All 35
+  moved into `frontend/tests/`**, mirroring `src/` minus the `__tests__`
+  segment. Pure `git mv`: every test imports through the `@/` alias, so there
+  were **zero** relative-import fixes and zero content edits — 314 tests passed
+  identically before and after. `test.include` in `vitest.config.ts` now
+  *declares* the layout. **But `include` alone makes things worse, not better**:
+  a test file outside the glob stops being collected and passes by never
+  running. Verified, not assumed — a `tests/lib/silentSkip.spec.tsx` asserting
+  `1 === 2` was added and the suite still reported 314 passed. So the layout is
+  enforced by a new **`ci/checks/test-layout.sh`** (manifest `test-layout`,
+  blocker/hygiene/pre-commit, `languages: []` so it cannot be skipped by
+  language detection) which fails on four conditions: a test outside
+  `frontend/tests/`, a lingering `__tests__/` dir, a file in the right tree with
+  a suffix the glob misses (`*.spec.tsx`), and the `include` being removed from
+  the config. Each of the four was exercised and observed to exit 20.
+  **Rode along — the JS lanes were dead.** `ci/checks/tests.sh`,
+  `ci/checks/typecheck.sh` and `ci/checks/node.sh` all `cd` to the repo root and
+  bail on a missing root `package.json`/`tsconfig.json`; this repo keeps both in
+  `frontend/`, so **no frontend test or type-check had ever run in the gate** —
+  `tests-js` and `typecheck-js` are manifest blockers that were silently passing
+  by skipping. New `ci::common::node_workspaces <manifest>` resolves workspaces
+  (root-manifest repos still resolve to `.` and behave exactly as before); all
+  three lanes iterate it. The lanes invoke `node_modules/.bin/` **directly**
+  rather than via `npx`, because npx walks up out of the workspace when bun's
+  Windows shims (`vitest.exe`/`.bunx`) don't match the names it expects — in
+  this checkout it found a different Vitest major against a different Vite and
+  produced ~160 phantom failures indistinguishable from real breakage. Lanes now
+  green: 38 files / 314 tests via JUnit, `tsc --noEmit` clean, `vite build` ok.
+  Also fixed: the Python-convention `lib/` rule in `.gitignore` was swallowing
+  **new** files under `frontend/tests/lib/` (17 of the moved tests live there;
+  the moved ones survived only because `git mv` tracks explicitly), so a
+  newly-authored test there would have been invisible to git — never committed,
+  never run, nothing on screen to say so. Negations added to match the existing
+  `frontend/src/lib/` ones, plus `.ci-gate/` (generated dep-cache fingerprints,
+  now written root-anchored per workspace instead of scattered).
 - ✅ Dependency supply-chain hardening (PR #155, merged 2026-08-03) — `main`'s
   `uv.lock` had drifted from `pyproject.toml` (still resolving `fastapi==0.136.3`
   and `pytest==9.0.3` against declared `0.137.1`/`9.1.0`), and the Dockerfile ran

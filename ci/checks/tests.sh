@@ -75,16 +75,70 @@ _tests_record_failure() {
 # Per-language test functions
 # ---------------------------------------------------------------------------
 
+# Resolve and run the test runner for one workspace.
+#
+# Workspace-local binaries are tried before anything on PATH. This is not a
+# preference — npx walks up out of the workspace when the local bin directory
+# lacks the shim name it expects, and will happily run a different major
+# version of vitest than the lockfile pins, against a different vite. That
+# produces mass phantom failures that look like real test breakage.
+#
+# Returns 127 when no runner is reachable.
+_tests_js_workspace() {
+  local ws="$1" junit_out="$2" jest_pattern="$3"
+  cd "$ws" || return 30
+
+  local candidate
+
+  for candidate in node_modules/.bin/vitest node_modules/.bin/vitest.exe node_modules/.bin/vitest.cmd; do
+    if [ -x "$candidate" ]; then
+      "$candidate" run --reporter=junit --outputFile="$junit_out"
+      return $?
+    fi
+  done
+
+  for candidate in node_modules/.bin/jest node_modules/.bin/jest.exe node_modules/.bin/jest.cmd; do
+    if [ -x "$candidate" ]; then
+      if ci::common::command_exists node && node -e "require.resolve('jest-junit')" >/dev/null 2>&1; then
+        JEST_JUNIT_OUTPUT_FILE="$junit_out" \
+          "$candidate" --ci --reporters=default --reporters=jest-junit ${jest_pattern:+$jest_pattern}
+        return $?
+      fi
+      "$candidate" --ci ${jest_pattern:+$jest_pattern}
+      return $?
+    fi
+  done
+
+  if ci::common::command_exists jest; then
+    if ci::common::command_exists node && node -e "require.resolve('jest-junit')" >/dev/null 2>&1; then
+      JEST_JUNIT_OUTPUT_FILE="$junit_out" \
+        jest --ci --reporters=default --reporters=jest-junit ${jest_pattern:+$jest_pattern}
+      return $?
+    fi
+    jest --ci ${jest_pattern:+$jest_pattern}
+    return $?
+  fi
+
+  if ci::common::command_exists vitest; then
+    vitest run --reporter=junit --outputFile="$junit_out"
+    return $?
+  fi
+
+  return 127
+}
+
 tests::run_js() {
-  if [ ! -f package.json ]; then
+  local workspaces
+  workspaces="$(ci::common::node_workspaces package.json)"
+
+  if [ -z "$workspaces" ]; then
     ci::log::info "skipped: no package.json found"
     return 0
   fi
-  ci::log::info "Running JavaScript tests..."
-  mkdir -p "$JUNIT_DIR"
-  local rc=0
+
   local jest_pattern=""
   local js_tests=""
+  local pattern
   if [ -n "$AFFECTED_TESTS" ]; then
     js_tests="$(_tests_filter_affected javascript)"
     if [ -z "$js_tests" ]; then
@@ -101,26 +155,37 @@ tests::run_js() {
     done <<< "$js_tests"
     [ -n "$jest_pattern" ] && jest_pattern="--testPathPattern=${jest_pattern}"
   fi
-  if ci::common::command_exists jest; then
-    if ci::common::command_exists node && node -e "require.resolve('jest-junit')" >/dev/null 2>&1; then
-      JEST_JUNIT_OUTPUT_FILE="$JUNIT_DIR/js.xml" \
-        jest --ci --reporters=default --reporters=jest-junit ${jest_pattern:+$jest_pattern} || rc=$?
+
+  mkdir -p "$JUNIT_DIR"
+
+  local ws rc junit_out label
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+
+    if [ "$ws" = "." ]; then
+      junit_out="$JUNIT_DIR/js.xml"
+      label="JavaScript"
     else
-      jest --ci ${jest_pattern:+$jest_pattern} || rc=$?
+      junit_out="$JUNIT_DIR/js-$(printf '%s' "$ws" | tr '/' '-').xml"
+      label="JavaScript (${ws})"
     fi
-  elif ci::common::command_exists npx && npx --no-install vitest --version >/dev/null 2>&1; then
-    npx --no-install vitest run --reporter=junit --outputFile="$JUNIT_DIR/js.xml" || rc=$?
-  elif ci::common::command_exists vitest; then
-    vitest run --reporter=junit --outputFile="$JUNIT_DIR/js.xml" || rc=$?
-  else
-    if ci::common::command_exists npx; then
-      npx --no-install jest --ci ${jest_pattern:+$jest_pattern} 2>&1 || rc=$?
-    else
-      ci::log::info "skipped: no JS test runner (jest/vitest) found"
-      return 0
+
+    ci::log::info "Running JavaScript tests in ${ws}..."
+
+    rc=0
+    # Subshell so the cd cannot leak into later languages.
+    ( _tests_js_workspace "$ws" "$junit_out" "$jest_pattern" ) || rc=$?
+
+    if [ "$rc" -eq 127 ]; then
+      ci::log::info "skipped: no JS test runner (jest/vitest) found in ${ws}"
+      continue
     fi
-  fi
-  [ "$rc" -ne 0 ] && _tests_record_failure "JavaScript" "exit code ${rc}"
+
+    if [ "$rc" -ne 0 ]; then
+      _tests_record_failure "$label" "exit code ${rc}"
+    fi
+  done <<< "$workspaces"
+
   return 0
 }
 

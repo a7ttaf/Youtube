@@ -21,6 +21,37 @@ ci::common::command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+# Emit each directory that anchors a JS/TS workspace, one per line, relative
+# to the current directory (callers cd to the repo root first).
+#
+# A repo whose manifest sits at the root keeps its existing behaviour exactly:
+# "." is emitted and nothing else, so single-package repos are unaffected.
+# Only when the root has no manifest do we look one level down — that is the
+# layout here (frontend/package.json, no root package.json), and without this
+# the JS lanes silently skipped and no frontend test ever ran in the gate.
+#
+# $1: manifest filename to look for (package.json, tsconfig.json, ...)
+ci::common::node_workspaces() {
+  local manifest="${1:-package.json}"
+  local dir
+
+  if [ -f "$manifest" ]; then
+    printf '%s\n' "."
+    return 0
+  fi
+
+  for dir in */; do
+    dir="${dir%/}"
+    if [ ! -d "$dir" ] || [ "$dir" = "node_modules" ]; then
+      continue
+    fi
+    if [ -f "$dir/$manifest" ]; then
+      printf '%s\n' "$dir"
+    fi
+  done
+  return 0
+}
+
 ci::common::hash_file() {
   local file="$1"
   local hash crc

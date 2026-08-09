@@ -11,10 +11,46 @@ cd "$ROOT_DIR"
 
 ci::common::section "Check: node lane"
 
+# The lane body below handles exactly one workspace. When invoked normally we
+# discover the workspaces and re-enter once per directory; CI_GATE_NODE_WORKSPACE
+# marks that recursive call. A repo with a root package.json resolves to "."
+# and behaves exactly as before.
+if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
+  NODE_WORKSPACES="$(ci::common::node_workspaces package.json)"
+
+  if [ -z "$NODE_WORKSPACES" ]; then
+    echo "No package.json found. Skipping Node lane."
+    exit "$CI_RESULT_PASS"
+  fi
+
+  NODE_OVERALL="$CI_RESULT_PASS"
+  while IFS= read -r _ws; do
+    [ -n "$_ws" ] || continue
+    echo ""
+    echo "--- Node lane workspace: ${_ws}"
+    _ws_rc=0
+    CI_GATE_NODE_WORKSPACE="$_ws" bash "$SCRIPT_DIR/node.sh" "$@" || _ws_rc=$?
+    NODE_OVERALL="$(ci::common::merge_results "$NODE_OVERALL" "$_ws_rc")"
+  done <<< "$NODE_WORKSPACES"
+
+  exit "$NODE_OVERALL"
+fi
+
+cd "$ROOT_DIR/$CI_GATE_NODE_WORKSPACE"
+
 if [ ! -f package.json ]; then
-  echo "No package.json found. Skipping Node lane."
+  echo "No package.json found in ${CI_GATE_NODE_WORKSPACE}. Skipping Node lane."
   exit "$CI_RESULT_PASS"
 fi
+
+# Dependency-cache fingerprints stay at the repo root so enabling a
+# subdirectory workspace does not scatter .ci-gate/ dirs through the tree.
+if [ "$CI_GATE_NODE_WORKSPACE" = "." ]; then
+  WS_SLUG="root"
+else
+  WS_SLUG="$(printf '%s' "$CI_GATE_NODE_WORKSPACE" | tr '/' '-')"
+fi
+NODE_HASH_FILE="$ROOT_DIR/.ci-gate/node_modules-${WS_SLUG}.hash"
 
 if ! ci::common::command_exists node; then
   echo "package.json exists but node is not installed."
@@ -69,9 +105,9 @@ if [ -z "$MANAGER" ]; then
 fi
 
 SKIP_INSTALL=0
-if [ -n "$LOCKFILE" ] && [ -d "node_modules" ] && [ -f ".ci-gate/node_modules.hash" ]; then
+if [ -n "$LOCKFILE" ] && [ -d "node_modules" ] && [ -f "$NODE_HASH_FILE" ]; then
   CURRENT_HASH="$(ci::common::hash_file "$LOCKFILE")"
-  CACHED_HASH="$(cat .ci-gate/node_modules.hash)"
+  CACHED_HASH="$(cat "$NODE_HASH_FILE")"
   if [ "$CURRENT_HASH" = "$CACHED_HASH" ]; then
     echo "node_modules up to date. Skipping install."
     SKIP_INSTALL=1
@@ -109,8 +145,8 @@ if [ "$SKIP_INSTALL" = "0" ]; then
     ;;
   esac
 
-  mkdir -p .ci-gate
-  ci::common::hash_file "$LOCKFILE" > .ci-gate/node_modules.hash
+  mkdir -p "$(dirname "$NODE_HASH_FILE")"
+  ci::common::hash_file "$LOCKFILE" > "$NODE_HASH_FILE"
 fi
 
 case "$MANAGER" in

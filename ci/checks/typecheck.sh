@@ -22,21 +22,62 @@ _tc_tool_missing() {
 # Per-language typecheck functions
 # ---------------------------------------------------------------------------
 
-typecheck::run_js() {
-  if ! ci::common::command_exists tsc; then
-    _tc_tool_missing tsc
-    return 0
+# Prefer the workspace's own tsc over anything on PATH. A globally resolved
+# binary can be a different major version than the one the lockfile pins, and
+# npx in particular will walk out of the workspace to find one.
+# Returns 127 when no tsc is reachable at all.
+_tc_js_workspace() {
+  local ws="$1"
+  cd "$ws" || return 30
+
+  local bin="" candidate
+  for candidate in node_modules/.bin/tsc node_modules/.bin/tsc.exe node_modules/.bin/tsc.cmd; do
+    if [ -x "$candidate" ]; then
+      bin="$candidate"
+      break
+    fi
+  done
+  if [ -z "$bin" ]; then
+    if ci::common::command_exists tsc; then
+      bin="tsc"
+    else
+      return 127
+    fi
   fi
-  if [ ! -f tsconfig.json ]; then
+
+  "$bin" --noEmit
+}
+
+typecheck::run_js() {
+  local workspaces
+  workspaces="$(ci::common::node_workspaces tsconfig.json)"
+
+  if [ -z "$workspaces" ]; then
     ci::log::info "skipped: no tsconfig.json found"
     return 0
   fi
-  ci::log::info "Running tsc --noEmit..."
-  local rc=0
-  tsc --noEmit || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"
-  fi
+
+  local ws rc
+  while IFS= read -r ws; do
+    [ -n "$ws" ] || continue
+
+    rc=0
+    # Subshell so the cd cannot leak into later languages.
+    ( _tc_js_workspace "$ws" ) || rc=$?
+
+    if [ "$rc" -eq 127 ]; then
+      _tc_tool_missing "tsc (${ws})"
+      continue
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+      ci::log::error "tsc --noEmit failed in ${ws} (exit ${rc})"
+      OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"
+    else
+      ci::log::info "tsc --noEmit passed in ${ws}"
+    fi
+  done <<< "$workspaces"
+
   return 0
 }
 

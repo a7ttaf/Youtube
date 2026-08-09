@@ -13,13 +13,60 @@ month, running the backend, and demoing the dashboard locally.
 
 ## Quick commands
 
+This workspace is on **bun** (`packageManager` in `package.json`, `bun.lock` is
+the only lockfile). Use `bun`, not `npm`/`npx` — see the trap below.
+
 ```bash
 cd frontend
-npm install        # first time only
-npm run dev        # Vite dev server on http://127.0.0.1:5173 (proxy -> backend)
-npm run build      # production build (tsc is not part of build; run it separately)
-npm run test       # Vitest (run mode)
-npx tsc --noEmit   # type-check only — must exit 0
+bun install --frozen-lockfile   # first time only
+bun run dev                     # Vite dev server on http://127.0.0.1:5173 (proxy -> backend)
+bun run build                   # production build (tsc is not part of build; run it separately)
+bun run test                    # Vitest (run mode)
+bun run typecheck               # tsc --noEmit — must exit 0
+```
+
+> **Do not use `npm install` or `npx` here.**
+>
+> `npm install` writes a `package-lock.json` alongside `bun.lock`, and
+> `ci/checks/node.sh` refuses to run with two lockfiles present
+> ("Multiple lockfiles detected", `FAIL_INFRA`).
+>
+> `npx <tool>` is worse because it fails *quietly*. bun writes Windows shims
+> (`vitest.exe`, `vitest.bunx`) into `node_modules/.bin`, and npx does not
+> recognise those names, so it walks **up out of the workspace** and runs
+> whatever it finds in a parent directory. In this checkout that is a different
+> major version of Vitest against a different Vite, which reports on the order
+> of 160 phantom test failures that look exactly like real breakage. `bun run`
+> always resolves the workspace-local binary. The CI lanes now do the same by
+> invoking `node_modules/.bin/` directly.
+
+## Test layout
+
+Every automated test lives under `frontend/tests/`, mirroring `src/` without a
+`__tests__` segment:
+
+| Source | Test |
+| --- | --- |
+| `src/lib/api/useGroups.ts` | `tests/lib/api/useGroups.test.tsx` |
+| `src/components/srcc/views/TraceView.tsx` | `tests/components/srcc/views/TraceView.test.tsx` |
+
+Rules:
+
+- Name test files `*.test.ts` / `*.test.tsx`. `.spec.*` is **not** collected.
+- Import the code under test through the `@/` alias, never a relative path.
+  The alias is what makes the tests movable and the layout cheap to change.
+- Do not create `__tests__/` directories. That convention is retired.
+
+The layout is declared by `test.include` in `vitest.config.ts` and enforced by
+`ci/checks/test-layout.sh`. The guard exists because `test.include` on its own
+*hides* mistakes: a test file outside the glob is silently not collected, so it
+passes by never running. The guard fails the build instead, and also fails if
+the `include` is ever removed from the config.
+
+Run it directly:
+
+```bash
+bash ci/checks/test-layout.sh
 ```
 
 ## End-to-end demo (seed → backend → dashboard)
@@ -141,7 +188,7 @@ uv run python -m uvicorn ums_smart_revenue.app:app --app-dir backend --port 8000
 
 ```bash
 cd frontend
-npm run dev
+bun run dev
 ```
 
 The dev proxy (`vite.config.ts`) forwards every tenant-scoped route
