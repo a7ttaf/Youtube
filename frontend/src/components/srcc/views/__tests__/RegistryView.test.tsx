@@ -121,20 +121,29 @@ const isMappingPatch = (url: string, init?: RequestInit) =>
 const isProposePost = (url: string, init?: RequestInit) =>
   url === "/revenue/channel-account-links" && init?.method === "POST";
 
+/** Resolve the registry's GET reads (channels, org-units, owner picker), or null. */
+const readRouteResponse = (url: string, overrides: RouteOverrides): Response | null => {
+  if (url === "/channels") {
+    return channelsResponse(overrides);
+  }
+  if (url === "/org-units") {
+    return orgUnitsResponse(overrides);
+  }
+  // The import stepper's owner picker (PR-B): no credentials seeded, so the
+  // picker renders its empty state with the Connectors pointer.
+  if (url === "/connectors/content-owners?connector_key=youtube-analytics") {
+    return jsonResponse({ items: [] });
+  }
+  return null;
+};
+
 /** Route the registry's endpoints; unrouted URLs fail loudly (404 + []). */
 const routeRegistry = (overrides: RouteOverrides = {}) => {
   return (input: unknown, init?: RequestInit) => {
     const url = urlOf(input);
-    if (url === "/channels") {
-      return Promise.resolve(channelsResponse(overrides));
-    }
-    if (url === "/org-units") {
-      return Promise.resolve(orgUnitsResponse(overrides));
-    }
-    // The import stepper's owner picker (PR-B): no credentials seeded, so the
-    // picker renders its empty state with the Connectors pointer.
-    if (url === "/connectors/content-owners?connector_key=youtube-analytics") {
-      return Promise.resolve(jsonResponse({ items: [] }));
+    const read = readRouteResponse(url, overrides);
+    if (read !== null) {
+      return Promise.resolve(read);
     }
     if (isMappingPatch(url, init)) {
       return Promise.resolve(mappingResponse(overrides, init));
