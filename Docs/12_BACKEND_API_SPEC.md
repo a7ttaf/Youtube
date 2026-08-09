@@ -154,9 +154,16 @@ unchanged; the opt-in half is pinned by
 `test_plan_bound_apply_refuses_a_row_whose_pre_state_drifted`,
 `test_unbound_apply_still_lets_the_file_win_over_drift`, and — for the
 durable rollback — `tests/api/test_channels_import_postgres.py::
-test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres`. Rows with an
-empty diff carry no reviewed pre-state and are exempt by construction, so an
-UNCHANGED row still heals drift even under a bound apply. Note the contrast
+test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres`. The guard
+compares ALL FOUR inventory fields, not only the ones the preview listed as
+changing: the write touches all four every time, and "no change to
+`revenue_required`" is a reviewed claim exactly as strong as a listed diff, so
+a writer who flips it in the plan-to-apply window must not have that decision
+reverted under an apply bound to a diff that never mentioned the field
+(`test_plan_bound_apply_refuses_drift_in_a_field_the_preview_showed_unchanged`).
+An UNCHANGED row is therefore not exempt under a bound apply — silent healing
+is precisely what that caller declined — while the unbound path heals and
+audits it as before. Note the contrast
 with the GROUP half of the same window, which is refused for EVERY caller
 (`ChannelImportGroupActionDivergedError`): a reviewed group `CREATE` becoming
 a `JOIN` is a different KIND of write, not a different value, and no prior

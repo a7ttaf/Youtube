@@ -821,6 +821,78 @@ def test_unbound_apply_still_lets_the_file_win_over_drift():
     }
 
 
+class _RevenueFlagDriftsAtWriteBoundary(ChannelRegistry):
+    """Flip a field the preview showed as UNCHANGED, at the write boundary.
+
+    The gap this pins: ``entry.changes`` omits a field when planning found it
+    already matching the roster, but ``update_inventory`` writes all four
+    fields regardless. Drifting an omitted field is the case a changes-only
+    guard cannot see.
+    """
+
+    def __init__(self, entries: list[ChannelRegistryEntry]) -> None:
+        super().__init__(entries)
+        self._drifted = False
+
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
+        """Turn revenue_required off once, just before the locked write."""
+        if not self._drifted:
+            self._drifted = True
+            current = super().get_channel(youtube_channel_id)
+            assert current is not None
+            super().update_inventory(
+                youtube_channel_id=current.youtube_channel_id,
+                channel_name=current.channel_name,
+                cms_status=current.cms_status,
+                content_owner_id=current.content_owner_id,
+                revenue_required=False,
+            )
+        return super().update_inventory(
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+        )
+
+
+def test_plan_bound_apply_refuses_drift_in_a_field_the_preview_showed_unchanged():
+    """ "No change to revenue_required" is a reviewed claim too (review #184).
+
+    The preview here promises exactly one effect — the rename — and implicitly
+    promises the other three fields stay put. A writer who turns
+    revenue_required OFF in the plan-to-apply window would have that decision
+    silently reverted by the roster's Yes, under an apply the operator bound
+    to a diff that never mentioned the flag. Reverting a revenue requirement
+    nobody reviewed is a finance-visible effect, not a cosmetic one.
+    """
+    drifting = _RevenueFlagDriftsAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID}))
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true").json()
+    # The reviewed diff mentions ONLY the name: the flag matched at plan time,
+    # so a changes-only guard has nothing to compare it against.
+    assert set(preview["rows"][0]["changes"]) == {"channel_name"}
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "no change to revenue_required" in detail
+    assert audit_sink.records == []
+
+
 def test_plan_bound_apply_proceeds_when_nothing_drifted():
     """Anti-vacuity: the opt-in guard must not reject the ordinary bound apply."""
     client, registry, _groups, _sink = create_import_app(_seeded_registry("Old Name"))

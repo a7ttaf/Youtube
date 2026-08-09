@@ -254,12 +254,14 @@ def apply_channel_import(
 
     ``enforce_reviewed_pre_state`` is the caller's opt-in to "apply the diff I
     reviewed, or none of it": when set, a row whose locked pre-state no longer
-    matches its reviewed ``changes`` fails the whole import closed instead of
-    overwriting a value the operator never saw. The route sets it exactly when
-    the client bound its apply with ``expected_plan_fingerprint``. Left off,
-    the documented default stands — the file wins, and the audit records the
-    real diff — so a caller that never previewed is unaffected (review #184
-    for the opt-in; review #159 for the default).
+    matches the one the preview showed fails the whole import closed instead of
+    overwriting a value the operator never saw — across ALL FOUR inventory
+    fields, including the ones the preview showed as unchanged. The route sets
+    it exactly when the client bound its apply with
+    ``expected_plan_fingerprint``. Left off, the documented default stands —
+    the file wins, and the audit records the real diff — so a caller that never
+    previewed is unaffected (review #184 for the opt-in; review #159 for the
+    default).
 
     CREATE rows perform a registry create and an audit event. UPDATE and
     UNCHANGED rows BOTH write through the registry at the write boundary: the
@@ -453,7 +455,7 @@ def _write_inventory_row(
     # still be the stored one, or the diff on their screen is not the diff
     # this write performs.
     if enforce_reviewed_pre_state:
-        _require_reviewed_pre_state(entry, previous)
+        _require_reviewed_pre_state(entry, previous, updated)
     applied_changes = _entry_changes(previous, updated)
     # The audit rule is the same for planned UPDATE and UNCHANGED: record
     # CHANNEL_UPDATED only when the write-boundary diff is non-empty. A planned
@@ -601,29 +603,53 @@ def _channel_audit_details(
 
 
 def _require_reviewed_pre_state(
-    entry: ChannelImportPlanEntry, previous: ChannelRegistryEntry
+    entry: ChannelImportPlanEntry,
+    previous: ChannelRegistryEntry,
+    updated: ChannelRegistryEntry,
 ) -> None:
     """Fail closed when the locked pre-state is not the one the operator read.
 
-    ``entry.changes`` holds the reviewed diff as ``field -> (from, to)``. The
-    ``from`` side is a claim about stored state at plan time; ``previous`` is
-    what the row-locked read actually found. A mismatch means a registry
-    writer committed in the plan-to-apply window, so the diff on the
+    Checks ALL FOUR inventory fields, not just the ones in ``entry.changes``,
+    because the write touches all four every time. A field the preview showed
+    as unchanged carries a pre-state claim just as strong as a changed one —
+    "this stays as it is" — and a concurrent writer who moved it would have
+    that change silently reverted to the roster value under an apply the
+    operator bound to a diff that never mentioned the field (review #184,
+    raised independently by qodo and codex).
+
+    The reviewed pre-state of each field is recoverable without threading the
+    roster values in. ``entry.changes`` omits a field precisely when planning
+    found stored == roster (see ``_inventory_changes``), so for an omitted
+    field the reviewed pre-state IS the value just written — ``updated``:
+
+        expected(f) = entry.changes[f].from   if planning saw a difference
+                      getattr(updated, f)     otherwise
+
+    ``previous`` is what the row-locked read actually found. Any mismatch means
+    a registry writer committed in the plan-to-apply window, so the diff on the
     operator's screen is not the diff this write would perform.
 
-    Rows with an EMPTY diff are exempt by construction — the loop is over
-    ``entry.changes`` — which preserves the UNCHANGED row's documented job of
-    healing drift: it carries no reviewed pre-state to contradict.
+    An UNCHANGED row is therefore NOT exempt here. That is deliberate and does
+    not touch review #159: this runs only for a caller that bound its apply, so
+    "heal the drift silently" is exactly the outcome that caller declined. The
+    unbound path still heals and audits it.
     """
-    for field, (planned_from, planned_to) in entry.changes.items():
-        actual_from = getattr(previous, field, None)
-        if actual_from != planned_from:
-            raise ChannelImportRowStateDivergedError(
-                f"channel {entry.youtube_channel_id} changed during the import: "
-                f"the preview showed {field} {planned_from!r} -> {planned_to!r}, "
-                f"but the stored value is now {actual_from!r}; re-run the "
-                "preview and review the change"
-            )
+    for field in _INVENTORY_FIELDS:
+        reviewed = entry.changes.get(field)
+        expected = reviewed[0] if reviewed is not None else getattr(updated, field)
+        actual = getattr(previous, field)
+        if actual == expected:
+            continue
+        shown = (
+            f"{field} {reviewed[0]!r} -> {reviewed[1]!r}"
+            if reviewed is not None
+            else f"no change to {field} (already {expected!r})"
+        )
+        raise ChannelImportRowStateDivergedError(
+            f"channel {entry.youtube_channel_id} changed during the import: "
+            f"the preview showed {shown}, but the stored value is now "
+            f"{actual!r}; re-run the preview and review the change"
+        )
 
 
 def _entry_changes(
