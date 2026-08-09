@@ -393,6 +393,20 @@ class _FailingGroupStore:
         """Delegate the bulk owner-NULL-key lookup to the real store."""
         return self._inner.list_adoptable_cms_group_ids(cms_group_ids)
 
+    def list_owned_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Delegate the bulk this-owner-key lookup to the real store.
+
+        The sync route does not read it (only import planning does), but this
+        fake is the twin of the one in test_channels_import_postgres.py and a
+        silently partial stand-in for the store Protocol is how the import
+        fake turned a new read into an AttributeError-500.
+        """
+        return self._inner.list_owned_cms_group_ids(
+            cms_group_ids, content_owner_id=content_owner_id
+        )
+
     def create_group(self, **kwargs: object) -> ChannelGroupEntry:
         """Delegate group creation until the armed call, then raise."""
         self.create_calls += 1

@@ -217,6 +217,47 @@ const ChannelCell = ({ row }: { row: ChannelImportRowResult }) => {
   );
 };
 
+/** Operator wording for each planned group effect. CREATE is called out as a
+ * NEW group because that is the finance-scope consequence a bare key hides;
+ * JOIN says "adds to" rather than promising a write, since a channel already
+ * in the group is a no-op (the plan reads group keys in bulk and deliberately
+ * does not load memberships for a 5000-row roster). */
+const GROUP_ACTION_LABELS: Record<
+  NonNullable<ChannelImportRowResult["group_action"]>,
+  string
+> = {
+  CREATE: "new group",
+  JOIN: "adds to existing",
+};
+
+/**
+ * The Group cell: the CMS key plus what the import will DO with it. The key
+ * alone is ambiguous between two effects with different blast radii —
+ * creating a new SECTOR group (a finance-scope object, stamped to this
+ * content owner at birth) versus attaching a channel to one that already
+ * exists — and the roster is approved all-or-nothing, so the operator has to
+ * see which before applying rather than reconstruct it from the audit trail
+ * afterwards. Object.hasOwn guards the lookup exactly as the outcome chip
+ * does: an unexpected wire value degrades to the bare key, never a wrong
+ * claim about a group write.
+ */
+const GroupCell = ({ row }: { row: ChannelImportRowResult }) => {
+  const { group_id, group_action } = row;
+  if (group_id === null) {
+    return <span className="muted">—</span>;
+  }
+  const label =
+    group_action !== null && Object.hasOwn(GROUP_ACTION_LABELS, group_action)
+      ? GROUP_ACTION_LABELS[group_action]
+      : null;
+  return (
+    <>
+      <div>{group_id}</div>
+      {label ? <div className="item-sub">{label}</div> : null}
+    </>
+  );
+};
+
 /**
  * The row's revenue flag as operator text. Spec-mandated column: on CREATE
  * rows the changes mapping is empty by design, so this cell is the ONLY place
@@ -243,7 +284,7 @@ const importOutcomeRow = (row: ChannelImportRowResult): OutcomeTableRow => {
       <ChannelCell key="channel" row={row} />,
       outcomeChip(row.outcome),
       <ChangesCell key="changes" changes={row.changes} />,
-      orMutedDash(row.group_id),
+      <GroupCell key="group" row={row} />,
       revenueFlagLabel(row.revenue_required),
       // The backend's verbatim row note (ERROR rows name the failure).
       orMutedDash(row.reason),

@@ -1264,6 +1264,14 @@ export type ChannelImportRowResult = {
   outcome: "CREATE" | "UPDATE" | "UNCHANGED" | "ERROR";
   channel_name: string | null;
   group_id: string | null;
+  // Which group write the row's `group_id` implies: "CREATE" mints a NEW
+  // SECTOR group (a fresh finance-scope object stamped to the request's
+  // content owner at birth), "JOIN" attaches the channel to a group this
+  // owner already holds. Null when the row carries no group_id, and on every
+  // ERROR row — those write nothing at all. The backend enum is
+  // ChannelImportGroupAction (org/channel_import.py); the wire field is a
+  // plain str, exactly like `outcome`.
+  group_action: "CREATE" | "JOIN" | null;
   revenue_required: boolean | null;
   changes: Record<string, ChannelImportFieldChange>;
   reason: string | null;

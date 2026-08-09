@@ -129,6 +129,13 @@ def plan_channel_import_with_stores(
     owner is a decision only that owner's CMS sync may make, so a row
     targeting one fails closed here instead of the apply stamping ownership
     on the authority of a spreadsheet cell.
+
+    The fourth group read is the only one that refuses nothing: the keys this
+    owner already holds are what let a surviving row disclose whether its
+    group is JOINed or newly CREATED. It is always performed here, so the
+    planner's ``None`` ("caller did not read") never reaches an API response —
+    a bare ``group_id`` cell would otherwise leave the operator approving a
+    new finance-scope group sight unseen.
     """
     wanted = {row.youtube_channel_id for row in parsed.rows}
     existing = {
@@ -147,6 +154,9 @@ def plan_channel_import_with_stores(
             groups.list_foreign_owner_cms_group_ids(group_ids, content_owner_id=content_owner_id)
         ),
         adoptable_group_ids=frozenset(groups.list_adoptable_cms_group_ids(group_ids)),
+        owned_group_ids=frozenset(
+            groups.list_owned_cms_group_ids(group_ids, content_owner_id=content_owner_id)
+        ),
     )
 
 

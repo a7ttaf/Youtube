@@ -804,6 +804,23 @@ single P-tier above.
   render hint — a group-bearing roster needs both, so a channels-only
   principal never sees a control that 403s mid-flow) gating the header
   action — hidden, not disabled, without it. No new endpoint; no migration.
+  Review round (2026-08-09, PR #184) added four corrections, all about the
+  preview telling the truth: (1) **both exits fail closed mid-request** —
+  Cancel and Preview's Back were live while an apply POST was in flight, and
+  since the hook has no abort and the backend commits independently, either
+  exit unmounted the flow while the write went on to land, showing a
+  cancelled import that actually committed (`ActionStepper` gained an
+  optional `cancelDisabledReason`); (2) the Channel cell shows the durable
+  `youtube_channel_id` **alongside** the mutable, non-unique `channel_name`
+  instead of falling back to it; (3) the Applied step labels its counts
+  **"Approved plan"** and names `CHANNEL_IMPORTED` as the authority, because
+  the route answers an apply with its PRE-write plan payload while the apply
+  tallies what it actually wrote under the write-boundary lock; (4) a second
+  additive backend touch — `group_action` (`CREATE`/`JOIN`) on each import
+  row, from a fourth bulk group lookup (`list_owned_cms_group_ids`), so the
+  Group cell can say whether a `Group_ID` **mints a new SECTOR group** (a
+  finance-scope object) or attaches to one this owner already holds. Still
+  no new endpoint and no migration.
 - ✅ Groups view UI — PR-A of the import/sync UI arc (2026-08-07, branch
   `feat/groups-view-ui`) — the grouping loop gets its first operator surface:
   a new **CMS Groups** nav view (table-first: name · CMS id · owner stamp ·

@@ -170,11 +170,11 @@ class ChannelImportFieldChange(BaseModel):
 class ChannelImportRowResult(BaseModel):
     """One CSV row's planned or applied outcome.
 
-    ``outcome``, ``changes``, and ``group_id`` describe every write the row
-    performs — there is no ownership write hiding behind them. An import never
-    claims an existing group for its content owner (a row targeting an unowned
-    group is an ERROR naming the sync remedy), so the only stamp it can write
-    belongs to a group the same row creates.
+    ``outcome``, ``changes``, ``group_id`` and ``group_action`` describe every
+    write the row performs — there is no ownership write hiding behind them.
+    An import never claims an existing group for its content owner (a row
+    targeting an unowned group is an ERROR naming the sync remedy), so the
+    only stamp it can write belongs to a group the same row creates.
     """
 
     row_number: int
@@ -182,6 +182,14 @@ class ChannelImportRowResult(BaseModel):
     outcome: str
     channel_name: str | None
     group_id: str | None
+    # "CREATE" (this row mints a new SECTOR group, stamped to the request's
+    # content owner at birth) or "JOIN" (the owner already holds the group;
+    # the row attaches the channel to it unless it is already a member).
+    # Null when the row carries no group_id, and on every ERROR row — those
+    # write nothing at all. The literal set is ChannelImportGroupAction
+    # (channel_import.py); the field itself is a plain str, matching how
+    # `outcome` renders its own enum.
+    group_action: str | None
     revenue_required: bool | None
     changes: dict[str, ChannelImportFieldChange]
     reason: str | None
@@ -841,10 +849,15 @@ def _import_plan_to_api(
     CMS status are echoed at the top level for the same reason.
 
     Both modes render the PLAN — unlike the sync route, whose apply renders the
-    write boundary's own record. That is safe here because the plan states
-    every write a row performs: the import claims no existing group's
-    ownership, so there is no write the apply could make that this payload
-    does not already show.
+    write boundary's own record. No KIND of write hides behind it: the import
+    claims no existing group's ownership, and ``group_action`` now names the
+    one remaining effect ``group_id`` alone left ambiguous (mint a new SECTOR
+    group vs attach to this owner's existing one). The plan is still not a
+    re-read, though: the apply re-checks every row under its write-boundary
+    lock and tallies what it ACTUALLY wrote into the CHANNEL_IMPORTED audit
+    event, so a concurrent writer can make a planned UPDATE a no-op. Consumers
+    must present these counts as the approved plan, not as the committed
+    result — the SPA's Applied step labels them exactly that way.
     """
     return {
         "dry_run": dry_run,
@@ -858,6 +871,9 @@ def _import_plan_to_api(
                 "outcome": entry.outcome.value,
                 "channel_name": entry.channel_name,
                 "group_id": entry.group_id,
+                "group_action": (
+                    entry.group_action.value if entry.group_action is not None else None
+                ),
                 "revenue_required": entry.revenue_required,
                 "changes": {
                     name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()

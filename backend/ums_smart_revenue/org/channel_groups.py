@@ -204,6 +204,21 @@ class ChannelGroupRegistryStore(Protocol):
         an ownership claim the request already carries.
         """
 
+    def list_owned_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys already stamped to THIS content owner.
+
+        The fourth and last of the matched bulk lookups, and the only one that
+        is not a refusal: the other three name keys whose rows the planner
+        FAILS, while this one names the keys the import will JOIN rather than
+        CREATE. Without it the four are not exhaustive — a key absent from all
+        of archived/foreign/adoptable is either an existing group of this
+        owner's or no group at all, and those are the two outcomes the
+        operator most needs told apart before approving. One bulk lookup, no
+        membership loading, unknown keys absent — matching its siblings.
+        """
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         pass
 
@@ -331,6 +346,16 @@ class ChannelGroupRegistry:
             group.cms_group_id
             for group in self._groups.values()
             if group.cms_group_id in cms_group_ids and group.content_owner_id is None
+        }
+
+    def list_owned_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys already stamped to this content owner."""
+        return {
+            group.cms_group_id
+            for group in self._groups.values()
+            if group.cms_group_id in cms_group_ids and group.content_owner_id == content_owner_id
         }
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:

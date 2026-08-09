@@ -1,6 +1,7 @@
 """Pure diff planning for the bulk channel import."""
 
 from ums_smart_revenue.org.channel_import import (
+    ChannelImportGroupAction,
     ChannelImportOutcome,
     ChannelImportRow,
     ChannelImportRowError,
@@ -275,6 +276,108 @@ def test_group_this_owner_already_holds_is_not_refused() -> None:
     assert entry.outcome is ChannelImportOutcome.UNCHANGED
     assert entry.group_id == "cms-mine"
     assert entry.reason is None
+
+
+def test_group_this_owner_holds_discloses_a_join() -> None:
+    """A key already stamped to this owner attaches to that group (review #184)."""
+    plan = plan_channel_import(
+        rows=(_row(group_id="cms-mine"),),
+        errors=(),
+        existing={CHANNEL_ID: _existing()},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        owned_group_ids=frozenset({"cms-mine"}),
+    )
+    assert plan.entries[0].group_action is ChannelImportGroupAction.JOIN
+
+
+def test_unknown_group_key_discloses_a_create() -> None:
+    """A key resolving to no local group mints a new SECTOR group.
+
+    The three refusal sets have already removed every other reason a key can
+    be missing from ``owned_group_ids``, so absence here means exactly one
+    thing — a brand-new finance-scope group the operator should see coming.
+    """
+    plan = plan_channel_import(
+        rows=(_row(group_id="cms-brand-new"),),
+        errors=(),
+        existing={CHANNEL_ID: _existing()},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        owned_group_ids=frozenset({"cms-some-other-key"}),
+    )
+    assert plan.entries[0].group_action is ChannelImportGroupAction.CREATE
+
+
+def test_group_action_is_none_without_a_group_key() -> None:
+    """No group key, no group write, no claim about one."""
+    plan = plan_channel_import(
+        rows=(_row(group_id=None),),
+        errors=(),
+        existing={CHANNEL_ID: _existing()},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        owned_group_ids=frozenset({"cms-mine"}),
+    )
+    assert plan.entries[0].group_action is None
+
+
+def test_refused_group_row_carries_no_group_action() -> None:
+    """An ERROR row writes nothing, so it must not predict a group effect.
+
+    Without the ordering guard the archived key would fall through to the
+    CREATE branch (it is absent from ``owned_group_ids``) and the preview
+    would promise a new group for a row that never runs.
+    """
+    plan = plan_channel_import(
+        rows=(_row(group_id="cms-archived"),),
+        errors=(),
+        existing={CHANNEL_ID: _existing()},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        archived_group_ids=frozenset({"cms-archived"}),
+        owned_group_ids=frozenset(),
+    )
+    entry = plan.entries[0]
+    assert entry.outcome is ChannelImportOutcome.ERROR
+    assert entry.group_action is None
+
+
+def test_unread_owned_group_ids_makes_no_group_claim() -> None:
+    """``None`` is not an empty set: it means the caller never performed the read.
+
+    An empty-frozenset default would let a forgetful caller report CREATE —
+    "this mints a new group" — for every JOIN, which is a confident falsehood
+    on the one disclosure this field exists to make. No claim beats a wrong one.
+    """
+    plan = _plan(rows=(_row(group_id="cms-mine"),), existing={CHANNEL_ID: _existing()})
+    assert plan.entries[0].group_id == "cms-mine"
+    assert plan.entries[0].group_action is None
+
+
+def test_repeated_membership_rows_each_disclose_their_group_action() -> None:
+    """Membership copies plan UNCHANGED but still carry a real group effect.
+
+    A roster repeats a channel once per group, so the SECOND copy is exactly
+    where an unnoticed group CREATE would hide: its inventory outcome is
+    UNCHANGED and its diff is empty, leaving group_action the only surface
+    that shows the write.
+    """
+    plan = plan_channel_import(
+        rows=(
+            _row(row_number=1, group_id="cms-mine"),
+            _row(row_number=2, group_id="cms-brand-new"),
+        ),
+        errors=(),
+        existing={CHANNEL_ID: _existing()},
+        content_owner_id=CONTENT_OWNER,
+        cms_status="INSIDE_CMS",
+        owned_group_ids=frozenset({"cms-mine"}),
+    )
+    first, second = plan.entries
+    assert first.group_action is ChannelImportGroupAction.JOIN
+    assert second.outcome is ChannelImportOutcome.UNCHANGED
+    assert second.group_action is ChannelImportGroupAction.CREATE
 
 
 def test_rows_without_a_resolvable_group_are_untouched_by_the_refusal() -> None:

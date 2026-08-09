@@ -463,7 +463,12 @@ on real ingestion (Phase 2) and the inventory load workflow.
   (read-only dry-run always first; ERROR rows block Apply per the
   all-or-nothing 422), gated by the new `canImportChannels` capability —
   derived from MANAGE_CHANNELS **and** MANAGE_GROUPS, since a group-bearing
-  roster needs both. The import/sync UI arc is complete.
+  roster needs both. Its review round added the preview's `group_action`
+  disclosure (does this `Group_ID` mint a new SECTOR group or join an
+  existing one — a second additive backend touch, no migration), pinned both
+  stepper exits closed while a write is in flight, and relabelled the Applied
+  counts as the approved PLAN (the durable tally is the `CHANNEL_IMPORTED`
+  audit event). The import/sync UI arc is complete.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to

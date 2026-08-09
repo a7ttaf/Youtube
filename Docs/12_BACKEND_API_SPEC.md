@@ -70,7 +70,21 @@ the declared
 `ChannelImportResult` model: `counts` by outcome plus per-row entries carrying
 `row_number`, `youtube_channel_id`, `outcome` (`CREATE`/`UPDATE`/`UNCHANGED`/
 `ERROR`), the planned `channel_name`/`group_id`/`revenue_required`, the
-field-level `changes` diff, and a `reason` for ERROR rows. A row whose
+field-level `changes` diff, and a `reason` for ERROR rows. `group_action`
+(added 2026-08-09, review #184) says which group write the row's `group_id`
+implies: `CREATE` mints a NEW `SECTOR` group, stamped to the request's content
+owner at birth, while `JOIN` attaches the channel to a group this owner
+already holds — two effects with different finance-scope and audit
+consequences that the key alone cannot distinguish, on a roster the operator
+approves all-or-nothing. It is null when the row carries no `group_id` and on
+every ERROR row (those write nothing). `JOIN` describes the GROUP's fate, not
+the membership row's: a channel already in the group writes nothing, and
+planning deliberately does not load memberships for a 5000-row roster.
+`counts` is the PLAN's tally in both modes — the apply re-checks each row
+under its write-boundary lock and records what it actually wrote in the
+`CHANNEL_IMPORTED` audit event, so a concurrent writer can turn a planned
+UPDATE into a no-op. Present these counts as the approved plan, not as the
+committed result; the SPA's Applied step labels them that way. A row whose
 `group_id` targets an existing group with a NULL `content_owner_id` is an
 `ERROR` row (Path A, 2026-08-06): the import never adopts an existing group —
 only the owner's own CMS sync (`POST /channels/groups/sync`) may claim one,

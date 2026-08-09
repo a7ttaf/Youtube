@@ -328,14 +328,31 @@ class ChannelImportOutcome(StrEnum):
     ERROR = "ERROR"
 
 
+class ChannelImportGroupAction(StrEnum):
+    """What a row's ``group_id`` will do to channel-group state.
+
+    ``group_id`` alone cannot say this, and the two differ in kind: JOIN adds
+    a channel to a group that already exists under this content owner, while
+    CREATE mints a NEW ``SECTOR`` group — a fresh finance-scope object stamped
+    to this owner at birth, audited as ``GROUP_UPDATED``/``group_created``.
+    An operator approving an all-or-nothing roster has to be able to tell
+    those apart before the write (review #184).
+    """
+
+    CREATE = "CREATE"
+    JOIN = "JOIN"
+
+
 @dataclass(frozen=True)
 class ChannelImportPlanEntry:
     """The planned outcome for one CSV row, with its field-level diff.
 
     Every write the apply performs for a row is implied by its ``outcome``,
-    its ``changes`` diff, and its ``group_id`` membership. Nothing rides along
-    invisibly: the import never claims ownership of a group it did not create,
-    so there is no ownership write left for an extra field to disclose.
+    its ``changes`` diff, and its ``group_id`` membership — the last of which
+    carries ``group_action`` to say WHICH group write it implies. Nothing
+    rides along invisibly: the import never claims ownership of a group it did
+    not create, so there is no ownership write left for an extra field to
+    disclose.
     """
 
     row_number: int
@@ -343,6 +360,10 @@ class ChannelImportPlanEntry:
     outcome: ChannelImportOutcome
     channel_name: str | None = None
     group_id: str | None = None
+    # None exactly when group_id is None (no group write) or the row is an
+    # ERROR (nothing is written at all). Never None alongside an attachable
+    # group key on a writable row.
+    group_action: ChannelImportGroupAction | None = None
     revenue_required: bool | None = None
     view_revenue_raw: str | None = None
     changes: Mapping[str, tuple[object, object]] = MappingProxyType({})
@@ -428,6 +449,35 @@ def _blocked_group_reason(
     return None
 
 
+def _planned_group_action(
+    group_id: str | None, *, owned_group_ids: frozenset[str] | None
+) -> ChannelImportGroupAction | None:
+    """Return the group effect an ATTACHABLE key implies, or None when unknown.
+
+    ``None`` covers two cases that both mean "make no claim": the row has no
+    group key at all, or the caller supplied no ``owned_group_ids`` read.
+
+    Only ever called for rows that already cleared ``_blocked_group_reason``,
+    so every key reaching here is attachable and the classification is a
+    two-way split: a key this owner already holds is a JOIN, and any other
+    surviving key resolves to no local group at all — a CREATE. Absence is the
+    CREATE signal precisely because the three refusal sets have already
+    removed every OTHER way a key can be absent from ``owned_group_ids``
+    (archived, another owner's, owner-NULL).
+
+    JOIN describes the GROUP's fate, not the membership row's: a channel
+    already in the group writes nothing. Distinguishing that would mean
+    loading every roster group's membership, which the bulk lookups
+    deliberately avoid for a 5000-row roster; the API spec and the operator
+    copy both say so rather than overstating this.
+    """
+    if group_id is None or owned_group_ids is None:
+        return None
+    if group_id in owned_group_ids:
+        return ChannelImportGroupAction.JOIN
+    return ChannelImportGroupAction.CREATE
+
+
 # ============================================================================
 def plan_channel_import(
     *,
@@ -439,6 +489,7 @@ def plan_channel_import(
     archived_group_ids: frozenset[str] = frozenset(),
     foreign_owner_group_ids: frozenset[str] = frozenset(),
     adoptable_group_ids: frozenset[str] = frozenset(),
+    owned_group_ids: frozenset[str] | None = None,
 ) -> ChannelImportPlan:
     """Diff parsed rows against the registry into a per-row execution plan.
 
@@ -460,6 +511,21 @@ def plan_channel_import(
     cell is not that owner speaking: the evidence has to come from YouTube, so
     only ``POST /channels/groups/sync`` may make the claim. The row error says
     so, and it blocks the whole apply the way every other row error does.
+
+    ``owned_group_ids`` is the one group set that does NOT refuse anything: it
+    carries the keys this content owner already holds, which is what lets a
+    surviving row say whether its group is JOINed or CREATEd. The other three
+    sets have already removed every other reason a key could be missing from
+    it, so absence WITHIN the set means "no local group" — and therefore a new
+    SECTOR group, a finance-scope object the operator should see coming.
+
+    It is ``None``-able rather than defaulting to an empty frozenset, and the
+    two are NOT the same: an empty set is a real answer (this owner holds none
+    of these keys, so every attachable row CREATEs), while ``None`` means the
+    caller did not perform the read and every ``group_action`` stays ``None``.
+    A default empty set would make a forgetful caller report "creates a new
+    group" for every JOIN — a confident falsehood on the exact disclosure this
+    field exists to provide. No claim beats a wrong one.
     """
     entries: list[ChannelImportPlanEntry] = [
         ChannelImportPlanEntry(
@@ -491,6 +557,10 @@ def plan_channel_import(
                 )
             )
             continue
+        # Computed only past the block check, so a refused key never carries a
+        # group_action: an ERROR row writes nothing at all, and claiming it
+        # would create or join a group would be the same lie in reverse.
+        group_action = _planned_group_action(row.group_id, owned_group_ids=owned_group_ids)
         current = existing.get(row.youtube_channel_id)
         # The archived check runs BEFORE the repeated-membership shortcut: a
         # repeated archived channel must report EVERY copy as an ERROR with
@@ -512,6 +582,7 @@ def plan_channel_import(
                         outcome=ChannelImportOutcome.UNCHANGED,
                         channel_name=row.channel_name,
                         group_id=row.group_id,
+                        group_action=group_action,
                         revenue_required=revenue_required,
                         view_revenue_raw=row.view_revenue_raw,
                     )
@@ -555,6 +626,7 @@ def plan_channel_import(
                 outcome=outcome,
                 channel_name=row.channel_name,
                 group_id=row.group_id,
+                group_action=group_action,
                 revenue_required=revenue_required,
                 view_revenue_raw=row.view_revenue_raw,
                 changes=MappingProxyType(dict(changes)),

@@ -429,6 +429,55 @@ def test_dry_run_shows_planned_create_values():
     assert row["channel_name"] == "Alpha News"
     assert row["group_id"] == "cms-tv"
     assert row["revenue_required"] is False
+    # No group carries this key yet, so the row mints a NEW SECTOR group.
+    assert row["group_action"] == "CREATE"
+
+
+def test_dry_run_discloses_group_create_versus_join():
+    """The preview says WHICH group write a Group_ID implies (review #184).
+
+    ``group_id`` alone cannot: minting a new SECTOR group creates a fresh
+    finance-scope object stamped to this content owner, while an existing key
+    only attaches a member. Both are audited GROUP_UPDATED, and the operator
+    approves an all-or-nothing roster, so the two must be told apart BEFORE
+    the write rather than reconstructed from the audit trail after it.
+    """
+    client, _registry, groups, _sink = create_import_app()
+    groups.create_group(
+        name="Existing TV",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+            f"{CHANNEL_ID},Alpha News,cms-brand-new,Yes",
+            header=header,
+        ),
+        dry_run="true",
+    )
+
+    assert response.status_code == 200, response.text
+    rows = response.json()["rows"]
+    assert [row["group_id"] for row in rows] == ["cms-tv", "cms-brand-new"]
+    assert [row["group_action"] for row in rows] == ["JOIN", "CREATE"]
+
+
+def test_rows_without_a_group_key_disclose_no_group_action():
+    """No Group_ID, no group write — and therefore no claim about one."""
+    client, _registry, _groups, _sink = create_import_app()
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"), dry_run="true")
+
+    assert response.status_code == 200, response.text
+    row = response.json()["rows"][0]
+    assert row["group_id"] is None
+    assert row["group_action"] is None
 
 
 def test_multi_group_roster_attaches_every_membership():

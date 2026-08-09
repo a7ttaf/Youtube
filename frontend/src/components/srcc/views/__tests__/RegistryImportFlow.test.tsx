@@ -70,6 +70,7 @@ const DRY_RUN_PLAN: ChannelImportResult = {
       outcome: "CREATE",
       channel_name: "Alpha Channel",
       group_id: null,
+      group_action: null,
       revenue_required: true,
       changes: {},
       reason: null,
@@ -80,6 +81,7 @@ const DRY_RUN_PLAN: ChannelImportResult = {
       outcome: "UPDATE",
       channel_name: "Beta Channel",
       group_id: "g1",
+      group_action: "CREATE",
       revenue_required: false,
       changes: {
         channel_name: { from: "Old Beta", to: "Beta Channel" },
@@ -108,6 +110,7 @@ const DRY_RUN_ERRORS: ChannelImportResult = {
       outcome: "ERROR",
       channel_name: null,
       group_id: null,
+      group_action: null,
       revenue_required: null,
       changes: {},
       reason: "missing youtube_channel_id",
@@ -363,6 +366,11 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("revenue_required: true → false")).toBeInTheDocument();
     expect(screen.getByText("g1")).toBeInTheDocument();
+    // The Group cell says WHICH group write the key implies. "g1" resolves to
+    // no existing group here, so this row MINTS a new SECTOR group — a
+    // finance-scope object the bare key would have hidden from the operator
+    // until the audit trail (review #184).
+    expect(screen.getByText("new group")).toBeInTheDocument();
 
     // Spec-mandated revenue flag column: the CREATE row's diff is EMPTY by
     // design, so this cell is the only preview surface for its
@@ -511,6 +519,46 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     );
     expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: /^back$/i })).toBeEnabled();
+  });
+
+  it("distinguishes a group JOIN from a group CREATE, and claims neither without one", async () => {
+    // Same key, opposite effects: the operator must be able to tell "this
+    // adds a channel to a group you already own" from "this mints a new
+    // finance-scope group", and a row with no key must promise nothing.
+    const joinPlan: ChannelImportResult = {
+      ...DRY_RUN_PLAN,
+      rows: [
+        { ...DRY_RUN_PLAN.rows[1], group_id: "g-existing", group_action: "JOIN" },
+        { ...DRY_RUN_PLAN.rows[0], row_number: 3, group_id: null, group_action: null },
+      ],
+    };
+    await runDryRunToPreview(() => jsonResponse(joinPlan));
+
+    expect(screen.getByText("g-existing")).toBeInTheDocument();
+    expect(screen.getByText("adds to existing")).toBeInTheDocument();
+    expect(screen.queryByText("new group")).not.toBeInTheDocument();
+
+    // The keyless row's Group cell is a bare dash — no effect claimed.
+    const keylessRow = screen.getByText("Alpha Channel").closest("tr");
+    expect(keylessRow).not.toBeNull();
+    const groupCell = within(keylessRow as HTMLElement).getAllByRole("cell")[4];
+    expect(groupCell.textContent).toBe("—");
+  });
+
+  it("falls back to the bare group key when the wire sends an unknown action", async () => {
+    // Prototype-chain + unknown-literal hardening, matching the outcome chip:
+    // a value the UI does not recognise must degrade to the key alone rather
+    // than render a wrong claim about a group write.
+    const oddPlan = {
+      ...DRY_RUN_PLAN,
+      rows: [{ ...DRY_RUN_PLAN.rows[1], group_id: "g9", group_action: "toString" }],
+    };
+    await runDryRunToPreview(() => jsonResponse(oddPlan));
+
+    const row = screen.getByText("g9").closest("tr");
+    expect(row).not.toBeNull();
+    const groupCell = within(row as HTMLElement).getAllByRole("cell")[4];
+    expect(groupCell.textContent).toBe("g9");
   });
 
   it("renders a muted dash for each half an ERROR row's channel identity lacks", async () => {
