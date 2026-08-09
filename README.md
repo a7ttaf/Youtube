@@ -35,14 +35,15 @@ uv sync --extra dev --extra test --extra lint
 #    Verify the database accepts connections before running migrations.
 
 # 3) Configure environment (see below for the full env-var matrix).
-#    Start from .env — it is the one place the dev gateway secret should live,
-#    because the dashboard's Vite dev proxy reads that same file from its own
-#    terminal. Generate a fresh value and paste it over the placeholder on the
-#    gateway-token line of .env BEFORE loading the file; a value set only in
-#    this shell leaves the dashboard on the placeholder and 401s every
-#    protected route.
+#    .env is the one place the dev gateway secret should live, because the
+#    dashboard's Vite dev proxy reads that same file from its own terminal.
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-python -c "import secrets; print(secrets.token_urlsafe(32))"
+#    Write a fresh secret OVER the placeholder .env.example ships, in the file
+#    itself. Merely printing it would leave that public placeholder in .env —
+#    the backend and the dev proxy would both keep using it and this whole step
+#    would be decorative.
+$fresh = python -c "import secrets; print(secrets.token_urlsafe(32))"
+(Get-Content .env) -replace '^(UMS_TRUSTED_GATEWAY_TOKEN=).*', "`$1$fresh" | Set-Content .env
 Get-Content .env | Where-Object { $_ -notmatch '^\s*(#|$)' } | ForEach-Object {
   $name, $value = $_ -split '=', 2
   # Strip a matching pair of surrounding quotes; a quoted .env value would

@@ -30,13 +30,11 @@ backend running, (3) the dev proxy injecting trusted-gateway headers.
 ### 1. Pick a trusted-gateway token
 
 The backend's header-auth path requires `UMS_TRUSTED_GATEWAY_TOKEN` to be set
-and to match the token the dev proxy injects. Copy `.env.example` to `.env` in
-the repo root, then replace its placeholder gateway-token value with fresh
-random output:
-
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
+and to match the token the dev proxy injects. Create `.env` with a fresh secret
+using the [root README's Quickstart step 3](../README.md#quickstart) — that
+snippet is the canonical copy and it **writes** the generated value over the
+placeholder `.env.example` ships, rather than printing it for a manual edit that
+is easy to skip.
 
 Keep that value in `.env` and let both steps below read it from there. Steps 3
 and 4 run in separate terminals, so a token exported in the backend's shell alone
