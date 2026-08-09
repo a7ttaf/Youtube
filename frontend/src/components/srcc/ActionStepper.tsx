@@ -15,7 +15,10 @@ import { Dot } from "./shared";
 //   the contract. Reuses the existing .steps/.step/.is-current/.is-done
 //   step-indicator classes and the Dot primitive (see AppShell's WorkflowRail)
 //   for the step row, and .action-row/.ghost-button for the Cancel action — no
-//   new visual language is introduced. .steps hardcodes a 6-column grid (sized
+//   new visual language is introduced. Cancel is disable-able by the caller
+//   (cancelDisabledReason) so a flow with a write in flight can refuse to
+//   unmount itself mid-request; the reason doubles as the button title, so a
+//   disabled Cancel always states why. .steps hardcodes a 6-column grid (sized
 //   for WorkflowRail's fixed 6-item rail); an inline gridTemplateColumns
 //   override sizes it to the caller's actual step count so a 3-step (or any
 //   N-step) flow lays out evenly instead of leaving empty trailing columns.
@@ -34,6 +37,13 @@ export type ActionStepperProps = {
   activeIndex: number;
   /** Fired when the Cancel control is activated. */
   onCancel: () => void;
+  /**
+   * When set, Cancel is DISABLED and this string is its title — the operator
+   * reason it cannot be used right now. One prop rather than a separate
+   * boolean + title so a disabled Cancel can never render without saying why.
+   * Omitted (the default) leaves Cancel enabled, the pre-existing behaviour.
+   */
+  cancelDisabledReason?: string;
   /** The active step's body content, rendered below the step row. */
   children: ReactNode;
 };
@@ -83,6 +93,7 @@ export const ActionStepper = ({
   steps,
   activeIndex,
   onCancel,
+  cancelDisabledReason,
   children,
 }: ActionStepperProps) => {
   return (
@@ -98,7 +109,13 @@ export const ActionStepper = ({
       </div>
       {children}
       <div className="action-row">
-        <button type="button" className="ghost-button" onClick={onCancel}>
+        <button
+          type="button"
+          className="ghost-button"
+          disabled={cancelDisabledReason !== undefined}
+          title={cancelDisabledReason}
+          onClick={onCancel}
+        >
           Cancel
         </button>
       </div>

@@ -159,7 +159,19 @@ const requireFormDataBody = (init: unknown): FormData => {
 
 type RouteOverrides = {
   contentOwners?: () => Response;
-  importPost?: (form: FormData) => Response;
+  // Deliberately wider than the synchronous default: a Promise-returning
+  // override lets a test HOLD the import POST in flight, which is the only way
+  // to observe the mid-request exit guards (Cancel/Back) the flow now applies.
+  importPost?: (form: FormData) => Response | Promise<Response>;
+};
+
+/** A pending Response plus its resolver, for holding a request in flight. */
+const deferredResponse = () => {
+  let release!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => {
+    release = resolve;
+  });
+  return { pending, release };
 };
 
 type Route = {
@@ -297,7 +309,9 @@ const cleanImport = (form: FormData): Response => {
 
 /** Render, open the stepper, fill Upload, fire the dry-run, await Preview. */
 const runDryRunToPreview = async (
-  importPost: (form: FormData) => Response,
+  // Same widening as RouteOverrides.importPost: the in-flight guard tests hand
+  // in a responder whose APPLY leg is a pending promise.
+  importPost: (form: FormData) => Response | Promise<Response>,
 ): Promise<File> => {
   routeFetch({ importPost });
   renderRegistry();
@@ -338,6 +352,12 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(screen.getByText("CREATE")).toBeInTheDocument();
     expect(screen.getByText("UPDATE")).toBeInTheDocument();
     expect(screen.getByText("Alpha Channel")).toBeInTheDocument();
+    // Both halves of the channel identity render: names are mutable and not
+    // unique, so the durable youtube_channel_id must be visible for the
+    // operator to tell which channel a CREATE/UPDATE will touch.
+    expect(screen.getByText("UCa")).toBeInTheDocument();
+    expect(screen.getByText("Beta Channel")).toBeInTheDocument();
+    expect(screen.getByText("UCb")).toBeInTheDocument();
     expect(
       screen.getByText("channel_name: Old Beta → Beta Channel"),
     ).toBeInTheDocument();
@@ -366,9 +386,18 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(importPosts()[1].get("dry_run")).toBe("false");
     expect(importPosts()[1].get("file")).toBe(file);
 
-    // Applied step: counts + reason echo. The refetch waits for Back to
-    // Registry — leaving the stepper is what reloads the table.
-    expect(screen.getByText("CREATE: 1 · UPDATE: 1")).toBeInTheDocument();
+    // Applied step: the counts are labelled as the PLAN the operator approved,
+    // never as a re-read of the write. The route answers an apply with its
+    // pre-write payload while the backend tallies what it actually wrote into
+    // the CHANNEL_IMPORTED audit event, so the bare "CREATE: 1 · UPDATE: 1"
+    // line must NOT reappear here unqualified.
+    expect(
+      screen.getByText("Approved plan — CREATE: 1 · UPDATE: 1"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("CREATE: 1 · UPDATE: 1")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/durable record of what committed is the CHANNEL_IMPORTED/i),
+    ).toBeInTheDocument();
     expect(screen.getByText("Reason: monthly roster load")).toBeInTheDocument();
     expect(channelGetCount()).toBe(1);
     fireEvent.click(screen.getByRole("button", { name: /back to registry/i }));
@@ -413,6 +442,90 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     ).not.toBeInTheDocument();
     expect(channelGetCount()).toBe(1);
     expect(importPosts()).toHaveLength(1);
+  });
+
+  it("refuses BOTH exits while an apply is in flight, then re-enables them", async () => {
+    // Hold the apply POST open so the flow stays mid-request for the whole
+    // assertion block. The hook exposes no abort, and the backend commits
+    // independently of this component: an exit taken here would neither stop
+    // nor invalidate the write, so a late success would commit the roster
+    // while the operator was shown a cancelled/abandoned import.
+    const applyGate = deferredResponse();
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : applyGate.pending,
+    );
+
+    const cancelButton = () => screen.getByRole("button", { name: /^cancel$/i });
+    const backButton = () => screen.getByRole("button", { name: /^back$/i });
+
+    // Baseline: with nothing in flight, both exits are live.
+    expect(cancelButton()).toBeEnabled();
+    expect(backButton()).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /applying…/i })).toBeInTheDocument(),
+    );
+
+    // Mid-apply: both exits are disabled and each says why.
+    const inFlightNote = /cannot be aborted/i;
+    expect(cancelButton()).toBeDisabled();
+    expect(cancelButton().getAttribute("title")).toMatch(inFlightNote);
+    expect(backButton()).toBeDisabled();
+    expect(backButton().getAttribute("title")).toMatch(inFlightNote);
+
+    // Clicking them anyway changes nothing: the flow is still on Preview and
+    // the registry table has not been restored behind a committing write.
+    fireEvent.click(cancelButton());
+    fireEvent.click(backButton());
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+    expect(screen.queryByText("UMS Drama")).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Import upload" })).not.toBeInTheDocument();
+
+    // Once the write lands, the flow advances and Cancel is live again — the
+    // guard is tied to the request, so it can never trap the operator.
+    applyGate.release(jsonResponse(APPLY_RESULT));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
+    expect(cancelButton()).toBeEnabled();
+    expect(importPosts()).toHaveLength(2);
+  });
+
+  it("re-enables the exits when an in-flight apply FAILS", async () => {
+    // The guard clears in the request's `finally`, not only on success — a
+    // failed apply must not leave the operator locked inside the stepper.
+    const applyGate = deferredResponse();
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : applyGate.pending,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeDisabled(),
+    );
+
+    applyGate.release(jsonResponse({ detail: "boom" }, 500));
+    await waitFor(() =>
+      expect(screen.getByText("Apply failed")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /^cancel$/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /^back$/i })).toBeEnabled();
+  });
+
+  it("renders a muted dash for each half an ERROR row's channel identity lacks", async () => {
+    await runDryRunToPreview((form) =>
+      jsonResponse(form.get("dry_run") === "true" ? DRY_RUN_ERRORS : APPLY_RESULT),
+    );
+
+    // The ERROR row carries neither channel_name nor youtube_channel_id, so
+    // BOTH lines of its channel cell fall back to a dash — the name/id
+    // fallback chain the preview no longer uses cannot hide one behind the
+    // other.
+    const errorRow = screen.getByText("missing youtube_channel_id").closest("tr");
+    expect(errorRow).not.toBeNull();
+    const channelCell = within(errorRow as HTMLElement).getAllByRole("cell")[1];
+    expect(channelCell.textContent).toBe("——");
   });
 
   it("disables the owner picker with the Connectors pointer and blocks Preview without credentials", async () => {

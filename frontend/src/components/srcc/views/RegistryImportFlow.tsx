@@ -23,10 +23,15 @@ import { isValidAuditReason } from "./GroupsSyncFlow";
 //   READ-ONLY dry-run (useChannelImport dryRun:true); (2) render the per-row
 //   plan via OutcomeTable and, only while the plan is ERROR-free, allow Apply
 //   (dryRun:false — the API is all-or-nothing and 422s an erroring plan);
-//   (3) echo the applied counts + reason. Cancel at any step restores the
-//   registry with NO refetch unless an apply already committed (then the
-//   parent reloads). The two close paths (onCancel / onDone) are supplied by
-//   RegistryView, which renders this only behind canImportChannels.
+//   (3) echo the APPROVED PLAN's counts + reason (labelled as the plan: the
+//   route answers an apply with its pre-write payload, and the durable tally
+//   lives in the CHANNEL_IMPORTED audit event). Cancel at any step restores
+//   the registry with NO refetch unless an apply already committed (then the
+//   parent reloads). BOTH exits (Cancel, Preview's Back) are disabled while a
+//   request is in flight: the hook exposes no abort, so leaving would neither
+//   stop nor invalidate a POST that still commits. The two close paths
+//   (onCancel / onDone) are supplied by RegistryView, which renders this only
+//   behind canImportChannels.
 // Database/ORM: None (frontend) — POSTs /channels/import (preview + apply) via
 //   useChannelImport; authorization (MANAGE_CHANNELS always, MANAGE_GROUPS on
 //   Group_ID-bearing rosters) and every 409/422 failure stay the backend's
@@ -34,6 +39,11 @@ import { isValidAuditReason } from "./GroupsSyncFlow";
 // Standards: No client-side authorization is invented. Apply is fail-closed
 //   against plans with ERROR rows (the API 422s them) and against an in-flight
 //   request (synchronous in-flight ref latch -> one request per click burst).
+//   The flow is also fail-closed against UNMOUNTING mid-request: while `busy`
+//   neither exit is clickable, so the UI can never report a cancelled or
+//   abandoned import that the backend went on to commit. `busy` clears in the
+//   request's `finally` on success and failure alike, so nothing traps the
+//   operator.
 //   The reason obeys the shared required + no-NUL audit contract via
 //   isValidAuditReason (imported from GroupsSyncFlow, not copied). Backend
 //   detail is shown only on canned-copy statuses (describeApiError). The 422
@@ -184,14 +194,27 @@ const ChangesCell = ({ changes }: {
   );
 };
 
-/** Channel cell label: name, else raw id, else a dash (ERROR rows may lack both). */
-const channelLabel = (row: ChannelImportRowResult): string => {
-  return row.channel_name ?? row.youtube_channel_id ?? "—";
-};
-
 /** A nullable wire string as itself, or a muted em-dash when null. */
 const orMutedDash = (value: string | null): ReactNode => {
   return value ?? <span className="muted">—</span>;
+};
+
+/**
+ * Channel cell: the display name over its durable youtube_channel_id. BOTH are
+ * shown, never one as a fallback for the other — channel_name is mutable and
+ * not unique, so two roster rows can carry the same name while a CREATE or an
+ * UPDATE keys on the id alone. Showing only the name would leave the operator
+ * unable to tell which channel identity an all-or-nothing apply will touch;
+ * the steady-state Registry table shows both for the same reason. ERROR rows
+ * can lack either half, and each missing half renders as a muted dash.
+ */
+const ChannelCell = ({ row }: { row: ChannelImportRowResult }) => {
+  return (
+    <>
+      <div>{orMutedDash(row.channel_name)}</div>
+      <div className="item-sub">{orMutedDash(row.youtube_channel_id)}</div>
+    </>
+  );
 };
 
 /**
@@ -215,10 +238,10 @@ const importOutcomeRow = (row: ChannelImportRowResult): OutcomeTableRow => {
     tone: row.outcome === "ERROR" ? "warn" : undefined,
     cells: [
       row.row_number,
-      channelLabel(row),
+      // Constant keys are unique among these siblings (one element literal per
+      // key); OutcomeTable re-keys each cell by column anyway.
+      <ChannelCell key="channel" row={row} />,
       outcomeChip(row.outcome),
-      // The only element literal in this cells array, so a constant key is
-      // unique among its siblings; OutcomeTable re-keys each cell by column.
       <ChangesCell key="changes" changes={row.changes} />,
       orMutedDash(row.group_id),
       revenueFlagLabel(row.revenue_required),
@@ -228,14 +251,21 @@ const importOutcomeRow = (row: ChannelImportRowResult): OutcomeTableRow => {
   };
 };
 
-/** Non-zero outcome counts as one "CREATE: 2 · UPDATE: 1" line (or nothing). */
-const CountsStrip = ({ counts }: { counts: Record<string, number> }) => {
+/**
+ * Non-zero outcome counts as one "CREATE: 2 · UPDATE: 1" line (or nothing).
+ * `label` prefixes the line so a step can name WHOSE counts these are — the
+ * Applied step must not present a plan tally as a re-read of the write.
+ */
+const CountsStrip = ({ counts, label }: {
+  counts: Record<string, number>;
+  label?: string;
+}) => {
   const entries = Object.entries(counts).filter(([, value]) => value > 0);
   if (entries.length === 0) {
     return null;
   }
   const text = entries.map(([outcome, value]) => `${outcome}: ${value}`).join(" · ");
-  return <p className="item-sub">{text}</p>;
+  return <p className="item-sub">{label ? `${label} — ${text}` : text}</p>;
 };
 
 /** Inline error banner shown in the current step; backend detail verbatim. */
@@ -409,6 +439,17 @@ const ErrorRowsNote = ({ show }: { show: boolean }) => {
 
 const IMPORT_COLUMNS = ["Row", "Channel", "Outcome", "Changes", "Group", "Revenue", "Note"];
 
+/**
+ * Why the flow refuses to be left while a request is in flight. The hook has
+ * no abort channel and the backend commits independently of this component, so
+ * an unmounted flow cannot be told the write landed: the operator would be
+ * shown a cancelled/abandoned import that actually committed. Both exits
+ * (Cancel, Back) carry this as their disabled title.
+ */
+const APPLY_IN_FLIGHT_NOTE =
+  "Wait for the request to finish — it cannot be aborted, and leaving now " +
+  "would hide an import that still commits.";
+
 type PreviewStepProps = {
   result: ChannelImportResult;
   onBack: () => void;
@@ -440,7 +481,19 @@ const PreviewStep = ({ result, onBack, onApply, busy, error }: PreviewStepProps)
       <ErrorRowsNote show={hasErrors} />
       {error ? <ImportErrorBanner title="Apply failed" detail={error} /> : null}
       <div className="action-row">
-        <button className="ghost-button" type="button" onClick={onBack}>
+        {/* Back is refused while an apply is in flight. Leaving would neither
+            abort nor invalidate the POST: a late success would commit the OLD
+            roster while the operator, already back on Upload, believes the
+            attempt was abandoned — and its setState would land on the
+            Preview step it had left. `busy` clears in the apply's `finally`
+            on success AND failure, so this never traps the operator. */}
+        <button
+          className="ghost-button"
+          type="button"
+          disabled={busy}
+          title={busy ? APPLY_IN_FLIGHT_NOTE : undefined}
+          onClick={onBack}
+        >
           Back
         </button>
         <button
@@ -463,7 +516,19 @@ type AppliedStepProps = {
   onDone: () => void;
 };
 
-/** Step 3: the applied outcome counts (non-zero only) + reason echo. */
+/**
+ * Step 3: the APPROVED PLAN's counts (non-zero only) + reason echo.
+ *
+ * The counts are deliberately labelled as the plan, not as the committed
+ * result. The route returns the pre-write plan payload for an apply too
+ * (channels.py builds it before calling apply_channel_import), while the
+ * backend re-reads every row under its write-boundary lock and tallies what
+ * it ACTUALLY wrote into the durable CHANNEL_IMPORTED audit event. A
+ * concurrent writer between preview and that lock can turn a planned UPDATE
+ * into a no-op — or let an UNCHANGED row heal real drift — so presenting this
+ * tally as "what committed" would disagree with the audit trail. The note
+ * below names the trail as the authority.
+ */
 const AppliedStep = ({ result, reason, onDone }: AppliedStepProps) => {
   return (
     <div className="confirm-panel" role="group" aria-label="Import applied">
@@ -473,7 +538,13 @@ const AppliedStep = ({ result, reason, onDone }: AppliedStepProps) => {
           The roster for content owner {result.content_owner_id} is applied.
         </span>
       </div>
-      <CountsStrip counts={result.counts} />
+      <CountsStrip counts={result.counts} label="Approved plan" />
+      <p className="muted" role="note">
+        These are the counts of the plan you approved, not a re-read of the
+        write. The backend re-checks every row under its write lock, so a
+        concurrent edit can make a planned UPDATE a no-op; the durable record
+        of what committed is the CHANNEL_IMPORTED audit event.
+      </p>
       <p className="item-sub">{`Reason: ${reason}`}</p>
       <div className="action-row">
         <button className="primary-button" type="button" onClick={onDone}>
@@ -594,6 +665,10 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
 
   // Cancel restores the registry WITHOUT a refetch — unless an apply already
   // committed, in which case the inventory changed and the parent must reload.
+  // It is unreachable while `busy` (ActionStepper disables the control), which
+  // is what keeps that `applied`-null test honest: without the guard, a Cancel
+  // fired mid-apply would take the no-reload path even though the request goes
+  // on to commit, and the parent would restore a stale registry.
   const handleCancel = () => {
     if (applied) onDone();
     else onCancel();
@@ -643,6 +718,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       steps={IMPORT_STEPS}
       activeIndex={STEP_INDEX[step]}
       onCancel={handleCancel}
+      cancelDisabledReason={busy ? APPLY_IN_FLIGHT_NOTE : undefined}
     >
       {renderStepBody()}
     </ActionStepper>
