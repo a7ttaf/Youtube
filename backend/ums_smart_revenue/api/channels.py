@@ -925,6 +925,31 @@ def _import_plan_to_api(
     }
 
 
+# ============================================================================
+# Purpose: Digest one import plan into the equality token an apply binds to,
+#   so a client can say "execute the plan I reviewed, or nothing".
+# Database/ORM: None — pure function over an already-rendered plan payload.
+# Standards: The digest is the CONTRACT, so its inputs are a change point:
+#   anything an operator reviews must be inside it (plan rows, counts, and the
+#   content owner + CMS status the write targets) and anything that legitimately
+#   differs between a preview and its apply must be outside it (`dry_run`).
+#   Widening or narrowing this set silently changes what "same plan" means —
+#   omitting the target once let an apply commit under a content owner that was
+#   never reviewed (review #184). Canonical JSON (sort_keys + tight separators)
+#   keeps the token stable across dict ordering and Python versions. It is an
+#   equality token only: never a secret, never an authorization input, so a
+#   plain SHA-256 is the whole mechanism and no constant-time compare applies.
+# Blast Radius: Which applies are accepted vs rejected 409, and — because
+#   sending the token opts in to write-boundary pre-state enforcement — whether
+#   a diverged row rolls the import back. No writes of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> import_channels
+#     compares it against expected_plan_fingerprint before the apply.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     enforce_reviewed_pre_state, which that comparison switches on.
+#   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> sends
+#     the reviewed plan's token and re-binds to the refreshed plan on 409.
+# ============================================================================
 def _plan_fingerprint(
     counts: dict[str, int],
     rows: list[dict[str, object]],

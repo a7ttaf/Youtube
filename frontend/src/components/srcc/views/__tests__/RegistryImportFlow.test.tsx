@@ -493,8 +493,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
     await waitFor(() =>
-      // `u` flag: the busy label carries a non-ASCII ellipsis, so the pattern
-      // must be parsed as Unicode rather than as UTF-16 code units.
+      // `u` flag for the analyzer's require-unicode-regexp rule, not for the
+      // ellipsis: U+2026 is BMP and matches without it. The flag's real effect
+      // here is strict-mode parsing of the pattern.
       expect(screen.getByRole("button", { name: /applying…/iu })).toBeInTheDocument(),
     );
 
@@ -784,6 +785,16 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     {
       name: "a 403 permission refusal",
       respond: () => jsonResponse({ detail: "Missing permission" }, 403),
+      unknown: false,
+    },
+    // The import route raises no 404 of its own, so the only 404 that can
+    // reach this flow comes from the tenancy resolver, which answers inside
+    // ASGI middleware without awaiting the app. The handler never ran, so
+    // "may have committed" would lock out retries over a request that
+    // provably wrote nothing.
+    {
+      name: "a tenancy 404",
+      respond: () => jsonResponse({ detail: "Tenant 'ums' not found" }, 404),
       unknown: false,
     },
   ];

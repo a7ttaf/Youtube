@@ -166,8 +166,15 @@ const refreshedPlanMessage = (status: number): string => {
  * Statuses on which the import route definitively wrote NOTHING. Every one is
  * raised before `apply_channel_import` runs, or aborts the single transaction
  * that wraps it: 400/401/403 authorization and form validation, 409 the
- * plan-to-apply conflicts and the fingerprint mismatch, 413 the payload cap,
- * 422 malformed uploads and ERROR-row plans.
+ * plan-to-apply conflicts, the fingerprint mismatch and the pre-state guard,
+ * 413 the payload cap, 422 malformed uploads and ERROR-row plans.
+ *
+ * 404 is on the list because the import route raises none of its own — the
+ * only 404 this flow can receive comes from the tenancy resolver, which
+ * answers inside ASGI middleware without ever awaiting the app (or from a
+ * request that never reached the backend at all). Either way the handler did
+ * not run, so treating it as "may have committed" would strand the operator
+ * on a retry lockout for a request that provably wrote nothing.
  *
  * Everything ELSE is ambiguous and must be treated as such — the two cases
  * that make this a set rather than a `status < 500` test:
@@ -179,7 +186,7 @@ const refreshedPlanMessage = (status: number): string => {
  * Both were previously read as definite refusals purely because they arrived
  * as an ApiError (review #184).
  */
-const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 403, 409, 413, 422]);
+const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 403, 404, 409, 413, 422]);
 
 /**
  * True when an apply failure leaves the outcome UNKNOWN: no response at all
@@ -623,9 +630,10 @@ type PreviewActionsProps = {
  * Back is refused while the APPLY is in flight — `applying`, not `busy`.
  * Leaving would neither abort nor invalidate that POST: a late success would
  * commit the OLD roster while the operator, already back on Upload, believes
- * the attempt was abandoned, and its setState would land on the Preview step
- * it had left. A read-only dry-run carries none of that risk and stays
- * abandonable. `applying` clears in the apply's `finally` on success AND
+ * the attempt was abandoned — and then `setStep("applied")` would yank them
+ * out of the upload they had started onto an Applied screen for a write they
+ * thought they had dropped. A read-only dry-run carries none of that risk and
+ * stays abandonable. `applying` clears in the apply's `finally` on success AND
  * failure, so this never traps anyone.
  */
 const PreviewActions = ({

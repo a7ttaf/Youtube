@@ -50,6 +50,7 @@ from ums_smart_revenue.db.session import (
     build_session_factory,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
+from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -520,20 +521,33 @@ def test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres(
     drifted: list[str] = []
 
     def drift_then_update(
-        registry: SqlAlchemyChannelRegistry, **kwargs: object
-    ) -> tuple[object, object]:
+        registry: SqlAlchemyChannelRegistry,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Commit an outside rename once, then run the real locked write."""
         if not drifted:
-            drifted.append(str(kwargs["youtube_channel_id"]))
+            drifted.append(youtube_channel_id)
             with owner_engine.begin() as conn:
                 conn.execute(
                     sa.text(
                         "UPDATE youtube_channels SET channel_name = :name "
                         "WHERE youtube_channel_id = :id"
                     ),
-                    {"name": "Renamed Outside The Import", "id": drifted[0]},
+                    {"name": "Renamed Outside The Import", "id": youtube_channel_id},
                 )
-        return original_update(registry, **kwargs)
+        return original_update(
+            registry,
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+        )
 
     before = _audit_log_count(owner_engine)
     with patch.object(SqlAlchemyChannelRegistry, "update_inventory", drift_then_update):

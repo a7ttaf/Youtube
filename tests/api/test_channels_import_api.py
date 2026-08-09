@@ -20,7 +20,11 @@ from ums_smart_revenue.org.bootstrap_registry import (
     BOOTSTRAP_COMPANY_TV_ID,
     BOOTSTRAP_ORG_INDEX,
 )
-from ums_smart_revenue.org.channel_groups import ChannelGroupConflictError, ChannelGroupRegistry
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupConflictError,
+    ChannelGroupEntry,
+    ChannelGroupRegistry,
+)
 from ums_smart_revenue.org.channel_registry import (
     ChannelRegistry,
     ChannelRegistryConflictError,
@@ -647,7 +651,9 @@ class _GroupAppearsAtWriteBoundary(ChannelGroupRegistry):
         self._race_owner = content_owner_id
         self._raced = False
 
-    def get_group_by_cms_id(self, cms_group_id, *, for_update=False):
+    def get_group_by_cms_id(
+        self, cms_group_id: str, *, for_update: bool = False
+    ) -> ChannelGroupEntry | None:
         """Race the group into existence once, just before the locked read."""
         if for_update and not self._raced and cms_group_id == self._race_key:
             self._raced = True
@@ -703,16 +709,25 @@ class _ChannelDriftsAtWriteBoundary(ChannelRegistry):
     already computed.
     """
 
-    def __init__(self, entries, *, drift_to: str) -> None:
+    def __init__(self, entries: list[ChannelRegistryEntry], *, drift_to: str) -> None:
         super().__init__(entries)
         self._drift_to = drift_to
         self._drifted = False
 
-    def update_inventory(self, **kwargs):
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Land a concurrent rename once, just before the locked write."""
         if not self._drifted:
             self._drifted = True
-            current = super().get_channel(kwargs["youtube_channel_id"])
+            current = super().get_channel(youtube_channel_id)
+            assert current is not None
             super().update_inventory(
                 youtube_channel_id=current.youtube_channel_id,
                 channel_name=self._drift_to,
@@ -720,7 +735,13 @@ class _ChannelDriftsAtWriteBoundary(ChannelRegistry):
                 content_owner_id=current.content_owner_id,
                 revenue_required=current.revenue_required,
             )
-        return super().update_inventory(**kwargs)
+        return super().update_inventory(
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+        )
 
 
 def _seeded_registry(channel_name: str) -> ChannelRegistry:

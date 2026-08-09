@@ -541,34 +541,6 @@ def _entry_changes(
     }
 
 
-# ============================================================================
-# Purpose: Reconcile one import row's CMS group membership — resolve the group
-#   by its CMS key, create it when absent, and attach the channel — returning
-#   the mutation performed so the caller can audit it.
-# Database/ORM: ChannelGroupORM (row-locked read via get_group_by_cms_id
-#   for_update=True; INSERT via create_group) and ChannelGroupMemberORM
-#   (INSERT via add_members). No channel or finance writes.
-# Standards: Write-boundary recheck over plan trust — the locked read
-#   re-examines `active` and the owner stamp, raising
-#   ChannelImportArchivedGroupError or ChannelImportAdoptableGroupError
-#   (route: 409) when a group was archived or unstamped in the plan-to-apply
-#   window, so the race fails the whole transaction closed rather than
-#   mutating a retired group or claiming an unowned one. This function NEVER
-#   writes ``content_owner_id`` onto a group that already exists; it only
-#   stamps groups it creates here, whose ownership the request already
-#   asserts. The parent group row is the membership serialization point every
-#   writer shares (FOR NO KEY UPDATE, compatible with membership FK key-share
-#   locks). Returns None when membership already existed so a no-op is never
-#   audited.
-# Blast Radius: Channel-group membership and therefore finance group-scope
-#   selection and rollups; the GROUP_UPDATED audit trail. No revenue totals,
-#   no allocation, no month-close.
-# Connections:
-#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the locked
-#     lookup, typed uniqueness conflict, and membership writers.
-#   - File: backend/ums_smart_revenue/api/channels.py -> maps the archived,
-#     unstamped, and cross-owner errors to 409.
-# ============================================================================
 def _require_planned_group_action(
     planned: ChannelImportGroupAction | None,
     *,
@@ -605,6 +577,36 @@ def _require_planned_group_action(
             "preview approved joining it, not creating it — re-run the preview "
             "and review the change"
         )
+
+
+# ============================================================================
+# Purpose: Reconcile one import row's CMS group membership — resolve the group
+#   by its CMS key, create it when absent, and attach the channel — returning
+#   the mutation performed so the caller can audit it.
+# Database/ORM: ChannelGroupORM (row-locked read via get_group_by_cms_id
+#   for_update=True; INSERT via create_group) and ChannelGroupMemberORM
+#   (INSERT via add_members). No channel or finance writes.
+# Standards: Write-boundary recheck over plan trust — the locked read
+#   re-examines `active` and the owner stamp, raising
+#   ChannelImportArchivedGroupError or ChannelImportAdoptableGroupError
+#   (route: 409) when a group was archived or unstamped in the plan-to-apply
+#   window, so the race fails the whole transaction closed rather than
+#   mutating a retired group or claiming an unowned one. This function NEVER
+#   writes ``content_owner_id`` onto a group that already exists; it only
+#   stamps groups it creates here, whose ownership the request already
+#   asserts. The parent group row is the membership serialization point every
+#   writer shares (FOR NO KEY UPDATE, compatible with membership FK key-share
+#   locks). Returns None when membership already existed so a no-op is never
+#   audited.
+# Blast Radius: Channel-group membership and therefore finance group-scope
+#   selection and rollups; the GROUP_UPDATED audit trail. No revenue totals,
+#   no allocation, no month-close.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the locked
+#     lookup, typed uniqueness conflict, and membership writers.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps the archived,
+#     unstamped, and cross-owner errors to 409.
+# ============================================================================
 
 
 def _attach_group_membership(

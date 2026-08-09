@@ -86,12 +86,21 @@ const urlOf = (input: unknown): string => {
   return String(input);
 };
 
+// The two shell reads every render performs. Named once because they are used
+// as BOTH route-map keys and substring probes: a literal that drifts in one
+// place and not the other silently routes a test to the fallback responder.
+const SESSION_ROUTE = "/session/me";
+const TENANT_ROUTE = "/tenants/me";
+
+// The one tenant every shell test resolves to; duplicated per route map before.
+const SHELL_TENANT = { id: "t1", slug: "ums", display_name: "UMS" };
+
 const isTenantCall = (input: unknown): boolean => {
-  return urlOf(input).includes("/tenants/me");
+  return urlOf(input).includes(TENANT_ROUTE);
 };
 
 const isSessionCall = (input: unknown): boolean => {
-  return urlOf(input).includes("/session/me");
+  return urlOf(input).includes(SESSION_ROUTE);
 };
 
 // Route fetch by URL: /session/me -> a ready full-capability session (so the
@@ -365,8 +374,8 @@ type FetchRouteMap = ReadonlyMap<string, () => Response>;
 const defaultSessionRouteResponse = () => jsonResponse(NET_REVENUE_BODY);
 
 const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRouteMap => new Map([
-  ["/session/me", sessionResponder],
-  ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
+  [SESSION_ROUTE, sessionResponder],
+  [TENANT_ROUTE, () => jsonResponse(SHELL_TENANT)],
   ["/connectors/credentials", () => jsonResponse(EMPTY_CONNECTOR_CREDENTIALS)],
   ["/connectors/content-owners", () => jsonResponse(EMPTY_CONTENT_OWNERS)],
   ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
@@ -760,8 +769,8 @@ const navButton = (label: string): HTMLElement => {
 // Only /channels/import is answered per test, so it is the sole branch in the
 // router below rather than another entry here.
 const IMPORT_SHELL_ROUTES: FetchRouteMap = new Map([
-  ["/session/me", () => jsonResponse(FULL_SESSION)],
-  ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
+  [SESSION_ROUTE, () => jsonResponse(FULL_SESSION)],
+  [TENANT_ROUTE, () => jsonResponse(SHELL_TENANT)],
   ["/channels", () => jsonResponse(IMPORT_CHANNELS)],
   ["/org-units", () => jsonResponse([])],
   ["/connectors/content-owners", () => jsonResponse({ items: [{ account_id: "OWNERaaa" }] })],
