@@ -395,7 +395,7 @@ def _apply_inventory_writes(
         channel_id = entry.youtube_channel_id
         if channel_id is None or entry.channel_name is None:
             continue
-        event_type, applied_changes = _write_inventory_row(
+        event_type, applied_changes, source_status_change = _write_inventory_row(
             entry,
             registry=registry,
             channel_id=channel_id,
@@ -426,6 +426,7 @@ def _apply_inventory_writes(
                     content_owner_id=content_owner_id,
                     cms_status=cms_status,
                     applied_changes=applied_changes,
+                    source_status_change=source_status_change,
                 ),
             )
     return applied_counts
@@ -462,7 +463,7 @@ def _write_inventory_row(
     cms_status: str,
     enforce_reviewed_pre_state: bool,
     applied_counts: dict[str, int],
-) -> tuple[AuditEventType | None, dict[str, tuple[object, object]]]:
+) -> tuple[AuditEventType | None, dict[str, tuple[object, object]], tuple[str | None, str] | None]:
     """Write ONE row and report what to audit, tallying ``applied_counts``.
 
     Returns ``(event_type, applied_changes)`` where a ``None`` event means the
@@ -474,7 +475,7 @@ def _write_inventory_row(
     the caller's skip check, so this never has to invent a fallback name.
     """
     if entry.outcome is ChannelImportOutcome.CREATE:
-        registry.create_channel(
+        created = registry.create_channel(
             youtube_channel_id=channel_id,
             channel_name=channel_name,
             primary_company_id=None,
@@ -483,9 +484,9 @@ def _write_inventory_row(
             content_owner_id=content_owner_id,
         )
         applied_counts[ChannelImportOutcome.CREATE.value] += 1
-        return AuditEventType.CHANNEL_CREATED, {}
+        return AuditEventType.CHANNEL_CREATED, {}, (None, created.revenue_source_status)
     if entry.outcome not in (ChannelImportOutcome.UPDATE, ChannelImportOutcome.UNCHANGED):
-        return None, {}
+        return None, {}, None
     # The registry re-reads the row under a lock at the write boundary and
     # returns what it actually replaced; the durable diff below is built from
     # THAT, not the plan's possibly-stale snapshot, so a concurrent committed
@@ -510,11 +511,22 @@ def _write_inventory_row(
     # UPDATE whose target values a concurrent writer already committed replaces
     # nothing — auditing it would claim a mutation that did not occur (review
     # #159 r3713966806).
+    # The write ALSO re-derives revenue_source_status when revenue_required
+    # flips, and _INVENTORY_FIELDS deliberately excludes it (it drives the
+    # outcome tally and the pre-state guard, which are about the operator's
+    # asserted fields). Reporting it separately keeps the audit trail able to
+    # reconstruct the finance-source transition that was actually persisted —
+    # the same one the preview now discloses (review #184).
+    source_status_change = (
+        None
+        if previous.revenue_source_status == updated.revenue_source_status
+        else (previous.revenue_source_status, updated.revenue_source_status)
+    )
     if not applied_changes:
         applied_counts[ChannelImportOutcome.UNCHANGED.value] += 1
-        return None, applied_changes
+        return None, applied_changes, source_status_change
     applied_counts[ChannelImportOutcome.UPDATE.value] += 1
-    return AuditEventType.CHANNEL_UPDATED, applied_changes
+    return AuditEventType.CHANNEL_UPDATED, applied_changes, source_status_change
 
 
 # ============================================================================
@@ -622,6 +634,28 @@ def _channel_write_order(
     )
 
 
+# ============================================================================
+# Purpose: Group the membership work by CMS key so each group is locked and
+#   resolved exactly once, and decide the order those batches are written in.
+# Database/ORM: None — pure partition of an in-memory plan. The batches it
+#   returns determine which ChannelGroupORM rows get locked and in what order.
+# Standards: Built ON _group_write_order, not beside it, so the lock order it
+#   establishes is inherited rather than re-derived: keys ascending, and
+#   channels within a key in (group key, channel id) order — which is also the
+#   order their GROUP_UPDATED events are emitted in. A channel repeated under
+#   the SAME key collapses to one entry: the per-row pass got that for free
+#   because the second copy found itself already a member and audited nothing,
+#   whereas a batch handing the same channel to add_members twice would claim
+#   two attachments for one membership. Rows with no id, no name, or no group
+#   key are skipped here rather than downstream.
+# Blast Radius: Which groups are locked, in what order, and therefore the
+#   deadlock behaviour of overlapping imports; and the shape of the
+#   GROUP_UPDATED trail. No writes of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _apply_group_memberships consumes these batches; _group_write_order
+#     supplies the ordering this preserves.
+# ============================================================================
 def _group_write_batches(
     entries: tuple[ChannelImportPlanEntry, ...],
 ) -> list[tuple[str, list[ChannelImportPlanEntry]]]:
@@ -671,6 +705,7 @@ def _channel_audit_details(
     content_owner_id: str,
     cms_status: str,
     applied_changes: dict[str, tuple[object, object]],
+    source_status_change: tuple[str | None, str] | None = None,
 ) -> dict[str, object]:
     """Build one channel write's audit details with full field-level provenance.
 
@@ -681,8 +716,15 @@ def _channel_audit_details(
     means the column was absent and the required-by-default rule applied —
     because the derived boolean alone cannot distinguish an explicit
     permission from the default.
+
+    ``revenue_source_status`` is recorded SEPARATELY from ``changes`` when the
+    write re-classified it. It is derived by the registry rather than asserted
+    by the roster, so it is not one of _INVENTORY_FIELDS — but leaving it out
+    of the trail entirely meant a CHANNEL_UPDATED event could record the
+    revenue_required flip while omitting the finance-source classification
+    that flip actually replaced (review #184).
     """
-    return {
+    details: dict[str, object] = {
         "channel_name": entry.channel_name,
         "content_owner_id": content_owner_id,
         "cms_status": cms_status,
@@ -693,6 +735,12 @@ def _channel_audit_details(
         },
         "source": AUDIT_SOURCE_BULK_IMPORT,
     }
+    if source_status_change is not None:
+        details["revenue_source_status"] = {
+            "from": source_status_change[0],
+            "to": source_status_change[1],
+        }
+    return details
 
 
 # ============================================================================
