@@ -503,9 +503,12 @@ const RegistryMainPanel = ({
 //     audited mapping write.
 //   - File: frontend/src/lib/api/useChannelMapping.ts:27
 //     useChannelMappingAction -> owns the PATCH this predicate gates.
-//   - File: frontend/src/components/srcc/views/RegistryView.tsx:559
-//     MappingChangeRequestPanel inFlightRef -> the real same-tick double-submit
-//     guard. `busy` is that panel's own useState, not something the hook owns.
+//   - File: frontend/src/components/srcc/views/RegistryView.tsx ->
+//     MappingChangeRequestPanel's inFlightRef (declared beside its useState
+//     block, latched in submit) is the real same-tick double-submit guard.
+//     `busy` is that panel's own useState, not something the hook owns. Named
+//     by symbol, not line: this pointer is into its own file, so any edit
+//     above it would silently invalidate a line number.
 // ============================================================================
 const isMappingSubmittable = (
   canManageRegistry: boolean,
