@@ -51,6 +51,15 @@ import { isValidAuditReason } from "./GroupsSyncFlow";
 //   stays abandonable. `applying` clears in the request's `finally` on success
 //   and failure alike, and the latch also releases on unmount, so nothing
 //   traps the operator or strands the shell.
+//   An apply whose response never arrived is INDETERMINATE, not failed: Apply
+//   is disabled (a blind retry would append a second unconditional
+//   CHANNEL_IMPORTED) and the flow offers "Check whether it landed", which
+//   RE-PLANS the same roster via the dry run. That settles it without any new
+//   API surface, because the apply is one all-or-nothing transaction: an
+//   all-UNCHANGED re-plan means the write committed. The control is
+//   operator-triggered and repeatable on purpose — the original POST may
+//   still be executing, and one automatic shot would race it and report a
+//   false "did not commit".
 //   The reason obeys the shared required + no-NUL audit contract via
 //   isValidAuditReason (imported from GroupsSyncFlow, not copied). Backend
 //   detail is shown only on canned-copy statuses (describeApiError). The 422
@@ -695,6 +704,7 @@ type PreviewStepProps = {
   result: ChannelImportResult;
   onBack: () => void;
   onApply: () => void;
+  onReconcile: () => void;
   busy: boolean;
   applying: boolean;
   indeterminate: boolean;
@@ -710,6 +720,7 @@ const PreviewStep = ({
   result,
   onBack,
   onApply,
+  onReconcile,
   busy,
   applying,
   indeterminate,
@@ -745,6 +756,23 @@ const PreviewStep = ({
           title={indeterminate ? "Apply outcome unknown" : "Apply failed"}
           detail={error}
         />
+      ) : null}
+      {/* The way OUT of "unknown". Re-planning the same roster settles it,
+          because the apply is one all-or-nothing transaction: all-UNCHANGED
+          means it committed. Repeatable, since the original POST may still be
+          in flight when the operator first asks. */}
+      {indeterminate ? (
+        <div className="action-row">
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={busy}
+            onClick={onReconcile}
+            title="Re-plan this roster against the registry to see whether the import landed"
+          >
+            {busy ? "Checking…" : "Check whether it landed"}
+          </button>
+        </div>
       ) : null}
       <PreviewActions
         hasErrors={hasErrors}
@@ -878,6 +906,70 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     } catch (caught) {
       // Stay on Upload; the button re-enables in finally for a retry.
       setError(describeImportError(caught));
+    } finally {
+      setBusy(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  /**
+   * Settle an indeterminate apply by RE-PLANNING the same roster.
+   *
+   * The apply is all-or-nothing in one transaction, so the refreshed plan is
+   * decisive rather than suggestive: every row UNCHANGED means the write
+   * committed, and any remaining CREATE/UPDATE means it did not. That answer
+   * comes from the dry-run endpoint the flow already uses — no new API
+   * surface, no idempotency key, no import-status resource.
+   *
+   * Operator-triggered and repeatable ON PURPOSE. The original POST may still
+   * be executing, and an automatic single shot would race it and report "did
+   * not commit" for a write that lands a moment later. Leaving the control in
+   * place lets the operator check again instead of being told once, wrongly.
+   */
+  const reconcileIndeterminate = async () => {
+    if (busy || inFlightRef.current) {
+      return;
+    }
+    // Re-planning needs the same roster. The file survives the apply in this
+    // closure, so this only trips if a future edit clears it — fail closed
+    // rather than re-plan a DIFFERENT roster and call the answer decisive.
+    if (file === null) {
+      setError(
+        "The roster is no longer loaded, so the earlier import's outcome " +
+          "cannot be checked here. Reload the registry to see the actual state.",
+      );
+      return;
+    }
+    inFlightRef.current = true;
+    setBusy(true);
+    try {
+      const refreshed = await importChannels({
+        file,
+        contentOwnerId: ownerId,
+        dryRun: true,
+        reason: trimmedReason,
+      });
+      const committed = refreshed.rows.every((row) => row.outcome === "UNCHANGED");
+      setPreview(refreshed);
+      if (committed) {
+        // Settled: the roster IS the registry, so this is no longer unknown.
+        // Clearing `indeterminate` re-arms Apply, which is correct — a further
+        // apply would now be a no-op re-import, not a blind duplicate write.
+        setIndeterminate(false);
+        setApplied(refreshed);
+        setStep("applied");
+        return;
+      }
+      setError(
+        "Still not committed: the refreshed plan below shows changes the " +
+          "registry does not have yet. The original request may still be " +
+          "running — check again in a moment, or apply the refreshed plan.",
+      );
+    } catch (caught) {
+      setError(
+        `Could not check the registry: ${describeImportError(caught)} ` +
+          "The earlier import's outcome is still unknown.",
+      );
     } finally {
       setBusy(false);
       inFlightRef.current = false;
@@ -1021,6 +1113,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
           result={preview}
           onBack={backToUpload}
           onApply={apply}
+          onReconcile={reconcileIndeterminate}
           busy={busy}
           applying={applying}
           indeterminate={indeterminate}

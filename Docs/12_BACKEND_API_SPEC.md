@@ -118,7 +118,14 @@ and `DELETE /groups/{id}/content-owner` is the admin remedy for a wrong stamp.
 The former `will_adopt_content_owner` disclosure field is gone from the import
 response (it survives on the group-sync response, where adoption is
 legitimate). A dry run writes
-nothing (no audit event). The apply is all-or-nothing: any ERROR row —
+nothing (no audit event), which also makes it the RECONCILIATION tool for a
+client whose apply response was lost: because the apply is one all-or-nothing
+transaction, re-planning the same roster is decisive — every row `UNCHANGED`
+means the write committed, any remaining `CREATE`/`UPDATE` means it did not.
+The SPA uses exactly this rather than a retry (review #184), so no idempotency
+key or per-import status resource is needed for the indeterminate case. The
+answer is only valid once the original request has settled, so the check is
+operator-triggered and repeatable. The apply is all-or-nothing: any ERROR row —
 malformed id/name/token, a value containing a NUL character, a group_id over
 255 characters, a CONFLICTING duplicate id (copies that disagree on
 channel_name/view_revenue; repeating a channel once per group is legal and

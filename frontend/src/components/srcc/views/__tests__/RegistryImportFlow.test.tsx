@@ -869,6 +869,60 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(screen.getByRole("button", { name: /^back$/i })).toBeEnabled();
   });
 
+  /** Drive to Preview, then fail the apply in a way that is INDETERMINATE. */
+  const reachIndeterminate = async (afterApply: () => Response) => {
+    let applyCount = 0;
+    await runDryRunToPreview((form) => {
+      if (form.get("dry_run") === "true") {
+        return applyCount === 0 ? jsonResponse(DRY_RUN_PLAN) : afterApply();
+      }
+      applyCount += 1;
+      // A gateway 502: the request may have reached the backend and committed.
+      return jsonResponse({ detail: "bad gateway" }, 502);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
+  };
+
+  it("settles an indeterminate apply by re-planning: all-UNCHANGED means it landed", async () => {
+    // The way OUT of "unknown", using the endpoint the flow already has. The
+    // apply is ONE all-or-nothing transaction, so an all-UNCHANGED re-plan is
+    // decisive: the roster IS the registry, therefore the write committed.
+    const settled: ChannelImportResult = {
+      ...DRY_RUN_PLAN,
+      plan_fingerprint: "plan-settled",
+      counts: { UNCHANGED: 2 },
+      rows: DRY_RUN_PLAN.rows.map((row) => ({ ...row, outcome: "UNCHANGED", changes: {} })),
+    };
+    await reachIndeterminate(() => jsonResponse(settled));
+
+    fireEvent.click(screen.getByRole("button", { name: /check whether it landed/iu }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
+    // The reconciliation used the DRY RUN, so nothing was written to find out.
+    expect(importPosts()[2].get("dry_run")).toBe("true");
+  });
+
+  it("keeps an indeterminate apply unknown when the re-plan still shows changes", async () => {
+    // The other half, and the reason the control is repeatable: the original
+    // POST may still be running. A re-plan that still shows work pending does
+    // NOT prove the import failed, so the flow must not claim it did.
+    await reachIndeterminate(() => jsonResponse(DRY_RUN_PLAN));
+
+    fireEvent.click(screen.getByRole("button", { name: /check whether it landed/iu }));
+
+    await waitFor(() => expect(screen.getByText(/still not committed/i)).toBeInTheDocument());
+    // Still on Preview, still offering another check — not a false verdict.
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /check whether it landed/iu }),
+    ).toBeEnabled();
+  });
+
   it("refuses a refreshed plan with no fingerprint rather than unbinding the apply", async () => {
     // The dangerous shape: rows and counts present, plan_fingerprint missing.
     // Accepting it would replace the preview with a plan carrying no digest,
