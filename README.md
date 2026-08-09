@@ -89,25 +89,28 @@ commands in either shell:
 #    .env.example ships so the backend and the dev proxy agree on one value.
 [ -f .env ] || cp .env.example .env
 fresh=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+#    The env var this step manages, named once so the presence test, the
+#    rewrite, and the read-back below cannot drift apart.
+var=UMS_TRUSTED_GATEWAY_TOKEN
 #    Replace the line when .env already has the key, APPEND it when it does not —
 #    an in-place replace alone silently no-ops on an existing .env that never
 #    carried it, the export below would then pick up nothing, and the backend
 #    would 503 on protected routes rather than reporting anything about .env.
 #    `-i.bak` + `rm` is the in-place form that works on both GNU and BSD sed.
-if grep -q '^UMS_TRUSTED_GATEWAY_TOKEN=' .env; then
-  sed -i.bak "s|^UMS_TRUSTED_GATEWAY_TOKEN=.*|UMS_TRUSTED_GATEWAY_TOKEN=$fresh|" .env
+if grep -q "^$var=" .env; then
+  sed -i.bak "s|^$var=.*|$var=$fresh|" .env
   rm -f .env.bak
 else
   #  Add the newline first if .env's last line lacks one, or the append would
   #  land on the end of that line instead of on a line of its own.
   if [ -n "$(tail -c1 .env)" ]; then echo >> .env; fi
-  echo "UMS_TRUSTED_GATEWAY_TOKEN=$fresh" >> .env
+  echo "$var=$fresh" >> .env
 fi
 #    Read the value back out of .env rather than exporting $fresh directly, so
 #    this shell provably holds the same value the dev proxy will read from the
 #    file in its own terminal — the write above is confirmed, not assumed.
 #    `tr -d '\r'` drops the CR a CRLF-saved .env would leave on the value.
-export UMS_TRUSTED_GATEWAY_TOKEN=$(sed -n 's/^UMS_TRUSTED_GATEWAY_TOKEN=//p' .env | head -n1 | tr -d '\r')
+export UMS_TRUSTED_GATEWAY_TOKEN=$(sed -n "s/^$var=//p" .env | head -n1 | tr -d '\r')
 export PYTHONPATH="$PWD/backend"
 export UMS_DATABASE_URL="postgresql+psycopg://ums:ums@localhost:5432/ums_smart_revenue"
 export UMS_AUTHZ_SOURCE=headers
