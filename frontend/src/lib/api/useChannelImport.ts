@@ -58,8 +58,16 @@ const isFieldChange = (value: unknown): boolean => {
  * An array, or `{cms_status: null}`, satisfies `typeof === "object"` and then
  * throws downstream where the renderer reads `change.from` (review #184).
  */
+/**
+ * A JSON OBJECT, excluding null and arrays — both of which `typeof` calls
+ * "object" and both of which then throw where a record is indexed.
+ */
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+};
+
 const isChangeMap = (value: unknown): boolean => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  if (!isPlainObject(value)) {
     return false;
   }
   return Object.values(value).every(isFieldChange);
@@ -67,6 +75,23 @@ const isChangeMap = (value: unknown): boolean => {
 
 const isNullableString = (value: unknown): boolean => {
   return value === null || typeof value === "string";
+};
+
+/**
+ * `revenue_source_status` is null (the write left the classification alone) or
+ * a from/to pair whose `to` is always present — the backend cannot emit a
+ * change that moves the row to nothing. Named rather than inlined into the
+ * field table so the predicate stays under the medium-risk complexity
+ * threshold (DeepSource JS-R1005).
+ */
+const isSourceStatusChange = (value: unknown): boolean => {
+  if (value === null) {
+    return true;
+  }
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  return isNullableString(value.from) && typeof value.to === "string";
 };
 
 /**
@@ -86,16 +111,7 @@ const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boole
   ["group_action", isNullableString],
   ["reason", isNullableString],
   ["revenue_required", (value) => value === null || typeof value === "boolean"],
-  [
-    "revenue_source_status",
-    (value) =>
-      value === null ||
-      (typeof value === "object" &&
-        value !== null &&
-        !Array.isArray(value) &&
-        isNullableString((value as Record<string, unknown>).from) &&
-        typeof (value as Record<string, unknown>).to === "string"),
-  ],
+  ["revenue_source_status", isSourceStatusChange],
 ];
 
 const isPlanRow = (row: unknown): boolean => {
