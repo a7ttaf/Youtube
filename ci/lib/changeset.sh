@@ -159,6 +159,12 @@ ci::changeset::classify_file() {
     Dockerfile|Dockerfile.*|*.dockerfile) printf 'dockerfile'; return 0 ;;
     Makefile|GNUmakefile|makefile)        printf 'make'; return 0 ;;
     Jenkinsfile)                          printf 'groovy'; return 0 ;;
+    # A package manifest or lockfile IS the JavaScript workspace. Classifying
+    # package.json as plain `json` (and a lockfile as `unknown`) emits no JS
+    # check ids, so a dependency bump or a changed script would skip the node
+    # lane entirely — no install, tests, typecheck or build.
+    package.json|package-lock.json|npm-shrinkwrap.json|pnpm-lock.yaml|yarn.lock|bun.lock|bun.lockb)
+      printf 'javascript'; return 0 ;;
   esac
 
   case "$ext" in

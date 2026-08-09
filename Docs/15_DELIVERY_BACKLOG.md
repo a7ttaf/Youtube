@@ -737,8 +737,33 @@ single P-tier above.
   with `FAIL_INFRA`, so a real regression was reported as broken infrastructure.
   New `ci::common::normalize_result` maps off-contract codes onto
   `FAIL_NEW_ISSUE`; `node.sh` normalizes each workspace result before merging.
-  `ci/tests/test_js_lane.bats` (12 cases) pins all three, and the pre-fix
-  config was re-run to confirm each assertion actually failed before.
+  `ci/tests/test_js_lane.bats` pins all three, and the pre-fix config was re-run
+  to confirm each assertion actually failed before.
+  A second review round found three more layers of the same "wired but never
+  runs" problem, plus three narrower defects. (4) Scheduling `test-layout` in
+  `preflight.sh` was still not enough: `_check_should_skip` filters any lane
+  absent from both the changeset reverse-mapping and the always-run list, and
+  the changeset only ever emits *language-derived* check ids — never
+  `test-layout` — so the guard was discarded whenever the diff did not look
+  like JavaScript, which is exactly when a misplaced test goes unnoticed. It is
+  now an always-run check alongside `git-safety` and `changed-files`. (5)
+  `ci/lib/changeset.sh` classified `package.json` as `json` and `bun.lock` as
+  `unknown`, neither of which emits JS check ids, so a dependency bump or a
+  changed script skipped the whole node lane — no install, tests, typecheck or
+  build. Manifests and lockfiles now classify as `javascript`. (6) Pinning
+  every off-contract exit to `FAIL_NEW_ISSUE` was too broad: `bun install
+  --frozen-lockfile` failing on a registry outage is provisioning, not code, so
+  each install now pins its own `FAIL_INFRA` exit and keeps that meaning
+  through `normalize_result`. (7) The guard's scans missed the `.mts`/`.cts`/
+  `.mjs`/`.cjs` suffixes that vitest's *default* glob collects, so a
+  `tests/foo.test.mts` read as a real test to every tool except the include
+  that would run it — verified: the pre-fix guard exits 0 on exactly that tree.
+  (8) `frontend/src/**/*.ts` does not match `frontend/src/test-setup.ts`,
+  because the matcher collapses `**` to `*` and then requires a path segment;
+  that file was covered only incidentally by the `frontend/*.ts` rule, so the
+  direct children are now spelled out. (9) `ci/UMS_INTEGRATION.md` still
+  advertised all four JS checks as disabled. Combined suite:
+  `test_test_layout.bats` (23) + `test_js_lane.bats` (18) = 41 cases.
   Also fixed: the Python-convention `lib/` rule in `.gitignore` was swallowing
   **new** files under `frontend/tests/lib/` (17 of the moved tests live there;
   the moved ones survived only because `git mv` tracks explicitly), so a

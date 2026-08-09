@@ -98,6 +98,48 @@ run_guard() {
   [[ "$output" == *"frontend/tests/app.spec.ts"* ]]
 }
 
+@test "test-layout: catches a module-suffixed test inside tests/" {
+  # vitest's default glob collects .mts; this config's include does not, so the
+  # file reads as a real test to every tool except the one that would run it.
+  printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/tests/missed.test.mts"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/tests/missed.test.mts"* ]]
+}
+
+@test "test-layout: catches every module suffix the default glob would collect" {
+  local ext
+  for ext in mts cts mjs cjs; do
+    rm -f "$SANDBOX/frontend/tests/missed.test."*
+    printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/tests/missed.test.$ext"
+    run_guard
+    [ "$status" -eq 20 ] || { echo "suffix .$ext passed the guard" >&2; return 1; }
+  done
+}
+
+@test "test-layout: catches a module-suffixed test outside tests/" {
+  mkdir -p "$SANDBOX/frontend/e2e"
+  printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/e2e/smoke.test.mjs"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/e2e/smoke.test.mjs"* ]]
+}
+
+@test "test-layout: the two collected suffixes are not reported as unrunnable" {
+  printf 'it("runs", () => {});\n' > "$SANDBOX/frontend/tests/nested.test.tsx"
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: exempt from incremental changeset filtering" {
+  # The changeset emits language-derived check ids and never emits test-layout,
+  # so without an always-run exemption the scheduled lane is discarded before it
+  # runs whenever the diff does not look like JavaScript.
+  run bash -c "sed -n '/Always-run checks are never skipped/,/esac/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test-layout"* ]]
+}
+
 # --- drift guard --------------------------------------------------------------
 
 @test "test-layout: catches a dropped include" {

@@ -23,13 +23,23 @@ Edited in [`ci/config/checks.yml`](config/checks.yml):
 | **tests-python** | enabled | `pytest` via the project's pyproject `[tool.pytest.ini_options]` |
 | **sast** / **secrets** / **supply-chain** / **license** | enabled | bandit / gitleaks / pip-audit / license-checker |
 | **commit-hygiene** / **branch-protection** | enabled | conventional commits, no direct main pushes |
-| **lint-js / typecheck-js / format-js / tests-js** | **disabled** | No JS in v1.0 (frontend lands in Phase 5) |
+| **typecheck-js** | enabled | `tsc --noEmit` in `frontend/`, via the `node` lane |
+| **tests-js** | enabled | `vitest run` in `frontend/`, via the `node` lane |
+| **lint-js / format-js** | **disabled** | `frontend/` has no eslint or prettier config, and no `lint` / `format:check` script |
 | **lint-go / typecheck-go / format-go / tests-go** | **disabled** | No Go in the project |
 | **lint-rust / typecheck-rust / format-rust / tests-rust** | **disabled** | No Rust in the project |
 | **container** | **disabled** | Re-enable once Dockerfile lint (`hadolint`) is wanted in the gate |
 | **iac** | **disabled** | Re-enable once Helm/Terraform land in Phase S2 |
 
 Re-enable any of the disabled lanes by flipping `enabled: true` in `ci/config/checks.yml`.
+
+These toggles are coarser than one row per check suggests. `ci/preflight.sh`
+schedules the coarse `node` and `python` lanes, and skips a lane only when
+*every* related check is disabled — so `tests-js: true` alone is enough to make
+the whole `node` lane run, and `lint-js: false` does not stop it. Within the
+lane, `ci/checks/node.sh` runs whichever of `format:check`, `lint`, `typecheck`,
+`test`, `test:unit` and `build` the workspace's `package.json` defines, and
+prints `Skipping missing script:` for the rest.
 
 ## How tools resolve
 

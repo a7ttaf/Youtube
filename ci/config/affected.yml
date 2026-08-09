@@ -28,6 +28,18 @@ rules:
     tests: "frontend/tests/**/*.test.ts"
   - source: "frontend/src/**/*.jsx"
     tests: "frontend/tests/**/*.test.tsx"
+  # The matcher collapses "**" to "*" and then compares with `case`, so
+  # "frontend/src/**/*.ts" requires at least one path segment under src/ and
+  # would not match frontend/src/test-setup.ts on its own. Spell the direct
+  # children out rather than relying on a broader rule happening to cover them.
+  - source: "frontend/src/*.ts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/src/*.js"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/src/*.jsx"
+    tests: "frontend/tests/**/*.test.tsx"
   # A change to a test, or to the runner config the layout is declared in, must
   # run the suite too.
   - source: "frontend/tests/**/*.ts"

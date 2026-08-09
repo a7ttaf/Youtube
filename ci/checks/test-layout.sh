@@ -54,11 +54,19 @@ PRUNE=(
 # 1. No test files may live outside the declared tests/ tree.
 #    These would be silently skipped by test.include rather than run.
 # ---------------------------------------------------------------------------
+# The module suffixes are not padding: vitest's own default glob recognises the
+# optional c/m forms, so a foo.test.mts reads as a real test to every tool
+# except this config's include.
+TEST_SUFFIXES=(
+  '(' -name '*.test.ts' -o -name '*.test.tsx' -o -name '*.test.mts' -o -name '*.test.cts'
+  -o -name '*.test.js' -o -name '*.test.jsx' -o -name '*.test.mjs' -o -name '*.test.cjs'
+  -o -name '*.spec.ts' -o -name '*.spec.tsx' -o -name '*.spec.mts' -o -name '*.spec.cts'
+  -o -name '*.spec.js' -o -name '*.spec.jsx' -o -name '*.spec.mjs' -o -name '*.spec.cjs'
+  ')'
+)
+
 STRAY="$(find "$FRONTEND_DIR" "${PRUNE[@]}" -type f \
-  \( -name '*.test.ts' -o -name '*.test.tsx' \
-  -o -name '*.test.js' -o -name '*.test.jsx' \
-  -o -name '*.spec.ts' -o -name '*.spec.tsx' \
-  -o -name '*.spec.js' -o -name '*.spec.jsx' \) -print 2>/dev/null | sort || true)"
+  "${TEST_SUFFIXES[@]}" -print 2>/dev/null | sort || true)"
 
 if [ -n "$STRAY" ]; then
   fail "Test files found outside ${TESTS_DIR}/. vitest include is '${DECLARED_GLOB}', so these would NEVER RUN:"
@@ -90,12 +98,13 @@ fi
 #    glob. A tests/foo.spec.tsx sits in the right tree but is never collected —
 #    this is the silent-skip failure mode the guard exists to catch.
 # ---------------------------------------------------------------------------
+#    Everything test-looking except the two suffixes the glob actually collects.
 UNRUNNABLE=""
 if [ -d "$TESTS_DIR" ]; then
   UNRUNNABLE="$(find "$TESTS_DIR" -type f \
-    \( -name '*.test.js' -o -name '*.test.jsx' \
-    -o -name '*.spec.ts' -o -name '*.spec.tsx' \
-    -o -name '*.spec.js' -o -name '*.spec.jsx' \) 2>/dev/null | sort || true)"
+    "${TEST_SUFFIXES[@]}" \
+    ! -name '*.test.ts' ! -name '*.test.tsx' \
+    -print 2>/dev/null | sort || true)"
 fi
 
 if [ -n "$UNRUNNABLE" ]; then

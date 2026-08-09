@@ -353,9 +353,15 @@ _check_should_skip() {
       esac
     done
     if [ "$found" = "0" ]; then
-      # Always-run checks are never skipped by changeset
+      # Always-run checks are never skipped by changeset.
+      # test-layout belongs here rather than in the reverse mapping above: the
+      # changeset emits language-derived check ids and never emits test-layout,
+      # so any mapping entry would still leave it filtered whenever the diff
+      # does not look like JavaScript — which is exactly when a misplaced test
+      # goes unnoticed. The check is a pruned walk of one directory tree and
+      # costs milliseconds.
       case "$label" in
-        git-safety|changed-files|security|debt) ;;
+        git-safety|changed-files|security|debt|test-layout) ;;
         *) return 0 ;;
       esac
     fi

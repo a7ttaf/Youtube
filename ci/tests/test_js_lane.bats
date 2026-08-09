@@ -90,6 +90,16 @@ _enabled_value() {
   [[ "$output" == *"test_"*".py"* ]]
 }
 
+@test "affected: a file directly under frontend/src maps to frontend test patterns" {
+  # The matcher collapses "**" to "*", so "frontend/src/**/*.ts" alone requires
+  # a subdirectory and misses frontend/src/test-setup.ts — a real file, and the
+  # one vitest loads as setupFiles.
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/src/test-setup.ts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
 @test "affected: a change to the vitest config runs the suite" {
   source ci/lib/affected.sh
   run ci::affected::get_affected_tests frontend/vitest.config.ts
@@ -123,4 +133,56 @@ _enabled_value() {
 @test "node lane: the workspace loop normalizes child results before merging" {
   run grep -n "ci::common::normalize_result" ci/checks/node.sh
   [ "$status" -eq 0 ]
+}
+
+@test "node lane: a failed dependency install stays an infra result" {
+  # normalize_result maps off-contract codes to FAIL_NEW_ISSUE, which is right
+  # for a failing package script and wrong for a registry outage. Every install
+  # pins its own exit so provisioning failures survive that mapping.
+  local mgr
+  for mgr in "pnpm install --frozen-lockfile" "npm ci --quiet" \
+             "yarn install --frozen-lockfile" "yarn install --immutable" \
+             "bun install --frozen-lockfile"; do
+    run grep -F "$mgr || exit \"\$CI_RESULT_FAIL_INFRA\"" ci/checks/node.sh
+    [ "$status" -eq 0 ] || { echo "install not pinned to FAIL_INFRA: $mgr" >&2; return 1; }
+  done
+}
+
+# --- package metadata triggers the lane ---------------------------------------
+#
+# preflight filters lanes by ci/lib/changeset.sh check ids, not affected.yml. A
+# manifest classified as `json` and a lockfile as `unknown` emit no JavaScript
+# check ids, so a dependency bump or a changed script skipped the node lane
+# entirely — no install, tests, typecheck or build.
+
+@test "changeset: a package manifest classifies as javascript" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file frontend/package.json)" = "javascript" ]
+}
+
+@test "changeset: every supported lockfile classifies as javascript" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  local f
+  for f in bun.lock bun.lockb package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock; do
+    [ "$(ci::changeset::classify_file "frontend/$f")" = "javascript" ] \
+      || { echo "$f did not classify as javascript" >&2; return 1; }
+  done
+}
+
+@test "changeset: a javascript classification emits the node lane check ids" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  run ci::changeset::_checks_for_language javascript
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-js"* ]]
+  [[ "$output" == *"typecheck-js"* ]]
+}
+
+@test "changeset: an unrelated json file is still json" {
+  # The manifest rule must key on the basename, not on the extension.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file Docs/example.json)" = "json" ]
 }

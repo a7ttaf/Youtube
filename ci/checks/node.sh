@@ -118,17 +118,21 @@ if [ -n "$LOCKFILE" ] && [ -d "node_modules" ] && [ -f "$NODE_HASH_FILE" ]; then
   fi
 fi
 
+# Dependency installation is provisioning, not a code result. Under set -e a
+# registry outage or auth failure exits 1, which normalize_result would map to
+# FAIL_NEW_ISSUE and blame the code for a broken environment. Each install is
+# pinned to FAIL_INFRA explicitly so the classification survives that mapping.
 if [ "$SKIP_INSTALL" = "0" ]; then
   case "$MANAGER" in
   pnpm)
     ci::common::command_exists pnpm || { echo "pnpm lockfile found but pnpm is missing."; exit "$CI_RESULT_FAIL_INFRA"; }
     echo "Installing dependencies: pnpm install --frozen-lockfile"
-    pnpm install --frozen-lockfile
+    pnpm install --frozen-lockfile || exit "$CI_RESULT_FAIL_INFRA"
     ;;
   npm)
     ci::common::command_exists npm || { echo "npm lockfile found but npm is missing."; exit "$CI_RESULT_FAIL_INFRA"; }
     echo "Installing dependencies: npm ci --quiet"
-    npm ci --quiet
+    npm ci --quiet || exit "$CI_RESULT_FAIL_INFRA"
     ;;
   yarn)
     ci::common::command_exists yarn || { echo "yarn lockfile found but yarn is missing."; exit "$CI_RESULT_FAIL_INFRA"; }
@@ -136,16 +140,16 @@ if [ "$SKIP_INSTALL" = "0" ]; then
     YARN_MAJOR="${YARN_VERSION%%.*}"
     if [ "$YARN_MAJOR" = "1" ]; then
       echo "Installing dependencies: yarn install --frozen-lockfile"
-      yarn install --frozen-lockfile
+      yarn install --frozen-lockfile || exit "$CI_RESULT_FAIL_INFRA"
     else
       echo "Installing dependencies: yarn install --immutable"
-      yarn install --immutable
+      yarn install --immutable || exit "$CI_RESULT_FAIL_INFRA"
     fi
     ;;
   bun)
     ci::common::command_exists bun || { echo "bun lockfile found but bun is missing."; exit "$CI_RESULT_FAIL_INFRA"; }
     echo "Installing dependencies: bun install --frozen-lockfile"
-    bun install --frozen-lockfile
+    bun install --frozen-lockfile || exit "$CI_RESULT_FAIL_INFRA"
     ;;
   esac
 
