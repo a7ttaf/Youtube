@@ -73,7 +73,7 @@ const DRY_RUN_RESULT: ChannelImportResult = {
       group_id: null,
       group_action: null,
       revenue_required: true,
-      revenue_source_status: null,
+      revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
       changes: {},
       reason: null,
     },
@@ -468,6 +468,122 @@ describe("useChannelImport", () => {
         reason: "monthly roster import",
       }),
     ).resolves.toMatchObject({ counts: { ERROR: 1 } });
+  });
+
+  const rejectsPlan = async (plan: unknown) => {
+    fetchMock().mockResolvedValue(jsonResponse(plan));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  };
+
+  const onlyRow = (row: Record<string, unknown>) => ({
+    ...DRY_RUN_RESULT,
+    counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 1, ERROR: 0 },
+    rows: [{ ...DRY_RUN_RESULT.rows[1], outcome: "UNCHANGED", changes: {}, ...row }],
+  });
+
+  /** A single UPDATE row with counts that AGREE with it, so countsMatchRows
+   * cannot be what rejects the payload — the outcome/diff rule has to be. */
+  const onlyUpdateRow = (row: Record<string, unknown>) => ({
+    ...DRY_RUN_RESULT,
+    counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+    rows: [{ ...DRY_RUN_RESULT.rows[1], ...row }],
+  });
+
+  it("rejects a CREATE that discloses no source status", async () => {
+    // The planner stamps (None, _created_revenue_source_status(...)) on EVERY
+    // create, so null is unemittable there — and it is exactly the case where
+    // silence hides the finance classification a new channel is born with
+    // (review #184, codex P2).
+    await rejectsPlan({
+      ...DRY_RUN_RESULT,
+      counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+      rows: [{ ...DRY_RUN_RESULT.rows[0], revenue_source_status: null }],
+    });
+  });
+
+  it("rejects a source status moving somewhere the planner cannot derive", async () => {
+    // `to` is always the DERIVED value, and derive_revenue_source_status
+    // returns only these two when the flag flips (otherwise the pair is null
+    // entirely). OFFICIAL_CMS_REVENUE can be a `from`, never a `to`.
+    await rejectsPlan(
+      onlyRow({
+        revenue_source_status: { from: "PERFORMANCE_ONLY", to: "OFFICIAL_CMS_REVENUE" },
+      }),
+    );
+  });
+
+  it("still accepts an UNCHANGED row that discloses nothing", async () => {
+    // The complement: _planned_revenue_source_status returns None whenever the
+    // write leaves the classification alone, which is the common case. The
+    // CREATE rule must not be over-applied to it.
+    fetchMock().mockResolvedValue(jsonResponse(onlyRow({ revenue_source_status: null })));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { UNCHANGED: 1 } });
+  });
+
+  it("rejects an UNCHANGED row that carries a diff", async () => {
+    // outcome = UPDATE if changes else UNCHANGED, exactly — so a row labelled
+    // UNCHANGED while carrying a real diff is unemittable, and it would show
+    // the operator "no change" over fields the apply will actually write
+    // (review #184, codex P2).
+    await rejectsPlan(
+      onlyRow({
+        changes: { channel_name: { from: "Old Beta", to: "Beta Channel" } },
+      }),
+    );
+  });
+
+  it("rejects an UPDATE carrying no diff at all", async () => {
+    await rejectsPlan(onlyUpdateRow({ changes: {} }));
+  });
+
+  it("rejects a diff naming a field the import never compares", async () => {
+    // _inventory_changes compares exactly four fields, so a diff mentioning
+    // anything else describes a write this route cannot perform.
+    await rejectsPlan(
+      onlyUpdateRow({ changes: { active: { from: true, to: false } } }),
+    );
+  });
+
+  it("rejects a successful plan carrying no rows", async () => {
+    // parse_channel_import_csv rejects a header-only or blank-only roster
+    // outright ("CSV contains no data rows"), which is a format error with a
+    // string detail — never a plan. Four zero counts satisfy countsMatchRows,
+    // so without this the preview reads "empty roster" while Apply stays live.
+    await rejectsPlan({
+      ...DRY_RUN_RESULT,
+      counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+      rows: [],
+    });
+  });
+
+  it("rejects duplicate row numbers", async () => {
+    // They are the preview's React keys and the record the operator must go
+    // and fix; the parser emits one per input row via enumerate(start=1).
+    await rejectsPlan({
+      ...DRY_RUN_RESULT,
+      rows: [DRY_RUN_RESULT.rows[0], { ...DRY_RUN_RESULT.rows[1], row_number: 1 }],
+    });
+  });
+
+  it("rejects a row number that is not a positive integer", async () => {
+    await rejectsPlan(onlyRow({ row_number: 0 }));
+    await rejectsPlan(onlyRow({ row_number: 1.5 }));
   });
 
   it("rejects a 2xx describing a plan other than the one bound", async () => {

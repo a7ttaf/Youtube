@@ -56,6 +56,23 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
  * joins an existing one — the single most consequential thing a Group_ID row
  * does, and the reason that column exists at all (review #184).
  */
+/**
+ * The only destinations a planned source-status change can name. Both the
+ * CREATE stamp and the flip derivation produce one of these two; every other
+ * declared status (OFFICIAL_CMS_REVENUE, OFFICIAL_MANUAL_IMPORT) can only be
+ * a `from`, never a `to`.
+ */
+const DERIVED_SOURCE_STATUSES = ["MISSING_REVENUE_SOURCE", "PERFORMANCE_ONLY"] as const;
+
+/** The inventory fields an UPDATE's diff may mention — _inventory_changes
+ * compares exactly these four and emits only the ones that differ. */
+const INVENTORY_FIELDS = [
+  "channel_name",
+  "cms_status",
+  "content_owner_id",
+  "revenue_required",
+] as const;
+
 const PLAN_OUTCOMES = ["CREATE", "UPDATE", "UNCHANGED", "ERROR"] as const;
 const GROUP_ACTIONS = ["CREATE", "JOIN"] as const;
 
@@ -135,6 +152,19 @@ const isChangeMap = (value: unknown): boolean => {
   return Object.values(value).every(isFieldChange);
 };
 
+/**
+ * `row_number` is the CSV record the operator has to go and fix, and it is the
+ * React key each preview row is rendered under. The parser enumerates data
+ * rows with `enumerate(reader, start=1)`, so the backend emits 1-based
+ * integers, one per input row — a fractional, zero, negative or duplicated
+ * value is unemittable, and a duplicate would collide as a React key so a
+ * refreshed preview could reuse or mis-show a row (review #184, codex P2).
+ * Uniqueness is checked across the plan in isPlanRows.
+ */
+const isRowNumber = (value: unknown): boolean => {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+};
+
 const isNullableString = (value: unknown): boolean => {
   return value === null || typeof value === "string";
 };
@@ -153,7 +183,40 @@ const isSourceStatusChange = (value: unknown): boolean => {
   if (!isPlainObject(value)) {
     return false;
   }
-  return isNullableString(value.from) && typeof value.to === "string";
+  // `to` is CONSTRAINED, not merely a string. It is always the DERIVED value,
+  // and derive_revenue_source_status returns the existing status when the flag
+  // is unchanged (which yields null here, not a pair) or exactly one of these
+  // two when it flips; _created_revenue_source_status returns the same two. So
+  // any other destination is a classification the backend cannot plan — an
+  // OFFICIAL_* status can be a `from`, never a `to` (review #184, codex P2).
+  return (
+    isNullableString(value.from) &&
+    DERIVED_SOURCE_STATUSES.some((status) => status === value.to)
+  );
+};
+
+/**
+ * A CREATE always DISCLOSES its source status: the planner stamps
+ * `(None, _created_revenue_source_status(...))` on every CREATE, so null there
+ * is unemittable — and it is exactly the case where silence hides the finance
+ * classification a new channel is born with. An ERROR row writes nothing and
+ * carries null.
+ *
+ * NOT extended to "any row whose revenue_required changes", which the finding
+ * also proposed: a flip can legitimately derive the SAME status the row
+ * already has, and _planned_revenue_source_status then returns None on purpose
+ * so a re-import does not read as a reclassification. Requiring disclosure
+ * there would reject payloads the backend does emit.
+ */
+const disclosesSourceStatus = (row: Record<string, unknown>): boolean => {
+  if (row.outcome === "ERROR") {
+    return row.revenue_source_status === null;
+  }
+  if (row.outcome !== "CREATE") {
+    return true;
+  }
+  const change = row.revenue_source_status;
+  return isPlainObject(change) && change.from === null;
 };
 
 /**
@@ -164,7 +227,7 @@ const isSourceStatusChange = (value: unknown): boolean => {
  * (review #184). Nullable is about ABSENCE, not "anything goes".
  */
 const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
-  ["row_number", (value) => typeof value === "number"],
+  ["row_number", isRowNumber],
   ["outcome", isOutcome],
   ["changes", isChangeMap],
   ["youtube_channel_id", isNullableString],
@@ -218,6 +281,32 @@ const hasWriteFields = (row: Record<string, unknown>): boolean => {
   );
 };
 
+/**
+ * The OUTCOME LABEL must match the diff it is labelling. The planner sets
+ * `outcome = UPDATE if changes else UNCHANGED` and gives CREATE an empty
+ * `changes` by construction, so the relation is exact — a row labelled
+ * UNCHANGED while carrying a real diff shows "no change" over fields the apply
+ * will write, and an UPDATE with an emptied diff claims a write it does not
+ * describe (review #184, codex P2).
+ *
+ * The KEY set is checked for the same reason: _inventory_changes compares
+ * exactly the four INVENTORY_FIELDS, so a diff naming anything else describes
+ * a write this route cannot perform.
+ *
+ * LIMIT, stated because it bounds the guarantee: a real UPDATE relabelled as
+ * UNCHANGED *with its diff removed* is indistinguishable from a genuine
+ * UNCHANGED row and no client-side check can catch it. The plan fingerprint is
+ * what binds the apply to the reviewed plan in that case.
+ */
+const outcomeMatchesChanges = (row: Record<string, unknown>): boolean => {
+  const names = Object.keys(row.changes as Record<string, unknown>);
+  if (!names.every((name) => INVENTORY_FIELDS.some((field) => field === name))) {
+    return false;
+  }
+  // CREATE, UNCHANGED and ERROR all carry an empty diff; UPDATE never does.
+  return row.outcome === "UPDATE" ? names.length > 0 : names.length === 0;
+};
+
 const isPlanRow = (row: unknown): boolean => {
   if (!isPlainObject(row)) {
     return false;
@@ -225,8 +314,29 @@ const isPlanRow = (row: unknown): boolean => {
   return (
     PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(row[field])) &&
     hasConsistentGroupEffect(row) &&
-    hasWriteFields(row)
+    hasWriteFields(row) &&
+    outcomeMatchesChanges(row) &&
+    disclosesSourceStatus(row)
   );
+};
+
+/**
+ * A successful plan always has at least ONE row: parse_channel_import_csv
+ * rejects a header-only or blank-only roster outright ("CSV contains no data
+ * rows"), which is a format error carrying a string detail, never a plan. An
+ * empty-rows body with four zero counts satisfies countsMatchRows, so without
+ * this the preview would say the roster is empty while Apply stayed enabled
+ * and the bound request executed the real file (review #184, codex P2).
+ *
+ * Row numbers must also be DISTINCT — they are the preview's React keys, and
+ * the parser emits exactly one per input row.
+ */
+const isPlanRows = (value: unknown): boolean => {
+  if (!Array.isArray(value) || value.length === 0 || !value.every(isPlanRow)) {
+    return false;
+  }
+  const numbers = value.map((row: { row_number: number }) => row.row_number);
+  return new Set(numbers).size === numbers.length;
 };
 
 /**
@@ -255,7 +365,7 @@ const CMS_STATUS_FIELD = "cms_status";
 const DRY_RUN_FIELD = "dry_run";
 
 const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
-  ["rows", (value) => Array.isArray(value) && value.every(isPlanRow)],
+  ["rows", isPlanRows],
   ["counts", isCountMap],
   ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
   [OWNER_FIELD, (value) => typeof value === "string"],

@@ -749,7 +749,7 @@ const IMPORT_PLAN = {
       group_id: null,
       group_action: null,
       revenue_required: true,
-      revenue_source_status: null,
+      revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
       changes: {},
       reason: null,
     },

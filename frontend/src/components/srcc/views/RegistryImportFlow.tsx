@@ -959,10 +959,13 @@ const PreviewStep = ({
       <div className="panel-title">
         <strong>Review the plan</strong>
         {/* The CMS status is echoed, not decorative: it decides whether the
-            connector's revenue pull targets a channel at all, the request
-            omits the form field so the backend default applies, and a CREATE
+            connector's revenue pull targets a channel at all, and a CREATE
             row's empty `changes` shows it nowhere else. An operator must not
-            approve a roster without seeing what every new channel gets. */}
+            approve a roster without seeing what every new channel gets.
+            The request sends this field EXPLICITLY as a fixed target
+            (IMPORT_CMS_STATUS), which is what lets the hook reject a preview
+            echoing a different one before it is approved — it is load-bearing,
+            not a redundant restatement of the route default (review #184). */}
         <span>
           Roster plan for content owner {result.content_owner_id} · CMS status{" "}
           {result.cms_status}.
