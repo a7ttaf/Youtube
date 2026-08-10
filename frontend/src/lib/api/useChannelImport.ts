@@ -350,54 +350,68 @@ export class ChannelImportShapeError extends Error {
   }
 }
 
+/** What the request asked for, against which a response is judged. */
+type ImportRequestTarget = {
+  dryRun: boolean;
+  contentOwnerId: string;
+  expectedPlanFingerprint?: string;
+};
+
 /**
- * Every reason a 2xx body is UNUSABLE, in one place, ordered from structural to
- * semantic. Throws rather than returning a verdict: each of these is the same
- * outcome for the caller — the flow's indeterminate path, because on an apply
- * the write may well have committed and only the body was unreadable.
+ * Every condition a usable 2xx body must meet, ORDERED from structural to
+ * semantic. A list rather than a chain of ifs: each entry has the same
+ * consequence — the body is unusable — so the branching carried no information
+ * the order does not, and stating them as data keeps the check under the
+ * analyzer's complexity threshold (DeepSource JS-R1005), conformed rather than
+ * suppressed.
  *
- * Extracted from the `.then` so that callback stays under the analyzer's
- * complexity threshold (DeepSource JS-R1005) — conformed, not suppressed.
+ * The FIRST entry must stay first: everything after it reads `result` as a
+ * ChannelImportResult, which is only sound once the structural check has
+ * passed. `every` short-circuits, so that ordering is enforced at runtime and
+ * not merely intended.
  */
-function assertUsableResult(
-  result: ChannelImportResult,
-  request: { dryRun: boolean; contentOwnerId: string; expectedPlanFingerprint?: string },
-): void {
+const RESULT_CHECKS: ReadonlyArray<
+  (result: ChannelImportResult, request: ImportRequestTarget) => boolean
+> = [
   // A 2xx is not a promise about SHAPE — client.post casts, it does not
-  // validate. Rejecting here keeps a malformed dry run a read-only failure,
-  // and routes a malformed apply into the INDETERMINATE path (this is not an
-  // ApiError, so it is not on the definite-rejection list).
-  if (!isChannelImportResult(result)) {
-    throw new ChannelImportShapeError();
-  }
+  // validate. Rejecting keeps a malformed dry run a read-only failure, and
+  // routes a malformed apply into the flow's INDETERMINATE path (this is not an
+  // ApiError, so it is not on the definite-rejection list) — which is right:
+  // the write may well have committed, only the body was unusable.
+  (result) => isChannelImportResult(result),
   // The MODE must match what was asked for. A structural check only proves
   // `dry_run` is a boolean, so a malformed or legacy apply response carrying
   // `dry_run: true` passed it — and the flow then advanced to Applied and told
   // the operator the import committed, on a body that identifies itself as a
   // preview (review #184). Treated as unusable rather than coerced.
-  if (result.dry_run !== request.dryRun) {
-    throw new ChannelImportShapeError();
-  }
+  (result, request) => result.dry_run === request.dryRun,
   // And it must be the plan we BOUND to. A stale, misrouted or legacy-server
   // 2xx can be structurally perfect and describe a different plan entirely;
   // accepting it lets the flow clear the unsettled record and present an
   // unrelated payload as the approved one. The route returns the same digest it
   // compared against on success (channels.py: the 409 fires when they differ),
-  // so an inequality here is never a legitimate response.
-  if (
-    request.expectedPlanFingerprint !== undefined &&
-    result.plan_fingerprint !== request.expectedPlanFingerprint
-  ) {
-    throw new ChannelImportShapeError();
-  }
+  // so an inequality is never a legitimate response. Unbound callers sent no
+  // expectation and so have nothing to compare.
+  (result, request) =>
+    request.expectedPlanFingerprint === undefined ||
+    result.plan_fingerprint === request.expectedPlanFingerprint,
   // And it must describe the TARGET this request named. Unlike the fingerprint
   // check this one applies to the dry run too, which is the important half: the
   // preview is what the operator approves, so an altered target has to be
   // refused before it is rendered rather than caught one step later.
-  if (!echoesRequestedTarget(result, request.contentOwnerId)) {
+  (result, request) => echoesRequestedTarget(result, request.contentOwnerId),
+];
+
+/**
+ * Throw unless the body is usable. Throws rather than returning a verdict
+ * because every failure above is the same outcome for the caller — on an apply
+ * the write may well have committed and only the body was unreadable.
+ */
+const assertUsableResult = (result: ChannelImportResult, request: ImportRequestTarget): void => {
+  if (!RESULT_CHECKS.every((holds) => holds(result, request))) {
     throw new ChannelImportShapeError();
   }
-}
+};
 
 export const useChannelImport = (): ((
   args: {
