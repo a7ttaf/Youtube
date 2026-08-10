@@ -186,9 +186,19 @@ ws_manifest() {
 
 ws_seed_fingerprint() {
   # Mirrors _deps_fingerprint in node.sh: lockfile hash, then manifest hash.
-  ( cd "$NODE_SB/ws" && printf '%s %s\n' \
-      "$(sha256sum bun.lock | cut -d' ' -f1)" \
-      "$(sha256sum package.json | cut -d' ' -f1)" \
+  #
+  # Hashed with the gate's own ci::common::hash_file rather than a hard-coded
+  # sha256sum. hash_file falls back through several tools, so on a machine
+  # where it picks a different backend a hand-rolled sha256sum seeds a value
+  # node.sh will never compute — the sandbox would then attempt a real install
+  # and these cases would fail for a reason that has nothing to do with what
+  # they assert. Deriving the fixture from the code under test is the same rule
+  # the extension-coverage case above follows.
+  ( cd "$NODE_SB/ws" \
+    && . "$REPO_ROOT/ci/lib/common.sh" \
+    && printf '%s %s\n' \
+      "$(ci::common::hash_file bun.lock)" \
+      "$(ci::common::hash_file package.json)" \
       > "$NODE_SB/.ci-gate/node_modules-ws.hash" )
 }
 
@@ -940,12 +950,29 @@ ws_run() {
   "
   rm -rf "$sb"
   [ "$status" -eq 0 ]
-  # 124 is what `timeout` returns, and what preflight maps to FAIL_INFRA.
-  [[ "$output" == *"rc=124"* ]]
   local elapsed
   elapsed="$(printf '%s\n' "$output" | sed -n 's/^elapsed=//p')"
   [ -n "$elapsed" ]
-  [ "$elapsed" -lt 5 ]
+
+  # ci::runner::submit wraps the check only when `timeout` or `gtimeout` exists
+  # and runs it bare otherwise, which is documented behaviour and not a defect.
+  # Asserting rc=124 unconditionally therefore made this case fail on a machine
+  # that has neither, for the one reason the runner is entitled to. Both
+  # branches are asserted instead of skipping either: a skip on the machine that
+  # lacks the tool is indistinguishable from a skip on the machine where the
+  # feature regressed.
+  if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    # 124 is what `timeout` returns, and what preflight maps to FAIL_INFRA, so
+    # a killed check is reported as one rather than as a mystery.
+    [[ "$output" == *"rc=124"* ]]
+    [ "$elapsed" -lt 5 ]
+  else
+    # No timeout tool: the check must still run to completion and report its own
+    # result. What must never happen is the runner inventing a timeout it cannot
+    # enforce.
+    [[ "$output" == *"rc=0"* ]]
+    [ "$elapsed" -ge 5 ]
+  fi
 }
 
 @test "tests-shell: a declared timeout is actually applied, not documentation" {
@@ -1159,12 +1186,18 @@ ws_run() {
   source ci/lib/changeset.sh
   source ci/lib/affected.sh
 
+  # `tr -d $' \t'` rather than `tr -d ' \t'`: bash expands the escape itself, so
+  # the set handed to tr is a real space and a real tab and does not depend on
+  # tr interpreting `\t`. The failure mode of getting that wrong is silent —
+  # a tr that took the backslash literally would delete every `t` and turn the
+  # parsed `.ts` and `.cts` into `.s` and `.cs`, and the loop below would then
+  # report the classifier disagreeing about extensions that do not exist.
   local exts
   exts="$(sed -n '/^  case "\$ext" in$/,/^  esac$/p' ci/lib/changeset.sh \
     | grep -E "printf 'javascript'" \
     | sed 's/).*//' \
     | tr '|' '\n' \
-    | tr -d ' \t' \
+    | tr -d $' \t' \
     | grep -vE '^$|^#')"
   [ -n "$exts" ]
 
@@ -1702,4 +1735,129 @@ ws_run() {
   # has hit repeatedly.
   run grep -nE '^export CI_GATE_MODE="\$MODE"$' ci/preflight.sh
   [ "$status" -eq 0 ]
+}
+
+@test "node lane: a comparator on an unstated major follows node-semver" {
+  # node-semver resolves an X-range major before any comparator runs: ">=x" and
+  # "<=x" become "*", "^x" and "~x" become "*", and ">x" and "<x" become
+  # "<0.0.0-0". Reading the wildcard as 0 instead got four of the six backwards.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  bash -n "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+
+  local spec want rc bad=""
+  # spec:expected, where expected is 0 satisfied / 1 not satisfied.
+  for pair in '>=x:0' '<=x:0' '^x:0' '~x:0' '>x:1' '<x:1' \
+              '>=X:0' '>=*:0' '>*:1' 'x:0' '*:0' '=x:0'; do
+    spec="${pair%:*}"; want="${pair#*:}"
+    rc=0
+    _semver_token_ok 20.11.1 "$spec" || rc=$?
+    [ "$rc" -eq "$want" ] || bad="${bad} ${spec}(want=${want} got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "wildcard-major mismatches:${bad}" >&2; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a caret range below 0.1.0 pins the patch" {
+  # "^0.0.3" is ">=0.0.3 <0.0.4": below 0.1.0 the patch carries the breaking
+  # change, so constraining the minor alone admitted 0.0.9.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  bash -n "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+
+  local rc bad=""
+  # version:spec:expected
+  for triple in '0.0.9:^0.0.3:1' '0.0.3:^0.0.3:0' '0.0.2:^0.0.3:1' \
+                '0.0.9:^0.0.x:0' '0.1.0:^0.0.x:1' \
+                '0.2.9:^0.2.3:0' '0.3.0:^0.2.3:1' \
+                '1.9.9:^1.2.3:0' '2.0.0:^1.2.3:1'; do
+    local ver="${triple%%:*}" rest="${triple#*:}"
+    local spec="${rest%:*}" want="${rest#*:}"
+    rc=0
+    _semver_token_ok "$ver" "$spec" || rc=$?
+    [ "$rc" -eq "$want" ] || bad="${bad} ${spec}@${ver}(want=${want} got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "caret mismatches:${bad}" >&2; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "affected: a nested module-extension source maps to frontend tests" {
+  # Reported in review as a gap: only "frontend/src/*.mts" is declared, so
+  # frontend/src/lib/x.mts was said to match nothing. It matches — the matcher
+  # collapses "**" to "*" and compares with `case`, where "*" crosses "/", so
+  # the direct-child spelling already covers nested paths. This passes at
+  # 98e3ecc8 too; it is here to hold the behaviour the disposition rests on,
+  # because the reasoning depends on a matcher detail that could be changed by
+  # someone tightening the globs with no idea this was load-bearing.
+  source ci/lib/affected.sh
+  local ext
+  for ext in mts cts mjs cjs; do
+    run ci::affected::get_affected_tests "frontend/src/lib/nested.$ext"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"frontend/tests/"* ]] \
+      || { echo "no frontend test pattern for nested .$ext" >&2; return 1; }
+  done
+}
+
+@test "preflight: a renamed .gitignore still un-filters the shell suite" {
+  # _CI_CHANGESET_FILES_RAW holds STATUS<TAB>PATH records and a rename is
+  # R100<TAB>old<TAB>new, so an end-of-line anchor matched only the destination.
+  # Renaming .gitignore away therefore filtered out the suite that guards it.
+  run grep -nE "gitignore\(\[\[:space:\]\]\|\\$\)" ci/preflight.sh
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | wc -l)" -eq 2 ]
+  # And the pattern itself matches a rename record, not just the source text.
+  run bash -c "printf 'R100\t.gitignore\t.gitignore.old\n' \
+    | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|\$))'"
+  [ "$status" -eq 0 ]
+}
+
+@test "node lane: a component stated after a wildcard is ignored, as npm ignores it" {
+  # Reported in review as "20.*.3 should be rejected as malformed". node-semver
+  # accepts it and reads it as 20.x.x — any X makes everything to its right an X
+  # — so rejecting it would fail a manifest npm installs. The real defect was
+  # next door: _semver_upper_bound already stopped at the first wildcard, so
+  # "<=20.*.3" was right, while the operand handed to the numeric comparators
+  # kept the stated 3 and made ">=20.*.3" reject 20.0.1.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  bash -n "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+
+  local rc bad=""
+  # version:spec:expected — every comparator reads 20.*.3 as 20.x.x.
+  for triple in '20.0.1:>=20.*.3:0' '19.9.9:>=20.*.3:1' \
+                '20.11.1:<=20.*.3:0' '21.0.0:<=20.*.3:1' \
+                '20.11.1:>20.*.3:1'  '21.0.0:>20.*.3:0' \
+                '19.9.9:<20.*.3:0'   '20.0.0:<20.*.3:1' \
+                '20.0.1:20.*.3:0'    '21.0.0:20.*.3:1' \
+                '20.11.1:^20.*.3:0'  '20.11.1:~20.*.3:0' \
+                '20.11.1:20..1:3'    '20.11.1:>=20..1:3'; do
+    local ver="${triple%%:*}" rest="${triple#*:}"
+    local spec="${rest%:*}" want="${rest#*:}"
+    rc=0
+    _semver_token_ok "$ver" "$spec" || rc=$?
+    [ "$rc" -eq "$want" ] || bad="${bad} ${spec}@${ver}(want=${want} got=${rc})"
+  done
+  # The grammar check still runs first, so a genuinely malformed operand is not
+  # truncated into something legal.
+  [ -z "$bad" ] || { echo "wildcard-truncation mismatches:${bad}" >&2; return 1; }
+  rm -rf "$NODE_SB"
 }

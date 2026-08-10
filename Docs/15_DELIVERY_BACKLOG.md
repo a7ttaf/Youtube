@@ -1053,7 +1053,39 @@ single P-tier above.
   string; and the `export default` anchor was still a raw substring search while
   everything read after it had already been made string-aware, so a quoted
   `export default` anywhere earlier re-pointed the whole extraction at prose.
-  Combined suite: `test_test_layout.bats` (70) + `test_js_lane.bats` (129) = 199
+  A twentieth round came from a surface the review-thread audits had been
+  missing entirely: Qodo files its findings in a **pinned issue comment**, not
+  as review threads, so "every thread resolved" was a true statement about the
+  wrong list. Nine findings were open there. Six were real. The comparator had
+  three, all in operand handling rather than in the comparisons themselves:
+  node-semver resolves an X-range **major** before any comparator runs — `>=x`
+  and `<=x` become `*`, `^x` and `~x` become `*`, `>x` and `<x` become nothing —
+  and reading the wildcard as `0` got four of those six backwards; `^0.0.3` is
+  `>=0.0.3 <0.0.4`, so pinning only the minor admitted `0.0.9`; and any `x` in
+  an operand makes everything to its right an `x`, so `>=20.*.3` is `>=20.0.0`
+  and was instead compared against `20.0.3`. `_semver_upper_bound` had always
+  truncated at the first wildcard, which is why `<=20.*.3` was right while
+  `>=20.*.3` was wrong — the operand is now normalised once, after the grammar
+  check, so every comparator reads the same range. In `preflight.sh`,
+  `\.gitignore$` and `frontend/README\.md$` were anchored on end of line, but
+  `_CI_CHANGESET_FILES_RAW` holds `STATUS<TAB>PATH` records and a rename is
+  `R100<TAB>old<TAB>new`: renaming `.gitignore` away filtered out the very suite
+  that guards it. Three were test-side: the sequential-timeout case asserted
+  `rc=124` unconditionally, which fails on a machine with neither `timeout` nor
+  `gtimeout` for the one reason the runner is entitled to (both branches are
+  asserted now, rather than skipping either); the fingerprint fixture hashed
+  with `sha256sum` while production uses `ci::common::hash_file` and its
+  fallbacks; and two cases extracted shell functions with `sed` ranges anchored
+  at column zero, so re-indenting a file would have failed the test rather than
+  the code.
+  Three of the nine did not survive checking, and each disposition is pinned by
+  a test rather than by an argument: `20.*.3` is **not** malformed — npm accepts
+  it, and rejecting it would fail a manifest that installs; `frontend/src/*.mts`
+  **does** match `frontend/src/lib/x.mts`, because the matcher collapses `**` to
+  `*` and compares with `case`, where `*` crosses `/`; and `tr -d ' \t'` is
+  POSIX, though it is now written `tr -d $' \t'` so the tab cannot depend on
+  `tr` interpreting the escape.
+  Combined suite: `test_test_layout.bats` (70) + `test_js_lane.bats` (134) = 204
   cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

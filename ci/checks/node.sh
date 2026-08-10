@@ -382,6 +382,37 @@ _semver_spec_states() {
   return 0
 }
 
+# _semver_truncate_wildcard <operand> – echo the operand with every component
+# from the first wildcard onwards removed; echo it unchanged when it has none.
+#
+# node-semver reads any X in an operand as making everything to its right an X
+# too ("we know patch is an x, because we have any x at all"), so "20.*.3" is
+# "20.x.x" and ">=20.*.3" is ">=20.0.0". _semver_part strips the "*" to 0 but
+# keeps the stated 3, so the comparison ran against 20.0.3 and rejected 20.0.1 —
+# a runtime the range admits. _semver_upper_bound already stopped at the first
+# wildcard, which is why "<=20.*.3" was right and ">=20.*.3" was not; truncating
+# the operand once makes every comparator read the same range.
+_semver_truncate_wildcard() {
+  local i part out=""
+  for i in 1 2 3; do
+    part="$(_semver_spec_part "$1" "$i")"
+    case "$part" in
+      '') break ;;
+      'x'|'X'|'*')
+        # A wildcard *major* states nothing at all, and the empty string is not
+        # a usable operand: "=x" came back malformed, when node-semver reads it
+        # as "*". Left as written, so the callers that ask whether a component
+        # is stated still get an answer.
+        [ "$i" -eq 1 ] && break
+        printf '%s' "$out"
+        return 0
+        ;;
+    esac
+    out="${out:+$out.}$part"
+  done
+  printf '%s' "$1"
+}
+
 # _semver_cmp <a> <b> – echo -1, 0 or 1. Pre-release suffixes are dropped: a
 # gate that accepted 22.12.0-rc for a >=22.12.0 requirement would be lying by a
 # hair, but the check exists to catch whole-version drift, not tag splitting.
@@ -428,8 +459,25 @@ _semver_token_ok() {
   case "$tok" in
     '>='*|'<='*|'>'*|'<'*|'^'*|'~'*|'='*)
       if ! _semver_is_version "$want"; then return 3; fi
+      # Checked for grammar first, then normalised: "20..1" must still be
+      # rejected rather than truncated into something legal.
+      want="$(_semver_truncate_wildcard "$want")"
       ;;
   esac
+
+  # node-semver resolves an X-range with an unstated major before any comparator
+  # sees it: ">=x" and "<=x" become "*", "^x" and "~x" become "*", and ">x" and
+  # "<x" become "<0.0.0-0", which nothing satisfies. Falling through to the
+  # numeric path read the wildcard as 0 instead and got four of the six
+  # backwards -- "<=x", "^x" and "~x" rejected every runtime, and ">x" admitted
+  # every one. Bare "x" is not listed because the X-range branch below already
+  # returns 0 for it, which is the same answer.
+  if ! _semver_spec_states "$want" 1; then
+    case "$tok" in
+      '>='*|'<='*|'^'*|'~'*) return 0 ;;
+      '>'*|'<'*)             return 1 ;;
+    esac
+  fi
 
   case "$tok" in
     '>='*)
@@ -471,6 +519,16 @@ _semver_token_ok() {
       if [ "$(_semver_part "$want" 1)" = "0" ] \
         && _semver_spec_states "$want" 2 \
         && [ "$(_semver_part "$version" 2)" != "$(_semver_part "$want" 2)" ]; then
+        return 1
+      fi
+      # The rule recurses one level further down: "^0.0.3" is ">=0.0.3 <0.0.4",
+      # because below 0.1.0 the patch is what carries the breaking change.
+      # Constraining the minor alone admitted 0.0.9 for a range that means
+      # 0.0.3 and nothing else.
+      if [ "$(_semver_part "$want" 1)" = "0" ] \
+        && _semver_spec_states "$want" 2 && [ "$(_semver_part "$want" 2)" = "0" ] \
+        && _semver_spec_states "$want" 3 \
+        && [ "$(_semver_part "$version" 3)" != "$(_semver_part "$want" 3)" ]; then
         return 1
       fi
       return 0

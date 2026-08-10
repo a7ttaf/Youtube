@@ -38,6 +38,38 @@ run_guard() {
   run bash "$SANDBOX/ci/checks/test-layout.sh"
 }
 
+# extract_shell_fn <file> <name> - print the named shell function's definition.
+#
+# A sed range anchored on "^name()" and "^}" assumes both sit at column zero, so
+# re-indenting a file - a change with no effect on behaviour - broke these cases
+# rather than the code they guard. The header is matched at any indentation and
+# the body closes on the first "}" at the same column, which is what the shell
+# formatter this repo runs produces. Callers that source the result run bash -n
+# on it first, so a mis-extraction fails loudly instead of quietly defining
+# nothing.
+extract_shell_fn() {
+  awk -v name="$2" '
+    !inside {
+      line = $0
+      sub(/[[:space:]]+$/, "", line)
+      probe = line
+      sub(/^[[:space:]]+/, "", probe)
+      # Compared as text, not as a pattern: a function name is a literal here,
+      # and building a regex out of one is how the parentheses would have to be
+      # escaped in the first place.
+      if (probe == name "()" || probe == name "() {") {
+        indent = line
+        sub(/[^[:space:]].*$/, "", indent)
+        inside = 1
+        print
+      }
+      next
+    }
+    { print }
+    $0 == indent "}" { inside = 0 }
+  ' "$1"
+}
+
 @test "test-layout: syntax check passes" {
   bash -n ci/checks/test-layout.sh
 }
@@ -342,9 +374,16 @@ export default defineConfig({
   },
 });
 EOF
+  # Extracted here rather than inside the subshell below, which does not inherit
+  # bats helper functions.
+  extract_shell_fn ci/checks/test-layout.sh strip_ts_comments  > "$SANDBOX/fns.sh"
+  extract_shell_fn ci/checks/test-layout.sh extract_test_block >> "$SANDBOX/fns.sh"
+  # A mis-extraction would otherwise define nothing and fail as "command not
+  # found", which reads like a missing function rather than a broken fixture.
+  bash -n "$SANDBOX/fns.sh"
+  grep -q 'extract_test_block()' "$SANDBOX/fns.sh"
   run bash -c "
     cd '$SANDBOX'
-    sed -n '/^strip_ts_comments()/,/^}/p;/^extract_test_block()/,/^}/p' ci/checks/test-layout.sh > '$SANDBOX/fns.sh'
     . '$SANDBOX/fns.sh'
     strip_ts_comments frontend/vitest.config.ts | extract_test_block
   "
@@ -898,13 +937,13 @@ EOF
 # check exists to prevent, so assert the wiring rather than the registration.
 
 @test "test-layout: scheduled by preflight quick mode" {
-  run bash -c "sed -n '/^run_common_checks()/,/^}/p' ci/preflight.sh"
+  run extract_shell_fn ci/preflight.sh run_common_checks
   [ "$status" -eq 0 ]
   [[ "$output" == *"test-layout:./ci/checks/test-layout.sh"* ]]
 }
 
 @test "test-layout: scheduled by preflight full and ship modes" {
-  run bash -c "sed -n '/^run_full_or_ship_checks()/,/^}/p' ci/preflight.sh"
+  run extract_shell_fn ci/preflight.sh run_full_or_ship_checks
   [ "$status" -eq 0 ]
   [[ "$output" == *"test-layout:./ci/checks/test-layout.sh"* ]]
 }

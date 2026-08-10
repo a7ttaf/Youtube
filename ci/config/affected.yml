@@ -40,7 +40,12 @@ rules:
     tests: "frontend/tests/**/*.test.ts"
   - source: "frontend/src/*.jsx"
     tests: "frontend/tests/**/*.test.tsx"
-  # TypeScript's module-specific extensions are source like any other.
+  # TypeScript's module-specific extensions are source like any other. One
+  # spelling is enough for these: the matcher compares with `case`, where `*`
+  # crosses `/`, so "frontend/src/*.mts" already covers frontend/src/lib/x.mts.
+  # The pair of rules above exists for the opposite reason — "**" collapses to
+  # "*/" and so cannot match a direct child — not because "*" misses nested
+  # ones. ci/tests/test_js_lane.bats pins the nested case either way.
   - source: "frontend/src/*.mts"
     tests: "frontend/tests/**/*.test.ts"
   - source: "frontend/src/*.cts"

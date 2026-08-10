@@ -379,9 +379,16 @@ _check_should_skip() {
     # the case written to reject it.
     #
     # Keep this list in step with what ci/tests/ actually asserts on.
+    #
+    # The whole-path entries are anchored on a field boundary, not on end of
+    # line. _CI_CHANGESET_FILES_RAW holds `STATUS<TAB>PATH` records, and a
+    # rename is `R100<TAB>old<TAB>new` — so `\.gitignore$` matched only the
+    # destination, and renaming .gitignore away filtered out the suite that
+    # guards it. The `ci/` and `.githooks/` entries are prefixes and were never
+    # affected.
     if [ "$found" = "0" ] && [ "$label" = "tests-shell" ] \
       && printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" \
-        | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore$|frontend/README\.md$)'; then
+        | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|$)|frontend/README\.md([[:space:]]|$))'; then
       found=1
     fi
 
@@ -690,7 +697,7 @@ if type ci::changeset::detect >/dev/null 2>&1; then
   # running.
   if [ "$RUN_ALL" -eq 0 ] && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ] \
     && ! printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" \
-      | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore$)'; then
+      | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|$))'; then
     echo "No relevant changes detected. Skipping gate."
     exit 0
   fi
