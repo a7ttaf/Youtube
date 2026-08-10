@@ -333,12 +333,33 @@ const explainsErrorRows = (row: Record<string, unknown>): boolean => {
   return row.outcome === "ERROR" ? isNonBlankString(row.reason) : row.reason === null;
 };
 
+/**
+ * The destination is DETERMINED by the row's revenue flag, not merely one of
+ * two literals. Both derivations agree on the rule — `_created_revenue_source_status`
+ * and `derive_revenue_source_status` each return MISSING_REVENUE_SOURCE when
+ * revenue is required and PERFORMANCE_ONLY when it is not — so a row pairing
+ * `revenue_required: true` with `to: "PERFORMANCE_ONLY"` (or the reverse) is
+ * one the planner cannot produce.
+ *
+ * Checking only membership let that pair through, and RevenueCell renders the
+ * two together: the operator would approve a finance classification that is
+ * the opposite of what the backend goes on to persist (review #184, codex P2).
+ */
+const sourceStatusMatchesRevenueFlag = (row: Record<string, unknown>): boolean => {
+  const change = row.revenue_source_status;
+  if (!isPlainObject(change)) {
+    return true;
+  }
+  return change.to === (row.revenue_required ? "MISSING_REVENUE_SOURCE" : "PERFORMANCE_ONLY");
+};
+
 const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [
   (row) => PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(row[field])),
   hasConsistentGroupEffect,
   hasWriteFields,
   outcomeMatchesChanges,
   disclosesSourceStatus,
+  sourceStatusMatchesRevenueFlag,
   explainsErrorRows,
 ];
 
@@ -555,6 +576,14 @@ const RESULT_CHECKS: ReadonlyArray<
   // preview is what the operator approves, so an altered target has to be
   // refused before it is rendered rather than caught one step later.
   (result, request) => echoesRequestedTarget(result, request.contentOwnerId),
+  // An APPLY cannot succeed over a plan holding ERROR rows: import_channels
+  // raises 422 before applying whenever plan.has_errors, so a 2xx carrying
+  // them is a response the route cannot produce. Without this the flow would
+  // settle the pending-write record and show "Import applied" for a write the
+  // backend refuses to perform — clearing the durable guard on a body that
+  // proves nothing landed. Routing it to the indeterminate path is right: the
+  // body is unusable, and what actually happened is unknown (review #184).
+  (result, request) => request.dryRun || result.counts.ERROR === 0,
 ];
 
 /**

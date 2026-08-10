@@ -615,6 +615,94 @@ describe("useChannelImport", () => {
     await rejectsPlan(onlyRow({ reason: "looks suspicious" }));
   });
 
+  it("rejects a source status contradicting the row's revenue flag", async () => {
+    // Both derivations agree: MISSING_REVENUE_SOURCE when revenue is required,
+    // PERFORMANCE_ONLY when it is not. Membership alone let the opposite pair
+    // through, and RevenueCell renders the two together — the operator would
+    // approve a finance classification that is the inverse of what the backend
+    // persists (review #184, codex P2).
+    await rejectsPlan(
+      onlyRow({
+        revenue_required: true,
+        revenue_source_status: { from: "PERFORMANCE_ONLY", to: "PERFORMANCE_ONLY" },
+      }),
+    );
+    await rejectsPlan(
+      onlyRow({
+        revenue_required: false,
+        revenue_source_status: { from: "PERFORMANCE_ONLY", to: "MISSING_REVENUE_SOURCE" },
+      }),
+    );
+  });
+
+  it("accepts the source status that MATCHES the revenue flag", async () => {
+    // The complement, so the rule cannot be over-applied to a legitimate flip.
+    fetchMock().mockResolvedValue(
+      jsonResponse(
+        onlyRow({
+          revenue_required: true,
+          revenue_source_status: { from: "PERFORMANCE_ONLY", to: "MISSING_REVENUE_SOURCE" },
+        }),
+      ),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { UNCHANGED: 1 } });
+  });
+
+  it("rejects an APPLY answered 2xx over a plan holding ERROR rows", async () => {
+    // import_channels raises 422 before applying whenever plan.has_errors, so
+    // a 2xx carrying them is unemittable. Accepting it settled the durable
+    // pending-write record and showed "Import applied" for a write the backend
+    // refuses to perform (review #184, codex P2).
+    const errored = {
+      ...DRY_RUN_RESULT,
+      dry_run: false,
+      counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 0, ERROR: 1 },
+      rows: [
+        {
+          row_number: 1,
+          youtube_channel_id: null,
+          outcome: "ERROR",
+          channel_name: null,
+          group_id: null,
+          group_action: null,
+          revenue_required: null,
+          revenue_source_status: null,
+          changes: {},
+          reason: "channel_name is empty",
+        },
+      ],
+    };
+    fetchMock().mockResolvedValue(jsonResponse(errored));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+
+    // But a DRY RUN over the same plan is exactly what the preview exists for.
+    fetchMock().mockResolvedValue(jsonResponse({ ...errored, dry_run: true }));
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { ERROR: 1 } });
+  });
+
   it("rejects a 2xx describing a plan other than the one bound", async () => {
     // A stale, misrouted or legacy-server response can be structurally perfect
     // and describe a DIFFERENT plan. The route returns the digest it compared
