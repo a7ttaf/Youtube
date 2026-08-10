@@ -352,17 +352,27 @@ const useTenantBootstrap = (
 
   return {
     proofLabel: tenantProofLabel(tenant, tenantError),
-    // SETTLED means the tenant id will not change under a write: it either
-    // hydrated, or resolution failed and never will. The window BETWEEN those
-    // is the dangerous one for anything namespaced by tenant — a key written
-    // then lands in the missing-tenant namespace and is silently orphaned once
-    // /tenants/me answers (review #184).
+    // SETTLED means the tenant is KNOWN, so anything namespaced by it lands
+    // where every other document for this operator will look. Nothing else
+    // counts — not a failure, and not a failure that will never be retried.
     //
-    // A FAILURE counts as settled deliberately. The alternative wedges: a
-    // tenant that cannot be resolved would withhold imports forever, which is
-    // a worse outcome than a guard degraded to the unscoped bucket — and the
-    // backend, not this scope, is the authority on tenancy either way.
-    tenantSettled: tenant.id !== null || tenantError !== null,
+    // This deliberately REVERSES an earlier reading of mine, which treated a
+    // failed resolution as settled on the grounds that a tenant which cannot
+    // resolve would otherwise withhold imports forever. That reasoning missed
+    // the case that matters: with /tenants/me failing in one tab and
+    // succeeding in another for the SAME operator, the two tabs build
+    // different scopes — different key prefixes AND different Web Lock names —
+    // so neither can see the other's pending apply and both dispatch the same
+    // roster, duplicating an audited write and its CHANNEL_IMPORTED event.
+    // Scope adoption cannot undo that: the request is already gone (review
+    // #184, codex P2).
+    //
+    // The lockout it trades against is far milder than I first judged: a
+    // reload re-runs the bootstrap, so the recovery path is a page refresh,
+    // and IMPORT_SCOPE_UNSETTLED_NOTE says so. Blocking an import until the
+    // workspace is known is the fail-closed direction; admitting one into a
+    // namespace nobody else shares is not.
+    tenantSettled: tenant.id !== null,
   };
 };
 
@@ -858,7 +868,7 @@ const resolveImportScope = (
  * answer either way. Kept beside resolveImportScope because the two read the
  * same two sources and must agree about which one supplied the tenant.
  */
-const isImportScopeSettled = (session: SessionMe, tenantSettled: boolean): boolean => {
+export const isImportScopeSettled = (session: SessionMe, tenantSettled: boolean): boolean => {
   return session.tenant?.id != null || tenantSettled;
 };
 

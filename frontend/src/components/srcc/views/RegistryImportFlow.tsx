@@ -663,12 +663,15 @@ const APPLY_NOT_DURABLE_NOTE =
 // admitting during that window files the record under the missing-tenant
 // namespace and then has the scope change out from under it, stranding the
 // record where neither this tab's guard nor another tab's looks for it (review
-// #184). A tenant that FAILS to resolve counts as settled: the guard degrades
-// to the unscoped bucket rather than locking the operator out of importing
-// forever.
+// #184). A tenant that FAILS to resolve does NOT count as settled: two tabs
+// disagreeing about the tenant build different namespaces and different Web
+// Locks, so neither sees the other and both dispatch. A reload re-runs the
+// bootstrap, which is why refusing here is recoverable rather than a wedge.
 const IMPORT_SCOPE_UNSETTLED_NOTE =
-  "Still confirming which workspace this import belongs to — this takes a " +
-  "moment. Try Apply again once it finishes.";
+  "Still confirming which workspace this import belongs to — this usually " +
+  "takes a moment, so try Apply again shortly. If it keeps saying this, " +
+  "reload the page: importing without a confirmed workspace could let the " +
+  "same roster be submitted twice from different tabs without either knowing.";
 
 /**
  * Which refusal the operator is looking at. Named rather than inlined at the

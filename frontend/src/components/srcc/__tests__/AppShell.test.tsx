@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import AppShell from "@/components/srcc/AppShell";
+import AppShell, { isImportScopeSettled } from "@/components/srcc/AppShell";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
 import type { SessionMe } from "@/lib/api/types";
@@ -122,6 +122,34 @@ const tenantFetchCalls = () => {
   const mock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
   return mock.mock.calls.filter(([input]) => isTenantCall(input));
 };
+
+describe("import scope settling", () => {
+  // The rule that decides whether an import may be ADMITTED at all. Its effect
+  // on the button is covered in RegistryImportFlow.test.tsx.
+  //
+  // NOT covered here, stated so the gap is not mistaken for coverage: that a
+  // FAILED /tenants/me reaches this predicate as `tenantSettled: false`. That
+  // is one line in useTenantBootstrap (`tenant.id !== null`, with the former
+  // `|| tenantError !== null` removed), and this predicate cannot see the
+  // difference — a failure and an in-flight request both arrive as false. An
+  // end-to-end assertion needs the shell driven through registry -> upload ->
+  // preview, which this file has no fetch routing for.
+  const sessionWith = (tenant: { id: string } | null) =>
+    ({ ...FULL_SESSION, tenant }) as unknown as Parameters<typeof isImportScopeSettled>[0];
+
+  it("is settled when the SESSION carries the tenant, bootstrap or not", () => {
+    // Nothing has to resolve: the session's own tenant is authoritative.
+    expect(isImportScopeSettled(sessionWith({ id: "t1" }), false)).toBe(true);
+  });
+
+  it("is NOT settled while a tenantless session is still resolving", () => {
+    expect(isImportScopeSettled(sessionWith(null), false)).toBe(false);
+  });
+
+  it("is settled once a tenantless session resolves its tenant", () => {
+    expect(isImportScopeSettled(sessionWith(null), true)).toBe(true);
+  });
+});
 
 describe("AppShell tenant proof tag", () => {
   it("hydrates the tenant and shows UMS (ums) on the dev-only tag", async () => {
