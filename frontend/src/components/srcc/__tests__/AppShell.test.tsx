@@ -755,10 +755,18 @@ const IMPORT_PLAN = {
 /** A pending Response plus its resolver, for holding the apply POST open. */
 const deferredImportResponse = () => {
   let release!: (response: Response) => void;
-  const pending = new Promise<Response>((resolve) => {
+  // `reject` models the LOST response — a transport failure, where the POST was
+  // dispatched and never answered. That is a different outcome from any status
+  // code, so the helper must be able to produce it.
+  let fail!: (reason: unknown) => void;
+  const pending = new Promise<Response>((resolve, reject) => {
     release = resolve;
+    fail = reject;
   });
-  return { pending, release };
+  // An unobserved rejection would fail the run before the flow catches it; the
+  // flow's own catch is the observer, so keep the promise quiet until then.
+  pending.catch(() => undefined);
+  return { pending, release, reject: fail };
 };
 
 /** The SIDEBAR button carrying this label (the button also holds an icon +
@@ -901,5 +909,61 @@ describe("AppShell navigation latch during an un-abortable write", () => {
       expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
     );
     expect(navButton("CMS Groups")).toBeEnabled();
+  });
+
+  it("UNSETTLED IMPORT: the warning survives navigating away and back", async () => {
+    // The nav latch releases when the request settles, which is correct — the
+    // warning's own advice is to open the Audit trail, so the shell must let
+    // the operator go. But that trip UNMOUNTS RegistryView. Holding the
+    // unsettled flag there meant returning to Registry produced a fresh view
+    // with Import CSV live again while the original request might still be
+    // committing — the duplicate CHANNEL_IMPORTED the flag exists to prevent
+    // (review #184, codex P1). The flag is owned by the shell for this reason.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
+
+    // Leaving the flow raises the shell-level warning.
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/iu }));
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu),
+    );
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+
+    // Follow the notice's advice: nav is free, so the trip is possible at all.
+    expect(navButton("Audit Log")).toBeEnabled();
+    fireEvent.click(navButton("Audit Log"));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /import csv/iu })).not.toBeInTheDocument(),
+    );
+
+    // Coming back, the warning is still there and the duplicate is still shut.
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+
+    // Only the explicit acknowledgement retires it.
+    fireEvent.click(
+      within(screen.getByRole("status")).getByRole("button", {
+        name: /checked the audit trail/iu,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled(),
+    );
   });
 });

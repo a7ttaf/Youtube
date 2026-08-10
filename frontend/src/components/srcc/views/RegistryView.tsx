@@ -16,6 +16,7 @@ import {
   SummaryTile,
 } from "../shared";
 import { RegistryImportFlow, type ImportExitOutcome } from "./RegistryImportFlow";
+import { useUnsettledImport } from "@/contexts/UnsettledImportContext";
 
 // ============================================================================
 // Purpose: The REAL-data Channel Registry screen (Phase 2). The table is wired
@@ -1123,9 +1124,10 @@ const RegistryView = ({
     useState<{ channel: ChannelRegistryEntry } | null>(null);
   const [importing, setImporting] = useState(false);
   // Raised when the stepper exits with an apply whose outcome it never learned.
-  // Held in the VIEW, not the flow: the flow unmounts on exit, and the whole
-  // point is that the warning outlives it.
-  const [importUnsettled, setImportUnsettled] = useState(false);
+  // Held in the SHELL, not here: this view unmounts the moment the operator
+  // follows the notice's own advice and opens the Audit trail, and the flag
+  // has to survive that (review #184).
+  const unsettledImport = useUnsettledImport();
 
   const unitsById = useMemo(
     () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
@@ -1172,7 +1174,7 @@ const RegistryView = ({
           channelState={channelState}
           unitsById={unitsById}
           importOpen={importing}
-          importUnsettled={importUnsettled}
+          importUnsettled={unsettledImport.unsettled}
           onStartImport={() => setImporting(true)}
           onCancelImport={() => setImporting(false)}
           onImportDone={(outcome) => {
@@ -1182,10 +1184,10 @@ const RegistryView = ({
             // exit raises a notice that survives it. "applied" needs none —
             // that response arrived, so the reload follows a committed write.
             if (outcome === "unknown") {
-              setImportUnsettled(true);
+              unsettledImport.markUnsettled();
             }
           }}
-          onAcknowledgeUnsettled={() => setImportUnsettled(false)}
+          onAcknowledgeUnsettled={unsettledImport.acknowledge}
           hasTraceNav={Boolean(onOpenTrace)}
           onMap={onMap}
           onAssign={onAssign}

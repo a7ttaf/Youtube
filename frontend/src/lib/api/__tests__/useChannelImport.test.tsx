@@ -236,4 +236,44 @@ describe("useChannelImport", () => {
       }),
     ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
+
+  it("rejects a 2xx whose HEADER fields are malformed, not just its rows", async () => {
+    // content_owner_id and cms_status are RENDERED by PreviewStep and
+    // AppliedStep. A payload with perfectly good rows, counts and fingerprint
+    // but content_owner_id: {} passed a rows-only check and then threw inside
+    // React — and after an apply that throw lands where the write may already
+    // have committed, escaping the indeterminate handling built for exactly
+    // that case (review #184, codex P2).
+    const malformedHeader = {
+      ...DRY_RUN_RESULT,
+      content_owner_id: {},
+    } as Record<string, unknown>;
+    fetchMock().mockResolvedValue(jsonResponse(malformedHeader));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("rejects a 2xx missing dry_run, which selects the flow's next step", async () => {
+    const noDryRun = { ...DRY_RUN_RESULT } as Record<string, unknown>;
+    delete noDryRun.dry_run;
+    fetchMock().mockResolvedValue(jsonResponse(noDryRun));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
 });

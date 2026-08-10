@@ -129,11 +129,21 @@ const isPlanRow = (row: unknown): boolean => {
  * DOWNGRADES the write to the backend's unbound, file-wins path — no
  * fingerprint compare and no write-boundary pre-state guard, under a request
  * the operator believes is still bound to the plan on screen (review #184).
+ *
+ * The header fields are here for the same reason the row fields are:
+ * `content_owner_id` and `cms_status` are RENDERED by PreviewStep and
+ * AppliedStep, so a payload carrying `content_owner_id: {}` would pass a
+ * rows-only check and then throw inside React — and after an apply, that throw
+ * lands where the write may already have committed, bypassing the
+ * indeterminate handling that exists precisely for that case.
  */
 const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
   ["rows", (value) => Array.isArray(value) && value.every(isPlanRow)],
-  ["counts", (value) => typeof value === "object" && value !== null],
+  ["counts", isPlainObject],
   ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
+  ["content_owner_id", (value) => typeof value === "string"],
+  ["cms_status", (value) => typeof value === "string"],
+  ["dry_run", (value) => typeof value === "boolean"],
 ];
 
 /**
