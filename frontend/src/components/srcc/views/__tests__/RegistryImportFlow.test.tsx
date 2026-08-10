@@ -757,7 +757,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
-    const applyButton = await screen.findByRole("button", { name: /applying…/i });
+    const applyButton = await screen.findByRole("button", { name: /applying…/iu });
     expect(applyButton).toBeDisabled();
     expect(applyButton.getAttribute("title")).toBeNull();
 
@@ -791,7 +791,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /checking…|check whether/iu })).toBeDisabled(),
     );
-    expect(screen.queryByRole("button", { name: /applying…/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /applying…/iu })).not.toBeInTheDocument();
 
     replanGate.release(jsonResponse(DRY_RUN_PLAN));
     await waitFor(() =>
