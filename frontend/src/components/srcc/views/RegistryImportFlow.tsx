@@ -15,6 +15,7 @@ import { ActionStepper } from "../ActionStepper";
 import { OutcomeTable, type OutcomeTableRow } from "../OutcomeTable";
 import { Badge } from "../shared";
 import { isValidAuditReason } from "./GroupsSyncFlow";
+import { useUnsettledImport } from "@/contexts/UnsettledImportContext";
 
 // ============================================================================
 // Purpose: The Registry CSV import flow (import/sync arc, PR-B): a three-step
@@ -916,23 +917,12 @@ const AppliedStep = ({ result, reason, onDone }: AppliedStepProps) => {
   );
 };
 
-/**
- * What the flow knows about the write when it hands control back.
- *
- * "applied" = the apply returned 2xx; the registry definitely changed.
- * "unknown" = the response never arrived. The write may still be executing, so
- * a reload issued now can return PRE-write rows and look authoritative. The
- * parent is told which of the two it is because the two demand different
- * treatment, and a bare `onDone()` cannot carry that distinction.
- */
-export type ImportExitOutcome = "applied" | "unknown";
-
 export type RegistryImportFlowProps = {
   /** Close the flow WITHOUT reloading the registry (no apply committed). */
   onCancel: () => void;
   /** Close the flow AND reload the registry (an apply committed, or leaving
-   * Applied), carrying whether that reload can be trusted as settled. */
-  onDone: (outcome: ImportExitOutcome) => void;
+   * Applied). */
+  onDone: () => void;
 };
 
 type ImportStep = "upload" | "preview" | "applied";
@@ -976,6 +966,11 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   // request is already running but the nav is still live. It also releases on
   // unmount, so a teardown mid-request cannot strand the shell.
   const navLatch = useWriteInFlightControl();
+  // Raised BEFORE the apply is dispatched and cleared only once the response
+  // establishes an outcome. The nav latch lives in this document; this one
+  // survives it, which is what covers an operator who closes the tab, reloads,
+  // or leaves via the sidebar instead of Cancel (review #184, codex P1 x2).
+  const unsettledImport = useUnsettledImport();
 
   const trimmedReason = reason.trim();
 
@@ -1098,6 +1093,9 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       // operator is actually looking at.
       setPreview(race);
       setError(refreshedPlanMessage((caught as ApiError).status));
+      // A 409 is an established refusal: the write was rejected at the
+      // boundary, so nothing committed and the uncertainty is retired.
+      unsettledImport.acknowledge();
       return;
     }
     // Anything that does not ESTABLISH rejection leaves the roster possibly
@@ -1114,6 +1112,9 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       );
       return;
     }
+    // Everything left is a DEFINITE rejection (the indeterminate branch above
+    // returned already), so the write did not happen and the flag comes down.
+    unsettledImport.acknowledge();
     setError(describeImportError(caught));
   };
 
@@ -1145,6 +1146,11 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     // and this flow's exits disable in ONE commit, leaving no window in which
     // the request is running but navigation is still live.
     navLatch.arm(APPLY_IN_FLIGHT_NOTE);
+    // BEFORE the request leaves. From here the outcome is unknown by default,
+    // and it stays unknown until something establishes otherwise — including
+    // across a tab close or a reload, which discards this document's fetch
+    // handler while the backend goes on committing.
+    unsettledImport.markUnsettled();
     setError(null);
     try {
       const result = await importChannels({
@@ -1157,6 +1163,8 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
         // commit as an UPDATE over a channel created since the preview.
         expectedPlanFingerprint: approved.plan.plan_fingerprint,
       });
+      // A 2xx settles it: the write committed and the flow can say so.
+      unsettledImport.acknowledge();
       setApplied(result);
       setStep("applied");
     } catch (caught) {
@@ -1185,13 +1193,14 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     // `indeterminate` joins `applied` on the reloading path: an apply whose
     // response was lost may have committed, and leaving without a refetch
     // would restore a registry that no longer matches the database. It exits
-    // as "unknown", NOT "applied": the reload it triggers races the original
-    // POST and can return pre-write rows, so the parent must keep saying so
-    // rather than present that table as settled (review #184, codex P2).
-    if (applied) {
-      onDone("applied");
-    } else if (indeterminate) {
-      onDone("unknown");
+    // The reload it triggers races the original POST and can return pre-write
+    // rows. That is NOT signalled through this callback: the shell-level
+    // unsettled flag was raised before the request was dispatched and is still
+    // up, so the warning is already correct however the operator leaves —
+    // including by the sidebar, which never reaches this handler at all
+    // (review #184, codex P1).
+    if (applied || indeterminate) {
+      onDone();
     } else {
       onCancel();
     }
@@ -1235,11 +1244,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       ) : null;
     }
     return applied ? (
-      <AppliedStep
-        result={applied}
-        reason={trimmedReason}
-        onDone={() => onDone("applied")}
-      />
+      <AppliedStep result={applied} reason={trimmedReason} onDone={onDone} />
     ) : null;
   };
 

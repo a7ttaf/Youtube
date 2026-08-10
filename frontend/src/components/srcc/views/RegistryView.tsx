@@ -15,7 +15,7 @@ import {
   RESTRICTED_FINANCE_VALUE,
   SummaryTile,
 } from "../shared";
-import { RegistryImportFlow, type ImportExitOutcome } from "./RegistryImportFlow";
+import { RegistryImportFlow } from "./RegistryImportFlow";
 import { useUnsettledImport } from "@/contexts/UnsettledImportContext";
 
 // ============================================================================
@@ -567,7 +567,7 @@ const RegistryMainPanel = ({
   importUnsettled: boolean;
   onStartImport: () => void;
   onCancelImport: () => void;
-  onImportDone: (outcome: ImportExitOutcome) => void;
+  onImportDone: () => void;
   onAcknowledgeUnsettled: () => void;
 } & RowActions) => {
   return (
@@ -1177,15 +1177,14 @@ const RegistryView = ({
           importUnsettled={unsettledImport.unsettled}
           onStartImport={() => setImporting(true)}
           onCancelImport={() => setImporting(false)}
-          onImportDone={(outcome) => {
+          onImportDone={() => {
             setImporting(false);
             channelState.reload();
-            // The reload above may race the original POST, so an "unknown"
-            // exit raises a notice that survives it. "applied" needs none —
-            // that response arrived, so the reload follows a committed write.
-            if (outcome === "unknown") {
-              unsettledImport.markUnsettled();
-            }
+            // Nothing to raise here: the flow raises the unsettled flag BEFORE
+            // it dispatches the apply and clears it only once the response
+            // establishes an outcome. Raising on this callback instead left
+            // the case codex found — an operator who leaves by the sidebar
+            // never reaches it, and neither does a closed tab.
           }}
           onAcknowledgeUnsettled={unsettledImport.acknowledge}
           hasTraceNav={Boolean(onOpenTrace)}

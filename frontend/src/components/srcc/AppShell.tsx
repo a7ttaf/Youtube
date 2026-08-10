@@ -12,10 +12,6 @@ import {
   useWriteInFlightLatch,
 } from "@/contexts/WriteInFlightContext";
 import {
-  UnsettledImportProvider,
-  useUnsettledImportLatch,
-} from "@/contexts/UnsettledImportContext";
-import {
   NAV_GROUPS,
   VIEW_COPY,
   WORKFLOW_STEPS,
@@ -851,10 +847,6 @@ const AppShell = () => {
   // this guard is the second half, so a keyboard or programmatic caller cannot
   // route around the disabled control.
   const writeInFlight = useWriteInFlightLatch();
-  // Owned HERE, not in RegistryView: an import of unknown outcome must stay
-  // flagged while the operator visits Audit to check for its CHANNEL_IMPORTED
-  // entry, and that trip unmounts the whole Registry subtree.
-  const unsettledImport = useUnsettledImportLatch();
   const navBlockedReason = writeInFlight.reason;
 
   const handleViewChange = useCallback(
@@ -890,7 +882,6 @@ const AppShell = () => {
 
   return (
     <WriteInFlightProvider value={writeInFlight}>
-    <UnsettledImportProvider value={unsettledImport}>
     <div className="app">
       {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
       <Sidebar
@@ -923,7 +914,6 @@ const AppShell = () => {
         {view === "command" && <WorkflowRail />}
       </main>
     </div>
-    </UnsettledImportProvider>
     </WriteInFlightProvider>
   );
 };

@@ -1011,6 +1011,92 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
   });
 
+  it("UNSETTLED IMPORT: leaving by the SIDEBAR still raises the warning", async () => {
+    // The flow's exit handler is not the only way out. Once the latch releases
+    // on an indeterminate apply, the sidebar is live and unmounts the flow
+    // without ever calling onDone — so raising the flag on that callback left
+    // the operator returning to a clean-looking Registry with Import CSV live
+    // (review #184, codex P1). The flag is raised at DISPATCH instead, so the
+    // route out no longer matters.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
+
+    // Out through the sidebar — never touching Cancel.
+    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+    fireEvent.click(navButton("CMS Groups"));
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+
+    expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+  });
+
+  it("UNSETTLED IMPORT: a tab closed mid-apply still warns the next document", async () => {
+    // Nothing has failed yet here — the POST is simply still in flight. If the
+    // operator closes the tab now, this document's fetch handler dies while the
+    // backend goes on committing, so the uncertainty has to already be durable
+    // BEFORE the request is dispatched, not recorded when it fails.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    const { unmount } = await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    unmount();
+
+    renderShell();
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+
+    expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+  });
+
+  it("UNSETTLED IMPORT: an established outcome clears the flag", async () => {
+    // The complement, and the reason raising at dispatch is safe: a 2xx and a
+    // definite rejection both SETTLE the question, so neither may leave the
+    // importer locked. A 422 is an established refusal — nothing committed.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    applyGate.release(jsonResponse({ detail: "roster rejected" }, 422));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/iu }));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
+  });
+
   it("UNSETTLED IMPORT: a browser that refuses storage still guards this document", async () => {
     // Private mode, blocked cookies, or a quota error must not take the shell
     // down and must not fail OPEN on the control. The cost of a refusal is
