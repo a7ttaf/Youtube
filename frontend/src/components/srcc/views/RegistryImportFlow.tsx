@@ -15,7 +15,11 @@ import { ActionStepper } from "../ActionStepper";
 import { OutcomeTable, type OutcomeTableRow } from "../OutcomeTable";
 import { Badge } from "../shared";
 import { isValidAuditReason } from "./GroupsSyncFlow";
-import { newApplyId, useUnsettledImport } from "@/contexts/UnsettledImportContext";
+import {
+  newApplyId,
+  useUnsettledImport,
+  type AdmissionResult,
+} from "@/contexts/UnsettledImportContext";
 
 // ============================================================================
 // Purpose: The Registry CSV import flow (import/sync arc, PR-B): a three-step
@@ -638,6 +642,17 @@ const APPLY_NOT_DURABLE_NOTE =
   "either attempt knowing about the other. Allow site data (cookies and " +
   "storage) for this site, or use a normal window instead of a private one, " +
   "then try again.";
+
+/**
+ * Which refusal the operator is looking at. Named rather than inlined at the
+ * dispatch site: the two have genuinely different remedies — go back to the
+ * other tab, versus change this browser's storage setting — and keeping the
+ * choice here also keeps `apply` under the analyzer's complexity threshold
+ * (DeepSource JS-R1005), conformed rather than suppressed.
+ */
+const admissionRefusalNote = (admission: AdmissionResult): string => {
+  return admission === "not-durable" ? APPLY_NOT_DURABLE_NOTE : OTHER_APPLY_PENDING_NOTE;
+};
 
 // The outcome literal both reconciliation predicates key off. Named because
 // a typo in either one silently changes a verdict about whether a write
@@ -1298,11 +1313,7 @@ export const RegistryImportFlow = ({
       const admission = await unsettledImport.admit(applyId);
       if (admission !== "admitted") {
         applyIdRef.current = null;
-        setError(
-          admission === "not-durable"
-            ? APPLY_NOT_DURABLE_NOTE
-            : OTHER_APPLY_PENDING_NOTE,
-        );
+        setError(admissionRefusalNote(admission));
         return;
       }
       const result = await importChannels({

@@ -828,6 +828,27 @@ const TenantProofTag = ({ label }: { label: string }) => {
 //   - File: frontend/src/contexts/SessionContext.tsx -> useSessionBootstrap.
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
 // ============================================================================
+/**
+ * Namespace for this operator's unsettled-import records.
+ *
+ * tenant.ID, never the slug: a slug is routing metadata and can be renamed,
+ * which would mint a fresh scope while an apply is still unsettled — hiding
+ * the warning and handing admission an empty bucket for a request whose
+ * outcome nobody knows. SessionMe.tenant is nullable, so the RESOLVED tenant
+ * from /tenants/me is the fallback: without it every tenant for one operator
+ * collapses into a single bucket and acknowledgeAll() sweeps across them
+ * (review #184).
+ *
+ * Extracted from AppShell so the shell stays under the analyzer's complexity
+ * threshold (DeepSource JS-R1005) — conformed, not suppressed.
+ */
+const resolveImportScope = (
+  session: SessionMe,
+  resolvedTenant: { id: string | null },
+): string => {
+  return importScopeFor(session.tenant?.id ?? resolvedTenant.id, session.user_id);
+};
+
 const AppShell = () => {
   const [view, setView] = useState<ViewKey>("command");
   const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
@@ -893,14 +914,7 @@ const AppShell = () => {
   // Namespaces the unsettled-import records. localStorage is origin-wide and
   // outlives sign-out, so without this a pending import follows a shared
   // browser into the next operator's or the next tenant's session.
-  // tenant.ID, never the slug: a slug is routing metadata and can be renamed,
-  // which would mint a fresh scope while an apply is still unsettled — hiding
-  // the warning and handing admission an empty bucket for a request whose
-  // outcome nobody knows (review #184).
-  const importScope = importScopeFor(
-    sessionBootstrap.session.tenant?.id ?? resolvedTenant.id,
-    sessionBootstrap.session.user_id,
-  );
+  const importScope = resolveImportScope(sessionBootstrap.session, resolvedTenant);
   const copy = VIEW_COPY[view];
 
 
