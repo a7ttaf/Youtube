@@ -66,6 +66,20 @@ const REVENUE_REQUIRED_STATUS = "MISSING_REVENUE_SOURCE";
 const REVENUE_OPTIONAL_STATUS = "PERFORMANCE_ONLY";
 const DERIVED_SOURCE_STATUSES = [REVENUE_REQUIRED_STATUS, REVENUE_OPTIONAL_STATUS] as const;
 
+/**
+ * Every status the column may hold — the `ck_youtube_channels_revenue_source_status`
+ * CHECK constraint's five literals. A transition's `from` is the row's CURRENT
+ * status, so it is drawn from all five; only `to` is narrowed to the two the
+ * planner derives.
+ */
+const SOURCE_STATUSES = [
+  "OFFICIAL_CMS_REVENUE",
+  "OFFICIAL_MANUAL_IMPORT",
+  "ALLOCATED_FROM_PAYMENT_POOL",
+  REVENUE_OPTIONAL_STATUS,
+  REVENUE_REQUIRED_STATUS,
+] as const;
+
 /** The inventory fields an UPDATE's diff may mention — _inventory_changes
  * compares exactly these four and emits only the ones that differ. */
 const INVENTORY_FIELDS = [
@@ -355,6 +369,30 @@ const sourceStatusMatchesRevenueFlag = (row: Record<string, unknown>): boolean =
   return change.to === (row.revenue_required ? REVENUE_REQUIRED_STATUS : REVENUE_OPTIONAL_STATUS);
 };
 
+/**
+ * The FROM-state of a source transition. `_planned_revenue_source_status` takes
+ * it from `current.revenue_source_status`, which the database constrains to the
+ * five declared literals and which is never null on an existing row — and it
+ * returns None outright when `planned == current`, so the two sides always
+ * differ.
+ *
+ * Accepting any string let a row present `GARBAGE -> MISSING_REVENUE_SOURCE`,
+ * or a fake no-op transition, while Apply stayed enabled and the retained
+ * fingerprint authorised the backend's real source mutation (review #184,
+ * codex P2). CREATE is exempt because it has no prior status: its `from` is
+ * null, which disclosesSourceStatus already requires.
+ */
+const sourceTransitionIsValid = (row: Record<string, unknown>): boolean => {
+  const change = row.revenue_source_status;
+  if (!isPlainObject(change)) {
+    return true;
+  }
+  if (change.from === change.to) {
+    return false;
+  }
+  return row.outcome === "CREATE" || SOURCE_STATUSES.some((status) => status === change.from);
+};
+
 const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [
   (row) => PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(row[field])),
   hasConsistentGroupEffect,
@@ -362,6 +400,7 @@ const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [
   outcomeMatchesChanges,
   disclosesSourceStatus,
   sourceStatusMatchesRevenueFlag,
+  sourceTransitionIsValid,
   explainsErrorRows,
 ];
 

@@ -771,6 +771,68 @@ describe("useChannelImport", () => {
     ).resolves.toMatchObject({ counts: { UPDATE: 1 } });
   });
 
+  it("rejects a source transition FROM a status the column cannot hold", async () => {
+    // `from` is the row's CURRENT status, which the
+    // ck_youtube_channels_revenue_source_status CHECK constrains to five
+    // literals. Accepting any string let a row present
+    // "GARBAGE -> MISSING_REVENUE_SOURCE" while Apply stayed enabled and the
+    // retained fingerprint authorised the real mutation (review #184, codex).
+    await rejectsPlan(
+      onlyRow({
+        revenue_required: true,
+        revenue_source_status: { from: "GARBAGE", to: "MISSING_REVENUE_SOURCE" },
+      }),
+    );
+  });
+
+  it("rejects a source transition that goes nowhere", async () => {
+    // _planned_revenue_source_status returns None when planned == current, so
+    // a pair with equal sides is unemittable — and it would announce a
+    // reclassification that is not happening.
+    await rejectsPlan(
+      onlyRow({
+        revenue_required: true,
+        revenue_source_status: {
+          from: "MISSING_REVENUE_SOURCE",
+          to: "MISSING_REVENUE_SOURCE",
+        },
+      }),
+    );
+  });
+
+  it("rejects a non-CREATE transition with no prior status", async () => {
+    // Only a CREATE has no `from`: it is born with its classification. An
+    // UPDATE or UNCHANGED row always has one.
+    await rejectsPlan(
+      onlyRow({
+        revenue_required: true,
+        revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
+      }),
+    );
+  });
+
+  it("accepts a transition from any of the five declared statuses", async () => {
+    // Including the two a plan never derives INTO — an OFFICIAL_* status is a
+    // legitimate `from`, which is why only `to` is narrowed.
+    fetchMock().mockResolvedValue(
+      jsonResponse(
+        onlyRow({
+          revenue_required: false,
+          revenue_source_status: { from: "OFFICIAL_CMS_REVENUE", to: "PERFORMANCE_ONLY" },
+        }),
+      ),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { UNCHANGED: 1 } });
+  });
+
   it("rejects a 2xx describing a plan other than the one bound", async () => {
     // A stale, misrouted or legacy-server response can be structurally perfect
     // and describe a DIFFERENT plan. The route returns the digest it compared

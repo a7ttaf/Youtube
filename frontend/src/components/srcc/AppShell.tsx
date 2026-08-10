@@ -863,7 +863,7 @@ const TenantProofTag = ({ label }: { label: string }) => {
  * the warning and handing admission an empty bucket for a request whose
  * outcome nobody knows. SessionMe.tenant is nullable, so the RESOLVED tenant
  * from /tenants/me is the fallback: without it every tenant for one operator
- * collapses into a single bucket and acknowledgeAll() sweeps across them
+ * collapses into a single bucket and one acknowledgement retires them all
  * (review #184).
  *
  * Extracted from AppShell so the shell stays under the analyzer's complexity

@@ -237,10 +237,31 @@ describe("unsettled import store", () => {
     act(() => result.current.trackApply("apply-one"));
     act(() => result.current.trackApply("apply-two"));
 
-    act(() => result.current.acknowledgeAll());
+    act(() => result.current.acknowledge(result.current.snapshotPendingIds()));
 
     expect(result.current.unsettled).toBe(false);
     expect(storedIds()).toEqual([]);
+  });
+
+  it("acknowledges only the applies the warning represented", () => {
+    // The operator's claim is "I checked the audit trail for the imports this
+    // warning told me about". An apply admitted in ANOTHER tab after that
+    // warning rendered was never represented by it and may still be
+    // committing, so sweeping every key in the scope drops the duplicate-write
+    // guard over a live request (review #184, codex P2).
+    const { result } = renderHook(() => useUnsettledImport());
+    act(() => result.current.trackApply("apply-warned"));
+
+    // What the warning showed, captured when it went up.
+    const warned = result.current.snapshotPendingIds();
+
+    // Another tab admits while the warning stands.
+    act(() => result.current.trackApply("apply-admitted-later"));
+
+    act(() => result.current.acknowledge(warned));
+
+    expect(storedIds()).toEqual(["apply-admitted-later"]);
+    expect(result.current.unsettled).toBe(true);
   });
 
   it("does not lose a write when two tabs record an apply concurrently", () => {
@@ -326,7 +347,7 @@ describe("unsettled import store", () => {
     expect(otherTenantHook.result.current.unsettled).toBe(false);
 
     // And Bob's blanket acknowledgement cannot retire Alice's protection.
-    act(() => bobHook.result.current.acknowledgeAll());
+    act(() => bobHook.result.current.acknowledge(bobHook.result.current.snapshotPendingIds()));
     expect(storedIds(alice)).toEqual(["apply-alice"]);
     expect(aliceHook.result.current.unsettled).toBe(true);
   });
@@ -354,7 +375,7 @@ describe("unsettled import store", () => {
   it("cannot let one tenant's scope be a PREFIX of another's", () => {
     // encodeURIComponent leaves `.` and `~` alone, so a slug shaped like
     // "ums~.child" produced keys beginning with the scope of a different
-    // operator — who would then see, block on, and acknowledgeAll() away that
+    // operator — who would then see, block on, and acknowledge away that
     // operator's pending imports, because the store matches with startsWith
     // (review #184, codex P2).
     const victim = importScopeFor("ums", "user-1");
@@ -373,7 +394,7 @@ describe("unsettled import store", () => {
     act(() => victimHook.result.current.trackApply("apply-victim"));
 
     expect(attackerHook.result.current.unsettled).toBe(false);
-    act(() => attackerHook.result.current.acknowledgeAll());
+    act(() => attackerHook.result.current.acknowledge(attackerHook.result.current.snapshotPendingIds()));
     expect(victimHook.result.current.unsettled).toBe(true);
     expect(storedIds(victim)).toEqual(["apply-victim"]);
   });
@@ -383,7 +404,7 @@ describe("unsettled import store", () => {
     // session, so bootstrap and degraded tenant contexts really reach this.
     // Collapsing to one "unknown" bucket whenever either half was missing put
     // two different operators — both with a known userId — in the same bucket,
-    // where one blocked the other and the second's acknowledgeAll() retired
+    // where one blocked the other and the second's acknowledgement retired
     // the first's protection (review #184, codex P2).
     const alice = importScopeFor(null, "user-alice");
     const bob = importScopeFor(undefined, "user-bob");
@@ -395,7 +416,7 @@ describe("unsettled import store", () => {
     act(() => aliceHook.result.current.trackApply("apply-alice"));
 
     expect(bobHook.result.current.unsettled).toBe(false);
-    act(() => bobHook.result.current.acknowledgeAll());
+    act(() => bobHook.result.current.acknowledge(bobHook.result.current.snapshotPendingIds()));
     expect(aliceHook.result.current.unsettled).toBe(true);
   });
 

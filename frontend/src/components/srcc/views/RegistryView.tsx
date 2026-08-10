@@ -1171,6 +1171,19 @@ const RegistryView = ({
   // follows the notice's own advice and opens the Audit trail, and the flag
   // has to survive that (review #184).
   const unsettledImport = useUnsettledImport(importScope);
+  // The applies the CURRENT warning represents, captured when it goes up. The
+  // operator's acknowledgement is about those, and re-reading the scope at
+  // click time would also retire an apply another tab admitted after the
+  // warning rendered — a live request the warning never mentioned (review
+  // #184, codex P2). Re-captured only on a false -> true transition, so ids
+  // added while the warning stands are deliberately excluded and keep it up.
+  const warnedApplyIdsRef = useRef<readonly string[]>([]);
+  const { unsettled, snapshotPendingIds } = unsettledImport;
+  useEffect(() => {
+    if (unsettled) {
+      warnedApplyIdsRef.current = snapshotPendingIds();
+    }
+  }, [unsettled, snapshotPendingIds]);
 
   const unitsById = useMemo(
     () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
@@ -1232,7 +1245,9 @@ const RegistryView = ({
             // the case codex found — an operator who leaves by the sidebar
             // never reaches it, and neither does a closed tab.
           }}
-          onAcknowledgeUnsettled={unsettledImport.acknowledgeAll}
+          onAcknowledgeUnsettled={() => {
+            unsettledImport.acknowledge(warnedApplyIdsRef.current);
+          }}
           hasTraceNav={Boolean(onOpenTrace)}
           onMap={onMap}
           onAssign={onAssign}

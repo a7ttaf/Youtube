@@ -597,6 +597,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
         {
           ...DRY_RUN_PLAN.rows[0],
           outcome: "UPDATE",
+          // An UPDATE has a prior status, so `from` cannot be null the way a
+          // CREATE's is — and this row is spread from the CREATE fixture.
+          revenue_source_status: null,
           changes: { channel_name: { from: "Someone Else", to: "Alpha Channel" } },
         },
       ],
@@ -1330,6 +1333,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
         ...row,
         outcome: "UNCHANGED",
         changes: {},
+        // An UNCHANGED row leaves the classification alone, so the planner
+        // reports no transition — these are spread from a CREATE fixture.
+        revenue_source_status: null,
         group_id: null,
         group_action: null,
       })),
@@ -1365,7 +1371,12 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       plan_fingerprint: "plan-groups-pending",
       counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
       // row[1] keeps its group_id "g1" — the effect that cannot be verified.
-      rows: DRY_RUN_PLAN.rows.map((row) => ({ ...row, outcome: "UNCHANGED", changes: {} })),
+      rows: DRY_RUN_PLAN.rows.map((row) => ({
+        ...row,
+        outcome: "UNCHANGED",
+        changes: {},
+        revenue_source_status: null,
+      })),
     };
     await reachIndeterminate(() => jsonResponse(channelsMatch));
 

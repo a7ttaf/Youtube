@@ -294,21 +294,29 @@ const removeId = (scope: string, applyId: string): void => {
 };
 
 /**
- * Retire every apply this document can see. Removal-only, so a key another tab
- * adds while this runs simply survives — the guard stays UP, which is the safe
- * direction for a race on an operator's "I have checked" statement.
+ * Retire exactly the applies the operator ACTED ON, never "everything in the
+ * scope right now".
+ *
+ * The operator's claim is "I have checked the audit trail for the imports this
+ * warning told me about". A fresh enumeration answers a different question: an
+ * apply admitted in another tab AFTER that warning rendered was never
+ * represented by it and may still be committing, so sweeping it away drops the
+ * duplicate-write guard over a live request (review #184, codex P2).
+ *
+ * Removal-only and per-key, so a key another tab adds while this runs simply
+ * survives — the guard stays UP, which is the safe direction for a race on an
+ * operator's statement.
  */
-const removeAllIds = (scope: string): void => {
-  try {
-    for (const key of storedApplyKeys(scope)) {
-      globalThis.localStorage.removeItem(key);
-    }
-  } catch {
-    // Ignored: the in-memory clear below still applies.
+const acknowledgeApplies = (scope: string, applyIds: readonly string[]): void => {
+  for (const applyId of applyIds) {
+    removeId(scope, applyId);
   }
-  // THIS scope only. An operator's "I have checked" is a statement about their
-  // own imports; it must not retire another principal's or another tenant's.
-  memoryIds = memoryIds.filter((id) => !id.startsWith(prefixFor(scope)));
+};
+
+/** The apply ids pending in one scope, as ids rather than full keys. */
+const pendingIdsIn = (scope: string): readonly string[] => {
+  const prefix = prefixFor(scope);
+  return readIds(scope).map((key) => key.slice(prefix.length));
 };
 
 // ============================================================================
@@ -423,7 +431,12 @@ export type UnsettledImportValue = {
   settleApply: (applyId: string) => void;
   /** Retire every pending apply — the operator states they have checked the
    * audit trail, which is a claim about all of them, not the newest. */
-  acknowledgeAll: () => void;
+  /** The apply ids currently pending, read IMPERATIVELY. Not a store snapshot:
+   * a caller wants the set as it stood when the warning it is acting on was
+   * raised, not a live one. */
+  snapshotPendingIds: () => readonly string[];
+  /** Retire exactly these ids. See acknowledgeApplies for why not "all". */
+  acknowledge: (applyIds: readonly string[]) => void;
 };
 
 let fallbackCounter = 0;
@@ -651,12 +664,16 @@ export const useUnsettledImport = (
     },
     [scope],
   );
-  const acknowledgeAll = useCallback(() => {
-    removeAllIds(scope);
-    notify();
-  }, [scope]);
+  const snapshotPendingIds = useCallback(() => pendingIdsIn(scope), [scope]);
+  const acknowledge = useCallback(
+    (applyIds: readonly string[]) => {
+      acknowledgeApplies(scope, applyIds);
+      notify();
+    },
+    [scope],
+  );
   return useMemo(
-    () => ({ unsettled, trackApply, admit, settleApply, acknowledgeAll }),
-    [unsettled, trackApply, admit, settleApply, acknowledgeAll],
+    () => ({ unsettled, trackApply, admit, settleApply, snapshotPendingIds, acknowledge }),
+    [unsettled, trackApply, admit, settleApply, snapshotPendingIds, acknowledge],
   );
 };
