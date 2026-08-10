@@ -515,6 +515,76 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+# --- a quoted property is the same property -----------------------------------
+
+@test "test-layout: catches a quoted test.exclude" {
+  # `"exclude": [...]` is valid TS and vitest applies it, but an
+  # identifier-only pattern does not see it — so an exclusion that drops whole
+  # test directories read as clean.
+  mkdir -p "$SANDBOX/frontend/tests/lib"
+  printf 'it("y", () => {});\n' > "$SANDBOX/frontend/tests/lib/b.test.ts"
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    "exclude": ["tests/lib/**"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"exclude"* ]]
+}
+
+@test "test-layout: catches a single-quoted test.exclude" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    'exclude': ["tests/lib/**"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"exclude"* ]]
+}
+
+@test "test-layout: accepts a quoted include" {
+  # The include side failed the other way: a quoted key was reported missing.
+  # Fail-closed, but still wrong about the file, and a false positive on a
+  # guard like this is how it ends up switched off.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    "include": ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: accepts a quoted test block" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  "test": {
+    "include": ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
 @test "test-layout: catches a missing vitest config" {
   rm "$SANDBOX/frontend/vitest.config.ts"
   run_guard

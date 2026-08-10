@@ -162,32 +162,27 @@ desktop.ini
 .pydevproject
 
 # Node / frontend (for the future frontend/ workspace)
-# The Python-convention lib/ rule above must not suppress frontend source.
+#
+# The Python-convention `lib/` rule above matches a *directory* at any depth, so
+# it swallows first-party source: frontend/src/lib/, the tests tree that mirrors
+# it, and the gate's own ci/lib/. A new file under any of them is silently
+# untracked — never committed, never run, with nothing on screen to say so.
+#
+# Each negation re-includes the directory and nothing more. That is deliberate:
+# `lib/` excluded the directory, and git will not evaluate rules for files under
+# an excluded directory, so un-excluding it is enough to make its contents
+# visible again — and they are then matched against every other rule as usual.
+# A `!<dir>/**` companion would instead re-include every descendant outright and
+# override the artifact and secret rules above it, which is how
+# ci/lib/__pycache__/x.pyc, ci/lib/x.pyc and ci/lib/.env became trackable.
 !frontend/src/lib/
-!frontend/src/lib/**
-# ...nor frontend tests, which mirror src/ and so also have a lib/ segment.
-# Without this a new frontend/tests/lib/*.test.ts is silently untracked:
-# never committed, never run, with nothing on screen to say so.
-# The directory must be re-included before its contents; git cannot
-# re-include a path whose parent directory is still excluded.
 !frontend/tests/lib/
-!frontend/tests/lib/**
-# The tests tree mirrors src/, so a lib/ segment can appear at any depth —
-# frontend/tests/features/lib/widget.test.ts is ignored by the root-level
-# negations alone. The guard and vitest both see such a file locally, so the
-# only symptom is that `git add .` quietly omits it and the committed suite
-# loses a test.
+# The trees mirror each other, so a lib/ segment can appear at any depth —
+# frontend/tests/features/lib/widget.test.ts is missed by the root-level
+# negations alone.
 !frontend/tests/**/lib/
-!frontend/tests/**/lib/**
-# Same reasoning for source: a nested lib/ under src/ is first-party code.
 !frontend/src/**/lib/
-!frontend/src/**/lib/**
-# The same Python-convention rule also shadows the gate's own library dir. The
-# existing files under ci/lib/ are tracked and so unaffected, but a newly added
-# one — the next helper any of these checks is split into — would be invisible
-# to `git add`, which is how a check ends up shipping with half its code.
 !ci/lib/
-!ci/lib/**
 node_modules/
 # Generated dependency-cache fingerprints written by ci/checks/node.sh
 # and ci/checks/python.sh.

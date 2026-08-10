@@ -881,7 +881,40 @@ single P-tier above.
   blocked local commits on the owner's Node 20.20.2 / bun 1.2.14; the machine
   now reports **v22.14.0** and **bun 1.3.14**, and the full lane (install,
   `tsc --noEmit`, 314 tests, `vite build`) passes under enforcement.
-  Combined suite: `test_test_layout.bats` (46) + `test_js_lane.bats` (67) = 113
+  A thirteenth round found six more, two P1 — five of them regressions in the
+  round-twelve code, which is the cost of adding enforcement. The node lane
+  returned PASS when **workspace discovery found nothing**: deleting
+  `frontend/package.json` leaves the lockfile, tsconfig and vitest config
+  behind, so the lane ran no install, typecheck, test or build while
+  `test-layout` still passed on the surviving config. That branch now fails
+  when workspace *configuration* remains without a manifest — keyed on config
+  rather than on source files, because this branch is also where a repo with no
+  JavaScript at all lands. The **result cache** outlived the toolchain it
+  vouched for: `_compute_cache_key` fingerprinted only `node` for the node lane
+  and only `bash` for `tests-shell`, so moving bun off the `packageManager` pin
+  or uninstalling bats replayed the old PASS and the new fail-closed checks
+  never executed. Both keys now include every tool their lane consults, absent
+  ones recorded as `absent`. The comparator read `"node": "20"` as `20.0.0` and
+  rejected Node 20.20.2 — npm's X-range semantics say an unstated component is
+  unconstrained, and a false infra failure is how a fail-closed check gets
+  switched off; a `cut` left in the wildcard path was the cause. It also
+  accepted `">=999.0.0 ||"`: the token counter was cumulative across
+  alternatives, so an empty alternative from a trailing `||` inherited the
+  previous one's count and its untouched `ok` flag. Malformed input is now
+  unverifiable however well another alternative matches, while an
+  *unrecognised* range form still loses to a satisfied sibling — the two are
+  deliberately different. In `test-layout.sh`, a **quoted** `"exclude"` was
+  invisible to the identifier-only pattern, so an exclusion dropping whole test
+  directories read as clean; quoted `"include"` and `"test"` failed the other
+  way, reporting valid config as broken. And the `lib/` negations used
+  `!<dir>/**`, which re-includes every descendant outright and overrode the
+  artifact and secret rules above them — `ci/lib/__pycache__/x.pyc`,
+  `ci/lib/x.pyc` and `ci/lib/.env` had all become trackable. Un-excluding the
+  directory alone is sufficient and is what the file now does: git skips rule
+  evaluation only *inside* an excluded directory, so its contents are matched
+  normally once it is back. Re-stating the artifact rules after the negations
+  would have re-ignored `.env.example`, which has its own negation further up.
+  Combined suite: `test_test_layout.bats` (50) + `test_js_lane.bats` (79) = 129
   cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

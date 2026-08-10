@@ -349,6 +349,118 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "node lane: engines X-ranges admit the versions npm admits" {
+  # "20" is >=20.0.0 <21.0.0, not 20.0.0 exactly. Defaulting an unstated
+  # component to 0 rejected a conforming runtime — a false infra failure, which
+  # is how a fail-closed check gets switched off.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"${major}\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an X-range still excludes the neighbouring major" {
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"$((major + 1))\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a malformed range cannot come back satisfied" {
+  # A trailing "||" leaves an empty alternative. Counting tokens across all
+  # alternatives let the empty one inherit the previous alternative's count and
+  # its untouched ok flag, so ">=999.0.0 ||" reported satisfied — the
+  # enforcement boundary switched off by a typo.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0 ||" }, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a malformed range is rejected even when an alternative matches" {
+  # Malformed input is unverifiable however well one alternative matches. This
+  # is the case an early return on the first satisfied alternative would hide.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1 ||" }, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unsupported range form does not fail a version another alternative admits" {
+  # The converse of the case above, and the reason the two are distinguished: a
+  # range form this comparator does not implement must not reject a runtime that
+  # a sibling alternative plainly accepts.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1 || 1.2.3 - 2.3.4" }, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a deleted manifest with workspace config left behind fails" {
+  # Discovery finds nothing, so the lane used to report PASS having run no
+  # install, typecheck, test or build — while the tracked frontend was left
+  # uninstallable and test-layout still passed on the surviving vitest config.
+  ws_setup
+  rm -f "$NODE_SB/ws/package.json"
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"still carries workspace configuration"* ]]
+  [[ "$output" == *"bun.lock"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a repository with no JavaScript at all still skips" {
+  # The negative control the check is keyed on: no manifest AND no workspace
+  # configuration is a repo without a Node lane, not a deleted manifest.
+  ws_setup
+  rm -f "$NODE_SB/ws/package.json" "$NODE_SB/ws/bun.lock"
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Skipping Node lane"* ]]
+  rm -rf "$NODE_SB"
+}
+
+# --- the result cache must not outlive the toolchain it vouched for -----------
+
+@test "cache key: the node lane keys on its package managers, not just node" {
+  # A cached PASS replayed after bun moved off the packageManager pin means the
+  # enforcement added for exactly that case never runs.
+  run bash -c "sed -n '/^_compute_cache_key()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  local tool
+  for tool in bun pnpm npm yarn; do
+    [[ "$output" == *"$tool"* ]] || { echo "node cache key ignores $tool" >&2; return 1; }
+  done
+  [[ "$output" == *"absent"* ]]
+}
+
+@test "cache key: the shell suite keys on bats" {
+  # Uninstalling bats turns tests-shell into FAIL_INFRA. Keyed on bash alone,
+  # the previous PASS is served instead and the suite silently stops running.
+  run bash -c "sed -n '/^_compute_cache_key()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-shell)"* ]]
+  [[ "$output" == *"bats-"* ]]
+}
+
 @test "node lane: a workspace with no tests at all is unaffected" {
   ws_setup
   rm -rf "$NODE_SB/ws/tests"
@@ -620,6 +732,36 @@ ws_run() {
   # The files already there are tracked and so unaffected; a newly added helper
   # would be invisible to `git add`, shipping a check with half its code.
   run git check-ignore -q --no-index ci/lib/newthing.sh
+  [ "$status" -ne 0 ]
+}
+
+@test "gitignore: the lib negations do not re-include ignored artifacts" {
+  # A `!<dir>/**` companion re-includes every descendant outright, overriding
+  # the artifact and secret rules above it. Un-excluding the directory alone is
+  # enough, because git only skips rule evaluation *inside* an excluded
+  # directory — everything under it is then matched normally.
+  local p
+  for p in \
+    ci/lib/__pycache__/x.pyc \
+    ci/lib/x.pyc \
+    ci/lib/x.so \
+    ci/lib/.env \
+    ci/lib/.vscode/settings.json \
+    frontend/src/lib/.env \
+    frontend/src/lib/secret.pem \
+    frontend/tests/lib/x.pyc \
+    frontend/tests/features/lib/.env
+  do
+    run git check-ignore -q --no-index "$p"
+    [ "$status" -eq 0 ] || { echo "leaked back in: $p" >&2; return 1; }
+  done
+}
+
+@test "gitignore: the example env files stay trackable" {
+  # The `.env.*` rule carries `!.env.example` negations that sit *above* this
+  # block. Re-stating the artifact rules after the negations, rather than
+  # narrowing them, would have re-ignored those.
+  run git check-ignore -q --no-index .env.example
   [ "$status" -ne 0 ]
 }
 

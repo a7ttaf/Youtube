@@ -416,8 +416,32 @@ _check_is_cacheable() {
 _compute_cache_key() {
   local label="$1"
   local tool_ver="unknown"
+  local _tool
+  # Every tool a lane's fail-closed checks consult belongs in its key. Keyed on
+  # the interpreter alone, a lane that passed under a conforming toolchain
+  # replays that PASS after the toolchain drifts -- bun moved off the
+  # packageManager pin, bats uninstalled -- and the enforcement added for
+  # exactly that case never executes. Absent tools are recorded as such, so
+  # removing one changes the key too.
   case "$label" in
-    node) tool_ver="$(ci::cache::tool_version node)" ;;
+    node)
+      tool_ver="$(ci::cache::tool_version node)"
+      for _tool in bun pnpm npm yarn; do
+        if command -v "$_tool" >/dev/null 2>&1; then
+          tool_ver="${tool_ver}|${_tool}-$("$_tool" --version 2>/dev/null | head -1)"
+        else
+          tool_ver="${tool_ver}|${_tool}-absent"
+        fi
+      done
+      ;;
+    tests-shell)
+      tool_ver="bash-$(bash --version | head -1)"
+      if command -v bats >/dev/null 2>&1; then
+        tool_ver="${tool_ver}|bats-$(bats --version 2>/dev/null | head -1)"
+      else
+        tool_ver="${tool_ver}|bats-absent"
+      fi
+      ;;
     python) tool_ver="$(ci::cache::tool_version python3)" ;;
     *) tool_ver="bash-$(bash --version | head -1)" ;;
   esac

@@ -276,7 +276,9 @@ extract_test_block() {
         if (depth == 1 && substr(all, p, 4) == "test") {
           before = (p > 1) ? substr(all, p - 1, 1) : " "
           rest = substr(all, p + 4)
-          if (before !~ /[A-Za-z0-9_$]/ && rest ~ /^[[:space:]]*:[[:space:]]*\{/) {
+          # `"test": { }` is the same key as `test: { }`; the optional closing
+          # quote is what makes the quoted form reachable at all.
+          if (before !~ /[A-Za-z0-9_$]/ && rest ~ /^["'"'"']?[[:space:]]*:[[:space:]]*\{/) {
             q = p + 4 + index(rest, "{")
             d2 = 1
             out = ""
@@ -339,10 +341,16 @@ check_one_config() {
   local cfg="$1"
   local block have_block=1 active_include="" active_exclude=""
 
+  # A quoted property is the same property: `"exclude": [...]` is valid TS and
+  # vitest applies it, but an identifier-only pattern does not see it, so an
+  # exclusion that silently drops whole test directories reads as clean. The
+  # include side fails the other way -- a quoted `"include"` would be reported
+  # missing -- which is safe but still wrong about the file.
+  local q='["'"'"']?'
   block="$(strip_ts_comments "$cfg" | extract_test_block)" || have_block=0
   if [ -n "$block" ]; then
-    active_include="$(printf '%s\n' "$block" | grep -E '^[[:space:]]*include:[[:space:]]*\[' || true)"
-    active_exclude="$(printf '%s\n' "$block" | grep -E '^[[:space:]]*exclude:' || true)"
+    active_include="$(printf '%s\n' "$block" | grep -E "^[[:space:]]*${q}include${q}[[:space:]]*:[[:space:]]*\[" || true)"
+    active_exclude="$(printf '%s\n' "$block" | grep -E "^[[:space:]]*${q}exclude${q}[[:space:]]*:" || true)"
   fi
 
   if [ "$have_block" = "0" ]; then

@@ -19,6 +19,35 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
   NODE_WORKSPACES="$(ci::common::node_workspaces package.json)"
 
   if [ -z "$NODE_WORKSPACES" ]; then
+    # "No manifest" and "no JavaScript here" are not the same statement.
+    # Deleting frontend/package.json leaves the lockfile, the tsconfig and the
+    # vitest config behind; discovery then finds nothing and this branch used to
+    # return PASS, so a commit that makes the tracked frontend uninstallable ran
+    # no install, typecheck, test or build and every mode accepted it.
+    #
+    # Keyed on workspace *configuration*, not on source files: a lockfile or a
+    # tsconfig/vite/vitest config with no manifest beside it is unambiguous
+    # evidence of a removed manifest, whereas a stray .js in a non-JS repo is
+    # not, and this branch is exactly where a non-JS repo lands.
+    ORPHAN_WS="$(find . \
+      \( -name 'node_modules' -o -name '.git' -o -name 'dist' -o -name 'build' \) -prune -o \
+      -type f \( -name 'package-lock.json' -o -name 'npm-shrinkwrap.json' \
+        -o -name 'pnpm-lock.yaml' -o -name 'yarn.lock' -o -name 'bun.lock' -o -name 'bun.lockb' \
+        -o -name 'tsconfig.json' -o -name 'jsconfig.json' \
+        -o -name 'vitest.config.*' -o -name 'vite.config.*' \) -print 2>/dev/null | head -10 || true)"
+
+    if [ -n "$ORPHAN_WS" ]; then
+      echo "No package.json anywhere, but the tree still carries workspace configuration:"
+      while IFS= read -r _orphan; do
+        [ -n "$_orphan" ] || continue
+        echo "    ${_orphan#./}"
+      done <<< "$ORPHAN_WS"
+      echo "  Nothing can be installed or run against these, so the lane would"
+      echo "  pass having executed no install, typecheck, test or build."
+      echo "  Restore the manifest, or remove the configuration with it."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+    fi
+
     echo "No package.json found. Skipping Node lane."
     exit "$CI_RESULT_PASS"
   fi
@@ -146,6 +175,19 @@ _semver_part() {
   }'
 }
 
+# _semver_spec_part <range-token> <1|2|3> – echo the component AS WRITTEN, or
+# nothing when the token does not state it. Deliberately distinct from
+# _semver_part: for a *version* an absent component is 0, but for a *range* it
+# is unconstrained, so "20" must admit 20.20.2 the way npm's X-ranges do.
+_semver_spec_part() {
+  printf '%s' "${1#v}" | awk -v i="$2" '{
+    v = $0
+    sub(/[-+].*$/, "", v)
+    n = split(v, p, ".")
+    print (i <= n ? p[i] : "")
+  }'
+}
+
 # _semver_cmp <a> <b> – echo -1, 0 or 1. Pre-release suffixes are dropped: a
 # gate that accepted 22.12.0-rc for a >=22.12.0 requirement would be lying by a
 # hair, but the check exists to catch whole-version drift, not tag splitting.
@@ -214,10 +256,12 @@ _semver_token_ok() {
       return 1
       ;;
     [0-9]*|v[0-9]*)
-      # A bare version is exact, except where a component is a wildcard: 22.x
-      # pins the major only. Compare the components the range actually states.
+      # An X-range: compare only the components the range actually states. "22"
+      # means >=22.0.0 <23.0.0 and "22.x" the same, so an unstated component
+      # ends the comparison rather than defaulting to 0 — reading "20" as
+      # "20.0.0" rejected Node 20.20.2, a conforming runtime.
       for i in 1 2 3; do
-        spec="$(printf '%s' "${tok#v}" | cut -d. -f"$i")"
+        spec="$(_semver_spec_part "$tok" "$i")"
         case "$spec" in
           ''|'x'|'X'|'*') return 0 ;;
         esac
@@ -238,13 +282,16 @@ _semver_token_ok() {
 # conjunctive, as npm defines them.
 _semver_satisfies() {
   local version="$1" rest="$2"
-  local alt tok ok tokens=0 unverifiable=0 rc more=1
+  local alt tok ok alt_tokens rc more=1
+  local satisfied=0 malformed=0 unrecognised=0 seen_alt=0
   while [ "$more" -eq 1 ]; do
     case "$rest" in
       *'||'*) alt="${rest%%||*}"; rest="${rest#*||}" ;;
       *)      alt="$rest"; more=0 ;;
     esac
+    seen_alt=1
     ok=1
+    alt_tokens=0
     # Word-splitting is the point: the tokens of one alternative are whitespace
     # separated and conjunctive, as npm defines them. Globbing is disabled
     # around the split because a bare "*" range would otherwise expand to the
@@ -252,11 +299,11 @@ _semver_satisfies() {
     set -f
     # shellcheck disable=SC2086
     for tok in $alt; do
-      tokens=$((tokens + 1))
+      alt_tokens=$((alt_tokens + 1))
       rc=0
       _semver_token_ok "$version" "$tok" || rc=$?
       if [ "$rc" -eq 2 ]; then
-        unverifiable=1
+        unrecognised=1
       fi
       # No early exit: a later token in this alternative may be the
       # unrecognised one, and "cannot evaluate" must win over "does not
@@ -266,11 +313,30 @@ _semver_satisfies() {
       fi
     done
     set +f
-    if [ "$tokens" -gt 0 ] && [ "$ok" -eq 1 ]; then
-      return 0
+    # An empty alternative comes from a trailing or doubled "||". It is
+    # malformed input, not a wildcard: counting tokens across all alternatives
+    # let ">=999.0.0 ||" come back satisfied, because the empty alternative
+    # inherited the previous one's token count and its untouched ok=1.
+    if [ "$alt_tokens" -eq 0 ]; then
+      malformed=1
+      continue
+    fi
+    if [ "$ok" -eq 1 ]; then
+      satisfied=1
     fi
   done
-  if [ "$unverifiable" -eq 1 ] || [ "$tokens" -eq 0 ]; then
+  # A malformed range is unverifiable however well one of its alternatives
+  # matches -- there is no early return above, so a satisfied alternative
+  # cannot hide a broken one. An *unrecognised* alternative is different: a
+  # range form this comparator does not implement must not fail a runtime that
+  # another alternative plainly admits.
+  if [ "$malformed" -eq 1 ] || [ "$seen_alt" -eq 0 ]; then
+    return 2
+  fi
+  if [ "$satisfied" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$unrecognised" -eq 1 ]; then
     return 2
   fi
   return 1
