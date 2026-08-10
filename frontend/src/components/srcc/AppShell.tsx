@@ -241,6 +241,8 @@ const SessionLoadingState = () => {
 type TenantBootstrap = {
   /** The label rendered in the dev-only tenant proof tag. */
   proofLabel: string;
+  /** Whether the tenant id has stopped moving — see the return statement. */
+  tenantSettled: boolean;
 };
 
 /** A parsed error body that carries an operator-facing `detail` message. */
@@ -348,7 +350,20 @@ const useTenantBootstrap = (
       });
   }, [client, tenant.id, tenant.hydrate, enabled, retryToken]);
 
-  return { proofLabel: tenantProofLabel(tenant, tenantError) };
+  return {
+    proofLabel: tenantProofLabel(tenant, tenantError),
+    // SETTLED means the tenant id will not change under a write: it either
+    // hydrated, or resolution failed and never will. The window BETWEEN those
+    // is the dangerous one for anything namespaced by tenant — a key written
+    // then lands in the missing-tenant namespace and is silently orphaned once
+    // /tenants/me answers (review #184).
+    //
+    // A FAILURE counts as settled deliberately. The alternative wedges: a
+    // tenant that cannot be resolved would withhold imports forever, which is
+    // a worse outcome than a guard degraded to the unscoped bucket — and the
+    // backend, not this scope, is the authority on tenancy either way.
+    tenantSettled: tenant.id !== null || tenantError !== null,
+  };
 };
 
 /* ------------------------------------------------------------------ sidebar */
@@ -596,6 +611,8 @@ type ViewRouterProps = {
   traceChannelId: string | null;
   /** Namespaces the unsettled-import records to one tenant + principal. */
   importScope: string;
+  /** False while that namespace can still change under a write. */
+  importScopeSettled: boolean;
   onOpenTrace: (channelId: string) => void;
 };
 
@@ -613,6 +630,7 @@ const ViewRouter = ({
   displayedRole,
   traceChannelId,
   importScope,
+  importScopeSettled,
   onOpenTrace,
 }: ViewRouterProps) => {
   const renderView: Record<ViewKey, () => ReactNode> = {
@@ -631,6 +649,7 @@ const ViewRouter = ({
         canViewFinance={permissions.canViewFinance}
         canViewAudit={permissions.canViewAudit}
         importScope={importScope}
+        importScopeSettled={importScopeSettled}
         onOpenTrace={onOpenTrace}
       />
     ),
@@ -849,6 +868,17 @@ const resolveImportScope = (
   return importScopeFor(session.tenant?.id ?? resolvedTenant.id, session.user_id);
 };
 
+/**
+ * Whether that scope has stopped moving. The session's own tenant is
+ * authoritative and needs no bootstrap, so a session carrying one is settled
+ * immediately; only a session WITHOUT one has to wait for /tenants/me to
+ * answer either way. Kept beside resolveImportScope because the two read the
+ * same two sources and must agree about which one supplied the tenant.
+ */
+const isImportScopeSettled = (session: SessionMe, tenantSettled: boolean): boolean => {
+  return session.tenant?.id != null || tenantSettled;
+};
+
 const AppShell = () => {
   const [view, setView] = useState<ViewKey>("command");
   const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
@@ -868,7 +898,7 @@ const AppShell = () => {
   const sessionReady = sessionBootstrap.status === "ready";
   // previewRole is passed as the retry token: a dev role switch after a failed
   // tenant bootstrap re-fires it (dev-only; it does not affect capabilities).
-  const { proofLabel } = useTenantBootstrap(sessionReady, previewRole);
+  const { proofLabel, tenantSettled } = useTenantBootstrap(sessionReady, previewRole);
 
   // FIX: Clear the Registry→Trace navigation seed when leaving the trace view
   // so that a later manual click on the Trace nav item opens a blank view
@@ -915,6 +945,11 @@ const AppShell = () => {
   // outlives sign-out, so without this a pending import follows a shared
   // browser into the next operator's or the next tenant's session.
   const importScope = resolveImportScope(sessionBootstrap.session, resolvedTenant);
+  // Withhold import ADMISSION until that namespace is final. Without this the
+  // shell renders while /tenants/me is still in flight, and an apply admitted
+  // in that window files its pending record under the missing-tenant scope
+  // that the very next render replaces (review #184).
+  const importScopeSettled = isImportScopeSettled(sessionBootstrap.session, tenantSettled);
   const copy = VIEW_COPY[view];
 
 
@@ -945,6 +980,7 @@ const AppShell = () => {
           displayedRole={displayedRole}
           traceChannelId={traceChannelId}
           importScope={importScope}
+          importScopeSettled={importScopeSettled}
           onOpenTrace={(channelId) => {
             setTraceChannelId(channelId);
             setView("trace");

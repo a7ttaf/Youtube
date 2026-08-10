@@ -573,6 +573,7 @@ const RegistryMainPanel = ({
   importUnsettled,
   canViewAudit,
   importScope,
+  importScopeSettled,
   onStartImport,
   onCancelImport,
   onImportDone,
@@ -587,6 +588,8 @@ const RegistryMainPanel = ({
   importUnsettled: boolean;
   canViewAudit: boolean;
   importScope: string | undefined;
+  /** False while that namespace can still change under a write. */
+  importScopeSettled: boolean;
   onStartImport: () => void;
   onCancelImport: () => void;
   onImportDone: () => void;
@@ -602,6 +605,7 @@ const RegistryMainPanel = ({
       {importOpen ? (
         <RegistryImportFlow
           importScope={importScope}
+          importScopeSettled={importScopeSettled}
           onCancel={onCancelImport}
           onDone={onImportDone}
         />
@@ -1135,6 +1139,7 @@ const RegistryView = ({
   canViewFinance,
   canViewAudit = false,
   importScope,
+  importScopeSettled = true,
   onOpenTrace,
 }: {
   canManageRegistry: boolean;
@@ -1143,6 +1148,9 @@ const RegistryView = ({
   /** Namespaces the unsettled-import records to one tenant + principal. Omitted
    * only in standalone renders, which fall back to the unscoped bucket. */
   importScope?: string;
+  /** False while that namespace can still change under a write. Defaults to
+   * true: a standalone render supplies no scope and has nothing to wait on. */
+  importScopeSettled?: boolean;
   /** Whether AuditView is reachable at all. Defaults to the SAFE assumption:
    * without it the notice must not send the operator somewhere they will be
    * refused. */
@@ -1212,6 +1220,7 @@ const RegistryView = ({
           importUnsettled={unsettledImport.unsettled}
           canViewAudit={canViewAudit}
           importScope={importScope}
+          importScopeSettled={importScopeSettled}
           onStartImport={() => setImporting(true)}
           onCancelImport={() => setImporting(false)}
           onImportDone={() => {

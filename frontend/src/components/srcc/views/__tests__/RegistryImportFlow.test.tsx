@@ -284,16 +284,18 @@ const importPosts = (): FormData[] => {
   ).map(([, init]) => requireFormDataBody(init));
 };
 
-const renderRegistry = (
-  writeLatch: { reason: string | null; setReason: (reason: string | null) => void } = {
-    reason: null,
-    setReason: () => undefined,
-  },
+const DEFAULT_WRITE_LATCH = { reason: null, setReason: () => undefined };
+
+/** The tree under test, separately from rendering it, so a test can re-render
+ * the same registry with one prop changed (the scope-settling test does). */
+const registryTree = (
+  writeLatch: { reason: string | null; setReason: (reason: string | null) => void },
   // Defaults to the capability-poor operator: the seeded import roles hold
   // MANAGE_CHANNELS + MANAGE_GROUPS but NOT VIEW_AUDIT_LOG.
-  canViewAudit = false,
+  canViewAudit: boolean,
+  importScopeSettled: boolean,
 ) => {
-  return render(
+  return (
     <TenantProvider initialSlug="ums">
       <WriteInFlightProvider value={writeLatch}>
         <RegistryView
@@ -301,10 +303,22 @@ const renderRegistry = (
           canImportChannels
           canViewFinance
           canViewAudit={canViewAudit}
+          importScopeSettled={importScopeSettled}
         />
       </WriteInFlightProvider>
-    </TenantProvider>,
+    </TenantProvider>
   );
+};
+
+const renderRegistry = (
+  writeLatch: {
+    reason: string | null;
+    setReason: (reason: string | null) => void;
+  } = DEFAULT_WRITE_LATCH,
+  canViewAudit = false,
+  importScopeSettled = true,
+) => {
+  return render(registryTree(writeLatch, canViewAudit, importScopeSettled));
 };
 
 /** The Upload step's panel — queries are scoped inside it because the Map
@@ -350,21 +364,28 @@ const cleanImport = (form: FormData): Response => {
 };
 
 /** Render, open the stepper, fill Upload, fire the dry-run, await Preview. */
+/** The render result of the most recent runDryRunToPreview, for the one test
+ * that needs to re-render the same tree with a prop changed. */
+let previewView: ReturnType<typeof render> | null = null;
+
 const runDryRunToPreview = async (
   // Same widening as RouteOverrides.importPost: the in-flight guard tests hand
   // in a responder whose APPLY leg is a pending promise.
   importPost: (form: FormData) => Response | Promise<Response>,
+  importScopeSettled = true,
 ): Promise<File> => {
   routeFetch({ importPost });
-  renderRegistry();
+  const view = renderRegistry(DEFAULT_WRITE_LATCH, false, importScopeSettled);
   await openImport();
   const file = await fillUpload();
   fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
   await waitFor(() =>
     expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
   );
+  previewView = view;
   return file;
 };
+
 
 describe("RegistryImportFlow stepper (through RegistryView)", () => {
   it("runs the happy path: upload -> dry-run preview -> apply -> applied counts + refetch", async () => {
@@ -830,6 +851,38 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     );
     // Only the dry run went out; this tab's apply never dispatched.
     expect(importPosts()).toHaveLength(1);
+  });
+
+  it("withholds Apply until the import SCOPE has settled", async () => {
+    // The scope is built from the tenant id, and a session whose body carries
+    // no tenant gets that id from /tenants/me AFTER the shell has rendered. An
+    // apply admitted in that window files its pending record under the
+    // missing-tenant namespace, and the very next render moves the namespace —
+    // so the record is orphaned: this tab's own guard no longer sees it, and
+    // neither does another tab (review #184, codex P2).
+    await runDryRunToPreview(() => jsonResponse(DRY_RUN_PLAN), false);
+
+    const applyButton = screen.getByRole("button", { name: /^apply$/i });
+    expect(applyButton).toBeDisabled();
+    // And it says WHY, rather than presenting a dead control.
+    expect(applyButton).toHaveAttribute("title", expect.stringMatching(/which workspace/i));
+    // The read-only dry run went out; no apply did.
+    expect(importPosts()).toHaveLength(1);
+  });
+
+  it("releases Apply once the scope settles, rather than wedging", async () => {
+    // The complement, and the reason a FAILED tenant resolution counts as
+    // settled upstream: a guard that never releases would lock an operator out
+    // of importing entirely, which is worse than the degraded namespace it was
+    // protecting.
+    await runDryRunToPreview(() => jsonResponse(DRY_RUN_PLAN), false);
+    expect(screen.getByRole("button", { name: /^apply$/i })).toBeDisabled();
+
+    previewView?.rerender(registryTree(DEFAULT_WRITE_LATCH, false, true));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled(),
+    );
   });
 
   it("points an AUDIT-capable operator at the audit trail instead", async () => {

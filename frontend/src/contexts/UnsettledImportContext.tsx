@@ -261,8 +261,7 @@ const rememberInMemory = (key: string, pending: boolean): void => {
 /**
  * Record one apply as pending. Touches ONLY this apply's key, so a concurrent
  * tab doing the same thing cannot drop it and it cannot drop theirs.
- */
-/**
+ *
  * Returns whether the record became DURABLE. A memory-only record is not a
  * successful claim: the Web Lock is released the moment admission returns, so
  * another tab cannot see it, and a reload erases it while the backend request
@@ -360,9 +359,20 @@ const admitApply = (scope: string, applyId: string): Promise<AdmissionResult> =>
     // Fail CLOSED on a storage failure. A memory-only record cannot be seen by
     // another tab and does not survive a reload, so admitting on one would
     // hand out a claim that no other document can honour — for an audited
-    // write that may commit anyway. The record stays in memory for this
-    // document's own guards, and the caller is refused.
-    return addId(scope, applyId) ? "admitted" : "not-durable";
+    // write that may commit anyway.
+    if (addId(scope, applyId)) {
+      return "admitted";
+    }
+    // And RETIRE the record addId kept in memory. A refused admission dispatches
+    // NOTHING, so leaving it would mark this document unsettled over a request
+    // that never happened: the next attempt would be refused as
+    // "other-apply-pending", and leaving the flow would warn that an import may
+    // still be committing until the operator reloaded or falsely acknowledged
+    // it (review #184). Retiring here and not in the caller keeps the rule with
+    // the decision — trackApply's own unconditional path still retains, because
+    // there a request really is in flight.
+    removeId(scope, applyId);
+    return "not-durable";
   };
   const locks = globalThis.navigator?.locks;
   if (locks === undefined) {

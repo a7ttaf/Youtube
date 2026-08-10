@@ -643,6 +643,19 @@ const APPLY_NOT_DURABLE_NOTE =
   "storage) for this site, or use a normal window instead of a private one, " +
   "then try again.";
 
+// A THIRD refusal, and the only TEMPORARY one: the namespace that isolates
+// these records is still being resolved. The scope is built from the tenant id,
+// and a session whose body carries no tenant gets that id from /tenants/me — so
+// admitting during that window files the record under the missing-tenant
+// namespace and then has the scope change out from under it, stranding the
+// record where neither this tab's guard nor another tab's looks for it (review
+// #184). A tenant that FAILS to resolve counts as settled: the guard degrades
+// to the unscoped bucket rather than locking the operator out of importing
+// forever.
+const IMPORT_SCOPE_UNSETTLED_NOTE =
+  "Still confirming which workspace this import belongs to — this takes a " +
+  "moment. Try Apply again once it finishes.";
+
 /**
  * Which refusal the operator is looking at. Named rather than inlined at the
  * dispatch site: the two have genuinely different remedies — go back to the
@@ -765,6 +778,7 @@ const applyBlockedTitle = (
   indeterminate: boolean,
   otherApplyPending: boolean,
   applying: boolean,
+  scopeUnsettled: boolean,
 ): string | undefined => {
   if (indeterminate) {
     return APPLY_INDETERMINATE_NOTE;
@@ -774,6 +788,12 @@ const applyBlockedTitle = (
   // for the request this very tab is running (review #184, qodo).
   if (applying) {
     return undefined;
+  }
+  // BEFORE otherApplyPending: while the scope is still moving, that flag was
+  // read out of a bucket this session may not end up owning, so blaming
+  // another tab would be a guess. This reason is the true one.
+  if (scopeUnsettled) {
+    return IMPORT_SCOPE_UNSETTLED_NOTE;
   }
   if (otherApplyPending) {
     return OTHER_APPLY_PENDING_NOTE;
@@ -788,19 +808,21 @@ const applyBlockedTitle = (
  * Whether Apply is refused, as one named predicate rather than a chain inside
  * the action row. Every clause is a distinct reason: an ERROR row the API
  * would 422 anyway, this tab's own request already in flight, this tab's
- * request whose outcome was never learned, and ANOTHER tab's request in the
- * same state. Extracted to keep PreviewActions under the analyzer's
- * medium-risk complexity threshold (DeepSource JS-R1005) — conformed, not
- * suppressed. Kept beside applyBlockedTitle on purpose: the two must stay in
- * step, or the button refuses a click with no explanation of why.
+ * request whose outcome was never learned, ANOTHER tab's request in the same
+ * state, and a namespace that has not stopped moving. Extracted to keep
+ * PreviewActions under the analyzer's medium-risk complexity threshold
+ * (DeepSource JS-R1005) — conformed, not suppressed. Kept beside
+ * applyBlockedTitle on purpose: the two must stay in step, or the button
+ * refuses a click with no explanation of why.
  */
 const applyRefused = (
   hasErrors: boolean,
   busy: boolean,
   indeterminate: boolean,
   otherApplyPending: boolean,
+  scopeUnsettled: boolean,
 ): boolean => {
-  return hasErrors || busy || indeterminate || otherApplyPending;
+  return hasErrors || busy || indeterminate || otherApplyPending || scopeUnsettled;
 };
 
 type PreviewActionsProps = {
@@ -811,6 +833,7 @@ type PreviewActionsProps = {
   applying: boolean;
   indeterminate: boolean;
   otherApplyPending: boolean;
+  scopeUnsettled: boolean;
 };
 
 /**
@@ -837,6 +860,7 @@ const PreviewActions = ({
   applying,
   indeterminate,
   otherApplyPending,
+  scopeUnsettled,
 }: PreviewActionsProps) => {
   return (
     <div className="action-row">
@@ -852,8 +876,20 @@ const PreviewActions = ({
       <button
         className="primary-button"
         type="button"
-        disabled={applyRefused(hasErrors, busy, indeterminate, otherApplyPending)}
-        title={applyBlockedTitle(hasErrors, indeterminate, otherApplyPending, applying)}
+        disabled={applyRefused(
+          hasErrors,
+          busy,
+          indeterminate,
+          otherApplyPending,
+          scopeUnsettled,
+        )}
+        title={applyBlockedTitle(
+          hasErrors,
+          indeterminate,
+          otherApplyPending,
+          applying,
+          scopeUnsettled,
+        )}
         onClick={onApply}
       >
         {/* `applying`, not `busy`: the reconciliation dry run also sets busy,
@@ -874,6 +910,7 @@ type PreviewStepProps = {
   applying: boolean;
   indeterminate: boolean;
   otherApplyPending: boolean;
+  scopeUnsettled: boolean;
   error: string | null;
 };
 
@@ -891,6 +928,7 @@ const PreviewStep = ({
   applying,
   indeterminate,
   otherApplyPending,
+  scopeUnsettled,
   error,
 }: PreviewStepProps) => {
   const hasErrors = hasErrorRows(result);
@@ -951,6 +989,7 @@ const PreviewStep = ({
         applying={applying}
         indeterminate={indeterminate}
         otherApplyPending={otherApplyPending}
+        scopeUnsettled={scopeUnsettled}
       />
     </div>
   );
@@ -1006,6 +1045,11 @@ export type RegistryImportFlowProps = {
    * match what RegistryView reads, or the flow's raise and the view's notice
    * would look at different buckets. */
   importScope?: string;
+  /** False while `importScope` can still change under a write — the tenant half
+   * is resolved asynchronously for sessions whose body carries no tenant.
+   * Defaults to true: a caller that supplies no scope has no resolution to wait
+   * on. */
+  importScopeSettled?: boolean;
   /** Close the flow WITHOUT reloading the registry (no apply committed). */
   onCancel: () => void;
   /** Close the flow AND reload the registry (an apply committed, or leaving
@@ -1026,6 +1070,7 @@ const STEP_INDEX: Record<ImportStep, number> = { upload: 0, preview: 1, applied:
  */
 export const RegistryImportFlow = ({
   importScope,
+  importScopeSettled = true,
   onCancel,
   onDone,
 }: RegistryImportFlowProps) => {
@@ -1284,6 +1329,17 @@ export const RegistryImportFlow = ({
    * ============================================================================
    */
   const apply = async () => {
+    // BEFORE the dispatch latch, because this is a statement about the
+    // NAMESPACE every record below is filed under, not about this request.
+    // Admitting while the scope can still change writes the record into the
+    // missing-tenant bucket and then moves the bucket, leaving a dispatched
+    // apply that neither this tab's guard nor another tab's can find (review
+    // #184). Reported rather than dropped: the state is transient and
+    // otherwise invisible, so a silent no-op would read as a dead button.
+    if (!importScopeSettled) {
+      setError(IMPORT_SCOPE_UNSETTLED_NOTE);
+      return;
+    }
     if (applyDispatchBlocked()) {
       return;
     }
@@ -1403,6 +1459,7 @@ export const RegistryImportFlow = ({
           applying={applying}
           indeterminate={indeterminate}
           otherApplyPending={unsettledImport.unsettled}
+          scopeUnsettled={!importScopeSettled}
           error={error}
         />
       ) : null;

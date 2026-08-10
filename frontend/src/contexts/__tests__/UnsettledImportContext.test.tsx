@@ -49,6 +49,80 @@ describe("unsettled import store", () => {
     expect(storedIds()).toEqual([]);
   });
 
+  it("refuses admission when the record cannot be persisted", async () => {
+    // Fail CLOSED: a memory-only record is invisible to another tab and gone
+    // after a reload, so admitting on one hands out a claim nobody else can
+    // honour — for a write that appends an audit event. Private-browsing and
+    // "block site data" both produce exactly this throw.
+    const setItem = vi
+      .spyOn(globalThis.Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("quota", "QuotaExceededError");
+      });
+    try {
+      const { result } = renderHook(() => useUnsettledImport());
+
+      await act(async () => {
+        await expect(result.current.admit("apply-nostore")).resolves.toBe("not-durable");
+      });
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it("leaves NOTHING pending after a refused admission", async () => {
+    // The follow-on finding: addId keeps the id in memory before reporting the
+    // failure, so a refusal that did not dispatch still marked the document
+    // unsettled. The next attempt was then refused as "other-apply-pending" —
+    // blaming a tab that does not exist — and leaving the flow warned that an
+    // import may still be committing for a request that never left (review
+    // #184, codex P2).
+    const setItem = vi
+      .spyOn(globalThis.Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("quota", "QuotaExceededError");
+      });
+    const { result } = renderHook(() => useUnsettledImport());
+    try {
+      await act(async () => {
+        await result.current.admit("apply-refused");
+      });
+
+      expect(result.current.unsettled).toBe(false);
+    } finally {
+      setItem.mockRestore();
+    }
+
+    // And the refusal is not sticky: once storage works, the NEXT admission is
+    // decided on its own merits rather than on the corpse of the refused one.
+    await act(async () => {
+      await expect(result.current.admit("apply-later")).resolves.toBe("admitted");
+    });
+    expect(result.current.unsettled).toBe(true);
+    expect(storedIds()).toEqual(["apply-later"]);
+  });
+
+  it("still retains a tracked apply when storage refuses", async () => {
+    // The complement, so the retirement above cannot be over-applied:
+    // trackApply is called AFTER a request is dispatched, and there the write
+    // really is in flight. Losing that record would take the guard down over a
+    // live write — the opposite failure.
+    const setItem = vi
+      .spyOn(globalThis.Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new DOMException("quota", "QuotaExceededError");
+      });
+    try {
+      const { result } = renderHook(() => useUnsettledImport());
+
+      act(() => result.current.trackApply("apply-dispatched"));
+
+      expect(result.current.unsettled).toBe(true);
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
   it("settling an id it does not hold changes nothing", () => {
     // A stale handler from a document that already settled must not be able to
     // retire a LATER apply by arriving late.
