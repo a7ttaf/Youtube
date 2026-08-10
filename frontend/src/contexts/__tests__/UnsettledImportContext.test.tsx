@@ -295,4 +295,39 @@ describe("unsettled import store", () => {
     const ids = new Set(Array.from({ length: 64 }, newApplyId));
     expect(ids.size).toBe(64);
   });
+
+  it("carries per-document entropy when randomUUID is unavailable", () => {
+    // randomUUID needs a SECURE CONTEXT, so an app served over plain HTTP has
+    // none — that is the case this fallback exists for, not an exotic one. A
+    // clock plus a counter is unique within a document and NOT across two:
+    // both tabs read the same millisecond and both start at 1, mint the same
+    // id, and since the id IS the localStorage key, one tab then removes the
+    // other's pending record (review #184, qodo).
+    vi.stubGlobal("crypto", {
+      getRandomValues: (array: Uint32Array) => {
+        array.fill(123456789);
+        return array;
+      },
+    });
+
+    const ids = Array.from({ length: 32 }, newApplyId);
+    expect(new Set(ids).size).toBe(32);
+    // salt + clock + counter, not just clock + counter.
+    for (const id of ids) {
+      expect(id).toMatch(/^apply-[0-9a-z]+-\d+-\d+$/u);
+    }
+
+    vi.unstubAllGlobals();
+  });
+
+  it("still mints an id when the runtime has no crypto at all", () => {
+    // Last resort. It must not throw on the way to dispatching an apply —
+    // that would block the import outright rather than degrade it.
+    vi.stubGlobal("crypto", undefined);
+
+    const ids = Array.from({ length: 32 }, newApplyId);
+
+    expect(new Set(ids).size).toBe(32);
+    vi.unstubAllGlobals();
+  });
 });

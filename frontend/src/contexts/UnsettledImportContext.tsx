@@ -338,19 +338,45 @@ export type UnsettledImportValue = {
 
 let fallbackCounter = 0;
 
+/**
+ * Per-DOCUMENT entropy for the fallback id, drawn once.
+ *
+ * A clock plus a counter is unique within one document and NOT across two:
+ * both tabs read the same millisecond and both start their counter at 1, so
+ * they mint the same id — and since the id is the localStorage key, one tab
+ * then removes the other's pending record and the cross-tab guard silently
+ * weakens (review #184, qodo).
+ *
+ * `crypto.getRandomValues` is the right source and is NOT the one that was
+ * missing: `randomUUID` requires a secure context, `getRandomValues` does not,
+ * so the very case this fallback exists for — an app served over plain HTTP —
+ * still has it. Math.random() is the last resort, and it is still far better
+ * than nothing here, because a collision needs both documents to draw the same
+ * salt AND share a millisecond AND share a counter value.
+ */
+const documentSalt = ((): string => {
+  const buffer = globalThis.crypto?.getRandomValues?.(new Uint32Array(2));
+  if (buffer !== undefined) {
+    return Array.from(buffer, (part) => part.toString(36)).join("");
+  }
+  return Array.from({ length: 2 }, () =>
+    Math.trunc(Math.random() * 2 ** 32).toString(36),
+  ).join("");
+})();
+
 /** Identity for one apply. Prefixed so a stray id is obvious in devtools. */
 export const newApplyId = (): string => {
   const random = globalThis.crypto?.randomUUID?.();
   if (random !== undefined) {
     return `apply-${random}`;
   }
-  // No randomUUID. The clock is only a readable prefix — the COUNTER is what
-  // makes the id unique, so a runtime without `performance` degrades to
-  // Date.now() rather than throwing on the way to dispatching an apply, which
-  // would block the import entirely (review #184, qodo).
+  // No randomUUID. The salt separates documents, the counter separates applies
+  // within one, and the clock is a readable prefix only — which is why a
+  // runtime without `performance` degrades to Date.now() rather than throwing
+  // on the way to dispatching an apply and blocking the import entirely.
   fallbackCounter += 1;
   const clock = globalThis.performance?.now?.() ?? Date.now();
-  return `apply-${Math.trunc(clock)}-${fallbackCounter}`;
+  return `apply-${documentSalt}-${Math.trunc(clock)}-${fallbackCounter}`;
 };
 
 /**
