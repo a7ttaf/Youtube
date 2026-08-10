@@ -655,15 +655,24 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
 
-    // Fail closed: the ordinary refusal banner, NOT the re-approve copy, and
-    // the operator keeps the plan they actually reviewed.
-    await waitFor(() =>
-      expect(screen.queryByText(/no longer does what you approved/i)).not.toBeInTheDocument(),
-    );
+    // Wait for a POSITIVE signal first. A bare negative assertion passes on the
+    // first tick — before the click has dispatched anything — so it would go
+    // green even if the apply never ran, hiding a regression in exactly the
+    // fail-closed behaviour this test exists to pin (review #184, qodo).
+    await waitFor(() => expect(screen.getByText("Apply failed")).toBeInTheDocument());
+    // And the apply really did settle: the button is live again for a retry.
+    expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled();
+
+    // Fail closed: the ORDINARY refusal banner, not the re-approve copy, so the
+    // operator keeps the plan they actually reviewed.
+    expect(
+      screen.queryByText(/no longer does what you approved/i),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
-    // The foreign plan never reached the screen: its owner is absent and the
-    // reviewed plan's fingerprint is what a retry would still bind to.
+    // The foreign plan never reached the screen: its owner is absent, and the
+    // reviewed owner is still the one on display.
     expect(screen.queryByText(/OWNERzzz/)).not.toBeInTheDocument();
+    expect(screen.getByText(/OWNERaaa/)).toBeInTheDocument();
   });
 
   it("arms the shell nav latch BEFORE the apply request is dispatched", async () => {

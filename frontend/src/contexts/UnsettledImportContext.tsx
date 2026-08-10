@@ -581,14 +581,31 @@ export const useUnsettledImport = (
   // The scope this store was last read under. A change to it is a namespace
   // change, and a pending record does not follow automatically.
   const previousScopeRef = useRef(scope);
-  useEffect(() => {
+  /**
+   * Drain a pending adoption. Returns whether anything moved, so only a real
+   * transition notifies.
+   *
+   * Called from the effect AND from admit(), never only the effect: an effect
+   * runs after paint, and admission in that gap would check the new — empty —
+   * scope and be granted while the old one still holds an outstanding apply,
+   * dropping the duplicate guard exactly during tenant resolution (review
+   * #184, qodo). Doing it here makes admission see the adopted records.
+   */
+  const syncScope = useCallback(() => {
     const previous = previousScopeRef.current;
+    if (previous === scope) {
+      return false;
+    }
     previousScopeRef.current = scope;
-    if (previous !== scope) {
-      adoptPendingApplies(previous, scope);
+    adoptPendingApplies(previous, scope);
+    return true;
+  }, [scope]);
+
+  useEffect(() => {
+    if (syncScope()) {
       notify();
     }
-  }, [scope]);
+  }, [syncScope]);
   const trackApply = useCallback(
     (applyId: string) => {
       addId(scope, applyId);
@@ -598,11 +615,15 @@ export const useUnsettledImport = (
   );
   const admit = useCallback(
     async (applyId: string) => {
+      // BEFORE the claim: see syncScope. An admission decided against a scope
+      // whose records have not been carried over yet is decided against an
+      // empty bucket.
+      syncScope();
       const outcome = await admitApply(scope, applyId);
       notify();
       return outcome;
     },
-    [scope],
+    [scope, syncScope],
   );
   const settleApply = useCallback(
     (applyId: string) => {

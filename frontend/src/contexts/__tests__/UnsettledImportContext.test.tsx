@@ -143,6 +143,35 @@ describe("unsettled import store", () => {
     expect(renderHook(() => useUnsettledImport(after)).result.current.unsettled).toBe(true);
   });
 
+  it("refuses admission under a scope whose adoption has not been drained", async () => {
+    // The migration lives in an effect, and an effect runs after paint. An
+    // admission decided in that gap checks the NEW — empty — scope and is
+    // granted while the old one still holds an outstanding apply, dropping the
+    // duplicate guard exactly during tenant resolution (review #184, qodo).
+    // admit() therefore drains the adoption itself before claiming.
+    //
+    // HONEST LIMIT: React flushes the effect during rerender here, so this
+    // asserts the end-to-end guarantee rather than isolating the pre-effect
+    // window — it would also pass if only the effect adopted. What pins the
+    // mechanism is the syncScope() call at the top of admit; this test fails
+    // if adoption stops happening at all on a scope change.
+    const before = importScopeFor(null, "user-1");
+    const after = importScopeFor("tenant-1", "user-1");
+    const { result, rerender } = renderHook(({ scope }) => useUnsettledImport(scope), {
+      initialProps: { scope: before },
+    });
+    act(() => result.current.trackApply("apply-outstanding"));
+
+    rerender({ scope: after });
+
+    await act(async () => {
+      await expect(result.current.admit("apply-second")).resolves.toBe(
+        "other-apply-pending",
+      );
+    });
+    expect(storedIds(after)).toEqual(["apply-outstanding"]);
+  });
+
   it("carries NOTHING across a change of principal", () => {
     // The isolation this scoping exists for. Every transition except a
     // same-user tenant resolution is a different operator, and inheriting
