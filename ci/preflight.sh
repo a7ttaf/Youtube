@@ -364,14 +364,18 @@ _check_should_skip() {
           ;;
       esac
     done
-    # The bats suites assert on the gate's scripts *and* on the config those
-    # scripts read: test_js_lane.bats validates ci/config/affected.yml and
-    # ci/config/checks.yml directly. A yaml-only changeset emits lint-yaml and
-    # nothing else, which would filter this lane and let a broken mapping past
-    # the very test written to catch it. Keyed on the path, not the language, so
-    # unrelated yaml elsewhere in the repo does not pull in a 4-minute suite.
+    # The bats suites assert on the gate's own inputs, and those inputs are not
+    # all classifiable by language: test_js_lane.bats validates
+    # ci/config/affected.yml and checks.yml (yaml -> lint-yaml only) and the
+    # .gitignore negations that keep frontend tests trackable (unknown -> no
+    # checks at all). Either would filter this lane and let a regression past
+    # the very test written to catch it. Matched by path rather than language so
+    # unrelated yaml elsewhere does not pull in a four-minute suite.
+    #
+    # Keep this list in step with what ci/tests/ actually asserts on.
     if [ "$found" = "0" ] && [ "$label" = "tests-shell" ] \
-      && printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" | grep -qE '(^|[[:space:]])ci/'; then
+      && printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" \
+        | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore$)'; then
       found=1
     fi
 

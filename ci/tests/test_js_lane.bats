@@ -450,14 +450,28 @@ ws_run() {
   [[ "$output" == *"./ci/checks/tests-shell.sh|yes|"* ]]
 }
 
-@test "tests-shell: a ci/config yaml change does not filter the lane" {
-  # These suites assert on ci/config/affected.yml and checks.yml directly, but a
-  # yaml-only changeset emits lint-yaml alone, which would filter the lane and
-  # let a broken mapping past the test written to catch it.
-  run bash -c "sed -n '/bats suites assert on the/,/^    fi$/p' ci/preflight.sh"
+@test "tests-shell: every input these suites assert on un-filters the lane" {
+  # The suites test the gate's own inputs, and those are not all classifiable by
+  # language: ci/config/*.yml emits lint-yaml only, and .gitignore emits nothing
+  # at all. Either would filter the lane that tests it.
+  run bash -c "sed -n '/bats suites assert on the/,/^    fi\$/p' ci/preflight.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"tests-shell"* ]]
-  [[ "$output" == *"ci/"* ]]
+  local dep
+  for dep in 'ci/' '.githooks/' '.gitignore'; do
+    [[ "$output" == *"$dep"* ]] || { echo "dependency path not covered: $dep" >&2; return 1; }
+  done
+}
+
+@test "tests-shell: a .gitignore-only change is not classified into any lane" {
+  # The reason the path exception exists: without it, the changeset for a
+  # .gitignore edit yields no check ids whatsoever.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file .gitignore)" = "unknown" ]
+  run ci::changeset::_checks_for_language unknown
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "layout guard: excluded from the result cache" {
