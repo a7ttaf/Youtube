@@ -296,7 +296,9 @@ const tenantProofLabel = (
 // ============================================================================
 // Purpose: Fire /tenants/me once on mount; hydrate TenantContext on success or
 //          surface the typed ApiError message in the dev-only proof tag on
-//          failure, returning the proof label for the shell to render.
+//          failure. Returns the proof label AND `tenantSettled` — whether the
+//          tenant id is KNOWN — which is no longer presentational: it decides
+//          whether an audited bulk import may be dispatched at all.
 // Database/ORM: None (frontend API call only).
 // Standards: useRef re-entry guard keeps fetch count at 1 under React StrictMode.
 //            Effect is gated on `enabled` (the session is ready) so a shell that
@@ -304,10 +306,23 @@ const tenantProofLabel = (
 //            a tenant bootstrap fetch. The guard is reset in the failure path so
 //            a subsequent dep change (provider rebuild) can retry — a transient
 //            5xx must not permanently pin tenantSlug to the bootstrap value.
-// Blast Radius: None detected (read-only; does not mutate financial state).
+//            `tenantSettled` is `tenant.id !== null` and NOTHING else. A failure
+//            does not settle it: two tabs disagreeing about the tenant build
+//            different key prefixes and different Web Lock names, so neither can
+//            see the other's pending import and both dispatch (review #184).
+//            Because the failure path RETRIES, "failed" is not terminal — which
+//            is exactly why it must not be read as settled.
+// Blast Radius: Beyond the dev proof tag: `tenantSettled` gates dispatch of an
+//            audited bulk import and decides whether cross-tab duplicate
+//            protection is namespaced by a stable tenant. A wrong value here
+//            shows as a refused import or a duplicated one plus a duplicated
+//            CHANNEL_IMPORTED audit event — never as an unpermitted write, since
+//            no authorization is derived from it. Still no financial mutation.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET helper.
 //   - File: frontend/src/contexts/TenantContext.tsx -> hydrate() stores id/displayName.
+//   - File: frontend/src/components/srcc/AppShell.tsx -> isImportScopeSettled,
+//       the admission gate that consumes tenantSettled (contract just below).
 // ============================================================================
 /**
  * Bootstrap the active tenant from /tenants/me, hydrating TenantContext and
