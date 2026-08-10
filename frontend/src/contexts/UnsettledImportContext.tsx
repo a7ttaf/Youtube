@@ -341,10 +341,16 @@ let fallbackCounter = 0;
 /** Identity for one apply. Prefixed so a stray id is obvious in devtools. */
 export const newApplyId = (): string => {
   const random = globalThis.crypto?.randomUUID?.();
-  // performance.now() is monotonic within a document and the counter breaks
-  // ties inside one millisecond, so the fallback cannot collide with itself.
+  if (random !== undefined) {
+    return `apply-${random}`;
+  }
+  // No randomUUID. The clock is only a readable prefix — the COUNTER is what
+  // makes the id unique, so a runtime without `performance` degrades to
+  // Date.now() rather than throwing on the way to dispatching an apply, which
+  // would block the import entirely (review #184, qodo).
   fallbackCounter += 1;
-  return `apply-${random ?? `${Math.trunc(performance.now())}-${fallbackCounter}`}`;
+  const clock = globalThis.performance?.now?.() ?? Date.now();
+  return `apply-${Math.trunc(clock)}-${fallbackCounter}`;
 };
 
 /**

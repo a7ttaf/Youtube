@@ -746,6 +746,59 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(importPosts()).toHaveLength(2);
   });
 
+  it("does not blame another tab for THIS tab's own apply", async () => {
+    // This tab raises the shared unsettled record the moment it admits its own
+    // apply, so a naive read of that flag made the disabled Apply button say
+    // "Another tab has an import whose outcome is not settled yet" about the
+    // request this very tab was running (review #184, qodo).
+    const applyGate = deferredResponse();
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : applyGate.pending,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    const applyButton = await screen.findByRole("button", { name: /applying…/i });
+    expect(applyButton).toBeDisabled();
+    expect(applyButton.getAttribute("title")).toBeNull();
+
+    applyGate.release(jsonResponse(APPLY_RESULT));
+    await screen.findByRole("group", { name: "Import applied" });
+  });
+
+  it("says Applying… only for an APPLY, never for the read-only re-plan", async () => {
+    // `busy` covers both requests. Labelling the reconciliation dry run
+    // "Applying…" tells the operator a write is running while nothing is being
+    // written — during an indeterminate state, of all moments.
+    const applyGate = deferredResponse();
+    const replanGate = deferredResponse();
+    let dryRuns = 0;
+    await runDryRunToPreview((form) => {
+      if (form.get("dry_run") !== "true") {
+        return applyGate.pending;
+      }
+      dryRuns += 1;
+      return dryRuns === 1 ? jsonResponse(DRY_RUN_PLAN) : replanGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText(/may have committed/i)).toBeInTheDocument(),
+    );
+
+    // Re-plan in flight: busy is true, but no write is running.
+    fireEvent.click(screen.getByRole("button", { name: /check whether it landed/iu }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /checking…|check whether/iu })).toBeDisabled(),
+    );
+    expect(screen.queryByRole("button", { name: /applying…/i })).not.toBeInTheDocument();
+
+    replanGate.release(jsonResponse(DRY_RUN_PLAN));
+    await waitFor(() =>
+      expect(screen.getByText(/does not match this roster/i)).toBeInTheDocument(),
+    );
+  });
+
   it("refuses Apply while ANOTHER tab has an apply of unknown outcome", async () => {
     // Both tabs already hold a preview, so the disabled "Import CSV" control
     // never applied to this one — it was already inside the flow when the
@@ -1177,12 +1230,19 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
         ? jsonResponse(DRY_RUN_PLAN)
         : jsonResponse(
             {
-                detail: {
-                  rows: [{}],
-                  counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
-                  plan_fingerprint: "x",
-                },
+              // Header fields present and VALID on purpose: without them the
+              // shared validator rejects on the header and never reaches the
+              // rows, so the test would pass while covering nothing of what
+              // it claims (review #184, qodo).
+              detail: {
+                dry_run: false,
+                content_owner_id: "OWNERaaa",
+                cms_status: "INSIDE_CMS",
+                rows: [{}],
+                counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+                plan_fingerprint: "x",
               },
+            },
             409,
           ),
     );

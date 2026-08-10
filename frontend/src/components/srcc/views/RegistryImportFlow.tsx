@@ -737,9 +737,16 @@ const applyBlockedTitle = (
   hasErrors: boolean,
   indeterminate: boolean,
   otherApplyPending: boolean,
+  applying: boolean,
 ): string | undefined => {
   if (indeterminate) {
     return APPLY_INDETERMINATE_NOTE;
+  }
+  // `applying` FIRST: this tab raises the shared unsettled record the moment it
+  // admits its own apply, so without this the button would blame "another tab"
+  // for the request this very tab is running (review #184, qodo).
+  if (applying) {
+    return undefined;
   }
   if (otherApplyPending) {
     return OTHER_APPLY_PENDING_NOTE;
@@ -819,10 +826,13 @@ const PreviewActions = ({
         className="primary-button"
         type="button"
         disabled={applyRefused(hasErrors, busy, indeterminate, otherApplyPending)}
-        title={applyBlockedTitle(hasErrors, indeterminate, otherApplyPending)}
+        title={applyBlockedTitle(hasErrors, indeterminate, otherApplyPending, applying)}
         onClick={onApply}
       >
-        {busy ? "Applying…" : "Apply"}
+        {/* `applying`, not `busy`: the reconciliation dry run also sets busy,
+            and labelling that "Applying…" tells the operator a write is
+            running when nothing is being written (review #184, qodo). */}
+        {applying ? "Applying…" : "Apply"}
       </button>
     </div>
   );
