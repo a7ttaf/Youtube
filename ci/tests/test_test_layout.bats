@@ -585,6 +585,58 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "test-layout: a decoy inside a template literal is not read as config" {
+  # A brace-and-token scan that reads through strings takes the decoy for the
+  # exported test block and stops there, so the narrowed real include never
+  # gets checked and both files report runnable while vitest collects one.
+  printf 'it("y", () => {});\n' > "$SANDBOX/frontend/tests/b.test.ts"
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  __note: `test: { include: ["tests/**/*.test.{ts,tsx}"] }`,
+  test: {
+    include: ["tests/a.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
+}
+
+@test "test-layout: a decoy in a double-quoted string is not read as config" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  __note: "test: { include: [\"tests/**/*.test.{ts,tsx}\"] }",
+  test: {
+    include: ["tests/a.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+}
+
+@test "test-layout: a string carrying an unbalanced brace does not derail the scan" {
+  # The declared glob is itself full of braces. One that does not pair would
+  # throw a depth count that reads through strings straight off the object.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  define: { __ODD__: "a stray { brace" },
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
 @test "test-layout: catches a missing vitest config" {
   rm "$SANDBOX/frontend/vitest.config.ts"
   run_guard

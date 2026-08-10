@@ -251,8 +251,30 @@ strip_ts_comments() {
 #
 # So: anchor at `export default`, brace-match the object it exports (skipping a
 # defineConfig( wrapper), then take the `test` key at that object's top level.
+#
+# String literals are opaque to the scan. A brace-and-token match that reads
+# through them takes a decoy inside a template literal for configuration and
+# stops there, and the declared glob itself contains braces
+# (`tests/**/*.test.{ts,tsx}`), so an unbalanced one in any string would throw
+# the depth count off. A quoted *key* is still a key, so a string is inspected
+# for that before being skipped.
 extract_test_block() {
   awk '
+    # Index just past the closing quote of the string opening at i.
+    function string_end(str, i, n,   q, c) {
+      q = substr(str, i, 1)
+      i++
+      while (i <= n) {
+        c = substr(str, i, 1)
+        if (c == "\\") { i += 2; continue }
+        if (c == q) { return i + 1 }
+        i++
+      }
+      return n + 1
+    }
+    function is_quote(c) {
+      return (c == "\"" || c == "'"'"'" || c == "`")
+    }
     { all = all $0 "\n" }
     END {
       n = length(all)
@@ -262,13 +284,35 @@ extract_test_block() {
 
       # First brace after `export default`, which skips a defineConfig( wrapper.
       p = ed + 14
-      while (p <= n && substr(all, p, 1) != "{") p++
+      while (p <= n) {
+        ch = substr(all, p, 1)
+        if (is_quote(ch)) { p = string_end(all, p, n); continue }
+        if (ch == "{") break
+        p++
+      }
       if (p > n) exit 1
       p++
 
       depth = 1
       while (p <= n && depth > 0) {
         ch = substr(all, p, 1)
+
+        if (is_quote(ch)) {
+          e = string_end(all, p, n)
+          # `"test": { }` is the same key as `test: { }`. Everything else in a
+          # string is data, however much it looks like config.
+          if (depth == 1 && substr(all, p + 1, e - p - 2) == "test") {
+            rest = substr(all, e)
+            if (rest ~ /^[[:space:]]*:[[:space:]]*\{/) {
+              start = e + index(rest, "{")
+              print capture(all, start, n)
+              exit 0
+            }
+          }
+          p = e
+          continue
+        }
+
         if (ch == "{") { depth++; p++; continue }
         if (ch == "}") { depth--; p++; continue }
 
@@ -276,20 +320,9 @@ extract_test_block() {
         if (depth == 1 && substr(all, p, 4) == "test") {
           before = (p > 1) ? substr(all, p - 1, 1) : " "
           rest = substr(all, p + 4)
-          # `"test": { }` is the same key as `test: { }`; the optional closing
-          # quote is what makes the quoted form reachable at all.
-          if (before !~ /[A-Za-z0-9_$]/ && rest ~ /^["'"'"']?[[:space:]]*:[[:space:]]*\{/) {
-            q = p + 4 + index(rest, "{")
-            d2 = 1
-            out = ""
-            while (q <= n) {
-              c2 = substr(all, q, 1)
-              if (c2 == "{") d2++
-              else if (c2 == "}") { d2--; if (d2 == 0) break }
-              out = out c2
-              q++
-            }
-            print out
+          if (before !~ /[A-Za-z0-9_$]/ && rest ~ /^[[:space:]]*:[[:space:]]*\{/) {
+            start = p + 4 + index(rest, "{")
+            print capture(all, start, n)
             exit 0
           }
         }
@@ -300,6 +333,27 @@ extract_test_block() {
       # empty block is a different failure from a missing one and both print
       # nothing.
       exit 1
+    }
+    # Body of the object whose opening brace sits just before `q`. Strings are
+    # copied through verbatim -- the include patterns live in them -- but their
+    # braces do not move the depth.
+    function capture(str, q, n,   d2, out, c2, e2) {
+      d2 = 1
+      out = ""
+      while (q <= n) {
+        c2 = substr(str, q, 1)
+        if (is_quote(c2)) {
+          e2 = string_end(str, q, n)
+          out = out substr(str, q, e2 - q)
+          q = e2
+          continue
+        }
+        if (c2 == "{") d2++
+        else if (c2 == "}") { d2--; if (d2 == 0) break }
+        out = out c2
+        q++
+      }
+      return out
     }
   '
 }

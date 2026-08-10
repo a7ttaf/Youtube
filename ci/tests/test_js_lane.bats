@@ -427,6 +427,90 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "node lane: a manifest staged for deletion but restored on disk fails" {
+  # Discovery reads the filesystem, so the restored worktree copy looked like a
+  # healthy workspace and every check below read it. Both pre-commit and
+  # pre-push passed for a commit carrying no manifest at all.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm --cached -q ws/package.json >/dev/null 2>&1
+  [ -f "$NODE_SB/ws/package.json" ]
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not in the git index"* ]]
+  [[ "$output" == *"ws/package.json"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the index check is inert where there is no index" {
+  # The lane also runs from a plain export with no .git. Failing there would be
+  # a false positive, not a finding.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  if git -C "$NODE_SB" rev-parse --git-dir >/dev/null 2>&1; then
+    rm -rf "$NODE_SB"
+    skip "the sandbox temp dir is itself inside a repository on this host"
+  fi
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a malformed comparator operand is unverifiable, not satisfied" {
+  # _semver_part strips non-numeric text and defaults to 0, so ">=banana" and a
+  # bare ">=" both became >=0.0.0 and admitted every version there is.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=banana" }, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a comparator with no operand is unverifiable" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=" }, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a partial tilde range covers its whole major" {
+  # "~20" is >=20.0.0 <21.0.0. Comparing the minor unconditionally read the
+  # omitted one as 0 and rejected 20.20.2 — a conforming runtime.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a tilde range that states a minor still pins it" {
+  # The converse: narrowing must survive the fix, or "~20.1" would admit 20.20.
+  ws_setup
+  local major minor
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  minor="$(node --version | sed 's/^v//' | cut -d. -f2)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.$((minor + 1))\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: a repository with no JavaScript at all still skips" {
   # The negative control the check is keyed on: no manifest AND no workspace
   # configuration is a repo without a Node lane, not a deleted manifest.
@@ -449,16 +533,71 @@ ws_run() {
   for tool in bun pnpm npm yarn; do
     [[ "$output" == *"$tool"* ]] || { echo "node cache key ignores $tool" >&2; return 1; }
   done
-  [[ "$output" == *"absent"* ]]
+  # Each manager goes through the fingerprint helper, which is what makes an
+  # absent or broken one safe; the two cases below pin that behaviour directly.
+  [[ "$output" == *"_tool_fingerprint"* ]]
 }
 
-@test "cache key: the shell suite keys on bats" {
-  # Uninstalling bats turns tests-shell into FAIL_INFRA. Keyed on bash alone,
-  # the previous PASS is served instead and the suite silently stops running.
+@test "cache key: the shell suite is excluded from the result cache" {
+  # tests-shell asserts on the whole ci/ tree and on files a changeset need not
+  # mention. A PASS cached for a .gitignore-only branch, rebased onto a base
+  # carrying a regression in ci/checks/node.sh, has an identical key: same
+  # tools, same changed files, same checks.yml.
+  run bash -c "sed -n '/^_check_is_cacheable()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-shell) return 1"* ]]
+  [[ "$output" == *"test-layout) return 1"* ]]
+}
+
+@test "cache key: a broken package manager cannot abort the gate" {
+  # Deriving a cache key must never end the run. Under `set -Eeuo pipefail` a
+  # bare $(tool --version | head -1) aborts preflight the moment a
+  # present-but-broken executable exits non-zero — before a single check has
+  # run, with a message about nothing the commit touched.
+  local sb
+  sb="$(mktemp -d)"
+  printf '#!/usr/bin/env bash\necho boom >&2\nexit 1\n' > "$sb/bun"
+  chmod +x "$sb/bun"
+
+  run bash -c "
+    set -Eeuo pipefail
+    cd '$REPO_ROOT'
+    source ci/lib/cache.sh
+    $(sed -n '/^_tool_fingerprint()/,/^}/p' "$REPO_ROOT/ci/preflight.sh")
+    PATH='$sb':\$PATH
+    printf 'FINGERPRINT=%s\n' \"\$(_tool_fingerprint bun)\"
+    echo REACHED_END
+  "
+  rm -rf "$sb"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REACHED_END"* ]]
+  # A tool that cannot report its version is not the same state as no tool.
+  [[ "$output" == *"bun-unknown"* ]]
+}
+
+@test "cache key: an uninstalled tool is recorded, not skipped" {
+  # Recording only the tools that happen to be installed would leave the
+  # original finding intact: uninstalling bats has to change the key.
+  run bash -c "
+    set -Eeuo pipefail
+    cd '$REPO_ROOT'
+    source ci/lib/cache.sh
+    $(sed -n '/^_tool_fingerprint()/,/^}/p' "$REPO_ROOT/ci/preflight.sh")
+    _tool_fingerprint definitely-not-a-real-tool-9de32131
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-absent"* ]]
+}
+
+@test "cache key: the shell suite has no key branch to go stale" {
+  # Uninstalling bats turns tests-shell into FAIL_INFRA, and keying on the
+  # bats version was the first fix for that. Excluding the lane from the cache
+  # entirely supersedes it and covers the inputs a key never could, so the
+  # branch must not linger: it is unreachable, and an unreachable cache key
+  # reads like the lane is still cached.
   run bash -c "sed -n '/^_compute_cache_key()/,/^}/p' ci/preflight.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"tests-shell)"* ]]
-  [[ "$output" == *"bats-"* ]]
+  [[ "$output" != *"tests-shell"* ]]
 }
 
 @test "node lane: a workspace with no tests at all is unaffected" {

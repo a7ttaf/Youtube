@@ -408,9 +408,39 @@ _check_should_skip() {
 # under a second; caching it buys nothing worth that hole.
 _check_is_cacheable() {
   case "$1" in
+    # test-layout reads the git index and walks the whole frontend tree, neither
+    # of which the changed-file key describes.
     test-layout) return 1 ;;
+    # tests-shell asserts on the entire ci/ tree and on files the changeset need
+    # not mention at all -- .gitignore rules, frontend/README.md, every gate
+    # script the suites exercise. A PASS cached for a .gitignore-only branch and
+    # then rebased onto a base carrying a regression in ci/checks/node.sh has an
+    # identical key: same tools, same changed files, same checks.yml. Listing
+    # the suite's inputs was the alternative, but "did we list them all?" is the
+    # question that produced this bug, and the suite runs only in full and ship.
+    tests-shell) return 1 ;;
   esac
   return 0
+}
+
+# _tool_fingerprint <tool> – echo "<tool>-<version>", or "<tool>-absent".
+#
+# The version probe goes through ci::cache::tool_version, which disables errexit
+# around the call. That matters more than it looks: deriving a cache key must
+# never be able to end the run, and under `set -Eeuo pipefail` a bare
+# `$(tool --version | head -1)` aborts preflight the moment a present-but-broken
+# executable exits non-zero -- before a single check has run, with a message
+# about nothing the commit touched.
+#
+# The absent branch stays separate because uninstalling a tool has to change the
+# key too: "absent" and "installed but unreadable" are different states, and
+# collapsing them would let a lane replay a PASS across the removal.
+_tool_fingerprint() {
+  if command -v "$1" >/dev/null 2>&1; then
+    printf '%s-%s' "$1" "$(ci::cache::tool_version "$1")"
+  else
+    printf '%s-absent' "$1"
+  fi
 }
 
 _compute_cache_key() {
@@ -421,29 +451,17 @@ _compute_cache_key() {
   # the interpreter alone, a lane that passed under a conforming toolchain
   # replays that PASS after the toolchain drifts -- bun moved off the
   # packageManager pin, bats uninstalled -- and the enforcement added for
-  # exactly that case never executes. Absent tools are recorded as such, so
-  # removing one changes the key too.
+  # exactly that case never executes. Probing goes through _tool_fingerprint,
+  # which cannot abort the run on a broken executable.
   case "$label" in
     node)
       tool_ver="$(ci::cache::tool_version node)"
       for _tool in bun pnpm npm yarn; do
-        if command -v "$_tool" >/dev/null 2>&1; then
-          tool_ver="${tool_ver}|${_tool}-$("$_tool" --version 2>/dev/null | head -1)"
-        else
-          tool_ver="${tool_ver}|${_tool}-absent"
-        fi
+        tool_ver="${tool_ver}|$(_tool_fingerprint "$_tool")"
       done
       ;;
-    tests-shell)
-      tool_ver="bash-$(bash --version | head -1)"
-      if command -v bats >/dev/null 2>&1; then
-        tool_ver="${tool_ver}|bats-$(bats --version 2>/dev/null | head -1)"
-      else
-        tool_ver="${tool_ver}|bats-absent"
-      fi
-      ;;
     python) tool_ver="$(ci::cache::tool_version python3)" ;;
-    *) tool_ver="bash-$(bash --version | head -1)" ;;
+    *) tool_ver="bash-$(ci::cache::tool_version bash)" ;;
   esac
 
   local files_hash=""

@@ -52,6 +52,35 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     exit "$CI_RESULT_PASS"
   fi
 
+  # Discovery reads the filesystem, so a staged deletion of package.json with
+  # the file restored in the worktree looked like a healthy workspace: every
+  # manifest and script check then read that worktree copy, and both pre-commit
+  # and pre-push passed for a commit that carries no manifest at all.
+  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    MISSING_FROM_INDEX=""
+    while IFS= read -r _ws; do
+      [ -n "$_ws" ] || continue
+      if [ "$_ws" = "." ]; then _mf="package.json"; else _mf="$_ws/package.json"; fi
+      if ! git cat-file -e ":$_mf" 2>/dev/null; then
+        MISSING_FROM_INDEX="${MISSING_FROM_INDEX}${_mf}"$'\n'
+      fi
+    done <<< "$NODE_WORKSPACES"
+
+    if [ -n "$MISSING_FROM_INDEX" ]; then
+      echo "A workspace manifest exists on disk but not in the git index:"
+      while IFS= read -r _mf; do
+        [ -n "$_mf" ] || continue
+        echo "    $_mf"
+      done <<< "$MISSING_FROM_INDEX"
+      echo "  The commit being made would carry no manifest for that workspace,"
+      echo "  so nothing there could be installed or run -- while every check"
+      echo "  below would read the worktree copy and pass."
+      echo "  Stage it (git add <path>), or restore it if the deletion was"
+      echo "  staged by mistake."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+    fi
+  fi
+
   NODE_OVERALL="$CI_RESULT_PASS"
   while IFS= read -r _ws; do
     [ -n "$_ws" ] || continue
@@ -188,6 +217,28 @@ _semver_spec_part() {
   }'
 }
 
+# _semver_is_version <string> – 0 when the string is a usable semver operand.
+#
+# The component parser strips non-numeric text and defaults to 0, which is right
+# for a runtime that reports "v20.20.2" but catastrophic for a range: ">=banana"
+# and a bare ">=" both parsed as >=0.0.0 and admitted every version there is,
+# switching the whole toolchain boundary off. Operands are checked before they
+# reach the comparator so a malformed one is reported as unverifiable instead.
+_semver_is_version() {
+  case "${1#v}" in
+    '') return 1 ;;
+    [0-9]*) ;;
+    *) return 1 ;;
+  esac
+  # Digits, dots, wildcards and the pre-release/build tail; anything else — an
+  # operator that leaked into the operand, say — is not a version. The trailing
+  # '-' keeps it a literal rather than opening a range.
+  case "${1#v}" in
+    *[!0-9A-Za-z.*+-]*) return 1 ;;
+  esac
+  return 0
+}
+
 # _semver_cmp <a> <b> – echo -1, 0 or 1. Pre-release suffixes are dropped: a
 # gate that accepted 22.12.0-rc for a >=22.12.0 requirement would be lying by a
 # hair, but the check exists to catch whole-version drift, not tag splitting.
@@ -211,47 +262,68 @@ _semver_token_ok() {
     '*'|'x'|'X'|'')
       return 0
       ;;
+    '>='*) want="${tok#>=}" ;;
+    '<='*) want="${tok#<=}" ;;
+    '>'*)  want="${tok#>}" ;;
+    '<'*)  want="${tok#<}" ;;
+    '^'*)  want="${tok#^}" ;;
+    '~'*)  want="${tok#\~}" ;;
+    '='*)  want="${tok#=}" ;;
+    *)     want="" ;;
+  esac
+
+  # An operator with a malformed operand is unverifiable, not satisfied.
+  # _semver_part strips non-numeric text and defaults to 0, so ">=banana" and a
+  # bare ">=" both became >=0.0.0 and admitted everything -- the boundary
+  # switched off by a typo in a manifest.
+  case "$tok" in
+    '>='*|'<='*|'>'*|'<'*|'^'*|'~'*|'='*)
+      if ! _semver_is_version "$want"; then return 2; fi
+      ;;
+  esac
+
+  case "$tok" in
     '>='*)
-      want="${tok#>=}"
       if [ "$(_semver_cmp "$version" "$want")" != "-1" ]; then return 0; fi
       return 1
       ;;
     '<='*)
-      want="${tok#<=}"
       if [ "$(_semver_cmp "$version" "$want")" != "1" ]; then return 0; fi
       return 1
       ;;
     '>'*)
-      want="${tok#>}"
       if [ "$(_semver_cmp "$version" "$want")" = "1" ]; then return 0; fi
       return 1
       ;;
     '<'*)
-      want="${tok#<}"
       if [ "$(_semver_cmp "$version" "$want")" = "-1" ]; then return 0; fi
       return 1
       ;;
     '^'*)
-      want="${tok#^}"
       if [ "$(_semver_cmp "$version" "$want")" = "-1" ]; then return 1; fi
       if [ "$(_semver_part "$version" 1)" != "$(_semver_part "$want" 1)" ]; then return 1; fi
       # Below 1.0.0 the minor carries the breaking change, so ^0.2.3 admits
-      # 0.2.x only. Comparing majors alone would accept 0.3.0.
+      # 0.2.x only. Comparing majors alone would accept 0.3.0 -- but only when
+      # the operand states a minor: bare "^0" is >=0.0.0 <1.0.0.
       if [ "$(_semver_part "$want" 1)" = "0" ] \
+        && [ -n "$(_semver_spec_part "$want" 2)" ] \
         && [ "$(_semver_part "$version" 2)" != "$(_semver_part "$want" 2)" ]; then
         return 1
       fi
       return 0
       ;;
     '~'*)
-      want="${tok#\~}"
       if [ "$(_semver_cmp "$version" "$want")" = "-1" ]; then return 1; fi
       if [ "$(_semver_part "$version" 1)" != "$(_semver_part "$want" 1)" ]; then return 1; fi
-      if [ "$(_semver_part "$version" 2)" != "$(_semver_part "$want" 2)" ]; then return 1; fi
+      # "~20" is the whole of major 20; only "~20.1" pins the minor. Comparing
+      # unconditionally read the omitted minor as 0 and rejected 20.20.2.
+      if [ -n "$(_semver_spec_part "$want" 2)" ] \
+        && [ "$(_semver_part "$version" 2)" != "$(_semver_part "$want" 2)" ]; then
+        return 1
+      fi
       return 0
       ;;
     '='*)
-      want="${tok#=}"
       if [ "$(_semver_cmp "$version" "$want")" = "0" ]; then return 0; fi
       return 1
       ;;

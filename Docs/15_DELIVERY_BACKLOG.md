@@ -914,7 +914,34 @@ single P-tier above.
   evaluation only *inside* an excluded directory, so its contents are matched
   normally once it is back. Re-stating the artifact rules after the negations
   would have re-ignored `.env.example`, which has its own negation further up.
-  Combined suite: `test_test_layout.bats` (50) + `test_js_lane.bats` (79) = 129
+  A fourteenth round found six more, three P1, all in the round-thirteen code.
+  Node workspace discovery read the **filesystem**, so staging the deletion of
+  `frontend/package.json` and restoring it in the worktree passed both
+  pre-commit and pre-push for a commit carrying no manifest — the same
+  index-vs-worktree divergence already fixed in `test-layout.sh`, one file over.
+  The comparator accepted **malformed operands**: `">=banana"` and a bare `">="`
+  both parsed to `>=0.0.0` and admitted everything, so a typo in a manifest
+  switched the toolchain boundary off; operands are now validated before they
+  reach the comparator and report unverifiable otherwise. `"~20"` was rejected
+  because the tilde branch compared the minor unconditionally — `~20` is the
+  whole of major 20, and only `~20.1` pins the minor (the same fix applies to
+  bare `^0`). `extract_test_block` read **through string literals**, so a decoy
+  resembling `test: { include: [...] }` in a string at the exported object's own
+  level was taken for the config and the real, narrowed include was never
+  checked; the scanner now treats strings as opaque, inspects them only for a
+  quoted key, and copies them verbatim into the captured block — which also
+  fixes the latent case of an unbalanced brace in any string, the declared glob
+  itself being full of braces. `tests-shell` was still **cacheable** although
+  its result depends on the whole `ci/` tree and on files a changeset need not
+  mention, so a PASS cached for a `.gitignore`-only branch survived a rebase
+  onto a base carrying a regression in a gate script; it joins `test-layout` as
+  non-cacheable, which covers inputs a key never could, and the now-unreachable
+  `tests-shell` key branch was removed with it. Finally, deriving a cache key
+  could **end the run**: under `set -Eeuo pipefail` a bare
+  `$(tool --version | head -1)` aborts preflight the moment a present-but-broken
+  package manager exits non-zero, before any check has run; probes go through
+  `_tool_fingerprint`, which cannot.
+  Combined suite: `test_test_layout.bats` (53) + `test_js_lane.bats` (88) = 141
   cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
