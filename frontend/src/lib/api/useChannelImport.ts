@@ -62,7 +62,9 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
  * declared status (OFFICIAL_CMS_REVENUE, OFFICIAL_MANUAL_IMPORT) can only be
  * a `from`, never a `to`.
  */
-const DERIVED_SOURCE_STATUSES = ["MISSING_REVENUE_SOURCE", "PERFORMANCE_ONLY"] as const;
+const REVENUE_REQUIRED_STATUS = "MISSING_REVENUE_SOURCE";
+const REVENUE_OPTIONAL_STATUS = "PERFORMANCE_ONLY";
+const DERIVED_SOURCE_STATUSES = [REVENUE_REQUIRED_STATUS, REVENUE_OPTIONAL_STATUS] as const;
 
 /** The inventory fields an UPDATE's diff may mention — _inventory_changes
  * compares exactly these four and emits only the ones that differ. */
@@ -350,7 +352,7 @@ const sourceStatusMatchesRevenueFlag = (row: Record<string, unknown>): boolean =
   if (!isPlainObject(change)) {
     return true;
   }
-  return change.to === (row.revenue_required ? "MISSING_REVENUE_SOURCE" : "PERFORMANCE_ONLY");
+  return change.to === (row.revenue_required ? REVENUE_REQUIRED_STATUS : REVENUE_OPTIONAL_STATUS);
 };
 
 const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [

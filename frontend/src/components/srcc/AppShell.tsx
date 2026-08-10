@@ -862,11 +862,19 @@ const resolveImportScope = (
 };
 
 /**
- * Whether that scope has stopped moving. The session's own tenant is
- * authoritative and needs no bootstrap, so a session carrying one is settled
- * immediately; only a session WITHOUT one has to wait for /tenants/me to
- * answer either way. Kept beside resolveImportScope because the two read the
- * same two sources and must agree about which one supplied the tenant.
+ * Whether the scope is FINAL. The session's own tenant is authoritative and
+ * needs no bootstrap, so a session carrying one is settled immediately; a
+ * session WITHOUT one waits for /tenants/me to SUCCEED.
+ *
+ * A failure does not settle it, and that is deliberate — see the comment on
+ * `tenantSettled` in useTenantBootstrap. Two tabs disagreeing about the tenant
+ * build different namespaces and different Web Locks, so neither sees the
+ * other's pending apply and both dispatch. Imports stay withheld until the
+ * workspace is known; a reload re-runs the bootstrap, which is why that is
+ * recoverable rather than a wedge (review #184).
+ *
+ * Kept beside resolveImportScope because the two read the same two sources and
+ * must agree about which one supplied the tenant.
  */
 export const isImportScopeSettled = (session: SessionMe, tenantSettled: boolean): boolean => {
   return session.tenant?.id != null || tenantSettled;
