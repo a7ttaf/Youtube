@@ -755,7 +755,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // The other tab dispatches. jsdom shares one localStorage but does not
     // synthesise the cross-document event, so raise it explicitly — this is
     // exactly what a real second tab's write delivers here.
-    const otherTabKey = "ums.unsettledChannelImport.apply-from-another-tab";
+    // The records are scoped; a standalone RegistryView uses the unscoped
+    // bucket, so the other tab's key has to live in the same one to be seen.
+    const otherTabKey = "ums.unsettledChannelImport.unscoped.apply-from-another-tab";
     globalThis.localStorage.setItem(otherTabKey, "1");
     fireEvent(globalThis.window, new StorageEvent("storage", { key: otherTabKey }));
 
@@ -1282,20 +1284,31 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(groupCell.textContent).toBe("—");
   });
 
-  it("falls back to the bare group key when the wire sends an unknown action", async () => {
-    // Prototype-chain + unknown-literal hardening, matching the outcome chip:
-    // a value the UI does not recognise must degrade to the key alone rather
-    // than render a wrong claim about a group write.
+  it("REFUSES a plan whose group action is not a declared literal", async () => {
+    // Supersedes the earlier "degrade to the bare group key" behaviour, and
+    // the reason is worth stating: degrading looked safe because it renders
+    // nothing WRONG, but it renders nothing at all about whether the apply
+    // mints a new finance-scope SECTOR group or joins an existing one — the
+    // most consequential thing a Group_ID row does, and the reason the column
+    // exists. Silence on that is not a safe fallback, so the payload is now
+    // rejected at the boundary instead (review #184, codex P2).
+    //
+    // "toString" is deliberate: it is a prototype-chain name, so this also
+    // pins that the literal check is a value comparison, not a property probe.
     const oddPlan = {
       ...DRY_RUN_PLAN,
       rows: [{ ...DRY_RUN_PLAN.rows[1], group_id: "g9", group_action: "toString" }],
     };
-    await runDryRunToPreview(() => jsonResponse(oddPlan));
+    routeFetch({ importPost: () => jsonResponse(oddPlan) });
+    renderRegistry();
+    await openImport();
+    await fillUpload();
+    fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
 
-    const row = screen.getByText("g9").closest("tr");
-    expect(row).not.toBeNull();
-    const groupCell = within(row as HTMLElement).getAllByRole("cell")[4];
-    expect(groupCell.textContent).toBe("g9");
+    // No preview is ever built from it, and the operator is told it failed
+    // rather than being shown a plan with a silent group column.
+    expect(await screen.findByText(/the import request failed/i)).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Import preview" })).not.toBeInTheDocument();
   });
 
   it("renders a muted dash for each half an ERROR row's channel identity lacks", async () => {

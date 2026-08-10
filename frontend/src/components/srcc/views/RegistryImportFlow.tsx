@@ -963,6 +963,10 @@ const AppliedStep = ({ result, reason, onDone }: AppliedStepProps) => {
 };
 
 export type RegistryImportFlowProps = {
+  /** Namespaces the unsettled-import records to one tenant + principal. MUST
+   * match what RegistryView reads, or the flow's raise and the view's notice
+   * would look at different buckets. */
+  importScope?: string;
   /** Close the flow WITHOUT reloading the registry (no apply committed). */
   onCancel: () => void;
   /** Close the flow AND reload the registry (an apply committed, or leaving
@@ -981,7 +985,11 @@ const STEP_INDEX: Record<ImportStep, number> = { upload: 0, preview: 1, applied:
  * ref latch collapses a same-tick double submit so one click burst fires one
  * request.
  */
-export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps) => {
+export const RegistryImportFlow = ({
+  importScope,
+  onCancel,
+  onDone,
+}: RegistryImportFlowProps) => {
   const importChannels = useChannelImport();
   const ownerState = useContentOwners(YOUTUBE_ANALYTICS_KEY);
   const [step, setStep] = useState<ImportStep>("upload");
@@ -1015,7 +1023,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   // establishes an outcome. The nav latch lives in this document; this one
   // survives it, which is what covers an operator who closes the tab, reloads,
   // or leaves via the sidebar instead of Cancel (review #184, codex P1 x2).
-  const unsettledImport = useUnsettledImport();
+  const unsettledImport = useUnsettledImport(importScope);
   // The id of the apply currently in flight, so the failure handler retires
   // exactly the request it is handling and never another tab's.
   const applyIdRef = useRef<string | null>(null);
@@ -1209,9 +1217,17 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     // handler while the backend goes on committing.
     const applyId = newApplyId();
     applyIdRef.current = applyId;
-    unsettledImport.trackApply(applyId);
     setError(null);
     try {
+      // ATOMIC admission, not the render-time `unsettled` read. That read and
+      // the record were two steps, so two tabs could both see "nothing
+      // pending" and both dispatch; this checks and records under one
+      // cross-document lock. A refusal writes nothing and sends no request.
+      if (!(await unsettledImport.admit(applyId))) {
+        applyIdRef.current = null;
+        setError(OTHER_APPLY_PENDING_NOTE);
+        return;
+      }
       const result = await importChannels({
         file: approved.file,
         contentOwnerId: ownerId,

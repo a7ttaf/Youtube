@@ -572,6 +572,7 @@ const RegistryMainPanel = ({
   importOpen,
   importUnsettled,
   canViewAudit,
+  importScope,
   onStartImport,
   onCancelImport,
   onImportDone,
@@ -585,6 +586,7 @@ const RegistryMainPanel = ({
   importOpen: boolean;
   importUnsettled: boolean;
   canViewAudit: boolean;
+  importScope: string | undefined;
   onStartImport: () => void;
   onCancelImport: () => void;
   onImportDone: () => void;
@@ -598,7 +600,11 @@ const RegistryMainPanel = ({
         onStartImport={onStartImport}
       />
       {importOpen ? (
-        <RegistryImportFlow onCancel={onCancelImport} onDone={onImportDone} />
+        <RegistryImportFlow
+          importScope={importScope}
+          onCancel={onCancelImport}
+          onDone={onImportDone}
+        />
       ) : (
         <>
           {importUnsettled ? (
@@ -1128,11 +1134,15 @@ const RegistryView = ({
   canImportChannels,
   canViewFinance,
   canViewAudit = false,
+  importScope,
   onOpenTrace,
 }: {
   canManageRegistry: boolean;
   canImportChannels: boolean;
   canViewFinance: boolean;
+  /** Namespaces the unsettled-import records to one tenant + principal. Omitted
+   * only in standalone renders, which fall back to the unscoped bucket. */
+  importScope?: string;
   /** Whether AuditView is reachable at all. Defaults to the SAFE assumption:
    * without it the notice must not send the operator somewhere they will be
    * refused. */
@@ -1152,7 +1162,7 @@ const RegistryView = ({
   // Held in the SHELL, not here: this view unmounts the moment the operator
   // follows the notice's own advice and opens the Audit trail, and the flag
   // has to survive that (review #184).
-  const unsettledImport = useUnsettledImport();
+  const unsettledImport = useUnsettledImport(importScope);
 
   const unitsById = useMemo(
     () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
@@ -1201,6 +1211,7 @@ const RegistryView = ({
           importOpen={importing}
           importUnsettled={unsettledImport.unsettled}
           canViewAudit={canViewAudit}
+          importScope={importScope}
           onStartImport={() => setImporting(true)}
           onCancelImport={() => setImporting(false)}
           onImportDone={() => {

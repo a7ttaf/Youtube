@@ -25,6 +25,7 @@ import { ConnectorsView } from "./views/ConnectorsView";
 import ExportsView from "./views/ExportsView";
 import { GroupsView } from "./views/GroupsView";
 import RegistryView from "./views/RegistryView";
+import { importScopeFor } from "@/contexts/UnsettledImportContext";
 import TraceView from "./views/TraceView";
 import {
   Badge,
@@ -593,6 +594,8 @@ type ViewRouterProps = {
   canViewFinance: boolean;
   displayedRole: Role;
   traceChannelId: string | null;
+  /** Namespaces the unsettled-import records to one tenant + principal. */
+  importScope: string;
   onOpenTrace: (channelId: string) => void;
 };
 
@@ -609,6 +612,7 @@ const ViewRouter = ({
   canViewFinance,
   displayedRole,
   traceChannelId,
+  importScope,
   onOpenTrace,
 }: ViewRouterProps) => {
   const renderView: Record<ViewKey, () => ReactNode> = {
@@ -626,6 +630,7 @@ const ViewRouter = ({
         canImportChannels={permissions.canImportChannels}
         canViewFinance={permissions.canViewFinance}
         canViewAudit={permissions.canViewAudit}
+        importScope={importScope}
         onOpenTrace={onOpenTrace}
       />
     ),
@@ -879,7 +884,15 @@ const AppShell = () => {
     sessionBootstrap.session.capabilities,
   );
   const canViewFinance = permissions.canViewFinance;
+  // Namespaces the unsettled-import records. localStorage is origin-wide and
+  // outlives sign-out, so without this a pending import follows a shared
+  // browser into the next operator's or the next tenant's session.
+  const importScope = importScopeFor(
+    sessionBootstrap.session.tenant?.slug,
+    sessionBootstrap.session.user_id,
+  );
   const copy = VIEW_COPY[view];
+
 
   return (
     <WriteInFlightProvider value={writeInFlight}>
@@ -907,6 +920,7 @@ const AppShell = () => {
           canViewFinance={canViewFinance}
           displayedRole={displayedRole}
           traceChannelId={traceChannelId}
+          importScope={importScope}
           onOpenTrace={(channelId) => {
             setTraceChannelId(channelId);
             setView("trace");

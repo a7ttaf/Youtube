@@ -37,28 +37,6 @@ import type { ChannelImportResult } from "@/lib/api/types";
 // ============================================================================
 
 /**
- * The per-ROW fields any consumer of a plan INDEXES into rather than merely
- * renders, each with the check it must pass.
- *
- *   `row_number` — the preview's React key; a missing one collides.
- *   `outcome`    — selects the row chip and the ERROR tone.
- *   `changes`    — a RECORD of from/to pairs; the renderer reads both
- *                  sides of every value, so an array or a null entry
- *                  throws just as surely as a missing map.
- */
-const isFieldChange = (value: unknown): boolean => {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-  return "from" in value && "to" in value;
-};
-
-/**
- * `changes` must be a RECORD of from/to pairs, not merely a non-null object.
- * An array, or `{cms_status: null}`, satisfies `typeof === "object"` and then
- * throws downstream where the renderer reads `change.from` (review #184).
- */
-/**
  * A JSON OBJECT, excluding null and arrays — both of which `typeof` calls
  * "object" and both of which then throw where a record is indexed.
  */
@@ -66,6 +44,50 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 };
 
+/**
+ * The DECLARED literal sets, mirroring ChannelImportOutcome and
+ * ChannelImportGroupAction (backend org/channel_import.py). Accepting any
+ * string here is not a smaller check, it is a different one: an unknown
+ * `group_action` falls past GroupCell's label lookup and the preview goes
+ * SILENT about whether the apply mints a new finance-scope SECTOR group or
+ * joins an existing one — the single most consequential thing a Group_ID row
+ * does, and the reason that column exists at all (review #184).
+ */
+const PLAN_OUTCOMES = ["CREATE", "UPDATE", "UNCHANGED", "ERROR"] as const;
+const GROUP_ACTIONS = ["CREATE", "JOIN"] as const;
+
+const isOutcome = (value: unknown): boolean => {
+  return typeof value === "string" && PLAN_OUTCOMES.some((outcome) => outcome === value);
+};
+
+const isGroupAction = (value: unknown): boolean => {
+  return value === null || GROUP_ACTIONS.some((action) => action === value);
+};
+
+/**
+ * The value types a diff side can hold. The backend only ever puts inventory
+ * scalars here — names and cms_status are strings, revenue_required is a
+ * boolean, content_owner_id is nullable — so anything else is a payload the
+ * preview cannot render honestly. Checking only for the KEYS let
+ * `{from: {}, to: "INSIDE_CMS"}` through, which the diff cell then rendered as
+ * the unreviewable "[object Object] → INSIDE_CMS" (review #184).
+ */
+const isChangeSide = (value: unknown): boolean => {
+  return value === null || typeof value === "string" || typeof value === "boolean";
+};
+
+const isFieldChange = (value: unknown): boolean => {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  return "from" in value && "to" in value && isChangeSide(value.from) && isChangeSide(value.to);
+};
+
+/**
+ * `changes` must be a RECORD of from/to pairs, not merely a non-null object.
+ * An array, or `{cms_status: null}`, satisfies `typeof === "object"` and then
+ * throws downstream where the renderer reads `change.from` (review #184).
+ */
 const isChangeMap = (value: unknown): boolean => {
   if (!isPlainObject(value)) {
     return false;
@@ -103,12 +125,12 @@ const isSourceStatusChange = (value: unknown): boolean => {
  */
 const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
   ["row_number", (value) => typeof value === "number"],
-  ["outcome", (value) => typeof value === "string"],
+  ["outcome", isOutcome],
   ["changes", isChangeMap],
   ["youtube_channel_id", isNullableString],
   ["channel_name", isNullableString],
   ["group_id", isNullableString],
-  ["group_action", isNullableString],
+  ["group_action", isGroupAction],
   ["reason", isNullableString],
   ["revenue_required", (value) => value === null || typeof value === "boolean"],
   ["revenue_source_status", isSourceStatusChange],

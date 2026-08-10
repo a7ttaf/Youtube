@@ -995,9 +995,10 @@ def _require_planned_group_action(
 
 
 # ============================================================================
-# Purpose: Reconcile one import row's CMS group membership — resolve the group
-#   by its CMS key, create it when absent, and attach the channel — returning
-#   the mutation performed so the caller can audit it.
+# Purpose: Reconcile a whole BATCH of import rows sharing one CMS group key —
+#   resolve the group by that key once, create it when absent, and attach every
+#   channel in the batch — returning one entry per mutation actually performed
+#   so the caller can audit each, or an EMPTY list when nothing was written.
 # Database/ORM: ChannelGroupORM (row-locked read via get_group_by_cms_id
 #   for_update=True; INSERT via create_group) and ChannelGroupMemberORM
 #   (INSERT via add_members). No channel or finance writes.
@@ -1011,8 +1012,16 @@ def _require_planned_group_action(
 #   stamps groups it creates here, whose ownership the request already
 #   asserts. The parent group row is the membership serialization point every
 #   writer shares (FOR NO KEY UPDATE, compatible with membership FK key-share
-#   locks). Returns None when membership already existed so a no-op is never
-#   audited.
+#   locks), and the batch takes it ONCE. That is the point of the batch
+#   boundary: resolving per channel made the payload quadratic, because each
+#   lookup materialized the full membership and each single-channel add read
+#   it and returned it again (review #184, measured 4.0x per doubling of the
+#   roster). Batching must not be traded away for "simpler" per-row calls.
+#   The AUDIT shape is deliberately unchanged by the batching: a newly created
+#   group still records exactly ONE group_created — for the first channel —
+#   and a member_added for each of the rest, which is why the create is passed
+#   only channel_ids[0] rather than the whole list. A channel already in the
+#   group yields no entry at all, so a no-op is never audited.
 # Blast Radius: Channel-group membership and therefore finance group-scope
 #   selection and rollups; the GROUP_UPDATED audit trail. No revenue totals,
 #   no allocation, no month-close.

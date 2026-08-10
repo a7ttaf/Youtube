@@ -511,6 +511,45 @@ def _planned_group_action(
 
 
 # ============================================================================
+# Purpose: The import's whole decision boundary. Diffs parsed rows against the
+#   registry into a per-row plan: the outcome (CREATE/UPDATE/UNCHANGED/ERROR),
+#   the field-level diff the operator reviews, the group effect each Group_ID
+#   implies, and the revenue-source transition the write would perform.
+#   Everything the apply later executes is decided HERE; the apply adds no
+#   judgement of its own.
+# Database/ORM: None — pure over the caller's already-loaded snapshots
+#   (``existing`` plus the four group-id sets). Keeping the reads outside is
+#   what bounds the route to a FIXED number of bulk queries regardless of
+#   roster size, and it is why this function can be exercised without a DB.
+# Standards: Fails CLOSED on every ambiguity, as ERROR rows rather than
+#   guesses: an archived channel (reactivation is an explicit registry action,
+#   never an import side effect), an archived group, a cross-owner group, an
+#   existing group with a NULL content_owner_id (the import never ADOPTS —
+#   only the owner's own CMS sync may claim one), and duplicate ids that
+#   disagree. One ERROR row 422s the entire file, because the apply is
+#   all-or-nothing — which is also what lets the apply's write-boundary guards
+#   assume every planned row was reviewed as valid and active.
+#   The group action is decided from the plan ALONE — no membership read — so
+#   `outcome` speaks only about channel inventory. That limit is load-bearing
+#   for the frontend: it is why a re-plan cannot verify a group-bearing
+#   roster, and it must not be quietly widened.
+#   The revenue-source transition is re-derived on exactly one trigger, a
+#   revenue_required flip, and disclosed in the plan so the operator approves
+#   the classification change rather than discovering it in the audit trail.
+# Blast Radius: FINANCE-SCOPE. The plan digested here becomes
+#   plan_fingerprint, which binds the apply; a row planned wrong is a row
+#   written wrong under an approval the operator did give. Group effects mint
+#   or join SECTOR groups, which move revenue rollups, and
+#   revenue_source_status drives missing_official_revenue and the
+#   outside-CMS recommendation downstream.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> executes
+#       this plan and re-checks the reviewed pre-state under the row lock.
+#   - File: backend/ums_smart_revenue/api/channels.py -> loads the snapshots,
+#       fingerprints the plan, and serves it as the preview.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the operator-facing contract for
+#       every outcome and error above.
+# ============================================================================
 def plan_channel_import(
     *,
     rows: tuple[ChannelImportRow, ...],

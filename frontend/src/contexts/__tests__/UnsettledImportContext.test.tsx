@@ -2,7 +2,9 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  UNSCOPED_IMPORT_SCOPE,
   UNSETTLED_IMPORT_STORAGE_KEY,
+  importScopeFor,
   newApplyId,
   useUnsettledImport,
 } from "@/contexts/UnsettledImportContext";
@@ -16,10 +18,10 @@ beforeEach(() => {
   globalThis.localStorage.clear();
 });
 
-/** The per-apply keys the mirror currently holds, suffix only. */
-const storedIds = (): string[] => {
+/** The apply ids the mirror currently holds for one scope. */
+const storedIds = (scope: string = UNSCOPED_IMPORT_SCOPE): string[] => {
   const store = globalThis.localStorage;
-  const prefix = `${UNSETTLED_IMPORT_STORAGE_KEY}.`;
+  const prefix = `${UNSETTLED_IMPORT_STORAGE_KEY}.${scope}.`;
   return Array.from({ length: store.length }, (_unused, index) => store.key(index))
     .filter((key): key is string => key !== null && key.startsWith(prefix))
     .map((key) => key.slice(prefix.length))
@@ -95,15 +97,69 @@ describe("unsettled import store", () => {
     expect(tabB.result.current.unsettled).toBe(true);
   });
 
+  it("does not lose a memory-only apply when a stored one settles", () => {
+    // Quota (or any write failure) can land one apply in storage and the next
+    // only in memory. Reading the mirror in PREFERENCE to memory reported just
+    // the stored one; when that settled, its removeItem succeeded and the
+    // guard dropped while the memory-only apply might still be committing
+    // (review #184, codex P1). The two sources are one set.
+    const { result } = renderHook(() => useUnsettledImport());
+    act(() => result.current.trackApply("apply-stored"));
+    expect(storedIds()).toEqual(["apply-stored"]);
+
+    // Writes start failing; reads keep working. This is the quota shape.
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+    act(() => result.current.trackApply("apply-memory-only"));
+    setItemSpy.mockRestore();
+
+    // The stored one settles cleanly. The memory-only one must survive it.
+    act(() => result.current.settleApply("apply-stored"));
+
+    expect(storedIds()).toEqual([]);
+    expect(result.current.unsettled).toBe(true);
+
+    act(() => result.current.settleApply("apply-memory-only"));
+    expect(result.current.unsettled).toBe(false);
+  });
+
   it("ignores keys that are not per-apply records", () => {
-    // The prefix must not swallow unrelated app storage, and the bare prefix
-    // itself is not a record.
+    // The prefix must not swallow unrelated app storage, the bare prefix is
+    // not a record, and another SCOPE's record belongs to another operator.
     globalThis.localStorage.setItem("ums.somethingElse", "1");
     globalThis.localStorage.setItem(UNSETTLED_IMPORT_STORAGE_KEY, "1");
+    globalThis.localStorage.setItem(`${UNSETTLED_IMPORT_STORAGE_KEY}.other~user.a`, "1");
 
     const { result } = renderHook(() => useUnsettledImport());
 
     expect(result.current.unsettled).toBe(false);
+  });
+
+  it("keeps one operator's pending import invisible to another", () => {
+    // localStorage is origin-wide and outlives sign-out. Unscoped, a pending
+    // import followed a shared browser into the next session: the new operator
+    // was blocked by an import they could not reconcile, and acknowledging it
+    // cleared the original operator's protection (review #184, codex P2).
+    const alice = importScopeFor("ums", "user-alice");
+    const bob = importScopeFor("ums", "user-bob");
+    const otherTenant = importScopeFor("other", "user-alice");
+    expect(new Set([alice, bob, otherTenant]).size).toBe(3);
+
+    const aliceHook = renderHook(() => useUnsettledImport(alice));
+    act(() => aliceHook.result.current.trackApply("apply-alice"));
+
+    // Neither the other principal nor the other tenant sees it.
+    const bobHook = renderHook(() => useUnsettledImport(bob));
+    const otherTenantHook = renderHook(() => useUnsettledImport(otherTenant));
+    expect(aliceHook.result.current.unsettled).toBe(true);
+    expect(bobHook.result.current.unsettled).toBe(false);
+    expect(otherTenantHook.result.current.unsettled).toBe(false);
+
+    // And Bob's blanket acknowledgement cannot retire Alice's protection.
+    act(() => bobHook.result.current.acknowledgeAll());
+    expect(storedIds(alice)).toEqual(["apply-alice"]);
+    expect(aliceHook.result.current.unsettled).toBe(true);
   });
 
   it("still guards this document when storage refuses every write", () => {
@@ -124,6 +180,74 @@ describe("unsettled import store", () => {
     expect(result.current.unsettled).toBe(false);
 
     vi.restoreAllMocks();
+  });
+
+  it("does its check and its record INSIDE one scope lock", async () => {
+    // The check-then-act window codex identified is CROSS-DOCUMENT: two tabs
+    // both read "nothing pending", both dispatch, and for an all-UNCHANGED
+    // roster both POSTs return 200 and each appends a CHANNEL_IMPORTED
+    // (review #184, codex P1). jsdom cannot host two documents, and within one
+    // the claim is synchronous and so already indivisible — meaning no test
+    // here can reproduce the interleave. What a test CAN pin is the mechanism
+    // that closes it: the check and the write happen inside a Web Lock held on
+    // this scope, which is the only cross-document exclusion a page has.
+    const held: string[] = [];
+    const request = vi.fn(async (name: string, callback: () => unknown) => {
+      held.push(`enter:${name}`);
+      const outcome = await callback();
+      held.push(`exit:${name}`);
+      return outcome;
+    });
+    vi.stubGlobal("navigator", { ...globalThis.navigator, locks: { request } });
+
+    const { result } = renderHook(() => useUnsettledImport());
+    expect(await result.current.admit("apply-one")).toBe(true);
+
+    // One lock, named for the scope, entered and exited around the claim —
+    // and the record exists only after it was taken.
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][0]).toBe(
+      `${UNSETTLED_IMPORT_STORAGE_KEY}.${UNSCOPED_IMPORT_SCOPE}`,
+    );
+    expect(held).toEqual([
+      `enter:${UNSETTLED_IMPORT_STORAGE_KEY}.${UNSCOPED_IMPORT_SCOPE}`,
+      `exit:${UNSETTLED_IMPORT_STORAGE_KEY}.${UNSCOPED_IMPORT_SCOPE}`,
+    ]);
+    expect(storedIds()).toEqual(["apply-one"]);
+
+    // A second claim under the same lock is refused and writes NOTHING, so a
+    // holder that loses the race cannot dispatch and cannot leave a record.
+    expect(await result.current.admit("apply-two")).toBe(false);
+    expect(storedIds()).toEqual(["apply-one"]);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("still admits when the browser has no Web Locks", async () => {
+    // Degraded, and deliberately not disguised: without navigator.locks the
+    // claim runs unlocked, which is narrower than the cross-document race but
+    // not free of it. It must not fail CLOSED and lock the operator out.
+    vi.stubGlobal("navigator", { userAgent: "test" });
+
+    const { result } = renderHook(() => useUnsettledImport());
+
+    expect(await result.current.admit("apply-nolocks")).toBe(true);
+    expect(await result.current.admit("apply-second")).toBe(false);
+    expect(storedIds()).toEqual(["apply-nolocks"]);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("admits again once the outstanding apply settles", async () => {
+    // Admission must not be a one-shot latch: a settled apply frees the next.
+    const { result } = renderHook(() => useUnsettledImport());
+    expect(await result.current.admit("apply-first")).toBe(true);
+    expect(await result.current.admit("apply-second")).toBe(false);
+
+    act(() => result.current.settleApply("apply-first"));
+
+    expect(await result.current.admit("apply-second")).toBe(true);
+    expect(storedIds()).toEqual(["apply-second"]);
   });
 
   it("mints ids that do not collide", () => {
