@@ -426,6 +426,39 @@ const assertUsableResult = (result: ChannelImportResult, request: ImportRequestT
   }
 };
 
+// ============================================================================
+// Purpose: The REQUEST side of this boundary — build the multipart form and
+//   dispatch it. The module block above states the wire contract this file
+//   implements; this one covers the dispatch itself, which is 400 lines below
+//   it now that the response machinery sits between them.
+// Database/ORM: None (frontend) — POSTs /channels/import. Every guard that
+//   matters (MANAGE_CHANNELS, MANAGE_GROUPS on group-bearing rosters, the plan
+//   fingerprint, the write-boundary pre-state check, the locked-month rule)
+//   belongs to that route and is untouched by anything here.
+// Standards: One stable useCallback so a re-render cannot mint a second
+//   dispatcher mid-flight. Both modes go through this single path; `dry_run`
+//   is the only difference, which is why the response validator checks the
+//   echoed flag rather than trusting the caller's intent.
+//   `expected_plan_fingerprint` is appended ONLY when the caller supplies it:
+//   sending an empty or stale value would either 409 a legitimate apply or, if
+//   omitted by accident, silently downgrade the write to the backend's
+//   unbound file-wins path (review #184). `cms_status` is sent explicitly so
+//   the echoed target can be checked against a value this request named.
+//   Adds NO error handling of its own — the calling view owns busy/error
+//   presentation — and nothing here retries: a retry of an audited bulk write
+//   is the operator's decision, made against the audit trail.
+// Blast Radius: Channel-registry inventory + row-created group membership, via
+//   the backend's guarded audited route. A mistake here shows as a refused or
+//   misdirected import, never as an unpermitted one.
+// Connections:
+//   - File: frontend/src/lib/api/client.ts -> useApiClient() POST, which
+//       passes FormData through verbatim so fetch sets the multipart boundary.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> the
+//       only caller; supplies contentOwnerId, the reason, and the bound
+//       fingerprint.
+//   - File: backend/ums_smart_revenue/api/channels.py -> import_channels, the
+//       route this dispatches to and whose echo assertUsableResult checks.
+// ============================================================================
 export const useChannelImport = (): ((
   args: {
     file: File;
