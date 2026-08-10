@@ -323,11 +323,21 @@ describe("unsettled import store", () => {
   it("still mints an id when the runtime has no crypto at all", () => {
     // Last resort. It must not throw on the way to dispatching an apply —
     // that would block the import outright rather than degrade it.
-    vi.stubGlobal("crypto", undefined);
+    //
+    // The property is REDEFINED rather than stubbed with a value: "no crypto"
+    // is the absence of the global, and defineProperty says that where passing
+    // an explicit undefined only approximates it.
+    const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: undefined,
+    });
 
     const ids = Array.from({ length: 32 }, newApplyId);
 
     expect(new Set(ids).size).toBe(32);
-    vi.unstubAllGlobals();
+    if (original !== undefined) {
+      Object.defineProperty(globalThis, "crypto", original);
+    }
   });
 });
