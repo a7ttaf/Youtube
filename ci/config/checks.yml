@@ -151,6 +151,12 @@ checks:
     severity: blocker
     required: false
     tool: bats
+    # The suites drive ci/preflight.sh, ci/checks/node.sh and
+    # ci/checks/test-layout.sh against synthetic trees, several of which spawn a
+    # package manager or init a repository; ~200 cases run for well over the
+    # 20-minute gate default. At that default the lane was killed and reported
+    # FAIL_INFRA, so a blocking check silently stopped running.
+    timeout_sec: 3600
 
   # --- Coverage ---
   coverage:

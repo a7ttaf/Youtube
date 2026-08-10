@@ -136,6 +136,25 @@ ci::runner::init() {
 
 # ci::runner::submit <job_id> <check_script> [args...]
 # Submits a job to the parallel pool. Blocks if pool is full.
+# ci::runner::_declared_timeout <check-id> – echo the check's own timeout_sec
+# from checks.yml, or nothing when it declares none.
+ci::runner::_declared_timeout() {
+  local want="$1"
+  local file="${CI_CHECKS_CONFIG:-ci/config/checks.yml}"
+  [ -f "$file" ] || return 0
+  awk -v want="  ${want}:" '
+    $0 == want { found = 1; next }
+    found && $0 ~ /^[[:space:]]*timeout_sec:/ {
+      sub(/^[[:space:]]*timeout_sec:[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*$/, "")
+      gsub(/[^0-9]/, "")
+      if ($0 != "") print
+      exit
+    }
+    found && $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { exit }
+  ' "$file"
+}
+
 ci::runner::submit() {
   local job_id="$1"
   shift
@@ -173,13 +192,25 @@ ci::runner::submit() {
     sleep 0.2 2>/dev/null || sleep 1
   done
 
-  # Determine timeout
+  # Determine timeout. checks.yml may declare timeout_sec per check; gate.yml's
+  # default_timeout_sec applies otherwise.
+  #
+  # The per-check value used to be documentation -- nothing read it -- and the
+  # shell suites have since grown past the 20-minute default, so `tests-shell`
+  # was killed at the cap and reported FAIL_INFRA. A blocking lane that cannot
+  # finish is a lane that does not run, which is the failure this gate exists to
+  # catch, announced in a single word at the end of a two-hour run.
+  local check_timeout="${CI_GATE_TIMEOUT:-}"
+  local declared_timeout
+  declared_timeout="$(ci::runner::_declared_timeout "$job_id")"
+  [ -n "$declared_timeout" ] && check_timeout="$declared_timeout"
+
   local timeout_cmd=""
-  if [ -n "${CI_GATE_TIMEOUT:-}" ] && [ "${CI_GATE_TIMEOUT}" != "0" ]; then
+  if [ -n "$check_timeout" ] && [ "$check_timeout" != "0" ]; then
     if command -v timeout >/dev/null 2>&1; then
-      timeout_cmd="timeout ${CI_GATE_TIMEOUT}"
+      timeout_cmd="timeout ${check_timeout}"
     elif command -v gtimeout >/dev/null 2>&1; then
-      timeout_cmd="gtimeout ${CI_GATE_TIMEOUT}"
+      timeout_cmd="gtimeout ${check_timeout}"
     fi
   fi
 

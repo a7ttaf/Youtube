@@ -985,7 +985,37 @@ single P-tier above.
   `test: { include: [...], exclude: [...] }` slipped past: properties are now
   split on commas at the object's own depth with strings opaque, which makes
   the check independent of formatting and of quoting in one move.
-  Combined suite: `test_test_layout.bats` (58) + `test_js_lane.bats` (103) = 161
+  A seventeenth round found seven, three P1, and two of the fixes invert a rule
+  rather than extend it. Workspace discovery still stated the **filesystem**, so
+  a workspace staged into the commit and then removed from disk was never
+  visited at all; the index is now a second source of workspaces, and one
+  staged-but-absent is a failure rather than a skip. A workspace could declare
+  TypeScript and define **no `typecheck` script**: `run_script` logged "Skipping
+  missing script" and the lane exited 0 after tests and a `vite build` that,
+  as `frontend/README.md` says, never runs `tsc`. `">= 20"` — valid npm, with a
+  space — was split into a bare `>=` and rejected as malformed, blocking a
+  conforming environment; operator and operand are rejoined before evaluation.
+  `testNamePattern` made vitest exit 0 with **every test reported skipped**
+  while the guard called all 38 files runnable; that is the third route to a
+  silent drop after `exclude` and the spread, so the rule is now an **allow-list**
+  — a property that cannot reduce what is collected is named in the script, and
+  anything else stops the guard until someone decides which it is. An `include`
+  computed by an expression hid the declared glob in the branch vitest does not
+  take, so the value must be a literal array. A **rename** was reduced to its
+  destination before classification, so `R100 frontend/src/x.ts Docs/x.md`
+  yielded `lint-markdown` alone; both sides are classified now. And workspace
+  membership was consulted only in `classify_file`'s unknown fallback, so a
+  *recognised* type never reached it — `frontend/src/data.json` scheduled
+  nothing — which makes membership a second signal alongside the language
+  rather than a last resort.
+  The ship gate itself then turned up an eighth, which no reviewer had raised:
+  `tests-shell` came back **FAIL_INFRA at exactly 1200s** -- the gate's default
+  per-check timeout. The suites had grown past it, so the blocking lane was
+  being killed rather than run, announced in one word at the end of a two-hour
+  gate. `checks.yml` has carried a per-check `timeout_sec` since before this PR
+  and **nothing read it**; the runner applied the global value to everything.
+  The runner now honours the declared value, and `tests-shell` declares 3600.
+  Combined suite: `test_test_layout.bats` (62) + `test_js_lane.bats` (115) = 177
   cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

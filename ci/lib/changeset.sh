@@ -279,29 +279,62 @@ ci::changeset::should_ignore() {
   return 1
 }
 
+# ci::changeset::_entry_paths <status> <path> <extra> – echo every path an entry
+# affects, one per line.
+#
+# A rename affects BOTH sides. `R100 frontend/src/x.ts Docs/x.md` was reduced to
+# its destination before classification, yielding lint-markdown alone -- so a
+# rename that removes a module the bundle imports schedules neither the tests,
+# the typecheck nor the build that would surface the broken import.
+ci::changeset::_entry_paths() {
+  local status="$1" path="$2" extra="$3"
+  case "$status" in
+    R*|C*)
+      if [ -n "$extra" ]; then
+        printf '%s\n%s\n' "$path" "$extra"
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s\n' "$path"
+}
+
+# ci::changeset::_workspace_checks <path> – node-lane check ids when the file
+# lives inside a Node workspace, whatever its language says.
+#
+# Workspace membership was consulted only in classify_file's unknown fallback,
+# so a *recognised* type never reached it: frontend/src/data.json classifies as
+# json, emits no node ids, and an imported JSON change ships without the tests,
+# typecheck or build that would catch it. Membership is a second signal, not a
+# fallback -- a file in a workspace is a build input for that workspace whether
+# or not its extension is one this table knows.
+ci::changeset::_workspace_checks() {
+  ci::changeset::_in_node_workspace "$1" || return 0
+  ci::changeset::_checks_for_language javascript
+}
+
 ci::changeset::_populate_state_from_raw() {
   local generated_languages="" generated_checks=""
   generated_checks="$_CI_CHANGESET_ALWAYS_CHECKS"
 
   if [ -n "$_CI_CHANGESET_FILES_RAW" ]; then
-    local status path extra lang file_checks ck
+    local status path extra p lang file_checks ck
     while IFS=$'\t' read -r status path extra; do
       [ -z "$path" ] && continue
-      case "$status" in
-        R*|C*)
-          [ -n "$extra" ] && path="$extra"
-          ;;
-      esac
 
-      ci::changeset::should_ignore "$path" && continue
+      while IFS= read -r p; do
+        [ -z "$p" ] && continue
+        ci::changeset::should_ignore "$p" && continue
 
-      lang="$(ci::changeset::classify_file "$path")"
-      generated_languages="$(ci::changeset::_add_unique "$generated_languages" "$lang")"
+        lang="$(ci::changeset::classify_file "$p")"
+        generated_languages="$(ci::changeset::_add_unique "$generated_languages" "$lang")"
 
-      file_checks="$(ci::changeset::_checks_for_language "$lang")"
-      for ck in $file_checks; do
-        generated_checks="$(ci::changeset::_add_unique "$generated_checks" "$ck")"
-      done
+        file_checks="$(ci::changeset::_checks_for_language "$lang")
+$(ci::changeset::_workspace_checks "$p")"
+        for ck in $file_checks; do
+          generated_checks="$(ci::changeset::_add_unique "$generated_checks" "$ck")"
+        done
+      done <<< "$(ci::changeset::_entry_paths "$status" "$path" "$extra")"
     done <<< "$_CI_CHANGESET_FILES_RAW"
   fi
 
@@ -444,8 +477,11 @@ ci::changeset::emit_json() {
       lang="$(ci::changeset::classify_file "$path")"
       generated_languages="$(ci::changeset::_add_unique "$generated_languages" "$lang")"
 
-      # Compute checks triggered for this file
-      file_checks="$(ci::changeset::_checks_for_language "$lang")"
+      # Compute checks triggered for this file. Workspace membership is a second
+      # signal alongside the language, in step with _populate_state_from_raw;
+      # the two disagreeing is how the JSON report and the scheduler drift.
+      file_checks="$(ci::changeset::_checks_for_language "$lang")
+$(ci::changeset::_workspace_checks "$path")"
       # Build checks_json array
       checks_json=""
       local ck ck_first=1

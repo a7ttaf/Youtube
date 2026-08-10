@@ -18,6 +18,20 @@ ci::common::section "Check: node lane"
 if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
   NODE_WORKSPACES="$(ci::common::node_workspaces package.json)"
 
+  # Discovery stats the filesystem, so a workspace that exists only in the index
+  # is invisible to it: stage a new added/package.json whose test script fails,
+  # then remove added/ from disk, and the lane never looks at it. The index is a
+  # second source of workspaces, and one that describes the commit rather than
+  # the tree.
+  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    INDEXED_WS="$(git ls-files -- 'package.json' '*/package.json' 2>/dev/null \
+      | awk -F/ 'NF == 1 { print "."; next } NF == 2 { print $1 }' | sort -u || true)"
+    if [ -n "$INDEXED_WS" ]; then
+      NODE_WORKSPACES="$(printf '%s\n%s\n' "$NODE_WORKSPACES" "$INDEXED_WS" \
+        | sed '/^$/d' | sort -u)"
+    fi
+  fi
+
   if [ -z "$NODE_WORKSPACES" ]; then
     # "No manifest" and "no JavaScript here" are not the same statement.
     # Deleting frontend/package.json leaves the lockfile, the tsconfig and the
@@ -77,6 +91,31 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       echo "  below would read the worktree copy and pass."
       echo "  Stage it (git add <path>), or restore it if the deletion was"
       echo "  staged by mistake."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+    fi
+
+    # The converse: staged into the commit but absent from the tree. The child
+    # would find no package.json there, print "Skipping Node lane" and return
+    # PASS -- so a workspace the commit adds, with a failing test script, is
+    # never run at all.
+    MISSING_FROM_DISK=""
+    while IFS= read -r _ws; do
+      [ -n "$_ws" ] || continue
+      if [ "$_ws" = "." ]; then _mf="package.json"; else _mf="$_ws/package.json"; fi
+      if git cat-file -e ":$_mf" 2>/dev/null && [ ! -f "$_mf" ]; then
+        MISSING_FROM_DISK="${MISSING_FROM_DISK}${_mf}"$'\n'
+      fi
+    done <<< "$NODE_WORKSPACES"
+
+    if [ -n "$MISSING_FROM_DISK" ]; then
+      echo "A workspace manifest is staged but missing from the worktree:"
+      while IFS= read -r _mf; do
+        [ -n "$_mf" ] || continue
+        echo "    $_mf"
+      done <<< "$MISSING_FROM_DISK"
+      echo "  The commit adds that workspace, but there is nothing on disk to"
+      echo "  install or run, so the lane would skip it and pass."
+      echo "  Restore the workspace, or unstage it."
       exit "$CI_RESULT_FAIL_NEW_ISSUE"
     fi
 
@@ -429,6 +468,7 @@ _semver_satisfies() {
   local version="$1" rest="$2"
   local alt tok ok alt_tokens rc more=1
   local satisfied=0 malformed=0 unrecognised=0 seen_alt=0
+  local -a alt_toks
   while [ "$more" -eq 1 ]; do
     case "$rest" in
       *'||'*) alt="${rest%%||*}"; rest="${rest#*||}" ;;
@@ -443,7 +483,26 @@ _semver_satisfies() {
     # directory listing and stop looking like a range at all.
     set -f
     # shellcheck disable=SC2086
-    for tok in $alt; do
+    set -- $alt
+    # npm allows whitespace between a comparator and its operand: ">= 20" is
+    # the same range as ">=20". Splitting on whitespace alone left a bare ">=",
+    # which the grammar check correctly calls malformed -- and so a conforming
+    # environment was blocked by an infrastructure failure over a space.
+    alt_toks=()
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        '>='|'<='|'>'|'<'|'='|'^'|'~')
+          if [ "$#" -ge 2 ]; then
+            alt_toks+=("$1$2")
+            shift 2
+            continue
+          fi
+          ;;
+      esac
+      alt_toks+=("$1")
+      shift
+    done
+    for tok in ${alt_toks[@]+"${alt_toks[@]}"}; do
       alt_tokens=$((alt_tokens + 1))
       rc=0
       _semver_token_ok "$version" "$tok" || rc=$?
@@ -643,6 +702,24 @@ run_script() {
     echo "Skipping missing script: $script_name"
   fi
 }
+
+# A workspace that declares TypeScript must be able to typecheck it. `vite build`
+# does not run tsc -- frontend/README.md says so explicitly -- so with the
+# `typecheck` script removed or renamed, run_script logs "Skipping missing
+# script" and the lane exits 0 after tests and a build that never looked at a
+# type. The one check that would have caught it is the one that silently
+# stopped running.
+if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
+  if ! script_exists "typecheck"; then
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} declares TypeScript configuration but"
+    echo "  defines no 'typecheck' script, so nothing here ever runs tsc:"
+    [ -f tsconfig.json ] && echo "    ${CI_GATE_NODE_WORKSPACE}/tsconfig.json"
+    [ -f jsconfig.json ] && echo "    ${CI_GATE_NODE_WORKSPACE}/jsconfig.json"
+    echo "  A bundler build is not a typecheck. Restore the script, or remove"
+    echo "  the TypeScript configuration with it."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
+fi
 
 # A workspace that ships tests must be able to run them. run_script only logs
 # "Skipping missing script", so deleting or renaming `test` would remove the

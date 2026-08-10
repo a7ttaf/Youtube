@@ -463,6 +463,7 @@ test_block_props() {
 check_one_config() {
   local cfg="$1"
   local block props have_block=1 active_include="" active_exclude="" active_spread=""
+  local unknown_props=""
 
   block="$(strip_ts_comments "$cfg" | extract_test_block)" || have_block=0
   if [ -n "$block" ]; then
@@ -474,16 +475,40 @@ check_one_config() {
     # applies whatever exclude `hidden` contains -- the same silent drop the
     # exclude rule exists to prevent, one indirection out of reach.
     active_spread="$(printf '%s\n' "$props" | awk -F'\t' '$1 == "..." { print $2 }')"
+    # Anything this guard does not recognise. `exclude` and a spread each got
+    # their own rule after each was found to drop tests silently, and then
+    # `testNamePattern` did the same thing by a third route -- vitest 3.2 exits
+    # 0 with every test reported skipped. Enumerating the dangerous options one
+    # finding at a time is losing by construction, so the list is inverted: a
+    # property that cannot reduce what is collected or run is named here, and
+    # everything else stops the guard until someone decides which it is.
+    unknown_props="$(printf '%s\n' "$props" | awk -F'\t' '
+      $1 == "" || $1 == "..." { next }
+      {
+        ok = "|include|environment|environmentOptions|globals|setupFiles|globalSetup" \
+             "|css|coverage|reporters|outputFile|restoreMocks|clearMocks|mockReset" \
+             "|testTimeout|hookTimeout|teardownTimeout|alias|pool|poolOptions|isolate" \
+             "|sequence|snapshotFormat|expect|fakeTimers|unstubEnvs|unstubGlobals" \
+             "|server|deps|silent|logHeapUsage|slowTestThreshold|chaiConfig|name|"
+        if (index(ok, "|" $1 "|") == 0) print $1
+      }')"
   fi
 
   if [ "$have_block" = "0" ]; then
     printf 'no-test-block'
+  elif [ -n "$active_include" ] && [ "${active_include#\[}" = "$active_include" ]; then
+    # A non-literal include cannot be read by searching its text: in
+    # `cond ? [glob] : ["tests/only.test.ts"]` the glob is present and inactive,
+    # so a substring match passes while vitest collects the other branch.
+    printf 'include-not-literal\t%s' "$active_include"
   elif [ -z "$active_include" ] || ! printf '%s\n' "$active_include" | grep -qF "$DECLARED_GLOB"; then
     printf 'no-include'
   elif [ -n "$active_exclude" ]; then
     printf 'has-exclude\t%s' "$active_exclude"
   elif [ -n "$active_spread" ]; then
     printf 'has-spread\t%s' "$active_spread"
+  elif [ -n "$unknown_props" ]; then
+    printf 'unknown-prop\t%s' "$(printf '%s' "$unknown_props" | tr '\n' ' ')"
   fi
 }
 
@@ -533,6 +558,25 @@ else
         echo "  covers node_modules and dist. If an exclude is genuinely needed, teach"
         echo "  this guard to evaluate it in the same commit."
         printf '%s\n' "$_detail" | sed 's/^/    /'
+        ;;
+      include-not-literal)
+        fail "${_label} computes test.include instead of declaring it literally."
+        echo "  The glob can then appear in a branch vitest never takes:"
+        echo "  cond ? [\"${DECLARED_GLOB}\"] : [\"tests/only.test.ts\"] contains it and"
+        echo "  collects one file. This guard reads the config as text, so an"
+        echo "  expression is not something it can decide."
+        echo "  Declare a literal array, or teach this guard to evaluate the"
+        echo "  expression in the same commit."
+        printf '%s\n' "$_detail" | sed 's/^/    /'
+        ;;
+      unknown-prop)
+        fail "${_label} sets test properties this guard cannot evaluate."
+        echo "  Any of them may reduce what vitest collects or runs while every"
+        echo "  assertion here still passes -- testNamePattern, for one, makes"
+        echo "  vitest exit 0 with every test reported skipped."
+        echo "  If a property is genuinely safe, add it to the allow-list in"
+        echo "  this script in the same commit that introduces it."
+        echo "    ${_detail}"
         ;;
       has-spread)
         fail "${_label} spreads another object into test: { }, which this guard cannot evaluate."

@@ -733,6 +733,90 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "node lane: a workspace staged but missing from disk stops the gate" {
+  # Discovery stats the filesystem, so a workspace that exists only in the index
+  # never entered NODE_WORKSPACES: the commit adds it, with a failing test
+  # script, and the lane never looks at it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  mkdir -p added
+  printf '%s\n' '{ "name": "a", "private": true, "scripts": { "test": "exit 1" } }' > added/package.json
+  printf '{}\n' > added/bun.lock
+  git add added >/dev/null 2>&1
+  rm -rf added
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"staged but missing from the worktree"* ]]
+  [[ "$output" == *"added/package.json"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace declaring TypeScript must be able to typecheck it" {
+  # vite build does not run tsc, so with the typecheck script gone run_script
+  # logs "Skipping missing script" and the lane exits 0 having checked no types.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no 'typecheck' script"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck script satisfies the TypeScript requirement" {
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true", "typecheck": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace with no TypeScript config needs no typecheck script" {
+  # The negative control: the rule is keyed on the workspace declaring
+  # TypeScript, not on every workspace everywhere.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: whitespace between a comparator and its operand is not malformed" {
+  # npm reads ">= 20" as ">=20". Splitting on whitespace alone left a bare ">=",
+  # which the grammar check correctly calls malformed — so a conforming
+  # environment was blocked by an infrastructure failure over a space.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">= ${major}\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a spaced comparator is still evaluated, not waved through" {
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">= $((major + 1))\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: a repository with no JavaScript at all still skips" {
   # The negative control the check is keyed on: no manifest AND no workspace
   # configuration is a repo without a Node lane, not a deleted manifest.
@@ -745,6 +829,30 @@ ws_run() {
 }
 
 # --- the result cache must not outlive the toolchain it vouched for -----------
+
+# --- a blocking lane that cannot finish is a lane that does not run ----------
+
+@test "tests-shell: the suites are given longer than the gate default" {
+  # Found by running the gate rather than by reading it: at the 1200s default
+  # the lane was killed and reported FAIL_INFRA, so the blocking shell suites
+  # silently stopped executing in ship mode.
+  source ci/lib/runner.sh
+  local declared default
+  declared="$(ci::runner::_declared_timeout tests-shell)"
+  default="$(awk '/^default_timeout_sec:/ { gsub(/[^0-9]/, ""); print; exit }' ci/config/gate.yml)"
+  [ -n "$declared" ]
+  [ -n "$default" ]
+  [ "$declared" -gt "$default" ]
+}
+
+@test "tests-shell: a declared timeout is actually applied, not documentation" {
+  # checks.yml has carried timeout_sec since before this PR and nothing read it;
+  # the runner used the global value for every check.
+  run bash -c "sed -n '/# Determine timeout/,/^  fi\$/p' ci/lib/runner.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"_declared_timeout"* ]]
+  [[ "$output" == *"check_timeout"* ]]
+}
 
 @test "cache key: the node lane is excluded from the result cache" {
   # The lane runs the workspace's complete test, typecheck and build scripts,
@@ -1203,6 +1311,50 @@ ws_run() {
   run bash -c 'PATH=/usr/bin:/bin bash ci/checks/tests-shell.sh'
   [ "$status" -eq 30 ]
   [[ "$output" == *"bats is not installed"* ]]
+}
+
+@test "changeset: a rename classifies both of its paths" {
+  # The entry was reduced to its destination before classification, so
+  # R100 frontend/src/x.ts -> Docs/x.md yielded lint-markdown alone — and a
+  # rename that removes a module the bundle imports scheduled neither the tests,
+  # the typecheck nor the build that would surface the broken import.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  _CI_CHANGESET_FILES_RAW="$(printf 'R100\tfrontend/src/x.ts\tDocs/x.md')"
+  ci::changeset::_populate_state_from_raw
+  [[ "$_CI_CHANGESET_LANGUAGES" == *javascript* ]]
+  [[ "$_CI_CHANGESET_LANGUAGES" == *markdown* ]]
+  [[ "$_CI_CHANGESET_CHECKS" == *tests-js* ]]
+  [[ "$_CI_CHANGESET_CHECKS" == *lint-markdown* ]]
+}
+
+@test "changeset: a recognised type inside a workspace still schedules the node lane" {
+  # Workspace membership was consulted only in classify_file's unknown fallback,
+  # so a recognised type never reached it: frontend/src/data.json classifies as
+  # json and emitted no node ids, while this workspace enables resolveJsonModule.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  _CI_CHANGESET_FILES_RAW="$(printf 'M\tfrontend/src/data.json')"
+  ci::changeset::_populate_state_from_raw
+  [[ "$_CI_CHANGESET_CHECKS" == *tests-js* ]]
+  [[ "$_CI_CHANGESET_CHECKS" == *typecheck-js* ]]
+}
+
+@test "changeset: workspace membership does not reach outside a workspace" {
+  # The negative control: a json file elsewhere still schedules no node lane.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  _CI_CHANGESET_FILES_RAW="$(printf 'M\tDocs/example.json')"
+  ci::changeset::_populate_state_from_raw
+  [[ "$_CI_CHANGESET_CHECKS" != *tests-js* ]]
+}
+
+@test "changeset: the JSON report and the scheduler agree on workspace membership" {
+  # emit_json duplicates the per-file check computation. The two disagreeing is
+  # how the report starts describing a gate that is not the one being run.
+  run bash -c "sed -n '/^ci::changeset::emit_json()/,/^}/p' ci/lib/changeset.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"_workspace_checks"* ]]
 }
 
 @test "changeset: an unrelated json file is still json" {

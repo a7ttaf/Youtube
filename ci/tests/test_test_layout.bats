@@ -721,6 +721,80 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "test-layout: catches a persistent test-name filter" {
+  # vitest 3.2 exits 0 with every test reported skipped when testNamePattern
+  # matches nothing, while the guard reported all files runnable.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    testNamePattern: "nothing-matches-this",
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"testNamePattern"* ]]
+}
+
+@test "test-layout: catches any test property it cannot evaluate" {
+  # The rule is an allow-list, not a list of known-bad options: enumerating the
+  # dangerous ones a finding at a time is what produced testNamePattern after
+  # exclude and the spread. passWithNoTests is a different route to the same
+  # green-on-nothing result.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    passWithNoTests: true,
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"passWithNoTests"* ]]
+}
+
+@test "test-layout: the allow-list admits the properties this repo actually uses" {
+  # The converse, and the cost of an allow-list: it must not fail a conforming
+  # config. This is the shape of frontend/vitest.config.ts.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    environment: "jsdom",
+    setupFiles: ["src/test-setup.ts"],
+    globals: true,
+    css: false,
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: catches an include computed by an expression" {
+  # A substring search finds the declared glob in the branch vitest never takes.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: false ? ["tests/**/*.test.{ts,tsx}"] : ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"computes test.include"* ]]
+}
+
 @test "test-layout: catches a missing vitest config" {
   rm "$SANDBOX/frontend/vitest.config.ts"
   run_guard
