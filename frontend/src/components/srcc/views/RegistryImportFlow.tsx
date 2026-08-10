@@ -20,7 +20,9 @@ import { OutcomeTable, type OutcomeTableRow } from "../OutcomeTable";
 import { Badge } from "../shared";
 import { isValidAuditReason } from "./GroupsSyncFlow";
 import {
+  UNSCOPED_IMPORT_SCOPE,
   newApplyId,
+  settleApplyIn,
   useUnsettledImport,
   type AdmissionResult,
 } from "@/contexts/UnsettledImportContext";
@@ -1147,10 +1149,22 @@ export const RegistryImportFlow = ({
   // The id of the apply currently in flight, so the failure handler retires
   // exactly the request it is handling and never another tab's.
   const applyIdRef = useRef<string | null>(null);
+  // The scope this apply was RECORDED under. Kept because the record does not
+  // always end up where the current binding points: a tenant resolution adopts
+  // it forward, and any other scope change leaves it behind.
+  const admittedScopeRef = useRef<string | null>(null);
   const settleThisApply = () => {
     const applyId = applyIdRef.current;
-    if (applyId !== null) {
-      unsettledRef.current.settleApply(applyId);
+    if (applyId === null) {
+      return;
+    }
+    // Current scope first (where adoption would have carried it), then the one
+    // that recorded it (where a non-adopting change would have left it). The
+    // other is a no-op — removal touches exactly one key.
+    unsettledRef.current.settleApply(applyId);
+    const admitted = admittedScopeRef.current;
+    if (admitted !== null) {
+      settleApplyIn(admitted, applyId);
     }
   };
 
@@ -1453,9 +1467,13 @@ export const RegistryImportFlow = ({
       const admission = await unsettledImport.admit(applyId);
       if (admission !== "admitted") {
         applyIdRef.current = null;
+        admittedScopeRef.current = null;
         setError(admissionRefusalNote(admission));
         return;
       }
+      // The claim was made under THIS scope; remember it so settlement can
+      // reach the record even if the namespace moves under the request.
+      admittedScopeRef.current = importScope ?? UNSCOPED_IMPORT_SCOPE;
       const result = await importChannels({
         file: approved.file,
         contentOwnerId: ownerId,
@@ -1467,7 +1485,7 @@ export const RegistryImportFlow = ({
         expectedPlanFingerprint: approved.plan.plan_fingerprint,
       });
       // A 2xx settles THIS apply: the write committed and the flow can say so.
-      unsettledRef.current.settleApply(applyId);
+      settleThisApply();
       setApplied(result);
       setStep("applied");
     } catch (caught) {

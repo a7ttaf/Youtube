@@ -569,6 +569,25 @@ export const adoptPendingApplies = (from: string, to: string): void => {
 };
 
 /**
+ * Retire one apply in a NAMED scope, rather than in whatever scope a hook
+ * binding happens to hold.
+ *
+ * A completed apply's record must come down wherever it actually lives, and
+ * the two ways it can move apart are opposites:
+ *   - a tenant RESOLUTION adopts it into the new scope, so the binding
+ *     captured at dispatch would no longer find it;
+ *   - any OTHER scope change (a different operator, a tenant switch) does not
+ *     adopt, so the latest binding is the one that would miss it.
+ * Settling in both the scope that recorded it and the scope in force now
+ * covers each; the other call is a no-op, because removal touches exactly one
+ * key (review #184, codex + qodo, from opposite directions).
+ */
+export const settleApplyIn = (scope: string, applyId: string): void => {
+  removeId(scope, applyId);
+  notify();
+};
+
+/**
  * Read and control the store. Safe to call from any number of components —
  * they all observe the same module state, so a raise in the flow is visible to
  * the notice in the view without either being wired to the other.

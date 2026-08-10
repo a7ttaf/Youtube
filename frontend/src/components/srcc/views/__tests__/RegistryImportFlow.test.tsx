@@ -973,6 +973,46 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(screen.getByRole("button", { name: /import csv/i })).toBeEnabled();
   });
 
+  it("settles an apply when the scope changes WITHOUT an adoption", async () => {
+    // The mirror of the migration case, and it fails the other way. A scope
+    // change that is not a same-user tenant resolution does NOT adopt — a
+    // different operator, or a tenant switch — so the record stays where it
+    // was recorded, and settling only through the latest binding is a no-op
+    // there: a completed apply would leave a pending key behind, warning about
+    // a write that demonstrably landed (review #184, qodo).
+    const before = importScopeFor("tenant-1", "user-1");
+    const afterOtherUser = importScopeFor("tenant-1", "user-2");
+    const apply = deferredResponse();
+    routeFetch({
+      importPost: (form) =>
+        form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : apply.pending,
+    });
+    const view = render(registryTree(DEFAULT_WRITE_LATCH, false, true, before));
+    await openImport();
+    await fillUpload();
+    fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(importPosts()).toHaveLength(2));
+
+    // A non-adopting scope change lands while the apply is outstanding.
+    view.rerender(registryTree(DEFAULT_WRITE_LATCH, false, true, afterOtherUser));
+    await act(async () => {
+      apply.release(jsonResponse(APPLY_RESULT));
+      await apply.pending;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
+    // Nothing pending survives in the scope that RECORDED it.
+    expect(
+      Object.keys(globalThis.localStorage).filter((key) => key.includes(before)),
+    ).toEqual([]);
+  });
+
   it("points an AUDIT-capable operator at the audit trail instead", async () => {
     // The other half of the capability branch. An operator who can open
     // AuditView gets the evidence that actually settles authorship; one who
