@@ -391,16 +391,19 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
   it("runs the happy path: upload -> dry-run preview -> apply -> applied counts + refetch", async () => {
     const file = await runDryRunToPreview(cleanImport);
 
-    // The dry-run POST is multipart FormData with exactly the four wire
-    // fields (cms_status omitted -> backend default INSIDE_CMS applies).
+    // The dry-run POST is multipart FormData with exactly the five wire
+    // fields. cms_status is sent explicitly (same value as the route default)
+    // so the echoed target can be checked against a value the client named.
     expect(importPosts()).toHaveLength(1);
     const dryRunForm = importPosts()[0];
     expect([...dryRunForm.keys()].sort()).toEqual([
+      "cms_status",
       "content_owner_id",
       "dry_run",
       "file",
       "reason",
     ]);
+    expect(dryRunForm.get("cms_status")).toBe("INSIDE_CMS");
     expect(dryRunForm.get("content_owner_id")).toBe("OWNERaaa");
     expect(dryRunForm.get("dry_run")).toBe("true");
     expect(dryRunForm.get("reason")).toBe("monthly roster load");

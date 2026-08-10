@@ -56,6 +56,11 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
 const PLAN_OUTCOMES = ["CREATE", "UPDATE", "UNCHANGED", "ERROR"] as const;
 const GROUP_ACTIONS = ["CREATE", "JOIN"] as const;
 
+/** A present, non-empty string — the backend never emits a blank for these. */
+const isNonBlankString = (value: unknown): boolean => {
+  return typeof value === "string" && value !== "";
+};
+
 const isOutcome = (value: unknown): boolean => {
   return typeof value === "string" && PLAN_OUTCOMES.some((outcome) => outcome === value);
 };
@@ -181,13 +186,43 @@ const hasConsistentGroupEffect = (row: Record<string, unknown>): boolean => {
   return (row.group_id === null) === (row.group_action === null);
 };
 
+/**
+ * A WRITABLE row must CARRY the values it will write. The field checks above
+ * are outcome-blind — `youtube_channel_id`, `channel_name` and
+ * `revenue_required` are each independently nullable, because an ERROR row
+ * legitimately carries none of them — so a CREATE/UPDATE/UNCHANGED row with all
+ * three null passes them, passes hasConsistentGroupEffect, and can still tally
+ * against `counts`. The preview then renders dashes where the channel, its
+ * name and its revenue flag belong, Apply stays enabled, and if the payload
+ * kept a valid fingerprint the backend goes on to write the REAL CSV values —
+ * which the operator was never shown (review #184, codex P2).
+ *
+ * The backend cannot emit such a row: every non-ERROR entry is constructed
+ * from a parsed row whose `youtube_channel_id` and `channel_name` are typed
+ * `str`, with `revenue_required` defaulted to a bool (channel_import.py, the
+ * UNCHANGED and CREATE/UPDATE entry constructions). ERROR rows are exempt here
+ * for the same reason they are nullable there: a parse failure has no channel
+ * to name.
+ */
+const hasWriteFields = (row: Record<string, unknown>): boolean => {
+  if (row.outcome === "ERROR") {
+    return true;
+  }
+  return (
+    isNonBlankString(row.youtube_channel_id) &&
+    isNonBlankString(row.channel_name) &&
+    typeof row.revenue_required === "boolean"
+  );
+};
+
 const isPlanRow = (row: unknown): boolean => {
   if (!isPlainObject(row)) {
     return false;
   }
   return (
     PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(row[field])) &&
-    hasConsistentGroupEffect(row)
+    hasConsistentGroupEffect(row) &&
+    hasWriteFields(row)
   );
 };
 
@@ -272,6 +307,38 @@ export const isChannelImportResult = (payload: unknown): payload is ChannelImpor
   );
 };
 
+/**
+ * The CMS status this flow imports under. Sent EXPLICITLY rather than left to
+ * the route's identical default, so the request states its own target: the
+ * response echoes `cms_status`, and a value the client never sent is one it
+ * cannot check the echo against. Import is CMS-only by design — the roster is
+ * a CMS content-owner roster — so there is one value, not a choice.
+ */
+const IMPORT_CMS_STATUS = "INSIDE_CMS";
+
+/**
+ * The echoed target must be the target that was ASKED for. `plan_fingerprint`
+ * covers the plan but cannot police this on its own: the digest is computed
+ * server-side over the request's actual owner and CMS status, so a malformed or
+ * misrouted body that keeps a valid fingerprint while changing
+ * `content_owner_id`/`cms_status` is internally consistent from the client's
+ * side — and the client cannot recompute the digest, which also takes the
+ * server-resolved tenant. Preview would then render the ALTERED target while
+ * Apply still sends the captured owner, so the write lands somewhere other
+ * than what the operator reviewed (review #184, codex P2).
+ *
+ * The owner is compared trimmed because that is exactly what the route echoes:
+ * `_validated_import_form` strips it once at the boundary and returns the
+ * normalized value, so a padded " owner-1 " legitimately comes back as
+ * "owner-1" and must not be read as a mismatch.
+ */
+const echoesRequestedTarget = (result: ChannelImportResult, contentOwnerId: string): boolean => {
+  return (
+    result.content_owner_id === contentOwnerId.trim() &&
+    result.cms_status === IMPORT_CMS_STATUS
+  );
+};
+
 /** Thrown when the backend answers 2xx with something that is not a plan. */
 export class ChannelImportShapeError extends Error {
   constructor() {
@@ -304,6 +371,7 @@ export const useChannelImport = (): ((
       const form = new FormData();
       form.append("file", file);
       form.append("content_owner_id", contentOwnerId);
+      form.append("cms_status", IMPORT_CMS_STATUS);
       form.append("dry_run", dryRun ? "true" : "false");
       form.append("reason", reason);
       if (expectedPlanFingerprint !== undefined) {
@@ -344,6 +412,14 @@ export const useChannelImport = (): ((
             expectedPlanFingerprint !== undefined &&
             result.plan_fingerprint !== expectedPlanFingerprint
           ) {
+            throw new ChannelImportShapeError();
+          }
+          // And it must describe the TARGET this request named. Unlike the
+          // fingerprint check this one applies to the dry run too, which is
+          // the important half: the preview is what the operator approves, so
+          // an altered target has to be refused before it is rendered rather
+          // than caught one step later on the apply.
+          if (!echoesRequestedTarget(result, contentOwnerId)) {
             throw new ChannelImportShapeError();
           }
           return result;

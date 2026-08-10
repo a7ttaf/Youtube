@@ -428,6 +428,41 @@ export type UnsettledImportValue = {
 
 let fallbackCounter = 0;
 
+// ============================================================================
+// Purpose: Mint the IDENTITY of one apply. Every durable pending-write record
+//   is keyed by the id this produces, so an id is what distinguishes two
+//   outstanding imports — including two in different documents.
+// Database/ORM: None (frontend) — the id is a localStorage key component, never
+//   sent to the backend and never part of any audited payload.
+// Standards: Ids must be unique ACROSS DOCUMENTS, not merely within one. A
+//   clock plus a counter satisfies the weaker property and fails the real one:
+//   two tabs read the same millisecond and both start their counter at 1, mint
+//   the same id, and then one tab's settleApply removes the OTHER tab's pending
+//   record — after which the duplicate-import guard is silently down over a
+//   write whose outcome nobody knows (review #184, qodo).
+//   Preference order is by ENTROPY, and each fallback exists for a runtime the
+//   one above it does not serve: crypto.randomUUID (absent outside a secure
+//   context), then the per-document salt from crypto.getRandomValues (which
+//   needs NO secure context, so plain HTTP still reaches it), then Math.random.
+//   The salt is drawn ONCE per document at module init, so every id from one
+//   document shares it and ids from two documents differ in it. Math.random is
+//   last and is still worth having: a collision then needs both documents to
+//   draw the same salt AND share a millisecond AND share a counter.
+//   Never THROWS. A runtime missing `performance` degrades to Date.now()
+//   rather than failing on the way to dispatching an apply, because throwing
+//   here would block the import outright — a worse outcome than a readable
+//   prefix being slightly less precise. The clock is a devtools convenience,
+//   not part of the uniqueness argument.
+// Blast Radius: Whether one tab can retire another tab's pending-import record.
+//   A collision weakens the duplicate-write guard on an audited bulk import; it
+//   carries no authorization meaning and reaches no request.
+// Connections:
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> calls
+//       newApplyId() once per apply and passes it to admit()/settleApply().
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> keyFor(), which
+//       makes this id the last component of the storage key.
+// ============================================================================
+
 /**
  * Per-DOCUMENT entropy for the fallback id, drawn once.
  *

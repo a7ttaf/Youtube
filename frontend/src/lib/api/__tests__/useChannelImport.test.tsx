@@ -139,14 +139,17 @@ describe("useChannelImport", () => {
     expect(urlOf(url)).toBe("/channels/import");
     expect((init as RequestInit).method).toBe("POST");
     const form = requireFormDataBody(init);
-    // Exactly the four wire fields — cms_status is omitted so the backend
-    // default (INSIDE_CMS) applies.
+    // Exactly the five wire fields. cms_status is sent EXPLICITLY, matching
+    // the route's own default: the response echoes it, and a value the client
+    // never sent is one it cannot check the echo against (review #184).
     expect([...form.keys()].sort()).toEqual([
+      "cms_status",
       "content_owner_id",
       "dry_run",
       "file",
       "reason",
     ]);
+    expect(form.get("cms_status")).toBe("INSIDE_CMS");
     expect(form.get("content_owner_id")).toBe("COabc");
     expect(form.get("dry_run")).toBe("true");
     expect(form.get("reason")).toBe("monthly roster import");
@@ -339,6 +342,132 @@ describe("useChannelImport", () => {
         reason: "monthly roster import",
       }),
     ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("rejects a 2xx describing a DIFFERENT content owner", async () => {
+    // The fingerprint cannot police this alone: the digest is computed
+    // server-side over the request's actual owner, and the client cannot
+    // recompute it (it also takes the server-resolved tenant), so a body that
+    // keeps a valid fingerprint while changing the owner is self-consistent
+    // from here. Preview would render the altered target while Apply still
+    // sends the captured owner (review #184, codex P2).
+    fetchMock().mockResolvedValue(
+      jsonResponse({ ...DRY_RUN_RESULT, content_owner_id: "COsomeone-else" }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("rejects a 2xx describing a different CMS status", async () => {
+    // The other half of the target, and the reason cms_status is now sent
+    // explicitly rather than left to the route default: an echo can only be
+    // checked against a value the request named.
+    fetchMock().mockResolvedValue(
+      jsonResponse({ ...DRY_RUN_RESULT, cms_status: "OUTSIDE_CMS" }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("accepts the echo of a PADDED owner, which the route strips", async () => {
+    // _validated_import_form strips the owner once at the boundary and plans
+    // against the normalized value, so " COabc " legitimately comes back as
+    // "COabc". Comparing raw would reject every response to a padded request.
+    fetchMock().mockResolvedValue(jsonResponse(DRY_RUN_RESULT));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "  COabc  ",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ content_owner_id: "COabc" });
+  });
+
+  it("rejects a writable row missing the values it would write", async () => {
+    // Each of these three fields is independently nullable because an ERROR
+    // row carries none of them, so an outcome-blind check passes a CREATE with
+    // all three null: Preview renders dashes where the channel, its name and
+    // its revenue flag belong, Apply stays enabled, and the backend goes on to
+    // write the real CSV values the operator never saw (review #184, codex P2).
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+        rows: [
+          {
+            ...DRY_RUN_RESULT.rows[0],
+            youtube_channel_id: null,
+            channel_name: null,
+            revenue_required: null,
+          },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("still accepts an ERROR row that carries none of them", async () => {
+    // The exemption is the whole reason those fields are nullable: a row that
+    // failed to parse has no channel to name. Requiring them everywhere would
+    // reject the payload the backend actually emits for a bad roster.
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 0, ERROR: 1 },
+        rows: [
+          {
+            row_number: 1,
+            youtube_channel_id: null,
+            outcome: "ERROR",
+            channel_name: null,
+            group_id: null,
+            group_action: null,
+            revenue_required: null,
+            revenue_source_status: null,
+            changes: {},
+            reason: "channel_name is empty",
+          },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { ERROR: 1 } });
   });
 
   it("rejects a 2xx describing a plan other than the one bound", async () => {

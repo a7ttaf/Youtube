@@ -830,23 +830,6 @@ const TenantProofTag = ({ label }: { label: string }) => {
   );
 };
 
-// ============================================================================
-// Purpose: Top-level SRCC shell. Hydrates the authenticated session from
-//          /session/me, then renders: a loading state while the bootstrap runs;
-//          the fail-closed <AccessDeniedState/> when hydration failed (401/403/
-//          network) OR the principal is disabled; otherwise the dashboard gated
-//          by the backend-DERIVED session.capabilities. The dev-only role
-//          selector drives the DISPLAYED label only — every capability gate
-//          comes from the session, never from the role string, so dev preview
-//          can never fabricate a capability the backend did not grant.
-// Database/ORM: None (frontend).
-// Standards: Hooks are called unconditionally before any early return. Fail
-//            closed: loading -> loading, error/disabled -> access denied.
-// Blast Radius: Authorization (UI gating). No graph projection impact detected.
-// Connections:
-//   - File: frontend/src/contexts/SessionContext.tsx -> useSessionBootstrap.
-//   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
-// ============================================================================
 /**
  * Namespace for this operator's unsettled-import records.
  *
@@ -879,6 +862,23 @@ const isImportScopeSettled = (session: SessionMe, tenantSettled: boolean): boole
   return session.tenant?.id != null || tenantSettled;
 };
 
+// ============================================================================
+// Purpose: Top-level SRCC shell. Hydrates the authenticated session from
+//          /session/me, then renders: a loading state while the bootstrap runs;
+//          the fail-closed <AccessDeniedState/> when hydration failed (401/403/
+//          network) OR the principal is disabled; otherwise the dashboard gated
+//          by the backend-DERIVED session.capabilities. The dev-only role
+//          selector drives the DISPLAYED label only — every capability gate
+//          comes from the session, never from the role string, so dev preview
+//          can never fabricate a capability the backend did not grant.
+// Database/ORM: None (frontend).
+// Standards: Hooks are called unconditionally before any early return. Fail
+//            closed: loading -> loading, error/disabled -> access denied.
+// Blast Radius: Authorization (UI gating). No graph projection impact detected.
+// Connections:
+//   - File: frontend/src/contexts/SessionContext.tsx -> useSessionBootstrap.
+//   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
+// ============================================================================
 const AppShell = () => {
   const [view, setView] = useState<ViewKey>("command");
   const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
