@@ -887,9 +887,11 @@ const PreviewStep = ({
           detail={error}
         />
       ) : null}
-      {/* The way OUT of "unknown". Re-planning the same roster settles it,
-          because the apply is one all-or-nothing transaction: all-UNCHANGED
-          means it committed. Repeatable, since the original POST may still be
+      {/* The way out of "unknown" is EVIDENCE, not a verdict. Re-planning the
+          same roster reports whether the registry currently matches it; it
+          cannot say which request made it match, so the flow never advances
+          to Applied on this and the outcome stays unknown until the audit
+          trail settles it. Repeatable, since the original POST may still be
           in flight when the operator first asks. */}
       {indeterminate ? (
         <div className="action-row">
@@ -1068,12 +1070,18 @@ export const RegistryImportFlow = ({
   /**
    * Turn a refreshed plan into the strongest claim it actually supports.
    *
+   * NEITHER branch establishes authorship, and the copy for each says so.
+   *
    * All-UNCHANGED means the registry matches the roster — the operationally
-   * important fact — but NOT that this request is what made it match, so the
+   * important fact — but not that this request is what made it match, so the
    * flow stays on Preview instead of advancing to Applied and points at the
-   * audit trail for authorship. Anything still CREATE/UPDATE means the write
-   * has not landed (yet); the original POST may still be executing, so the
-   * note says "check again", never "it failed".
+   * audit trail.
+   *
+   * Remaining CREATE/UPDATE work is the mirror image and was wrong for the
+   * same reason: it means the registry DIVERGES from the roster, not that the
+   * write failed. A completed import followed by another writer's edit
+   * produces exactly this plan. The note therefore says "check again" when it
+   * may simply still be running, and never "it did not commit".
    */
   const settleFromReplan = (refreshed: ChannelImportResult) => {
     setPreview(refreshed);

@@ -261,6 +261,53 @@ describe("useChannelImport", () => {
     ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
 
+  it("rejects a plan whose counts are not counts", async () => {
+    // CountsStrip coerces during `value > 0`, so a string renders as a plan
+    // total and a negative or NaN silently HIDES an outcome the operator
+    // needed to see — on a payload that stays applicable (review #184).
+    const badCounts = [
+      { CREATE: "1" },
+      { CREATE: -1 },
+      { CREATE: 1.5 },
+      { CREATE: Number.NaN },
+      // A key the strip has no label for is a plan shape this UI cannot read.
+      { NOT_AN_OUTCOME: 1 },
+    ];
+
+    for (const counts of badCounts) {
+      fetchMock().mockResolvedValue(jsonResponse({ ...DRY_RUN_RESULT, counts }));
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+      ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+    }
+  });
+
+  it("accepts a zero count, which is a real tally", async () => {
+    // The complement: zero is legitimate (the preview hides zero rows rather
+    // than rejecting the plan), so the check must not confuse "empty" with
+    // "malformed".
+    fetchMock().mockResolvedValue(
+      jsonResponse({ ...DRY_RUN_RESULT, counts: { CREATE: 0, UNCHANGED: 2 } }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { CREATE: 0, UNCHANGED: 2 } });
+  });
+
   it("rejects a 2xx missing dry_run, which selects the flow's next step", async () => {
     const noDryRun = { ...DRY_RUN_RESULT } as Record<string, unknown>;
     delete noDryRun.dry_run;

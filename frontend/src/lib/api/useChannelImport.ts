@@ -65,6 +65,28 @@ const isGroupAction = (value: unknown): boolean => {
 };
 
 /**
+ * `counts` is a tally, so every value must be a count: a finite, non-negative
+ * INTEGER. Accepting any plain object let a malformed or legacy payload put a
+ * string, a float, a negative, or NaN in there, and CountsStrip coerces during
+ * `value > 0` — so `"3"` renders as a plan total and `-1` or `NaN` silently
+ * hides an outcome the operator needed to see, on a payload that stays
+ * applicable (review #184). Unknown keys are rejected too: a count the strip
+ * has no label for is a plan shape this UI does not understand.
+ */
+const isCountMap = (value: unknown): boolean => {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  return Object.entries(value).every(
+    ([outcome, count]) =>
+      PLAN_OUTCOMES.some((declared) => declared === outcome) &&
+      typeof count === "number" &&
+      Number.isInteger(count) &&
+      count >= 0,
+  );
+};
+
+/**
  * The value types a diff side can hold. The backend only ever puts inventory
  * scalars here — names and cms_status are strings, revenue_required is a
  * boolean, content_owner_id is nullable — so anything else is a payload the
@@ -161,7 +183,7 @@ const isPlanRow = (row: unknown): boolean => {
  */
 const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
   ["rows", (value) => Array.isArray(value) && value.every(isPlanRow)],
-  ["counts", isPlainObject],
+  ["counts", isCountMap],
   ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
   ["content_owner_id", (value) => typeof value === "string"],
   ["cms_status", (value) => typeof value === "string"],
