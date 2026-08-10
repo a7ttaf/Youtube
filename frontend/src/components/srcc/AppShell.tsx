@@ -625,6 +625,7 @@ const ViewRouter = ({
         canManageRegistry={permissions.canManageRegistry}
         canImportChannels={permissions.canImportChannels}
         canViewFinance={permissions.canViewFinance}
+        canViewAudit={permissions.canViewAudit}
         onOpenTrace={onOpenTrace}
       />
     ),

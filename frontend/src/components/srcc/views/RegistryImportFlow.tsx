@@ -663,12 +663,21 @@ const hasUnverifiableGroupEffects = (plan: ChannelImportResult): boolean => {
   );
 };
 
-/** Copy for a re-plan that still shows work the registry has not taken. */
+/**
+ * Copy for a re-plan that still shows work the registry has not taken.
+ *
+ * Says DIVERGENCE, never "your import failed" — the inverse branch cannot
+ * establish authorship any more than the matching one can. The apply may well
+ * have committed and another writer may have edited or archived a row since,
+ * which puts UPDATE or ERROR work back into the plan. So this reports the
+ * comparison and leaves the request's outcome unknown (review #184).
+ */
 const RECONCILE_PENDING_NOTE =
-  "Still not committed: the refreshed plan below shows changes the registry " +
-  "does not have yet. The original request may still be running, so check " +
-  "again in a moment. Do not re-import until this settles — a second apply " +
-  "while the first is still running would record it twice.";
+  "The registry does not match this roster: the refreshed plan below still " +
+  "shows work. That does NOT establish that your import failed — it may have " +
+  "committed and been changed since. If the request is simply still running, " +
+  "this will settle shortly, so check again in a moment. Do not re-import " +
+  "until you know which it was.";
 
 /**
  * Copy for a re-plan whose channels all match but whose rows carry group

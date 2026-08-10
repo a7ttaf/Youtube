@@ -219,12 +219,10 @@ type RowActions = {
 const RegistryPanelHeader = ({
   canImportChannels,
   importOpen,
-  importUnsettled,
   onStartImport,
 }: {
   canImportChannels: boolean;
   importOpen: boolean;
-  importUnsettled: boolean;
   onStartImport: () => void;
 }) => {
   return (
@@ -238,12 +236,7 @@ const RegistryPanelHeader = ({
           <button
             className="primary-button"
             type="button"
-            disabled={importOpen || importUnsettled}
-            title={
-              importUnsettled
-                ? "An earlier import has not been accounted for — resolve the notice below before importing again"
-                : undefined
-            }
+            disabled={importOpen}
             onClick={onStartImport}
           >
             Import CSV
@@ -499,10 +492,20 @@ const RegistryTable = ({
 //   auto-settle, because `outcome` is computed from channel inventory and the
 //   planner never loads memberships — that operator would have no way out at
 //   all. So the exit is left open and the hazard is made loud and PERSISTENT:
-//   it survives reloads, and only an explicit acknowledgement clears it.
-//   "Import CSV" stays disabled throughout, which is the actual harm this
-//   closes — a second import launched off a stale table would append a second
-//   unconditional CHANNEL_IMPORTED for a write that already committed.
+//   it survives reloads, other views, and the document, and only an explicit
+//   acknowledgement clears it.
+//   "Import CSV" deliberately stays LIVE. The duplicate it once guarded is
+//   already unreachable a layer down — Apply is disabled and the dispatch is
+//   refused while any apply is unaccounted for — so disabling the opener
+//   bought no safety and cost the operator the only reconciliation surface
+//   they have: re-opening the importer runs the READ-ONLY dry run against the
+//   same roster, which is what tells them whether the registry matches it.
+//   That matters most for the operators who cannot read the audit trail at
+//   all: MANAGE_CHANNELS + MANAGE_GROUPS does not imply VIEW_AUDIT_LOG, so
+//   the seeded revenue_operations_admin and data_steward roles can import but
+//   cannot open AuditView. Telling THEM to "check the audit trail" is advice
+//   they cannot follow, so the notice reads their capability and says
+//   something they can act on (review #184, codex P2).
 // Blast Radius: Whether an operator can start a duplicate audited bulk import
 //   after an import of unknown outcome. No requests beyond the registry GET,
 //   no authorization meaning.
@@ -513,9 +516,11 @@ const RegistryTable = ({
 //       tool for an apply whose response was lost.
 // ============================================================================
 const UnsettledImportNotice = ({
+  canViewAudit,
   onReload,
   onAcknowledge,
 }: {
+  canViewAudit: boolean;
   onReload: () => void;
   onAcknowledge: () => void;
 }) => {
@@ -524,16 +529,29 @@ const UnsettledImportNotice = ({
       <strong>An import may still be committing.</strong>{" "}
       <span>
         Its response never arrived, so the rows below may predate it. Reload
-        before judging the registry, and check the audit trail for a
-        CHANNEL_IMPORTED entry rather than re-importing — a second import would
-        record the same roster twice.
+        before judging the registry, and do not re-import until you know what
+        happened — a second import would record the same roster twice.
+      </span>{" "}
+      <span>
+        {canViewAudit
+          ? "The audit trail settles it: look for a CHANNEL_IMPORTED entry for " +
+            "this roster. You can also re-open Import CSV and preview the same " +
+            "file — Apply stays blocked until this is accounted for."
+          : "Your role cannot open the audit trail, which is the only place " +
+            "that says which import wrote what. Re-open Import CSV and preview " +
+            "the same file to see whether the registry already matches it — " +
+            "Apply stays blocked until this is accounted for — and ask someone " +
+            "with audit access to confirm the CHANNEL_IMPORTED entry before " +
+            "importing it again."}
       </span>
       <div className="view-actions">
         <button className="ghost-button" type="button" onClick={onReload}>
           Reload registry
         </button>
         <button className="ghost-button" type="button" onClick={onAcknowledge}>
-          I have checked the audit trail
+          {canViewAudit
+            ? "I have checked the audit trail"
+            : "This import is accounted for"}
         </button>
       </div>
     </div>
@@ -553,6 +571,7 @@ const RegistryMainPanel = ({
   unitsById,
   importOpen,
   importUnsettled,
+  canViewAudit,
   onStartImport,
   onCancelImport,
   onImportDone,
@@ -565,6 +584,7 @@ const RegistryMainPanel = ({
   unitsById: Map<string, OrgUnit>;
   importOpen: boolean;
   importUnsettled: boolean;
+  canViewAudit: boolean;
   onStartImport: () => void;
   onCancelImport: () => void;
   onImportDone: () => void;
@@ -575,7 +595,6 @@ const RegistryMainPanel = ({
       <RegistryPanelHeader
         canImportChannels={canImportChannels}
         importOpen={importOpen}
-        importUnsettled={importUnsettled}
         onStartImport={onStartImport}
       />
       {importOpen ? (
@@ -584,6 +603,7 @@ const RegistryMainPanel = ({
         <>
           {importUnsettled ? (
             <UnsettledImportNotice
+              canViewAudit={canViewAudit}
               onReload={channelState.reload}
               onAcknowledge={onAcknowledgeUnsettled}
             />
@@ -1107,11 +1127,16 @@ const RegistryView = ({
   canManageRegistry,
   canImportChannels,
   canViewFinance,
+  canViewAudit = false,
   onOpenTrace,
 }: {
   canManageRegistry: boolean;
   canImportChannels: boolean;
   canViewFinance: boolean;
+  /** Whether AuditView is reachable at all. Defaults to the SAFE assumption:
+   * without it the notice must not send the operator somewhere they will be
+   * refused. */
+  canViewAudit?: boolean;
   onOpenTrace?: (channelId: string) => void;
 }) => {
   const channelState = useChannels();
@@ -1175,6 +1200,7 @@ const RegistryView = ({
           unitsById={unitsById}
           importOpen={importing}
           importUnsettled={unsettledImport.unsettled}
+          canViewAudit={canViewAudit}
           onStartImport={() => setImporting(true)}
           onCancelImport={() => setImporting(false)}
           onImportDone={() => {

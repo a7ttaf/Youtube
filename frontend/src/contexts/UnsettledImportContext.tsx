@@ -28,6 +28,13 @@ import { useCallback, useMemo, useSyncExternalStore } from "react";
 //   first to settle would clear the other's protection, so a later lost
 //   response would find the guard already down (review #184, codex P1). Each
 //   apply carries its own id; settling removes only that id.
+//   One KEY PER APPLY, never a shared array. An array needs read-modify-write,
+//   and that is not atomic across documents: two tabs dispatching before
+//   either sees the other's storage event both read the same list and the
+//   second setItem drops the first id — after which one settle takes the guard
+//   down while a genuinely unknown write is still outstanding. Per-key writes
+//   touch only the entry they own, so there is no shared cell to lose a write
+//   on and nothing to serialize (review #184, codex P1).
 //   Cleared ONLY by an established outcome: a 2xx apply, a definite rejection,
 //   or the operator stating they have checked the audit trail — which clears
 //   ALL of them, because that is the claim the operator is actually making. A
@@ -48,7 +55,10 @@ import { useCallback, useMemo, useSyncExternalStore } from "react";
 //       evidence only, which is why an unknown outcome stays unknown.
 // ============================================================================
 
-/** The mirror's key. Its PRESENCE is the flag; the value is unused. */
+/**
+ * Key PREFIX. Each pending apply gets `${prefix}.${applyId}`; the presence of
+ * such a key is the record, and its value is never read.
+ */
 export const UNSETTLED_IMPORT_STORAGE_KEY = "ums.unsettledChannelImport";
 
 /**
@@ -72,32 +82,31 @@ const notify = (): void => {
  * outright or throw on write, and neither may take down the shell — the cost
  * of a refusal is cross-document persistence, not the guard itself.
  *
- * A key holding something unparseable is treated as "still pending", not as
- * empty: a corrupted mirror is a reason to keep the guard up, never to drop
- * it. The sentinel id makes that state visible rather than silently coercing.
+ * The KEY is the record; its value is never read. That is what removes the
+ * read-modify-write, and with it the lost-update race and any need to parse
+ * (so there is no corrupt-value branch to get wrong either).
  */
-const CORRUPT_SENTINEL = "unreadable";
+const keyFor = (applyId: string): string => `${UNSETTLED_IMPORT_STORAGE_KEY}.${applyId}`;
 
-const parseIds = (raw: string | null): readonly string[] => {
-  if (raw === null) {
-    return [];
-  }
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.every((id) => typeof id === "string")) {
-      return parsed as readonly string[];
+const isApplyKey = (key: string): boolean => {
+  return key.startsWith(`${UNSETTLED_IMPORT_STORAGE_KEY}.`);
+};
+
+const storedApplyKeys = (): string[] => {
+  const store = globalThis.localStorage;
+  const keys: string[] = [];
+  for (let index = 0; index < store.length; index += 1) {
+    const key = store.key(index);
+    if (key !== null && isApplyKey(key)) {
+      keys.push(key);
     }
-  } catch {
-    // Fall through to the sentinel below.
   }
-  return [CORRUPT_SENTINEL];
+  return keys;
 };
 
 const readIds = (): readonly string[] => {
   try {
-    const stored = parseIds(
-      globalThis.localStorage.getItem(UNSETTLED_IMPORT_STORAGE_KEY),
-    );
+    const stored = storedApplyKeys();
     // Either source holding an id WINS. A browser that reads storage happily
     // but throws on write (quota) would otherwise lose an apply recorded only
     // in memory — a fail-open on the one control this guards.
@@ -112,28 +121,49 @@ const readFlag = (): boolean => {
   return readIds().length > 0;
 };
 
-const writeIds = (ids: readonly string[]): void => {
-  try {
-    if (ids.length > 0) {
-      globalThis.localStorage.setItem(UNSETTLED_IMPORT_STORAGE_KEY, JSON.stringify(ids));
-    } else {
-      globalThis.localStorage.removeItem(UNSETTLED_IMPORT_STORAGE_KEY);
-      memoryIds = [];
-    }
-  } catch {
-    // Storage refused this write. The in-memory copy is the whole guard now.
-    memoryIds = ids;
-  }
+const rememberInMemory = (applyId: string, pending: boolean): void => {
+  memoryIds = pending
+    ? [...memoryIds.filter((id) => id !== applyId), applyId]
+    : memoryIds.filter((id) => id !== applyId);
 };
 
 /**
- * Read-modify-write against the CURRENT mirror rather than a React snapshot:
- * another tab may have added or removed an id since this document last
- * rendered, and clobbering its entry is exactly the bug identity solves.
+ * Record one apply as pending. Touches ONLY this apply's key, so a concurrent
+ * tab doing the same thing cannot drop it and it cannot drop theirs.
  */
-const mutateIds = (change: (ids: readonly string[]) => readonly string[]): void => {
-  writeIds(change(readIds()));
-  notify();
+const addId = (applyId: string): void => {
+  try {
+    globalThis.localStorage.setItem(keyFor(applyId), "1");
+  } catch {
+    // Storage refused this write. The in-memory copy is the whole guard now.
+    rememberInMemory(applyId, true);
+  }
+};
+
+/** Retire one apply. Same per-key isolation, in the other direction. */
+const removeId = (applyId: string): void => {
+  try {
+    globalThis.localStorage.removeItem(keyFor(applyId));
+  } catch {
+    // Ignored: rememberInMemory below is the whole guard when storage refuses.
+  }
+  rememberInMemory(applyId, false);
+};
+
+/**
+ * Retire every apply this document can see. Removal-only, so a key another tab
+ * adds while this runs simply survives — the guard stays UP, which is the safe
+ * direction for a race on an operator's "I have checked" statement.
+ */
+const removeAllIds = (): void => {
+  try {
+    for (const key of storedApplyKeys()) {
+      globalThis.localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignored: the in-memory clear below still applies.
+  }
+  memoryIds = [];
 };
 
 const subscribe = (listener: () => void): (() => void) => {
@@ -142,7 +172,7 @@ const subscribe = (listener: () => void): (() => void) => {
   // cannot loop against our own writes. A null key means the whole store was
   // cleared, so re-read rather than trusting newValue.
   const onStorage = (event: StorageEvent) => {
-    if (event.key === null || event.key === UNSETTLED_IMPORT_STORAGE_KEY) {
+    if (event.key === null || isApplyKey(event.key)) {
       listener();
     }
   };
@@ -185,13 +215,16 @@ export const newApplyId = (): string => {
 export const useUnsettledImport = (): UnsettledImportValue => {
   const unsettled = useSyncExternalStore(subscribe, readFlag, readFlag);
   const trackApply = useCallback((applyId: string) => {
-    mutateIds((ids) => (ids.includes(applyId) ? ids : [...ids, applyId]));
+    addId(applyId);
+    notify();
   }, []);
   const settleApply = useCallback((applyId: string) => {
-    mutateIds((ids) => ids.filter((id) => id !== applyId));
+    removeId(applyId);
+    notify();
   }, []);
   const acknowledgeAll = useCallback(() => {
-    mutateIds(() => []);
+    removeAllIds();
+    notify();
   }, []);
   return useMemo(
     () => ({ unsettled, trackApply, settleApply, acknowledgeAll }),

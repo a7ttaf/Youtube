@@ -284,11 +284,19 @@ const renderRegistry = (
     reason: null,
     setReason: () => undefined,
   },
+  // Defaults to the capability-poor operator: the seeded import roles hold
+  // MANAGE_CHANNELS + MANAGE_GROUPS but NOT VIEW_AUDIT_LOG.
+  canViewAudit = false,
 ) => {
   return render(
     <TenantProvider initialSlug="ums">
       <WriteInFlightProvider value={writeLatch}>
-        <RegistryView canManageRegistry canImportChannels canViewFinance />
+        <RegistryView
+          canManageRegistry
+          canImportChannels
+          canViewFinance
+          canViewAudit={canViewAudit}
+        />
       </WriteInFlightProvider>
     </TenantProvider>,
   );
@@ -702,29 +710,33 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // The warning outlives the flow that raised it.
     const notice = await screen.findByRole("status");
     expect(notice).toHaveTextContent(/may still be committing/i);
-    expect(notice).toHaveTextContent(/audit trail/i);
+    // RegistryView here has no canViewAudit, which is the seeded
+    // revenue_operations_admin / data_steward case: MANAGE_CHANNELS +
+    // MANAGE_GROUPS does not imply VIEW_AUDIT_LOG. The notice must not send
+    // them to a view that will refuse them (review #184, codex P2).
+    expect(notice).toHaveTextContent(/cannot open the audit trail/i);
+    expect(notice).toHaveTextContent(/re-open import csv and preview/i);
 
-    // And the duplicate is unreachable while it stands.
-    const importButton = screen.getByRole("button", { name: /import csv/i });
-    expect(importButton).toBeDisabled();
-    expect(importButton.getAttribute("title")).toMatch(/not been accounted for/iu);
+    // The importer stays OPENABLE on purpose — re-previewing the same roster
+    // is the operator's reconciliation surface, and for a role without audit
+    // access it is the only one they have. The duplicate is blocked a layer
+    // down instead, which the "ANOTHER tab" test pins directly.
+    expect(screen.getByRole("button", { name: /import csv/i })).toBeEnabled();
 
     // Reloading does NOT clear it — a fresh GET still cannot prove the write
     // landed, so only an explicit acknowledgement retires the notice.
     fireEvent.click(within(notice).getByRole("button", { name: /reload registry/i }));
     await waitFor(() => expect(channelGetCount()).toBe(3));
     expect(screen.getByRole("status")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /import csv/i })).toBeDisabled();
 
     fireEvent.click(
       within(screen.getByRole("status")).getByRole("button", {
-        name: /checked the audit trail/i,
+        name: /accounted for/i,
       }),
     );
     await waitFor(() =>
       expect(screen.queryByRole("status")).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole("button", { name: /import csv/i })).toBeEnabled();
 
     // Still exactly two POSTs — nothing here re-submitted the roster.
     expect(importPosts()).toHaveLength(2);
@@ -743,20 +755,50 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // The other tab dispatches. jsdom shares one localStorage but does not
     // synthesise the cross-document event, so raise it explicitly — this is
     // exactly what a real second tab's write delivers here.
-    globalThis.localStorage.setItem(
-      "ums.unsettledChannelImport",
-      JSON.stringify(["apply-from-another-tab"]),
-    );
-    fireEvent(
-      globalThis.window,
-      new StorageEvent("storage", { key: "ums.unsettledChannelImport" }),
-    );
+    const otherTabKey = "ums.unsettledChannelImport.apply-from-another-tab";
+    globalThis.localStorage.setItem(otherTabKey, "1");
+    fireEvent(globalThis.window, new StorageEvent("storage", { key: otherTabKey }));
 
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^apply$/i })).toBeDisabled(),
     );
     // Only the dry run went out; this tab's apply never dispatched.
     expect(importPosts()).toHaveLength(1);
+  });
+
+  it("points an AUDIT-capable operator at the audit trail instead", async () => {
+    // The other half of the capability branch. An operator who can open
+    // AuditView gets the evidence that actually settles authorship; one who
+    // cannot must not be sent there (review #184, codex P2).
+    const applyGate = deferredResponse();
+    routeFetch({
+      importPost: (form) =>
+        form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : applyGate.pending,
+    });
+    renderRegistry(undefined, true);
+    await openImport();
+    await fillUpload();
+    fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^cancel$/i })).toBeDisabled(),
+    );
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText(/may have committed/i)).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent(/CHANNEL_IMPORTED/);
+    expect(notice).not.toHaveTextContent(/cannot open the audit trail/i);
+    expect(
+      within(notice).getByRole("button", { name: /checked the audit trail/i }),
+    ).toBeInTheDocument();
   });
 
   it("does not raise the unsettled notice after a normal applied exit", async () => {
@@ -1079,7 +1121,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     );
     // Explicitly NOT applied, and not falsely reported as "did not commit".
     expect(screen.queryByRole("group", { name: "Import applied" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/still not committed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/does not match this roster/i)).not.toBeInTheDocument();
   });
 
   it("freezes the roster inputs while an apply's outcome is unknown", async () => {
@@ -1104,7 +1146,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /check whether it landed/iu }));
 
-    await waitFor(() => expect(screen.getByText(/still not committed/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/does not match this roster/i)).toBeInTheDocument());
     // Still on Preview, still offering another check — not a false verdict.
     expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
     expect(

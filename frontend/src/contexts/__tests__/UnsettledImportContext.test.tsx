@@ -16,9 +16,14 @@ beforeEach(() => {
   globalThis.localStorage.clear();
 });
 
-const storedIds = (): unknown => {
-  const raw = globalThis.localStorage.getItem(UNSETTLED_IMPORT_STORAGE_KEY);
-  return raw === null ? null : JSON.parse(raw);
+/** The per-apply keys the mirror currently holds, suffix only. */
+const storedIds = (): string[] => {
+  const store = globalThis.localStorage;
+  const prefix = `${UNSETTLED_IMPORT_STORAGE_KEY}.`;
+  return Array.from({ length: store.length }, (_unused, index) => store.key(index))
+    .filter((key): key is string => key !== null && key.startsWith(prefix))
+    .map((key) => key.slice(prefix.length))
+    .sort();
 };
 
 describe("unsettled import store", () => {
@@ -39,7 +44,7 @@ describe("unsettled import store", () => {
 
     act(() => result.current.settleApply("apply-tab-b"));
     expect(result.current.unsettled).toBe(false);
-    expect(storedIds()).toBeNull();
+    expect(storedIds()).toEqual([]);
   });
 
   it("settling an id it does not hold changes nothing", () => {
@@ -64,17 +69,41 @@ describe("unsettled import store", () => {
     act(() => result.current.acknowledgeAll());
 
     expect(result.current.unsettled).toBe(false);
-    expect(storedIds()).toBeNull();
+    expect(storedIds()).toEqual([]);
   });
 
-  it("treats an unreadable mirror as still pending", () => {
-    // Fail closed. A corrupted value is a reason to keep the guard up, never
-    // to drop it.
-    globalThis.localStorage.setItem(UNSETTLED_IMPORT_STORAGE_KEY, "{not json");
+  it("does not lose a write when two tabs record an apply concurrently", () => {
+    // The lost-update race a shared array had: both documents read the same
+    // list before either saw the other's storage event, and the second write
+    // dropped the first id. One key per apply has no shared cell to lose
+    // (review #184, codex P1).
+    const tabA = renderHook(() => useUnsettledImport());
+    const tabB = renderHook(() => useUnsettledImport());
+
+    // Interleaved deliberately: neither hook re-reads between the two writes.
+    act(() => {
+      tabA.result.current.trackApply("apply-tab-a");
+      tabB.result.current.trackApply("apply-tab-b");
+    });
+    expect(storedIds()).toEqual(["apply-tab-a", "apply-tab-b"]);
+
+    act(() => tabA.result.current.settleApply("apply-tab-a"));
+
+    // Tab B's request is still unaccounted for, and both documents say so.
+    expect(storedIds()).toEqual(["apply-tab-b"]);
+    expect(tabA.result.current.unsettled).toBe(true);
+    expect(tabB.result.current.unsettled).toBe(true);
+  });
+
+  it("ignores keys that are not per-apply records", () => {
+    // The prefix must not swallow unrelated app storage, and the bare prefix
+    // itself is not a record.
+    globalThis.localStorage.setItem("ums.somethingElse", "1");
+    globalThis.localStorage.setItem(UNSETTLED_IMPORT_STORAGE_KEY, "1");
 
     const { result } = renderHook(() => useUnsettledImport());
 
-    expect(result.current.unsettled).toBe(true);
+    expect(result.current.unsettled).toBe(false);
   });
 
   it("still guards this document when storage refuses every write", () => {

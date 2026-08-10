@@ -948,7 +948,9 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu),
     );
-    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
 
     // Follow the notice's advice: nav is free, so the trip is possible at all.
     expect(navButton("Audit Log")).toBeEnabled();
@@ -961,7 +963,9 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     fireEvent.click(navButton("Channel Registry"));
     await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
     expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
-    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
 
     // Only the explicit acknowledgement retires it.
     fireEvent.click(
@@ -970,7 +974,7 @@ describe("AppShell navigation latch during an un-abortable write", () => {
       }),
     );
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled(),
+      expect(screen.queryByRole("status")).not.toBeInTheDocument(),
     );
   });
 
@@ -1008,7 +1012,9 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
 
     expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
-    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
   });
 
   it("UNSETTLED IMPORT: leaving by the SIDEBAR still raises the warning", async () => {
@@ -1042,7 +1048,9 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
 
     expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
-    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
   });
 
   it("UNSETTLED IMPORT: a tab closed mid-apply still warns the next document", async () => {
@@ -1070,7 +1078,9 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
 
     expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
-    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
   });
 
   it("UNSETTLED IMPORT: an established outcome clears the flag", async () => {
@@ -1129,6 +1139,8 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       /may still be committing/iu,
     );
-    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
   });
 });
