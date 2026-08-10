@@ -823,8 +823,25 @@ single P-tier above.
   but unmapped in `affected.yml`; since that classifier/mapping gap had recurred
   three times, the bats case now **derives** its extension list from
   `changeset.sh` rather than hand-listing files.
-  Combined suite: `test_test_layout.bats` (43) + `test_js_lane.bats` (44) = 87
-  cases, 109 across every suite the `tests-shell` lane runs, 0 failures. The node lane was run end
+  A ninth round found three more, one P1. `test-layout`'s result was **cached**:
+  `_changeset_content_hash` hashes worktree copies of the changed paths, so
+  staging a narrowed `vitest.config.ts` while keeping the passing worktree copy
+  leaves both the path list and the content hash identical, and the guard would
+  serve a cached PASS for a commit it never inspected — defeating the
+  index-awareness added the round before. A `_check_is_cacheable` predicate now
+  excludes it on both the read and the write side; the check costs under a
+  second, so caching it bought nothing. A `ci/config/*.yml`-only change emitted
+  `lint-yaml` and nothing else, filtering the `tests-shell` lane even though
+  `test_js_lane.bats` asserts on `affected.yml` and `checks.yml` directly — the
+  lane now also runs when any `ci/` path changes, keyed on path rather than
+  language so unrelated yaml does not pull in a four-minute suite. And the
+  `.gitignore` negations added earlier covered only `frontend/tests/lib/` at the
+  tree root, so a mirrored `frontend/tests/features/lib/widget.test.ts` was
+  still silently untracked — the same defect this PR already fixed, one level
+  deeper. Negations now apply at any depth under both `tests/` and `src/`, with
+  a case asserting `node_modules` is still ignored.
+  Combined suite: `test_test_layout.bats` (43) + `test_js_lane.bats` (49) = 92
+  cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
   earlier revision of this paragraph quoted stale ones.

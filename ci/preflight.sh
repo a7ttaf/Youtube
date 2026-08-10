@@ -364,6 +364,17 @@ _check_should_skip() {
           ;;
       esac
     done
+    # The bats suites assert on the gate's scripts *and* on the config those
+    # scripts read: test_js_lane.bats validates ci/config/affected.yml and
+    # ci/config/checks.yml directly. A yaml-only changeset emits lint-yaml and
+    # nothing else, which would filter this lane and let a broken mapping past
+    # the very test written to catch it. Keyed on the path, not the language, so
+    # unrelated yaml elsewhere in the repo does not pull in a 4-minute suite.
+    if [ "$found" = "0" ] && [ "$label" = "tests-shell" ] \
+      && printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" | grep -qE '(^|[[:space:]])ci/'; then
+      found=1
+    fi
+
     if [ "$found" = "0" ]; then
       # Always-run checks are never skipped by changeset.
       # test-layout belongs here rather than in the reverse mapping above: the
@@ -380,6 +391,22 @@ _check_should_skip() {
   fi
 
   return 1
+}
+
+# Checks whose result is not a function of the changed-file list, so a cache
+# entry keyed on that list can be served when the answer has actually changed.
+#
+# test-layout reads the git index and walks the whole frontend tree.
+# _changeset_content_hash hashes worktree copies of the changed paths, so
+# staging a narrowed vitest.config.ts while keeping the previously passing
+# worktree copy leaves both the path list and the content hash identical — and
+# the guard would report a cached PASS for a commit it never inspected. It costs
+# under a second; caching it buys nothing worth that hole.
+_check_is_cacheable() {
+  case "$1" in
+    test-layout) return 1 ;;
+  esac
+  return 0
 }
 
 _compute_cache_key() {
@@ -442,7 +469,7 @@ run_phase() {
 
     # Try cache lookup before submitting
     local cache_digest="" cache_hit=0
-    if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && type ci::cache::key >/dev/null 2>&1; then
+    if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && _check_is_cacheable "$label" && type ci::cache::key >/dev/null 2>&1; then
       # Composite content-hash digest identifying this check's cache entry
       # (lane + tool version + files hash + config hash).
       cache_digest="$(_compute_cache_key "$label")"
@@ -505,7 +532,7 @@ run_phase() {
     _collect_check_result "$lbl" "$rc" "$output" "$check_start" "$check_end"
 
     # Store result in cache
-    if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && type ci::cache::key >/dev/null 2>&1; then
+    if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && _check_is_cacheable "$lbl" && type ci::cache::key >/dev/null 2>&1; then
       local cache_dest="${CI_REPORT_DIR}/.cache/${lbl}"
       mkdir -p "$cache_dest"
       printf '%d' "$rc" > "$cache_dest/result.txt"

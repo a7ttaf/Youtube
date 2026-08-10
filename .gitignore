@@ -172,6 +172,16 @@ desktop.ini
 # re-include a path whose parent directory is still excluded.
 !frontend/tests/lib/
 !frontend/tests/lib/**
+# The tests tree mirrors src/, so a lib/ segment can appear at any depth —
+# frontend/tests/features/lib/widget.test.ts is ignored by the root-level
+# negations alone. The guard and vitest both see such a file locally, so the
+# only symptom is that `git add .` quietly omits it and the committed suite
+# loses a test.
+!frontend/tests/**/lib/
+!frontend/tests/**/lib/**
+# Same reasoning for source: a nested lib/ under src/ is first-party code.
+!frontend/src/**/lib/
+!frontend/src/**/lib/**
 node_modules/
 # Generated dependency-cache fingerprints written by ci/checks/node.sh
 # and ci/checks/python.sh.

@@ -450,6 +450,51 @@ ws_run() {
   [[ "$output" == *"./ci/checks/tests-shell.sh|yes|"* ]]
 }
 
+@test "tests-shell: a ci/config yaml change does not filter the lane" {
+  # These suites assert on ci/config/affected.yml and checks.yml directly, but a
+  # yaml-only changeset emits lint-yaml alone, which would filter the lane and
+  # let a broken mapping past the test written to catch it.
+  run bash -c "sed -n '/bats suites assert on the/,/^    fi$/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-shell"* ]]
+  [[ "$output" == *"ci/"* ]]
+}
+
+@test "layout guard: excluded from the result cache" {
+  # test-layout reads the git index and walks the whole frontend tree, but the
+  # cache key is derived from the changed-file list and worktree contents. A
+  # staged config change with an unchanged worktree copy would serve a cached
+  # PASS for a commit the guard never inspected.
+  run bash -c "sed -n '/^_check_is_cacheable()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test-layout"* ]]
+  # Both the read and the write side must consult it, or a stale entry is
+  # stored now and served later.
+  run grep -c '_check_is_cacheable "' ci/preflight.sh
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 2 ]
+}
+
+@test "gitignore: a nested lib directory under frontend/tests is trackable" {
+  # The tests tree mirrors src/, so a lib/ segment can appear at any depth. The
+  # guard and vitest both see such a file; only `git add` quietly omits it.
+  run git check-ignore -q frontend/tests/features/lib/widget.test.ts
+  [ "$status" -ne 0 ]
+  run git check-ignore -q frontend/tests/a/b/lib/deep.test.ts
+  [ "$status" -ne 0 ]
+}
+
+@test "gitignore: a nested lib directory under frontend/src is trackable" {
+  run git check-ignore -q frontend/src/features/lib/util.ts
+  [ "$status" -ne 0 ]
+}
+
+@test "gitignore: vendored lib directories are still ignored" {
+  # The negations must not reach into node_modules.
+  run git check-ignore -q frontend/node_modules/pkg/lib/index.js
+  [ "$status" -eq 0 ]
+}
+
 @test "tests-shell: a shell change emits the tests-shell check id" {
   # Without this the lane is scheduled and then filtered straight back out.
   source ci/lib/common.sh
