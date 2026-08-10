@@ -741,6 +741,25 @@ const applyBlockedTitle = (
   return undefined;
 };
 
+/**
+ * Whether Apply is refused, as one named predicate rather than a chain inside
+ * the action row. Every clause is a distinct reason: an ERROR row the API
+ * would 422 anyway, this tab's own request already in flight, this tab's
+ * request whose outcome was never learned, and ANOTHER tab's request in the
+ * same state. Extracted to keep PreviewActions under the analyzer's
+ * medium-risk complexity threshold (DeepSource JS-R1005) — conformed, not
+ * suppressed. Kept beside applyBlockedTitle on purpose: the two must stay in
+ * step, or the button refuses a click with no explanation of why.
+ */
+const applyRefused = (
+  hasErrors: boolean,
+  busy: boolean,
+  indeterminate: boolean,
+  otherApplyPending: boolean,
+): boolean => {
+  return hasErrors || busy || indeterminate || otherApplyPending;
+};
+
 type PreviewActionsProps = {
   hasErrors: boolean;
   onBack: () => void;
@@ -790,7 +809,7 @@ const PreviewActions = ({
       <button
         className="primary-button"
         type="button"
-        disabled={hasErrors || busy || indeterminate || otherApplyPending}
+        disabled={applyRefused(hasErrors, busy, indeterminate, otherApplyPending)}
         title={applyBlockedTitle(hasErrors, indeterminate, otherApplyPending)}
         onClick={onApply}
       >
