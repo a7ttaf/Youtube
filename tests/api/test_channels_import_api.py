@@ -763,6 +763,74 @@ def _seeded_registry(channel_name: str) -> ChannelRegistry:
     )
 
 
+class _ChannelArchivedAtWriteBoundary(ChannelRegistry):
+    """Archive a channel between the apply's re-plan and its row lock.
+
+    The planner ERRORs any archived channel and an ERROR row 422s the whole
+    file, so a plan that reaches the write boundary reviewed every row as
+    ACTIVE. Retiring the row inside ``update_inventory`` reproduces the one
+    window in which that stops being true.
+    """
+
+    def __init__(self, entries: list[ChannelRegistryEntry]) -> None:
+        super().__init__(entries)
+        self._archived = False
+
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
+        """Retire the row once, just before the locked write reads it."""
+        if not self._archived:
+            self._archived = True
+            current = self._channels[youtube_channel_id]
+            self._channels[youtube_channel_id] = dataclasses.replace(current, active=False)
+        return super().update_inventory(
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+        )
+
+
+def test_plan_bound_apply_refuses_a_row_archived_after_planning():
+    """A concurrent archive is a divergence, not something to write through.
+
+    ``active`` is not one of _INVENTORY_FIELDS — the roster never carries it —
+    so without an explicit check the bound apply would overwrite and audit
+    inventory on a channel an operator deliberately retired, and carry a
+    group-bearing row on into the membership pass to attach that archived
+    channel to a group. Reactivation is an explicit registry action, never an
+    import side effect (review #184, codex P2).
+    """
+    archiving = _ChannelArchivedAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID})),
+    )
+    client, _registry, groups, audit_sink = create_import_app(archiving)
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true").json()
+    # The preview reviewed it as a live UPDATE that also mints a group.
+    assert preview["rows"][0]["outcome"] == "UPDATE"
+    assert preview["rows"][0]["group_action"] == "CREATE"
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    assert "since been archived" in response.json()["detail"]
+    # The membership pass never ran, so no group was minted around the
+    # retired channel, and nothing claims a mutation the operator approved.
+    assert groups.get_group_by_cms_id("cms-tv") is None
+    assert audit_sink.records == []
+
+
 def test_plan_bound_apply_refuses_a_row_whose_pre_state_drifted():
     """A bound apply means "the diff I reviewed, or none of it" (review #184).
 

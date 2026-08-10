@@ -802,6 +802,7 @@ def _require_reviewed_pre_state(
     unbound path still heals and audits it.
     """
     _require_reviewed_source_status(entry, previous)
+    _require_reviewed_active(entry, previous)
     for field in _INVENTORY_FIELDS:
         reviewed = entry.changes.get(field)
         expected = reviewed[0] if reviewed is not None else getattr(updated, field)
@@ -818,6 +819,49 @@ def _require_reviewed_pre_state(
             f"the preview showed {shown}, but the stored value is now "
             f"{actual!r}; re-run the preview and review the change"
         )
+
+
+# ============================================================================
+# Purpose: Enforce, for a plan-bound apply only, that a row the preview saw as
+#   ACTIVE has not been archived in the plan-to-write window.
+# Database/ORM: None directly — reads the row-locked ``previous`` the
+#   registry's write already returned (YouTubeChannelORM).
+# Standards: ``active`` cannot live in _INVENTORY_FIELDS: the roster never
+#   carries it, so it is neither a planned change nor a value ``updated``
+#   holds an opinion about. It still belongs in the reviewed pre-state,
+#   because the planner ERRORs every archived channel and an ERROR row 422s
+#   the whole file — so any plan that reached this point necessarily reviewed
+#   this row as active. A concurrent archive between the route's re-plan and
+#   the row lock would otherwise let a bound apply overwrite and audit
+#   inventory on a channel an operator deliberately retired, and carry a
+#   group-bearing row on into the membership pass to attach that archived
+#   channel to a group. Fails the WHOLE import closed, as every divergence
+#   here does — the apply is one all-or-nothing transaction.
+#   Not a reactivation path either way: reactivation is an explicit registry
+#   action, never an import side effect (channel_import._plan_entries).
+# Blast Radius: Registry write + audit. This is the difference between a 409
+#   the operator can re-review and a silent resurrection of a retired channel,
+#   membership included.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py -> the planner's
+#       archived-channel ERROR row, which is what makes "reviewed as active"
+#       a safe assumption here.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps
+#       ChannelImportRowStateDivergedError to 409.
+# ============================================================================
+def _require_reviewed_active(
+    entry: ChannelImportPlanEntry,
+    previous: ChannelRegistryEntry,
+) -> None:
+    """Fail closed when a reviewed row was archived before the write."""
+    if previous.active:
+        return
+    raise ChannelImportRowStateDivergedError(
+        f"channel {entry.youtube_channel_id} changed during the import: "
+        "the preview reviewed it as active, but it has since been archived "
+        "(active=false); reactivate it before importing, then re-run the "
+        "preview and review the change"
+    )
 
 
 # ============================================================================

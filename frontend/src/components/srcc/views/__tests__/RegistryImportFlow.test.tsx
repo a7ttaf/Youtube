@@ -730,6 +730,35 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(importPosts()).toHaveLength(2);
   });
 
+  it("refuses Apply while ANOTHER tab has an apply of unknown outcome", async () => {
+    // Both tabs already hold a preview, so the disabled "Import CSV" control
+    // never applied to this one — it was already inside the flow when the
+    // other tab dispatched. Its own `indeterminate` knows nothing about that
+    // request, so without consulting the shared store both POSTs run, and
+    // whichever settles first clears the other's protection (review #184,
+    // codex P1).
+    await runDryRunToPreview(() => jsonResponse(DRY_RUN_PLAN));
+    expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled();
+
+    // The other tab dispatches. jsdom shares one localStorage but does not
+    // synthesise the cross-document event, so raise it explicitly — this is
+    // exactly what a real second tab's write delivers here.
+    globalThis.localStorage.setItem(
+      "ums.unsettledChannelImport",
+      JSON.stringify(["apply-from-another-tab"]),
+    );
+    fireEvent(
+      globalThis.window,
+      new StorageEvent("storage", { key: "ums.unsettledChannelImport" }),
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^apply$/i })).toBeDisabled(),
+    );
+    // Only the dry run went out; this tab's apply never dispatched.
+    expect(importPosts()).toHaveLength(1);
+  });
+
   it("does not raise the unsettled notice after a normal applied exit", async () => {
     // The complement: a 2xx apply is settled, so leaving Applied must NOT
     // leave the registry wearing a warning or lock the importer.

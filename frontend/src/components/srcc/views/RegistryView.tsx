@@ -1186,7 +1186,7 @@ const RegistryView = ({
             // the case codex found — an operator who leaves by the sidebar
             // never reaches it, and neither does a closed tab.
           }}
-          onAcknowledgeUnsettled={unsettledImport.acknowledge}
+          onAcknowledgeUnsettled={unsettledImport.acknowledgeAll}
           hasTraceNav={Boolean(onOpenTrace)}
           onMap={onMap}
           onAssign={onAssign}

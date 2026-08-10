@@ -15,7 +15,7 @@ import { ActionStepper } from "../ActionStepper";
 import { OutcomeTable, type OutcomeTableRow } from "../OutcomeTable";
 import { Badge } from "../shared";
 import { isValidAuditReason } from "./GroupsSyncFlow";
-import { useUnsettledImport } from "@/contexts/UnsettledImportContext";
+import { newApplyId, useUnsettledImport } from "@/contexts/UnsettledImportContext";
 
 // ============================================================================
 // Purpose: The Registry CSV import flow (import/sync arc, PR-B): a three-step
@@ -619,6 +619,14 @@ const APPLY_INDETERMINATE_NOTE =
   "This import may already have committed — reload the registry and check " +
   "before importing again.";
 
+// Not this tab's request: another document holds an apply whose outcome is
+// still unknown. Named separately from APPLY_INDETERMINATE_NOTE because the
+// remedy is different — there is nothing to reload here, the operator has to
+// go back to the tab that is waiting.
+const OTHER_APPLY_PENDING_NOTE =
+  "Another tab has an import whose outcome is not settled yet — finish or " +
+  "account for that one before applying this roster.";
+
 // The outcome literal both reconciliation predicates key off. Named because
 // a typo in either one silently changes a verdict about whether a write
 // landed, and the two must always mean the same thing.
@@ -719,9 +727,13 @@ const backBlockedTitle = (
 const applyBlockedTitle = (
   hasErrors: boolean,
   indeterminate: boolean,
+  otherApplyPending: boolean,
 ): string | undefined => {
   if (indeterminate) {
     return APPLY_INDETERMINATE_NOTE;
+  }
+  if (otherApplyPending) {
+    return OTHER_APPLY_PENDING_NOTE;
   }
   if (hasErrors) {
     return "The API refuses plans with error rows (422)";
@@ -736,6 +748,7 @@ type PreviewActionsProps = {
   busy: boolean;
   applying: boolean;
   indeterminate: boolean;
+  otherApplyPending: boolean;
 };
 
 /**
@@ -761,6 +774,7 @@ const PreviewActions = ({
   busy,
   applying,
   indeterminate,
+  otherApplyPending,
 }: PreviewActionsProps) => {
   return (
     <div className="action-row">
@@ -776,8 +790,8 @@ const PreviewActions = ({
       <button
         className="primary-button"
         type="button"
-        disabled={hasErrors || busy || indeterminate}
-        title={applyBlockedTitle(hasErrors, indeterminate)}
+        disabled={hasErrors || busy || indeterminate || otherApplyPending}
+        title={applyBlockedTitle(hasErrors, indeterminate, otherApplyPending)}
         onClick={onApply}
       >
         {busy ? "Applying…" : "Apply"}
@@ -794,6 +808,7 @@ type PreviewStepProps = {
   busy: boolean;
   applying: boolean;
   indeterminate: boolean;
+  otherApplyPending: boolean;
   error: string | null;
 };
 
@@ -810,6 +825,7 @@ const PreviewStep = ({
   busy,
   applying,
   indeterminate,
+  otherApplyPending,
   error,
 }: PreviewStepProps) => {
   const hasErrors = hasErrorRows(result);
@@ -867,6 +883,7 @@ const PreviewStep = ({
         busy={busy}
         applying={applying}
         indeterminate={indeterminate}
+        otherApplyPending={otherApplyPending}
       />
     </div>
   );
@@ -971,6 +988,15 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
   // survives it, which is what covers an operator who closes the tab, reloads,
   // or leaves via the sidebar instead of Cancel (review #184, codex P1 x2).
   const unsettledImport = useUnsettledImport();
+  // The id of the apply currently in flight, so the failure handler retires
+  // exactly the request it is handling and never another tab's.
+  const applyIdRef = useRef<string | null>(null);
+  const settleThisApply = () => {
+    const applyId = applyIdRef.current;
+    if (applyId !== null) {
+      unsettledImport.settleApply(applyId);
+    }
+  };
 
   const trimmedReason = reason.trim();
 
@@ -1094,8 +1120,8 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       setPreview(race);
       setError(refreshedPlanMessage((caught as ApiError).status));
       // A 409 is an established refusal: the write was rejected at the
-      // boundary, so nothing committed and the uncertainty is retired.
-      unsettledImport.acknowledge();
+      // boundary, so nothing committed and THIS apply is retired.
+      settleThisApply();
       return;
     }
     // Anything that does not ESTABLISH rejection leaves the roster possibly
@@ -1113,8 +1139,8 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
       return;
     }
     // Everything left is a DEFINITE rejection (the indeterminate branch above
-    // returned already), so the write did not happen and the flag comes down.
-    unsettledImport.acknowledge();
+    // returned already), so this write did not happen and its id comes down.
+    settleThisApply();
     setError(describeImportError(caught));
   };
 
@@ -1127,7 +1153,10 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
    * committed.
    */
   const applyDispatchBlocked = (): boolean => {
-    return busy || inFlightRef.current || indeterminate;
+    // `unsettledImport.unsettled` covers what this component cannot see: a
+    // SECOND TAB holding a preview of its own, whose apply is still pending.
+    // `indeterminate` only knows about this document's request.
+    return busy || inFlightRef.current || indeterminate || unsettledImport.unsettled;
   };
 
   /** Commit the plan; refuse while any row errors (the API 422s it anyway). */
@@ -1150,7 +1179,9 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
     // and it stays unknown until something establishes otherwise — including
     // across a tab close or a reload, which discards this document's fetch
     // handler while the backend goes on committing.
-    unsettledImport.markUnsettled();
+    const applyId = newApplyId();
+    applyIdRef.current = applyId;
+    unsettledImport.trackApply(applyId);
     setError(null);
     try {
       const result = await importChannels({
@@ -1163,8 +1194,8 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
         // commit as an UPDATE over a channel created since the preview.
         expectedPlanFingerprint: approved.plan.plan_fingerprint,
       });
-      // A 2xx settles it: the write committed and the flow can say so.
-      unsettledImport.acknowledge();
+      // A 2xx settles THIS apply: the write committed and the flow can say so.
+      unsettledImport.settleApply(applyId);
       setApplied(result);
       setStep("applied");
     } catch (caught) {
@@ -1239,6 +1270,7 @@ export const RegistryImportFlow = ({ onCancel, onDone }: RegistryImportFlowProps
           busy={busy}
           applying={applying}
           indeterminate={indeterminate}
+          otherApplyPending={unsettledImport.unsettled}
           error={error}
         />
       ) : null;
