@@ -725,7 +725,13 @@ def import_channels(
         cms_status=cms_status,
     )
     payload = _import_plan_to_api(
-        plan, dry_run=dry_run, content_owner_id=content_owner_id, cms_status=cms_status
+        plan,
+        dry_run=dry_run,
+        content_owner_id=content_owner_id,
+        cms_status=cms_status,
+        # The RESOLVED tenant, not a client-supplied echo: an approval obtained
+        # in one tenant must not be spendable in another.
+        tenant_id=str(_resolve_tenant_uuid(user)),
     )
 
     if plan.has_errors and not dry_run:
@@ -896,7 +902,12 @@ def _parse_import_upload(file: UploadFile) -> ParsedChannelImport:
 
 
 def _import_plan_to_api(
-    plan: ChannelImportPlan, *, dry_run: bool, content_owner_id: str, cms_status: str
+    plan: ChannelImportPlan,
+    *,
+    dry_run: bool,
+    content_owner_id: str,
+    cms_status: str,
+    tenant_id: str,
 ) -> dict[str, object]:
     """Render an import plan as the API response body.
 
@@ -958,7 +969,11 @@ def _import_plan_to_api(
         "counts": counts,
         "rows": rows,
         "plan_fingerprint": _plan_fingerprint(
-            counts, rows, content_owner_id=content_owner_id, cms_status=cms_status
+            counts,
+            rows,
+            content_owner_id=content_owner_id,
+            cms_status=cms_status,
+            tenant_id=tenant_id,
         ),
     }
 
@@ -968,9 +983,10 @@ def _import_plan_to_api(
 #   so a client can say "execute the plan I reviewed, or nothing".
 # Database/ORM: None — pure function over an already-rendered plan payload.
 # Standards: The digest is the CONTRACT, so its inputs are a change point:
-#   anything an operator reviews must be inside it (plan rows, counts, and the
-#   content owner + CMS status the write targets) and anything that legitimately
-#   differs between a preview and its apply must be outside it (`dry_run`).
+#   anything an operator reviews must be inside it (plan rows, counts, the
+#   content owner + CMS status the write targets, and the RESOLVED tenant it
+#   lands in) and anything that legitimately differs between a preview and its
+#   apply must be outside it (`dry_run`).
 #   Widening or narrowing this set silently changes what "same plan" means —
 #   omitting the target once let an apply commit under a content owner that was
 #   never reviewed (review #184). Canonical JSON (sort_keys + tight separators)
@@ -994,6 +1010,7 @@ def _plan_fingerprint(
     *,
     content_owner_id: str,
     cms_status: str,
+    tenant_id: str,
 ) -> str:
     """Digest everything an operator reviews: the plan AND the target it targets.
 
@@ -1008,6 +1025,15 @@ def _plan_fingerprint(
     waved it through, committing channels and groups under the wrong content
     owner (review #184).
 
+    ``tenant_id`` is in for the same reason and one step further out: it is the
+    resolved tenant, never a client echo. Without it, two EMPTY tenants and an
+    all-CREATE roster digest identically — a CREATE's ``changes`` is empty by
+    design and the rows carry no tenant — so a preview approved in tenant A
+    satisfied the guard on an apply directed at tenant B, and channels, groups
+    and audit records committed there on an approval that was never given for
+    them (review #184). Tenancy is the one boundary an equality token must
+    never straddle.
+
     ``dry_run`` stays out, and that exclusion is load-bearing: a preview and
     its apply differ in it by definition, so folding it in would make every
     fingerprint mismatch — and a guard that always fires protects nothing.
@@ -1019,6 +1045,7 @@ def _plan_fingerprint(
     """
     canonical = json.dumps(
         {
+            "tenant_id": tenant_id,
             "content_owner_id": content_owner_id,
             "cms_status": cms_status,
             "counts": counts,

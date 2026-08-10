@@ -5,6 +5,7 @@ import dataclasses
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.api.channels import (
+    _plan_fingerprint,
     current_audit_sink,
     current_channel_registry,
 )
@@ -797,6 +798,36 @@ class _ChannelArchivedAtWriteBoundary(ChannelRegistry):
             content_owner_id=content_owner_id,
             revenue_required=revenue_required,
         )
+
+
+def test_plan_fingerprint_is_bound_to_the_resolved_tenant():
+    """An approval obtained in one tenant must not be spendable in another.
+
+    Two EMPTY tenants and an all-CREATE roster produce identical plans: a
+    CREATE's ``changes`` is empty by design and no row carries a tenant, so
+    without the tenant in the digest the preview approved under tenant A
+    satisfied the guard on an apply directed at tenant B — committing channels,
+    groups and audit records there on an approval never given for them
+    (review #184, codex P1).
+    """
+    counts = {"CREATE": 1}
+    rows = [{"row_number": 1, "youtube_channel_id": CHANNEL_ID, "outcome": "CREATE"}]
+    common = {"content_owner_id": CONTENT_OWNER, "cms_status": "INSIDE_CMS"}
+
+    tenant_a = _plan_fingerprint(
+        counts, rows, **common, tenant_id="11111111-1111-1111-1111-111111111111"
+    )
+    tenant_b = _plan_fingerprint(
+        counts, rows, **common, tenant_id="22222222-2222-2222-2222-222222222222"
+    )
+    same_again = _plan_fingerprint(
+        counts, rows, **common, tenant_id="11111111-1111-1111-1111-111111111111"
+    )
+
+    assert tenant_a != tenant_b
+    # Still an equality token within one tenant: the guard must not fire on a
+    # plan that genuinely did not change.
+    assert tenant_a == same_again
 
 
 def test_plan_bound_apply_refuses_a_row_archived_after_planning():

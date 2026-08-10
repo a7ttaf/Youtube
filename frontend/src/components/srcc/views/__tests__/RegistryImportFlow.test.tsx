@@ -806,7 +806,15 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
   it("does not raise the unsettled notice after a normal applied exit", async () => {
     // The complement: a 2xx apply is settled, so leaving Applied must NOT
     // leave the registry wearing a warning or lock the importer.
-    await runDryRunToPreview(() => jsonResponse(DRY_RUN_PLAN));
+    //
+    // The apply leg must answer with APPLY_RESULT, not the dry-run body: the
+    // hook now requires the response's `dry_run` to match the request, and a
+    // preview payload returned to an apply is a shape the backend cannot
+    // produce. Reusing DRY_RUN_PLAN here was the fixture asserting against an
+    // impossible response (review #184, codex P2).
+    await runDryRunToPreview((form) =>
+      jsonResponse(form.get("dry_run") === "true" ? DRY_RUN_PLAN : APPLY_RESULT),
+    );
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
     await screen.findByRole("button", { name: /back to registry/i });
     fireEvent.click(screen.getByRole("button", { name: /back to registry/i }));

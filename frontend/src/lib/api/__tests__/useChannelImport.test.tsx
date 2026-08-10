@@ -289,6 +289,41 @@ describe("useChannelImport", () => {
     }
   });
 
+  it("rejects an apply answered with a PREVIEW payload", async () => {
+    // A structural check only proves `dry_run` is a boolean. A malformed or
+    // legacy apply response carrying `dry_run: true` passed it, and the flow
+    // then advanced to Applied and told the operator the import committed —
+    // on a body that identifies itself as a preview (review #184).
+    fetchMock().mockResolvedValue(jsonResponse(DRY_RUN_RESULT));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("rejects a preview answered with an APPLY payload", async () => {
+    // The mirror image, and the more alarming direction: a dry run that comes
+    // back marked as a committed write means something wrote when the
+    // operator asked for a read.
+    fetchMock().mockResolvedValue(jsonResponse(APPLY_RESULT));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
   it("accepts a zero count, which is a real tally", async () => {
     // The complement: zero is legitimate (the preview hides zero rows rather
     // than rejecting the plan), so the check must not confuse "empty" with

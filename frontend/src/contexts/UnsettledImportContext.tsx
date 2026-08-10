@@ -221,20 +221,40 @@ const removeAllIds = (scope: string): void => {
   memoryIds = memoryIds.filter((id) => !id.startsWith(prefixFor(scope)));
 };
 
-/**
- * Claim the right to dispatch an apply, atomically where possible.
- *
- * Returns true when this document is admitted and `applyId` is now recorded as
- * pending; false when another apply in the same scope is already outstanding,
- * in which case NOTHING was written and the caller must not dispatch.
- *
- * The Web Lock is held across the read AND the write, which is what makes this
- * different from calling `unsettled` and then `trackApply`: the lock is
- * cross-document, so a second tab blocks until the first has either recorded
- * its key or released. Web Locks is the only cross-document mutual-exclusion
- * primitive available to a page; storage events are notifications, not
- * exclusion, and cannot close this window.
- */
+// ============================================================================
+// Purpose: The admission decision for an audited bulk import - atomically
+//   claim the right to dispatch one apply, or refuse. Returns true with
+//   `applyId` recorded as pending; false having written NOTHING, in which case
+//   the caller must not send the request.
+// Database/ORM: None (frontend) - reads and writes only this scope's
+//   localStorage records. It issues no request of its own; what it gates is
+//   POST /channels/import with dry_run=false.
+// Standards: The check and the write happen inside ONE Web Lock held on the
+//   scope. Doing them as two steps - read `unsettled`, then `trackApply` - is
+//   the bug this replaces: two tabs both observe "nothing pending" and both
+//   dispatch, and for an all-UNCHANGED roster both POSTs return 200 and each
+//   appends a CHANNEL_IMPORTED (review #184). Web Locks is the only
+//   cross-document mutual-exclusion primitive a page has; storage events are
+//   notifications, not exclusion, and cannot close this window - so this must
+//   not be "simplified" back into a read followed by a write.
+//   FAIL-OPEN LIMITATION, stated because it is real: where navigator.locks is
+//   unavailable this degrades to the same check-then-set WITHOUT the lock.
+//   That is narrower than the race, not free of it. It fails open rather than
+//   closed on purpose - refusing every apply on such a browser would lock the
+//   operator out of the feature entirely - and it is one more reason this is
+//   not a substitute for durable server-side idempotency, which is the only
+//   thing that closes the window across browsers and devices.
+// Blast Radius: Whether a second audited bulk import can be dispatched while
+//   one is outstanding, and therefore whether a duplicate CHANNEL_IMPORTED can
+//   be appended for a roster that already committed. No authorization meaning:
+//   the backend's own permission checks and fingerprint guard are unaffected.
+// Connections:
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       awaits this before dispatching the apply; a refusal shows
+//       OTHER_APPLY_PENDING_NOTE and sends no request.
+//   - File: backend/ums_smart_revenue/api/channels.py -> import_channels, the
+//       route whose CHANNEL_IMPORTED event a duplicate would append to.
+// ============================================================================
 const admitApply = (scope: string, applyId: string): Promise<boolean> => {
   const claim = (): boolean => {
     if (readFlag(scope)) {

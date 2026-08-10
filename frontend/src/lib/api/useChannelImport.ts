@@ -277,6 +277,16 @@ export const useChannelImport = (): ((
           if (!isChannelImportResult(result)) {
             throw new ChannelImportShapeError();
           }
+          // The MODE must match what was asked for. A structural check only
+          // proves `dry_run` is a boolean, so a malformed or legacy apply
+          // response carrying `dry_run: true` passed it — and the flow then
+          // advanced to Applied and told the operator the import committed,
+          // on a body that identifies itself as a preview (review #184).
+          // Treated as unusable rather than coerced, which routes an apply
+          // into the indeterminate path where an unreadable outcome belongs.
+          if (result.dry_run !== dryRun) {
+            throw new ChannelImportShapeError();
+          }
           return result;
         });
     },
