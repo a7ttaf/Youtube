@@ -307,17 +307,30 @@ const outcomeMatchesChanges = (row: Record<string, unknown>): boolean => {
   return row.outcome === "UPDATE" ? names.length > 0 : names.length === 0;
 };
 
+/**
+ * Every condition a row must meet, as a list for the same reason RESULT_CHECKS
+ * is one: each has the same consequence — the row is not one the backend could
+ * have planned — so the conjunction carried no information the list does not,
+ * and naming them keeps isPlanRow under the analyzer's complexity threshold
+ * (DeepSource JS-R1005), conformed rather than suppressed.
+ *
+ * The FIELD check stays first: every rule after it reads fields at their
+ * declared types, which is only sound once that one has passed. `every`
+ * short-circuits, so the ordering holds at runtime.
+ */
+const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [
+  (row) => PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(row[field])),
+  hasConsistentGroupEffect,
+  hasWriteFields,
+  outcomeMatchesChanges,
+  disclosesSourceStatus,
+];
+
 const isPlanRow = (row: unknown): boolean => {
   if (!isPlainObject(row)) {
     return false;
   }
-  return (
-    PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(row[field])) &&
-    hasConsistentGroupEffect(row) &&
-    hasWriteFields(row) &&
-    outcomeMatchesChanges(row) &&
-    disclosesSourceStatus(row)
-  );
+  return ROW_CHECKS.every((holds) => holds(row));
 };
 
 /**
