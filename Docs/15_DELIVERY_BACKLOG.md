@@ -1085,8 +1085,24 @@ single P-tier above.
   `*` and compares with `case`, where `*` crosses `/`; and `tr -d ' \t'` is
   POSIX, though it is now written `tr -d $' \t'` so the tab cannot depend on
   `tr` interpreting the escape.
-  Combined suite: `test_test_layout.bats` (70) + `test_js_lane.bats` (134) = 204
-  cases, 0 failures. The node lane was run end
+  A twenty-first round was self-found, by going looking for the round-nineteen
+  P1's *shape* rather than for more instances of it: a check that is correct
+  about a tree the gate is not standing behind. `git-safety.sh` was the same
+  defect on the security path. Every content scan it runs — sensitive files,
+  `node_modules`, virtualenvs, build output, blobs over 5MB, conflict markers
+  and the secret-pattern diff — read the index, so in `ship` mode, where the
+  index matches `HEAD`, all seven inspected an empty diff and the pre-push gate
+  passed. Demonstrated rather than reasoned: the identical `secrets.env` exits
+  20 staged and exited 0 once committed. The reference now follows
+  `CI_GATE_MODE`, and the push range is computed once in
+  `ci::git::push_range` — `branch-protection.sh` had its own copy, and a second
+  copy of a computation is exactly how the changeset scheduler and its report
+  drifted apart in round eighteen. Fixing it surfaced a second, older defect in
+  the same loop: the file list included **deletions**, so committing
+  `git rm secrets.env` was blocked for the file it removes. The list is now
+  additions, copies, renames and modifications, which cures the index form too.
+  Combined suite: `bats ci/tests/` = 232 cases, 0 failures.
+  The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
   earlier revision of this paragraph quoted stale ones.

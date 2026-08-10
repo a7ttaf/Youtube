@@ -11,6 +11,8 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$ROOT_DIR/ci/lib/common.sh"
 # shellcheck source=ci/lib/log.sh
 source "$ROOT_DIR/ci/lib/log.sh"
+# shellcheck source=ci/lib/git.sh
+source "$ROOT_DIR/ci/lib/git.sh"
 
 cd "$ROOT_DIR"
 
@@ -26,32 +28,11 @@ _bp_fail() {
   OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"
 }
 
+# The range this check reasons about is the same one git-safety.sh scans for
+# staged-content problems, so it is computed in one place. Kept as a name here
+# because the call sites below read better with it.
 _bp_commit_range() {
-  local old_sha="${CI_GATE_PUSH_OLD_SHA:-${GITHUB_EVENT_BEFORE:-}}"
-  local new_sha="${CI_GATE_PUSH_NEW_SHA:-HEAD}"
-  local zero_sha="0000000000000000000000000000000000000000"
-
-  if [ -n "$old_sha" ] && [ "$old_sha" != "$zero_sha" ] &&
-     git rev-parse --verify "${old_sha}^{commit}" >/dev/null 2>&1 &&
-     git rev-parse --verify "${new_sha}^{commit}" >/dev/null 2>&1; then
-    printf '%s..%s' "$old_sha" "$new_sha"
-    return 0
-  fi
-
-  local upstream base
-  upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
-  if [ -n "$upstream" ]; then
-    base="$(git merge-base HEAD "$upstream" 2>/dev/null || true)"
-  fi
-  if [ -z "${base:-}" ]; then
-    base="$(git rev-parse HEAD~1 2>/dev/null || true)"
-  fi
-  if [ -n "${base:-}" ]; then
-    printf '%s..HEAD' "$base"
-    return 0
-  fi
-
-  return 1
+  ci::git::push_range
 }
 
 _is_protected_branch() {

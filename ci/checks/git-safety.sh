@@ -39,16 +39,59 @@ if ! git diff --check >/dev/null 2>&1; then
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi
 
-if ! git diff --cached --check >/dev/null 2>&1; then
-  echo "Whitespace/conflict-marker problems found in staged changes."
-  git diff --cached --check || true
+# Which content is this run vouching for?
+#
+# Everything below scanned the index, which describes the pre-commit gate and
+# nothing else. In ship mode -- the pre-push gate -- the commit already exists
+# and the index matches HEAD, so `git diff --cached` is empty: the sensitive
+# file, build artifact, large blob, conflict marker and secret pattern scans all
+# inspected nothing and the gate passed. Proven, not inferred: the same
+# secrets.env exits 20 staged and exited 0 once committed.
+#
+# So the reference follows the gate's own mode. GATE_RANGE empty means the
+# index; otherwise it is the range of commits being pushed.
+GATE_RANGE=""
+GATE_BLOB_REF=":"
+GATE_WHAT="staged"
+if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+  GATE_RANGE="$(ci::git::push_range 2>/dev/null || true)"
+  if [ -z "$GATE_RANGE" ]; then
+    echo "Cannot determine the range being pushed; refusing to report on it."
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
+  GATE_BLOB_REF="HEAD:"
+  GATE_WHAT="in the pushed commits"
+fi
+
+_gs_diff() {
+  # shellcheck disable=SC2086
+  if [ -n "$GATE_RANGE" ]; then
+    git diff $GATE_RANGE "$@"
+  else
+    git diff --cached "$@"
+  fi
+}
+
+_gs_content_files() {
+  # Additions, copies, renames and modifications only. A path that is being
+  # *removed* is not content this commit introduces, and listing deletions here
+  # blocked the one change that fixes the problem: committing `git rm secrets.env`
+  # failed the gate for the file it deletes. The index form had the same flaw and
+  # the same cure.
+  _gs_diff --name-only --diff-filter=ACMR 2>/dev/null || true
+}
+
+if ! _gs_diff --check >/dev/null 2>&1; then
+  echo "Whitespace/conflict-marker problems found ${GATE_WHAT}."
+  _gs_diff --check || true
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi
 
 # git diff --check already catches conflict markers. Keep this explicit helper
 # check so the failure message is specific and easier to understand.
-if ci::git::has_conflict_markers_in_changed || ci::git::has_conflict_markers_in_staged; then
-  echo "Merge conflict markers found in changed/staged content."
+if ci::git::has_conflict_markers_in_changed \
+  || _gs_diff -U0 | grep -E '^\+[[:space:]]*(<{7}|={7}|>{7})([[:space:]]|$)' >/dev/null 2>&1; then
+  echo "Merge conflict markers found in changed content or ${GATE_WHAT}."
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi
 
@@ -67,31 +110,31 @@ while IFS= read -r path; do
   [ -z "$path" ] && continue
   case "$path" in
     .env|.env.*|.env-*|env.local|env.local.*|*.env|*.env.*|*.env-*|*.pem|*.key|*.p12|*.pfx|*id_rsa|*id_ed25519|*.jks|.npmrc|.pypirc|*.gpg)
-      echo "Sensitive file is staged: $path"
+      echo "Sensitive file ${GATE_WHAT}: $path"
       SENSITIVE_FILE_MATCH=1
       ;;
     node_modules/*|*/node_modules/*)
-      echo "node_modules path is staged: $path"
+      echo "node_modules path ${GATE_WHAT}: $path"
       VENV_OR_NODE_MODULES_MATCH=1
       ;;
     .venv/*|venv/*|*/.venv/*|*/venv/*)
-      echo "Virtual environment path is staged: $path"
+      echo "Virtual environment path ${GATE_WHAT}: $path"
       VENV_OR_NODE_MODULES_MATCH=1
       ;;
     dist/*|build/*|coverage/*|htmlcov/*|*/dist/*|*/build/*|*/coverage/*|*/htmlcov/*)
-      echo "Build output path is staged (blocked by default): $path"
+      echo "Build output path ${GATE_WHAT} (blocked by default): $path"
       BUILD_ARTIFACT_MATCH=1
       ;;
   esac
 
-  if git cat-file -e ":$path" 2>/dev/null; then
-    size_bytes="$(git cat-file -s ":$path" 2>/dev/null || echo 0)"
+  if git cat-file -e "${GATE_BLOB_REF}$path" 2>/dev/null; then
+    size_bytes="$(git cat-file -s "${GATE_BLOB_REF}$path" 2>/dev/null || echo 0)"
     if [ "${size_bytes:-0}" -gt 5242880 ]; then
-      echo "Large staged file detected (>5MB): $path (${size_bytes} bytes)"
+      echo "Large file detected ${GATE_WHAT} (>5MB): $path (${size_bytes} bytes)"
       LARGE_ARTIFACT_MATCH=1
     fi
   fi
-done < <(ci::git::staged_files)
+done < <(_gs_content_files)
 
 secret_pattern_file="$(mktemp)"
 secret_cleanup() {
@@ -106,8 +149,8 @@ if ! grep -E -f "$secret_pattern_file" /dev/null >/dev/null 2>&1; then
     exit "$CI_RESULT_FAIL_INFRA"
   fi
 fi
-if git diff --cached -U0 | grep -E -f "$secret_pattern_file" >/dev/null 2>&1; then
-  echo "Potential secret-like value detected in staged additions."
+if _gs_diff -U0 | grep -E -f "$secret_pattern_file" >/dev/null 2>&1; then
+  echo "Potential secret-like value detected in additions ${GATE_WHAT}."
   SECRET_PATTERN_MATCH=1
 fi
 secret_cleanup
@@ -115,21 +158,21 @@ secret_cleanup
 if [ "$SENSITIVE_FILE_MATCH" -eq 1 ] || [ "$BUILD_ARTIFACT_MATCH" -eq 1 ] || [ "$VENV_OR_NODE_MODULES_MATCH" -eq 1 ] || [ "$LARGE_ARTIFACT_MATCH" -eq 1 ] || [ "$SECRET_PATTERN_MATCH" -eq 1 ]; then
   blocked_reasons=()
   if [ "$SENSITIVE_FILE_MATCH" -eq 1 ]; then
-    blocked_reasons+=("sensitive-staged-files")
+    blocked_reasons+=("sensitive-files")
   fi
   if [ "$BUILD_ARTIFACT_MATCH" -eq 1 ]; then
-    blocked_reasons+=("build-artifacts-staged")
+    blocked_reasons+=("build-artifacts")
   fi
   if [ "$VENV_OR_NODE_MODULES_MATCH" -eq 1 ]; then
-    blocked_reasons+=("venv-or-node_modules-staged")
+    blocked_reasons+=("venv-or-node_modules")
   fi
   if [ "$LARGE_ARTIFACT_MATCH" -eq 1 ]; then
-    blocked_reasons+=("large-staged-files")
+    blocked_reasons+=("large-files")
   fi
   if [ "$SECRET_PATTERN_MATCH" -eq 1 ]; then
     blocked_reasons+=("secret-pattern-match")
   fi
-  printf 'Blocking staged content checks: %s\n' "${blocked_reasons[*]}"
+  printf 'Blocking content checks (%s): %s\n' "$GATE_WHAT" "${blocked_reasons[*]}"
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi
 
