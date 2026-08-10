@@ -91,11 +91,42 @@ rules:
   # case pattern matches "/" too, so "frontend/*.css" already covers both
   # frontend/app.css and frontend/src/styles.css. Spelling both forms would just
   # emit the same pattern twice.
+  # Every extension ci/lib/changeset.sh classifies as `javascript` needs a rule
+  # here, or the lane it schedules finds nothing affected and skips. The bats
+  # case `classifier and mapping agree on every javascript extension` derives
+  # its list from the classifier, so adding one there without adding it here
+  # fails rather than silently regressing.
   - source: "frontend/*.css"
     tests: "frontend/tests/**/*.test.ts"
   - source: "frontend/*.scss"
     tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.sass"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.less"
+    tests: "frontend/tests/**/*.test.ts"
   - source: "frontend/*.html"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.htm"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.vue"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.svelte"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.astro"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.mts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.cts"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.mjs"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.cjs"
+    tests: "frontend/tests/**/*.test.ts"
+  - source: "frontend/*.tsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/*.jsx"
+    tests: "frontend/tests/**/*.test.tsx"
+  - source: "frontend/*.js"
     tests: "frontend/tests/**/*.test.ts"
 
   # Python: module -> test file

@@ -302,51 +302,93 @@ extract_test_block() {
   '
 }
 
+# The config has to be read the way the file list is: from what git will commit.
+# Staging a narrowed test.include and then restoring the correct config in the
+# worktree leaves a commit that collects almost nothing while a worktree-only
+# read reports the layout declared. Both copies are checked, so a bad include in
+# either fails.
+config_sources() {
+  printf '%s\n' "$VITEST_CONFIG"
+  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    if git cat-file -e ":$VITEST_CONFIG" 2>/dev/null; then
+      local staged
+      staged="$(mktemp)"
+      if git show ":$VITEST_CONFIG" > "$staged" 2>/dev/null; then
+        printf '%s\n' "$staged"
+      else
+        rm -f "$staged"
+      fi
+    fi
+  fi
+}
+
+# Runs the include/exclude assertions over one config file. Echoes nothing on
+# success; on failure echoes a reason keyword the caller turns into a message.
+check_one_config() {
+  local cfg="$1"
+  local block have_block=1 active_include="" active_exclude=""
+
+  block="$(strip_ts_comments "$cfg" | extract_test_block)" || have_block=0
+  if [ -n "$block" ]; then
+    active_include="$(printf '%s\n' "$block" | grep -E '^[[:space:]]*include:[[:space:]]*\[' || true)"
+    active_exclude="$(printf '%s\n' "$block" | grep -E '^[[:space:]]*exclude:' || true)"
+  fi
+
+  if [ "$have_block" = "0" ]; then
+    printf 'no-test-block'
+  elif [ -z "$active_include" ] || ! printf '%s\n' "$active_include" | grep -qF "$DECLARED_GLOB"; then
+    printf 'no-include'
+  elif [ -n "$active_exclude" ]; then
+    printf 'has-exclude\t%s' "$active_exclude"
+  fi
+}
+
 if [ ! -f "$VITEST_CONFIG" ]; then
   fail "Missing ${VITEST_CONFIG}; cannot confirm the test layout is declared."
 else
-  # The include must be live config inside the test block, on a single line:
-  # an active `include: [...]` carrying the declared glob. Fail closed on
-  # anything else — a reformat this cannot read is drift the guard must surface
-  # rather than wave through.
-  TEST_BLOCK=""
-  HAVE_TEST_BLOCK=1
-  TEST_BLOCK="$(strip_ts_comments "$VITEST_CONFIG" | extract_test_block)" || HAVE_TEST_BLOCK=0
-  ACTIVE_INCLUDE=""
-  if [ -n "$TEST_BLOCK" ]; then
-    ACTIVE_INCLUDE="$(printf '%s\n' "$TEST_BLOCK" | grep -E '^[[:space:]]*include:[[:space:]]*\[' || true)"
-  fi
-  # A correct include is not sufficient: test.exclude is applied on top of it,
-  # so `exclude: ["tests/lib/**"]` drops 23 of this tree's 38 files while every
-  # include assertion above still passes. The guard cannot evaluate an arbitrary
-  # exclude pattern against the tree, so it refuses to bless one — vitest's own
-  # default exclude already covers node_modules and dist, and an explicit one
-  # here means the declared layout is no longer the whole story.
-  ACTIVE_EXCLUDE=""
-  if [ -n "$TEST_BLOCK" ]; then
-    ACTIVE_EXCLUDE="$(printf '%s\n' "$TEST_BLOCK" | grep -E '^[[:space:]]*exclude:' || true)"
-  fi
+  # Each source is checked independently: a bad include in the staged copy or in
+  # the worktree copy is drift either way.
+  while IFS= read -r _cfg; do
+    [ -z "$_cfg" ] && continue
+    if [ "$_cfg" = "$VITEST_CONFIG" ]; then
+      _label="$VITEST_CONFIG"
+    else
+      _label="${VITEST_CONFIG} (staged)"
+    fi
 
-  if [ "$HAVE_TEST_BLOCK" = "0" ]; then
-    fail "${VITEST_CONFIG} has no readable 'test: { ... }' block; cannot confirm the layout is declared."
-    echo "  The layout must be declared under test.include, where vitest reads it."
-  elif [ -z "$ACTIVE_INCLUDE" ] || ! printf '%s\n' "$ACTIVE_INCLUDE" | grep -qF "$DECLARED_GLOB"; then
-    fail "${VITEST_CONFIG} no longer declares an active test.include '${DECLARED_GLOB}'."
-    echo "  The layout must be declared in config, not left to vitest's default glob;"
-    echo "  it must be live code — a commented-out include does not count; and it"
-    echo "  must sit inside test: { }, not another section that happens to have an"
-    echo "  include field. Restore a single-line 'include: [...]' carrying the glob,"
-    echo "  or update DECLARED_GLOB in this script to match."
-  elif [ -n "$ACTIVE_EXCLUDE" ]; then
-    fail "${VITEST_CONFIG} declares a test.exclude, which this guard cannot verify."
-    echo "  exclude is applied on top of include, so a correct '${DECLARED_GLOB}'"
-    echo "  can still collect nothing: exclude: [\"tests/lib/**\"] silently drops"
-    echo "  every test under that path while this check keeps reporting them."
-    echo "  Express the layout with include alone — vitest's default exclude already"
-    echo "  covers node_modules and dist. If an exclude is genuinely needed, teach"
-    echo "  this guard to evaluate it in the same commit."
-    printf '%s\n' "$ACTIVE_EXCLUDE" | sed 's/^/    /'
-  fi
+    _verdict="$(check_one_config "$_cfg")"
+    _reason="${_verdict%%$'\t'*}"
+    _detail="${_verdict#*$'\t'}"
+
+    case "$_reason" in
+      "") ;;
+      no-test-block)
+        fail "${_label} has no readable 'test: { ... }' block; cannot confirm the layout is declared."
+        echo "  The layout must be declared under test.include, where vitest reads it."
+        ;;
+      no-include)
+        fail "${_label} no longer declares an active test.include '${DECLARED_GLOB}'."
+        echo "  The layout must be declared in config, not left to vitest's default glob;"
+        echo "  it must be live code — a commented-out include does not count; and it"
+        echo "  must sit inside test: { }, not another section that happens to have an"
+        echo "  include field. Restore a single-line 'include: [...]' carrying the glob,"
+        echo "  or update DECLARED_GLOB in this script to match."
+        ;;
+      has-exclude)
+        fail "${_label} declares a test.exclude, which this guard cannot verify."
+        echo "  exclude is applied on top of include, so a correct '${DECLARED_GLOB}'"
+        echo "  can still collect nothing: exclude: [\"tests/lib/**\"] silently drops"
+        echo "  every test under that path while this check keeps reporting them."
+        echo "  Express the layout with include alone — vitest's default exclude already"
+        echo "  covers node_modules and dist. If an exclude is genuinely needed, teach"
+        echo "  this guard to evaluate it in the same commit."
+        printf '%s\n' "$_detail" | sed 's/^/    /'
+        ;;
+    esac
+
+    # Drop the temp copy of the staged config.
+    [ "$_cfg" = "$VITEST_CONFIG" ] || rm -f "$_cfg"
+  done <<< "$(config_sources)"
 fi
 
 # ---------------------------------------------------------------------------

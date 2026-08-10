@@ -807,8 +807,24 @@ single P-tier above.
   script path directly and cannot carry `CI_GATE_CHECK_ID`), scheduled in
   `run_full_or_ship_checks` and `lanes.conf`, with `tests-shell` added to the
   shell language mapping so the lane is not filtered straight back out.
-  Combined suite: `test_test_layout.bats` (43) + `test_js_lane.bats` (40) = 83
-  cases, 94 including the hooks and changeset suites. The node lane was run end
+  An eighth round found four more, two of them P1. The drift check still read
+  only the **worktree** `vitest.config.ts` after the candidate list moved to the
+  index: staging a narrowed `test.include` and restoring the good config on disk
+  passed the guard. Both copies are now checked and the failure names which one.
+  The new `tests-shell.sh` was committed **100644** — `core.fileMode=false`
+  means a local `chmod` is not what git records, and `run_phase` executes the
+  path directly, so the lane would have exited 126 before any test ran; the bats
+  case asserting `[ -x ]` passed because it tested the worktree, the same
+  index-vs-worktree blindness the P1 above describes. It now asserts
+  `git ls-files -s` mode. A missing `bats` made the enabled blocker log
+  `skipped: bats not installed` and report PASS having executed nothing —
+  `uv sync` does not provision bats — so the wrapper now exits `FAIL_INFRA`.
+  And `htm`/`sass`/`less`/`vue`/`svelte`/`astro` were classified as javascript
+  but unmapped in `affected.yml`; since that classifier/mapping gap had recurred
+  three times, the bats case now **derives** its extension list from
+  `changeset.sh` rather than hand-listing files.
+  Combined suite: `test_test_layout.bats` (43) + `test_js_lane.bats` (44) = 87
+  cases, 109 across every suite the `tests-shell` lane runs, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
   earlier revision of this paragraph quoted stale ones.

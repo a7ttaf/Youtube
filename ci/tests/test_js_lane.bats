@@ -353,12 +353,47 @@ ws_run() {
   [[ "$output" == *"frontend/tests/"* ]]
 }
 
-@test "affected: classifier and mapping agree on frontend build inputs" {
+@test "affected: classifier and mapping agree on every javascript extension" {
+  # Derived from the classifier, not a hand-kept list: adding an extension to
+  # ci/lib/changeset.sh without a matching affected.yml rule fails here rather
+  # than silently scheduling a lane that then finds nothing to run. This gap has
+  # recurred three times in review, which is why the list is computed.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  source ci/lib/affected.sh
+
+  local exts
+  exts="$(sed -n '/^  case "\$ext" in$/,/^  esac$/p' ci/lib/changeset.sh \
+    | grep -E "printf 'javascript'" \
+    | sed 's/).*//' \
+    | tr '|' '\n' \
+    | tr -d ' \t' \
+    | grep -vE '^$|^#')"
+  [ -n "$exts" ]
+
+  local ext missing=""
+  while IFS= read -r ext; do
+    [ -z "$ext" ] && continue
+    [ "$(ci::changeset::classify_file "frontend/src/probe.$ext")" = "javascript" ] \
+      || { echo "classifier disagrees for .$ext" >&2; return 1; }
+    case "$(ci::affected::get_affected_tests "frontend/src/probe.$ext")" in
+      *frontend/tests/*) ;;
+      *) missing="${missing} .${ext}" ;;
+    esac
+  done <<< "$exts"
+
+  if [ -n "$missing" ]; then
+    echo "classified javascript but unmapped in affected.yml:${missing}" >&2
+    return 1
+  fi
+}
+
+@test "affected: classifier and mapping agree on frontend manifests and lockfiles" {
   source ci/lib/common.sh
   source ci/lib/changeset.sh
   source ci/lib/affected.sh
   local f
-  for f in frontend/src/styles.css frontend/index.html frontend/tsconfig.json frontend/bun.lock; do
+  for f in frontend/package.json frontend/tsconfig.json frontend/bun.lock frontend/index.html; do
     [ "$(ci::changeset::classify_file "$f")" = "javascript" ] \
       || { echo "$f not classified javascript" >&2; return 1; }
     case "$(ci::affected::get_affected_tests "$f")" in
@@ -424,12 +459,42 @@ ws_run() {
   [[ "$output" == *"tests-shell"* ]]
 }
 
-@test "tests-shell: the wrapper is executable and dispatches to tests.sh" {
-  [ -x ci/checks/tests-shell.sh ]
+@test "tests-shell: the wrapper is executable in the index, not just on disk" {
+  # run_phase executes the path directly, so a wrapper committed 100644 exits
+  # 126 Permission denied and the gate reports infra failure before any test
+  # runs. core.fileMode=false means a local chmod is not what git records, so
+  # this asserts the index mode — checking [ -x ] on the worktree passes while
+  # the committed file is still non-executable.
+  run git ls-files -s ci/checks/tests-shell.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == 100755* ]]
   bash -n ci/checks/tests-shell.sh
+}
+
+@test "tests-shell: every ci/checks script is executable in the index" {
+  run bash -c "git ls-files -s ci/checks/ | grep -v '\.yml\$' | awk '\$1 != \"100755\"'"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tests-shell: the wrapper dispatches to tests.sh as tests-shell" {
   run grep -c 'CI_GATE_CHECK_ID=tests-shell' ci/checks/tests-shell.sh
   [ "$status" -eq 0 ]
   [ "$output" -ge 1 ]
+}
+
+@test "tests-shell: a missing bats runner is infra failure, not a green skip" {
+  # tests.sh logs "skipped: bats not installed" and returns 0, which would make
+  # this enabled blocker pass having executed nothing. uv sync does not
+  # provision bats, so a fresh environment hits exactly that.
+  # A PATH that still has a shell and coreutils but no bats: emptying PATH
+  # entirely would break bash before the check under test ever runs.
+  if PATH=/usr/bin:/bin command -v bats >/dev/null 2>&1; then
+    skip "bats resolves from /usr/bin on this host; cannot simulate its absence"
+  fi
+  run bash -c 'PATH=/usr/bin:/bin bash ci/checks/tests-shell.sh'
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"bats is not installed"* ]]
 }
 
 @test "changeset: an unrelated json file is still json" {

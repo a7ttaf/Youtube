@@ -13,5 +13,23 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# shellcheck source=ci/lib/common.sh
+source "$ROOT_DIR/ci/lib/common.sh"
+
+# tests.sh logs "skipped: bats not installed" and returns 0, which is right for
+# a generic lane that may run in a repo with no shell tests. It is wrong here:
+# this lane exists *because* these suites must run, and `uv sync` does not
+# provision bats, so a fresh environment would report PASS having executed
+# nothing. An enabled blocker that cannot find its runner is broken
+# infrastructure, not a pass.
+if ! ci::common::command_exists bats; then
+  echo "bats is not installed, so the ci/tests/ suites cannot run."
+  echo "  This lane is scheduled as a blocker precisely so those suites execute;"
+  echo "  reporting PASS here would mean the layout and node gates are unguarded."
+  echo "  Install bats (e.g. 'npm i -g bats', or your platform's package manager)."
+  exit "$CI_RESULT_FAIL_INFRA"
+fi
 
 exec env CI_GATE_CHECK_ID=tests-shell bash "$SCRIPT_DIR/tests.sh" "$@"
