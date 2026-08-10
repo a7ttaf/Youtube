@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 
 // ============================================================================
 // Purpose: Remember that a bulk import's outcome was never established. The
@@ -504,6 +504,70 @@ export const newApplyId = (): string => {
   return `apply-${documentSalt}-${Math.trunc(clock)}-${fallbackCounter}`;
 };
 
+/** Split a scope into its tenant and user halves. Both halves are encoded over
+ * a strict alphabet, so `~` cannot occur inside either and the first one is
+ * unambiguously the separator. */
+const scopeParts = (scope: string): readonly [string, string] => {
+  const separator = scope.indexOf("~");
+  return [scope.slice(0, separator), scope.slice(separator + 1)];
+};
+
+/**
+ * Whether `to` is the SAME principal as `from` with the tenant newly resolved.
+ * That is the one scope transition which is not a change of who is looking:
+ * a session whose body carries no tenant starts on the missing-tenant scope
+ * and moves to the real one when /tenants/me answers.
+ *
+ * Everything else — a different user, a different tenant, or a tenant going
+ * BACK to unresolved — is a different principal or a regression, and carrying
+ * records across either would be the cross-operator leak the scoping exists to
+ * prevent.
+ */
+const isTenantResolution = (from: string, to: string): boolean => {
+  const [fromTenant, fromUser] = scopeParts(from);
+  const [toTenant, toUser] = scopeParts(to);
+  return fromTenant === MISSING && toTenant !== MISSING && fromUser === toUser;
+};
+
+// ============================================================================
+// Purpose: Carry pending applies across a tenant RESOLUTION so a record made
+//   before /tenants/me answered is not stranded in the namespace it was
+//   written to.
+// Database/ORM: None (frontend) — moves localStorage keys between prefixes.
+// Standards: Runs ONLY for a same-principal tenant resolution (see
+//   isTenantResolution); every other scope change is a different operator and
+//   must not inherit anything. Fail-closed on a storage failure: the old
+//   record is removed only once the new one is DURABLE, so a refused write
+//   leaves the guard standing in the old scope rather than dropping it from
+//   both. Idempotent — a second call finds the old prefix empty — which
+//   matters because two components read this store under the same scope.
+//   This is a MITIGATION, not a licence to let the scope move under a write:
+//   admission is still withheld until the scope settles. It covers the case
+//   that gate cannot, a tenant that resolves AFTER a failure (review #184).
+// Blast Radius: Whether a pending-import warning survives tenant resolution.
+//   No requests, no authorization meaning; a mistake shows as a warning that
+//   is missing or duplicated, never as a permitted write.
+// Connections:
+//   - File: frontend/src/components/srcc/AppShell.tsx -> resolves the tenant
+//       whose arrival is exactly this transition.
+//   - File: frontend/src/contexts/TenantContext.tsx -> the hydration that
+//       moves the tenant half from missing to known.
+// ============================================================================
+export const adoptPendingApplies = (from: string, to: string): void => {
+  if (!isTenantResolution(from, to)) {
+    return;
+  }
+  const prefix = prefixFor(from);
+  for (const key of readIds(from)) {
+    const applyId = key.slice(prefix.length);
+    // Remove only once the new record is durable, so a storage refusal cannot
+    // erase the old one and leave nothing anywhere.
+    if (addId(to, applyId)) {
+      removeId(from, applyId);
+    }
+  }
+};
+
 /**
  * Read and control the store. Safe to call from any number of components —
  * they all observe the same module state, so a raise in the flow is visible to
@@ -514,6 +578,17 @@ export const useUnsettledImport = (
 ): UnsettledImportValue => {
   const snapshot = useCallback(() => readFlag(scope), [scope]);
   const unsettled = useSyncExternalStore(subscribe, snapshot, snapshot);
+  // The scope this store was last read under. A change to it is a namespace
+  // change, and a pending record does not follow automatically.
+  const previousScopeRef = useRef(scope);
+  useEffect(() => {
+    const previous = previousScopeRef.current;
+    previousScopeRef.current = scope;
+    if (previous !== scope) {
+      adoptPendingApplies(previous, scope);
+      notify();
+    }
+  }, [scope]);
   const trackApply = useCallback(
     (applyId: string) => {
       addId(scope, applyId);

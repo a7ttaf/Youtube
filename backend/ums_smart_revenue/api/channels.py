@@ -231,11 +231,23 @@ class ChannelImportResult(BaseModel):
     cms_status: str
     counts: dict[str, int]
     rows: list[ChannelImportRowResult]
-    # Digest of exactly the plan content above (counts + rows). A client echoes
-    # a dry run's value back as `expected_plan_fingerprint` on the apply, and a
-    # mismatch is a 409: the apply re-plans from CURRENT state, so without this
-    # a row reviewed as CREATE could silently commit as an UPDATE over a
-    # concurrently created channel (review #184).
+    # Digest of the plan content above (`counts` + `rows`) AND the TARGET the
+    # write lands in: `content_owner_id`, `cms_status`, and the server-resolved
+    # tenant. A client echoes a dry run's value back as
+    # `expected_plan_fingerprint` on the apply, and a mismatch is a 409: the
+    # apply re-plans from CURRENT state, so without this a row reviewed as
+    # CREATE could silently commit as an UPDATE over a concurrently created
+    # channel (review #184).
+    #
+    # The target inputs are LOAD-BEARING, not incidental. An all-CREATE roster's
+    # rows carry no owner (a CREATE's `changes` is empty by design), so a digest
+    # over content alone let a preview approved for owner A authorize the same
+    # plan against owner B; the tenant is in for the same reason across
+    # tenancies. It is server-resolved and never client-supplied, which is what
+    # makes it a boundary rather than an echo — and it is why this digest is
+    # NOT reproducible client-side. It is an opaque equality token to echo
+    # back, not a checksum to recompute. Only `dry_run` is outside it, because
+    # a preview and its apply differ in it by definition.
     plan_fingerprint: str
 
 

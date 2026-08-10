@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   UNSCOPED_IMPORT_SCOPE,
+  adoptPendingApplies,
   UNSETTLED_IMPORT_STORAGE_KEY,
   importScopeFor,
   newApplyId,
@@ -121,6 +122,71 @@ describe("unsettled import store", () => {
     } finally {
       setItem.mockRestore();
     }
+  });
+
+  it("carries a pending apply across a tenant RESOLUTION", () => {
+    // A session whose body has no tenant starts on the missing-tenant scope
+    // and moves to the real one when /tenants/me answers. Admission is
+    // withheld until the scope settles, but a tenant that resolves AFTER a
+    // failed bootstrap can still move it under an outstanding apply — and the
+    // record would then sit where neither this tab's guard nor another tab's
+    // looks for it (review #184, codex P2).
+    const before = importScopeFor(null, "user-1");
+    const after = importScopeFor("tenant-1", "user-1");
+    const beforeHook = renderHook(() => useUnsettledImport(before));
+    act(() => beforeHook.result.current.trackApply("apply-mid-bootstrap"));
+
+    act(() => adoptPendingApplies(before, after));
+
+    expect(storedIds(after)).toEqual(["apply-mid-bootstrap"]);
+    expect(storedIds(before)).toEqual([]);
+    expect(renderHook(() => useUnsettledImport(after)).result.current.unsettled).toBe(true);
+  });
+
+  it("carries NOTHING across a change of principal", () => {
+    // The isolation this scoping exists for. Every transition except a
+    // same-user tenant resolution is a different operator, and inheriting
+    // their pending import is the cross-operator leak — an acknowledgement
+    // would then retire protection that was never theirs.
+    const alice = importScopeFor(null, "user-alice");
+    const bobResolved = importScopeFor("tenant-1", "user-bob");
+    const aliceHook = renderHook(() => useUnsettledImport(alice));
+    act(() => aliceHook.result.current.trackApply("apply-alice"));
+
+    act(() => adoptPendingApplies(alice, bobResolved));
+
+    expect(storedIds(bobResolved)).toEqual([]);
+    expect(storedIds(alice)).toEqual(["apply-alice"]);
+  });
+
+  it("carries nothing BACKWARDS, from a known tenant to none", () => {
+    // A tenant going back to unresolved is a regression, not a resolution:
+    // sign-out and re-bootstrap look like this, and the next session must not
+    // inherit the previous one's pending import.
+    const resolved = importScopeFor("tenant-1", "user-1");
+    const unresolved = importScopeFor(null, "user-1");
+    const hook = renderHook(() => useUnsettledImport(resolved));
+    act(() => hook.result.current.trackApply("apply-resolved"));
+
+    act(() => adoptPendingApplies(resolved, unresolved));
+
+    expect(storedIds(unresolved)).toEqual([]);
+    expect(storedIds(resolved)).toEqual(["apply-resolved"]);
+  });
+
+  it("adopts idempotently, because two components share the scope", () => {
+    // RegistryView and RegistryImportFlow both read this store, so the effect
+    // runs twice for one scope change. The second pass must find nothing left
+    // to move rather than duplicating or dropping.
+    const before = importScopeFor(null, "user-1");
+    const after = importScopeFor("tenant-1", "user-1");
+    const hook = renderHook(() => useUnsettledImport(before));
+    act(() => hook.result.current.trackApply("apply-once"));
+
+    act(() => adoptPendingApplies(before, after));
+    act(() => adoptPendingApplies(before, after));
+
+    expect(storedIds(after)).toEqual(["apply-once"]);
   });
 
   it("settling an id it does not hold changes nothing", () => {
