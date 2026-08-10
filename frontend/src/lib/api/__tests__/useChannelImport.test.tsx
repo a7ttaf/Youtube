@@ -703,6 +703,74 @@ describe("useChannelImport", () => {
     ).resolves.toMatchObject({ counts: { ERROR: 1 } });
   });
 
+  it("rejects a diff whose sides are EQUAL", async () => {
+    // _inventory_changes keeps only pairs where pair[0] != pair[1], so an
+    // unchanged pair is unemittable — and it presents "no change" for a field
+    // the apply may well write (review #184, codex P2).
+    await rejectsPlan(
+      onlyUpdateRow({ changes: { channel_name: { from: "Beta Channel", to: "Beta Channel" } } }),
+    );
+  });
+
+  it("rejects a diff whose `to` contradicts the row", async () => {
+    // The reported case: a diff saying revenue_required stays false, beside a
+    // row saying it is true. Apply writes the row's value; the operator read
+    // the diff.
+    await rejectsPlan(
+      onlyUpdateRow({
+        revenue_required: true,
+        revenue_source_status: { from: "PERFORMANCE_ONLY", to: "MISSING_REVENUE_SOURCE" },
+        changes: { revenue_required: { from: false, to: false } },
+      }),
+    );
+    await rejectsPlan(
+      onlyUpdateRow({
+        channel_name: "Beta Channel",
+        changes: { channel_name: { from: "Old Beta", to: "Someone Else" } },
+      }),
+    );
+  });
+
+  it("rejects a diff whose `to` contradicts the request TARGET", async () => {
+    // cms_status and content_owner_id take their `to` from the request, not
+    // the row, so they are checked against the plan's echoed target.
+    await rejectsPlan(
+      onlyUpdateRow({ changes: { cms_status: { from: "OUTSIDE_CMS", to: "OUTSIDE_CMS_2" } } }),
+    );
+    await rejectsPlan(
+      onlyUpdateRow({ changes: { content_owner_id: { from: null, to: "COsomeone-else" } } }),
+    );
+  });
+
+  it("accepts diffs that agree with the row and the target", async () => {
+    // The complement, one entry per field, so the rule cannot be over-applied
+    // to the payload the backend actually emits.
+    fetchMock().mockResolvedValue(
+      jsonResponse(
+        onlyUpdateRow({
+          channel_name: "Beta Channel",
+          revenue_required: true,
+          revenue_source_status: { from: "PERFORMANCE_ONLY", to: "MISSING_REVENUE_SOURCE" },
+          changes: {
+            channel_name: { from: "Old Beta", to: "Beta Channel" },
+            revenue_required: { from: false, to: true },
+            cms_status: { from: "OUTSIDE_CMS", to: "INSIDE_CMS" },
+            content_owner_id: { from: null, to: "COabc" },
+          },
+        }),
+      ),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { UPDATE: 1 } });
+  });
+
   it("rejects a 2xx describing a plan other than the one bound", async () => {
     // A stale, misrouted or legacy-server response can be structurally perfect
     // and describe a DIFFERENT plan. The route returns the digest it compared

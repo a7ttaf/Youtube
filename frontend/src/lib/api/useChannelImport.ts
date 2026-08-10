@@ -425,6 +425,84 @@ const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => b
   [DRY_RUN_FIELD, (value) => typeof value === "boolean"],
 ];
 
+/**
+ * `counts` must be the TALLY of `rows`, not merely a well-formed map. The
+ * backend derives each count by counting rows with that outcome, so a payload
+ * where they disagree — 99 CREATEs beside one UPDATE row — is one it cannot
+ * emit, and it would put contradictory totals on the preview and carry them
+ * onto the Applied screen as the approved plan (review #184).
+ */
+/**
+ * For each diff field: the type BOTH sides hold, and the value its `to` must
+ * equal. `_inventory_changes` compares exactly these four and takes `to` from
+ * the planned value — the row's own for channel_name and revenue_required, the
+ * REQUEST target for cms_status and content_owner_id.
+ */
+const CHANGE_FIELD_RULES: Record<
+  string,
+  {
+    side: (value: unknown) => boolean;
+    target: (row: Record<string, unknown>, plan: Record<string, unknown>) => unknown;
+  }
+> = {
+  channel_name: { side: (value) => typeof value === "string", target: (row) => row.channel_name },
+  revenue_required: {
+    side: (value) => typeof value === "boolean",
+    target: (row) => row.revenue_required,
+  },
+  cms_status: { side: (value) => typeof value === "string", target: (_row, plan) => plan.cms_status },
+  content_owner_id: { side: isNullableString, target: (_row, plan) => plan.content_owner_id },
+};
+
+/**
+ * One diff entry must describe ITS OWN field, and describe a real change.
+ * `_inventory_changes` keeps only pairs where `pair[0] != pair[1]`, so equal
+ * sides are unemittable; and its `to` is the value the write will persist, so
+ * a `to` disagreeing with the row or the request target is describing a write
+ * that will not happen.
+ *
+ * The key allowlist alone accepted `revenue_required: {from: false, to: false}`
+ * beside `revenue_required: true` — a diff saying "no change" next to a field
+ * saying the opposite, with Apply live and the retained fingerprint letting the
+ * real value through (review #184, codex P2).
+ */
+const changeIsWellFormed = (
+  field: string,
+  change: { from: unknown; to: unknown },
+  row: Record<string, unknown>,
+  plan: Record<string, unknown>,
+): boolean => {
+  const rule = CHANGE_FIELD_RULES[field];
+  if (rule === undefined) {
+    return false;
+  }
+  return (
+    rule.side(change.from) &&
+    rule.side(change.to) &&
+    change.from !== change.to &&
+    change.to === rule.target(row, plan)
+  );
+};
+
+/** Every row's diff, checked against the row and the plan's target. */
+const diffsMatchTheirFields = (plan: Record<string, unknown>): boolean => {
+  const rows = plan.rows as Record<string, unknown>[];
+  return rows.every((row) => {
+    const changes = row.changes as Record<string, { from: unknown; to: unknown }>;
+    return Object.entries(changes).every(([field, change]) =>
+      changeIsWellFormed(field, change, row, plan),
+    );
+  });
+};
+
+const countsMatchRows = (candidate: Record<string, unknown>): boolean => {
+  const counts = candidate.counts as Record<string, number>;
+  const rows = candidate.rows as ChannelImportRowResult[];
+  return PLAN_OUTCOMES.every(
+    (outcome) => counts[outcome] === rows.filter((row) => row.outcome === outcome).length,
+  );
+};
+
 // ============================================================================
 // Purpose: The typed boundary between an untrusted HTTP body and trusted UI
 //   state. Nothing may replace the plan on screen — not a 200 apply result,
@@ -455,21 +533,6 @@ const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => b
 //       computes plan_fingerprint over the disclosed payload.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> the plan contract this mirrors.
 // ============================================================================
-/**
- * `counts` must be the TALLY of `rows`, not merely a well-formed map. The
- * backend derives each count by counting rows with that outcome, so a payload
- * where they disagree — 99 CREATEs beside one UPDATE row — is one it cannot
- * emit, and it would put contradictory totals on the preview and carry them
- * onto the Applied screen as the approved plan (review #184).
- */
-const countsMatchRows = (candidate: Record<string, unknown>): boolean => {
-  const counts = candidate.counts as Record<string, number>;
-  const rows = candidate.rows as ChannelImportRowResult[];
-  return PLAN_OUTCOMES.every(
-    (outcome) => counts[outcome] === rows.filter((row) => row.outcome === outcome).length,
-  );
-};
-
 export const isChannelImportResult = (payload: unknown): payload is ChannelImportResult => {
   if (!isPlainObject(payload)) {
     return false;
@@ -478,7 +541,8 @@ export const isChannelImportResult = (payload: unknown): payload is ChannelImpor
   // both as their declared types, which is only sound once they have passed.
   return (
     PLAN_PAYLOAD_FIELDS.every(([field, isValid]) => isValid(payload[field])) &&
-    countsMatchRows(payload)
+    countsMatchRows(payload) &&
+    diffsMatchTheirFields(payload)
   );
 };
 

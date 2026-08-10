@@ -1337,49 +1337,6 @@ export const RegistryImportFlow = ({
 
   /**
    * ============================================================================
-   * Purpose: The frontend's WRITE DISPATCH boundary for the audited bulk
-   *   import. It admits (or refuses) the request across documents, records the
-   *   apply as unsettled before it leaves, binds it to the reviewed plan, sends
-   *   it, and classifies the outcome as settled or indeterminate.
-   * Database/ORM: None directly (frontend) — POSTs /channels/import with
-   *   dry_run=false via useChannelImport. That route writes channel inventory,
-   *   creates or joins CMS groups, and appends CHANNEL_IMPORTED. This is the
-   *   only place in the UI that can cause any of it.
-   * Standards: The ORDER of the opening steps is the contract, not a style
-   *   choice. `inFlightRef` is set synchronously so a same-tick double click
-   *   cannot pass; `navLatch.arm` batches with setApplying so the shell's nav
-   *   and this flow's exits disable in ONE commit, leaving no window where the
-   *   write is running and navigation is live; and admission is AWAITED before
-   *   dispatch, so a second tab cannot slip a concurrent apply through the gap
-   *   between reading the guard and recording the claim. A refusal writes
-   *   nothing and sends nothing.
-   *   `expected_plan_fingerprint` binds the write to the plan on screen. It is
-   *   always sent, which also opts this caller into the backend's strict
-   *   pre-state guard — the flow is asking for "the diff I reviewed, or none
-   *   of it", not the unbound file-wins path.
-   *   Failure classification is fail-CLOSED: only an ESTABLISHED rejection
-   *   retires the apply's record. Anything else — a lost response, a gateway
-   *   5xx, an unreadable body — stays INDETERMINATE, because the write may
-   *   have committed and the flow must not re-arm Apply over it. Never retry
-   *   from here; a blind second apply appends a second CHANNEL_IMPORTED.
-   * Blast Radius: Channel-registry inventory, CMS group membership, and the
-   *   CHANNEL_IMPORTED audit trail — via the backend's own guarded, audited
-   *   route, whose permission checks and fingerprint guard remain the
-   *   authority. No revenue math; the locked-month guard rejects
-   *   revenue_required flips server-side.
-   * Connections:
-   *   - File: frontend/src/contexts/UnsettledImportContext.tsx -> admit()
-   *       (cross-document admission) and settleApply().
-   *   - File: frontend/src/contexts/WriteInFlightContext.tsx -> the shell nav
-   *       latch armed for the duration of the request.
-   *   - File: frontend/src/lib/api/useChannelImport.ts -> the POST and the
-   *       payload validation every response passes through.
-   *   - File: backend/ums_smart_revenue/api/channels.py -> import_channels,
-   *       the route this dispatches to.
-   * ============================================================================
-   */
-  /**
-   * ============================================================================
    * Purpose: The ADMISSION PRECONDITION for the audited bulk import write.
    *   Every reason a dispatch stops before it starts, in one place: a namespace
    *   that can still change, a request already running, and a plan that is not
@@ -1440,6 +1397,49 @@ export const RegistryImportFlow = ({
     return approvedApply(file, preview);
   };
 
+  /**
+   * ============================================================================
+   * Purpose: The frontend's WRITE DISPATCH boundary for the audited bulk
+   *   import. It admits (or refuses) the request across documents, records the
+   *   apply as unsettled before it leaves, binds it to the reviewed plan, sends
+   *   it, and classifies the outcome as settled or indeterminate.
+   * Database/ORM: None directly (frontend) — POSTs /channels/import with
+   *   dry_run=false via useChannelImport. That route writes channel inventory,
+   *   creates or joins CMS groups, and appends CHANNEL_IMPORTED. This is the
+   *   only place in the UI that can cause any of it.
+   * Standards: The ORDER of the opening steps is the contract, not a style
+   *   choice. `inFlightRef` is set synchronously so a same-tick double click
+   *   cannot pass; `navLatch.arm` batches with setApplying so the shell's nav
+   *   and this flow's exits disable in ONE commit, leaving no window where the
+   *   write is running and navigation is live; and admission is AWAITED before
+   *   dispatch, so a second tab cannot slip a concurrent apply through the gap
+   *   between reading the guard and recording the claim. A refusal writes
+   *   nothing and sends nothing.
+   *   `expected_plan_fingerprint` binds the write to the plan on screen. It is
+   *   always sent, which also opts this caller into the backend's strict
+   *   pre-state guard — the flow is asking for "the diff I reviewed, or none
+   *   of it", not the unbound file-wins path.
+   *   Failure classification is fail-CLOSED: only an ESTABLISHED rejection
+   *   retires the apply's record. Anything else — a lost response, a gateway
+   *   5xx, an unreadable body — stays INDETERMINATE, because the write may
+   *   have committed and the flow must not re-arm Apply over it. Never retry
+   *   from here; a blind second apply appends a second CHANNEL_IMPORTED.
+   * Blast Radius: Channel-registry inventory, CMS group membership, and the
+   *   CHANNEL_IMPORTED audit trail — via the backend's own guarded, audited
+   *   route, whose permission checks and fingerprint guard remain the
+   *   authority. No revenue math; the locked-month guard rejects
+   *   revenue_required flips server-side.
+   * Connections:
+   *   - File: frontend/src/contexts/UnsettledImportContext.tsx -> admit()
+   *       (cross-document admission) and settleApply().
+   *   - File: frontend/src/contexts/WriteInFlightContext.tsx -> the shell nav
+   *       latch armed for the duration of the request.
+   *   - File: frontend/src/lib/api/useChannelImport.ts -> the POST and the
+   *       payload validation every response passes through.
+   *   - File: backend/ums_smart_revenue/api/channels.py -> import_channels,
+   *       the route this dispatches to.
+   * ============================================================================
+   */
   const apply = async () => {
     const approved = preflightApply();
     if (approved === null) {
