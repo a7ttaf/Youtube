@@ -34,11 +34,31 @@ teardown() {
   fi
   ci::cache::init
   src="$(mktemp -d)"
-  echo "0" > "$src/result"
-  echo "test output" > "$src/output.log"
+  # These filenames are the cache contract, not arbitrary fixture names:
+  # ci::cache::hit requires result.txt, and ci/preflight.sh writes result.txt
+  # and output.txt. A fixture using result/output.log stores an entry that can
+  # never be a hit, which is why this test failed against a working cache.
+  echo "0" > "$src/result.txt"
+  echo "test output" > "$src/output.txt"
 
   ci::cache::put "test-key-12345" "$src"
   ci::cache::hit "test-key-12345"
+
+  rm -rf "$src"
+}
+
+@test "cache: an entry missing result.txt is not a hit" {
+  # The other half of the contract: put must not make an incomplete entry look
+  # cached, or a check would be skipped with nothing to restore.
+  if ! declare -f ci::cache::put >/dev/null 2>&1; then
+    skip "cache library not loaded"
+  fi
+  ci::cache::init
+  src="$(mktemp -d)"
+  echo "test output" > "$src/output.txt"
+
+  ci::cache::put "test-key-incomplete" "$src"
+  ! ci::cache::hit "test-key-incomplete"
 
   rm -rf "$src"
 }

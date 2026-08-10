@@ -791,8 +791,24 @@ single P-tier above.
   mappings, and `changeset.sh` now classifies web build inputs (`html`, `css`,
   `tsconfig.json`) as `javascript` so a change to the entry document or the
   stylesheet still schedules the lane.
-  Combined suite: `test_test_layout.bats` (37) + `test_js_lane.bats` (32) = 69
-  cases, 80 including the hooks and changeset suites. The node lane was run end
+  A seventh round closed the last four. The guard scanned the **worktree** while
+  git commits the **index**: a partially staged move left
+  `frontend/src/probe.test.ts` staged and moved on disk, and the guard passed a
+  commit whose test is never collected. Candidates are now the union of the
+  filesystem walk and `git ls-files`, so a stray file that is only staged, or
+  only on disk, fails either way. `test.exclude` was unchecked, so a correct
+  include could still collect nothing — `exclude: ["tests/lib/**"]` drops 23 of
+  38 files while every include assertion passes; the guard now refuses an
+  exclude it cannot evaluate. `.mts`/`.cts` were missing from the changeset
+  classifier, so module-suffixed **source** scheduled no lane at all. And the
+  bats suites themselves were never scheduled: a change to `ci/checks/*.sh`
+  emitted only `lint-shell` and `format-shell`, so the tests guarding this gate
+  ran only by hand. New `ci/checks/tests-shell.sh` wrapper (preflight executes a
+  script path directly and cannot carry `CI_GATE_CHECK_ID`), scheduled in
+  `run_full_or_ship_checks` and `lanes.conf`, with `tests-shell` added to the
+  shell language mapping so the lane is not filtered straight back out.
+  Combined suite: `test_test_layout.bats` (43) + `test_js_lane.bats` (40) = 83
+  cases, 94 including the hooks and changeset suites. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
   earlier revision of this paragraph quoted stale ones.

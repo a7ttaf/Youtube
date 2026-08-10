@@ -82,7 +82,7 @@ ci::changeset::_sniff_content() {
 ci::changeset::_checks_for_language() {
   local lang="$1"
   case "$lang" in
-    shell)      printf 'lint-shell format-shell' ;;
+    shell)      printf 'lint-shell format-shell tests-shell' ;;
     javascript) printf 'lint-js typecheck-js format-js tests-js' ;;
     python)     printf 'lint-python typecheck-python format-python tests-python' ;;
     go)         printf 'lint-go typecheck-go format-go tests-go' ;;
@@ -171,7 +171,9 @@ ci::changeset::classify_file() {
   esac
 
   case "$ext" in
-    js|ts|tsx|jsx|mjs|cjs)  printf 'javascript' ;;
+    # mts/cts are TypeScript's module-specific extensions: real source, and
+    # test-layout.sh does not cover non-test files, so there is no other guard.
+    js|ts|tsx|jsx|mjs|cjs|mts|cts) printf 'javascript' ;;
     # Web build inputs: the node lane is the only one that can validate these,
     # so leaving them `unknown` means a change to the entry document or the
     # stylesheet schedules nothing at all — no typecheck, no tests, no build.

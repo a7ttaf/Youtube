@@ -83,6 +83,18 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# Validate the mode here rather than at dispatch. The changeset check below can
+# short-circuit with "No relevant changes detected" and exit 0 before run_mode
+# is ever reached, so on a clean tree an unknown --mode was silently accepted.
+case "$MODE" in
+  quick|full|ship|debt) ;;
+  *)
+    echo "ERROR: unknown --mode '$MODE'" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
+
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
@@ -516,6 +528,7 @@ run_full_or_ship_checks() {
   run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "branch-protection:./ci/checks/branch-protection.sh"     "test-layout:./ci/checks/test-layout.sh"
   run_phase     "security:./ci/checks/security.sh"
   run_phase     "node:./ci/checks/node.sh"     "python:./ci/checks/python.sh"     "build:./ci/checks/build.sh"
+  run_phase     "tests-shell:./ci/checks/tests-shell.sh"
   run_phase     "debt:./ci/checks/debt.sh"
 }
 

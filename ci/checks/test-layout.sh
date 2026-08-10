@@ -70,8 +70,68 @@ TEST_SUFFIXES=(
   ')'
 )
 
-STRAY="$(find "$FRONTEND_DIR" "${PRUNE[@]}" -type f \
-  "${TEST_SUFFIXES[@]}" -print 2>/dev/null | sort || true)"
+# Candidates are the union of the worktree and the git index. A partially staged
+# move leaves the two disagreeing: `git mv`-ing a stray test without staging the
+# move leaves frontend/src/probe.test.ts in the index while the worktree shows
+# only the moved copy, so a filesystem-only scan blesses a commit that is not
+# clean. Checking both is fail-closed in either direction — a stray file that is
+# only staged, or only on disk, still fails.
+# Note this deliberately does NOT prune the tests tree: section 3 has to see
+# inside it to find files the include never collects. Only vendored packages and
+# build output are pruned here; which tree a candidate belongs to is decided by
+# the predicates below.
+CANDIDATE_PRUNE=(
+  '(' -name 'node_modules'
+  -o -path "$FRONTEND_DIR/dist"
+  -o -path "$FRONTEND_DIR/build"
+  -o -path "$FRONTEND_DIR/coverage"
+  -o -path "$FRONTEND_DIR/.next"
+  -o -path "$FRONTEND_DIR/.turbo"
+  -o -path "$FRONTEND_DIR/.vite"
+  ')' -prune -o
+)
+
+candidate_files() {
+  {
+    find "$FRONTEND_DIR" "${CANDIDATE_PRUNE[@]}" -type f "${TEST_SUFFIXES[@]}" -print 2>/dev/null || true
+    if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+      git ls-files -- "$FRONTEND_DIR" 2>/dev/null || true
+    fi
+  } | sort -u
+}
+
+# find applies PRUNE itself; git ls-files does not, so the predicates below are
+# the single source of truth for both sources.
+path_is_test_like() {
+  case "$1" in
+    *.test.ts | *.test.tsx | *.test.mts | *.test.cts \
+      | *.test.js | *.test.jsx | *.test.mjs | *.test.cjs \
+      | *.spec.ts | *.spec.tsx | *.spec.mts | *.spec.cts \
+      | *.spec.js | *.spec.jsx | *.spec.mjs | *.spec.cjs) return 0 ;;
+  esac
+  return 1
+}
+
+path_is_pruned() {
+  case "$1" in
+    */node_modules/*) return 0 ;;
+    "$FRONTEND_DIR"/dist/* | "$FRONTEND_DIR"/build/* | "$FRONTEND_DIR"/coverage/* \
+      | "$FRONTEND_DIR"/.next/* | "$FRONTEND_DIR"/.turbo/* | "$FRONTEND_DIR"/.vite/*) return 0 ;;
+  esac
+  return 1
+}
+
+ALL_CANDIDATES="$(candidate_files)"
+
+STRAY=""
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  path_is_test_like "$f" || continue
+  path_is_pruned "$f" && continue
+  case "$f" in "$TESTS_DIR"/*) continue ;; esac
+  STRAY="${STRAY}${f}"$'\n'
+done <<< "$ALL_CANDIDATES"
+STRAY="$(printf '%s' "$STRAY" | sed '/^$/d')"
 
 if [ -n "$STRAY" ]; then
   fail "Test files found outside ${TESTS_DIR}/. vitest include is '${DECLARED_GLOB}', so these would NEVER RUN:"
@@ -88,7 +148,18 @@ fi
 # ---------------------------------------------------------------------------
 # 2. No lingering __tests__ directories outside tests/ (the retired convention).
 # ---------------------------------------------------------------------------
-LEGACY_DIRS="$(find "$FRONTEND_DIR" "${PRUNE[@]}" -type d -name '__tests__' -print 2>/dev/null | sort || true)"
+LEGACY_DIRS="$( {
+  find "$FRONTEND_DIR" "${PRUNE[@]}" -type d -name '__tests__' -print 2>/dev/null || true
+  # Index side: a staged file under a __tests__/ path names the directory even
+  # when the directory no longer exists on disk.
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    path_is_pruned "$f" && continue
+    case "$f" in
+      */__tests__/*) printf '%s\n' "${f%%/__tests__/*}/__tests__" ;;
+    esac
+  done <<< "$ALL_CANDIDATES"
+} | sort -u | sed '/^$/d')"
 
 if [ -n "$LEGACY_DIRS" ]; then
   fail "Retired __tests__ directories still present under ${FRONTEND_DIR}/:"
@@ -105,12 +176,14 @@ fi
 # ---------------------------------------------------------------------------
 #    Everything test-looking except the two suffixes the glob actually collects.
 UNRUNNABLE=""
-if [ -d "$TESTS_DIR" ]; then
-  UNRUNNABLE="$(find "$TESTS_DIR" -type f \
-    "${TEST_SUFFIXES[@]}" \
-    ! -name '*.test.ts' ! -name '*.test.tsx' \
-    -print 2>/dev/null | sort || true)"
-fi
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  case "$f" in "$TESTS_DIR"/*) ;; *) continue ;; esac
+  path_is_test_like "$f" || continue
+  case "$f" in *.test.ts | *.test.tsx) continue ;; esac
+  UNRUNNABLE="${UNRUNNABLE}${f}"$'\n'
+done <<< "$ALL_CANDIDATES"
+UNRUNNABLE="$(printf '%s' "$UNRUNNABLE" | sed '/^$/d')"
 
 if [ -n "$UNRUNNABLE" ]; then
   fail "Files under ${TESTS_DIR}/ that do not match '${DECLARED_GLOB}' and are therefore silently skipped:"
@@ -243,6 +316,17 @@ else
   if [ -n "$TEST_BLOCK" ]; then
     ACTIVE_INCLUDE="$(printf '%s\n' "$TEST_BLOCK" | grep -E '^[[:space:]]*include:[[:space:]]*\[' || true)"
   fi
+  # A correct include is not sufficient: test.exclude is applied on top of it,
+  # so `exclude: ["tests/lib/**"]` drops 23 of this tree's 38 files while every
+  # include assertion above still passes. The guard cannot evaluate an arbitrary
+  # exclude pattern against the tree, so it refuses to bless one — vitest's own
+  # default exclude already covers node_modules and dist, and an explicit one
+  # here means the declared layout is no longer the whole story.
+  ACTIVE_EXCLUDE=""
+  if [ -n "$TEST_BLOCK" ]; then
+    ACTIVE_EXCLUDE="$(printf '%s\n' "$TEST_BLOCK" | grep -E '^[[:space:]]*exclude:' || true)"
+  fi
+
   if [ "$HAVE_TEST_BLOCK" = "0" ]; then
     fail "${VITEST_CONFIG} has no readable 'test: { ... }' block; cannot confirm the layout is declared."
     echo "  The layout must be declared under test.include, where vitest reads it."
@@ -253,6 +337,15 @@ else
     echo "  must sit inside test: { }, not another section that happens to have an"
     echo "  include field. Restore a single-line 'include: [...]' carrying the glob,"
     echo "  or update DECLARED_GLOB in this script to match."
+  elif [ -n "$ACTIVE_EXCLUDE" ]; then
+    fail "${VITEST_CONFIG} declares a test.exclude, which this guard cannot verify."
+    echo "  exclude is applied on top of include, so a correct '${DECLARED_GLOB}'"
+    echo "  can still collect nothing: exclude: [\"tests/lib/**\"] silently drops"
+    echo "  every test under that path while this check keeps reporting them."
+    echo "  Express the layout with include alone — vitest's default exclude already"
+    echo "  covers node_modules and dist. If an exclude is genuinely needed, teach"
+    echo "  this guard to evaluate it in the same commit."
+    printf '%s\n' "$ACTIVE_EXCLUDE" | sed 's/^/    /'
   fi
 fi
 

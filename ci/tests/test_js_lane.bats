@@ -378,6 +378,60 @@ ws_run() {
   [ "$output" -ge 1 ]
 }
 
+@test "changeset: mts and cts classify as javascript" {
+  # Module-specific TypeScript extensions are production source, and
+  # test-layout.sh only covers test files, so nothing else would catch them.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  local ext
+  for ext in mts cts mjs cjs; do
+    [ "$(ci::changeset::classify_file "frontend/src/client.$ext")" = "javascript" ] \
+      || { echo ".$ext did not classify as javascript" >&2; return 1; }
+  done
+}
+
+@test "affected: an mts source change maps to the frontend suite" {
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/src/client.mts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+# --- the gate runs its own test suites ----------------------------------------
+#
+# The suites in this directory cover the layout guard and the node lane. Until
+# they were scheduled they ran only by hand — the same "registered but never
+# runs" failure they exist to catch.
+
+@test "tests-shell: scheduled by preflight full and ship modes" {
+  run bash -c "sed -n '/^run_full_or_ship_checks()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-shell:./ci/checks/tests-shell.sh"* ]]
+}
+
+@test "tests-shell: registered as a blocking lane" {
+  run grep -E '^tests-shell\|' ci/config/lanes.conf
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"./ci/checks/tests-shell.sh|yes|"* ]]
+}
+
+@test "tests-shell: a shell change emits the tests-shell check id" {
+  # Without this the lane is scheduled and then filtered straight back out.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  run ci::changeset::_checks_for_language shell
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-shell"* ]]
+}
+
+@test "tests-shell: the wrapper is executable and dispatches to tests.sh" {
+  [ -x ci/checks/tests-shell.sh ]
+  bash -n ci/checks/tests-shell.sh
+  run grep -c 'CI_GATE_CHECK_ID=tests-shell' ci/checks/tests-shell.sh
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
 @test "changeset: an unrelated json file is still json" {
   # The manifest rule must key on the basename, not on the extension.
   source ci/lib/common.sh

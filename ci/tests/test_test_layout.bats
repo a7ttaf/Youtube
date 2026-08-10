@@ -439,6 +439,82 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "test-layout: rejects a test.exclude it cannot verify" {
+  # exclude is applied on top of include, so every include assertion can pass
+  # while collection silently drops whole directories.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    exclude: ["tests/lib/**"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"test.exclude"* ]]
+}
+
+@test "test-layout: a commented-out exclude does not trip the guard" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    // exclude: ["tests/lib/**"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: an exclude outside the test block is not the guard's business" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  build: {
+    exclude: ["something"],
+  },
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: a stray test present only in the index fails the guard" {
+  # A partially staged move: the index still holds the out-of-tree file while
+  # the worktree shows only the moved copy. A filesystem-only scan blesses a
+  # commit whose test is never collected.
+  cd "$SANDBOX"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'it("stray", () => {});\n' > "$SANDBOX/frontend/src/probe.test.ts"
+  git add frontend/src/probe.test.ts >/dev/null 2>&1
+  mv "$SANDBOX/frontend/src/probe.test.ts" "$SANDBOX/frontend/tests/probe.test.ts"
+  [ ! -f "$SANDBOX/frontend/src/probe.test.ts" ]
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/src/probe.test.ts"* ]]
+}
+
+@test "test-layout: a clean index and worktree still pass" {
+  cd "$SANDBOX"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
 @test "test-layout: catches a missing vitest config" {
   rm "$SANDBOX/frontend/vitest.config.ts"
   run_guard
