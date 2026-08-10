@@ -522,6 +522,49 @@ EOF
   [[ "$output" == *"cannot confirm the test layout is declared"* ]]
 }
 
+@test "test-layout: catches a config staged for deletion but restored on disk" {
+  # The mirror image of the stray-test case. `git rm --cached` stages the
+  # deletion while the worktree keeps a perfectly valid copy, so a scan that
+  # reads only the worktree sees a declared layout that the commit would not
+  # contain. The committed tree would have no vitest config at all and vitest
+  # would fall back to its default glob — collecting the very files this guard
+  # exists to reject.
+  cd "$SANDBOX"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm --cached -q frontend/vitest.config.ts >/dev/null 2>&1
+  [ -f "$SANDBOX/frontend/vitest.config.ts" ]
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not in the git index"* ]]
+}
+
+@test "test-layout: an unstaged new config is reported, not accepted" {
+  # The same rule from the other direction, pinned so it is not later mistaken
+  # for a false positive: a config that exists only in the worktree declares
+  # nothing about the commit. The message names the fix rather than the fault.
+  cd "$SANDBOX"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git rm --cached -q frontend/vitest.config.ts >/dev/null 2>&1
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"git add frontend/vitest.config.ts"* ]]
+}
+
+@test "test-layout: the index check is inert where there is no index" {
+  # ci/preflight.sh also runs from a plain export or tarball with no .git. The
+  # guard must fall back to the worktree copy there instead of failing on an
+  # index it cannot read.
+  cd "$SANDBOX"
+  if git -C "$SANDBOX" rev-parse --git-dir >/dev/null 2>&1; then
+    skip "the sandbox temp dir is itself inside a repository on this host"
+  fi
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
 # --- wiring -------------------------------------------------------------------
 #
 # Registering the check in manifest.yml documents it; only preflight.sh and

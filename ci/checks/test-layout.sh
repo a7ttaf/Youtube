@@ -322,6 +322,17 @@ config_sources() {
   fi
 }
 
+# A config absent from the index is not "nothing to check" — it is a commit with
+# no vitest config at all, whose layout nothing declares. Staging the deletion
+# and restoring the file in the worktree used to read as clean, because only the
+# worktree copy was validated.
+config_missing_from_index() {
+  command -v git >/dev/null 2>&1 || return 1
+  git rev-parse --git-dir >/dev/null 2>&1 || return 1
+  git cat-file -e ":$VITEST_CONFIG" 2>/dev/null && return 1
+  return 0
+}
+
 # Runs the include/exclude assertions over one config file. Echoes nothing on
 # success; on failure echoes a reason keyword the caller turns into a message.
 check_one_config() {
@@ -345,6 +356,12 @@ check_one_config() {
 
 if [ ! -f "$VITEST_CONFIG" ]; then
   fail "Missing ${VITEST_CONFIG}; cannot confirm the test layout is declared."
+elif config_missing_from_index; then
+  fail "${VITEST_CONFIG} exists on disk but is not in the git index."
+  echo "  The commit being made would carry no vitest config, so nothing would"
+  echo "  declare the layout and vitest would fall back to its default glob."
+  echo "  Stage the config (git add ${VITEST_CONFIG}), or restore it if the"
+  echo "  deletion was staged by mistake."
 else
   # Each source is checked independently: a bad include in the staged copy or in
   # the worktree copy is drift either way.

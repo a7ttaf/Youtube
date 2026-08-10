@@ -108,6 +108,229 @@ if [ -z "$MANAGER" ]; then
   exit "$CI_RESULT_FAIL_INFRA"
 fi
 
+# ---- Declared toolchain ------------------------------------------------------
+#
+# The workspace manifest states the toolchain its results are reproducible
+# under. Accepting whatever `node` and the package manager happen to resolve to
+# means a green lane vouches for nothing: the same commit can pass here and
+# fail on a conforming machine, or the reverse, and neither result is evidence.
+# Both assertions read the workspace's own package.json, so a manifest that
+# declares nothing is unaffected; a manifest whose range cannot be evaluated is
+# reported rather than assumed to hold.
+
+# _manifest_field <dotted.path> – echo the value, or nothing when absent.
+# node is already a hard requirement above and parses its own manifest format
+# on any version, so this stays correct even while the version is in question.
+_manifest_field() {
+  node -e '
+    const fs = require("fs");
+    const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    const val = process.argv[1]
+      .split(".")
+      .reduce((o, k) => (o === null || o === undefined ? o : o[k]), pkg);
+    if (val !== null && val !== undefined) process.stdout.write(String(val));
+  ' "$1" 2>/dev/null || true
+}
+
+# _semver_part <version> <1|2|3> – echo one numeric component, defaulting to 0.
+# An absent component really is 0: `cut -d. -f2` would echo the whole string for
+# a version like "23", making ">=22.12.0 <23" accept 23.1.0.
+_semver_part() {
+  printf '%s' "${1#v}" | awk -v i="$2" '{
+    v = $0
+    sub(/[-+].*$/, "", v)
+    n = split(v, p, ".")
+    x = (i <= n ? p[i] : "0")
+    gsub(/[^0-9]/, "", x)
+    print (x == "" ? "0" : x)
+  }'
+}
+
+# _semver_cmp <a> <b> – echo -1, 0 or 1. Pre-release suffixes are dropped: a
+# gate that accepted 22.12.0-rc for a >=22.12.0 requirement would be lying by a
+# hair, but the check exists to catch whole-version drift, not tag splitting.
+_semver_cmp() {
+  local i av bv
+  for i in 1 2 3; do
+    av="$(_semver_part "$1" "$i")"
+    bv="$(_semver_part "$2" "$i")"
+    if [ "$av" -gt "$bv" ]; then printf '1'; return 0; fi
+    if [ "$av" -lt "$bv" ]; then printf -- '-1'; return 0; fi
+  done
+  printf '0'
+}
+
+# _semver_token_ok <version> <token> – 0 satisfied, 1 unsatisfied,
+# 2 unrecognised. The third status is what keeps an exotic range (a hyphen
+# range, say) from being silently read as "fine".
+_semver_token_ok() {
+  local version="$1" tok="$2" want i spec
+  case "$tok" in
+    '*'|'x'|'X'|'')
+      return 0
+      ;;
+    '>='*)
+      want="${tok#>=}"
+      if [ "$(_semver_cmp "$version" "$want")" != "-1" ]; then return 0; fi
+      return 1
+      ;;
+    '<='*)
+      want="${tok#<=}"
+      if [ "$(_semver_cmp "$version" "$want")" != "1" ]; then return 0; fi
+      return 1
+      ;;
+    '>'*)
+      want="${tok#>}"
+      if [ "$(_semver_cmp "$version" "$want")" = "1" ]; then return 0; fi
+      return 1
+      ;;
+    '<'*)
+      want="${tok#<}"
+      if [ "$(_semver_cmp "$version" "$want")" = "-1" ]; then return 0; fi
+      return 1
+      ;;
+    '^'*)
+      want="${tok#^}"
+      if [ "$(_semver_cmp "$version" "$want")" = "-1" ]; then return 1; fi
+      if [ "$(_semver_part "$version" 1)" != "$(_semver_part "$want" 1)" ]; then return 1; fi
+      # Below 1.0.0 the minor carries the breaking change, so ^0.2.3 admits
+      # 0.2.x only. Comparing majors alone would accept 0.3.0.
+      if [ "$(_semver_part "$want" 1)" = "0" ] \
+        && [ "$(_semver_part "$version" 2)" != "$(_semver_part "$want" 2)" ]; then
+        return 1
+      fi
+      return 0
+      ;;
+    '~'*)
+      want="${tok#\~}"
+      if [ "$(_semver_cmp "$version" "$want")" = "-1" ]; then return 1; fi
+      if [ "$(_semver_part "$version" 1)" != "$(_semver_part "$want" 1)" ]; then return 1; fi
+      if [ "$(_semver_part "$version" 2)" != "$(_semver_part "$want" 2)" ]; then return 1; fi
+      return 0
+      ;;
+    '='*)
+      want="${tok#=}"
+      if [ "$(_semver_cmp "$version" "$want")" = "0" ]; then return 0; fi
+      return 1
+      ;;
+    [0-9]*|v[0-9]*)
+      # A bare version is exact, except where a component is a wildcard: 22.x
+      # pins the major only. Compare the components the range actually states.
+      for i in 1 2 3; do
+        spec="$(printf '%s' "${tok#v}" | cut -d. -f"$i")"
+        case "$spec" in
+          ''|'x'|'X'|'*') return 0 ;;
+        esac
+        if [ "$(_semver_part "$version" "$i")" != "$(_semver_part "$tok" "$i")" ]; then
+          return 1
+        fi
+      done
+      return 0
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+# _semver_satisfies <version> <range> – 0 satisfied, 1 unsatisfied,
+# 2 unverifiable. Alternatives split on "||"; tokens within one alternative are
+# conjunctive, as npm defines them.
+_semver_satisfies() {
+  local version="$1" rest="$2"
+  local alt tok ok tokens=0 unverifiable=0 rc more=1
+  while [ "$more" -eq 1 ]; do
+    case "$rest" in
+      *'||'*) alt="${rest%%||*}"; rest="${rest#*||}" ;;
+      *)      alt="$rest"; more=0 ;;
+    esac
+    ok=1
+    # Word-splitting is the point: the tokens of one alternative are whitespace
+    # separated and conjunctive, as npm defines them. Globbing is disabled
+    # around the split because a bare "*" range would otherwise expand to the
+    # directory listing and stop looking like a range at all.
+    set -f
+    # shellcheck disable=SC2086
+    for tok in $alt; do
+      tokens=$((tokens + 1))
+      rc=0
+      _semver_token_ok "$version" "$tok" || rc=$?
+      if [ "$rc" -eq 2 ]; then
+        unverifiable=1
+      fi
+      # No early exit: a later token in this alternative may be the
+      # unrecognised one, and "cannot evaluate" must win over "does not
+      # satisfy" so the message names the real problem.
+      if [ "$rc" -ne 0 ]; then
+        ok=0
+      fi
+    done
+    set +f
+    if [ "$tokens" -gt 0 ] && [ "$ok" -eq 1 ]; then
+      return 0
+    fi
+  done
+  if [ "$unverifiable" -eq 1 ] || [ "$tokens" -eq 0 ]; then
+    return 2
+  fi
+  return 1
+}
+
+DECLARED_NODE="$(_manifest_field engines.node)"
+if [ -n "$DECLARED_NODE" ]; then
+  ACTUAL_NODE="$(node --version 2>/dev/null || true)"
+  _node_rc=0
+  _semver_satisfies "$ACTUAL_NODE" "$DECLARED_NODE" || _node_rc=$?
+  case "$_node_rc" in
+    0) ;;
+    1)
+      echo "Node ${ACTUAL_NODE:-<unknown>} does not satisfy the engines.node range"
+      echo "  declared by ${CI_GATE_NODE_WORKSPACE}/package.json: ${DECLARED_NODE}"
+      echo "  Results produced under an undeclared runtime are not reproducible,"
+      echo "  so the lane stops before installing or running anything."
+      exit "$CI_RESULT_FAIL_INFRA"
+      ;;
+    *)
+      echo "Cannot evaluate the engines.node range declared by"
+      echo "  ${CI_GATE_NODE_WORKSPACE}/package.json: ${DECLARED_NODE}"
+      echo "  The lane refuses to run rather than assume the toolchain conforms."
+      exit "$CI_RESULT_FAIL_INFRA"
+      ;;
+  esac
+fi
+
+DECLARED_PM="$(_manifest_field packageManager)"
+if [ -n "$DECLARED_PM" ]; then
+  # corepack's format is name@version, optionally with a +integrity suffix. The
+  # version is a pin, not a range: two patch releases of a package manager can
+  # resolve a lockfile differently.
+  PM_NAME="${DECLARED_PM%%@*}"
+  PM_VERSION="${DECLARED_PM#*@}"
+  PM_VERSION="${PM_VERSION%%+*}"
+
+  if [ "$PM_NAME" != "$MANAGER" ]; then
+    echo "The lockfile in ${CI_GATE_NODE_WORKSPACE} selects ${MANAGER}, but"
+    echo "  package.json declares packageManager ${DECLARED_PM}."
+    echo "  Installing with a manager the manifest does not declare produces a"
+    echo "  tree the lockfile does not describe."
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
+
+  ci::common::command_exists "$PM_NAME" || {
+    echo "package.json declares packageManager ${DECLARED_PM} but ${PM_NAME} is missing."
+    exit "$CI_RESULT_FAIL_INFRA"
+  }
+  ACTUAL_PM="$("$PM_NAME" --version 2>/dev/null || true)"
+  ACTUAL_PM="${ACTUAL_PM#v}"
+  if [ "$ACTUAL_PM" != "$PM_VERSION" ]; then
+    echo "${PM_NAME} ${ACTUAL_PM:-<unknown>} is installed, but"
+    echo "  ${CI_GATE_NODE_WORKSPACE}/package.json pins packageManager ${DECLARED_PM}."
+    echo "  Install the declared version (corepack, or the manager's own"
+    echo "  upgrade path) so the install is the one the lockfile describes."
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
+fi
+
 # The fingerprint covers the manifest as well as the lockfile. Keyed on the
 # lockfile alone, a package.json edited without a matching lockfile update looks
 # cached, the frozen install that would have caught the mismatch is skipped, and

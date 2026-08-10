@@ -237,6 +237,118 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+# --- the declared toolchain gates the workspace -------------------------------
+#
+# Accepting whatever node and the package manager resolve to means a green lane
+# vouches for nothing: the same commit can pass on one machine and fail on a
+# conforming one. These pin that the manifest's own declarations are enforced
+# before anything is installed or run, and that a manifest declaring nothing is
+# left alone.
+
+@test "node lane: an unsatisfied engines.node stops the workspace" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0" }, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy the engines.node range"* ]]
+  [[ "$output" == *">=999.0.0"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a satisfied engines.node is not in the way" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1" }, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a range it cannot evaluate is reported, not assumed" {
+  # Failing open here would be the whole finding again: an exotic range read as
+  # "fine" is indistinguishable from no check at all.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": "1.2.3 - 2.3.4" }, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate the engines.node range"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: engines ranges are evaluated, not pattern-matched" {
+  # The comparator has to treat an absent component as 0. Reading "23" as
+  # "23.23.23" would make this upper bound accept the version it excludes.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=0.0.1 <${major}\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a packageManager pin that the host misses stops the workspace" {
+  command -v bun >/dev/null 2>&1 || skip "bun is not installed on this host"
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "packageManager": "bun@0.0.1", "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"pins packageManager bun@0.0.1"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the declared packageManager must be the one the lockfile selects" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "packageManager": "pnpm@9.0.0", "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"selects bun"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a matching packageManager pin is not in the way" {
+  command -v bun >/dev/null 2>&1 || skip "bun is not installed on this host"
+  ws_setup
+  local bunv
+  bunv="$(bun --version)"
+  # The integrity suffix corepack appends must not be compared as part of the
+  # version, or every real-world manifest would fail this check.
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"packageManager\": \"bun@${bunv}+abc123\", \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a manifest declaring no toolchain is left alone" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"engines.node"* ]]
+  [[ "$output" != *"packageManager"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the version gate runs before any install or script" {
+  # "Before invoking the workspace" is the point: an install under an undeclared
+  # toolchain has already produced the tree the run would be judged on.
+  ws_setup
+  rm -f "$NODE_SB/.ci-gate/node_modules-ws.hash"
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0" }, "scripts": { "test": "exit 1" } }'
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" != *"Installing dependencies"* ]]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: a workspace with no tests at all is unaffected" {
   ws_setup
   rm -rf "$NODE_SB/ws/tests"
@@ -503,6 +615,14 @@ ws_run() {
   [ "$status" -ne 0 ]
 }
 
+@test "gitignore: a new file under ci/lib is trackable" {
+  # The Python-convention `lib/` rule shadows the gate's own library directory.
+  # The files already there are tracked and so unaffected; a newly added helper
+  # would be invisible to `git add`, shipping a check with half its code.
+  run git check-ignore -q --no-index ci/lib/newthing.sh
+  [ "$status" -ne 0 ]
+}
+
 @test "gitignore: vendored lib directories are still ignored" {
   # The negations must not reach into node_modules.
   run git check-ignore -q frontend/node_modules/pkg/lib/index.js
@@ -561,4 +681,94 @@ ws_run() {
   source ci/lib/common.sh
   source ci/lib/changeset.sh
   [ "$(ci::changeset::classify_file Docs/example.json)" = "json" ]
+}
+
+# --- the fast exit must not front-run the path exception ----------------------
+#
+# _check_should_skip carries an exception so a change to ci/, .githooks/ or
+# .gitignore still runs tests-shell. That exception is dead code if preflight
+# returns before run_mode ever calls it, which is exactly what happens for those
+# paths: none of them classifies into a language.
+
+@test "preflight: a gate-input-only change does not hit the fast exit" {
+  # Read the guard rather than the whole gate: driving preflight end to end
+  # would run every scheduled check. What has to hold is that the condition
+  # names the same paths the exception does.
+  run bash -c "sed -n '/Fast-exit if no relevant files changed/,/^  fi\$/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"_CI_CHANGESET_FILES_RAW"* ]]
+  local dep
+  for dep in 'ci/' '.githooks/' '.gitignore'; do
+    [[ "$output" == *"$dep"* ]] || { echo "fast exit still swallows: $dep" >&2; return 1; }
+  done
+}
+
+@test "preflight: the fast exit still fires for a genuinely irrelevant change" {
+  # The exception must stay narrow. A Docs-only commit carries no language and
+  # touches no gate input, so it must still skip rather than run the full gate.
+  run bash -c "
+    _CI_CHANGESET_FILES_RAW='M	Docs/15_DELIVERY_BACKLOG.md'
+    printf '%s\n' \"\$_CI_CHANGESET_FILES_RAW\" \
+      | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore\$)'
+  "
+  [ "$status" -ne 0 ]
+}
+
+@test "preflight: the gate-input pattern matches the changeset's own line format" {
+  # _CI_CHANGESET_FILES_RAW holds STATUS<TAB>PATH lines, so a pattern anchored
+  # only at ^ would never match. Feed the real shape through the real pattern.
+  local raw
+  raw="$(printf 'M\tci/preflight.sh\nA\t.gitignore\nM\t.githooks/pre-commit\n')"
+  run bash -c "printf '%s\n' \"\$1\" | grep -cE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore\$)'" _ "$raw"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 3 ]
+}
+
+# --- workspace build inputs that no extension list can enumerate --------------
+
+@test "changeset: a frontend dotfile classifies into the node lane" {
+  # frontend/.env supplies the VITE_ variables the bundle is compiled against.
+  # Left `unknown` it emits no check ids at all, so changing what ships would
+  # run no install, no typecheck, no tests and no build.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file frontend/.env)" = "javascript" ]
+}
+
+@test "changeset: a frontend static asset classifies into the node lane" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file frontend/public/fonts/inter.woff2)" = "javascript" ]
+  [ "$(ci::changeset::classify_file frontend/public/favicon.ico)" = "javascript" ]
+}
+
+@test "changeset: the workspace rule does not reach outside a package.json tree" {
+  # Anchoring on package.json is what keeps this from swallowing the repo: a
+  # backend asset or a root dotfile has no JavaScript to check.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file .gitignore)" = "unknown" ]
+  [ "$(ci::changeset::classify_file src/ums/static/logo.woff2)" = "unknown" ]
+}
+
+@test "changeset: an explicit language still wins inside the workspace" {
+  # The workspace rule is the last resort, after the extension table and both
+  # sniffs. A shell script or a markdown file under frontend/ keeps its own lane.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file frontend/scripts/build.sh)" = "shell" ]
+  [ "$(ci::changeset::classify_file frontend/README.md)" = "markdown" ]
+}
+
+@test "affected: every path the workspace rule classifies maps to a test pattern" {
+  # Scheduling the lane without a mapping just moves the silence: tests.sh
+  # reports "no affected JavaScript tests" and the suite still does not run.
+  source ci/lib/affected.sh
+  local f
+  for f in frontend/.env frontend/public/fonts/inter.woff2 frontend/public/favicon.ico; do
+    run ci::affected::get_affected_tests "$f"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"frontend/tests/"* ]] \
+      || { echo "$f maps to no frontend test pattern" >&2; return 1; }
+  done
 }

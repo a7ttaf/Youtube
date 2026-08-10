@@ -182,6 +182,12 @@ desktop.ini
 # Same reasoning for source: a nested lib/ under src/ is first-party code.
 !frontend/src/**/lib/
 !frontend/src/**/lib/**
+# The same Python-convention rule also shadows the gate's own library dir. The
+# existing files under ci/lib/ are tracked and so unaffected, but a newly added
+# one — the next helper any of these checks is split into — would be invisible
+# to `git add`, which is how a check ends up shipping with half its code.
+!ci/lib/
+!ci/lib/**
 node_modules/
 # Generated dependency-cache fingerprints written by ci/checks/node.sh
 # and ci/checks/python.sh.

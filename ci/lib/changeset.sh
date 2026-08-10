@@ -78,6 +78,31 @@ ci::changeset::_sniff_content() {
   return 1
 }
 
+# ci::changeset::_in_node_workspace <path> – true when the file sits under a
+# directory anchored by a package.json.
+#
+# An extension list cannot cover a workspace's build inputs: frontend/.env
+# supplies the VITE_ variables the bundle is compiled against, and a file under
+# frontend/public/ is copied verbatim into the shipped output. Neither has an
+# extension that says "JavaScript", so both fall through to `unknown`, emit no
+# check ids, and skip the node lane entirely — no install, no typecheck, no
+# tests, no build, for a change that alters what ships.
+#
+# Anchoring on package.json keeps this from over-reaching: it fires only inside
+# a real Node workspace, so a repo-root .env or a Python package's data file is
+# still classified by the rules above (or left unknown).
+ci::changeset::_in_node_workspace() {
+  local dir
+  dir="$(dirname "$1")"
+  while [ -n "$dir" ] && [ "$dir" != "." ] && [ "$dir" != "/" ]; do
+    if [ -f "$dir/package.json" ]; then
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
 # ci::changeset::_checks_for_language <lang> – echo space-separated checks
 ci::changeset::_checks_for_language() {
   local lang="$1"
@@ -203,6 +228,10 @@ ci::changeset::classify_file() {
         printf '%s' "$lang"
       elif lang="$(ci::changeset::_sniff_content "$path" 2>/dev/null)"; then
         printf '%s' "$lang"
+      elif ci::changeset::_in_node_workspace "$path"; then
+        # Extensionless or asset-typed, but inside a Node workspace: it is a
+        # build input for that workspace, so the node lane must run.
+        printf 'javascript'
       else
         printf 'unknown'
       fi

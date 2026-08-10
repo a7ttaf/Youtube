@@ -840,7 +840,48 @@ single P-tier above.
   still silently untracked — the same defect this PR already fixed, one level
   deeper. Negations now apply at any depth under both `tests/` and `src/`, with
   a case asserting `node_modules` is still ignored.
-  Combined suite: `test_test_layout.bats` (43) + `test_js_lane.bats` (49) = 92
+  A twelfth round found three more, one P1. `config_sources` reads the staged
+  copy of `vitest.config.ts` only when one exists in the index, so staging the
+  file's **deletion** while leaving a valid copy in the worktree validated the
+  worktree alone: the guard exited 0 for a commit that would carry no vitest
+  config at all, leaving vitest to fall back to its default glob — precisely the
+  layout this check rejects. `config_missing_from_index` now fails that case
+  with the staging command in the message, and stays inert where there is no
+  index (a tarball or plain export). The `tests-shell` path exception added in
+  round nine was **unreachable**: `ci/`, `.githooks/` and `.gitignore` classify
+  into no language, so `preflight.sh` hit its "no relevant changes" fast exit
+  before `run_mode` ever called `_check_should_skip` — a regression in the
+  `.gitignore` negations could ship with its own test never running. The fast
+  exit now also consults the raw changed-path list for the gate's own inputs,
+  and still fires for a genuinely irrelevant commit. Finally, `classify_file`
+  returned `unknown` for `frontend/.env` and anything under `frontend/public/`,
+  so a change to what actually ships scheduled no install, typecheck, tests or
+  build. Rather than extend the extension table a fourth time, the fallback now
+  anchors on `package.json`: a file inside a Node workspace tree is a build
+  input for that workspace. It is the last resort — after the extension table
+  and both sniffs — so `frontend/scripts/build.sh` stays `shell` and
+  `frontend/README.md` stays `markdown`, and it does not reach a repo-root
+  dotfile or a backend asset. `affected.yml` gained the matching `frontend/*`
+  catch-all so the lane it schedules finds tests instead of reporting none; the
+  per-extension rules stay, because the bats case that derives its list from the
+  classifier is what keeps the two files from drifting.
+  The last finding held open for the owner is now fixed too: the node lane
+  accepted whatever `node` and the package manager resolved to, so a green run
+  vouched for nothing — the same commit could pass here and fail on a machine
+  matching `frontend/package.json`. The lane now evaluates `engines.node` and
+  the `packageManager` pin **before** installing or running anything, and exits
+  `FAIL_INFRA` (a non-conforming toolchain is a broken environment, not a code
+  regression). The comparator handles `>=`/`>`/`<=`/`<`/`=`/bare/`^`/`~`,
+  wildcard components, space-conjunction and `||` alternation; a range it does
+  not recognise is reported as unverifiable rather than assumed to hold, since
+  failing open there would reinstate the finding. `packageManager` is compared
+  as the exact pin corepack means, with the `+integrity` suffix stripped, and
+  its name must be the manager the lockfile selects. A manifest that declares
+  neither is untouched. This was previously deferred because it would have
+  blocked local commits on the owner's Node 20.20.2 / bun 1.2.14; the machine
+  now reports **v22.14.0** and **bun 1.3.14**, and the full lane (install,
+  `tsc --noEmit`, 314 tests, `vite build`) passes under enforcement.
+  Combined suite: `test_test_layout.bats` (46) + `test_js_lane.bats` (67) = 113
   cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

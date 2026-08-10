@@ -128,6 +128,20 @@ rules:
     tests: "frontend/tests/**/*.test.tsx"
   - source: "frontend/*.js"
     tests: "frontend/tests/**/*.test.ts"
+  # Catch-all for the workspace's remaining build inputs. ci/lib/changeset.sh
+  # classifies anything under a package.json tree as `javascript`, so a change
+  # to frontend/.env or frontend/public/fonts/*.woff2 now schedules the node
+  # lane; without a rule here that lane would run and immediately report "no
+  # affected JavaScript tests". The matcher collapses "**" to "*" and a case
+  # "*" matches "/", so this single pattern covers every depth.
+  #
+  # It deliberately overlaps the explicit rules above. Those stay because the
+  # bats case `classifier and mapping agree on every javascript extension`
+  # derives its list from the classifier and asserts a per-extension rule, which
+  # is what keeps the two files from drifting apart one extension at a time.
+  - source: "frontend/*"
+    tests: "frontend/tests/**/*.test.ts"
+    also: "frontend/tests/**/*.test.tsx"
 
   # Python: module -> test file
   - source: "src/**/*.py"

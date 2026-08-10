@@ -627,7 +627,16 @@ if type ci::changeset::detect >/dev/null 2>&1; then
     ci::changeset::emit_json || true
   fi
   # Fast-exit if no relevant files changed (applies to every mode except --all).
-  if [ "$RUN_ALL" -eq 0 ] && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ]; then
+  #
+  # "No language detected" is not the same as "nothing relevant changed". The
+  # gate's own inputs — ci/, .githooks/, .gitignore — carry no language, so a
+  # commit touching only those would exit 0 here, before run_mode, making the
+  # tests-shell path exception in _check_should_skip unreachable. That is how a
+  # regression in the frontend lib/ negations could ship with its own test never
+  # running.
+  if [ "$RUN_ALL" -eq 0 ] && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ] \
+    && ! printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" \
+      | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore$)'; then
     echo "No relevant changes detected. Skipping gate."
     exit 0
   fi

@@ -16,6 +16,13 @@ month, running the backend, and demoing the dashboard locally.
 This workspace is on **bun** (`packageManager` in `package.json`, `bun.lock` is
 the only lockfile). Use `bun`, not `npm`/`npx` — see the trap below.
 
+`package.json` declares the toolchain (`engines.node`, `packageManager`) and
+`ci/checks/node.sh` enforces both **before** it installs or runs anything: an
+undeclared Node or a package-manager version other than the pin exits
+`FAIL_INFRA` rather than producing a result the declared toolchain does not
+vouch for. If the lane stops there, install the declared versions — it is
+reporting the environment, not the code.
+
 ```bash
 cd frontend
 bun install --frozen-lockfile   # first time only
