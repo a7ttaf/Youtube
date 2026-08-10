@@ -1015,7 +1015,26 @@ single P-tier above.
   gate. `checks.yml` has carried a per-check `timeout_sec` since before this PR
   and **nothing read it**; the runner applied the global value to everything.
   The runner now honours the declared value, and `tests-shell` declares 3600.
-  Combined suite: `test_test_layout.bats` (62) + `test_js_lane.bats` (115) = 177
+  An eighteenth round found five, two P1, one of which undid a round-seventeen
+  fix a line after it landed: `emit_json` **recomputed and wrote back**
+  `_CI_CHANGESET_LANGUAGES` and `_CI_CHANGESET_CHECKS` from its own view, which
+  still collapsed a rename to its destination — and `preflight.sh` calls it
+  immediately after `detect`, so the scheduler's correct classification was
+  replaced by the report's wrong one. The report generator no longer assigns
+  scheduler state at all; it serialises it, so the two cannot disagree by
+  construction. The partial-staging rule missed a **staged deletion recreated as
+  an untracked file** (`D  app.js` plus `?? app.js`): `git diff` compares
+  tracked content, so the intersection stayed empty and the lane tested a file
+  the commit deletes. A **malformed operand was outvoted by a satisfied
+  alternative** — `">=20banana || >=20"` came back satisfied — because invalid
+  operands shared a status with merely-unsupported range forms; they are now
+  distinct, and only the unsupported one can lose to a sibling. `include` was
+  checked for *starting* with `[`, so `[...].slice(1)` passed while vitest
+  received one element; the bracket's match must now be the value's last
+  character. And the per-check timeout added the round before applied only on
+  the parallel path, so `CI_GATE_PARALLEL=0` ignored both it and the global
+  timeout and could hang indefinitely.
+  Combined suite: `test_test_layout.bats` (65) + `test_js_lane.bats` (121) = 186
   cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

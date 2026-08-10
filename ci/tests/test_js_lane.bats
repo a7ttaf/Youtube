@@ -556,6 +556,74 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "node lane: a staged deletion recreated as an untracked file is caught" {
+  # git reports `D  app.js` and `?? app.js`, but `git diff` compares tracked
+  # content only, so the intersection stayed empty and the lane tested the
+  # recreated file for a commit that deletes it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm --cached -q ws/app.js >/dev/null 2>&1
+  rm -f ws/app.js
+  printf 'export const recreated = 1;\n' > ws/app.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ordinary untracked file is not partial staging" {
+  # The rule still has to stay on files that are part of this commit. A new
+  # file nobody has staged is the normal way work starts.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'export const brand_new = 1;\n' > ws/newfile.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an invalid operand beats a satisfied alternative" {
+  # A malformed operand is a typo, not a range form this comparator lacks, and
+  # no sibling should rescue it: ">=20banana || >=<major>" came back satisfied
+  # while _semver_is_version was rejecting the first operand outright.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=20banana || >=${major}\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unsupported form still loses to a satisfied alternative" {
+  # The distinction that makes the case above meaningful: a hyphen range is
+  # valid syntax this comparator does not implement, and it must not fail a
+  # runtime a sibling plainly admits.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=${major} || 1.2.3 - 2.3.4\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: an ordinary dirty worktree is not partial staging" {
   # The rule has to stay on files that are part of this commit. Running the gate
   # by hand on an edited-but-unstaged tree is the normal case, and failing it
@@ -843,6 +911,41 @@ ws_run() {
   [ -n "$declared" ]
   [ -n "$default" ]
   [ "$declared" -gt "$default" ]
+}
+
+@test "tests-shell: the timeout applies in sequential mode too" {
+  # CI_GATE_PARALLEL=0, or a single-worker pool, runs the check directly. With
+  # the timeout applied only on the background path, a supported mode ignored
+  # both the declared value and the global one and could hang indefinitely.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/config"
+  cp "$REPO_ROOT/ci/lib/runner.sh" "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf 'checks:\n  slowcheck:\n    enabled: true\n    timeout_sec: 1\n' > "$sb/ci/config/checks.yml"
+  printf '#!/usr/bin/env bash\nsleep 6\nexit 0\n' > "$sb/slow.sh"
+  chmod +x "$sb/slow.sh"
+
+  run bash -c "
+    set -Eeuo pipefail
+    cd '$sb'
+    source ci/lib/common.sh 2>/dev/null || true
+    source ci/lib/runner.sh
+    CI_GATE_PARALLEL=0
+    ci::runner::init
+    start=\$(date +%s)
+    ci::runner::submit slowcheck ./slow.sh || true
+    end=\$(date +%s)
+    echo \"elapsed=\$((end-start))\"
+    echo \"rc=\$(ci::runner::get_result slowcheck 2>/dev/null || echo unknown)\"
+  "
+  rm -rf "$sb"
+  [ "$status" -eq 0 ]
+  # 124 is what `timeout` returns, and what preflight maps to FAIL_INFRA.
+  [[ "$output" == *"rc=124"* ]]
+  local elapsed
+  elapsed="$(printf '%s\n' "$output" | sed -n 's/^elapsed=//p')"
+  [ -n "$elapsed" ]
+  [ "$elapsed" -lt 5 ]
 }
 
 @test "tests-shell: a declared timeout is actually applied, not documentation" {
@@ -1338,6 +1441,30 @@ ws_run() {
   ci::changeset::_populate_state_from_raw
   [[ "$_CI_CHANGESET_CHECKS" == *tests-js* ]]
   [[ "$_CI_CHANGESET_CHECKS" == *typecheck-js* ]]
+}
+
+@test "changeset: the report generator does not overwrite scheduler state" {
+  # emit_json recomputed the language and check sets from its own collapsed view
+  # of a rename and wrote them back, so classifying both rename paths in the
+  # scheduler was undone one call later — and preflight calls emit_json
+  # immediately after detect.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  local tmp
+  tmp="$(mktemp -d)"
+  CI_CHANGESET_JSON="$tmp/changeset.json"
+  _CI_CHANGESET_MODE="test"
+  _CI_CHANGESET_FILES_RAW="$(printf 'R100\tfrontend/src/x.ts\tDocs/x.md')"
+  ci::changeset::_populate_state_from_raw
+  [[ "$_CI_CHANGESET_CHECKS" == *tests-js* ]]
+  ci::changeset::emit_json
+  [[ "$_CI_CHANGESET_CHECKS" == *tests-js* ]] \
+    || { echo "emit_json dropped tests-js from the scheduler" >&2; rm -rf "$tmp"; return 1; }
+  # And the report describes the same change set it is reporting on.
+  grep -q 'tests-js' "$tmp/changeset.json"
+  grep -q 'frontend/src/x.ts' "$tmp/changeset.json"
+  grep -q 'Docs/x.md' "$tmp/changeset.json"
+  rm -rf "$tmp"
 }
 
 @test "changeset: workspace membership does not reach outside a workspace" {

@@ -138,7 +138,15 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       [ "$_scope" = "." ] && _scope="."
       _staged="$(git diff --cached --name-only -- "$_scope" 2>/dev/null | sort || true)"
       [ -n "$_staged" ] || continue
-      _unstaged="$(git diff --name-only -- "$_scope" 2>/dev/null | sort || true)"
+      # `git diff` compares tracked content only, so it says nothing about a
+      # path staged for deletion and then recreated as an untracked file:
+      # `D  app.js` plus `?? app.js` produced an empty intersection, and the
+      # lane tested the recreated file for a commit that deletes it. The
+      # untracked list is the other half of "what is on disk here".
+      _unstaged="$( {
+        git diff --name-only -- "$_scope" 2>/dev/null || true
+        git ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || true
+      } | sort -u)"
       [ -n "$_unstaged" ] || continue
       _both="$(comm -12 <(printf '%s\n' "$_staged") <(printf '%s\n' "$_unstaged") || true)"
       [ -n "$_both" ] && PARTIAL="${PARTIAL}${_both}"$'\n'
@@ -348,8 +356,14 @@ _semver_cmp() {
 }
 
 # _semver_token_ok <version> <token> – 0 satisfied, 1 unsatisfied,
-# 2 unrecognised. The third status is what keeps an exotic range (a hyphen
-# range, say) from being silently read as "fine".
+# 2 unsupported range form, 3 invalid operand.
+#
+# The last two are different failures and must not share a status. An exotic but
+# VALID form -- a hyphen range -- is something this comparator does not
+# implement, and a sibling alternative that plainly admits the runtime should
+# still win. A malformed operand is a typo in the manifest, and no sibling
+# should rescue it: ">=20banana || >=20" came back satisfied while
+# _semver_is_version was rejecting the first operand outright.
 _semver_token_ok() {
   local version="$1" tok="$2" want i spec
   case "$tok" in
@@ -372,7 +386,7 @@ _semver_token_ok() {
   # switched off by a typo in a manifest.
   case "$tok" in
     '>='*|'<='*|'>'*|'<'*|'^'*|'~'*|'='*)
-      if ! _semver_is_version "$want"; then return 2; fi
+      if ! _semver_is_version "$want"; then return 3; fi
       ;;
   esac
 
@@ -444,7 +458,7 @@ _semver_token_ok() {
       # A bare operand needs the same grammar check as an operator's: "20banana"
       # starts with a digit, so it reached the loop, matched on the major and
       # returned satisfied on the unstated minor.
-      if ! _semver_is_version "$spec"; then return 2; fi
+      if ! _semver_is_version "$spec"; then return 3; fi
       for i in 1 2 3; do
         case "$(_semver_spec_part "$spec" "$i")" in
           ''|'x'|'X'|'*') return 0 ;;
@@ -509,6 +523,9 @@ _semver_satisfies() {
       if [ "$rc" -eq 2 ]; then
         unrecognised=1
       fi
+      if [ "$rc" -eq 3 ]; then
+        malformed=1
+      fi
       # No early exit: a later token in this alternative may be the
       # unrecognised one, and "cannot evaluate" must win over "does not
       # satisfy" so the message names the real problem.
@@ -529,11 +546,13 @@ _semver_satisfies() {
       satisfied=1
     fi
   done
-  # A malformed range is unverifiable however well one of its alternatives
-  # matches -- there is no early return above, so a satisfied alternative
-  # cannot hide a broken one. An *unrecognised* alternative is different: a
-  # range form this comparator does not implement must not fail a runtime that
-  # another alternative plainly admits.
+  # Malformed input is unverifiable however well one of its alternatives
+  # matches -- there is no early return above, so a satisfied alternative cannot
+  # hide a broken one. That covers an empty alternative from a stray "||" and an
+  # invalid operand alike, because both are typos rather than range forms.
+  # An *unrecognised* alternative is different: a valid range form this
+  # comparator does not implement must not fail a runtime that another
+  # alternative plainly admits.
   if [ "$malformed" -eq 1 ] || [ "$seen_alt" -eq 0 ]; then
     return 2
   fi

@@ -458,6 +458,39 @@ test_block_props() {
   '
 }
 
+# value_is_literal_array – 0 when stdin is exactly one bracketed literal.
+#
+# "Starts with [" is not the same as "is an array": `["a", "b"].slice(1)` starts
+# with a bracket and hands vitest one element. The opening bracket's match has
+# to be the last character, so the value is the array rather than an expression
+# built from one.
+value_is_literal_array() {
+  awk '
+    { v = v $0 " " }
+    END {
+      sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
+      n = length(v)
+      if (n < 2 || substr(v, 1, 1) != "[") { exit 1 }
+      depth = 0; instr = ""
+      for (i = 1; i <= n; i++) {
+        c = substr(v, i, 1)
+        if (instr != "") {
+          if (c == "\\") { i++; continue }
+          if (c == instr) instr = ""
+          continue
+        }
+        if (c == "\"" || c == "'"'"'" || c == "`") { instr = c; continue }
+        if (c == "[" || c == "{" || c == "(") { depth++; continue }
+        if (c == "]" || c == "}" || c == ")") {
+          depth--
+          if (depth == 0) { exit (i == n) ? 0 : 1 }
+        }
+      }
+      exit 1
+    }
+  '
+}
+
 # Runs the include/exclude assertions over one config file. Echoes nothing on
 # success; on failure echoes a reason keyword the caller turns into a message.
 check_one_config() {
@@ -496,7 +529,7 @@ check_one_config() {
 
   if [ "$have_block" = "0" ]; then
     printf 'no-test-block'
-  elif [ -n "$active_include" ] && [ "${active_include#\[}" = "$active_include" ]; then
+  elif [ -n "$active_include" ] && ! printf '%s\n' "$active_include" | value_is_literal_array; then
     # A non-literal include cannot be read by searching its text: in
     # `cond ? [glob] : ["tests/only.test.ts"]` the glob is present and inactive,
     # so a substring match passes while vitest collects the other branch.

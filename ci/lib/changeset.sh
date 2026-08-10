@@ -455,40 +455,41 @@ ci::changeset::emit_json() {
 
   # Build the "files" JSON array
   local files_json="" first=1
-  local status path lang file_checks checks_json
+  local status path lang file_checks checks_json entry_paths
 
   if [ -n "$_CI_CHANGESET_FILES_RAW" ]; then
     while IFS=$'\t' read -r status path extra; do
       [ -z "$path" ] && continue
-      # Rename status: R100\t... -> R
+      # Both sides of a rename, exactly as the scheduler reads them: a report
+      # that lists only the destination describes a different change set from
+      # the one being gated.
+      entry_paths="$(ci::changeset::_entry_paths "$status" "$path" "$extra")"
       case "$status" in
-        R*)
-          status="R"
-          [ -n "$extra" ] && path="$extra"
-          ;;
-        C*)
-          status="C"
-          [ -n "$extra" ] && path="$extra"
-          ;;
+        R*) status="R" ;;
+        C*) status="C" ;;
       esac
 
+      while IFS= read -r path; do
+      [ -z "$path" ] && continue
       ci::changeset::should_ignore "$path" && continue
 
       lang="$(ci::changeset::classify_file "$path")"
-      generated_languages="$(ci::changeset::_add_unique "$generated_languages" "$lang")"
 
       # Compute checks triggered for this file. Workspace membership is a second
       # signal alongside the language, in step with _populate_state_from_raw;
       # the two disagreeing is how the JSON report and the scheduler drift.
       file_checks="$(ci::changeset::_checks_for_language "$lang")
 $(ci::changeset::_workspace_checks "$path")"
+      # The two signals overlap for a .ts file inside a workspace; the report
+      # should list each check once.
+      # shellcheck disable=SC2086
+      file_checks="$(printf '%s\n' $file_checks | awk 'NF && !seen[$0]++')"
       # Build checks_json array
       checks_json=""
       local ck ck_first=1
       for ck in $file_checks; do
         local escaped_ck
         escaped_ck="$(ci::changeset::_json_escape "$ck")"
-        generated_checks="$(ci::changeset::_add_unique "$generated_checks" "$ck")"
         if [ "$ck_first" = "1" ]; then
           checks_json="\"${escaped_ck}\""
           ck_first=0
@@ -511,13 +512,14 @@ $(ci::changeset::_workspace_checks "$path")"
       else
         files_json="${files_json},${file_entry}"
       fi
+      done <<< "$entry_paths"
     done <<< "$_CI_CHANGESET_FILES_RAW"
   fi
 
   # Build languages JSON array
   local languages_json="" lfirst=1
   local lword
-  for lword in $generated_languages; do
+  for lword in $_CI_CHANGESET_LANGUAGES; do
     local escaped_lword
     escaped_lword="$(ci::changeset::_json_escape "$lword")"
     if [ "$lfirst" = "1" ]; then
@@ -531,7 +533,7 @@ $(ci::changeset::_workspace_checks "$path")"
   # Build checks JSON array
   local checks_json_out="" cfirst=1
   local cword
-  for cword in $generated_checks; do
+  for cword in $_CI_CHANGESET_CHECKS; do
     local escaped_cword
     escaped_cword="$(ci::changeset::_json_escape "$cword")"
     if [ "$cfirst" = "1" ]; then
@@ -542,8 +544,13 @@ $(ci::changeset::_workspace_checks "$path")"
     fi
   done
 
-  _CI_CHANGESET_LANGUAGES="$generated_languages"
-  _CI_CHANGESET_CHECKS="$generated_checks"
+  # Deliberately no assignment back into _CI_CHANGESET_LANGUAGES / _CHECKS.
+  # This is the report generator, and preflight.sh calls it immediately after
+  # detect: recomputing the sets here and writing them back meant the report's
+  # view -- which collapsed a rename to its destination -- replaced the
+  # scheduler's, so classifying both rename paths in the scheduler was undone a
+  # line later. The arrays above are serialised from the scheduler's state, so
+  # the report cannot describe a gate other than the one being run.
 
 cat > "$CI_CHANGESET_JSON" <<EOF
 {

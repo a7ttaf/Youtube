@@ -166,12 +166,43 @@ ci::runner::submit() {
   local pid_file="${_CI_RUNNER_JOBS_DIR}/${job_id}.pid"
   local start_file="${_CI_RUNNER_JOBS_DIR}/${job_id}.start"
 
+  # Determine timeout. checks.yml may declare timeout_sec per check; gate.yml's
+  # default_timeout_sec applies otherwise.
+  #
+  # The per-check value used to be documentation -- nothing read it -- and the
+  # shell suites have since grown past the 20-minute default, so `tests-shell`
+  # was killed at the cap and reported FAIL_INFRA. A blocking lane that cannot
+  # finish is a lane that does not run, which is the failure this gate exists to
+  # catch, announced in a single word at the end of a two-hour run.
+  #
+  # Computed before the sequential branch on purpose: with CI_GATE_PARALLEL=0,
+  # or a single-worker pool, that branch executes the check directly, so a
+  # timeout applied only to the background path meant a supported mode ignored
+  # both the declared value and the global one -- and could hang indefinitely.
+  local check_timeout="${CI_GATE_TIMEOUT:-}"
+  local declared_timeout
+  declared_timeout="$(ci::runner::_declared_timeout "$job_id")"
+  [ -n "$declared_timeout" ] && check_timeout="$declared_timeout"
+
+  local timeout_cmd=""
+  if [ -n "$check_timeout" ] && [ "$check_timeout" != "0" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+      timeout_cmd="timeout ${check_timeout}"
+    elif command -v gtimeout >/dev/null 2>&1; then
+      timeout_cmd="gtimeout ${check_timeout}"
+    fi
+  fi
+
   # If sequential mode (max_jobs=1 or CI_GATE_PARALLEL=0)
   if [ "${CI_GATE_PARALLEL:-}" = "0" ] || [ "$_CI_RUNNER_MAX_JOBS" -eq 1 ]; then
     local exit_code=0
     printf '%s' "$(ci::runner::_epoch)" > "$start_file"
     set +e
-    "$check_script" ${args[@]+"${args[@]}"} > "$log_file" 2>&1
+    if [ -n "$timeout_cmd" ]; then
+      $timeout_cmd "$check_script" ${args[@]+"${args[@]}"} > "$log_file" 2>&1
+    else
+      "$check_script" ${args[@]+"${args[@]}"} > "$log_file" 2>&1
+    fi
     exit_code=$?
     set -e
     printf '%d' "$exit_code" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.rc"
@@ -191,28 +222,6 @@ ci::runner::submit() {
     fi
     sleep 0.2 2>/dev/null || sleep 1
   done
-
-  # Determine timeout. checks.yml may declare timeout_sec per check; gate.yml's
-  # default_timeout_sec applies otherwise.
-  #
-  # The per-check value used to be documentation -- nothing read it -- and the
-  # shell suites have since grown past the 20-minute default, so `tests-shell`
-  # was killed at the cap and reported FAIL_INFRA. A blocking lane that cannot
-  # finish is a lane that does not run, which is the failure this gate exists to
-  # catch, announced in a single word at the end of a two-hour run.
-  local check_timeout="${CI_GATE_TIMEOUT:-}"
-  local declared_timeout
-  declared_timeout="$(ci::runner::_declared_timeout "$job_id")"
-  [ -n "$declared_timeout" ] && check_timeout="$declared_timeout"
-
-  local timeout_cmd=""
-  if [ -n "$check_timeout" ] && [ "$check_timeout" != "0" ]; then
-    if command -v timeout >/dev/null 2>&1; then
-      timeout_cmd="timeout ${check_timeout}"
-    elif command -v gtimeout >/dev/null 2>&1; then
-      timeout_cmd="gtimeout ${check_timeout}"
-    fi
-  fi
 
   # Launch background job
   printf '%s' "$(ci::runner::_epoch)" > "$start_file"

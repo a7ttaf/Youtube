@@ -795,6 +795,52 @@ EOF
   [[ "$output" == *"computes test.include"* ]]
 }
 
+@test "test-layout: catches an array expression in test.include" {
+  # "Starts with [" is not "is an array": .slice(1) hands vitest one element
+  # while the declared glob is still visible in the text.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}", "tests/only.test.ts"].slice(1),
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"computes test.include"* ]]
+}
+
+@test "test-layout: catches an include built by concatenation" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"].concat(["tests/other.test.ts"]),
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+}
+
+@test "test-layout: a literal include carrying a trailing comment is still literal" {
+  # The boundary: literal-with-noise is fine, expression-shaped is not.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"], // the single declared layout
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
 @test "test-layout: catches a missing vitest config" {
   rm "$SANDBOX/frontend/vitest.config.ts"
   run_guard
