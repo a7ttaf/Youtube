@@ -35,6 +35,14 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
   SHELL_DRIFT="$( {
     git diff --name-only HEAD -- ci .githooks .gitignore frontend/README.md 2>/dev/null || true
     git ls-files --others --exclude-standard -- ci .githooks 2>/dev/null || true
+    # And the ignored ones. A commit that deletes a bats file and adds its path
+    # to .gitignore leaves the worktree replacement invisible to both lists
+    # above — HEAD does not carry the path, and --exclude-standard drops
+    # exactly this file — so the suites ran the replacement for a commit that
+    # removes their own coverage. Nothing under ci/ or .githooks/ is
+    # legitimately ignored except the gate's own generated cache.
+    git ls-files --others --ignored --exclude-standard -- ci .githooks 2>/dev/null \
+      | grep -Ev '(^|/)(\.ci-gate|node_modules)/' || true
   } | sort -u | sed '/^$/d')"
   if [ -n "$SHELL_DRIFT" ]; then
     echo "Gate inputs differ between HEAD and the worktree:"

@@ -1160,3 +1160,51 @@ EOF
   [ "$status" -eq 20 ]
   [[ "$output" == *"exclude"* ]]
 }
+
+@test "test-layout: a regex after a keyword is not read as division" {
+  # `return /x/` ends in the "n" of a keyword, and an identifier character alone
+  # said "division" — so the anchor landed inside the regex again, one step past
+  # the fix that made it regex-aware.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+function mention() { return /export default/ }
+
+const base = {
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+};
+
+export default defineConfig({
+  test: {
+    include: ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
+}
+
+@test "test-layout: an identifier before a slash still divides" {
+  # The control that the keyword rule must not swallow: `total / count` ends in
+  # an identifier character too, and reading it as a regex would consume the
+  # rest of the config.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const total = 10;
+const count = 2;
+const each = total / count;
+
+export default defineConfig({
+  test: {
+    testTimeout: 1000 * each,
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}

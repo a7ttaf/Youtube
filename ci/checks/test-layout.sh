@@ -290,10 +290,24 @@ extract_test_block() {
     # usual test applies: a regex can only appear where a value can, so the
     # preceding token decides. `const mention = /export default/;` was read as
     # ordinary text, and the anchor landed inside it.
-    function is_regex_start(str, i,   c) {
+    function is_regex_start(str, i,   c, w, j) {
       c = prev_signif(str, i)
       if (c == "") return 1
-      return (c ~ /[A-Za-z0-9_$)\]]/) ? 0 : 1
+      if (c !~ /[A-Za-z0-9_$)\]]/) return 1
+      # An identifier character does not settle it: `return /x/` ends in the "n"
+      # of a keyword, and a keyword is a position where a value may start. Read
+      # the whole word back and check it, or `function f() { return /export
+      # default/ }` classifies the slash as division and the anchor lands inside
+      # the regex.
+      if (c !~ /[A-Za-z_$]/) return 0
+      w = ""
+      j = i - 1
+      while (j >= 1 && substr(str, j, 1) ~ /[[:space:]]/) j--
+      while (j >= 1 && substr(str, j, 1) ~ /[A-Za-z0-9_$]/) {
+        w = substr(str, j, 1) w
+        j--
+      }
+      return (w ~ /^(return|typeof|instanceof|in|of|new|delete|void|case|do|else|yield|await|throw)$/) ? 1 : 0
     }
     # Index just past the closing "/" of the regex opening at i. A "/" inside a
     # character class does not close it; an unterminated one is not a regex at

@@ -2019,3 +2019,53 @@ ws_run() {
   [ "$status" -eq 0 ]
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: in ship mode an ignored replacement of a deleted path is caught" {
+  # An outgoing commit deletes a workspace file and adds its path to .gitignore;
+  # the worktree keeps a passing copy. HEAD does not carry the path so
+  # `git diff HEAD` says nothing, and --exclude-standard is documented to drop
+  # exactly that file — so the lane ran the replacement for a commit that
+  # removes it. Same defect as the pre-commit branch had, one mode over.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm -q ws/app.js >/dev/null 2>&1
+  printf 'ws/app.js\n' > .gitignore
+  git add .gitignore >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete and ignore" >/dev/null 2>&1
+  printf 'export const recreated = 1;\n' > ws/app.js
+  ws_seed_fingerprint
+  # The premise: neither list the guard used to consult sees this file.
+  run bash -c "cd '$NODE_SB' && git diff --name-only HEAD -- ws; git ls-files --others --exclude-standard -- ws"
+  [ -z "$output" ]
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: in ship mode an ignored build directory is not drift" {
+  # The control, and the reason the ignored list is pruned rather than taken
+  # whole: node_modules and dist are ignored on purpose, and reporting them
+  # would mean the ship gate never passes for any Node workspace.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  printf 'ws/node_modules/\nws/dist/\n' > .gitignore
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  mkdir -p ws/dist
+  printf 'built\n' > ws/dist/bundle.js
+  printf 'dep\n' > ws/node_modules/dep.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}

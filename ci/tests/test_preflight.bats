@@ -290,3 +290,37 @@ gs_run() {
   [[ "$output" == *"OUTSIDE"* ]]
   rm -rf "$sb"
 }
+
+@test "tests-shell: an ignored replacement of a deleted bats file is caught" {
+  # Same class as the node lane's: a commit that deletes a bats file and ignores
+  # its path leaves the worktree copy invisible to `git diff HEAD` and to
+  # --exclude-standard alike, so the suites ran the replacement for a commit
+  # that removes their own coverage.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/ci/checks/tests.sh"
+  chmod +x "$sb/ci/checks/tests.sh"
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  (
+    cd "$sb"
+    git init -q -b feature/x .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+    git rm -q ci/tests/t.bats
+    printf 'ci/tests/t.bats\n' > .gitignore
+    git add .gitignore
+    git -c user.email=t@t -c user.name=t commit -qm "delete and ignore"
+  ) >/dev/null 2>&1
+  # git rm took the now-empty directory with it.
+  mkdir -p "$sb/ci/tests"
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  run bash -c "cd '$sb' && git diff --name-only HEAD -- ci; git ls-files --others --exclude-standard -- ci"
+  [ -z "$output" ]
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ci/tests/t.bats"* ]]
+  rm -rf "$sb"
+}

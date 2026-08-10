@@ -167,6 +167,20 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
         _drift="$( {
           git diff --name-only HEAD -- "$_scope" 2>/dev/null || true
           git ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || true
+          # And the ignored ones. An outgoing commit that deletes a script and
+          # adds its path to .gitignore makes the worktree replacement invisible
+          # to both lists above: HEAD does not carry the path, so `git diff
+          # HEAD` says nothing, and --exclude-standard is documented to drop
+          # exactly this file. The lane then ran the replacement.
+          #
+          # Pruned to the directories a Node workspace is *expected* to ignore,
+          # which are the same ones every scan in this file already treats as
+          # not-source. Without that every node_modules entry is drift and the
+          # ship gate never passes; with it, an ignored file anywhere a
+          # developer keeps source is reported, which is the intent.
+          git ls-files --others --ignored --exclude-standard -- "$_scope" 2>/dev/null \
+            | grep -Ev '(^|/)(node_modules|dist|build|coverage|\.next|\.turbo|\.vite|\.git|\.ci-gate)/' \
+            || true
         } | sort -u | sed '/^$/d')"
         [ -n "$_drift" ] && PARTIAL="${PARTIAL}${_drift}"$'\n'
         continue

@@ -1146,7 +1146,20 @@ single P-tier above.
   config-level filter it already rejects, one layer out, and it is the same
   sentence as the typecheck rule — that a script *exists* says nothing about
   whether it runs anything.
-  Combined suite: `bats ci/tests/` = 252 cases, 0 failures.
+  A twenty-fourth round found three, all of them **the previous round's fix,
+  applied one step short of where the same argument leads**. `.gitignore` had
+  already defeated the pre-commit drift rule once; the ship-mode branch and the
+  new `tests-shell` guard both used `--exclude-standard` and fell to the
+  identical trick — an outgoing commit that deletes a path and ignores it makes
+  the worktree replacement invisible to `git diff HEAD` (HEAD has no such path)
+  and to the untracked list (documented to drop it) at the same time. Both now
+  consult the ignored list as well, pruned to the directories a workspace is
+  *expected* to ignore, because taking it whole means `node_modules` is drift
+  and the ship gate never passes. And the regex-aware anchor read `return /x/`
+  as division, because the character before the slash is the `n` of a keyword:
+  an identifier character does not settle the question, so the whole preceding
+  word is read and checked against the keywords a value may follow.
+  Combined suite: `bats ci/tests/` = 257 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
