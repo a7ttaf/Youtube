@@ -372,10 +372,16 @@ _check_should_skip() {
     # the very test written to catch it. Matched by path rather than language so
     # unrelated yaml elsewhere does not pull in a four-minute suite.
     #
+    # frontend/README.md is here for the same reason: test_test_layout.bats
+    # asserts on its prose about which modes run the guard, and a README-only
+    # change classifies as markdown, which schedules lint-markdown and nothing
+    # else -- so the gate could publish a false coverage claim without running
+    # the case written to reject it.
+    #
     # Keep this list in step with what ci/tests/ actually asserts on.
     if [ "$found" = "0" ] && [ "$label" = "tests-shell" ] \
       && printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" \
-        | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore$)'; then
+        | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore$|frontend/README\.md$)'; then
       found=1
     fi
 
@@ -419,6 +425,13 @@ _check_is_cacheable() {
     # the suite's inputs was the alternative, but "did we list them all?" is the
     # question that produced this bug, and the suite runs only in full and ship.
     tests-shell) return 1 ;;
+    # node runs the workspace's complete test, typecheck and build scripts, so
+    # its result depends on every file in that workspace -- not just the ones
+    # this branch happens to touch. A PASS cached for one frontend change and
+    # then rebased onto a base carrying a regression in another frontend file
+    # has an identical key, and the lane is restored without executing
+    # anything. Same argument as tests-shell, one lane over.
+    node) return 1 ;;
   esac
   return 0
 }
@@ -446,22 +459,14 @@ _tool_fingerprint() {
 _compute_cache_key() {
   local label="$1"
   local tool_ver="unknown"
-  local _tool
-  # Every tool a lane's fail-closed checks consult belongs in its key. Keyed on
-  # the interpreter alone, a lane that passed under a conforming toolchain
-  # replays that PASS after the toolchain drifts -- bun moved off the
-  # packageManager pin, bats uninstalled -- and the enforcement added for
-  # exactly that case never executes. Probing goes through _tool_fingerprint,
-  # which cannot abort the run on a broken executable.
+  # Every probe goes through _tool_fingerprint. Lanes whose result depends on a
+  # toolchain the key cannot describe -- node, tests-shell -- are excluded from
+  # the cache outright by _check_is_cacheable rather than given a longer key, so
+  # no branch here needs to enumerate their tools. What remains is the property
+  # that matters for the lanes that ARE cached: a probe can never end the run.
   case "$label" in
-    node)
-      tool_ver="$(ci::cache::tool_version node)"
-      for _tool in bun pnpm npm yarn; do
-        tool_ver="${tool_ver}|$(_tool_fingerprint "$_tool")"
-      done
-      ;;
-    python) tool_ver="$(ci::cache::tool_version python3)" ;;
-    *) tool_ver="bash-$(ci::cache::tool_version bash)" ;;
+    python) tool_ver="$(_tool_fingerprint python3)" ;;
+    *) tool_ver="$(_tool_fingerprint bash)" ;;
   esac
 
   local files_hash=""

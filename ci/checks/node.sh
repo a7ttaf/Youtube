@@ -79,6 +79,40 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       echo "  staged by mistake."
       exit "$CI_RESULT_FAIL_NEW_ISSUE"
     fi
+
+    # Existing in the index is not enough. Every check below -- engines,
+    # packageManager, the lockfile fingerprint, whether a `test` script exists
+    # at all -- reads the worktree copy, so staging the removal of the test
+    # script and restoring the healthy manifest on disk ran the restored script
+    # and exited 0 for a commit that ships tests with no way to run them.
+    #
+    # Rejecting divergence rather than validating both copies is deliberate:
+    # the manifest feeds a dozen decisions spread through this file, and a rule
+    # that has to be applied at each of them is a rule that will be forgotten at
+    # one of them. One comparison covers all of them, now and later.
+    DIVERGED=""
+    while IFS= read -r _ws; do
+      [ -n "$_ws" ] || continue
+      if [ "$_ws" = "." ]; then _mf="package.json"; else _mf="$_ws/package.json"; fi
+      _staged_hash="$(git rev-parse ":$_mf" 2>/dev/null || true)"
+      _disk_hash="$(git hash-object -- "$_mf" 2>/dev/null || true)"
+      if [ -n "$_staged_hash" ] && [ -n "$_disk_hash" ] \
+        && [ "$_staged_hash" != "$_disk_hash" ]; then
+        DIVERGED="${DIVERGED}${_mf}"$'\n'
+      fi
+    done <<< "$NODE_WORKSPACES"
+
+    if [ -n "$DIVERGED" ]; then
+      echo "A workspace manifest differs between the git index and the worktree:"
+      while IFS= read -r _mf; do
+        [ -n "$_mf" ] || continue
+        echo "    $_mf"
+      done <<< "$DIVERGED"
+      echo "  Every check below reads the worktree copy, so the lane would"
+      echo "  report on a manifest the commit does not contain."
+      echo "  Stage the change (git add <path>), or discard it."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+    fi
   fi
 
   NODE_OVERALL="$CI_RESULT_PASS"
@@ -224,19 +258,13 @@ _semver_spec_part() {
 # and a bare ">=" both parsed as >=0.0.0 and admitted every version there is,
 # switching the whole toolchain boundary off. Operands are checked before they
 # reach the comparator so a malformed one is reported as unverifiable instead.
+# The whole grammar, not just the first character and the character set:
+# ">=20banana", ">=20..1" and ">=20.1.2.3" all begin with a digit and carry only
+# legal characters, and node-semver rejects every one of them. Checking the
+# shape piecemeal let each of those through as >=20.0.0.
 _semver_is_version() {
-  case "${1#v}" in
-    '') return 1 ;;
-    [0-9]*) ;;
-    *) return 1 ;;
-  esac
-  # Digits, dots, wildcards and the pre-release/build tail; anything else — an
-  # operator that leaked into the operand, say — is not a version. The trailing
-  # '-' keeps it a literal rather than opening a range.
-  case "${1#v}" in
-    *[!0-9A-Za-z.*+-]*) return 1 ;;
-  esac
-  return 0
+  printf '%s' "$1" | grep -Eq \
+    '^v?([0-9]+|[xX*])(\.([0-9]+|[xX*]))?(\.([0-9]+|[xX*]))?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
 }
 
 # _semver_cmp <a> <b> – echo -1, 0 or 1. Pre-release suffixes are dropped: a
@@ -323,21 +351,25 @@ _semver_token_ok() {
       fi
       return 0
       ;;
-    '='*)
-      if [ "$(_semver_cmp "$version" "$want")" = "0" ]; then return 0; fi
-      return 1
-      ;;
-    [0-9]*|v[0-9]*)
+    '='*|[0-9]*|v[0-9]*)
       # An X-range: compare only the components the range actually states. "22"
       # means >=22.0.0 <23.0.0 and "22.x" the same, so an unstated component
       # ends the comparison rather than defaulting to 0 — reading "20" as
       # "20.0.0" rejected Node 20.20.2, a conforming runtime.
+      #
+      # "=20" is the same range. Routing it through exact comparison instead
+      # reintroduced the defaulting this branch exists to avoid, for the one
+      # spelling that makes the intent explicit.
+      case "$tok" in '='*) spec="$want" ;; *) spec="$tok" ;; esac
+      # A bare operand needs the same grammar check as an operator's: "20banana"
+      # starts with a digit, so it reached the loop, matched on the major and
+      # returned satisfied on the unstated minor.
+      if ! _semver_is_version "$spec"; then return 2; fi
       for i in 1 2 3; do
-        spec="$(_semver_spec_part "$tok" "$i")"
-        case "$spec" in
+        case "$(_semver_spec_part "$spec" "$i")" in
           ''|'x'|'X'|'*') return 0 ;;
         esac
-        if [ "$(_semver_part "$version" "$i")" != "$(_semver_part "$tok" "$i")" ]; then
+        if [ "$(_semver_part "$version" "$i")" != "$(_semver_part "$spec" "$i")" ]; then
           return 1
         fi
       done
@@ -548,14 +580,24 @@ script_exists() {
 
 run_script() {
   local script_name="$1"
+  local rc=0
   if script_exists "$script_name"; then
     echo "Running script: $script_name"
     case "$MANAGER" in
-      pnpm) pnpm run "$script_name" ;;
-      npm) npm run "$script_name" ;;
-      yarn) yarn run "$script_name" ;;
-      bun) bun run "$script_name" ;;
+      pnpm) pnpm run "$script_name" || rc=$? ;;
+      npm) npm run "$script_name" || rc=$? ;;
+      yarn) yarn run "$script_name" || rc=$? ;;
+      bun) bun run "$script_name" || rc=$? ;;
     esac
+    if [ "$rc" -ne 0 ]; then
+      # A package script does not implement the gate's result contract, and its
+      # exit code collides with it: `vitest` or any tool it wraps exiting 10
+      # propagated straight through as PASS_WITH_KNOWN_DEBT, so preflight
+      # recorded the failed lane as passed, skipped the remaining scripts and
+      # exited 0. Every nonzero script status is a failing script.
+      echo "Script '${script_name}' failed with status ${rc}."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+    fi
   else
     echo "Skipping missing script: $script_name"
   fi
@@ -580,6 +622,29 @@ if ! script_exists "test" && ! script_exists "test:unit"; then
     done <<< "$ORPHAN_TESTS"
     echo "  Restore the script in package.json, or remove the tests."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
+
+  # "No test script AND no test files" is the one arrangement the rule above
+  # cannot see, and it is the worst one: deleting every file under tests/ and
+  # both scripts leaves nothing to be orphaned, test-layout reports "0 file(s)"
+  # quite happily, and a successful build carries the whole gate to exit 0 after
+  # the suite has disappeared. A workspace that had tests must still have them.
+  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    HEAD_TESTS="$(git ls-tree -r --name-only HEAD -- . 2>/dev/null \
+      | grep -E '\.(test|spec)\.[cm]?[jt]sx?$' | head -5 || true)"
+    if [ -n "$HEAD_TESTS" ]; then
+      echo "Workspace ${CI_GATE_NODE_WORKSPACE} has lost its entire test suite."
+      echo "  HEAD carries test files here, this tree has none, and the manifest"
+      echo "  defines no 'test' or 'test:unit' script -- so nothing is reported"
+      echo "  as orphaned and the lane would pass having run no tests at all."
+      echo "  Present at HEAD, for example:"
+      while IFS= read -r _gone; do
+        [ -n "$_gone" ] || continue
+        echo "    $_gone"
+      done <<< "$HEAD_TESTS"
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+    fi
   fi
 fi
 

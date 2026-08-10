@@ -941,7 +941,35 @@ single P-tier above.
   `$(tool --version | head -1)` aborts preflight the moment a present-but-broken
   package manager exits non-zero, before any check has run; probes go through
   `_tool_fingerprint`, which cannot.
-  Combined suite: `test_test_layout.bats` (53) + `test_js_lane.bats` (88) = 141
+  A fifteenth round found eight more, four P1. The staged-manifest check
+  verified only that `package.json` **existed** in the index, while every
+  decision below it — engines, `packageManager`, the dependency fingerprint,
+  whether a `test` script exists — still read the worktree copy; index/worktree
+  divergence is now rejected outright, because a rule applied at each of a dozen
+  reading sites is a rule that gets forgotten at one of them. A workspace could
+  **lose its entire suite**: delete every file under `tests/` and both scripts
+  and nothing is orphaned, `test-layout` reports "0 file(s)", and a successful
+  build carries the gate to exit 0 — a workspace whose HEAD carries tests must
+  still have them. A package script exiting **10** propagated through as
+  `PASS_WITH_KNOWN_DEBT`, so a failing lane was recorded as passed and the
+  remaining scripts skipped; every nonzero script status is now
+  `FAIL_NEW_ISSUE`, decided in the workspace child rather than relying on the
+  parent's normalisation. The operand grammar check was **first-character and
+  charset only**, so `>=20banana`, `>=20..1` and `>=20.1.2.3` all parsed as
+  `>=20.0.0`; the whole shape is now matched, for bare operands as well as
+  operator ones. `"=20"` was routed through exact comparison and rejected a
+  conforming runtime — node-semver normalises it to `>=20.0.0 <21.0.0-0`, so it
+  takes the X-range path like every other partial. A **spread** in the test
+  object (`test: { ...hidden, include: [...] }`) carried in an exclude the guard
+  never saw; a spread it cannot evaluate is now a failure. The **node** lane was
+  still cacheable although it runs the workspace's complete test, typecheck and
+  build scripts, so a PASS cached for one frontend change survived a rebase onto
+  a base with a regression in another; it joins `test-layout` and `tests-shell`
+  as non-cacheable, and the unreachable key branches went with them. And
+  `frontend/README.md` was missing from the `tests-shell` dependency paths even
+  though the suites assert on its prose — a README-only change classifies as
+  markdown, scheduling `lint-markdown` and nothing else.
+  Combined suite: `test_test_layout.bats` (55) + `test_js_lane.bats` (98) = 153
   cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

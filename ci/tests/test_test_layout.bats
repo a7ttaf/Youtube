@@ -637,6 +637,47 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "test-layout: catches an exclusion inherited through a spread" {
+  # A spread carries in properties the guard never sees. Every direct-property
+  # assertion passes while vitest applies whatever exclude the spread object
+  # holds — the same silent drop the exclude rule exists to prevent, one
+  # indirection out of reach.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const hidden = { exclude: ["tests/lib/**"] };
+
+export default defineConfig({
+  test: {
+    ...hidden,
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"spreads another object into test"* ]]
+}
+
+@test "test-layout: a spread outside the test block is not the guard's business" {
+  # The rule has to stay inside test: { }. A spread anywhere else in the config
+  # cannot reach test.exclude, and failing on it would be a false positive.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const shared = { clearScreen: false };
+
+export default defineConfig({
+  ...shared,
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
 @test "test-layout: catches a missing vitest config" {
   rm "$SANDBOX/frontend/vitest.config.ts"
   run_guard

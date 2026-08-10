@@ -393,7 +393,7 @@ config_missing_from_index() {
 # success; on failure echoes a reason keyword the caller turns into a message.
 check_one_config() {
   local cfg="$1"
-  local block have_block=1 active_include="" active_exclude=""
+  local block have_block=1 active_include="" active_exclude="" active_spread=""
 
   # A quoted property is the same property: `"exclude": [...]` is valid TS and
   # vitest applies it, but an identifier-only pattern does not see it, so an
@@ -405,6 +405,11 @@ check_one_config() {
   if [ -n "$block" ]; then
     active_include="$(printf '%s\n' "$block" | grep -E "^[[:space:]]*${q}include${q}[[:space:]]*:[[:space:]]*\[" || true)"
     active_exclude="$(printf '%s\n' "$block" | grep -E "^[[:space:]]*${q}exclude${q}[[:space:]]*:" || true)"
+    # A spread carries in properties this guard never sees. `test: { ...hidden,
+    # include: [...] }` passes every direct-property check above while vitest
+    # applies whatever exclude `hidden` contains -- the same silent drop the
+    # exclude rule exists to prevent, one indirection out of reach.
+    active_spread="$(printf '%s\n' "$block" | grep -E '^[[:space:]]*\.\.\.' || true)"
   fi
 
   if [ "$have_block" = "0" ]; then
@@ -413,6 +418,8 @@ check_one_config() {
     printf 'no-include'
   elif [ -n "$active_exclude" ]; then
     printf 'has-exclude\t%s' "$active_exclude"
+  elif [ -n "$active_spread" ]; then
+    printf 'has-spread\t%s' "$active_spread"
   fi
 }
 
@@ -461,6 +468,15 @@ else
         echo "  Express the layout with include alone — vitest's default exclude already"
         echo "  covers node_modules and dist. If an exclude is genuinely needed, teach"
         echo "  this guard to evaluate it in the same commit."
+        printf '%s\n' "$_detail" | sed 's/^/    /'
+        ;;
+      has-spread)
+        fail "${_label} spreads another object into test: { }, which this guard cannot evaluate."
+        echo "  A spread carries in properties this check never sees. An exclude"
+        echo "  reached that way drops tests exactly as a direct one would, while"
+        echo "  every assertion here still passes."
+        echo "  Write the test block out directly, or teach this guard to resolve"
+        echo "  the spread in the same commit."
         printf '%s\n' "$_detail" | sed 's/^/    /'
         ;;
     esac

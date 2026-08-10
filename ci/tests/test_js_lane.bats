@@ -511,6 +511,145 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "node lane: a manifest that differs from the index stops the workspace" {
+  # Existing in the index is not enough: every check below reads the worktree
+  # copy, so staging the removal of the test script and restoring the healthy
+  # manifest on disk ran the restored script and exited 0 for a commit that
+  # ships tests with no way to run them.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  # Stage a manifest with no test script, then restore the healthy one on disk.
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": {} }' > ws/package.json
+  git add ws/package.json >/dev/null 2>&1
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "true" } }' > ws/package.json
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"differs between the git index and the worktree"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an index that matches the worktree is not in the way" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an established workspace cannot lose its whole suite" {
+  # Deleting every test file AND both scripts leaves nothing to be orphaned,
+  # test-layout reports "0 file(s)" quite happily, and a successful build
+  # carries the gate to exit 0 after the suite has disappeared.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  rm -rf ws/tests
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "build": "true" } }' > ws/package.json
+  git add -A >/dev/null 2>&1
+  # Seeded after the mutation: the fingerprint covers the manifest, so seeding
+  # it earlier would leave the install to run against a stub lockfile.
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"lost its entire test suite"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace that never had tests is unaffected by the suite rule" {
+  # The negative control: "had tests at HEAD" is the whole trigger, so a
+  # genuinely test-free workspace must still pass.
+  ws_setup
+  rm -rf "$NODE_SB/ws/tests"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a script exiting 10 is a failure, not known debt" {
+  # 10 is the gate's PASS_WITH_KNOWN_DEBT. A package script does not implement
+  # that contract, so vitest — or any tool it wraps — exiting 10 was recorded as
+  # a passing lane, the remaining scripts were skipped, and preflight exited 0.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "exit 10" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"failed with status 10"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ordinary script failure is still a new issue" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "exit 1" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a numeric-prefixed malformed operand is unverifiable" {
+  # ">=20banana" begins with a digit and carries only legal characters, so a
+  # first-character-and-charset check accepted it and _semver_part then parsed
+  # it as >=20.0.0. node-semver rejects it outright.
+  ws_setup
+  local bad
+  for bad in '>=20banana' '>=20..1' '>=20.1.2.3'; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"${bad}\" }, \"scripts\": { \"test\": \"true\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 30 ] || { echo "accepted malformed range: $bad" >&2; return 1; }
+    [[ "$output" == *"Cannot evaluate"* ]] || { echo "wrong message for: $bad" >&2; return 1; }
+  done
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an equality-prefixed partial range keeps X-range semantics" {
+  # node-semver normalises "=20" to >=20.0.0 <21.0.0-0. Routing it through
+  # exact comparison defaulted the omitted components to zero and rejected a
+  # conforming runtime — the same defaulting the bare form was fixed for.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"=${major}\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an equality range that states every component still pins it" {
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"=$((major + 1)).0.0\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: a repository with no JavaScript at all still skips" {
   # The negative control the check is keyed on: no manifest AND no workspace
   # configuration is a repo without a Node lane, not a deleted manifest.
@@ -524,18 +663,16 @@ ws_run() {
 
 # --- the result cache must not outlive the toolchain it vouched for -----------
 
-@test "cache key: the node lane keys on its package managers, not just node" {
-  # A cached PASS replayed after bun moved off the packageManager pin means the
-  # enforcement added for exactly that case never runs.
-  run bash -c "sed -n '/^_compute_cache_key()/,/^}/p' ci/preflight.sh"
+@test "cache key: the node lane is excluded from the result cache" {
+  # The lane runs the workspace's complete test, typecheck and build scripts,
+  # so its result depends on every file in that workspace -- not just the ones
+  # the branch touches. A PASS cached for one frontend change, rebased onto a
+  # base carrying a regression in another frontend file, has an identical key.
+  # Keying on the package managers was the first fix and covered only the
+  # toolchain half.
+  run bash -c "sed -n '/^_check_is_cacheable()/,/^}/p' ci/preflight.sh"
   [ "$status" -eq 0 ]
-  local tool
-  for tool in bun pnpm npm yarn; do
-    [[ "$output" == *"$tool"* ]] || { echo "node cache key ignores $tool" >&2; return 1; }
-  done
-  # Each manager goes through the fingerprint helper, which is what makes an
-  # absent or broken one safe; the two cases below pin that behaviour directly.
-  [[ "$output" == *"_tool_fingerprint"* ]]
+  [[ "$output" == *"node) return 1"* ]]
 }
 
 @test "cache key: the shell suite is excluded from the result cache" {
@@ -589,15 +726,18 @@ ws_run() {
   [[ "$output" == *"-absent"* ]]
 }
 
-@test "cache key: the shell suite has no key branch to go stale" {
-  # Uninstalling bats turns tests-shell into FAIL_INFRA, and keying on the
-  # bats version was the first fix for that. Excluding the lane from the cache
-  # entirely supersedes it and covers the inputs a key never could, so the
-  # branch must not linger: it is unreachable, and an unreachable cache key
-  # reads like the lane is still cached.
-  run bash -c "sed -n '/^_compute_cache_key()/,/^}/p' ci/preflight.sh"
+@test "cache key: an uncached lane keeps no key branch to go stale" {
+  # Keying on the bats and package-manager versions was the first fix for both
+  # lanes. Excluding them from the cache supersedes it and covers inputs a key
+  # never could, so their branches must not linger: they are unreachable --
+  # _compute_cache_key is only called when _check_is_cacheable passes -- and an
+  # unreachable cache key reads like the lane is still cached.
+  # Comments are stripped first: this block explains why those lanes are not
+  # here, and the explanation must not be what satisfies the assertion.
+  run bash -c "sed -n '/^_compute_cache_key()/,/^}/p' ci/preflight.sh | grep -v '^[[:space:]]*#'"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"tests-shell"* ]]
+  [[ "$output" != *"tests-shell)"* ]]
+  [[ "$output" != *"node)"* ]]
 }
 
 @test "node lane: a workspace with no tests at all is unaffected" {
@@ -821,9 +961,34 @@ ws_run() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"tests-shell"* ]]
   local dep
-  for dep in 'ci/' '.githooks/' '.gitignore'; do
+  for dep in 'ci/' '.githooks/' '.gitignore' 'frontend/README'; do
     [[ "$output" == *"$dep"* ]] || { echo "dependency path not covered: $dep" >&2; return 1; }
   done
+}
+
+@test "tests-shell: the README the suites assert on schedules them" {
+  # test_test_layout.bats validates frontend/README.md's prose about which modes
+  # run the guard. A README-only change classifies as markdown, schedules
+  # lint-markdown and nothing else, and would let a false coverage claim through
+  # without running the case written to reject it.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  # The reason the path exception is needed: the language route schedules
+  # lint-markdown and nothing else.
+  [ "$(ci::changeset::classify_file frontend/README.md)" = "markdown" ]
+  run ci::changeset::_checks_for_language markdown
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"tests-shell"* ]]
+
+  # Feed a README-only changeset line through preflight's OWN pattern, lifted
+  # from the file rather than copied — a copy would pass whatever preflight
+  # actually contains.
+  local pattern
+  pattern="$(sed -n "/bats suites assert on the/,/^    fi\$/p" ci/preflight.sh \
+    | sed -n "s/.*grep -qE '\(.*\)'.*/\1/p")"
+  [ -n "$pattern" ]
+  run bash -c "printf 'M\tfrontend/README.md\n' | grep -qE '$pattern'"
+  [ "$status" -eq 0 ]
 }
 
 @test "tests-shell: a .gitignore-only change is not classified into any lane" {
