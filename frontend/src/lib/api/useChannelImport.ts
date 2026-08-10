@@ -350,6 +350,55 @@ export class ChannelImportShapeError extends Error {
   }
 }
 
+/**
+ * Every reason a 2xx body is UNUSABLE, in one place, ordered from structural to
+ * semantic. Throws rather than returning a verdict: each of these is the same
+ * outcome for the caller — the flow's indeterminate path, because on an apply
+ * the write may well have committed and only the body was unreadable.
+ *
+ * Extracted from the `.then` so that callback stays under the analyzer's
+ * complexity threshold (DeepSource JS-R1005) — conformed, not suppressed.
+ */
+function assertUsableResult(
+  result: ChannelImportResult,
+  request: { dryRun: boolean; contentOwnerId: string; expectedPlanFingerprint?: string },
+): void {
+  // A 2xx is not a promise about SHAPE — client.post casts, it does not
+  // validate. Rejecting here keeps a malformed dry run a read-only failure,
+  // and routes a malformed apply into the INDETERMINATE path (this is not an
+  // ApiError, so it is not on the definite-rejection list).
+  if (!isChannelImportResult(result)) {
+    throw new ChannelImportShapeError();
+  }
+  // The MODE must match what was asked for. A structural check only proves
+  // `dry_run` is a boolean, so a malformed or legacy apply response carrying
+  // `dry_run: true` passed it — and the flow then advanced to Applied and told
+  // the operator the import committed, on a body that identifies itself as a
+  // preview (review #184). Treated as unusable rather than coerced.
+  if (result.dry_run !== request.dryRun) {
+    throw new ChannelImportShapeError();
+  }
+  // And it must be the plan we BOUND to. A stale, misrouted or legacy-server
+  // 2xx can be structurally perfect and describe a different plan entirely;
+  // accepting it lets the flow clear the unsettled record and present an
+  // unrelated payload as the approved one. The route returns the same digest it
+  // compared against on success (channels.py: the 409 fires when they differ),
+  // so an inequality here is never a legitimate response.
+  if (
+    request.expectedPlanFingerprint !== undefined &&
+    result.plan_fingerprint !== request.expectedPlanFingerprint
+  ) {
+    throw new ChannelImportShapeError();
+  }
+  // And it must describe the TARGET this request named. Unlike the fingerprint
+  // check this one applies to the dry run too, which is the important half: the
+  // preview is what the operator approves, so an altered target has to be
+  // refused before it is rendered rather than caught one step later.
+  if (!echoesRequestedTarget(result, request.contentOwnerId)) {
+    throw new ChannelImportShapeError();
+  }
+}
+
 export const useChannelImport = (): ((
   args: {
     file: File;
@@ -380,48 +429,7 @@ export const useChannelImport = (): ((
       return client
         .post<ChannelImportResult>("/channels/import", form)
         .then((result) => {
-          // A 2xx is not a promise about SHAPE — client.post casts, it does
-          // not validate. Rejecting here keeps a malformed dry run a
-          // read-only failure, and routes a malformed apply into the flow's
-          // INDETERMINATE path (this is not an ApiError, so it is not on the
-          // definite-rejection list) — which is right: the write may well
-          // have committed, only the body was unusable.
-          if (!isChannelImportResult(result)) {
-            throw new ChannelImportShapeError();
-          }
-          // The MODE must match what was asked for. A structural check only
-          // proves `dry_run` is a boolean, so a malformed or legacy apply
-          // response carrying `dry_run: true` passed it — and the flow then
-          // advanced to Applied and told the operator the import committed,
-          // on a body that identifies itself as a preview (review #184).
-          // Treated as unusable rather than coerced, which routes an apply
-          // into the indeterminate path where an unreadable outcome belongs.
-          if (result.dry_run !== dryRun) {
-            throw new ChannelImportShapeError();
-          }
-          // And it must be the plan we BOUND to. A stale, misrouted or
-          // legacy-server 2xx can be structurally perfect and describe a
-          // different plan entirely; accepting it lets the flow clear the
-          // unsettled record and present an unrelated payload as the approved
-          // one. The route returns the same digest it compared against on
-          // success (channels.py: the 409 fires when they differ), so an
-          // inequality here is never a legitimate response — it goes down the
-          // indeterminate path, because the write may still have happened
-          // (review #184).
-          if (
-            expectedPlanFingerprint !== undefined &&
-            result.plan_fingerprint !== expectedPlanFingerprint
-          ) {
-            throw new ChannelImportShapeError();
-          }
-          // And it must describe the TARGET this request named. Unlike the
-          // fingerprint check this one applies to the dry run too, which is
-          // the important half: the preview is what the operator approves, so
-          // an altered target has to be refused before it is rendered rather
-          // than caught one step later on the apply.
-          if (!echoesRequestedTarget(result, contentOwnerId)) {
-            throw new ChannelImportShapeError();
-          }
+          assertUsableResult(result, { dryRun, contentOwnerId, expectedPlanFingerprint });
           return result;
         });
     },
