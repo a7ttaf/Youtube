@@ -312,6 +312,21 @@ export const useChannelImport = (): ((
           if (result.dry_run !== dryRun) {
             throw new ChannelImportShapeError();
           }
+          // And it must be the plan we BOUND to. A stale, misrouted or
+          // legacy-server 2xx can be structurally perfect and describe a
+          // different plan entirely; accepting it lets the flow clear the
+          // unsettled record and present an unrelated payload as the approved
+          // one. The route returns the same digest it compared against on
+          // success (channels.py: the 409 fires when they differ), so an
+          // inequality here is never a legitimate response — it goes down the
+          // indeterminate path, because the write may still have happened
+          // (review #184).
+          if (
+            expectedPlanFingerprint !== undefined &&
+            result.plan_fingerprint !== expectedPlanFingerprint
+          ) {
+            throw new ChannelImportShapeError();
+          }
           return result;
         });
     },

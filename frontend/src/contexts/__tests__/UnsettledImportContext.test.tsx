@@ -209,6 +209,40 @@ describe("unsettled import store", () => {
     expect(storedIds(victim)).toEqual(["apply-victim"]);
   });
 
+  it("keeps two known operators apart when the TENANT is missing", () => {
+    // SessionMe.tenant is nullable and hasActiveSession still admits such a
+    // session, so bootstrap and degraded tenant contexts really reach this.
+    // Collapsing to one "unknown" bucket whenever either half was missing put
+    // two different operators — both with a known userId — in the same bucket,
+    // where one blocked the other and the second's acknowledgeAll() retired
+    // the first's protection (review #184, codex P2).
+    const alice = importScopeFor(null, "user-alice");
+    const bob = importScopeFor(undefined, "user-bob");
+    expect(alice).not.toBe(bob);
+    expect(alice).not.toBe(UNSCOPED_IMPORT_SCOPE);
+
+    const aliceHook = renderHook(() => useUnsettledImport(alice));
+    const bobHook = renderHook(() => useUnsettledImport(bob));
+    act(() => aliceHook.result.current.trackApply("apply-alice"));
+
+    expect(bobHook.result.current.unsettled).toBe(false);
+    act(() => bobHook.result.current.acknowledgeAll());
+    expect(aliceHook.result.current.unsettled).toBe(true);
+  });
+
+  it("keeps a known tenant apart from a wholly unknown session", () => {
+    // The other half of the same rule, and the fully-unknown case still has
+    // its own named bucket rather than sharing with anyone identified.
+    const tenantOnly = importScopeFor("tenant-1", null);
+    const nothing = importScopeFor(null, null);
+
+    expect(tenantOnly).not.toBe(nothing);
+    expect(nothing).toBe(UNSCOPED_IMPORT_SCOPE);
+    // A known component can never be read as a missing one: the presence flag
+    // is a fixed leading character, so no real id can impersonate the sentinel.
+    expect(importScopeFor("0", "user-1")).not.toBe(importScopeFor(null, "user-1"));
+  });
+
   it("keeps distinct identities distinct after encoding", () => {
     // The encoding must be injective on the pair, or two different operators
     // would share one bucket — the same leak from the other direction.

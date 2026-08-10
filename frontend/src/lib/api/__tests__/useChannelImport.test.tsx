@@ -341,6 +341,63 @@ describe("useChannelImport", () => {
     ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
 
+  it("rejects a 2xx describing a plan other than the one bound", async () => {
+    // A stale, misrouted or legacy-server response can be structurally perfect
+    // and describe a DIFFERENT plan. The route returns the digest it compared
+    // against on success, so an inequality is never legitimate — and accepting
+    // it lets the flow clear the unsettled record and present an unrelated
+    // payload as the approved one (review #184, codex P2).
+    fetchMock().mockResolvedValue(
+      jsonResponse({ ...APPLY_RESULT, plan_fingerprint: "someone-elses-plan" }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+        expectedPlanFingerprint: "plan-abc",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("accepts a 2xx echoing the bound fingerprint", async () => {
+    // The complement: the check must not reject the legitimate case, or every
+    // apply would land in the indeterminate path.
+    fetchMock().mockResolvedValue(jsonResponse(APPLY_RESULT));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+        expectedPlanFingerprint: APPLY_RESULT.plan_fingerprint,
+      }),
+    ).resolves.toMatchObject({ plan_fingerprint: APPLY_RESULT.plan_fingerprint });
+  });
+
+  it("does not police the fingerprint on an UNBOUND request", async () => {
+    // An API client that never previewed sends no expectation, so there is
+    // nothing to compare and nothing to refuse.
+    fetchMock().mockResolvedValue(
+      jsonResponse({ ...APPLY_RESULT, plan_fingerprint: "whatever-the-server-says" }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ plan_fingerprint: "whatever-the-server-says" });
+  });
+
   it("rejects an apply answered with a PREVIEW payload", async () => {
     // A structural check only proves `dry_run` is a boolean. A malformed or
     // legacy apply response carrying `dry_run: true` passed it, and the flow

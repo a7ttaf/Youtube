@@ -1219,9 +1219,15 @@ export type GroupUpdateResponse = ChannelGroupApiEntry & {
 // ============================================================================
 // Purpose: TypeScript mirror of the backend channel-import JSON contract
 //   consumed by the Registry import stepper: POST /channels/import takes a
-//   multipart CSV roster form and returns ONE shape for both modes — a PREVIEW
-//   when dry_run is true, an APPLIED result when false — so the view must read
-//   the flag rather than assume either. Fields are matched 1:1 against the
+//   multipart CSV roster form and returns ONE shape for both modes: the PLAN.
+//   dry_run true is the previewed plan; dry_run false is the APPROVED plan
+//   echoed back after a successful apply — NOT a report of what the write did.
+//   Both modes render the pre-write plan, and the committed result lives only
+//   in the CHANNEL_IMPORTED audit event, because a concurrent writer can turn
+//   a planned UPDATE into a no-op between planning and the row lock. A
+//   consumer that presents `counts` from the false-mode body as committed
+//   totals is making a claim this payload does not support. The view must
+//   still read the flag rather than assume either mode. Fields are matched 1:1 against the
 //   DECLARED backend Pydantic models (not guessed); nullable fields serialize
 //   as null. WIRE CASING NOTE: these models have NO alias generator, so
 //   payloads stay snake_case on the wire — except ChannelImportFieldChange,
@@ -1299,12 +1305,20 @@ export type ChannelImportResult = {
   cms_status: string;
   counts: Record<string, number>;
   rows: ChannelImportRowResult[];
-  // Digest of everything the operator reviews: `counts`, `rows`, AND the
-  // target — `content_owner_id` and `cms_status`. Those two are IN the digest
-  // deliberately: an all-CREATE roster's rows carry no owner (a CREATE's
-  // `changes` is empty by design), so leaving them out let a preview of owner
-  // A apply against owner B with an identical digest. Only `dry_run` is
-  // excluded, because a preview and its apply differ in it by definition.
+  // Digest of everything the operator reviews — `counts` and `rows` — plus the
+  // target the write lands in: `content_owner_id`, `cms_status`, and the
+  // server-resolved TENANT. The target fields are in deliberately: an
+  // all-CREATE roster's rows carry no owner (a CREATE's `changes` is empty by
+  // design), so leaving them out let a preview of owner A apply against owner
+  // B with an identical digest, and leaving the tenant out let a preview
+  // approved in one tenant authorize the same plan in another.
+  //
+  // The tenant input is NOT part of this payload and clients neither send nor
+  // control it — the backend resolves it from the request principal. So this
+  // digest is not reproducible client-side, and it is not meant to be: it is
+  // an opaque equality token to echo back, not a checksum to recompute. Of the
+  // fields listed in this type, only `dry_run` is outside the digest, because
+  // a preview and its apply differ in it by definition.
   //
   // Echo a dry run's value back as `expected_plan_fingerprint` on the apply:
   // the backend 409s if the plan it would execute is no longer the one that

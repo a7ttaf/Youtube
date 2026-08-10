@@ -9,6 +9,7 @@ import type {
 } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 import { WriteInFlightProvider } from "@/contexts/WriteInFlightContext";
+import { UNSCOPED_IMPORT_SCOPE } from "@/contexts/UnsettledImportContext";
 
 // RegistryImportFlow is exercised THROUGH RegistryView (the GroupsView.test.tsx
 // idiom for GroupsSyncFlow): the capability gate, the table swap, and the
@@ -575,9 +576,15 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     await runDryRunToPreview((form) => {
       if (form.get("dry_run") === "true") return jsonResponse(DRY_RUN_PLAN);
       applyCount += 1;
+      // The second apply echoes the REFRESHED plan, because that is what the
+      // route does: it returns the payload whose fingerprint it compared
+      // against, so a success always carries the digest the request was bound
+      // to. Answering with APPLY_RESULT here returned `plan-clean-v1` for a
+      // request bound to `plan-refreshed-v2` — a shape the backend cannot
+      // produce, and one the hook now rejects (review #184, codex P2).
       return applyCount === 1
         ? jsonResponse({ detail: refreshed }, 409)
-        : jsonResponse(APPLY_RESULT);
+        : jsonResponse({ ...refreshed, dry_run: false });
     });
 
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
@@ -814,7 +821,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // exactly what a real second tab's write delivers here.
     // The records are scoped; a standalone RegistryView uses the unscoped
     // bucket, so the other tab's key has to live in the same one to be seen.
-    const otherTabKey = "ums.unsettledChannelImport.unscoped.apply-from-another-tab";
+    const otherTabKey = `ums.unsettledChannelImport.${UNSCOPED_IMPORT_SCOPE}.apply-from-another-tab`;
     globalThis.localStorage.setItem(otherTabKey, "1");
     fireEvent(globalThis.window, new StorageEvent("storage", { key: otherTabKey }));
 

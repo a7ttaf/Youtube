@@ -81,12 +81,21 @@ import { useCallback, useMemo, useSyncExternalStore } from "react";
 export const UNSETTLED_IMPORT_STORAGE_KEY = "ums.unsettledChannelImport";
 
 /**
- * The scope used when no principal is known - a standalone render, or a shell
- * that has not hydrated a session yet. Deliberately a real, NAMED scope rather
- * than an empty string: records made without an identity must not be visible
- * to an identified operator, and vice versa.
+ * Presence flags. Each half of a scope is `1<encoded>` when the component is
+ * known and `0` when it is not, so a KNOWN component is never conflated with a
+ * missing one and no real value can impersonate the sentinel — the flag is a
+ * fixed leading character outside the encoded alphabet's control.
  */
-export const UNSCOPED_IMPORT_SCOPE = "unscoped";
+const KNOWN = "1";
+const MISSING = "0";
+
+/**
+ * The scope when NEITHER component is known - a standalone render, or a shell
+ * with no session at all. Deliberately a real, NAMED scope rather than an
+ * empty string: records made without an identity must not be visible to an
+ * identified operator, and vice versa.
+ */
+export const UNSCOPED_IMPORT_SCOPE = `${MISSING}~${MISSING}`;
 
 /**
  * Percent-encode everything outside an unreserved alphabet, INCLUDING the
@@ -116,15 +125,28 @@ const encodeScopePart = (value: string): string => {
  * One operator on one tenant, encoded so the pair cannot be confused with any
  * other pair. Both halves go through encodeScopePart, so `~` is unambiguously
  * the separator and `.` unambiguously the key delimiter.
+ *
+ * Each component is kept INDEPENDENTLY. Collapsing to a single "unknown"
+ * bucket whenever either was missing was wrong in a state the app really
+ * reaches: `SessionMe.tenant` is nullable and `hasActiveSession` still admits
+ * such a session, so during bootstrap or a degraded tenant context two
+ * different operators — both with a known `userId` — shared one bucket. One
+ * blocked the other, and the second operator's acknowledgeAll() retired the
+ * first's protection (review #184). A component is only ever pooled with other
+ * MISSING components, never with a known one.
+ *
+ * `tenantId` is the tenant's immutable database id, not its routing slug: a
+ * slug rename while an apply is unsettled would otherwise mint a fresh scope,
+ * hiding the warning and handing admission an empty bucket for a request whose
+ * outcome is still unknown.
  */
 export const importScopeFor = (
-  tenantSlug: string | null | undefined,
+  tenantId: string | null | undefined,
   userId: string | null | undefined,
 ): string => {
-  if (!tenantSlug || !userId) {
-    return UNSCOPED_IMPORT_SCOPE;
-  }
-  return `${encodeScopePart(tenantSlug)}~${encodeScopePart(userId)}`;
+  const tenantPart = tenantId ? `${KNOWN}${encodeScopePart(tenantId)}` : MISSING;
+  const userPart = userId ? `${KNOWN}${encodeScopePart(userId)}` : MISSING;
+  return `${tenantPart}~${userPart}`;
 };
 
 /**

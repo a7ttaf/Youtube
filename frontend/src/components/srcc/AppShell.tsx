@@ -887,8 +887,12 @@ const AppShell = () => {
   // Namespaces the unsettled-import records. localStorage is origin-wide and
   // outlives sign-out, so without this a pending import follows a shared
   // browser into the next operator's or the next tenant's session.
+  // tenant.ID, never the slug: a slug is routing metadata and can be renamed,
+  // which would mint a fresh scope while an apply is still unsettled — hiding
+  // the warning and handing admission an empty bucket for a request whose
+  // outcome nobody knows (review #184).
   const importScope = importScopeFor(
-    sessionBootstrap.session.tenant?.slug,
+    sessionBootstrap.session.tenant?.id,
     sessionBootstrap.session.user_id,
   );
   const copy = VIEW_COPY[view];
