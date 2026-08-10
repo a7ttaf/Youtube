@@ -389,27 +389,91 @@ config_missing_from_index() {
   return 0
 }
 
+# Splits a test block into its own top-level properties, one per line, as
+# NAME<TAB>VALUE. A spread is reported as the name "...".
+#
+# Line-anchored greps read formatting, not structure. `test: { include: [...],
+# exclude: [...] }` on one line is the same configuration as the same two
+# properties on two lines, and vitest applies it identically -- but a pattern
+# anchored at ^ saw only the first. Splitting on commas at the object's own
+# depth, with strings opaque, makes the check independent of where the newlines
+# happen to fall. Quoted names are unwrapped here too, so `"exclude"` and
+# `exclude` arrive as the same property.
+test_block_props() {
+  awk '
+    { all = all $0 "\n" }
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function unquote(s,   q) {
+      s = trim(s)
+      if (length(s) >= 2) {
+        q = substr(s, 1, 1)
+        if ((q == "\"" || q == "'"'"'" || q == "`") && substr(s, length(s), 1) == q) {
+          return substr(s, 2, length(s) - 2)
+        }
+      }
+      return s
+    }
+    function emit(seg,   name, value, colon, i, n, c, depth, instr) {
+      seg = trim(seg)
+      if (seg == "") return
+      gsub(/\n/, " ", seg)
+      if (substr(seg, 1, 3) == "...") { print "..." "\t" seg; return }
+      # First colon at the segment own depth separates name from value.
+      n = length(seg); depth = 0; instr = ""; colon = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(seg, i, 1)
+        if (instr != "") {
+          if (c == "\\") { i++; continue }
+          if (c == instr) instr = ""
+          continue
+        }
+        if (c == "\"" || c == "'"'"'" || c == "`") { instr = c; continue }
+        if (c == "{" || c == "[" || c == "(") { depth++; continue }
+        if (c == "}" || c == "]" || c == ")") { depth--; continue }
+        if (c == ":" && depth == 0) { colon = i; break }
+      }
+      if (colon == 0) { print unquote(seg) "\t"; return }
+      name = unquote(substr(seg, 1, colon - 1))
+      value = trim(substr(seg, colon + 1))
+      print name "\t" value
+    }
+    END {
+      n = length(all); depth = 0; instr = ""; seg = ""
+      for (i = 1; i <= n; i++) {
+        c = substr(all, i, 1)
+        if (instr != "") {
+          seg = seg c
+          if (c == "\\") { seg = seg substr(all, i + 1, 1); i++; continue }
+          if (c == instr) instr = ""
+          continue
+        }
+        if (c == "\"" || c == "'"'"'" || c == "`") { instr = c; seg = seg c; continue }
+        if (c == "{" || c == "[" || c == "(") { depth++; seg = seg c; continue }
+        if (c == "}" || c == "]" || c == ")") { depth--; seg = seg c; continue }
+        if (c == "," && depth == 0) { emit(seg); seg = ""; continue }
+        seg = seg c
+      }
+      emit(seg)
+    }
+  '
+}
+
 # Runs the include/exclude assertions over one config file. Echoes nothing on
 # success; on failure echoes a reason keyword the caller turns into a message.
 check_one_config() {
   local cfg="$1"
-  local block have_block=1 active_include="" active_exclude="" active_spread=""
+  local block props have_block=1 active_include="" active_exclude="" active_spread=""
 
-  # A quoted property is the same property: `"exclude": [...]` is valid TS and
-  # vitest applies it, but an identifier-only pattern does not see it, so an
-  # exclusion that silently drops whole test directories reads as clean. The
-  # include side fails the other way -- a quoted `"include"` would be reported
-  # missing -- which is safe but still wrong about the file.
-  local q='["'"'"']?'
   block="$(strip_ts_comments "$cfg" | extract_test_block)" || have_block=0
   if [ -n "$block" ]; then
-    active_include="$(printf '%s\n' "$block" | grep -E "^[[:space:]]*${q}include${q}[[:space:]]*:[[:space:]]*\[" || true)"
-    active_exclude="$(printf '%s\n' "$block" | grep -E "^[[:space:]]*${q}exclude${q}[[:space:]]*:" || true)"
+    props="$(printf '%s\n' "$block" | test_block_props)"
+    active_include="$(printf '%s\n' "$props" | awk -F'\t' '$1 == "include" { print $2 }')"
+    active_exclude="$(printf '%s\n' "$props" | awk -F'\t' '$1 == "exclude" { print $2 }')"
     # A spread carries in properties this guard never sees. `test: { ...hidden,
     # include: [...] }` passes every direct-property check above while vitest
     # applies whatever exclude `hidden` contains -- the same silent drop the
     # exclude rule exists to prevent, one indirection out of reach.
-    active_spread="$(printf '%s\n' "$block" | grep -E '^[[:space:]]*\.\.\.' || true)"
+    active_spread="$(printf '%s\n' "$props" | awk -F'\t' '$1 == "..." { print $2 }')"
   fi
 
   if [ "$have_block" = "0" ]; then

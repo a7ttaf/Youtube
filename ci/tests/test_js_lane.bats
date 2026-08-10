@@ -511,7 +511,7 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
-@test "node lane: a manifest that differs from the index stops the workspace" {
+@test "node lane: a partially staged manifest stops the workspace" {
   # Existing in the index is not enough: every check below reads the worktree
   # copy, so staging the removal of the test script and restoring the healthy
   # manifest on disk ran the restored script and exited 0 for a commit that
@@ -528,7 +528,50 @@ ws_run() {
   printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "true" } }' > ws/package.json
   run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
   [ "$status" -eq 20 ]
-  [[ "$output" == *"differs between the git index and the worktree"* ]]
+  [[ "$output" == *"staged but changed again in the worktree"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a partially staged source file stops the workspace" {
+  # The manifest is not the only file the lane consumes: it installs,
+  # typechecks, tests and builds the worktree. Staging a failing source file and
+  # restoring the passing copy on disk reported "Node lane passed" for a commit
+  # whose code fails once checked out.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'throw new Error("fail");\n' > ws/app.js
+  git add ws/app.js >/dev/null 2>&1
+  printf 'export const ok = true;\n' > ws/app.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ordinary dirty worktree is not partial staging" {
+  # The rule has to stay on files that are part of this commit. Running the gate
+  # by hand on an edited-but-unstaged tree is the normal case, and failing it
+  # makes the lane unusable rather than stricter. Uses the manifest on purpose:
+  # the first version of this check compared package.json against the index
+  # unconditionally, so every uncommitted manifest edit failed the lane.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "true", "build": "true" } }' > ws/package.json
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
   cd "$REPO_ROOT"
   rm -rf "$NODE_SB"
 }
@@ -647,6 +690,46 @@ ws_run() {
   run ws_run
   [ "$status" -eq 30 ]
   [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a comparator on a partial range covers the whole major" {
+  # node-semver expands "<=20" to <21.0.0-0. Comparing against a zero-filled
+  # 20.0.0 rejected 20.20.2, a conforming runtime.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"<=${major}\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a strict comparator on a partial range excludes the whole major" {
+  # The other side of the same bound: ">20" requires 21 or later, and against a
+  # zero-filled 20.0.0 it wrongly admitted 20.20.2.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">${major}\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a fully stated comparator is unaffected by the expansion" {
+  # ">=20.0.0" and "<20.0.0" already read correctly; the bound must only apply
+  # where the operand leaves components unstated.
+  ws_setup
+  local ver
+  ver="$(node --version | sed 's/^v//')"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">${ver}\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
   rm -rf "$NODE_SB"
 }
 

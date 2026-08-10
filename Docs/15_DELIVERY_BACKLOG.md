@@ -969,7 +969,23 @@ single P-tier above.
   `frontend/README.md` was missing from the `tests-shell` dependency paths even
   though the suites assert on its prose — a README-only change classifies as
   markdown, scheduling `lint-markdown` and nothing else.
-  Combined suite: `test_test_layout.bats` (55) + `test_js_lane.bats` (98) = 153
+  A sixteenth round found three, one P1 — the first round to shrink. The
+  manifest-divergence rule from round fifteen was both **too narrow and too
+  wide**: it compared only `package.json`, while the lane installs, typechecks,
+  tests and builds every file in the workspace (staging a failing source file
+  and restoring the passing copy on disk reported "Node lane passed"), and it
+  rejected *any* divergence, so an ordinary edited-but-unstaged manifest failed
+  the lane — a false positive that would have made the gate unusable by hand.
+  The rule is now **partial staging**, across the whole workspace: a file whose
+  index copy differs from HEAD *and* whose worktree copy differs from the index.
+  Comparator-prefixed partials still used zero-filled comparison, so `<=20`
+  rejected 20.20.2 and `>20` admitted it; node-semver reads a partial as an
+  X-range, and both comparators now use the same upper bound (`20` → `21.0.0`).
+  And the exclude/spread greps were **line-anchored**, so the compact
+  `test: { include: [...], exclude: [...] }` slipped past: properties are now
+  split on commas at the object's own depth with strings opaque, which makes
+  the check independent of formatting and of quoting in one move.
+  Combined suite: `test_test_layout.bats` (58) + `test_js_lane.bats` (103) = 161
   cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

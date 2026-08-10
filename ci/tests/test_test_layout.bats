@@ -659,6 +659,49 @@ EOF
   [[ "$output" == *"spreads another object into test"* ]]
 }
 
+@test "test-layout: catches an exclude written on the same line as the include" {
+  # A line-anchored grep reads formatting, not structure. The compact block is
+  # the same configuration and vitest applies it identically.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"], exclude: ["tests/lib/**"] },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"exclude"* ]]
+}
+
+@test "test-layout: accepts a compact test block with no exclude" {
+  # The converse: formatting alone must not fail a conforming config either.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({ test: { include: ["tests/**/*.test.{ts,tsx}"] } });
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: an exclude in a nested section is not the guard's business" {
+  # Properties are read at the test object's own level. coverage.exclude does
+  # not drop tests, and failing on it would be a false positive.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    coverage: { exclude: ["src/generated/**"] },
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
 @test "test-layout: a spread outside the test block is not the guard's business" {
   # The rule has to stay inside test: { }. A spread anywhere else in the config
   # cannot reach test.exclude, and failing on it would be a false positive.

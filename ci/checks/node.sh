@@ -80,37 +80,41 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       exit "$CI_RESULT_FAIL_NEW_ISSUE"
     fi
 
-    # Existing in the index is not enough. Every check below -- engines,
-    # packageManager, the lockfile fingerprint, whether a `test` script exists
-    # at all -- reads the worktree copy, so staging the removal of the test
-    # script and restoring the healthy manifest on disk ran the restored script
-    # and exited 0 for a commit that ships tests with no way to run them.
+    # Existing in the index is not enough, and the manifest is not the only file
+    # that matters. Every check below -- engines, packageManager, the lockfile
+    # fingerprint, and then the workspace's own test, typecheck and build
+    # scripts -- consumes the worktree. Stage a failing source file, restore the
+    # passing copy on disk, and the lane reports on code the commit does not
+    # contain.
     #
-    # Rejecting divergence rather than validating both copies is deliberate:
-    # the manifest feeds a dozen decisions spread through this file, and a rule
-    # that has to be applied at each of them is a rule that will be forgotten at
-    # one of them. One comparison covers all of them, now and later.
-    DIVERGED=""
+    # The rule is *partial staging*, not any divergence: a file whose index copy
+    # differs from HEAD (it is part of this commit) AND whose worktree copy
+    # differs from the index. An ordinary dirty worktree -- edited, not yet
+    # staged -- is left alone, because there the developer is deliberately
+    # testing what is on disk and nothing claims otherwise.
+    PARTIAL=""
     while IFS= read -r _ws; do
       [ -n "$_ws" ] || continue
-      if [ "$_ws" = "." ]; then _mf="package.json"; else _mf="$_ws/package.json"; fi
-      _staged_hash="$(git rev-parse ":$_mf" 2>/dev/null || true)"
-      _disk_hash="$(git hash-object -- "$_mf" 2>/dev/null || true)"
-      if [ -n "$_staged_hash" ] && [ -n "$_disk_hash" ] \
-        && [ "$_staged_hash" != "$_disk_hash" ]; then
-        DIVERGED="${DIVERGED}${_mf}"$'\n'
-      fi
+      _scope="$_ws"
+      [ "$_scope" = "." ] && _scope="."
+      _staged="$(git diff --cached --name-only -- "$_scope" 2>/dev/null | sort || true)"
+      [ -n "$_staged" ] || continue
+      _unstaged="$(git diff --name-only -- "$_scope" 2>/dev/null | sort || true)"
+      [ -n "$_unstaged" ] || continue
+      _both="$(comm -12 <(printf '%s\n' "$_staged") <(printf '%s\n' "$_unstaged") || true)"
+      [ -n "$_both" ] && PARTIAL="${PARTIAL}${_both}"$'\n'
     done <<< "$NODE_WORKSPACES"
+    PARTIAL="$(printf '%s' "$PARTIAL" | sed '/^$/d')"
 
-    if [ -n "$DIVERGED" ]; then
-      echo "A workspace manifest differs between the git index and the worktree:"
-      while IFS= read -r _mf; do
-        [ -n "$_mf" ] || continue
-        echo "    $_mf"
-      done <<< "$DIVERGED"
-      echo "  Every check below reads the worktree copy, so the lane would"
-      echo "  report on a manifest the commit does not contain."
-      echo "  Stage the change (git add <path>), or discard it."
+    if [ -n "$PARTIAL" ]; then
+      echo "Workspace files are staged but changed again in the worktree:"
+      while IFS= read -r _p; do
+        [ -n "$_p" ] || continue
+        echo "    $_p"
+      done <<< "$PARTIAL"
+      echo "  The lane installs, typechecks, tests and builds the worktree, so"
+      echo "  it would report on content the commit does not contain."
+      echo "  Stage the rest (git add <path>), or discard it."
       exit "$CI_RESULT_FAIL_NEW_ISSUE"
     fi
   fi
@@ -267,6 +271,29 @@ _semver_is_version() {
     '^v?([0-9]+|[xX*])(\.([0-9]+|[xX*]))?(\.([0-9]+|[xX*]))?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
 }
 
+# _semver_upper_bound <operand> – echo the version one past everything a partial
+# operand covers, or nothing when the operand states all three components.
+#
+# node-semver reads a partial as an X-range, so "20" spans all of major 20 and
+# "20.1" all of minor 20.1. Both comparators that care about the top of that
+# span were comparing against the zero-filled floor instead: "<=20" rejected
+# 20.20.2, and ">20" admitted it. The bound is the same value for both.
+_semver_upper_bound() {
+  local stated=0 i
+  for i in 1 2 3; do
+    case "$(_semver_spec_part "$1" "$i")" in
+      ''|'x'|'X'|'*') break ;;
+    esac
+    stated="$i"
+  done
+  [ "$stated" -eq 0 ] && return 0
+  [ "$stated" -ge 3 ] && return 0
+  case "$stated" in
+    1) printf '%s.0.0' "$(( $(_semver_part "$1" 1) + 1 ))" ;;
+    2) printf '%s.%s.0' "$(_semver_part "$1" 1)" "$(( $(_semver_part "$1" 2) + 1 ))" ;;
+  esac
+}
+
 # _semver_cmp <a> <b> – echo -1, 0 or 1. Pre-release suffixes are dropped: a
 # gate that accepted 22.12.0-rc for a >=22.12.0 requirement would be lying by a
 # hair, but the check exists to catch whole-version drift, not tag splitting.
@@ -312,18 +339,32 @@ _semver_token_ok() {
 
   case "$tok" in
     '>='*)
+      # >=20 is >=20.0.0: zero-filling is already the right reading.
       if [ "$(_semver_cmp "$version" "$want")" != "-1" ]; then return 0; fi
       return 1
       ;;
     '<='*)
+      # <=20 admits every 20.x: node-semver expands it to <21.0.0-0. Comparing
+      # against a zero-filled 20.0.0 rejected 20.20.2, a conforming runtime.
+      if [ -n "$(_semver_upper_bound "$want")" ]; then
+        if [ "$(_semver_cmp "$version" "$(_semver_upper_bound "$want")")" = "-1" ]; then return 0; fi
+        return 1
+      fi
       if [ "$(_semver_cmp "$version" "$want")" != "1" ]; then return 0; fi
       return 1
       ;;
     '>'*)
+      # >20 requires 21 or later; against a zero-filled 20.0.0 it wrongly
+      # admitted 20.20.2. The bound is the same one <= uses, from the other side.
+      if [ -n "$(_semver_upper_bound "$want")" ]; then
+        if [ "$(_semver_cmp "$version" "$(_semver_upper_bound "$want")")" != "-1" ]; then return 0; fi
+        return 1
+      fi
       if [ "$(_semver_cmp "$version" "$want")" = "1" ]; then return 0; fi
       return 1
       ;;
     '<'*)
+      # <20 is <20.0.0: zero-filling is already the right reading.
       if [ "$(_semver_cmp "$version" "$want")" = "-1" ]; then return 0; fi
       return 1
       ;;
