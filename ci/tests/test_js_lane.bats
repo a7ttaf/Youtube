@@ -1580,3 +1580,126 @@ ws_run() {
       || { echo "$f maps to no frontend test pattern" >&2; return 1; }
   done
 }
+
+@test "node lane: a tilde range on a wildcard minor covers the whole major" {
+  # `~20.x` states a minor textually and none semantically. Testing the operand
+  # for a non-empty second component treated the `x` as a stated minor, pinned
+  # the upper bound at 20.1.0, and failed every runtime above 20.0.x — a range
+  # npm reads as the whole of major 20.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.x\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a caret range on a wildcard minor covers the whole major" {
+  # A control, not a second reproduction: the caret branch reads the same
+  # predicate but only consults the minor when the major is 0, so `^20.x` was
+  # already correct. It is here so the shared fix is pinned on both branches.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"^${major}.x\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a tilde range on a stated minor still pins that minor" {
+  # The control that keeps the case above from being a hole: with a real number
+  # in the minor position the tilde bound is still enforced.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~$((major - 1)).0\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: in ship mode a commit repaired only on disk is caught" {
+  # The partial-staging rule is written against the index, and in ship mode the
+  # index matches HEAD: `git diff --cached` is empty and the rule never fires.
+  # So a workspace committed without a way to run its tests, then repaired in
+  # the worktree, passed the pre-push gate on the strength of the repair.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": {} }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  # Repair on disk only. HEAD still ships a workspace with no test script.
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "true" } }' > ws/package.json
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"differ between HEAD and the worktree"* ]]
+  [[ "$output" == *"ws/package.json"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: in ship mode an untracked workspace file is caught too" {
+  # A file that exists only on disk is not in the commits being pushed either,
+  # and `git diff HEAD` says nothing about it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'export const only_on_disk = 1;\n' > ws/extra.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/extra.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: in ship mode a worktree matching HEAD passes" {
+  # The control: the rule must fail a divergent tree, not every ship run.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: outside ship mode an uncommitted edit is still allowed" {
+  # The reference tree follows the gate, so the stricter HEAD rule must not leak
+  # into the pre-commit gate, where working on a dirty tree is the normal case.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "true", "build": "true" } }' > ws/package.json
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: preflight exports the gate mode the reference tree depends on" {
+  # node.sh reads CI_GATE_MODE, and nothing else sets it. Without the export the
+  # ship rule above is dead code in the real gate — the shape of failure this PR
+  # has hit repeatedly.
+  run grep -nE '^export CI_GATE_MODE="\$MODE"$' ci/preflight.sh
+  [ "$status" -eq 0 ]
+}

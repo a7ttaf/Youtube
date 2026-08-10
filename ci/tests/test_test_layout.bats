@@ -924,3 +924,100 @@ EOF
   [ "$status" -eq 0 ]
   [ "$output" -ge 1 ]
 }
+
+@test "test-layout: catches an include whose elements are computed" {
+  # The outer brackets can be a genuine array literal and the contents still be
+  # decided at runtime. `[...(cond ? [glob] : [])]` opens with `[`, closes on
+  # the last character, and contains the declared glob in text — everything the
+  # literal test asked for — while vitest may receive an empty include.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: [...(process.env.CI ? ["tests/**/*.test.{ts,tsx}"] : [])],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"computes test.include"* ]]
+}
+
+@test "test-layout: catches an include element built from a variable" {
+  # Same class, simplest form: the glob is a string in the file but not the
+  # string vitest is handed.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const dir = "tests";
+
+export default defineConfig({
+  test: {
+    include: [dir + "/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"computes test.include"* ]]
+}
+
+@test "test-layout: a two-element literal include is still literal" {
+  # The boundary for the element rule: several plain quoted strings, with the
+  # trailing comma vitest configs are usually written with, stay acceptable.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: [
+      "tests/**/*.test.{ts,tsx}",
+      "tests/**/*.spec.{ts,tsx}",
+    ],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: a decoy export default inside a string does not anchor the read" {
+  # The scan below the anchor was made string-aware, but the anchor itself was
+  # still a raw substring search — so a quoted `export default` earlier in the
+  # file re-pointed the whole extraction at prose. Here the string carries a
+  # conforming config and the real one narrows the include to a single file:
+  # reading the decoy passes, reading the export fails.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const usage = "export default defineConfig({ test: { include: ['tests/**/*.test.{ts,tsx}'] } })";
+
+export default defineConfig({
+  test: {
+    include: ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
+}
+
+@test "test-layout: prose mentioning export default does not fail a conforming config" {
+  # The control for the case above: the anchor still has to be found. A string
+  # containing the phrase must not make the guard give up on a healthy file.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const note = "see the export default below";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}

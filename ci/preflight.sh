@@ -658,6 +658,13 @@ if [ "$RUN_FIX" -eq 1 ] && [ -f "./ci/checks/format.sh" ]; then
   echo "=== --fix: format pass complete; continuing gate ==="
 fi
 
+# Which tree is this run vouching for? Checks that compare the worktree against
+# what will be committed need to know, and the answer is not the changeset mode:
+# --all rewrites that to "all" without changing what the gate is standing behind.
+# quick is the pre-commit gate and stands behind the index; ship is the pre-push
+# gate and stands behind HEAD, which is already committed.
+export CI_GATE_MODE="$MODE"
+
 # ---- Changeset detection ----
 CHANGESET_MODE="pre-commit"
 case "$MODE" in

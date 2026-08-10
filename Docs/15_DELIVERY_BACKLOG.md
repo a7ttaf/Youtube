@@ -1034,7 +1034,26 @@ single P-tier above.
   character. And the per-check timeout added the round before applied only on
   the parallel path, so `CI_GATE_PARALLEL=0` ignored both it and the global
   timeout and could hang indefinitely.
-  Combined suite: `test_test_layout.bats` (65) + `test_js_lane.bats` (121) = 186
+  A nineteenth round found four, one P1, and it is the clearest instance yet of
+  a rule being right about the wrong tree. The partial-staging guard added in
+  round fifteen compares the index against the worktree, which is the correct
+  reference for exactly one gate: `quick`, the pre-commit hook. In `ship` — the
+  **pre-push** gate — the commit already exists, the index matches `HEAD`, and
+  `git diff --cached` is empty, so the guard never fires. A workspace committed
+  broken and repaired only on disk therefore passed the gate on the strength of
+  the repair, and the push carried the broken commit. The reference tree now
+  follows `CI_GATE_MODE`, which `preflight.sh` exports: `ship` stands behind
+  `HEAD`, every other mode behind the index. Note what the changeset mode could
+  not have supplied here — `--all` rewrites it to `all` without changing what
+  the run is vouching for. Three P2s: `~20.x` **states a minor textually and
+  none semantically**, and testing the operand for a non-empty second component
+  pinned the upper bound at `20.1.0`, rejecting a runtime npm reads as in range;
+  the array-literal check accepted `[...(cond ? [glob] : [])]` because it only
+  constrained the **brackets**, so every element must now be a plain quoted
+  string; and the `export default` anchor was still a raw substring search while
+  everything read after it had already been made string-aware, so a quoted
+  `export default` anywhere earlier re-pointed the whole extraction at prose.
+  Combined suite: `test_test_layout.bats` (70) + `test_js_lane.bats` (129) = 199
   cases, 0 failures. The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

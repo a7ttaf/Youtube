@@ -279,7 +279,16 @@ extract_test_block() {
     END {
       n = length(all)
 
-      ed = index(all, "export default")
+      # The anchor has to be found the same way everything after it is read.
+      # A raw index() matched `export default` inside a string literal, so a
+      # decoy in any quoted text anchored the whole extraction there -- the same
+      # class the scan below was already string-aware for, one step earlier.
+      ed = 0
+      for (i = 1; i <= n; i++) {
+        c = substr(all, i, 1)
+        if (is_quote(c)) { i = string_end(all, i, n) - 1; continue }
+        if (substr(all, i, 14) == "export default") { ed = i; break }
+      }
       if (ed == 0) exit 1
 
       # First brace after `export default`, which skips a defineConfig( wrapper.
@@ -458,33 +467,65 @@ test_block_props() {
   '
 }
 
-# value_is_literal_array – 0 when stdin is exactly one bracketed literal.
+# value_is_literal_array – 0 when stdin is one bracketed array whose every
+# element is a plain quoted string.
 #
-# "Starts with [" is not the same as "is an array": `["a", "b"].slice(1)` starts
-# with a bracket and hands vitest one element. The opening bracket's match has
-# to be the last character, so the value is the array rather than an expression
-# built from one.
+# Two separate ways this went wrong, and the second is why the element check
+# exists rather than only the bracket check:
+#
+#   ["a", "b"].slice(1)                  -- starts with [ but is an expression
+#   [...(cond ? ["a"] : ["b"])]          -- is an array, of a computed element
+#
+# Both put the declared glob in the text while handing vitest something else, so
+# the value is only readable as a declaration when the outer bracket's match is
+# the last character AND every element is a literal string.
 value_is_literal_array() {
   awk '
     { v = v $0 " " }
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function element_is_literal(s,   q) {
+      s = trim(s)
+      if (s == "") return 1          # trailing comma
+      q = substr(s, 1, 1)
+      if (q != "\"" && q != "'"'"'" && q != "`") return 0
+      # The closing quote must be the last character: "a" + x is not a literal.
+      return (substr(s, length(s), 1) == q && length(s) >= 2)
+    }
     END {
-      sub(/^[[:space:]]+/, "", v); sub(/[[:space:]]+$/, "", v)
+      v = trim(v)
       n = length(v)
       if (n < 2 || substr(v, 1, 1) != "[") { exit 1 }
-      depth = 0; instr = ""
+      depth = 0; instr = ""; seg = ""; ok = 1
       for (i = 1; i <= n; i++) {
         c = substr(v, i, 1)
         if (instr != "") {
-          if (c == "\\") { i++; continue }
+          seg = seg c
+          if (c == "\\") { seg = seg substr(v, i + 1, 1); i++; continue }
           if (c == instr) instr = ""
           continue
         }
-        if (c == "\"" || c == "'"'"'" || c == "`") { instr = c; continue }
-        if (c == "[" || c == "{" || c == "(") { depth++; continue }
+        if (c == "\"" || c == "'"'"'" || c == "`") { instr = c; seg = seg c; continue }
+        if (c == "[" || c == "{" || c == "(") {
+          depth++
+          if (depth > 1) seg = seg c
+          continue
+        }
         if (c == "]" || c == "}" || c == ")") {
           depth--
-          if (depth == 0) { exit (i == n) ? 0 : 1 }
+          if (depth == 0) {
+            if (!element_is_literal(seg)) ok = 0
+            # Anything after the outer bracket makes this an expression.
+            exit (i == n && ok) ? 0 : 1
+          }
+          seg = seg c
+          continue
         }
+        if (c == "," && depth == 1) {
+          if (!element_is_literal(seg)) ok = 0
+          seg = ""
+          continue
+        }
+        seg = seg c
       }
       exit 1
     }

@@ -131,11 +131,29 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     # differs from the index. An ordinary dirty worktree -- edited, not yet
     # staged -- is left alone, because there the developer is deliberately
     # testing what is on disk and nothing claims otherwise.
+    #
+    # That rule is written against the index, which is the right reference for
+    # exactly one gate. In ship mode the commit already exists: the index
+    # matches HEAD, `git diff --cached` is empty, and the rule never fires --
+    # so a workspace file broken in a commit and repaired only on disk sailed
+    # through the pre-push gate on the strength of the repair. The tree a run
+    # vouches for is the gate's, not the changeset's, so the reference follows
+    # CI_GATE_MODE: ship stands behind HEAD, everything else behind the index.
     PARTIAL=""
     while IFS= read -r _ws; do
       [ -n "$_ws" ] || continue
       _scope="$_ws"
       [ "$_scope" = "." ] && _scope="."
+
+      if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+        _drift="$( {
+          git diff --name-only HEAD -- "$_scope" 2>/dev/null || true
+          git ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || true
+        } | sort -u | sed '/^$/d')"
+        [ -n "$_drift" ] && PARTIAL="${PARTIAL}${_drift}"$'\n'
+        continue
+      fi
+
       _staged="$(git diff --cached --name-only -- "$_scope" 2>/dev/null | sort || true)"
       [ -n "$_staged" ] || continue
       # `git diff` compares tracked content only, so it says nothing about a
@@ -154,14 +172,23 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     PARTIAL="$(printf '%s' "$PARTIAL" | sed '/^$/d')"
 
     if [ -n "$PARTIAL" ]; then
-      echo "Workspace files are staged but changed again in the worktree:"
+      if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+        echo "Workspace files differ between HEAD and the worktree:"
+      else
+        echo "Workspace files are staged but changed again in the worktree:"
+      fi
       while IFS= read -r _p; do
         [ -n "$_p" ] || continue
         echo "    $_p"
       done <<< "$PARTIAL"
       echo "  The lane installs, typechecks, tests and builds the worktree, so"
-      echo "  it would report on content the commit does not contain."
-      echo "  Stage the rest (git add <path>), or discard it."
+      if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+        echo "  it would report on content the pushed commits do not contain."
+        echo "  Commit the rest, stash it, or discard it."
+      else
+        echo "  it would report on content the commit does not contain."
+        echo "  Stage the rest (git add <path>), or discard it."
+      fi
       exit "$CI_RESULT_FAIL_NEW_ISSUE"
     fi
   fi
@@ -341,6 +368,20 @@ _semver_upper_bound() {
   esac
 }
 
+# _semver_spec_states <operand> <i> – 0 when the operand states component i as a
+# number.
+#
+# "20.x" states a minor textually but as a wildcard, so the tilde and caret
+# rules must not pin against it: ~20.x is the whole of major 20, exactly as ~20
+# is. Testing for non-empty rather than numeric compared the runtime's minor
+# against 0 and rejected a conforming version.
+_semver_spec_states() {
+  case "$(_semver_spec_part "$1" "$2")" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
 # _semver_cmp <a> <b> – echo -1, 0 or 1. Pre-release suffixes are dropped: a
 # gate that accepted 22.12.0-rc for a >=22.12.0 requirement would be lying by a
 # hair, but the check exists to catch whole-version drift, not tag splitting.
@@ -428,7 +469,7 @@ _semver_token_ok() {
       # 0.2.x only. Comparing majors alone would accept 0.3.0 -- but only when
       # the operand states a minor: bare "^0" is >=0.0.0 <1.0.0.
       if [ "$(_semver_part "$want" 1)" = "0" ] \
-        && [ -n "$(_semver_spec_part "$want" 2)" ] \
+        && _semver_spec_states "$want" 2 \
         && [ "$(_semver_part "$version" 2)" != "$(_semver_part "$want" 2)" ]; then
         return 1
       fi
@@ -438,8 +479,9 @@ _semver_token_ok() {
       if [ "$(_semver_cmp "$version" "$want")" = "-1" ]; then return 1; fi
       if [ "$(_semver_part "$version" 1)" != "$(_semver_part "$want" 1)" ]; then return 1; fi
       # "~20" is the whole of major 20; only "~20.1" pins the minor. Comparing
-      # unconditionally read the omitted minor as 0 and rejected 20.20.2.
-      if [ -n "$(_semver_spec_part "$want" 2)" ] \
+      # unconditionally read the omitted minor as 0 and rejected 20.20.2, and
+      # then "~20.x" -- a minor stated as a wildcard -- did the same thing.
+      if _semver_spec_states "$want" 2 \
         && [ "$(_semver_part "$version" 2)" != "$(_semver_part "$want" 2)" ]; then
         return 1
       fi
