@@ -51,6 +51,7 @@ fi
 # So the reference follows the gate's own mode. GATE_RANGE empty means the
 # index; otherwise it is the range of commits being pushed.
 GATE_RANGE=""
+GATE_COMMITS=""
 GATE_WHAT="staged"
 if [ "${CI_GATE_MODE:-}" = "ship" ]; then
   GATE_RANGE="$(ci::git::push_range 2>/dev/null || true)"
@@ -59,6 +60,18 @@ if [ "${CI_GATE_MODE:-}" = "ship" ]; then
     exit "$CI_RESULT_FAIL_INFRA"
   fi
   GATE_WHAT="in the pushed commits"
+
+  # Enumerated once, and fail-closed. Every scan below walks this list, and each
+  # of them reached it through `git rev-list ... || true`: an unresolvable range
+  # produced no commits, no scanning, and a confident PASS on the security path.
+  # "Nothing to push" and "the walk failed" are indistinguishable in the output
+  # and must not be indistinguishable in the result, so the exit status decides.
+  if ! GATE_COMMITS="$(git rev-list "$GATE_RANGE" 2>&1)"; then
+    echo "Cannot enumerate the commits being pushed (${GATE_RANGE}):"
+    printf '%s\n' "$GATE_COMMITS"
+    echo "  Refusing to report on a range that could not be walked."
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
 fi
 
 # The diff this run is reporting on.
@@ -77,7 +90,7 @@ _gs_diff() {
     while IFS= read -r sha; do
       [ -n "$sha" ] || continue
       git show --format= "$@" "$sha" 2>/dev/null || true
-    done < <(git rev-list "$GATE_RANGE" 2>/dev/null || true)
+    done <<< "$GATE_COMMITS"
   else
     git diff --cached "$@"
   fi
@@ -97,7 +110,7 @@ _gs_max_blob_size() {
     [ -n "$sha" ] || continue
     size="$(git cat-file -s "${sha}:${path}" 2>/dev/null || echo 0)"
     [ "${size:-0}" -gt "$max" ] && max="$size"
-  done < <(git rev-list "$GATE_RANGE" 2>/dev/null || true)
+  done <<< "$GATE_COMMITS"
   printf '%s' "$max"
 }
 
@@ -123,7 +136,7 @@ _gs_check() {
   while IFS= read -r sha; do
     [ -n "$sha" ] || continue
     git show --format= --check "$sha" || rc=1
-  done < <(git rev-list "$GATE_RANGE" 2>/dev/null || true)
+  done <<< "$GATE_COMMITS"
   return "$rc"
 }
 

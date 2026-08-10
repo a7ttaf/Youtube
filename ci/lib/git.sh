@@ -48,8 +48,6 @@ ci::git::push_range() {
   local old_sha="${CI_GATE_PUSH_OLD_SHA:-${GITHUB_EVENT_BEFORE:-}}"
   local new_sha="${CI_GATE_PUSH_NEW_SHA:-HEAD}"
   local zero_sha="0000000000000000000000000000000000000000"
-  # The hash of git's empty tree, which is stable across every repository.
-  local empty_tree="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
   local ref base="" default_branch
 
   if [ -n "$old_sha" ] && [ "$old_sha" != "$zero_sha" ] \
@@ -79,7 +77,13 @@ ci::git::push_range() {
 
   if [ -z "$base" ]; then
     git rev-parse --verify HEAD >/dev/null 2>&1 || return 1
-    base="$empty_tree"
+    # Every commit reachable from HEAD, which is what a genuine first push
+    # contains. Written as a plain rev rather than `<empty-tree>..HEAD`: the
+    # empty tree is a tree object, not a commit, and handing a non-commit to a
+    # revision walk is one `|| true` away from a silent empty result. Callers
+    # pass this straight to `git rev-list` and `git log`, both of which take it.
+    printf 'HEAD'
+    return 0
   fi
   printf '%s..HEAD' "$base"
 }

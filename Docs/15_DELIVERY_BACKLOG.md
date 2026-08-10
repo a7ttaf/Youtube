@@ -1159,7 +1159,19 @@ single P-tier above.
   as division, because the character before the slash is the `n` of a keyword:
   an identifier character does not settle the question, so the whole preceding
   word is read and checked against the keywords a value may follow.
-  Combined suite: `bats ci/tests/` = 257 cases, 0 failures.
+  A twenty-fifth round, from the pinned Qodo review, found the **fail-open under
+  the fail-closed rule**: every ship-mode scan reached its commit list through
+  `git rev-list … || true`, so a range that could not be walked produced no
+  commits, no scanning, and a confident PASS on the security path. "Nothing to
+  push" and "the walk failed" are indistinguishable in the output and must not
+  be indistinguishable in the result. The commits are enumerated once now, and
+  a failed enumeration is `FAIL_INFRA`. The same masking sat in
+  `branch-protection.sh`, where it decided whether every pushed commit is
+  signed. And `push_range`'s no-base case emitted `<empty-tree>..HEAD` — a tree
+  object on the left of a revision walk, which is exactly the input that makes
+  the walk fail; a first push is every commit reachable from `HEAD`, and it now
+  says so.
+  Combined suite: `bats ci/tests/` = 259 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

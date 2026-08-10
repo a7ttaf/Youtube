@@ -324,3 +324,42 @@ gs_run() {
   [[ "$output" == *"ci/tests/t.bats"* ]]
   rm -rf "$sb"
 }
+
+@test "git-safety: an unwalkable push range fails closed" {
+  # Every ship-mode scan reached its commit list through `git rev-list ... ||
+  # true`. An unresolvable range produced no commits, no scanning, and a
+  # confident PASS — on the security path. "Nothing to push" and "the walk
+  # failed" look identical in the output and must not look identical in the
+  # result.
+  gs_setup
+  printf 'SECRET=1\n' > "$GS_SB/secrets.env"
+  gs_commit "add secret"
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef CI_GATE_PUSH_NEW_SHA=HEAD bash ci/checks/git-safety.sh 2>&1"
+  # The bad SHA is rejected by push_range's own verification, so the range falls
+  # back and the scan still runs — the secret is found rather than skipped.
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"secrets.env"* ]]
+
+  # And a range that resolves but cannot be walked is infrastructure failure,
+  # not a pass. `refs/heads/nope..HEAD` names a ref that does not exist.
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship bash -c '
+    source ci/lib/common.sh; source ci/lib/git.sh
+    ci::git::push_range() { printf \"refs/heads/nope..HEAD\"; }
+    export -f ci::git::push_range
+    bash ci/checks/git-safety.sh' 2>&1"
+  [ "$status" -ne 0 ]
+  rm -rf "$GS_SB"
+}
+
+@test "git-safety: the push range is a plain rev when there is no base" {
+  # `<empty-tree>..HEAD` names a tree object on the left of a revision walk,
+  # which is one `|| true` away from a silent empty result. A first push is
+  # every commit reachable from HEAD, and that is what it says now.
+  gs_setup
+  run bash -c "cd '$GS_SB' && . ci/lib/git.sh && ci::git::push_range"
+  [ "$output" = "HEAD" ]
+  # And it is a range git will actually walk.
+  run bash -c "cd '$GS_SB' && git rev-list HEAD >/dev/null"
+  [ "$status" -eq 0 ]
+  rm -rf "$GS_SB"
+}

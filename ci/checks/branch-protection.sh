@@ -85,6 +85,15 @@ _bp_check_signed_commits() {
 
   ci::log::info "Checking commit signatures in range: ${range}"
   local sig_status commit found=0
+  # Enumerated before the loop so a failed walk is distinguishable from an empty
+  # one. `git log ... || true` piped into a while-read reported "no commits" for
+  # both, and this is the check that decides whether every pushed commit is
+  # signed — the one place a silent empty result must not read as a pass.
+  local log_out
+  if ! log_out="$(git log --pretty='%G? %H' "$range" 2>&1)"; then
+    _bp_fail "Cannot walk the push range ${range}: ${log_out}"
+    return 0
+  fi
   while IFS=' ' read -r sig_status commit; do
     [ -z "$commit" ] && continue
     found=1
@@ -94,7 +103,7 @@ _bp_check_signed_commits() {
         _bp_fail "Unsigned or unverified commit ${commit} (status: ${sig_status})."
         ;;
     esac
-  done < <(git log --pretty='%G? %H' "$range" 2>/dev/null || true)
+  done <<< "$log_out"
   [ "$found" -eq 1 ] || ci::log::info "No commits found in push range; skipping signed commit check."
 }
 
@@ -124,7 +133,10 @@ _bp_check_linear_history() {
 
   ci::log::info "Checking for merge commits in range: ${range}"
   local merge_count
-  merge_count="$(git rev-list --count --merges "$range" 2>/dev/null || echo 0)"
+  if ! merge_count="$(git rev-list --count --merges "$range" 2>&1)"; then
+    _bp_fail "Cannot count merge commits in ${range}: ${merge_count}"
+    return 0
+  fi
   if [ "${merge_count:-0}" -gt 0 ]; then
     _bp_fail "Linear history required: ${merge_count} merge commit(s) found. Use rebase instead of merge."
   fi
