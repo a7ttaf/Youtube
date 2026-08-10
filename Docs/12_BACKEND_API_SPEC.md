@@ -131,13 +131,24 @@ The former `will_adopt_content_owner` disclosure field is gone from the import
 response (it survives on the group-sync response, where adoption is
 legitimate). A dry run writes
 nothing (no audit event), which also makes it the RECONCILIATION tool for a
-client whose apply response was lost: because the apply is one all-or-nothing
-transaction, re-planning the same roster is decisive — every row `UNCHANGED`
-means the write committed, any remaining `CREATE`/`UPDATE` means it did not.
-The SPA uses exactly this rather than a retry (review #184), so no idempotency
-key or per-import status resource is needed for the indeterminate case. The
-answer is only valid once the original request has settled, so the check is
-operator-triggered and repeatable. The apply is all-or-nothing: any ERROR row —
+client whose apply response was lost — with a claim boundary that clients MUST
+respect. Re-planning the same roster reports the END STATE, not authorship: an
+all-`UNCHANGED` result says the registry now matches the roster, and nothing
+more. It does NOT establish that the lost request is what made it match. The
+roster may have been entirely `UNCHANGED` before the request was ever sent;
+another writer may have landed the same inventory values; and rows carrying a
+`group_id` are outside the claim altogether, because `outcome` is computed from
+channel inventory and the planner never reads memberships. Any remaining
+`CREATE`/`UPDATE` does mean the write has not landed *yet* — the original
+request may still be executing — so the check is operator-triggered and
+repeatable, and a single automatic shot would race it into a false "did not
+commit".
+A client MUST NOT report success or advance an "applied" state on this
+evidence, and MUST NOT treat it as licence to retry: the durable record of
+what committed is the `CHANNEL_IMPORTED` audit event, which is where an
+operator settles authorship. The SPA does exactly this (review #184) — it
+reports "the registry now matches this roster", stays on Preview, keeps Apply
+disabled, and points at the audit trail. The apply is all-or-nothing: any ERROR row —
 malformed id/name/token, a value containing a NUL character, a group_id over
 255 characters, a CONFLICTING duplicate id (copies that disagree on
 channel_name/view_revenue; repeating a channel once per group is legal and

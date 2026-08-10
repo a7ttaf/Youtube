@@ -146,15 +146,36 @@ const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => b
   ["dry_run", (value) => typeof value === "boolean"],
 ];
 
-/**
- * Structural check that an unknown payload is a usable import plan.
- *
- * Shared by BOTH directions on purpose: the rejection `detail` a 409/422
- * carries, and — since `client.post` only CASTS the body to its type
- * parameter — every successful 200 as well. A legacy or malformed success
- * body is not a smaller version of a plan; trusting one is what lets an
- * unbound apply through the front door.
- */
+// ============================================================================
+// Purpose: The typed boundary between an untrusted HTTP body and trusted UI
+//   state. Nothing may replace the plan on screen — not a 200 apply result,
+//   not the refreshed plan inside a 409/422 `detail` — without passing here.
+// Database/ORM: None (frontend) — a pure structural predicate over a decoded
+//   JSON body. It issues no request and reads no state.
+// Standards: Shared by BOTH directions on purpose. `client.post` only CASTS
+//   the body to its type parameter, so a successful 200 is exactly as
+//   unverified as a rejection payload, and a legacy or malformed success body
+//   is not a smaller version of a plan. Fails CLOSED: an unrecognised payload
+//   raises ChannelImportShapeError rather than being coerced, which routes an
+//   apply into the flow's indeterminate handling instead of letting it look
+//   like a clean result. Checks every field the UI renders or indexes, not
+//   just the typed few — a nullable field carrying an object passes a
+//   "nullable" check and then throws inside React.
+// Blast Radius: Whether the next Apply stays FINGERPRINT-BOUND. A plan
+//   accepted without `plan_fingerprint` reaches Apply as `undefined`, which
+//   omits `expected_plan_fingerprint` from the form and silently downgrades
+//   the audited bulk write to the backend's unbound, file-wins path — no
+//   fingerprint compare and no write-boundary pre-state guard — under a
+//   request the operator believes is still bound to the plan on screen. It
+//   also decides whether a malformed body crashes the renderer at a point
+//   where the write may already have committed.
+// Connections:
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       the only consumer of a plan; renders every field checked here.
+//   - File: backend/ums_smart_revenue/api/channels.py -> emits the plan and
+//       computes plan_fingerprint over the disclosed payload.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> the plan contract this mirrors.
+// ============================================================================
 export const isChannelImportResult = (payload: unknown): payload is ChannelImportResult => {
   if (typeof payload !== "object" || payload === null) {
     return false;

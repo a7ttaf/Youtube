@@ -20,6 +20,10 @@ const ORIGINAL_FETCH = globalThis.fetch;
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
+  // The unsettled-import flag mirrors into localStorage ON PURPOSE, so it
+  // outlives a browser reload. That makes it leak between tests unless it is
+  // cleared here — the leak is the feature working, not a bug to design away.
+  globalThis.localStorage.clear();
 });
 
 afterEach(() => {

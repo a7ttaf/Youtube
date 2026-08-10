@@ -43,6 +43,10 @@ const FULL_SESSION: SessionMe = {
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
+  // The unsettled-import flag mirrors into localStorage ON PURPOSE, so it
+  // outlives a browser reload. That makes it leak between tests unless it is
+  // cleared here — the leak is the feature working, not a bug to design away.
+  globalThis.localStorage.clear();
 });
 
 afterEach(() => {
@@ -808,7 +812,9 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       routeImportShell(applyResponder),
     );
-    renderShell();
+    // Returned so a test can tear the DOCUMENT down (the reload case), not
+    // merely navigate within it.
+    const rendered = renderShell();
 
     await screen.findByRole("complementary", { name: "Primary navigation" });
     fireEvent.click(navButton("Channel Registry"));
@@ -833,6 +839,7 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     await waitFor(() =>
       expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
     );
+    return rendered;
   };
 
   it("NAV LATCH: blocks sidebar navigation while an import apply is in flight", async () => {
@@ -965,5 +972,77 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled(),
     );
+  });
+
+  it("UNSETTLED IMPORT: the warning survives a browser reload and a second tab", async () => {
+    // Holding it in React state alone meant F5 — or opening the app in another
+    // tab — initialised the flag back to false and re-enabled Import CSV while
+    // the original POST might still be committing (review #184, codex P1). The
+    // flag mirrors into localStorage, so a fresh DOCUMENT still sees it.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    const { unmount } = await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/iu }));
+    await screen.findByRole("status");
+
+    // Tear the whole document down — the reload / second-tab case. Nothing of
+    // the previous React tree survives this; only the mirror does.
+    unmount();
+
+    renderShell();
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+
+    expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
+  });
+
+  it("UNSETTLED IMPORT: a browser that refuses storage still guards this document", async () => {
+    // Private mode, blocked cookies, or a quota error must not take the shell
+    // down and must not fail OPEN on the control. The cost of a refusal is
+    // cross-document persistence only — the in-memory flag stays authoritative.
+    const denied = () => {
+      throw new DOMException("denied", "SecurityError");
+    };
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(denied);
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(denied);
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(denied);
+
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/iu }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      /may still be committing/iu,
+    );
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeDisabled();
   });
 });
