@@ -67,7 +67,11 @@ const DRY_RUN_PLAN: ChannelImportResult = {
   dry_run: true,
   content_owner_id: "OWNERaaa",
   cms_status: "INSIDE_CMS",
-  counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0 },
+  // All four declared outcomes, always: the planner seeds every one at 0
+  // (`{outcome.value: 0 for outcome in ChannelImportOutcome}`), so a partial
+  // map is a shape the backend cannot emit. The preview HIDES zero counts;
+  // that is a render decision, not a payload one (review #184).
+  counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
   plan_fingerprint: "plan-clean-v1",
   rows: [
     {
@@ -114,7 +118,7 @@ const DRY_RUN_ERRORS: ChannelImportResult = {
   dry_run: true,
   content_owner_id: "OWNERaaa",
   cms_status: "INSIDE_CMS",
-  counts: { CREATE: 1, ERROR: 1 },
+  counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 1 },
   plan_fingerprint: "plan-errors-v1",
   rows: [
     DRY_RUN_PLAN.rows[0],
@@ -558,7 +562,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     const refreshed: ChannelImportResult = {
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-refreshed-v2",
-      counts: { UPDATE: 1 },
+      counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
       rows: [
         {
           ...DRY_RUN_PLAN.rows[0],
@@ -1080,7 +1084,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     const settled: ChannelImportResult = {
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-settled",
-      counts: { UNCHANGED: 2 },
+      counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
       rows: DRY_RUN_PLAN.rows.map((row) => ({
         ...row,
         outcome: "UNCHANGED",
@@ -1118,7 +1122,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     const channelsMatch: ChannelImportResult = {
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-groups-pending",
-      counts: { UNCHANGED: 2 },
+      counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
       // row[1] keeps its group_id "g1" — the effect that cannot be verified.
       rows: DRY_RUN_PLAN.rows.map((row) => ({ ...row, outcome: "UNCHANGED", changes: {} })),
     };
@@ -1172,7 +1176,13 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       form.get("dry_run") === "true"
         ? jsonResponse(DRY_RUN_PLAN)
         : jsonResponse(
-            { detail: { rows: [{}], counts: { UPDATE: 1 }, plan_fingerprint: "x" } },
+            {
+                detail: {
+                  rows: [{}],
+                  counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+                  plan_fingerprint: "x",
+                },
+              },
             409,
           ),
     );
@@ -1252,7 +1262,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // the shape the backend actually emits for them.
     const nameOnly: ChannelImportResult = {
       ...DRY_RUN_PLAN,
-      counts: { UPDATE: 1 },
+      counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
       rows: [
         {
           ...DRY_RUN_PLAN.rows[1],

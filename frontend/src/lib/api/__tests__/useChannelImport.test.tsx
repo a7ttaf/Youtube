@@ -62,7 +62,7 @@ const DRY_RUN_RESULT: ChannelImportResult = {
   dry_run: true,
   content_owner_id: "COabc",
   cms_status: "INSIDE_CMS",
-  counts: { CREATE: 1, UPDATE: 1 },
+  counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
   plan_fingerprint: "plan-abc",
   rows: [
     {
@@ -104,7 +104,7 @@ const BLOCKED_APPLY_DETAIL: ChannelImportResult = {
   dry_run: false,
   content_owner_id: "COabc",
   cms_status: "INSIDE_CMS",
-  counts: { ERROR: 1 },
+  counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 0, ERROR: 1 },
   plan_fingerprint: "plan-blocked",
   rows: [
     {
@@ -265,13 +265,21 @@ describe("useChannelImport", () => {
     // CountsStrip coerces during `value > 0`, so a string renders as a plan
     // total and a negative or NaN silently HIDES an outcome the operator
     // needed to see — on a payload that stays applicable (review #184).
+    const whole = { CREATE: 0, UPDATE: 0, UNCHANGED: 0, ERROR: 0 };
     const badCounts = [
-      { CREATE: "1" },
-      { CREATE: -1 },
-      { CREATE: 1.5 },
-      { CREATE: Number.NaN },
+      { ...whole, CREATE: "1" },
+      { ...whole, CREATE: -1 },
+      { ...whole, CREATE: 1.5 },
+      { ...whole, CREATE: Number.NaN },
       // A key the strip has no label for is a plan shape this UI cannot read.
-      { NOT_AN_OUTCOME: 1 },
+      { ...whole, NOT_AN_OUTCOME: 1 },
+      // Vacuously "valid" under a bare `every`, and a shape the planner cannot
+      // emit: it seeds all four outcomes at 0 unconditionally.
+      {},
+      // Partial, for the same reason — CountsStrip would silently omit a total
+      // the operator is entitled to, including on the Applied screen.
+      { CREATE: 1 },
+      { CREATE: 1, UPDATE: 1, UNCHANGED: 1 },
     ];
 
     for (const counts of badCounts) {
@@ -373,7 +381,10 @@ describe("useChannelImport", () => {
     // than rejecting the plan), so the check must not confuse "empty" with
     // "malformed".
     fetchMock().mockResolvedValue(
-      jsonResponse({ ...DRY_RUN_RESULT, counts: { CREATE: 0, UNCHANGED: 2 } }),
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
+      }),
     );
     const { result } = renderHook(() => useChannelImport(), { wrapper });
 
@@ -384,7 +395,9 @@ describe("useChannelImport", () => {
         dryRun: true,
         reason: "monthly roster import",
       }),
-    ).resolves.toMatchObject({ counts: { CREATE: 0, UNCHANGED: 2 } });
+    ).resolves.toMatchObject({
+      counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
+    });
   });
 
   it("rejects a 2xx missing dry_run, which selects the flow's next step", async () => {

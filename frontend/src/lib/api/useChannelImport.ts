@@ -77,7 +77,17 @@ const isCountMap = (value: unknown): boolean => {
   if (!isPlainObject(value)) {
     return false;
   }
-  return Object.entries(value).every(
+  const entries = Object.entries(value);
+  // EXACTLY the declared outcomes. `every` alone is vacuously true for `{}`
+  // and happily accepts a partial map, and the backend emits all four
+  // unconditionally (`{outcome.value: 0 for outcome in ChannelImportOutcome}`)
+  // — so a missing key is a payload it cannot have produced, and CountsStrip
+  // would silently omit a total the operator is entitled to, including on the
+  // Applied screen (review #184).
+  if (entries.length !== PLAN_OUTCOMES.length) {
+    return false;
+  }
+  return entries.every(
     ([outcome, count]) =>
       PLAN_OUTCOMES.some((declared) => declared === outcome) &&
       typeof count === "number" &&

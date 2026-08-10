@@ -738,7 +738,7 @@ const IMPORT_PLAN = {
   dry_run: true,
   content_owner_id: "OWNERaaa",
   cms_status: "INSIDE_CMS",
-  counts: { CREATE: 1 },
+  counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
   plan_fingerprint: "plan-appshell-v1",
   rows: [
     {

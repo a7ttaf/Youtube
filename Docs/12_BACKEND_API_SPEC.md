@@ -98,13 +98,19 @@ compares against, so a derived value does not belong in it. `from` is null for
 a CREATE, which has no prior classification (review #184).
 
 `plan_fingerprint` (added 2026-08-09, review #184) is a SHA-256 over
-everything the operator reviews: `content_owner_id`, `cms_status`, `counts`
-and `rows`. Only `dry_run` is excluded, and that exclusion is load-bearing — a
-preview and its apply differ in it by definition, so folding it in would make
-every fingerprint mismatch. The owner and CMS status are IN the digest because
-an all-`CREATE` roster's rows carry neither (a CREATE's `changes` is empty by
+everything the operator reviews AND the target it lands in: the resolved
+`tenant_id`, `content_owner_id`, `cms_status`, `counts` and `rows`. Only
+`dry_run` is excluded, and that exclusion is load-bearing — a preview and its
+apply differ in it by definition, so folding it in would make every
+fingerprint mismatch. The owner and CMS status are IN the digest because an
+all-`CREATE` roster's rows carry neither (a CREATE's `changes` is empty by
 design), so two different content owners would otherwise produce identical
-digests and an apply could bind to a target that was never reviewed.
+digests and an apply could bind to a target that was never reviewed. The
+tenant is in for the same reason one step further out, and it is
+SERVER-DERIVED — resolved from the request principal, never read from the
+request body — so a client cannot influence it. Without it, two empty tenants
+and an all-`CREATE` roster digest identically, and a preview approved in one
+tenant satisfies the guard on an apply directed at another.
 An apply may send the approved dry run's value back as the optional
 `expected_plan_fingerprint` form field; if the plan the route would execute no
 longer matches, it returns **409** with that refreshed plan as `detail` (the
@@ -138,15 +144,18 @@ more. It does NOT establish that the lost request is what made it match. The
 roster may have been entirely `UNCHANGED` before the request was ever sent;
 another writer may have landed the same inventory values; and rows carrying a
 `group_id` are outside the claim altogether, because `outcome` is computed from
-channel inventory and the planner never reads memberships. Any remaining
-`CREATE`/`UPDATE` does mean the write has not landed *yet* — the original
-request may still be executing — so the check is operator-triggered and
-repeatable, and a single automatic shot would race it into a false "did not
-commit".
+channel inventory and the planner never reads memberships. A refreshed plan that still shows
+`CREATE`/`UPDATE`/`ERROR` work is the mirror image and carries no more
+authority: it says the registry currently DIVERGES from the roster, not that
+this request failed. A completed import followed by another writer's edit or
+archive produces exactly that plan. The check is operator-triggered and
+repeatable because the original request may also still be executing, and a
+single automatic shot would race it into a false "did not commit".
 A client MUST NOT report success or advance an "applied" state on this
-evidence, and MUST NOT treat it as licence to retry: the durable record of
-what committed is the `CHANNEL_IMPORTED` audit event, which is where an
-operator settles authorship. The SPA does exactly this (review #184) — it
+evidence, MUST NOT report failure or "not committed" on the inverse, and MUST
+NOT treat either as licence to retry: the durable record of what committed is
+the `CHANNEL_IMPORTED` audit event, which is where an operator settles
+authorship. Neither direction of the comparison establishes it. The SPA does exactly this (review #184) — it
 reports "the registry now matches this roster", stays on Preview, keeps Apply
 disabled, and points at the audit trail. The apply is all-or-nothing: any ERROR row —
 malformed id/name/token, a value containing a NUL character, a group_id over
