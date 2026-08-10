@@ -820,6 +820,40 @@ script_exists() {
   printf '%s\n' "$PACKAGE_SCRIPTS" | grep -Fx -- "$script_name" >/dev/null 2>&1
 }
 
+script_command() {
+  node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{})['$1']||''))}catch(e){}" 2>/dev/null || true
+}
+
+# A test script that narrows the suite is a suite that does not run.
+#
+# The layout guard rejects a persistent filter written into vitest.config.ts,
+# and this is the same filter one layer out: `vitest run -t no-such-name` exits
+# 0 with every collected test skipped, and the config the guard inspects is
+# untouched. Checking that a `test` script *exists* said nothing about whether
+# it runs anything, in exactly the way that checking a `typecheck` script exists
+# said nothing about whether tsc ran.
+#
+# Matched as whole arguments so a path or a test name containing "-t" is not
+# mistaken for the flag.
+assert_no_persistent_filter() {
+  local script_name="$1" cmd tok
+  cmd="$(script_command "$script_name")"
+  [ -n "$cmd" ] || return 0
+  # shellcheck disable=SC2086
+  for tok in $cmd; do
+    case "$tok" in
+      -t|--testNamePattern|--testNamePattern=*|--shard|--shard=*|--bail|--bail=*|--related|--changed|--changed=*)
+        echo "Workspace ${CI_GATE_NODE_WORKSPACE} narrows its own suite in the '${script_name}' script:"
+        echo "    ${script_name}: ${cmd}"
+        echo "  '${tok}' selects a subset, so the lane can exit 0 with the rest of"
+        echo "  the suite never collected. Remove it, or move the selection to a"
+        echo "  separate script this gate does not run."
+        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        ;;
+    esac
+  done
+}
+
 run_script() {
   local script_name="$1"
   local rc=0
@@ -916,6 +950,9 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
     fi
   fi
 fi
+
+assert_no_persistent_filter "test"
+assert_no_persistent_filter "test:unit"
 
 run_script "format:check"
 run_script "lint"

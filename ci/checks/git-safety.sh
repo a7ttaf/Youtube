@@ -51,7 +51,6 @@ fi
 # So the reference follows the gate's own mode. GATE_RANGE empty means the
 # index; otherwise it is the range of commits being pushed.
 GATE_RANGE=""
-GATE_BLOB_REF=":"
 GATE_WHAT="staged"
 if [ "${CI_GATE_MODE:-}" = "ship" ]; then
   GATE_RANGE="$(ci::git::push_range 2>/dev/null || true)"
@@ -59,17 +58,47 @@ if [ "${CI_GATE_MODE:-}" = "ship" ]; then
     echo "Cannot determine the range being pushed; refusing to report on it."
     exit "$CI_RESULT_FAIL_INFRA"
   fi
-  GATE_BLOB_REF="HEAD:"
   GATE_WHAT="in the pushed commits"
 fi
 
+# The diff this run is reporting on.
+#
+# In ship mode that is *every outgoing commit*, not the net change between the
+# base and HEAD. `git diff base..HEAD` collapses the endpoints, so a token added
+# by one commit and removed by a later one in the same push disappears from the
+# diff while both commits are pushed and the token stays in the history forever.
+# `git rev-list` walks each commit; `git show` prints what that commit added.
+#
+# --first-parent is deliberately absent: a merged side branch is part of what is
+# being pushed, and its commits carry their content into the remote too.
 _gs_diff() {
-  # shellcheck disable=SC2086
+  local sha
   if [ -n "$GATE_RANGE" ]; then
-    git diff $GATE_RANGE "$@"
+    while IFS= read -r sha; do
+      [ -n "$sha" ] || continue
+      git show --format= "$@" "$sha" 2>/dev/null || true
+    done < <(git rev-list "$GATE_RANGE" 2>/dev/null || true)
   else
     git diff --cached "$@"
   fi
+}
+
+# The largest this path ever was anywhere in what is being reported on. `HEAD:`
+# cannot see a blob that existed only in an intermediate commit, which is the
+# same hole as the net diff: a 40MB file added and removed within one push is
+# still 40MB in the objects the remote receives.
+_gs_max_blob_size() {
+  local path="$1" sha size max=0
+  if [ -z "$GATE_RANGE" ]; then
+    git cat-file -s ":$path" 2>/dev/null || echo 0
+    return 0
+  fi
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    size="$(git cat-file -s "${sha}:${path}" 2>/dev/null || echo 0)"
+    [ "${size:-0}" -gt "$max" ] && max="$size"
+  done < <(git rev-list "$GATE_RANGE" 2>/dev/null || true)
+  printf '%s' "$max"
 }
 
 _gs_content_files() {
@@ -81,9 +110,26 @@ _gs_content_files() {
   _gs_diff --name-only --diff-filter=ACMR 2>/dev/null || true
 }
 
-if ! _gs_diff --check >/dev/null 2>&1; then
+# `--check` reports through its exit status, and _gs_diff swallows that: it runs
+# one git per commit and cannot return all of them. So this asks the question
+# separately rather than reusing the helper — the alternative is an `if` that
+# can never be false, which is the failure mode this whole PR is about.
+_gs_check() {
+  local sha rc=0
+  if [ -z "$GATE_RANGE" ]; then
+    git diff --cached --check || rc=$?
+    return "$rc"
+  fi
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    git show --format= --check "$sha" || rc=1
+  done < <(git rev-list "$GATE_RANGE" 2>/dev/null || true)
+  return "$rc"
+}
+
+if ! _gs_check >/dev/null 2>&1; then
   echo "Whitespace/conflict-marker problems found ${GATE_WHAT}."
-  _gs_diff --check || true
+  _gs_check || true
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi
 
@@ -127,12 +173,10 @@ while IFS= read -r path; do
       ;;
   esac
 
-  if git cat-file -e "${GATE_BLOB_REF}$path" 2>/dev/null; then
-    size_bytes="$(git cat-file -s "${GATE_BLOB_REF}$path" 2>/dev/null || echo 0)"
-    if [ "${size_bytes:-0}" -gt 5242880 ]; then
-      echo "Large file detected ${GATE_WHAT} (>5MB): $path (${size_bytes} bytes)"
-      LARGE_ARTIFACT_MATCH=1
-    fi
+  size_bytes="$(_gs_max_blob_size "$path")"
+  if [ "${size_bytes:-0}" -gt 5242880 ]; then
+    echo "Large file detected ${GATE_WHAT} (>5MB): $path (${size_bytes} bytes)"
+    LARGE_ARTIFACT_MATCH=1
   fi
 done < <(_gs_content_files)
 

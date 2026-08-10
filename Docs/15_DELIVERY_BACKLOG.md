@@ -1126,7 +1126,27 @@ single P-tier above.
   One report did not reproduce: `~20.x.1` was already cured by the operand
   normalisation in round twenty, which truncates at the first wildcard before
   any comparator runs. Pinned rather than argued.
-  Combined suite: `bats ci/tests/` = 247 cases, 0 failures.
+  A twenty-third round found three, and two of them were **defects in the
+  round-twenty-one fix itself** — filed independently by both reviewers, which
+  is the clearest signal in the whole sequence that the fix had been reasoned
+  about rather than attacked. `git diff base..HEAD` collapses the endpoints, so
+  a token added by one outgoing commit and removed by a later one vanished from
+  the diff while both commits were pushed and the blob stayed in the history
+  forever; the scan now walks `git rev-list` and reads what each commit added,
+  and the blob-size check takes the maximum across the range rather than
+  whatever survives at `HEAD`. And `HEAD~1` sat in `ci::git::push_range` as a
+  "last resort" when it is nothing of the kind: on the first push of a
+  three-commit branch with no upstream it silently reduced the range to the
+  final commit, so a secret in the first sailed through a gate reporting on the
+  third. A wrong base is worse than no base, because it produces a confident
+  green — the order is now the hook's own SHAs, `@{push}`, `@{upstream}`, the
+  merge base with the remote default branch, and only then the whole of `HEAD`.
+  The third: `"test": "vitest run -t no-such-name"` exits 0 with every collected
+  test skipped, and the layout guard sees an untouched config. That is the
+  config-level filter it already rejects, one layer out, and it is the same
+  sentence as the typecheck rule — that a script *exists* says nothing about
+  whether it runs anything.
+  Combined suite: `bats ci/tests/` = 252 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

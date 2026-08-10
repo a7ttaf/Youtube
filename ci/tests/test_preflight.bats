@@ -61,6 +61,11 @@ gs_setup() {
   (
     cd "$GS_SB"
     git init -q -b feature/x .
+    # The copied gate scripts stay out of the history under test. ci/checks/
+    # defines the secret patterns as literal text and several of them match
+    # themselves — `DATABASE_URL=[^[:space:]]+` is its own witness — so a range
+    # reaching the first commit would flag the fixture rather than the case.
+    printf 'ci/\n' > .gitignore
     printf 'x\n' > a.txt
     git add -A
     git -c user.email=t@t -c user.name=t commit -qm init
@@ -125,9 +130,52 @@ gs_run() {
   run gs_run quick
   [ "$status" -eq 0 ]
 
+  # For the ship half the base has to be pinned to the commit that added it.
+  # Without that the range covers both commits, and blocking is then correct —
+  # the secret is in the history being pushed. That case is asserted separately.
+  local base
+  base="$( cd "$GS_SB" && git rev-parse HEAD )"
   gs_commit "drop secret"
-  run gs_run ship
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' bash ci/checks/git-safety.sh 2>&1"
   [ "$status" -eq 0 ]
+  rm -rf "$GS_SB"
+}
+
+@test "git-safety: a secret added and removed within the push is still caught" {
+  # `git diff base..HEAD` collapses the endpoints, so a token added by one
+  # outgoing commit and removed by a later one vanishes from the net diff while
+  # both commits are pushed and the blob stays in the history forever. The scan
+  # walks each commit instead.
+  gs_setup
+  local base
+  base="$( cd "$GS_SB" && git rev-parse HEAD )"
+  printf 'token = "ghp_%s"\n' "$(printf 'A%.0s' $(seq 36))" > "$GS_SB/leak.txt"
+  gs_commit "add token"
+  ( cd "$GS_SB" && git rm -q leak.txt ) >/dev/null 2>&1
+  gs_commit "remove token"
+  # The premise: the net diff really is clean.
+  run bash -c "cd '$GS_SB' && git diff --name-only '$base'..HEAD"
+  [ -z "$output" ]
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"secret-pattern-match"* ]]
+  rm -rf "$GS_SB"
+}
+
+@test "git-safety: the push range covers every outgoing commit on a first push" {
+  # No upstream, three commits, the secret in the first: HEAD~1 as the fallback
+  # base reduced the range to the last commit and the gate reported on it alone.
+  # A wrong base is worse than no base — it produces a confident green.
+  gs_setup
+  printf 'SECRET=1\n' > "$GS_SB/secrets.env"
+  gs_commit "add secret"
+  printf 'b\n' > "$GS_SB/b.txt"
+  gs_commit "ordinary"
+  printf 'c\n' > "$GS_SB/c.txt"
+  gs_commit "ordinary again"
+  run gs_run ship
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"secrets.env"* ]]
   rm -rf "$GS_SB"
 }
 

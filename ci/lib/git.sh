@@ -31,21 +31,26 @@ ci::git::has_conflict_markers_in_staged() {
 
 # ci::git::push_range – echo the `A..B` range a pre-push gate is standing behind.
 #
-# The hook's own old/new SHAs when it has them, the merge base with the upstream
-# otherwise, and HEAD~1 as a last resort. A root commit has no predecessor, so
-# the empty tree stands in: the range is then the whole of HEAD, which is
-# exactly what a first push contains.
-#
 # Lives here rather than in one check because two of them need the same answer,
 # and a second copy is how the last duplicated computation in this gate drifted
 # out of step with the first.
+#
+# The order matters more than any single step. `HEAD~1` was in it as a "last
+# resort" and is not one: on the first push of a three-commit branch with no
+# upstream configured, it silently reduced the range to the final commit, and a
+# secret added by the first of the three sailed through a gate reporting on the
+# third. A wrong base is worse than no base, because it produces a confident
+# green. So: the hook's own SHAs, then @{push}, then @{upstream}, then the merge
+# base with the remote default branch, then the local default branch, and only
+# then the whole of HEAD — which is what a genuine first push contains anyway.
+# `ci::changeset::detect pre-push` resolves the same question the same way.
 ci::git::push_range() {
   local old_sha="${CI_GATE_PUSH_OLD_SHA:-${GITHUB_EVENT_BEFORE:-}}"
   local new_sha="${CI_GATE_PUSH_NEW_SHA:-HEAD}"
   local zero_sha="0000000000000000000000000000000000000000"
   # The hash of git's empty tree, which is stable across every repository.
   local empty_tree="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-  local upstream base=""
+  local ref base="" default_branch
 
   if [ -n "$old_sha" ] && [ "$old_sha" != "$zero_sha" ] \
     && git rev-parse --verify "${old_sha}^{commit}" >/dev/null 2>&1 \
@@ -54,13 +59,24 @@ ci::git::push_range() {
     return 0
   fi
 
-  upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
-  if [ -n "$upstream" ]; then
-    base="$(git merge-base HEAD "$upstream" 2>/dev/null || true)"
-  fi
+  # @{push} is the ref this branch would actually push to, which is not always
+  # @{upstream} — triangular workflows differ, and this repository's own layout
+  # is one push remote away from being such a case.
+  for ref in '@{push}' '@{upstream}'; do
+    base="$(git merge-base HEAD "$ref" 2>/dev/null || true)"
+    [ -n "$base" ] && break
+  done
+
   if [ -z "$base" ]; then
-    base="$(git rev-parse HEAD~1 2>/dev/null || true)"
+    default_branch="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
+      | sed 's|refs/remotes/origin/||' || true)"
+    [ -n "$default_branch" ] || default_branch="main"
+    for ref in "origin/${default_branch}" "$default_branch" origin/main main origin/master master; do
+      base="$(git merge-base HEAD "$ref" 2>/dev/null || true)"
+      [ -n "$base" ] && break
+    done
   fi
+
   if [ -z "$base" ]; then
     git rev-parse --verify HEAD >/dev/null 2>&1 || return 1
     base="$empty_tree"

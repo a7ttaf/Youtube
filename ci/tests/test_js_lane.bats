@@ -1979,3 +1979,43 @@ ws_run() {
   [ "$status" -eq 0 ]
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: a test script carrying a persistent name filter fails" {
+  # The layout guard rejects a persistent filter written into vitest.config.ts.
+  # This is the same filter one layer out: `vitest run -t no-such-name` exits 0
+  # with every collected test skipped, and the config the guard inspects is
+  # untouched. "A test script exists" said nothing about whether it runs
+  # anything, exactly as "a typecheck script exists" said nothing about tsc.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run -t definitely-no-such-test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: every narrowing flag is rejected, not just -t" {
+  ws_setup
+  local flag
+  for flag in '-t x' '--testNamePattern=x' '--shard=1/2' '--bail=1' '--changed' '--related src/a.ts'; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run ${flag}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "flag '${flag}' passed the guard" >&2; return 1; }
+  done
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ordinary test script is not read as a filter" {
+  # The control. A path or a test name is not a flag, and matching on substrings
+  # would fail every workspace whose script mentions one. `true` stands in for
+  # the runner so the case exercises the parser rather than a vitest install —
+  # the arguments are what the guard reads, and they are the realistic ones.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true run --reporter=dot tests/no-t-here.test.ts --outputFile=t.json" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
