@@ -296,48 +296,60 @@ describe("unsettled import store", () => {
     expect(ids.size).toBe(64);
   });
 
-  it("carries per-document entropy when randomUUID is unavailable", () => {
-    // randomUUID needs a SECURE CONTEXT, so an app served over plain HTTP has
-    // none — that is the case this fallback exists for, not an exotic one. A
-    // clock plus a counter is unique within a document and NOT across two:
-    // both tabs read the same millisecond and both start at 1, mint the same
-    // id, and since the id IS the localStorage key, one tab then removes the
-    // other's pending record (review #184, qodo).
-    vi.stubGlobal("crypto", {
+  it("draws the document salt from getRandomValues at MODULE INIT", async () => {
+    // The salt is an IIFE at module scope, so stubbing `crypto` inside a test
+    // that imported the module earlier changes nothing — a test written that
+    // way asserts the id FORMAT and would pass even if the salt initialization
+    // regressed entirely (review #184, qodo). Reset the module registry and
+    // re-import under the stub so the real initialization path runs.
+    vi.resetModules();
+    let calls = 0;
+    const stubbed = {
       getRandomValues: (array: Uint32Array) => {
-        array.fill(123456789);
+        calls += 1;
+        array.fill(0xabcdef);
         return array;
       },
-    });
+    };
+    vi.stubGlobal("crypto", stubbed);
+    try {
+      const fresh = await import("@/contexts/UnsettledImportContext");
+      const id = fresh.newApplyId();
 
-    const ids = Array.from({ length: 32 }, newApplyId);
-    expect(new Set(ids).size).toBe(32);
-    // salt + clock + counter, not just clock + counter.
-    for (const id of ids) {
+      // The module asked for entropy at init, exactly once...
+      expect(calls).toBe(1);
+      // ...and what it was given is IN the id, so the salt is really sourced
+      // from getRandomValues rather than reconstructed from the clock.
+      expect(id).toContain((0xabcdef).toString(36));
+      // No randomUUID on the stub, so this is the fallback shape.
       expect(id).toMatch(/^apply-[0-9a-z]+-\d+-\d+$/u);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
     }
-
-    vi.unstubAllGlobals();
   });
 
-  it("still mints an id when the runtime has no crypto at all", () => {
-    // Last resort. It must not throw on the way to dispatching an apply —
-    // that would block the import outright rather than degrade it.
-    //
-    // The property is REDEFINED rather than stubbed with a value: "no crypto"
-    // is the absence of the global, and defineProperty says that where passing
-    // an explicit undefined only approximates it.
+  it("initialises the salt without crypto at all, rather than throwing", async () => {
+    // Last resort, and it must survive MODULE LOAD: a throw here would break
+    // the import of this context entirely, not merely degrade an id.
+    vi.resetModules();
     const original = Object.getOwnPropertyDescriptor(globalThis, "crypto");
-    Object.defineProperty(globalThis, "crypto", {
-      configurable: true,
-      value: undefined,
-    });
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: undefined });
+    try {
+      const fresh = await import("@/contexts/UnsettledImportContext");
+      const ids = Array.from({ length: 32 }, fresh.newApplyId);
 
-    const ids = Array.from({ length: 32 }, newApplyId);
-
-    expect(new Set(ids).size).toBe(32);
-    if (original !== undefined) {
-      Object.defineProperty(globalThis, "crypto", original);
+      expect(new Set(ids).size).toBe(32);
+      expect(ids[0]).toMatch(/^apply-[0-9a-z]+-\d+-\d+$/u);
+    } finally {
+      // ALWAYS, and unconditionally: a thrown assertion above must not leak a
+      // crypto-less global into every test that runs after this one.
+      if (original === undefined) {
+        Reflect.deleteProperty(globalThis, "crypto");
+      } else {
+        Object.defineProperty(globalThis, "crypto", original);
+      }
+      vi.resetModules();
     }
   });
 });
