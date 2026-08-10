@@ -102,7 +102,7 @@ describe("unsettled import store", () => {
     expect(storedIds()).toEqual(["apply-later"]);
   });
 
-  it("still retains a tracked apply when storage refuses", async () => {
+  it("still retains a tracked apply when storage refuses", () => {
     // The complement, so the retirement above cannot be over-applied:
     // trackApply is called AFTER a request is dispatched, and there the write
     // really is in flight. Losing that record would take the guard down over a

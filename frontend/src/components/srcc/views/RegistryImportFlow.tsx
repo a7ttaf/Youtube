@@ -772,7 +772,19 @@ const backBlockedTitle = (
   return indeterminate ? RECONCILE_FROZEN_NOTE : undefined;
 };
 
-/** Apply's disabled title: why the button is refused, or undefined when live. */
+/** The plan itself is what the API refuses here, not anything about this tab. */
+const ERROR_ROWS_NOTE = "The API refuses plans with error rows (422)";
+
+/**
+ * Apply's disabled title: why the button is refused, or undefined when live.
+ *
+ * An ORDERED table, first match wins, rather than a chain of ifs — order is the
+ * whole contract here (several reasons can hold at once and only the truest one
+ * should be shown), and a table states the precedence in one readable place
+ * instead of spreading it across early returns. It also keeps the function
+ * under the analyzer's complexity threshold (DeepSource JS-R1005) — conformed,
+ * not suppressed.
+ */
 const applyBlockedTitle = (
   hasErrors: boolean,
   indeterminate: boolean,
@@ -780,28 +792,23 @@ const applyBlockedTitle = (
   applying: boolean,
   scopeUnsettled: boolean,
 ): string | undefined => {
-  if (indeterminate) {
-    return APPLY_INDETERMINATE_NOTE;
-  }
-  // `applying` FIRST: this tab raises the shared unsettled record the moment it
-  // admits its own apply, so without this the button would blame "another tab"
-  // for the request this very tab is running (review #184, qodo).
-  if (applying) {
-    return undefined;
-  }
-  // BEFORE otherApplyPending: while the scope is still moving, that flag was
-  // read out of a bucket this session may not end up owning, so blaming
-  // another tab would be a guess. This reason is the true one.
-  if (scopeUnsettled) {
-    return IMPORT_SCOPE_UNSETTLED_NOTE;
-  }
-  if (otherApplyPending) {
-    return OTHER_APPLY_PENDING_NOTE;
-  }
-  if (hasErrors) {
-    return "The API refuses plans with error rows (422)";
-  }
-  return undefined;
+  const rules: readonly (readonly [boolean, string | undefined])[] = [
+    [indeterminate, APPLY_INDETERMINATE_NOTE],
+    // `applying` ahead of both shared-record reasons, with NO note: this tab
+    // raises the shared unsettled record the moment it admits its own apply, so
+    // without this the button would blame "another tab" for the request this
+    // very tab is running (review #184, qodo).
+    [applying, undefined],
+    // And ahead of otherApplyPending: while the scope is still moving, that
+    // flag was read out of a bucket this session may not end up owning, so
+    // blaming another tab would be a guess. This reason is the true one.
+    [scopeUnsettled, IMPORT_SCOPE_UNSETTLED_NOTE],
+    [otherApplyPending, OTHER_APPLY_PENDING_NOTE],
+    [hasErrors, ERROR_ROWS_NOTE],
+  ];
+  // No match and a matched rule carrying no note both mean "say nothing", which
+  // is exactly what the `applying` row wants.
+  return rules.find(([applies]) => applies)?.[1];
 };
 
 /**
@@ -1328,22 +1335,39 @@ export const RegistryImportFlow = ({
    *       the route this dispatches to.
    * ============================================================================
    */
-  const apply = async () => {
-    // BEFORE the dispatch latch, because this is a statement about the
-    // NAMESPACE every record below is filed under, not about this request.
-    // Admitting while the scope can still change writes the record into the
-    // missing-tenant bucket and then moves the bucket, leaving a dispatched
-    // apply that neither this tab's guard nor another tab's can find (review
-    // #184). Reported rather than dropped: the state is transient and
-    // otherwise invisible, so a silent no-op would read as a dead button.
+  /**
+   * Every reason a dispatch stops BEFORE it starts, in one place: an unsettled
+   * namespace, a request already running, and a plan that is not applicable.
+   * Returns the approved file + plan to dispatch, or null having already told
+   * the operator whatever they need to know.
+   *
+   * Extracted from `apply` so that handler stays under the analyzer's
+   * complexity threshold (DeepSource JS-R1005) — conformed, not suppressed —
+   * and because the three really are one step: none of them touches the
+   * request, and all of them run before anything is latched.
+   */
+  const preflightApply = (): { file: File; plan: ChannelImportResult } | null => {
+    // FIRST, because this is a statement about the NAMESPACE every record below
+    // is filed under, not about this request. Admitting while the scope can
+    // still change writes the record into the missing-tenant bucket and then
+    // moves the bucket, leaving a dispatched apply that neither this tab's
+    // guard nor another tab's can find (review #184). Reported rather than
+    // dropped: the state is transient and otherwise invisible, so a silent
+    // no-op would read as a dead button.
     if (!importScopeSettled) {
       setError(IMPORT_SCOPE_UNSETTLED_NOTE);
-      return;
+      return null;
     }
+    // Silent by contrast, and deliberately: each of its reasons already has a
+    // visible explanation on the control the operator just used.
     if (applyDispatchBlocked()) {
-      return;
+      return null;
     }
-    const approved = approvedApply(file, preview);
+    return approvedApply(file, preview);
+  };
+
+  const apply = async () => {
+    const approved = preflightApply();
     if (approved === null) {
       return;
     }
