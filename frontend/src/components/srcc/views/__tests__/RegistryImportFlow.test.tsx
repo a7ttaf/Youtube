@@ -637,6 +637,35 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-refreshed-v2");
   });
 
+  it("refuses a refreshed plan describing a DIFFERENT owner", async () => {
+    // The 409/422 detail REPLACES the preview and becomes what the operator
+    // re-approves — and the next Apply still sends the captured owner. So a
+    // refreshed plan for another owner would be reviewed against one target
+    // and applied against another. The 2xx path already refused that; this
+    // path is where it matters more (review #184, self-review).
+    const foreign: ChannelImportResult = {
+      ...DRY_RUN_PLAN,
+      content_owner_id: "OWNERzzz",
+      plan_fingerprint: "plan-foreign-v2",
+    };
+    await runDryRunToPreview((form) => {
+      if (form.get("dry_run") === "true") return jsonResponse(DRY_RUN_PLAN);
+      return jsonResponse({ detail: foreign }, 409);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+
+    // Fail closed: the ordinary refusal banner, NOT the re-approve copy, and
+    // the operator keeps the plan they actually reviewed.
+    await waitFor(() =>
+      expect(screen.queryByText(/no longer does what you approved/i)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+    // The foreign plan never reached the screen: its owner is absent and the
+    // reviewed plan's fingerprint is what a retry would still bind to.
+    expect(screen.queryByText(/OWNERzzz/)).not.toBeInTheDocument();
+  });
+
   it("arms the shell nav latch BEFORE the apply request is dispatched", async () => {
     // The ordering property, not the rendered result. A DOM assertion cannot
     // prove this: fireEvent wraps the click in act(), which flushes effects,

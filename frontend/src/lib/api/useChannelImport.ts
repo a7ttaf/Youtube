@@ -345,7 +345,10 @@ const IMPORT_CMS_STATUS = "INSIDE_CMS";
  * normalized value, so a padded " owner-1 " legitimately comes back as
  * "owner-1" and must not be read as a mismatch.
  */
-const echoesRequestedTarget = (result: ChannelImportResult, contentOwnerId: string): boolean => {
+export const echoesRequestedTarget = (
+  result: ChannelImportResult,
+  contentOwnerId: string,
+): boolean => {
   return (
     result.content_owner_id === contentOwnerId.trim() &&
     result.cms_status === IMPORT_CMS_STATUS

@@ -8,7 +8,11 @@ import type {
   ChannelImportResult,
   ChannelImportRowResult,
 } from "@/lib/api/types";
-import { isChannelImportResult, useChannelImport } from "@/lib/api/useChannelImport";
+import {
+  echoesRequestedTarget,
+  isChannelImportResult,
+  useChannelImport,
+} from "@/lib/api/useChannelImport";
 import { useContentOwners } from "@/lib/api/useContentOwners";
 import type { Severity } from "@/lib/mock/data";
 import { ActionStepper } from "../ActionStepper";
@@ -133,16 +137,26 @@ const describeImportError = (err: unknown): string => {
  */
 const PLAN_BEARING_STATUSES = new Set([409, 422]);
 
-const applyRaceDetail = (err: unknown): ChannelImportResult | null => {
+const applyRaceDetail = (
+  err: unknown,
+  contentOwnerId: string,
+): ChannelImportResult | null => {
   if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
     return null;
   }
   const body = err.body as { detail?: unknown } | null;
   const detail = body?.detail;
-  if (isChannelImportResult(detail)) {
-    return detail;
+  if (!isChannelImportResult(detail)) {
+    return null;
   }
-  return null;
+  // The refreshed plan must describe the TARGET this request named, the same
+  // rule the 2xx path applies. It matters MORE here: this payload REPLACES the
+  // preview and becomes what the operator re-approves, and the next Apply
+  // sends the captured owner — so a plan for a different owner would be
+  // reviewed against one target and applied against another. Falling through
+  // to the ordinary banner is the fail-closed direction: the operator is told
+  // the apply was refused and keeps the plan they actually reviewed.
+  return echoesRequestedTarget(detail, contentOwnerId) ? detail : null;
 };
 
 /** The banner for a refreshed plan, worded for which rejection produced it. */
@@ -1245,7 +1259,7 @@ export const RegistryImportFlow = ({
    * reality; every other failure surfaces as banner copy only.
    */
   const handleApplyFailure = (caught: unknown) => {
-    const race = applyRaceDetail(caught);
+    const race = applyRaceDetail(caught, ownerId);
     if (race) {
       // Replacing the preview also re-binds the fingerprint: the next Apply
       // sends the refreshed plan's digest, so approval always tracks what the
