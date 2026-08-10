@@ -627,6 +627,18 @@ const OTHER_APPLY_PENDING_NOTE =
   "Another tab has an import whose outcome is not settled yet — finish or " +
   "account for that one before applying this roster.";
 
+// The OTHER refusal, and it needs its own words: there is no other tab to go
+// back to and nothing to reload. Without durable site storage the flow cannot
+// record that this import is in flight, so a reload or a second tab would have
+// no idea it happened — and this write appends an audit event. Refusing is the
+// safe direction, but the operator has to be told what to change.
+const APPLY_NOT_DURABLE_NOTE =
+  "This browser is not storing site data, so the import cannot be tracked " +
+  "while it runs — and an untracked import can be submitted twice without " +
+  "either attempt knowing about the other. Allow site data (cookies and " +
+  "storage) for this site, or use a normal window instead of a private one, " +
+  "then try again.";
+
 // The outcome literal both reconciliation predicates key off. Named because
 // a typo in either one silently changes a verdict about whether a write
 // landed, and the two must always mean the same thing.
@@ -1283,9 +1295,14 @@ export const RegistryImportFlow = ({
       // the record were two steps, so two tabs could both see "nothing
       // pending" and both dispatch; this checks and records under one
       // cross-document lock. A refusal writes nothing and sends no request.
-      if (!(await unsettledImport.admit(applyId))) {
+      const admission = await unsettledImport.admit(applyId);
+      if (admission !== "admitted") {
         applyIdRef.current = null;
-        setError(OTHER_APPLY_PENDING_NOTE);
+        setError(
+          admission === "not-durable"
+            ? APPLY_NOT_DURABLE_NOTE
+            : OTHER_APPLY_PENDING_NOTE,
+        );
         return;
       }
       const result = await importChannels({

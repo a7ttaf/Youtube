@@ -836,6 +836,12 @@ const AppShell = () => {
   const [traceChannelId, setTraceChannelId] = useState<string | null>(null);
 
   const sessionBootstrap = useSessionBootstrap();
+  // The RESOLVED tenant, for the import scope below. SessionMe.tenant is
+  // nullable, and /tenants/me may have resolved the tenant even when the
+  // session body carries none — falling back to it keeps two tenants for the
+  // same operator in separate buckets instead of collapsing them (review
+  // #184).
+  const resolvedTenant = useTenant();
   // The tenant bootstrap only runs once the authenticated session is ready, so
   // a loading or access-denied shell never issues a /tenants/me fetch.
   const sessionReady = sessionBootstrap.status === "ready";
@@ -892,7 +898,7 @@ const AppShell = () => {
   // the warning and handing admission an empty bucket for a request whose
   // outcome nobody knows (review #184).
   const importScope = importScopeFor(
-    sessionBootstrap.session.tenant?.id,
+    sessionBootstrap.session.tenant?.id ?? resolvedTenant.id,
     sessionBootstrap.session.user_id,
   );
   const copy = VIEW_COPY[view];

@@ -1107,40 +1107,41 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
   });
 
-  it("UNSETTLED IMPORT: a browser that refuses storage still guards this document", async () => {
-    // Private mode, blocked cookies, or a quota error must not take the shell
-    // down and must not fail OPEN on the control. The cost of a refusal is
-    // cross-document persistence only — the in-memory flag stays authoritative.
+  it("UNSETTLED IMPORT: a browser that refuses storage REFUSES the apply", async () => {
+    // Supersedes an earlier fail-OPEN reading of this case, and codex was right
+    // to push back on it. A record that lives only in memory is not a claim:
+    // the Web Lock is released the moment admission returns, so no other tab
+    // can see it, and a reload erases it while the backend request may still
+    // be committing. Admitting on one hands out a claim nobody else can
+    // honour — for an audited write. So admission FAILS CLOSED.
+    //
+    // The cost is real and deliberate: the operator cannot import until
+    // storage works. That is why the refusal names the cause and the remedy
+    // rather than reading as a generic failure.
     const denied = () => {
       throw new DOMException("denied", "SecurityError");
     };
-    vi.spyOn(Storage.prototype, "getItem").mockImplementation(denied);
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(denied);
-    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(denied);
 
-    const applyGate = deferredImportResponse();
-    let firstCall = true;
+    let applyCalls = 0;
     await openImportPreview(() => {
-      if (firstCall) {
-        firstCall = false;
-        return jsonResponse(IMPORT_PLAN);
-      }
-      return applyGate.pending;
+      applyCalls += 1;
+      return jsonResponse(IMPORT_PLAN);
     });
+    const beforeApply = applyCalls;
 
     fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
-    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
-    applyGate.reject(new TypeError("Failed to fetch"));
-    await waitFor(() =>
-      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
-    );
-    fireEvent.click(screen.getByRole("button", { name: /^cancel$/iu }));
 
-    expect(await screen.findByRole("status")).toHaveTextContent(
-      /may still be committing/iu,
+    await waitFor(() =>
+      expect(screen.getByText(/not storing site data/iu)).toBeInTheDocument(),
     );
-    // Openable on purpose: re-previewing the roster is the reconciliation
-    // surface. The duplicate is refused at Apply, not at the opener.
-    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
+    expect(screen.getByText(/allow site data/iu)).toBeInTheDocument();
+    // Nothing was dispatched: the write never left, so there is no outcome to
+    // be unknown about and the nav latch is free again.
+    expect(applyCalls).toBe(beforeApply);
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+
+    vi.restoreAllMocks();
   });
 });

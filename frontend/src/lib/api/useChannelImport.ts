@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 
 import { useApiClient } from "@/lib/api/client";
-import type { ChannelImportResult } from "@/lib/api/types";
+import type { ChannelImportResult, ChannelImportRowResult } from "@/lib/api/types";
 
 // ============================================================================
 // Purpose: Imperative action hook for the Registry CSV import stepper: one
@@ -245,12 +245,31 @@ const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => b
 //       computes plan_fingerprint over the disclosed payload.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> the plan contract this mirrors.
 // ============================================================================
+/**
+ * `counts` must be the TALLY of `rows`, not merely a well-formed map. The
+ * backend derives each count by counting rows with that outcome, so a payload
+ * where they disagree — 99 CREATEs beside one UPDATE row — is one it cannot
+ * emit, and it would put contradictory totals on the preview and carry them
+ * onto the Applied screen as the approved plan (review #184).
+ */
+const countsMatchRows = (candidate: Record<string, unknown>): boolean => {
+  const counts = candidate.counts as Record<string, number>;
+  const rows = candidate.rows as ChannelImportRowResult[];
+  return PLAN_OUTCOMES.every(
+    (outcome) => counts[outcome] === rows.filter((row) => row.outcome === outcome).length,
+  );
+};
+
 export const isChannelImportResult = (payload: unknown): payload is ChannelImportResult => {
-  if (typeof payload !== "object" || payload === null) {
+  if (!isPlainObject(payload)) {
     return false;
   }
-  const candidate = payload as Record<string, unknown>;
-  return PLAN_PAYLOAD_FIELDS.every(([field, isValid]) => isValid(candidate[field]));
+  // The field checks run FIRST and the tally second: countsMatchRows reads
+  // both as their declared types, which is only sound once they have passed.
+  return (
+    PLAN_PAYLOAD_FIELDS.every(([field, isValid]) => isValid(payload[field])) &&
+    countsMatchRows(payload)
+  );
 };
 
 /** Thrown when the backend answers 2xx with something that is not a plan. */

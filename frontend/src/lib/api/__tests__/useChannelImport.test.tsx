@@ -433,13 +433,43 @@ describe("useChannelImport", () => {
     ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
 
+  it("rejects counts that disagree with the rows they claim to tally", async () => {
+    // All four keys, all valid integers — and a lie. The backend derives each
+    // count BY tallying the rows, so a payload where they disagree is one it
+    // cannot emit, and it would put contradictory totals on the preview and
+    // carry them onto the Applied screen as the approved plan (review #184).
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 99, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
   it("accepts a zero count, which is a real tally", async () => {
     // The complement: zero is legitimate (the preview hides zero rows rather
     // than rejecting the plan), so the check must not confuse "empty" with
     // "malformed".
     fetchMock().mockResolvedValue(
+      // The tally must MATCH the rows now, so this varies the rows too: zero is
+      // legitimate for an outcome nothing planned, which is the point of the
+      // test — the check must not confuse "empty" with "malformed".
       jsonResponse({
         ...DRY_RUN_RESULT,
+        rows: [
+          { ...DRY_RUN_RESULT.rows[1], outcome: "UNCHANGED", changes: {} },
+          { ...DRY_RUN_RESULT.rows[1], row_number: 3, outcome: "UNCHANGED", changes: {} },
+        ],
         counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
       }),
     );

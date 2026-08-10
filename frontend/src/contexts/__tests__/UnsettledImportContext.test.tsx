@@ -276,7 +276,7 @@ describe("unsettled import store", () => {
     vi.stubGlobal("navigator", { ...globalThis.navigator, locks: { request } });
 
     const { result } = renderHook(() => useUnsettledImport());
-    expect(await result.current.admit("apply-one")).toBe(true);
+    expect(await result.current.admit("apply-one")).toBe("admitted");
 
     // One lock, named for the scope, entered and exited around the claim —
     // and the record exists only after it was taken.
@@ -292,7 +292,7 @@ describe("unsettled import store", () => {
 
     // A second claim under the same lock is refused and writes NOTHING, so a
     // holder that loses the race cannot dispatch and cannot leave a record.
-    expect(await result.current.admit("apply-two")).toBe(false);
+    expect(await result.current.admit("apply-two")).toBe("other-apply-pending");
     expect(storedIds()).toEqual(["apply-one"]);
 
     vi.unstubAllGlobals();
@@ -306,8 +306,8 @@ describe("unsettled import store", () => {
 
     const { result } = renderHook(() => useUnsettledImport());
 
-    expect(await result.current.admit("apply-nolocks")).toBe(true);
-    expect(await result.current.admit("apply-second")).toBe(false);
+    expect(await result.current.admit("apply-nolocks")).toBe("admitted");
+    expect(await result.current.admit("apply-second")).toBe("other-apply-pending");
     expect(storedIds()).toEqual(["apply-nolocks"]);
 
     vi.unstubAllGlobals();
@@ -316,12 +316,12 @@ describe("unsettled import store", () => {
   it("admits again once the outstanding apply settles", async () => {
     // Admission must not be a one-shot latch: a settled apply frees the next.
     const { result } = renderHook(() => useUnsettledImport());
-    expect(await result.current.admit("apply-first")).toBe(true);
-    expect(await result.current.admit("apply-second")).toBe(false);
+    expect(await result.current.admit("apply-first")).toBe("admitted");
+    expect(await result.current.admit("apply-second")).toBe("other-apply-pending");
 
     act(() => result.current.settleApply("apply-first"));
 
-    expect(await result.current.admit("apply-second")).toBe(true);
+    expect(await result.current.admit("apply-second")).toBe("admitted");
     expect(storedIds()).toEqual(["apply-second"]);
   });
 

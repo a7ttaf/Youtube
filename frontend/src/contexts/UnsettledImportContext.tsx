@@ -121,10 +121,40 @@ const encodeScopePart = (value: string): string => {
     .join("");
 };
 
+// ============================================================================
+// Purpose: The tenancy + principal ISOLATION BOUNDARY for durable pending-write
+//   records. Produces the namespace every unsettled-import key lives under, so
+//   one operator's pending import is visible only to that operator, in that
+//   tenant.
+// Database/ORM: None (frontend) — a pure function over identity values. What
+//   it namespaces is localStorage, and through it which POST /channels/import
+//   the admission gate will refuse.
+// Standards: Both halves go through encodeScopePart, so `~` is unambiguously
+//   the separator and `.` unambiguously the key delimiter, and no encoded
+//   component can contain either — a prefix match must not cross a scope.
+//   Components are kept INDEPENDENTLY behind a presence flag: a missing half
+//   never pools a known half with someone else's, and no real id can
+//   impersonate the missing sentinel because the flag is a fixed leading
+//   character.
+//   The tenant is the IMMUTABLE database id, never the routing slug: a slug
+//   rename while an apply is unsettled would mint a fresh scope, hiding the
+//   warning and handing admission an empty bucket for a request whose outcome
+//   nobody knows.
+// Blast Radius: Cross-tenant and cross-operator isolation of the duplicate-
+//   import guard. A mistake here lets one operator block on, or acknowledge
+//   away, another tenant's unsettled import — and an acknowledgement is what
+//   re-enables dispatch, so it decides whether a duplicate audited write
+//   becomes reachable. No authorization meaning: the backend's permission
+//   checks and its own tenant scoping are unaffected either way.
+// Connections:
+//   - File: frontend/src/components/srcc/AppShell.tsx -> supplies the resolved
+//       tenant id and the authenticated user id.
+//   - File: frontend/src/contexts/TenantContext.tsx -> the resolved tenant id
+//       used when the session body has not carried one.
+// ============================================================================
 /**
  * One operator on one tenant, encoded so the pair cannot be confused with any
- * other pair. Both halves go through encodeScopePart, so `~` is unambiguously
- * the separator and `.` unambiguously the key delimiter.
+ * other pair.
  *
  * Each component is kept INDEPENDENTLY. Collapsing to a single "unknown"
  * bucket whenever either was missing was wrong in a state the app really
@@ -232,12 +262,23 @@ const rememberInMemory = (key: string, pending: boolean): void => {
  * Record one apply as pending. Touches ONLY this apply's key, so a concurrent
  * tab doing the same thing cannot drop it and it cannot drop theirs.
  */
-const addId = (scope: string, applyId: string): void => {
+/**
+ * Returns whether the record became DURABLE. A memory-only record is not a
+ * successful claim: the Web Lock is released the moment admission returns, so
+ * another tab cannot see it, and a reload erases it while the backend request
+ * may still be committing. Callers admitting a write must treat `false` as a
+ * refusal (review #184).
+ */
+const addId = (scope: string, applyId: string): boolean => {
   try {
     globalThis.localStorage.setItem(keyFor(scope, applyId), "1");
+    return true;
   } catch {
-    // Storage refused this write. The in-memory copy is the whole guard now.
+    // Storage refused this write. Keep it in memory so THIS document's own
+    // guards (the disabled Apply button, the notice) still hold, and report
+    // the failure so an admission decision can refuse.
     rememberInMemory(keyFor(scope, applyId), true);
+    return false;
   }
 };
 
@@ -287,6 +328,12 @@ const removeAllIds = (scope: string): void => {
 //   cross-document mutual-exclusion primitive a page has; storage events are
 //   notifications, not exclusion, and cannot close this window - so this must
 //   not be "simplified" back into a read followed by a write.
+//   Admission FAILS CLOSED when the record cannot be persisted. A memory-only
+//   record is not a claim: the lock is released the moment admission returns,
+//   so no other document can see it, and a reload erases it while the request
+//   may still commit. Refusing is the safe direction here even though it costs
+//   the operator the feature until storage works — the alternative hands out a
+//   claim nobody else can honour, on an audited write.
 //   FAIL-OPEN LIMITATION, stated because it is real: where navigator.locks is
 //   unavailable this degrades to the same check-then-set WITHOUT the lock.
 //   That is narrower than the race, not free of it. It fails open rather than
@@ -305,13 +352,17 @@ const removeAllIds = (scope: string): void => {
 //   - File: backend/ums_smart_revenue/api/channels.py -> import_channels, the
 //       route whose CHANNEL_IMPORTED event a duplicate would append to.
 // ============================================================================
-const admitApply = (scope: string, applyId: string): Promise<boolean> => {
-  const claim = (): boolean => {
+const admitApply = (scope: string, applyId: string): Promise<AdmissionResult> => {
+  const claim = (): AdmissionResult => {
     if (readFlag(scope)) {
-      return false;
+      return "other-apply-pending";
     }
-    addId(scope, applyId);
-    return true;
+    // Fail CLOSED on a storage failure. A memory-only record cannot be seen by
+    // another tab and does not survive a reload, so admitting on one would
+    // hand out a claim that no other document can honour — for an audited
+    // write that may commit anyway. The record stays in memory for this
+    // document's own guards, and the caller is refused.
+    return addId(scope, applyId) ? "admitted" : "not-durable";
   };
   const locks = globalThis.navigator?.locks;
   if (locks === undefined) {
@@ -341,6 +392,13 @@ const subscribe = (listener: () => void): (() => void) => {
   };
 };
 
+/**
+ * Why an apply was or was not admitted. A boolean could not distinguish the
+ * two refusals, and they need different operator copy: one says "go back to
+ * the other tab", the other says "this browser is not storing site data".
+ */
+export type AdmissionResult = "admitted" | "other-apply-pending" | "not-durable";
+
 export type UnsettledImportValue = {
   /** True while any apply of unknown outcome is unaccounted for. */
   unsettled: boolean;
@@ -348,9 +406,9 @@ export type UnsettledImportValue = {
    * fails — a tab closed mid-request never reaches a failure handler. Prefer
    * `admit` from a dispatch path; this is the unconditional form. */
   trackApply: (applyId: string) => void;
-  /** Atomically claim the right to dispatch. False means another apply is
-   * already outstanding in this scope and nothing was recorded. */
-  admit: (applyId: string) => Promise<boolean>;
+  /** Atomically claim the right to dispatch. Anything but "admitted" means
+   * nothing durable was recorded and the caller MUST NOT dispatch. */
+  admit: (applyId: string) => Promise<AdmissionResult>;
   /** Retire ONE apply: its response established success or refusal. */
   settleApply: (applyId: string) => void;
   /** Retire every pending apply — the operator states they have checked the
@@ -420,9 +478,9 @@ export const useUnsettledImport = (
   );
   const admit = useCallback(
     async (applyId: string) => {
-      const admitted = await admitApply(scope, applyId);
+      const outcome = await admitApply(scope, applyId);
       notify();
-      return admitted;
+      return outcome;
     },
     [scope],
   );
