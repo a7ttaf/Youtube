@@ -586,6 +586,35 @@ describe("useChannelImport", () => {
     await rejectsPlan(onlyRow({ row_number: 1.5 }));
   });
 
+  it("rejects an ERROR row that explains nothing", async () => {
+    // `reason` is the only thing telling the operator WHY Apply is blocked and
+    // which CSV record to fix. Every backend error entry carries one, so null
+    // or blank is unemittable — and it renders as a dash in the Note column
+    // (review #184, codex P2).
+    const errorRow = {
+      row_number: 1,
+      youtube_channel_id: null,
+      outcome: "ERROR",
+      channel_name: null,
+      group_id: null,
+      group_action: null,
+      revenue_required: null,
+      revenue_source_status: null,
+      changes: {},
+      reason: null,
+    };
+    const counts = { CREATE: 0, UPDATE: 0, UNCHANGED: 0, ERROR: 1 };
+    await rejectsPlan({ ...DRY_RUN_RESULT, counts, rows: [errorRow] });
+    await rejectsPlan({ ...DRY_RUN_RESULT, counts, rows: [{ ...errorRow, reason: "" }] });
+  });
+
+  it("rejects a WRITABLE row carrying a reason", async () => {
+    // The inverse impossible shape: no writable entry passes `reason` at all,
+    // so it defaults to None there. A reason beside a CREATE would present a
+    // diagnosis for a row that is not failing.
+    await rejectsPlan(onlyRow({ reason: "looks suspicious" }));
+  });
+
   it("rejects a 2xx describing a plan other than the one bound", async () => {
     // A stale, misrouted or legacy-server response can be structurally perfect
     // and describe a DIFFERENT plan. The route returns the digest it compared

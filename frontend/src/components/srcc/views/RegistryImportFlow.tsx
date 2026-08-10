@@ -1132,13 +1132,22 @@ export const RegistryImportFlow = ({
   // survives it, which is what covers an operator who closes the tab, reloads,
   // or leaves via the sidebar instead of Cancel (review #184, codex P1 x2).
   const unsettledImport = useUnsettledImport(importScope);
+  // The LATEST store binding, not the one captured when `apply` was defined.
+  // A tenant that resolves mid-apply migrates the pending record to the new
+  // scope, but the in-flight continuation still held a settleApply closed over
+  // the PRE-migration scope — so a 2xx removed the now-empty old key and left
+  // the migrated one behind, warning about a completed import and blocking the
+  // next apply until the operator manually acknowledged it (review #184).
+  // Settlement has to follow the id, so it reads through this ref.
+  const unsettledRef = useRef(unsettledImport);
+  unsettledRef.current = unsettledImport;
   // The id of the apply currently in flight, so the failure handler retires
   // exactly the request it is handling and never another tab's.
   const applyIdRef = useRef<string | null>(null);
   const settleThisApply = () => {
     const applyId = applyIdRef.current;
     if (applyId !== null) {
-      unsettledImport.settleApply(applyId);
+      unsettledRef.current.settleApply(applyId);
     }
   };
 
@@ -1455,7 +1464,7 @@ export const RegistryImportFlow = ({
         expectedPlanFingerprint: approved.plan.plan_fingerprint,
       });
       // A 2xx settles THIS apply: the write committed and the flow can say so.
-      unsettledImport.settleApply(applyId);
+      unsettledRef.current.settleApply(applyId);
       setApplied(result);
       setStep("applied");
     } catch (caught) {

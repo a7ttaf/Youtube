@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import RegistryView from "@/components/srcc/views/RegistryView";
@@ -9,7 +9,10 @@ import type {
 } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 import { WriteInFlightProvider } from "@/contexts/WriteInFlightContext";
-import { UNSCOPED_IMPORT_SCOPE } from "@/contexts/UnsettledImportContext";
+import {
+  UNSCOPED_IMPORT_SCOPE,
+  importScopeFor,
+} from "@/contexts/UnsettledImportContext";
 
 // RegistryImportFlow is exercised THROUGH RegistryView (the GroupsView.test.tsx
 // idiom for GroupsSyncFlow): the capability gate, the table swap, and the
@@ -294,6 +297,7 @@ const registryTree = (
   // MANAGE_CHANNELS + MANAGE_GROUPS but NOT VIEW_AUDIT_LOG.
   canViewAudit: boolean,
   importScopeSettled: boolean,
+  importScope?: string,
 ) => {
   return (
     <TenantProvider initialSlug="ums">
@@ -304,6 +308,7 @@ const registryTree = (
           canViewFinance
           canViewAudit={canViewAudit}
           importScopeSettled={importScopeSettled}
+          importScope={importScope}
         />
       </WriteInFlightProvider>
     </TenantProvider>
@@ -924,6 +929,48 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled(),
     );
+  });
+
+  it("settles an apply whose SCOPE migrated while it was in flight", async () => {
+    // A tenant that resolves after a failed bootstrap migrates the pending
+    // record to the new scope. The in-flight continuation used to hold a
+    // settleApply bound to the PRE-migration scope, so a clean 2xx removed the
+    // now-empty old key and left the migrated one behind — warning about an
+    // import that had demonstrably completed, and blocking the next apply until
+    // the operator manually acknowledged it (review #184, codex P2).
+    const before = importScopeFor(null, "user-1");
+    const after = importScopeFor("tenant-1", "user-1");
+    const apply = deferredResponse();
+    routeFetch({
+      importPost: (form) =>
+        form.get("dry_run") === "true" ? jsonResponse(DRY_RUN_PLAN) : apply.pending,
+    });
+    const view = render(registryTree(DEFAULT_WRITE_LATCH, false, true, before));
+    await openImport();
+    await fillUpload();
+    fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(importPosts()).toHaveLength(2));
+
+    // The tenant resolves mid-apply: same operator, new namespace.
+    view.rerender(registryTree(DEFAULT_WRITE_LATCH, false, true, after));
+    await act(async () => {
+      apply.release(jsonResponse(APPLY_RESULT));
+      await apply.pending;
+    });
+
+    // The write landed and the flow says so — with no unsettled record left in
+    // either namespace.
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /back to registry/i }));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    expect(screen.queryByText(/may still be committing/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /import csv/i })).toBeEnabled();
   });
 
   it("points an AUDIT-capable operator at the audit trail instead", async () => {

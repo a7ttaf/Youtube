@@ -318,12 +318,28 @@ const outcomeMatchesChanges = (row: Record<string, unknown>): boolean => {
  * declared types, which is only sound once that one has passed. `every`
  * short-circuits, so the ordering holds at runtime.
  */
+/**
+ * `reason` is the row-specific diagnosis the operator needs to fix the roster,
+ * and it belongs to ERROR rows EXACTLY. Every backend error entry carries one
+ * — a parse failure's message, or the blocked-group / archived-channel text —
+ * and no writable entry passes `reason` at all, so it defaults to None there.
+ *
+ * The field-level nullable-string check sees neither half: an ERROR row with
+ * `reason: null` or `""` renders a dash in the Note column, withholding the
+ * only explanation of why Apply is blocked; and a writable row carrying a
+ * reason is a shape the planner cannot produce (review #184, codex P2).
+ */
+const explainsErrorRows = (row: Record<string, unknown>): boolean => {
+  return row.outcome === "ERROR" ? isNonBlankString(row.reason) : row.reason === null;
+};
+
 const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [
   (row) => PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(row[field])),
   hasConsistentGroupEffect,
   hasWriteFields,
   outcomeMatchesChanges,
   disclosesSourceStatus,
+  explainsErrorRows,
 ];
 
 const isPlanRow = (row: unknown): boolean => {
