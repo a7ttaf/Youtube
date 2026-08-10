@@ -1336,15 +1336,46 @@ export const RegistryImportFlow = ({
    * ============================================================================
    */
   /**
-   * Every reason a dispatch stops BEFORE it starts, in one place: an unsettled
-   * namespace, a request already running, and a plan that is not applicable.
-   * Returns the approved file + plan to dispatch, or null having already told
-   * the operator whatever they need to know.
-   *
-   * Extracted from `apply` so that handler stays under the analyzer's
-   * complexity threshold (DeepSource JS-R1005) — conformed, not suppressed —
-   * and because the three really are one step: none of them touches the
-   * request, and all of them run before anything is latched.
+   * ============================================================================
+   * Purpose: The ADMISSION PRECONDITION for the audited bulk import write.
+   *   Every reason a dispatch stops before it starts, in one place: a namespace
+   *   that can still change, a request already running, and a plan that is not
+   *   applicable. Returns the approved file + plan to dispatch, or null having
+   *   already told the operator whatever they need to know.
+   * Database/ORM: None (frontend) — issues no request itself. It decides
+   *   whether POST /channels/import is reached at all, and therefore whether a
+   *   CHANNEL_IMPORTED audit event can be appended.
+   * Standards: Ordered, and the order is load-bearing. The scope check is
+   *   FIRST because it is a statement about the namespace every pending-write
+   *   record below is filed under, not about this request: admitting while the
+   *   scope can still change files the record in the missing-tenant bucket and
+   *   then moves the bucket, leaving a dispatched apply that neither this tab's
+   *   guard nor another tab's can find (review #184).
+   *   Fails CLOSED in every branch — a reason to doubt is a reason not to
+   *   dispatch, because the write it gates is unabortable and audited.
+   *   Two REPORTING modes on purpose: the scope refusal sets operator-facing
+   *   copy, because that state is transient and otherwise invisible and a
+   *   silent no-op would read as a dead button; the dispatch-latch refusal is
+   *   silent, because each of its reasons already has a visible explanation on
+   *   the control the operator just used. Neither is a substitute for the
+   *   backend's own guards: permissions, the plan fingerprint and the
+   *   write-boundary pre-state check all remain the authority.
+   *   Extracted from `apply` so that handler stays under the analyzer's
+   *   complexity threshold (DeepSource JS-R1005) — conformed, not suppressed —
+   *   and because the three really are one step: none touches the request, and
+   *   all run before anything is latched.
+   * Blast Radius: Whether a second audited bulk import can be dispatched, and
+   *   whether a dispatched one is trackable at all. No authorization meaning
+   *   and no revenue math; a mistake here shows as a refused or duplicated
+   *   import, never as an unpermitted one.
+   * Connections:
+   *   - File: frontend/src/contexts/UnsettledImportContext.tsx -> the scope
+   *       whose stability this waits on, and the store `apply` admits into.
+   *   - File: frontend/src/components/srcc/AppShell.tsx -> resolves
+   *       importScopeSettled from the session and the tenant bootstrap.
+   *   - File: backend/ums_smart_revenue/api/channels.py -> import_channels,
+   *       the route a passing preflight allows `apply` to reach.
+   * ============================================================================
    */
   const preflightApply = (): { file: File; plan: ChannelImportResult } | null => {
     // FIRST, because this is a statement about the NAMESPACE every record below

@@ -1232,11 +1232,22 @@ export type GroupUpdateResponse = ChannelGroupApiEntry & {
 //   as null. WIRE CASING NOTE: these models have NO alias generator, so
 //   payloads stay snake_case on the wire — except ChannelImportFieldChange,
 //   whose `from`/`to` keys are explicit backend Field aliases.
+// Database/ORM: None (frontend) — declarations only. What they mirror is the
+//   backend's Pydantic rendering of a plan over `youtube_channels` and
+//   `channel_groups`; nothing here reads or writes either.
 // Standards: Read-only typed boundary at the API surface; no logic here. An
 //   apply attempted while the plan holds any ERROR row is rejected as a 422
 //   whose `detail` is this same ChannelImportResult payload
 //   (channels.py:688-689) — the all-or-nothing contract the import stepper
 //   mirrors by blocking Apply client-side while an ERROR row exists.
+// Blast Radius: What the operator sees before approving an audited bulk write,
+//   and what the runtime validator can even be written to check — a field
+//   missing from this mirror is one no guard can require. `plan_fingerprint`
+//   is the field that carries authorization weight: it is what binds an apply
+//   to the reviewed plan, and a consumer that loses it downgrades the write to
+//   the backend's unbound, file-wins path. Declarations alone enforce nothing
+//   at runtime, which is precisely why useChannelImport validates every field
+//   named here against the decoded body.
 // Connections:
 //   - File: backend/ums_smart_revenue/api/channels.py
 //       ChannelImportFieldChange -> ChannelImportFieldChange
