@@ -1060,3 +1060,103 @@ EOF
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "test-layout: catches an interpolated template element in test.include" {
+  # A backtick value passed every literal test — it opens and closes with the
+  # same quote and the outer bracket's match is the last character — while
+  # `${...}` chooses the string vitest actually receives at runtime, leaving the
+  # declared glob visible in the branch never taken.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: [`${false ? "tests/**/*.test.{ts,tsx}" : "tests/only.test.ts"}`],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"computes test.include"* ]]
+}
+
+@test "test-layout: a plain template element is still literal" {
+  # The boundary: a backtick with nothing computed in it is an ordinary string,
+  # and prettier writes them.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: [`tests/**/*.test.{ts,tsx}`],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: a decoy export default inside a regex literal does not anchor the read" {
+  # The string-aware anchor was still blind to the other delimiter a JS file
+  # can hide text behind. Here the regex carries the phrase, a helper object
+  # below it carries the conforming glob, and the real export narrows the
+  # include: anchoring at the regex reads the helper and passes.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const mention = /export default/;
+
+const base = {
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+};
+
+export default defineConfig({
+  test: {
+    include: ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
+}
+
+@test "test-layout: division is not mistaken for a regex" {
+  # The other half of the disambiguation. A "/" after a value divides, and
+  # treating it as a regex would swallow the rest of the config.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const half = 10 / 2;
+
+export default defineConfig({
+  test: {
+    testTimeout: 1000 / half,
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: a regex inside the test block does not derail the scan" {
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    name: "unit",
+    exclude: [],
+  },
+});
+EOF
+  run_guard
+  # exclude is still rejected — the point is that the block was read at all,
+  # rather than the scan losing its place inside a slash.
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"exclude"* ]]
+}

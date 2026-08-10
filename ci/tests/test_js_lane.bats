@@ -432,8 +432,46 @@ ws_run() {
   printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
   run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
   [ "$status" -eq 20 ]
-  [[ "$output" == *"still carries workspace configuration"* ]]
+  [[ "$output" == *"no package.json beside it"* ]]
   [[ "$output" == *"bun.lock"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an orphaned workspace beside a healthy one still fails" {
+  # The scan was nested under "the repository has no workspace at all", which
+  # made an orphan a property of the repository rather than of the directory it
+  # sits in. With two siblings, deleting b/package.json left a, discovery
+  # succeeded, and b — lockfile and all — was never looked at.
+  ws_setup
+  mkdir -p "$NODE_SB/wb"
+  printf '{ "name": "b", "private": true, "scripts": { "test": "true" } }\n' > "$NODE_SB/wb/package.json"
+  printf '{}\n' > "$NODE_SB/wb/bun.lock"
+  printf '{}\n' > "$NODE_SB/wb/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  rm -f "$NODE_SB/wb/package.json"
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no package.json beside it"* ]]
+  [[ "$output" == *"wb/"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace added only in the index is not an orphan" {
+  # The control: a manifest that exists in the index but not yet on disk is a
+  # workspace being added, not configuration left behind by a deletion.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  rm -f ws/package.json
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  # The manifest is gone from disk, so the workspace guard fires — but not the
+  # orphan scan, which is what this case is about.
+  [[ "$output" != *"no package.json beside it"* ]]
+  cd "$REPO_ROOT"
   rm -rf "$NODE_SB"
 }
 
@@ -1859,5 +1897,85 @@ ws_run() {
   # The grammar check still runs first, so a genuinely malformed operand is not
   # truncated into something legal.
   [ -z "$bad" ] || { echo "wildcard-truncation mismatches:${bad}" >&2; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ignored recreation of a staged deletion is caught" {
+  # `git ls-files --others` adds the standard exclusions, so a file recreated
+  # after its deletion was staged shows as `!!` rather than `??` once .gitignore
+  # covers it, and dropped out of the list the intersection was built from. The
+  # rule now asks each staged path directly: whether a path is ignored has
+  # nothing to do with whether the lane is about to read it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm --cached -q ws/app.js >/dev/null 2>&1
+  rm -f ws/app.js
+  printf 'ws/app.js\n' > .gitignore
+  printf 'export const recreated = 1;\n' > ws/app.js
+  ws_seed_fingerprint
+  # The premise: git agrees the file is ignored, not merely untracked.
+  run bash -c "cd '$NODE_SB' && git status --porcelain --ignored ws/app.js"
+  [[ "$output" == *"!!"* ]]
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: losing the whole suite fails even with a test script left behind" {
+  # The suite-loss check was nested under "and no test script", which made
+  # deleting every test safe as long as the runner survived —
+  # `vitest run --passWithNoTests` exits 0 on an empty collection, so the lane
+  # reported a pass over a suite that no longer exists.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  rm -rf ws/tests
+  git add -A >/dev/null 2>&1
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"lost its entire test suite"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace that never had tests is not accused of losing them" {
+  # The control. Keyed on HEAD carrying tests, not on the tree lacking them.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  rm -rf "$NODE_SB/ws/tests"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a tilde range with a stated patch after a wildcard covers the major" {
+  # Reported after the wildcard-minor fix: `~20.x.1` is `>=20.0.0 <21.0.0-0`
+  # to npm, and mapping the `x` to zero compared the runtime patch against the
+  # trailing 1. Already cured by normalising the operand at the grammar check,
+  # which truncates at the first wildcard — pinned here so it stays cured.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.x.1\" }, \"scripts\": { \"test\": \"true\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
   rm -rf "$NODE_SB"
 }

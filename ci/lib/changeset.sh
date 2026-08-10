@@ -100,7 +100,13 @@ ci::changeset::_in_node_workspace() {
     fi
     dir="$(dirname "$dir")"
   done
-  return 1
+  # The walk stopped one directory short of the only one it never examined.
+  # ci::common::node_workspaces treats a root package.json as the workspace ".",
+  # so in a repository laid out that way every path is inside a Node workspace
+  # and none of them were recognised as such: src/data.json stayed classified as
+  # json alone, emitted no node checks, and an imported asset could change with
+  # no install, typecheck, test or build.
+  [ -f "./package.json" ]
 }
 
 # ci::changeset::_checks_for_language <lang> – echo space-separated checks

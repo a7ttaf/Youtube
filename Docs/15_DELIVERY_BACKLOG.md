@@ -1101,7 +1101,32 @@ single P-tier above.
   the same loop: the file list included **deletions**, so committing
   `git rm secrets.env` was blocked for the file it removes. The list is now
   additions, copies, renames and modifications, which cures the index form too.
-  Combined suite: `bats ci/tests/` = 232 cases, 0 failures.
+  A twenty-second round found eight, four P1, and every one of them is a
+  **guard that fires only in the arrangement its author happened to picture**.
+  The suite-loss check sat under "and no test script", so deleting all 38 test
+  files was safe as long as `vitest run --passWithNoTests` stayed behind — the
+  one script somebody actually leaves. The orphan-configuration scan sat under
+  "the repository has no workspace at all", which made an orphan a property of
+  the repository rather than of the directory it sits in: with two siblings,
+  deleting `b/package.json` left `a`, and `b` was never looked at. The
+  partial-staging rule used `git ls-files --others --exclude-standard`, so a
+  file recreated after its deletion was staged became `!!` rather than `??` the
+  moment `.gitignore` covered it and dropped out of the intersection — it now
+  asks each staged path directly, because whether a path is ignored has nothing
+  to do with whether the lane is about to read it. `_in_node_workspace` walked
+  up to `.` and stopped without examining the only directory it had not looked
+  at, so in a root-manifest repository nothing was inside a workspace. The
+  literal-array rule accepted any backtick value, and `` `${cond ? glob : one}` ``
+  is quoted by every test it applied. The `export default` anchor was made
+  string-aware two rounds ago and was still blind to the other delimiter a JS
+  file can hide text behind, so `/export default/` re-anchored it; both scans
+  are now regex-aware, with the division case pinned from the other side. And
+  `tests-shell` had no HEAD/worktree guard at all — Codex found the twin of the
+  defect I had just reported finding myself, in the lane next door.
+  One report did not reproduce: `~20.x.1` was already cured by the operand
+  normalisation in round twenty, which truncates at the first wildcard before
+  any comparator runs. Pinned rather than argued.
+  Combined suite: `bats ci/tests/` = 247 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

@@ -275,6 +275,43 @@ extract_test_block() {
     function is_quote(c) {
       return (c == "\"" || c == "'"'"'" || c == "`")
     }
+    # The last character before i that is not whitespace.
+    function prev_signif(str, i,   j, c) {
+      j = i - 1
+      while (j >= 1) {
+        c = substr(str, j, 1)
+        if (c !~ /[[:space:]]/) return c
+        j--
+      }
+      return ""
+    }
+    # Whether the "/" at i opens a regex literal rather than dividing. Comments
+    # are already stripped, so those are the only two possibilities, and the
+    # usual test applies: a regex can only appear where a value can, so the
+    # preceding token decides. `const mention = /export default/;` was read as
+    # ordinary text, and the anchor landed inside it.
+    function is_regex_start(str, i,   c) {
+      c = prev_signif(str, i)
+      if (c == "") return 1
+      return (c ~ /[A-Za-z0-9_$)\]]/) ? 0 : 1
+    }
+    # Index just past the closing "/" of the regex opening at i. A "/" inside a
+    # character class does not close it; an unterminated one is not a regex at
+    # all, so the line ends the skip rather than swallowing the file.
+    function regex_end(str, i, n,   c, incls) {
+      i++
+      incls = 0
+      while (i <= n) {
+        c = substr(str, i, 1)
+        if (c == "\\") { i += 2; continue }
+        if (c == sprintf("%c", 10)) { return i }
+        if (c == "[") { incls = 1; i++; continue }
+        if (c == "]") { incls = 0; i++; continue }
+        if (c == "/" && !incls) { return i + 1 }
+        i++
+      }
+      return n + 1
+    }
     { all = all $0 "\n" }
     END {
       n = length(all)
@@ -287,6 +324,7 @@ extract_test_block() {
       for (i = 1; i <= n; i++) {
         c = substr(all, i, 1)
         if (is_quote(c)) { i = string_end(all, i, n) - 1; continue }
+        if (c == "/" && is_regex_start(all, i)) { i = regex_end(all, i, n) - 1; continue }
         if (substr(all, i, 14) == "export default") { ed = i; break }
       }
       if (ed == 0) exit 1
@@ -296,6 +334,7 @@ extract_test_block() {
       while (p <= n) {
         ch = substr(all, p, 1)
         if (is_quote(ch)) { p = string_end(all, p, n); continue }
+        if (ch == "/" && is_regex_start(all, p)) { p = regex_end(all, p, n); continue }
         if (ch == "{") break
         p++
       }
@@ -321,6 +360,8 @@ extract_test_block() {
           p = e
           continue
         }
+
+        if (ch == "/" && is_regex_start(all, p)) { p = regex_end(all, p, n); continue }
 
         if (ch == "{") { depth++; p++; continue }
         if (ch == "}") { depth--; p++; continue }
@@ -353,6 +394,12 @@ extract_test_block() {
         c2 = substr(str, q, 1)
         if (is_quote(c2)) {
           e2 = string_end(str, q, n)
+          out = out substr(str, q, e2 - q)
+          q = e2
+          continue
+        }
+        if (c2 == "/" && is_regex_start(str, q)) {
+          e2 = regex_end(str, q, n)
           out = out substr(str, q, e2 - q)
           q = e2
           continue
@@ -489,7 +536,13 @@ value_is_literal_array() {
       q = substr(s, 1, 1)
       if (q != "\"" && q != "'"'"'" && q != "`") return 0
       # The closing quote must be the last character: "a" + x is not a literal.
-      return (substr(s, length(s), 1) == q && length(s) >= 2)
+      if (substr(s, length(s), 1) != q || length(s) < 2) return 0
+      # A backtick-delimited value is only a literal while nothing inside it is
+      # computed. `${false ? glob : "tests/one.test.ts"}` is a quoted value by
+      # every test above and still hands vitest a string chosen at runtime, with
+      # the declared glob sitting in the file as the branch never taken.
+      if (q == "`" && index(s, "${") > 0) return 0
+      return 1
     }
     END {
       v = trim(v)

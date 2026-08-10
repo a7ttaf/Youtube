@@ -18,6 +18,36 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=ci/lib/common.sh
 source "$ROOT_DIR/ci/lib/common.sh"
 
+cd "$ROOT_DIR"
+
+# The suites run from the worktree, which is the tree this lane is entitled to
+# report on only in the pre-commit gate. In ship mode the commit already exists,
+# so a gate script, a bats file or .gitignore broken in an outgoing commit and
+# repaired only on disk is validated in its repaired form while the broken
+# version is pushed. The node lane had the same defect against its own inputs;
+# this is the same rule over the inputs these suites actually read.
+#
+# Scoped to those inputs rather than the whole tree: an unrelated dirty file is
+# not something this lane's result claims anything about.
+if [ "${CI_GATE_MODE:-}" = "ship" ] \
+  && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
+  && git rev-parse --verify HEAD >/dev/null 2>&1; then
+  SHELL_DRIFT="$( {
+    git diff --name-only HEAD -- ci .githooks .gitignore frontend/README.md 2>/dev/null || true
+    git ls-files --others --exclude-standard -- ci .githooks 2>/dev/null || true
+  } | sort -u | sed '/^$/d')"
+  if [ -n "$SHELL_DRIFT" ]; then
+    echo "Gate inputs differ between HEAD and the worktree:"
+    while IFS= read -r _p; do
+      [ -n "$_p" ] || continue
+      echo "    $_p"
+    done <<< "$SHELL_DRIFT"
+    echo "  These suites read the worktree, so the run would report on files the"
+    echo "  pushed commits do not contain. Commit the rest, stash it, or discard it."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
+fi
+
 # tests.sh logs "skipped: bats not installed" and returns 0, which is right for
 # a generic lane that may run in a repo with no shell tests. It is wrong here:
 # this lane exists *because* these suites must run, and `uv sync` does not

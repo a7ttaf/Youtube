@@ -32,36 +32,54 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     fi
   fi
 
-  if [ -z "$NODE_WORKSPACES" ]; then
-    # "No manifest" and "no JavaScript here" are not the same statement.
-    # Deleting frontend/package.json leaves the lockfile, the tsconfig and the
-    # vitest config behind; discovery then finds nothing and this branch used to
-    # return PASS, so a commit that makes the tracked frontend uninstallable ran
-    # no install, typecheck, test or build and every mode accepted it.
-    #
-    # Keyed on workspace *configuration*, not on source files: a lockfile or a
-    # tsconfig/vite/vitest config with no manifest beside it is unambiguous
-    # evidence of a removed manifest, whereas a stray .js in a non-JS repo is
-    # not, and this branch is exactly where a non-JS repo lands.
-    ORPHAN_WS="$(find . \
+  # "No manifest" and "no JavaScript here" are not the same statement. Deleting
+  # frontend/package.json leaves the lockfile, the tsconfig and the vitest
+  # config behind; discovery then finds nothing there, and a commit that makes
+  # the workspace uninstallable ran no install, typecheck, test or build.
+  #
+  # Keyed on workspace *configuration*, not on source files: a lockfile or a
+  # tsconfig/vite/vitest config with no manifest beside it is unambiguous
+  # evidence of a removed manifest, whereas a stray .js in a non-JS repo is not.
+  #
+  # Runs for every directory, not only when the repository has no workspace left
+  # at all. Nesting it under that condition made the scan a property of the
+  # *repository*: with two sibling workspaces, deleting b/package.json still
+  # left a, discovery succeeded, and b -- lockfile and all -- was never looked
+  # at. An orphan is a property of the directory it sits in.
+  ORPHAN_CFG="$(find . \
       \( -name 'node_modules' -o -name '.git' -o -name 'dist' -o -name 'build' \) -prune -o \
       -type f \( -name 'package-lock.json' -o -name 'npm-shrinkwrap.json' \
         -o -name 'pnpm-lock.yaml' -o -name 'yarn.lock' -o -name 'bun.lock' -o -name 'bun.lockb' \
         -o -name 'tsconfig.json' -o -name 'jsconfig.json' \
-        -o -name 'vitest.config.*' -o -name 'vite.config.*' \) -print 2>/dev/null | head -10 || true)"
+        -o -name 'vitest.config.*' -o -name 'vite.config.*' \) -print 2>/dev/null || true)"
 
-    if [ -n "$ORPHAN_WS" ]; then
-      echo "No package.json anywhere, but the tree still carries workspace configuration:"
-      while IFS= read -r _orphan; do
-        [ -n "$_orphan" ] || continue
-        echo "    ${_orphan#./}"
-      done <<< "$ORPHAN_WS"
-      echo "  Nothing can be installed or run against these, so the lane would"
-      echo "  pass having executed no install, typecheck, test or build."
-      echo "  Restore the manifest, or remove the configuration with it."
-      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  ORPHANS=""
+  while IFS= read -r _cfg; do
+    [ -n "$_cfg" ] || continue
+    _cfg_dir="$(dirname "$_cfg")"
+    # A manifest beside it settles the question — on disk, or in the index,
+    # because a workspace being added is not an orphan either.
+    [ -f "$_cfg_dir/package.json" ] && continue
+    if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+      git cat-file -e ":${_cfg_dir#./}/package.json" 2>/dev/null && continue
     fi
+    ORPHANS="${ORPHANS}${_cfg#./}"$'\n'
+  done <<< "$ORPHAN_CFG"
+  ORPHANS="$(printf '%s' "$ORPHANS" | sed '/^$/d' | head -10)"
 
+  if [ -n "$ORPHANS" ]; then
+    echo "Workspace configuration with no package.json beside it:"
+    while IFS= read -r _orphan; do
+      [ -n "$_orphan" ] || continue
+      echo "    $_orphan"
+    done <<< "$ORPHANS"
+    echo "  Nothing can be installed or run against these, so the lane would"
+    echo "  pass having executed no install, typecheck, test or build there."
+    echo "  Restore the manifest, or remove the configuration with it."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
+
+  if [ -z "$NODE_WORKSPACES" ]; then
     echo "No package.json found. Skipping Node lane."
     exit "$CI_RESULT_PASS"
   fi
@@ -156,18 +174,23 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
 
       _staged="$(git diff --cached --name-only -- "$_scope" 2>/dev/null | sort || true)"
       [ -n "$_staged" ] || continue
-      # `git diff` compares tracked content only, so it says nothing about a
-      # path staged for deletion and then recreated as an untracked file:
-      # `D  app.js` plus `?? app.js` produced an empty intersection, and the
-      # lane tested the recreated file for a commit that deletes it. The
-      # untracked list is the other half of "what is on disk here".
-      _unstaged="$( {
-        git diff --name-only -- "$_scope" 2>/dev/null || true
-        git ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || true
-      } | sort -u)"
-      [ -n "$_unstaged" ] || continue
-      _both="$(comm -12 <(printf '%s\n' "$_staged") <(printf '%s\n' "$_unstaged") || true)"
-      [ -n "$_both" ] && PARTIAL="${PARTIAL}${_both}"$'\n'
+      # Asked of each staged path directly rather than by intersecting with a
+      # list of "other" files. Both list-based attempts had the same defect in
+      # different clothes: `git diff` compares tracked content and misses a path
+      # staged for deletion and recreated, and `git ls-files --others` adds the
+      # standard exclusions, so a recreated file that .gitignore now covers is
+      # `!!` rather than `??` and drops out of the list. Whether a path is
+      # ignored has nothing to do with whether the lane is about to read it.
+      while IFS= read -r _p; do
+        [ -n "$_p" ] || continue
+        if git cat-file -e ":$_p" 2>/dev/null; then
+          # Present in the index: the worktree copy must match it.
+          git diff --quiet -- "$_p" 2>/dev/null || PARTIAL="${PARTIAL}${_p}"$'\n'
+        else
+          # Staged for deletion: any file on disk here is one the commit removes.
+          [ -e "$_p" ] && PARTIAL="${PARTIAL}${_p}"$'\n'
+        fi
+      done <<< "$_staged"
     done <<< "$NODE_WORKSPACES"
     PARTIAL="$(printf '%s' "$PARTIAL" | sed '/^$/d')"
 
@@ -860,21 +883,30 @@ if ! script_exists "test" && ! script_exists "test:unit"; then
     echo "  Restore the script in package.json, or remove the tests."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
   fi
+fi
 
-  # "No test script AND no test files" is the one arrangement the rule above
-  # cannot see, and it is the worst one: deleting every file under tests/ and
-  # both scripts leaves nothing to be orphaned, test-layout reports "0 file(s)"
-  # quite happily, and a successful build carries the whole gate to exit 0 after
-  # the suite has disappeared. A workspace that had tests must still have them.
-  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
-    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+# A workspace that had a suite must still have one. Deleting every file under
+# tests/ leaves nothing to be orphaned, test-layout reports "0 file(s)" quite
+# happily, and a successful build carries the gate to exit 0 after the suite has
+# disappeared.
+#
+# Deliberately NOT nested under "and no test script": that made losing the whole
+# suite safe as long as the script survived, and `vitest run --passWithNoTests`
+# -- documented as exiting 0 when it collects nothing -- is exactly the script
+# that gets left behind. The presence of a runner says nothing about whether
+# there is anything left for it to run.
+if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
+  && git rev-parse --verify HEAD >/dev/null 2>&1; then
+  WORKTREE_TESTS="$(find . \( -name 'node_modules' -o -name 'dist' -o -name 'build' \) -prune -o \
+    -type f \( -name '*.test.*' -o -name '*.spec.*' \) -print 2>/dev/null | head -1 || true)"
+  if [ -z "$WORKTREE_TESTS" ]; then
     HEAD_TESTS="$(git ls-tree -r --name-only HEAD -- . 2>/dev/null \
       | grep -E '\.(test|spec)\.[cm]?[jt]sx?$' | head -5 || true)"
     if [ -n "$HEAD_TESTS" ]; then
       echo "Workspace ${CI_GATE_NODE_WORKSPACE} has lost its entire test suite."
-      echo "  HEAD carries test files here, this tree has none, and the manifest"
-      echo "  defines no 'test' or 'test:unit' script -- so nothing is reported"
-      echo "  as orphaned and the lane would pass having run no tests at all."
+      echo "  HEAD carries test files here and this tree has none, so the lane"
+      echo "  would pass having run no tests at all -- a test script left behind"
+      echo "  does not change that, because there is nothing for it to run."
       echo "  Present at HEAD, for example:"
       while IFS= read -r _gone; do
         [ -n "$_gone" ] || continue

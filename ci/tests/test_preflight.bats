@@ -149,3 +149,96 @@ gs_run() {
   run grep -n 'CI_GATE_PUSH_OLD_SHA' ci/checks/branch-protection.sh
   [ "$status" -ne 0 ]
 }
+
+@test "tests-shell: ship mode rejects gate inputs repaired only on disk" {
+  # The suites read the worktree. In ship mode the commit already exists, so a
+  # gate script or bats file broken in an outgoing commit and repaired on disk
+  # is validated in its repaired form while the broken version is pushed — the
+  # node lane's defect, over this lane's inputs.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  (
+    cd "$sb"
+    git init -q -b feature/x .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+  ) >/dev/null 2>&1
+  printf '@test "x" { false; }\n' > "$sb/ci/tests/t.bats"
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"differ between HEAD and the worktree"* ]]
+  [[ "$output" == *"ci/tests/t.bats"* ]]
+  rm -rf "$sb"
+}
+
+@test "tests-shell: an unrelated dirty file does not stop the shell suite" {
+  # Scoped to this lane's own inputs. A dirty file elsewhere is not something
+  # the suites' result claims anything about, and failing on it would make the
+  # ship gate unusable rather than stricter.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests" "$sb/app"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  # Stands in for the real dispatcher, so a clean run reaches exit 0 and the
+  # assertion below reads "the guard let it through" rather than "the script
+  # died before getting there".
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/ci/checks/tests.sh"
+  chmod +x "$sb/ci/checks/tests.sh"
+  printf 'a\n' > "$sb/app/main.py"
+  (
+    cd "$sb"
+    git init -q -b feature/x .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+  ) >/dev/null 2>&1
+  printf 'b\n' > "$sb/app/main.py"
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"differ between HEAD and the worktree"* ]]
+  rm -rf "$sb"
+}
+
+@test "changeset: a root package.json makes every path a workspace member" {
+  # The walk terminated at "." without ever examining the only directory it had
+  # not looked at. ci::common::node_workspaces calls a root manifest workspace
+  # ".", so in a repository laid out that way nothing was recognised as being
+  # inside one, and an imported asset could change with no node lane at all.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/src"
+  printf '{ "name": "root" }\n' > "$sb/package.json"
+  printf '{}\n' > "$sb/src/data.json"
+  run bash -c "
+    cd '$sb'
+    . '$REPO_ROOT/ci/lib/common.sh'
+    . '$REPO_ROOT/ci/lib/changeset.sh'
+    ci::changeset::_in_node_workspace src/data.json && echo INSIDE || echo OUTSIDE
+    ci::changeset::_in_node_workspace README.md && echo INSIDE2 || echo OUTSIDE2
+  "
+  [[ "$output" == *"INSIDE"* ]]
+  [[ "$output" == *"INSIDE2"* ]]
+  rm -rf "$sb"
+}
+
+@test "changeset: without a root package.json the walk still says no" {
+  # The control. Anchoring on a manifest is what keeps this from claiming every
+  # file in a Python repository belongs to a Node workspace.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/src"
+  printf '{}\n' > "$sb/src/data.json"
+  run bash -c "
+    cd '$sb'
+    . '$REPO_ROOT/ci/lib/common.sh'
+    . '$REPO_ROOT/ci/lib/changeset.sh'
+    ci::changeset::_in_node_workspace src/data.json && echo INSIDE || echo OUTSIDE
+  "
+  [[ "$output" == *"OUTSIDE"* ]]
+  rm -rf "$sb"
+}
