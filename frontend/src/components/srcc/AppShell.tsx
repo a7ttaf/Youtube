@@ -861,21 +861,44 @@ const resolveImportScope = (
   return importScopeFor(session.tenant?.id ?? resolvedTenant.id, session.user_id);
 };
 
-/**
- * Whether the scope is FINAL. The session's own tenant is authoritative and
- * needs no bootstrap, so a session carrying one is settled immediately; a
- * session WITHOUT one waits for /tenants/me to SUCCEED.
- *
- * A failure does not settle it, and that is deliberate — see the comment on
- * `tenantSettled` in useTenantBootstrap. Two tabs disagreeing about the tenant
- * build different namespaces and different Web Locks, so neither sees the
- * other's pending apply and both dispatch. Imports stay withheld until the
- * workspace is known; a reload re-runs the bootstrap, which is why that is
- * recoverable rather than a wedge (review #184).
- *
- * Kept beside resolveImportScope because the two read the same two sources and
- * must agree about which one supplied the tenant.
- */
+// ============================================================================
+// Purpose: The ADMISSION PRECONDITION for an audited bulk import — whether the
+//   namespace that isolates pending-write records is FINAL. The session's own
+//   tenant is authoritative and needs no bootstrap, so a session carrying one
+//   is settled immediately; a session WITHOUT one waits for /tenants/me to
+//   SUCCEED.
+// Database/ORM: None (frontend) — a pure predicate over two identity sources.
+//   It issues no request and decides no permission; what it gates is whether
+//   RegistryImportFlow may reach POST /channels/import at all, and therefore
+//   whether a CHANNEL_IMPORTED audit event can be appended.
+// Standards: A FAILURE does not settle it, and that is the load-bearing part.
+//   Treating a failure as settled — which this did until review #184 — lets
+//   two tabs for the same operator disagree about the tenant: one builds the
+//   missing-tenant scope, the other the resolved one. Different key prefixes
+//   AND different Web Lock names, so neither can see the other's pending apply
+//   and both dispatch the same roster, duplicating an audited write. Scope
+//   adoption cannot undo that, because the request has already left.
+//   Fails CLOSED, and recoverably: a reload re-runs the bootstrap, so
+//   withholding is a retry rather than a wedge, and
+//   IMPORT_SCOPE_UNSETTLED_NOTE tells the operator exactly that.
+//   Kept beside resolveImportScope on purpose — the two read the same two
+//   sources and must agree about which one supplied the tenant, or the guard
+//   would be settled against one scope and the record written under another.
+//   Not an authorization input: the backend's permission checks, its own
+//   tenant scoping, and the plan fingerprint remain the authority regardless
+//   of what this returns.
+// Blast Radius: Whether a duplicate audited bulk import can be dispatched
+//   while tenant identity is unresolved. No revenue math; a mistake here shows
+//   as a refused import or a duplicated one, never as an unpermitted one.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> importScopeFor
+//       builds the namespace this decides the finality of, and admit() is what
+//       it gates.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       receives this as importScopeSettled and refuses Apply while false.
+//   - File: frontend/src/contexts/TenantContext.tsx -> the hydration that
+//       flips it, via useTenantBootstrap's tenantSettled just above.
+// ============================================================================
 export const isImportScopeSettled = (session: SessionMe, tenantSettled: boolean): boolean => {
   return session.tenant?.id != null || tenantSettled;
 };
