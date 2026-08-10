@@ -235,7 +235,7 @@ const removeAllIds = (scope: string): void => {
  * primitive available to a page; storage events are notifications, not
  * exclusion, and cannot close this window.
  */
-const admitApply = async (scope: string, applyId: string): Promise<boolean> => {
+const admitApply = (scope: string, applyId: string): Promise<boolean> => {
   const claim = (): boolean => {
     if (readFlag(scope)) {
       return false;
@@ -247,7 +247,9 @@ const admitApply = async (scope: string, applyId: string): Promise<boolean> => {
   if (locks === undefined) {
     // No cross-document exclusion available. Same check, same order, without
     // the guarantee — honestly narrower than the race rather than closed.
-    return claim();
+    // Wrapped so both branches return a promise and callers cannot come to
+    // depend on this one resolving synchronously.
+    return Promise.resolve(claim());
   }
   return locks.request(`${UNSETTLED_IMPORT_STORAGE_KEY}.${scope}`, claim);
 };
