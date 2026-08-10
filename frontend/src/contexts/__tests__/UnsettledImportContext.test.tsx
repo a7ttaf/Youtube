@@ -182,6 +182,47 @@ describe("unsettled import store", () => {
     vi.restoreAllMocks();
   });
 
+  it("cannot let one tenant's scope be a PREFIX of another's", () => {
+    // encodeURIComponent leaves `.` and `~` alone, so a slug shaped like
+    // "ums~.child" produced keys beginning with the scope of a different
+    // operator — who would then see, block on, and acknowledgeAll() away that
+    // operator's pending imports, because the store matches with startsWith
+    // (review #184, codex P2).
+    const victim = importScopeFor("ums", "user-1");
+    const attacker = importScopeFor("ums~.child", "user-1");
+
+    expect(attacker.startsWith(victim)).toBe(false);
+    expect(victim.startsWith(attacker)).toBe(false);
+    // Neither half may contain the separator or the key delimiter.
+    for (const scope of [victim, attacker, importScopeFor("a.b~c", "d~e.f")]) {
+      expect(scope.split("~")).toHaveLength(2);
+      expect(scope).not.toContain(".");
+    }
+
+    const victimHook = renderHook(() => useUnsettledImport(victim));
+    const attackerHook = renderHook(() => useUnsettledImport(attacker));
+    act(() => victimHook.result.current.trackApply("apply-victim"));
+
+    expect(attackerHook.result.current.unsettled).toBe(false);
+    act(() => attackerHook.result.current.acknowledgeAll());
+    expect(victimHook.result.current.unsettled).toBe(true);
+    expect(storedIds(victim)).toEqual(["apply-victim"]);
+  });
+
+  it("keeps distinct identities distinct after encoding", () => {
+    // The encoding must be injective on the pair, or two different operators
+    // would share one bucket — the same leak from the other direction.
+    const scopes = [
+      importScopeFor("a~b", "c"),
+      importScopeFor("a", "b~c"),
+      importScopeFor("a.b", "c"),
+      importScopeFor("a", "b.c"),
+      importScopeFor("A", "c"),
+      importScopeFor("a", "C"),
+    ];
+    expect(new Set(scopes).size).toBe(scopes.length);
+  });
+
   it("does its check and its record INSIDE one scope lock", async () => {
     // The check-then-act window codex identified is CROSS-DOCUMENT: two tabs
     // both read "nothing pending", both dispatch, and for an all-UNCHANGED

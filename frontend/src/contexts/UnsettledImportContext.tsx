@@ -46,7 +46,10 @@ import { useCallback, useMemo, useSyncExternalStore } from "react";
 //   blocked by an import they cannot reconcile - and their acknowledgement
 //   would clear the original operator's protection, after which returning to
 //   the first tenant permits the duplicate this exists to stop (review #184,
-//   codex P2). Every read, write and sweep is confined to one scope.
+//   codex P2). Every read, write and sweep is confined to one scope, and the
+//   scope's two halves are percent-encoded over a strict alphabet so neither
+//   the `~` separator nor the `.` key delimiter can occur inside them — a
+//   prefix match must not be able to cross a scope boundary.
 //   ADMISSION is atomic where the platform allows it. Reading `unsettled` and
 //   then creating the key are two operations, so two tabs could both observe
 //   false and both dispatch — for an all-UNCHANGED roster both POSTs return
@@ -86,8 +89,33 @@ export const UNSETTLED_IMPORT_STORAGE_KEY = "ums.unsettledChannelImport";
 export const UNSCOPED_IMPORT_SCOPE = "unscoped";
 
 /**
- * One operator on one tenant. Encoded because the separator is a dot and a
- * slug or id containing one would otherwise blur two scopes together.
+ * Percent-encode everything outside an unreserved alphabet, INCLUDING the
+ * characters `encodeURIComponent` leaves alone: `.` `~` `!` `*` `'` `(` `)`.
+ *
+ * That matters because the scope is used as a key PREFIX and matched with
+ * `startsWith`. With `.` and `~` surviving encoding, a tenant slug shaped like
+ * `ums~.child` produced keys beginning with `ums~.` — the prefix of a
+ * DIFFERENT operator's scope — so that operator would see, block on, and
+ * `acknowledgeAll()` away someone else's pending imports (review #184).
+ * After this, no encoded component can contain the separator or the delimiter,
+ * so a prefix match cannot cross a scope boundary.
+ */
+const encodeScopePart = (value: string): string => {
+  return [...value]
+    .map((character) =>
+      /[A-Za-z0-9_-]/.test(character)
+        ? character
+        : [...new TextEncoder().encode(character)]
+            .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`)
+            .join(""),
+    )
+    .join("");
+};
+
+/**
+ * One operator on one tenant, encoded so the pair cannot be confused with any
+ * other pair. Both halves go through encodeScopePart, so `~` is unambiguously
+ * the separator and `.` unambiguously the key delimiter.
  */
 export const importScopeFor = (
   tenantSlug: string | null | undefined,
@@ -96,7 +124,7 @@ export const importScopeFor = (
   if (!tenantSlug || !userId) {
     return UNSCOPED_IMPORT_SCOPE;
   }
-  return `${encodeURIComponent(tenantSlug)}~${encodeURIComponent(userId)}`;
+  return `${encodeScopePart(tenantSlug)}~${encodeScopePart(userId)}`;
 };
 
 /**

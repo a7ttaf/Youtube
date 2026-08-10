@@ -158,12 +158,27 @@ const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boole
   ["revenue_source_status", isSourceStatusChange],
 ];
 
+/**
+ * `group_action` is non-null EXACTLY when `group_id` is. Field-by-field checks
+ * cannot see that: `{outcome: "UPDATE", group_id: "g1", group_action: null}`
+ * passes each of them individually, GroupCell then renders the bare key, and
+ * Apply stays enabled over a row whose finance-scope effect — mint a new
+ * SECTOR group, or join an existing one — was never disclosed. The backend
+ * reserves null for rows with no group and for ERROR rows, which carry no
+ * group key either, so the relation is a biconditional (review #184).
+ */
+const hasConsistentGroupEffect = (row: Record<string, unknown>): boolean => {
+  return (row.group_id === null) === (row.group_action === null);
+};
+
 const isPlanRow = (row: unknown): boolean => {
-  if (typeof row !== "object" || row === null) {
+  if (!isPlainObject(row)) {
     return false;
   }
-  const candidate = row as Record<string, unknown>;
-  return PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(candidate[field]));
+  return (
+    PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(row[field])) &&
+    hasConsistentGroupEffect(row)
+  );
 };
 
 /**

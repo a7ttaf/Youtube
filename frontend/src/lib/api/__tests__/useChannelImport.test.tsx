@@ -289,6 +289,50 @@ describe("useChannelImport", () => {
     }
   });
 
+  it("rejects a row whose group EFFECT is undisclosed", async () => {
+    // Field-by-field checks each pass on
+    // {outcome: "UPDATE", group_id: "g1", group_action: null}: the id is a
+    // string, the action is a legal null. Together they are a writable row
+    // whose finance-scope effect — mint a new SECTOR group, or join an
+    // existing one — was never disclosed, and Apply would stay enabled over
+    // it (review #184).
+    const undisclosed = {
+      ...DRY_RUN_RESULT,
+      rows: [{ ...DRY_RUN_RESULT.rows[1], group_id: "g1", group_action: null }],
+    };
+    fetchMock().mockResolvedValue(jsonResponse(undisclosed));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("rejects a group action on a row carrying no group", async () => {
+    // The other direction: an action with no key claims a group write the
+    // operator has no way to identify.
+    const orphanAction = {
+      ...DRY_RUN_RESULT,
+      rows: [{ ...DRY_RUN_RESULT.rows[0], group_id: null, group_action: "CREATE" }],
+    };
+    fetchMock().mockResolvedValue(jsonResponse(orphanAction));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
   it("rejects an apply answered with a PREVIEW payload", async () => {
     // A structural check only proves `dry_run` is a boolean. A malformed or
     // legacy apply response carrying `dry_run: true` passed it, and the flow

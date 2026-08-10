@@ -800,6 +800,31 @@ class _ChannelArchivedAtWriteBoundary(ChannelRegistry):
         )
 
 
+def test_unbound_apply_also_refuses_a_row_archived_after_planning():
+    """The archive guard is NOT plan-bound, and that is deliberate.
+
+    "The file wins" (review #159) settled that a roster may overwrite
+    concurrent drift in the fields it ASSERTS. The roster does not carry
+    ``active`` and never asserts it, so that decision does not reach here —
+    an unbound apply racing an archive would otherwise resurrect a channel an
+    operator deliberately retired and attach it to a group (review #184).
+    """
+    archiving = _ChannelArchivedAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID})),
+    )
+    client, _registry, groups, audit_sink = create_import_app(archiving)
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    # NO expected_plan_fingerprint: the unbound, file-wins path.
+    response = post_import(client, body)
+
+    assert response.status_code == 409, response.text
+    assert "since been archived" in response.json()["detail"]
+    assert groups.get_group_by_cms_id("cms-tv") is None
+    assert audit_sink.records == []
+
+
 def test_plan_fingerprint_is_bound_to_the_resolved_tenant():
     """An approval obtained in one tenant must not be spendable in another.
 
