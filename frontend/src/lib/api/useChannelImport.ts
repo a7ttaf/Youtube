@@ -11,9 +11,12 @@ import type { ChannelImportResult, ChannelImportRowResult } from "@/lib/api/type
 //   wire form fields at this boundary — the deliberate frontend/backend casing
 //   seam.
 // Database/ORM: None (frontend) — calls the backend import endpoint.
-// Standards: The FormData carries `file`, `content_owner_id`, `dry_run`
-//   ("true"/"false"), and `reason`; `cms_status` is OMITTED so the backend
-//   default (INSIDE_CMS) applies. useApiClient passes FormData through
+// Standards: The FormData carries `file`, `content_owner_id`, `cms_status`,
+//   `dry_run` ("true"/"false"), and `reason` — plus `expected_plan_fingerprint`
+//   when the caller is binding to a reviewed plan. `cms_status` is sent
+//   EXPLICITLY, with the same value the route defaults to: the response echoes
+//   it, and a value the client never sent is one it cannot check the echo
+//   against (review #184). useApiClient passes FormData through
 //   verbatim (isRawBodyInit) with no JSON Content-Type, so fetch sets the
 //   multipart boundary itself. Errors propagate as the typed ApiError (403 =
 //   missing MANAGE_CHANNELS, or missing MANAGE_GROUPS on a Group_ID-bearing
@@ -241,13 +244,23 @@ const isPlanRow = (row: unknown): boolean => {
  * lands where the write may already have committed, bypassing the
  * indeterminate handling that exists precisely for that case.
  */
+/**
+ * The three wire names that appear on BOTH sides of this boundary — named once
+ * so the request builder and the response checks cannot drift apart on a
+ * spelling. The response-only names stay inline in the tables: there is no
+ * second site for them to disagree with (review #184, qodo).
+ */
+const OWNER_FIELD = "content_owner_id";
+const CMS_STATUS_FIELD = "cms_status";
+const DRY_RUN_FIELD = "dry_run";
+
 const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boolean]> = [
   ["rows", (value) => Array.isArray(value) && value.every(isPlanRow)],
   ["counts", isCountMap],
   ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
-  ["content_owner_id", (value) => typeof value === "string"],
-  ["cms_status", (value) => typeof value === "string"],
-  ["dry_run", (value) => typeof value === "boolean"],
+  [OWNER_FIELD, (value) => typeof value === "string"],
+  [CMS_STATUS_FIELD, (value) => typeof value === "string"],
+  [DRY_RUN_FIELD, (value) => typeof value === "boolean"],
 ];
 
 // ============================================================================
@@ -433,9 +446,9 @@ export const useChannelImport = (): ((
     ({ file, contentOwnerId, dryRun, reason, expectedPlanFingerprint }) => {
       const form = new FormData();
       form.append("file", file);
-      form.append("content_owner_id", contentOwnerId);
-      form.append("cms_status", IMPORT_CMS_STATUS);
-      form.append("dry_run", dryRun ? "true" : "false");
+      form.append(OWNER_FIELD, contentOwnerId);
+      form.append(CMS_STATUS_FIELD, IMPORT_CMS_STATUS);
+      form.append(DRY_RUN_FIELD, dryRun ? "true" : "false");
       form.append("reason", reason);
       if (expectedPlanFingerprint !== undefined) {
         form.append("expected_plan_fingerprint", expectedPlanFingerprint);
