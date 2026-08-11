@@ -286,13 +286,18 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1808 insertions across eight files** (`git diff --stat
+backend diff is **1860 insertions across eight files** (`git diff --stat
 $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a frontend revert
 leaves all of it running.
 
 The figure is scoped to `backend/`, so editing this document does not move it —
-but any review round that changes backend code does, and several have. Re-run
+but any review round that touches backend code does, and several have. Re-run
 the command rather than trusting this line if the branch has advanced.
+
+That includes **comment-only** rounds, which is the case that has actually
+caught this line out: the last refresh recorded 1,808 and a round that added
+nothing but contract blocks moved it to 1,860. `--stat` counts lines, not
+behaviour, so "no executable change" is not a reason to skip re-running it.
 
 ### Reverting the frontend only
 
