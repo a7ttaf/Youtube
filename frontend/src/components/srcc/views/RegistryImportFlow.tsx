@@ -139,6 +139,39 @@ const describeImportError = (err: unknown): string => {
  */
 const PLAN_BEARING_STATUSES = new Set([409, 422]);
 
+// ============================================================================
+// Purpose: Decide whether an apply REJECTION carries a plan worth putting in
+//   front of the operator, and hand it back only if it does. This is the one
+//   path where a payload from a FAILED request replaces the preview the
+//   operator already approved and becomes what the next fingerprint-bound
+//   apply is reviewed against.
+// Database/ORM: None (frontend) — a pure predicate over a decoded error body.
+//   It dispatches nothing and mutates no state; the caller decides what to do
+//   with the plan it returns.
+// Standards: Two gates, both required. The status must be plan-bearing (409 or
+//   422, the two that mean "the plan you saw is not the plan we would
+//   execute"), and the body must pass isChannelImportResult AND
+//   echoesRequestedTarget — the same target rule the 2xx path applies, which
+//   matters MORE here because this payload becomes the reviewed plan while the
+//   next Apply still sends the CAPTURED owner. Fails CLOSED in both
+//   directions: anything unrecognised returns null, the error falls through to
+//   the ordinary banner, and the operator keeps the plan they actually
+//   reviewed. Not every 409 carries a plan — this flow always sends
+//   expected_plan_fingerprint, so it opts into the backend's strict pre-state
+//   check, whose 409 detail is a STRING naming the row that moved; that lands
+//   in the banner verbatim, which already says to re-run the preview.
+// Blast Radius: FINANCE + group membership, at one remove. A wrongly accepted
+//   payload does not itself write; it changes what the operator APPROVES, and
+//   the apply that follows is bound to a fingerprint for a plan they never
+//   saw — a different group action or revenue-source classification reviewed
+//   under the banner of the one they did.
+// Connections:
+//   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult
+//       and echoesRequestedTarget, the two gates applied here.
+//   - File: backend/ums_smart_revenue/api/channels.py -> the route that emits
+//       the 409/422 whose `detail` is a full ChannelImportResult.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> the documented rejection contract.
+// ============================================================================
 const applyRaceDetail = (
   err: unknown,
   contentOwnerId: string,
@@ -735,15 +768,36 @@ const admissionRefusalNote = (admission: AdmissionResult): string => {
   return admission === "not-durable" ? APPLY_NOT_DURABLE_NOTE : OTHER_APPLY_PENDING_NOTE;
 };
 
-/**
- * Admit, with a THROW folded into the result rather than left to propagate.
- *
- * Returning a note instead of raising is what keeps a failure to ADMIT from
- * being classified as a failure to WRITE. Admission runs before the POST, so
- * its failure modes all share one fact — nothing was dispatched — and that is
- * the opposite of the indeterminate default every other error in `apply`
- * correctly falls into.
- */
+// ============================================================================
+// Purpose: Run the cross-document admission claim and fold a THROW into the
+//   RESULT rather than letting it propagate. Returning a note instead of
+//   raising is the whole point: it keeps a failure to ADMIT from being
+//   classified as a failure to WRITE.
+// Database/ORM: None (frontend). The claim is browser-local (the cross-tab
+//   lock behind `admit`); no request is dispatched from here.
+// Standards: Admission runs strictly BEFORE the POST, so every failure mode it
+//   has shares one fact — nothing was sent — which is the exact opposite of
+//   the INDETERMINATE default every other error in `apply` correctly falls
+//   into. The `catch` is deliberately broad because the failures are
+//   environmental (a browser refusing storage, an embedded or restricted
+//   window), not conditions worth distinguishing: they share both the fact and
+//   the remedy. The refusal notes stay distinct from the throw note because
+//   their remedies differ — go back to the other tab, versus change this
+//   browser's storage setting.
+// Blast Radius: Whether an AUDITED import is dispatched at all, and whether
+//   the durable duplicate-write guard stays raised. Getting this wrong in the
+//   permissive direction dispatches a second copy of a roster; getting it
+//   wrong in the other direction tells the operator their import MAY have
+//   committed, freezes Back, and offers to reconcile a write that provably
+//   never left the browser (review #184, codex P2). No finance math here — it
+//   decides whether the write happens, not what it contains.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> the admission
+//       claim and its AdmissionResult states, which this classifies.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       `apply`, the only caller, whose indeterminate default this exists to
+//       keep off the not-dispatched path.
+// ============================================================================
 const admitForApply = async (
   admit: (applyId: string) => Promise<AdmissionResult>,
   applyId: string,
@@ -763,23 +817,41 @@ const admitForApply = async (
 // landed, and the two must always mean the same thing.
 const OUTCOME_UNCHANGED = "UNCHANGED";
 
-/**
- * Does the registry now MATCH this roster?
- *
- * Note what this is not: proof that the operator's own apply committed.
- * Inventory equality cannot establish authorship — the request may never have
- * reached the backend while another writer landed the same values, and a
- * roster can even preview as all-UNCHANGED before any apply at all. Nothing
- * reachable from this endpoint carries a durable import identity, so the flow
- * reports the STATE it can prove and points at the audit trail for the event.
- * (A `CHANNEL_IMPORTED` identity to reconcile against is the open API-surface
- * question flagged to the owner on this PR.)
- *
- * Rows carrying group keys are excluded from even that weaker claim, because
- * `outcome` is computed from channel INVENTORY only — the planner never loads
- * memberships — so the channels can match while the attachments the same
- * import owed are still missing.
- */
+// ============================================================================
+// Purpose: Answer the one question a re-plan CAN settle after a write of
+//   unknown outcome — does the registry now match this roster? — and refuse
+//   the question it cannot. It is the evidence behind telling an operator that
+//   nothing remains to apply.
+// Database/ORM: None (frontend) — a predicate over a freshly re-planned
+//   payload. The re-plan itself is a dry run, so asking this question writes
+//   nothing.
+// Standards: This is deliberately a STATE claim, never an authorship one.
+//   Inventory equality cannot establish who wrote the values: the request may
+//   never have reached the backend while another writer landed the same ones,
+//   and a roster can preview as all-UNCHANGED before any apply at all. Nothing
+//   reachable from this endpoint carries a durable import identity, so the
+//   flow reports what it can prove and points at the audit trail for the
+//   event. (A `CHANNEL_IMPORTED` identity to reconcile against is the open
+//   API-surface question flagged to the owner on this PR.) Rows carrying group
+//   keys are excluded from even that weaker claim, because `outcome` is
+//   computed from channel INVENTORY only — the planner never loads
+//   memberships — so the channels can match while the attachments the same
+//   import owed are still missing; `hasUnverifiableGroupEffects` below is the
+//   branch that says so out loud rather than letting silence read as success.
+// Blast Radius: AUDIT follow-up and duplicate-import guidance. A false TRUE
+//   tells an operator whose write outcome is unknown that there is nothing
+//   left to do, closing out an import that may have half-landed; a false FALSE
+//   invites them to re-apply a roster that already committed. Neither writes
+//   anything itself — both steer what the operator does next.
+// Connections:
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       hasUnverifiableGroupEffects, the sibling that keeps the group-bearing
+//       case from silently reading as a match.
+//   - File: backend/ums_smart_revenue/org/channel_import.py -> the planner
+//       whose inventory-only `outcome` is exactly why group rows are excluded.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> the re-plan whose
+//       result this reads.
+// ============================================================================
 const rosterMatchesRegistry = (plan: ChannelImportResult): boolean => {
   return plan.rows.every(
     (row) => row.outcome === OUTCOME_UNCHANGED && row.group_id === null,

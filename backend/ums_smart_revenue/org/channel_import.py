@@ -465,6 +465,36 @@ def _repeated_associations(rows: list[ChannelImportRow]) -> set[tuple[str, str |
     return repeated
 
 
+# ============================================================================
+# Purpose: Decide which duplicate verdict a row earns — the harsher CONFLICT,
+#   the softer REPEAT, or none — and word it as the remediation the operator
+#   needs. This is where the two duplicate rules are ORDERED against each
+#   other, which neither set builder can express on its own.
+# Database/ORM: None — a pure classification over parsed rows. Nothing is read
+#   from the registry; both sets are derived from the file alone.
+# Standards: Conflict is reported AHEAD of repetition because a channel whose
+#   copies disagree has no settled inventory to attach a group to, so naming
+#   the repeat first would send the operator to fix the lesser defect and hit
+#   the greater one on the next upload. The two repeat messages are separate
+#   because the remedies are: a pair carrying NO group can only be fixed by
+#   dropping the copy, while a pair naming a group can be fixed by giving the
+#   copy a DISTINCT group. Returning None — not raising — is what lets the
+#   caller keep an admissible row.
+# Blast Radius: This is the BREAKING duplicate rule. Every string returned here
+#   becomes a ChannelImportRowError, and a single surviving ERROR row refuses
+#   the ENTIRE all-or-nothing apply — a roster that used to import with a 200
+#   now gets a 422. The text is the operator's only remediation, so a wrong
+#   verdict here is a wrong instruction, not just a wrong label. No finance
+#   math and no write; it decides whether the write happens at all.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py -> _flag_duplicates,
+#     the only caller, which turns a non-None result into the row error.
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     _conflicting_channel_ids and _repeated_associations, the two sets whose
+#     precedence this function decides.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the documented 422 contract and the
+#     duplicate rule this enforces.
+# ============================================================================
 def _duplicate_reason(
     row: ChannelImportRow,
     *,

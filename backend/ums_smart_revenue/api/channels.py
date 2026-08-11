@@ -913,6 +913,42 @@ def _parse_import_upload(file: UploadFile) -> ParsedChannelImport:
         ) from exc
 
 
+# ============================================================================
+# Purpose: Render an import plan as the API response body — which is the same
+#   object twice over: the disclosure the operator approves, and (for four of
+#   the five digest inputs) the material ``_plan_fingerprint`` binds an apply
+#   to. Disclosure and binding are deliberately the SAME payload, so a field
+#   hidden from the operator is also outside the token, and a field added to
+#   the token must be shown.
+# Database/ORM: None — a pure projection of an already-computed plan. It issues
+#   no query and re-reads nothing; ``tenant_id`` arrives resolved.
+# Standards: Every row echoes the planned inventory VALUES, not just the field
+#   diff — a CREATE's ``changes`` is empty by design, and the dry run exists so
+#   the operator can see the exact values a full-roster apply would write.
+#   ``revenue_source_status`` is disclosed OUTSIDE ``changes`` on purpose: it is
+#   derived by the write rather than asserted by the CSV, and ``changes`` is
+#   what the write-boundary pre-state guard compares, so folding it in would
+#   make that guard police a field the roster never claimed. ``rows`` is
+#   annotated rather than inferred because ``list`` is invariant and the
+#   inferred element type would not satisfy ``_plan_fingerprint``. Both modes
+#   render the PLAN — unlike the sync route, whose apply renders the write
+#   boundary's own record.
+# Blast Radius: FINANCE + TENANCY + write authorization. These counts are the
+#   APPROVED PLAN, never the committed result: the apply re-checks every row
+#   under its write-boundary lock and tallies what it actually wrote into the
+#   ``CHANNEL_IMPORTED`` event, so a concurrent writer can turn a planned
+#   UPDATE into a no-op. Consumers must label them as the plan — the SPA's
+#   Applied step does. The tenant reaching the digest here is what stops a plan
+#   reviewed in one tenant from authorizing a write in another.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> _plan_fingerprint,
+#     which digests exactly this payload plus the resolved tenant.
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     ChannelImportPlan / ChannelImportPlanEntry, the source of every field.
+#   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult,
+#     the client-side structural gate that mirrors this shape field for field.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the documented response contract.
+# ============================================================================
 def _import_plan_to_api(
     plan: ChannelImportPlan,
     *,
