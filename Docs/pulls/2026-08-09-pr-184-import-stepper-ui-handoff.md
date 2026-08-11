@@ -157,7 +157,7 @@ with the pinned toolchain:
 | --- | --- |
 | `uv sync --extra dev --extra test --extra lint` | 87 resolved, 85 checked |
 | `uv run ruff check backend tests scripts` | **All checks passed** |
-| `uv run pytest -q` | **2817 passed**, 15 warnings (7m55s) |
+| `uv run pytest -q` | **2817 passed**, 15 warnings (8m22s) — re-run at `4c70c599` |
 | `git diff --check` | clean (exit 0) |
 | `uv run mypy backend` | clean for this PR's files (see note) |
 
