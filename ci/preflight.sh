@@ -714,6 +714,24 @@ fi
 # gate and stands behind HEAD, which is already committed.
 export CI_GATE_MODE="$MODE"
 
+# And is that tree the one being pushed? Ship mode resolves its *ranges* from
+# the hook's SHAs, so the history checks read the right commits — but every
+# check that runs content reads the worktree, and `git push origin
+# other-branch` leaves those two describing different branches. The gate would
+# then install, typecheck, test and build the branch you are standing on and
+# report the result as a verdict on the one going out.
+#
+# Refused rather than worked around. Running the outgoing tip would mean
+# checking it out, or building a second worktree, inside a pre-push hook —
+# which is a much larger change than this is a bug, and one that fails badly
+# on a dirty tree. Declining to answer is the honest option, and the remedy is
+# one command for the developer.
+if [ "$MODE" = "ship" ] && type ci::git::push_tip_is_checkout >/dev/null 2>&1 \
+  && ! ci::git::push_tip_is_checkout; then
+  ci::git::explain_push_tip_drift >&2
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+fi
+
 # ---- Changeset detection ----
 CHANGESET_MODE="pre-commit"
 case "$MODE" in

@@ -1476,7 +1476,41 @@ single P-tier above.
   merely never been fetched hard-refused the push. A missing remote object is
   now the same statement as a new branch: no base, so nothing narrows the range
   and ship mode walks all of HEAD. Scanning more, never less.
-  Combined suite: `bats ci/tests/` = 325 cases, 0 failures.
+  A thirty-second round found two, both P1, and both are the gate reporting
+  confidently on something it had not actually looked at.
+  (1) Ship mode resolves its *ranges* from the hook's SHAs, so the history
+  checks read the right commits — while every check that runs content reads the
+  worktree, of which there is one. `git push origin other-branch` therefore had
+  the two halves of a single run describing different branches, and the half
+  that executes things was describing the wrong one: a passing checkout vouched
+  for an outgoing branch whose tests fail. Reproduced before fixing — the lane
+  exited 0 on a branch whose test script exits 1. Refused rather than worked
+  around: running the outgoing tip means checking it out or building a second
+  worktree inside a pre-push hook, which is a far larger change than this is a
+  bug and fails badly on a dirty tree, and the developer's remedy is one
+  command. The comparison lives in `ci::git::push_tip_is_checkout` and is called
+  from `preflight.sh` and `node.sh` — the node lane is not the only check that
+  reads the worktree, so fixing it only where it was reported would have left
+  the identical hole in test-layout, the suites and the build.
+  (2) Delegation was accepted on the strength of a target *token*: any
+  recognised wrapper followed by any non-flag token passed, without ever reading
+  the target. `"test": "bash scripts/test.sh"` therefore passed while that
+  script was `exit 0`. The suite proved it — `ws_setup` wrote exactly that
+  script and **90 fixtures** named it, so the fixtures had been asserting that a
+  workspace running no tests is in good standing. That is the third fix to this
+  rule and the fourth time the fixtures encoded the defect under test: `"test":
+  "true"`, then `bash -c true`, and now a file whose contents run nothing —
+  each the previous no-op wearing one more layer. The stated reason for
+  allowing delegation ("a script the gate cannot read either way") was false: a
+  package script is in the manifest and a shell script is a file in the
+  workspace. Both are read now and judged by the same predicate, line by line
+  with comments stripped, depth-capped at 8. What genuinely cannot be resolved —
+  `make test`, or a target that is neither a manifest script nor a readable
+  file — is refused, which is a real behaviour change and the honest one.
+  Fixtures are wrappers that reach a runner now, via a `scripts/vitest` stand-in
+  that marks the true boundary: the gate can see a script invoke something named
+  `vitest` and cannot see what that binary does.
+  Combined suite: `bats ci/tests/` = 327 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

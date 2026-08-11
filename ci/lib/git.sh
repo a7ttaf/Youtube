@@ -109,3 +109,48 @@ ci::git::push_range() {
 ci::git::has_conflict_markers_in_changed() {
   git diff -U0 | grep -E '^\+[[:space:]]*(<{7}|={7}|>{7})([[:space:]]|$)' >/dev/null 2>&1
 }
+
+# ci::git::push_tip_is_checkout – 0 when the commit being pushed is the one the
+# worktree is standing on.
+#
+# Ranges are resolved from the hook's SHAs, so the *history* checks read the
+# right commits. Everything that runs content — the node lane, the test-layout
+# guard, the suites, the build — reads the worktree instead, and there is only
+# one of those. `git push origin other-branch` therefore gated the branch you
+# happen to be standing on: a passing checkout vouching for an outgoing branch
+# whose tests fail, reported as a clean push. That is the confident green this
+# gate exists to remove, and it cannot be fixed by looking harder at the wrong
+# tree.
+#
+# Answered here rather than in each lane so the lanes cannot drift apart about
+# it — the last several rounds were all one rule agreeing with its counterpart
+# on one axis and not another.
+#
+# Unset means nobody said, which is CI and every direct invocation: those run
+# against whatever is checked out by design, and there is no second tree to be
+# wrong about.
+ci::git::push_tip_is_checkout() {
+  local tip="${CI_GATE_PUSH_NEW_SHA:-}"
+  [ -n "$tip" ] || return 0
+  local pushed head
+  pushed="$(git rev-parse --verify "${tip}^{commit}" 2>/dev/null || true)"
+  head="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)"
+  # A tip that cannot be resolved is not evidence that it matches. Refusing on
+  # an unreadable sha is the same fail-closed direction as everywhere else.
+  [ -n "$pushed" ] || return 1
+  [ -n "$head" ] || return 1
+  [ "$pushed" = "$head" ]
+}
+
+# The message, in one place, because two callers print it.
+ci::git::explain_push_tip_drift() {
+  local tip="${CI_GATE_PUSH_NEW_SHA:-<unknown>}"
+  echo "The commit being pushed is not the commit checked out."
+  echo "  pushed: ${tip}"
+  echo "  HEAD:   $(git rev-parse --verify HEAD 2>/dev/null || echo '<none>')"
+  echo "  Every check that runs content reads the worktree, so this run would"
+  echo "  report on the branch you are standing on and not on the one going"
+  echo "  out — a pass here would vouch for a tree nobody is pushing."
+  echo "  Check out the commit being pushed and push again, or push the branch"
+  echo "  you have checked out."
+}

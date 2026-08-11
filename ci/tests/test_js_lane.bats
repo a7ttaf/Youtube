@@ -185,15 +185,24 @@ ws_setup() {
   printf '{}\n' > "$NODE_SB/ws/bun.lock"
   # Real wrapper scripts for the fixtures to name.
   #
-  # The stub was `"test": "true"`, then `"test": "bash scripts/test.sh"`, and the lane
-  # now rejects both — neither runs anything, and neither *names* anything that
-  # could. A script on disk is what a workspace wrapping its suite actually
-  # has, so the fixtures say that rather than standing in for it with a command
-  # that ignores its arguments.
+  # The stub was `"test": "true"`, then `"test": "bash -c true"`, then a
+  # `scripts/test.sh` containing `exit 0` — and the lane rejects all three now.
+  # Each was the previous no-op wearing one more layer: a command that runs
+  # nothing, a wrapper around a command that runs nothing, and a *file* whose
+  # contents run nothing. The gate follows delegation to its end, so the
+  # fixtures have to be wrappers that genuinely reach a runner.
+  #
+  # `scripts/vitest` stands in for the installed binary. That is the real
+  # boundary: the gate can see that a script invokes something named `vitest`
+  # and cannot see what that binary then does — so a fixture that names it is
+  # modelling a true wrapper, not evading the rule. The exit codes the cases
+  # rely on come from the wrapper, after the runner it names has been invoked.
   mkdir -p "$NODE_SB/ws/scripts"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/test.sh"
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$NODE_SB/ws/scripts/fail.sh"
-  printf '#!/usr/bin/env bash\nexit 10\n' > "$NODE_SB/ws/scripts/fail10.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/vitest"
+  chmod +x "$NODE_SB/ws/scripts/vitest"
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\n' > "$NODE_SB/ws/scripts/test.sh"
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\nexit 1\n' > "$NODE_SB/ws/scripts/fail.sh"
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\nexit 10\n' > "$NODE_SB/ws/scripts/fail10.sh"
 }
 
 ws_manifest() {
@@ -2060,14 +2069,15 @@ ws_run() {
   # would fail every workspace whose script mentions one.
   #
   # A wrapper, not a runner: for a known runner that trailing path *is* a filter
-  # and is rejected on purpose, which is the case above. The stand-in used to be
-  # `true`, and `true` is now refused as a command that runs no test runner — so
-  # it is a real wrapper script, created here so the lane can actually run it.
+  # and is rejected on purpose, which is the case above.
+  #
+  # The wrapper is ws_setup's, deliberately. This case used to write its own
+  # `scripts/test.sh` containing `exit 0` — re-creating, one round later and in
+  # a control, the no-op the rule above it exists to reject, and it passed
+  # because delegation was accepted without the target ever being read. What is
+  # under test here is the *argument* handling, so the wrapper only has to be
+  # one the lane accepts.
   ws_setup
-  mkdir -p "$NODE_SB/ws/scripts"
-  printf '#!/usr/bin/env bash
-exit 0
-' > "$NODE_SB/ws/scripts/test.sh"
   ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --reporter=dot tests/no-t-here.test.ts --outputFile=t.json" } }'
   ws_seed_fingerprint
   run ws_run
@@ -2218,14 +2228,12 @@ exit 0
   # fail every workspace that wraps its suite.
   #
   # The fixture said `true scripts/test.sh --ci`, using `true` as a stand-in for
-  # the wrapper — and `true` is now rejected as a command that runs no test
-  # runner, which is the same stub-becomes-the-defect the typecheck case hit.
-  # `bash` is the wrapper this was always describing.
+  # the wrapper, and then a `scripts/test.sh` of its own containing `exit 0`.
+  # Both were the no-op this rule rejects, standing in for the wrapper it was
+  # describing — the second one surviving only because delegation was accepted
+  # without the target being read. ws_setup's wrapper is a real one, and what
+  # this case is about is the positional argument beside it.
   ws_setup
-  mkdir -p "$NODE_SB/ws/scripts"
-  printf '#!/usr/bin/env bash
-exit 0
-' > "$NODE_SB/ws/scripts/test.sh"
   ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --ci" } }'
   ws_seed_fingerprint
   run ws_run
@@ -2430,12 +2438,14 @@ exit 0
 }
 
 @test "node lane: a typecheck that delegates to another runner is accepted" {
-  # Delegation is not evasion: the script it hands to is either another package
-  # script this rule has already seen, or a shell script the gate does not read
-  # either way. Rejecting it would fail every workspace that wraps its build.
+  # Delegation is not evasion, but it is not taken on trust either: the script
+  # it hands to is followed. `typecheck:all` has to exist in the manifest and
+  # has to reach a checker, which is what npm would require of it at runtime
+  # anyway — the earlier version of this case delegated to a script that was
+  # never defined and still passed.
   ws_setup
   printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "npm run typecheck:all", "test": "bash scripts/test.sh" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "npm run typecheck:all", "typecheck:all": "tsc --noEmit", "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [[ "$output" != *"type checker"* ]]
@@ -2554,12 +2564,13 @@ exit 0
 }
 
 @test "node lane: a typecheck delegating to a named script is accepted" {
-  # The control, and the reason delegation is allowed at all: the script it
-  # hands to is one the gate cannot read either way, and rejecting it would
-  # fail every workspace that wraps its checks.
+  # The control, and the reason delegation is allowed at all: a workspace that
+  # wraps its checks in a shell script must keep working. What changed is that
+  # the script has to actually reach a checker — the earlier version of this
+  # case wrapped `exit 0` and passed, which is the hole it was meant to guard.
   ws_setup
   printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tc.sh"
+  printf '#!/usr/bin/env bash\ntsc --noEmit\n' > "$NODE_SB/ws/scripts/tc.sh"
   ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bash scripts/tc.sh", "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
@@ -2644,6 +2655,68 @@ exit 0
   run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
   [ "$status" -eq 20 ]
   [[ "$output" == *"packages/app/package.json"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a delegated script that runs nothing is rejected" {
+  # Delegation was accepted on the strength of a target *token*, without ever
+  # reading the target -- so `bash scripts/noop.sh` passed while the script it
+  # names is `exit 0`. That is the same no-op the rule rejects, one file out
+  # rather than one wrapper out.
+  ws_setup
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/noop.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/noop.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: ship mode refuses a push whose tip is not the checkout" {
+  # The range is resolved from CI_GATE_PUSH_NEW_SHA, but everything that
+  # actually runs -- the drift comparison and every script -- reads the
+  # worktree. `git push origin other-branch` therefore gated the branch you are
+  # standing on: a passing checkout vouched for an outgoing branch whose tests
+  # fail, which is the confident-green this whole gate exists to remove.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm safe >/dev/null 2>&1
+  local here
+  here="$(git rev-parse --abbrev-ref HEAD)"
+  git checkout -q -b other
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fail.sh" } }'
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm bad >/dev/null 2>&1
+  local other
+  other="$(git rev-parse HEAD)"
+  git checkout -q "$here"
+  ws_seed_fingerprint
+
+  # The premise: the two tips really do differ, and the checkout really is the
+  # passing one -- so a PASS here is a report about the wrong tree.
+  [ "$other" != "$(git rev-parse HEAD)" ]
+
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA='$other' \
+    CI_GATE_NODE_WORKSPACE=ws bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not the commit checked out"* ]]
+  [[ "$output" == *"$other"* ]]
+  # And it stopped before running anything, so it cannot have reported on the
+  # checked-out branch's passing suite.
+  [[ "$output" != *"Running script"* ]]
+
+  # The control: pushing the branch you are standing on is the ordinary case
+  # and must still run. Without this the fix would be satisfied by a check that
+  # refuses every push.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA=\"\$(cd '$NODE_SB' && git rev-parse HEAD)\" \
+    CI_GATE_NODE_WORKSPACE=ws bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"not the commit checked out"* ]]
   cd "$REPO_ROOT"
   rm -rf "$NODE_SB"
 }

@@ -13,6 +13,16 @@ cd "$ROOT_DIR"
 
 ci::common::section "Check: node lane"
 
+# Before anything is discovered, installed or run: this lane executes scripts
+# out of the worktree, so if the worktree is not the commit being pushed it can
+# only report on the wrong tree. Checked here as well as in preflight.sh because
+# the lane is invoked directly too, and both call the one helper rather than
+# each carrying its own copy of the comparison.
+if [ "${CI_GATE_MODE:-}" = "ship" ] && ! ci::git::push_tip_is_checkout; then
+  ci::git::explain_push_tip_drift
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+fi
+
 # The lane body below handles exactly one workspace. When invoked normally we
 # discover the workspaces and re-enter once per directory; CI_GATE_NODE_WORKSPACE
 # marks that recursive call. A repo with a root package.json resolves to "."
@@ -1169,8 +1179,9 @@ script_command() {
 # and `npm run check:all` name a target; `bash -c true` names nothing, and its
 # contents are then judged as the command they are.
 _script_names_a_checker() {
-  local cmd="$1" tok has_runner=0 has_target=0
+  local cmd="$1" tok has_runner=0 has_target=""
   local tools="${2:-tsc tsc.cmd tsgo vue-tsc svelte-check astro tsd attw}"
+  local depth="${3:-0}"
   local runners="npm pnpm yarn bun npx pnpx turbo nx lerna make bash sh zsh"
   local t
 
@@ -1200,9 +1211,54 @@ _script_names_a_checker() {
     case "$tok" in
       run|exec|dlx|--) continue ;;
     esac
-    [ "$has_runner" -eq 1 ] && has_target=1 && break
+    [ "$has_runner" -eq 1 ] && has_target="$tok" && break
   done
-  [ "$has_runner" -eq 1 ] && [ "$has_target" -eq 1 ]
+  [ "$has_runner" -eq 1 ] && [ -n "$has_target" ] || return 1
+
+  # Delegation is followed, not taken on trust.
+  #
+  # Accepting a runner plus any non-flag token meant `bash scripts/test.sh`
+  # passed while the script it names is `exit 0` -- the same no-op this rule
+  # rejects, one file out instead of one wrapper out. "The gate cannot read it
+  # either way" was the reason given for allowing it, and it is not true: a
+  # package script is in the manifest, and a shell script is a file sitting in
+  # the workspace. Both are read now, and judged by this same predicate.
+  #
+  # What genuinely cannot be resolved -- `make test`, a target that is not in
+  # the manifest and not a readable file -- is refused. A gate that cannot see
+  # what it delegates to has no basis for reporting PASS on it, which is the
+  # rule this whole check is built on.
+  [ "$depth" -ge 8 ] && return 1
+
+  # A package script by that name. `npm run typecheck:all` is delegation to
+  # something this predicate has already seen the *shape* of but never the
+  # contents of; a target naming no such script is refused rather than assumed,
+  # because npm would fail on it at runtime too.
+  local sub
+  sub="$(script_command "$has_target" 2>/dev/null || true)"
+  if [ -n "$sub" ]; then
+    _script_names_a_checker "$sub" "$tools" "$((depth + 1))"
+    return $?
+  fi
+
+  # Or a readable file in the workspace. Judged line by line, so one line
+  # naming a checker is enough and a `-c` somewhere else in the file does not
+  # condemn the whole script. Comments are stripped first: a checker named only
+  # in a comment is not a checker being run, and stripping can only ever cause
+  # a refusal, never an acceptance.
+  if [ -f "$has_target" ] && [ -r "$has_target" ]; then
+    local line stripped
+    while IFS= read -r line || [ -n "$line" ]; do
+      stripped="${line%%#*}"
+      case "$stripped" in *[![:space:]]*) ;; *) continue ;; esac
+      if _script_names_a_checker "$stripped" "$tools" "$((depth + 1))"; then
+        return 0
+      fi
+    done < "$has_target"
+    return 1
+  fi
+
+  return 1
 }
 
 _filter_reject() {
