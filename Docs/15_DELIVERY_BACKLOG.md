@@ -823,18 +823,30 @@ single P-tier above.
   no new endpoint and no migration.
   **Backend scope correction (2026-08-11).** The two "additive touch" notes
   above were written early and undercount what the PR ships: the final diff
-  is **1295 insertions across six backend files**, and calling it additive
-  reads as frontend-with-a-flag. Beyond `can_import_channels` and
-  `group_action`, the route gained `expected_plan_fingerprint` — a **plan-
-  bound apply** that 409s with the refreshed plan when the reviewed pre-state
-  has drifted — a `plan_fingerprint` widened to cover the target *and* the
-  server-resolved tenant, `revenue_source_status` disclosure on every row,
-  and a write-boundary recheck of the previewed group effect under the group
-  row lock that applies to **unbound callers too**. Both new behaviours are
-  refusals, so the no-endpoint and no-migration claims still hold, and the
-  unbound "the file wins" rule of #159 is untouched. Scope, rollback ordering
-  and the per-file evidence live in
-  `Docs/pulls/2026-08-09-pr-184-import-stepper-ui-handoff.md`.
+  is **1866 insertions across eight backend files as of `e30c56ba`**, and
+  calling it additive reads as frontend-with-a-flag. Beyond
+  `can_import_channels` and `group_action`, the route gained
+  `expected_plan_fingerprint` — a **plan-bound apply** that 409s with the
+  refreshed plan when the reviewed pre-state has drifted — a
+  `plan_fingerprint` widened to cover the target *and* the server-resolved
+  tenant, `revenue_source_status` disclosure on every row, and a
+  write-boundary recheck of the previewed group effect under the group row
+  lock that applies to **unbound callers too**. A later round added a third
+  refusal: the parser now rejects a roster that **restates the same
+  `(youtube_channel_id, group_id)` pair** — including two rows carrying no
+  group — because the write pass collapses such a pair into one membership,
+  so keeping both copies made the preview promise the group work twice and
+  count the channel twice for a single association. It is the only change on
+  this branch that refuses input the previous code accepted, and it cannot
+  lose an import that previously succeeded: the duplicate row never wrote
+  anything. All three new behaviours are refusals, so the no-endpoint and
+  no-migration claims still hold, and the unbound "the file wins" rule of
+  #159 is untouched. Scope, rollback ordering and the per-file evidence live
+  in `Docs/pulls/2026-08-09-pr-184-import-stepper-ui-handoff.md`.
+  The insertion figure names the commit it measured because it moves whenever
+  backend code does — including comment-only rounds; re-derive it with
+  `git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`
+  rather than trusting this line if the branch has advanced.
 - ✅ Groups view UI — PR-A of the import/sync UI arc (2026-08-07, branch
   `feat/groups-view-ui`) — the grouping loop gets its first operator surface:
   a new **CMS Groups** nav view (table-first: name · CMS id · owner stamp ·
