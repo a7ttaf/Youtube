@@ -168,7 +168,20 @@ tests::run_js() {
     ( _tests_js_workspace "$ws" "$junit_out" "$jest_pattern" ) || rc=$?
 
     if [ "$rc" -eq 127 ]; then
-      ci::log::info "skipped: no workspace-local JS test runner in ${ws}/node_modules/.bin (a global jest/vitest is deliberately not used)"
+      # A detected workspace with no runner is broken infrastructure, not a
+      # skip. Reaching here means discovery found a manifest and this lane was
+      # scheduled for it, so "no runner" does not mean "nothing to run" -- it
+      # means the suite that exists could not be executed, and continuing let
+      # tests-js exit 0 having run no JavaScript at all. An uninstalled
+      # node_modules or a missing binary would take a blocking lane green.
+      #
+      # The same rule ci/checks/tests-shell.sh applies to a missing bats: an
+      # enabled blocker that cannot find its runner has not passed.
+      OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+      ci::log::error "No workspace-local JS test runner in ${ws}/node_modules/.bin"
+      ci::log::error "  (a global jest/vitest is deliberately not used). This workspace was"
+      ci::log::error "  detected and scheduled, so reporting PASS here would mean its suite"
+      ci::log::error "  never ran. Install its dependencies, or remove the workspace."
       continue
     fi
 
