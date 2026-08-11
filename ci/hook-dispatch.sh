@@ -42,7 +42,7 @@ case "$HOOK_NAME" in
     # branch with no base, which push_range already handles by walking all of
     # HEAD — and here that means leaving the base empty so it can.
     if [ ! -t 0 ]; then
-      _push_old="" _push_new="" _push_nobase=0 _push_unrelated="" _push_dests=""
+      _push_old="" _push_new="" _push_nobase=0 _push_unrelated="" _push_dests="" _push_any_content=0
       while read -r _lref _lsha _rref _rsha; do
         [ -n "${_lsha:-}" ] || continue
 
@@ -63,7 +63,19 @@ case "$HOOK_NAME" in
         esac
 
         # A deletion pushes the zero sha as the local one; there is no content.
-        case "$_lsha" in *[!0]*) ;; *) continue ;; esac
+        #
+        # Counted, not merely skipped. `git push --delete origin feature` is
+        # every record being a deletion, so nothing set _push_new -- and
+        # ci::git::push_range defaults a missing new sha to HEAD, which handed
+        # git-safety and the signature and linear-history checks the branch that
+        # happens to be checked out. Deleting an unrelated ref could then be
+        # blocked by commits that are not being pushed anywhere.
+        _push_has_content=1
+        case "$_lsha" in *[!0]*) ;; *) _push_has_content=0 ;; esac
+        if [ "$_push_has_content" -eq 0 ]; then
+          continue
+        fi
+        _push_any_content=1
 
         # The tip is chosen by ancestry, not by arrival. `_push_new="$_lsha"`
         # on every record meant "whichever ref git happened to list last",
@@ -146,6 +158,16 @@ case "$HOOK_NAME" in
       # for the sole reason that you were standing on main. Unset means nobody
       # said, which is every caller that is not this hook.
       export CI_GATE_PUSH_REMOTE_REFS="${_push_dests# }"
+      # A push that carries no content at all is a deletion, and there is
+      # nothing for a content or history check to report on. Stated explicitly
+      # rather than left as "no new sha", because that is indistinguishable from
+      # "nobody told us" and resolves to HEAD -- the checked-out branch, which
+      # is not being pushed anywhere. Destination protection still runs off
+      # CI_GATE_PUSH_REMOTE_REFS above: deleting `main` is exactly the push that
+      # must still be refused.
+      if [ "$_push_any_content" -eq 0 ]; then
+        export CI_GATE_PUSH_DELETIONS_ONLY=1
+      fi
       if [ -n "$_push_new" ]; then
         export CI_GATE_PUSH_NEW_SHA="$_push_new"
         [ -n "$_push_old" ] && export CI_GATE_PUSH_OLD_SHA="$_push_old"

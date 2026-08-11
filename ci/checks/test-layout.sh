@@ -384,15 +384,31 @@ extract_test_block() {
       if (ed == 0) exit 1
 
       # First brace after `export default`, which skips a defineConfig( wrapper.
+      #
+      # What sits between the two is an allow-list, not "anything, then take the
+      # first object". `defineConfig(Object.assign({ test: { include: [broad] } },
+      # { test: { include: ["one.test.ts"] } }))` put the *broad* object first, so
+      # this scan validated it and exited 0 while Object.assign let the second
+      # object replace `test` and vitest collected one file. Composition is
+      # invisible to a reader that only ever looks at one object literal.
+      #
+      # So: nothing, or exactly `defineConfig(`. A wrapper this guard has not
+      # been taught -- Object.assign, mergeConfig, a helper of your own -- stops
+      # it rather than being assumed transparent. Same inversion as the flags and
+      # the config properties: name what is known to be safe, and let everything
+      # else ask a human.
+      pre = ""
       p = ed + 14
       while (p <= n) {
         ch = substr(all, p, 1)
         if (is_quote(ch)) { p = string_end(all, p, n); continue }
         if (ch == "/" && is_regex_start(all, p)) { p = regex_end(all, p, n); continue }
         if (ch == "{") break
+        if (ch !~ /[[:space:]]/) pre = pre ch
         p++
       }
       if (p > n) exit 1
+      if (pre != "" && pre != "defineConfig(") { exit 3 }
       p++
 
       depth = 1
@@ -427,7 +443,35 @@ extract_test_block() {
         # include as live while vitest collected the narrowed one. This reader
         # works on text and cannot evaluate a computed key in general, so any
         # computed property at this level stops it rather than being guessed at.
+        # Only where a *key* would be, which is right after the opening brace
+        # or a comma. `[` at this level is far more often an ordinary array
+        # value -- `plugins: [react()]` is in most vitest configs there is --
+        # and treating every one of them as a computed key failed the guard on
+        # a config that is entirely correct. Proven, not reasoned: adding a
+        # bare `plugins: []` to the vitest.config.ts in this repository made the
+        # check exit 20 with "more than one top-level test block". A guard that
+        # blocks correct work gets switched off, and then it guards nothing.
+        #
+        # The narrowing keeps the case it was written for: `["test"]: {...}`
+        # follows `{` or `,` because that is where a property starts.
         if (depth == 1 && ch == "[") {
+          pc = prev_signif(all, p)
+          if (pc == "{" || pc == "," || pc == "") computed = 1
+        }
+
+        # A spread at this level is the same problem as a computed key, and was
+        # the next one along: `{ test: {broad}, ...narrow }` applies the spread
+        # `test` last, so the block this scan captured is not the one vitest
+        # uses. The test-block reader already refuses a spread *inside* the
+        # block for exactly this reason; the exported object own level had
+        # never been asked.
+        # Only a spread that comes *after* the test key. JavaScript keeps the
+        # later property, so `{ ...shared, test: {...} }` cannot be overridden
+        # by the spread -- the explicit key wins -- while `{ test: {...},
+        # ...narrow }` can be. Flagging both failed a config that is entirely
+        # correct and is the ordinary way to reuse a base config, which is the
+        # same false failure this round has already fixed twice.
+        if (depth == 1 && seen > 0 && substr(all, p, 3) == "...") {
           computed = 1
         }
 
@@ -700,6 +744,15 @@ check_one_config() {
     printf 'duplicate-test-block'
     return 0
   fi
+  # Four answers now. A composed export -- Object.assign, mergeConfig, any
+  # wrapper this reader has not been taught -- is not "no test block": the block
+  # is right there, and the point is that it may not be the one that survives
+  # composition. Saying "no readable test block" would send someone looking for
+  # a missing block that is not missing.
+  if [ "$_xt_rc" -eq 3 ]; then
+    printf 'composed-config'
+    return 0
+  fi
   [ "$_xt_rc" -eq 0 ] || have_block=0
   if [ -n "$block" ]; then
     props="$(printf '%s\n' "$block" | test_block_props)"
@@ -788,6 +841,17 @@ else
       no-test-block)
         fail "${_label} has no readable 'test: { ... }' block; cannot confirm the layout is declared."
         echo "  The layout must be declared under test.include, where vitest reads it."
+        ;;
+      composed-config)
+        fail "${_label} composes its exported config, so the block read here may not be the one vitest uses."
+        echo "  defineConfig(Object.assign({ test: { include: [\"${DECLARED_GLOB}\"] } },"
+        echo "  { test: { include: [\"tests/only.test.ts\"] } })) validates the first"
+        echo "  object and runs the second: Object.assign replaces test wholesale."
+        echo "  This guard reads one object literal, so a wrapper that merges"
+        echo "  several is something it cannot follow."
+        echo "  Export a single literal config — 'export default defineConfig({ ... })'"
+        echo "  or 'export default { ... }' — or teach this guard the wrapper in"
+        echo "  the same commit."
         ;;
       duplicate-test-block)
         fail "${_label} declares more than one top-level 'test: { ... }' block, or a computed one."

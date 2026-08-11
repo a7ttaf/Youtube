@@ -160,6 +160,13 @@ _bp_check_signed_commits() {
   if [ "${CI_GATE_REQUIRE_SIGNED_COMMITS:-0}" != "1" ]; then
     return 0
   fi
+  # A deletion pushes no commits, so there are none to have signed. Without
+  # this the missing new sha resolves to HEAD and the checked-out branch is
+  # audited instead -- commits nobody is pushing.
+  if [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
+    ci::log::info "Push deletes refs and carries no commits; skipping signature check."
+    return 0
+  fi
   if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
     ci::log::info "No HEAD commit; skipping signed commit check."
     return 0
@@ -200,6 +207,11 @@ _bp_check_signed_commits() {
 
 _bp_check_linear_history() {
   if [ "${CI_GATE_REQUIRE_LINEAR_HISTORY:-0}" != "1" ]; then
+    return 0
+  fi
+  # Same reason as the signature check: no commits are going out.
+  if [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
+    ci::log::info "Push deletes refs and carries no commits; skipping linear-history check."
     return 0
   fi
   if ! git rev-parse --verify HEAD >/dev/null 2>&1; then

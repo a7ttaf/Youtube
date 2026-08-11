@@ -102,12 +102,39 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
   while IFS= read -r _cfg; do
     [ -n "$_cfg" ] || continue
     _cfg_dir="$(dirname "$_cfg")"
-    # A manifest beside it settles the question — on disk, or in the index,
-    # because a workspace being added is not an orphan either.
-    [ -f "$_cfg_dir/package.json" ] && continue
-    if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
-      git cat-file -e ":${_cfg_dir#./}/package.json" 2>/dev/null && continue
-    fi
+    # A manifest settles the question — on disk, or in the index, because a
+    # workspace being added is not an orphan either.
+    #
+    # Looked for up the tree, not only beside it. A nested TypeScript project
+    # config is ordinary: `frontend/e2e/tsconfig.json` extending
+    # `../tsconfig.json` shares its package manager and dependencies with
+    # frontend, and demanding a second package.json next to it made
+    # `CI_GATE_MODE=full bash ci/checks/node.sh` exit 20 before reaching the
+    # frontend workspace at all. The rule is meant to catch a workspace that
+    # *lost* its manifest, and a config with an ancestor workspace has lost
+    # nothing.
+    #
+    # The case it was written for still fails: delete frontend/package.json and
+    # the walk from frontend reaches the repository root, which has no manifest
+    # either, so the lockfile and tsconfig left behind are still reported.
+    _mf_found=0
+    _mf_dir="$_cfg_dir"
+    while :; do
+      if [ -f "$_mf_dir/package.json" ]; then _mf_found=1; break; fi
+      if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+        _mf_rel="${_mf_dir#./}"
+        if [ "$_mf_rel" = "." ] || [ -z "$_mf_rel" ]; then
+          git cat-file -e ":package.json" 2>/dev/null && { _mf_found=1; break; }
+        else
+          git cat-file -e ":${_mf_rel}/package.json" 2>/dev/null && { _mf_found=1; break; }
+        fi
+      fi
+      case "$_mf_dir" in
+        .|/|"") break ;;
+      esac
+      _mf_dir="$(dirname "$_mf_dir")"
+    done
+    [ "$_mf_found" -eq 1 ] && continue
     ORPHANS="${ORPHANS}${_cfg#./}"$'\n'
   done <<< "$ORPHAN_CFG"
   ORPHANS="$(printf '%s' "$ORPHANS" | sed '/^$/d' | head -10)"
@@ -1165,96 +1192,181 @@ script_command() {
 #
 # Matched as whole arguments so a path or a test name containing "-t" is not
 # mistaken for the flag.
-# _script_names_a_checker <command> [runner-list-name] – 0 when the command
-# either invokes a known tool or delegates to something it names.
+# _script_names_a_checker <command> [tool-list] [depth] - 0 when the command
+# actually runs a known checker, or delegates to something that does.
 #
-# Two ways to be acceptable, and the second is where the first attempt at this
-# went wrong. Naming a tool is obvious. Delegating is legitimate too — the
-# script it hands to is one the gate cannot read either way — but only when it
-# *names* what it hands to. Accepting any token from a runner list meant
-# `bash -c true` satisfied the guard: the exact no-op the rule exists to
-# reject, one wrapper out.
+# Rewritten around *command position*. Scanning for a tool token anywhere in the
+# string accepted `"test": "echo vitest"`, which runs echo and collects nothing,
+# and `bash scripts/x.sh` reached through `echo bash scripts/x.sh` the same way.
+# A token is evidence that a checker runs only where a command starts: at the
+# beginning, or after a separator.
 #
-# So an inline `-c` command disqualifies delegation. `bash scripts/check.sh`
-# and `npm run check:all` name a target; `bash -c true` names nothing, and its
-# contents are then judged as the command they are.
+# This rule has now been fixed five times, and every previous attempt lost for
+# the same reason -- it asked whether a string contains something rather than
+# whether the shell would execute it. Presence is not execution.
+# Strip one leading and one trailing quote from $tok, in place.
+#
+# A bracket expression is the obvious way to write this and is treacherous:
+# `${tok#[\"\']}` and `${tok#[\"']}` differ by one backslash and behave
+# differently, and the failure is silent -- the wrong one strips the first
+# *character* of every token, so `tsc` became `sc` and every TypeScript
+# workspace was told it has no type checker. Matched one quote at a time here,
+# with `?` removing exactly one character, because that cannot be misread.
+_unquote_tok() {
+  case "$tok" in
+    '"'*) tok="${tok#?}" ;;
+    "'"*) tok="${tok#?}" ;;
+  esac
+  case "$tok" in
+    *'"') tok="${tok%?}" ;;
+    *"'") tok="${tok%?}" ;;
+  esac
+}
+
 _script_names_a_checker() {
-  local cmd="$1" tok has_runner=0 has_target=""
+  local cmd="$1"
   local tools="${2:-tsc tsc.cmd tsgo vue-tsc svelte-check astro tsd attw}"
   local depth="${3:-0}"
-  local runners="npm pnpm yarn bun npx pnpx turbo nx lerna make bash sh zsh"
-  local t
+  # `make` is deliberately absent. Its argument is a Makefile target, not a
+  # package script and not a file, so resolving it the way the others are
+  # resolved is simply wrong -- `make test` looked up a `test` *script* in the
+  # manifest and accepted whatever that ran, which is not what make would do.
+  # A Makefile is not something this gate reads, so `make test` is delegation it
+  # cannot follow, and unresolvable delegation is refused like any other.
+  local runners="npm pnpm yarn bun npx pnpx turbo nx lerna bash sh zsh"
+  local tok t
 
-  # shellcheck disable=SC2086
-  for tok in $cmd; do
-    # Quotes cling to the token when the command is split on whitespace, so
-    # `sh -c 'tsc --noEmit'` yields `'tsc` and would miss its own checker.
-    tok="${tok#[\"\']}"
-    tok="${tok%[\"\']}"
-    for t in $tools; do
-      [ "${tok##*/}" = "$t" ] && return 0
-    done
-  done
-
-  # An inline shell command names no target; it just ran, and nothing above
-  # found a tool in it.
-  case " $cmd " in
-    *" -c "*) return 1 ;;
-  esac
-
-  # shellcheck disable=SC2086
-  for tok in $cmd; do
-    case "$tok" in -*) continue ;; esac
-    for t in $runners; do
-      [ "${tok##*/}" = "$t" ] && has_runner=1 && continue 2
-    done
-    case "$tok" in
-      run|exec|dlx|--) continue ;;
-    esac
-    [ "$has_runner" -eq 1 ] && has_target="$tok" && break
-  done
-  [ "$has_runner" -eq 1 ] && [ -n "$has_target" ] || return 1
-
-  # Delegation is followed, not taken on trust.
-  #
-  # Accepting a runner plus any non-flag token meant `bash scripts/test.sh`
-  # passed while the script it names is `exit 0` -- the same no-op this rule
-  # rejects, one file out instead of one wrapper out. "The gate cannot read it
-  # either way" was the reason given for allowing it, and it is not true: a
-  # package script is in the manifest, and a shell script is a file sitting in
-  # the workspace. Both are read now, and judged by this same predicate.
-  #
-  # What genuinely cannot be resolved -- `make test`, a target that is not in
-  # the manifest and not a readable file -- is refused. A gate that cannot see
-  # what it delegates to has no basis for reporting PASS on it, which is the
-  # rule this whole check is built on.
   [ "$depth" -ge 8 ] && return 1
 
-  # A package script by that name. `npm run typecheck:all` is delegation to
-  # something this predicate has already seen the *shape* of but never the
-  # contents of; a target naming no such script is refused rather than assumed,
-  # because npm would fail on it at runtime too.
+  # Compositions that prove nothing. `true || vitest run` never reaches the
+  # checker; `vitest run || true` reaches it and throws the result away, which
+  # is worse -- the suite fails and the script still exits 0. Neither can be
+  # vouched for, so `||` is refused outright rather than reasoned about
+  # case by case. `&` backgrounds the checker and lets the script exit before
+  # it finishes, which is the same lie with different timing.
+  case " $cmd " in
+    *" || "*) return 1 ;;
+    *" & "*) return 1 ;;
+  esac
+  case "$cmd" in
+    *" &") return 1 ;;
+  esac
+
+  # An inline shell command is judged as the command it is. `bash -c tsc` runs
+  # a checker and is accepted; `bash -c true` names nothing and is not. Only
+  # when the thing being handed `-c` is actually a shell -- `echo -c tsc` runs
+  # echo.
+  local first=""
+  # shellcheck disable=SC2086
+  for tok in $cmd; do
+    _unquote_tok
+    case "$tok" in
+      [A-Za-z_]*=*) continue ;;
+    esac
+    first="${tok##*/}"
+    break
+  done
+  case " $first " in
+    " bash "|" sh "|" zsh ")
+      case " $cmd " in
+        *" -c "*)
+          local inline="${cmd#* -c }"
+          tok="$inline"
+          _unquote_tok
+          inline="$tok"
+          _script_names_a_checker "$inline" "$tools" "$((depth + 1))"
+          return $?
+          ;;
+      esac
+      ;;
+  esac
+
+  # One pass, tracking whether the next token starts a command.
+  local expect_cmd=1 runner="" target=""
+  # shellcheck disable=SC2086
+  for tok in $cmd; do
+    _unquote_tok
+    case "$tok" in
+      ";"|"&&"|"|"|"("|")"|"{"|"}"|"!")
+        expect_cmd=1
+        runner=""
+        target=""
+        continue
+        ;;
+    esac
+
+    if [ "$expect_cmd" -eq 1 ]; then
+      # `NODE_ENV=test vitest run` still starts with vitest.
+      case "$tok" in
+        [A-Za-z_]*=*) continue ;;
+      esac
+      for t in $tools; do
+        [ "${tok##*/}" = "$t" ] && return 0
+      done
+      for t in $runners; do
+        if [ "${tok##*/}" = "$t" ]; then
+          runner="$tok"
+          expect_cmd=0
+          continue 2
+        fi
+      done
+      # Some other command. Its arguments are arguments, not commands.
+      expect_cmd=0
+      continue
+    fi
+
+    # Arguments of whatever is currently running. Only a runner has a
+    # delegation target worth resolving.
+    [ -n "$runner" ] || continue
+    [ -n "$target" ] && continue
+    case "$tok" in
+      -*) continue ;;
+      run|exec|dlx|--) continue ;;
+    esac
+    target="$tok"
+  done
+
+  [ -n "$runner" ] && [ -n "$target" ] || return 1
+
+  # For `npx`, `pnpm dlx` and friends the target *is* the executable, so a
+  # checker there is a checker being run and needs no further resolution.
+  # Reached only through a runner in command position, so `echo vitest` does
+  # not arrive here.
+  for t in $tools; do
+    [ "${target##*/}" = "$t" ] && return 0
+  done
+
+  # Delegation is followed, not taken on trust. Accepting a runner plus a target
+  # token meant `bash scripts/test.sh` passed while that script was `exit 0`.
+  # A package script is in the manifest and a shell script is a file in the
+  # workspace, so both are read.
+  #
+  # What cannot be resolved -- `make test`, or a target that is neither -- is
+  # refused: a gate that cannot see what it delegates to has no basis for
+  # reporting PASS on it.
   local sub
-  sub="$(script_command "$has_target" 2>/dev/null || true)"
+  sub="$(script_command "$target" 2>/dev/null || true)"
   if [ -n "$sub" ]; then
     _script_names_a_checker "$sub" "$tools" "$((depth + 1))"
     return $?
   fi
 
-  # Or a readable file in the workspace. Judged line by line, so one line
-  # naming a checker is enough and a `-c` somewhere else in the file does not
-  # condemn the whole script. Comments are stripped first: a checker named only
-  # in a comment is not a checker being run, and stripping can only ever cause
-  # a refusal, never an acceptance.
-  if [ -f "$has_target" ] && [ -r "$has_target" ]; then
+  # A readable file, judged line by line: one line reaching a checker is enough,
+  # and a `-c` elsewhere does not condemn the whole script. Comments are
+  # stripped first, because a checker named in a comment is not one being run --
+  # and stripping can only ever cause a refusal, never an acceptance.
+  if [ -f "$target" ] && [ -r "$target" ]; then
     local line stripped
     while IFS= read -r line || [ -n "$line" ]; do
       stripped="${line%%#*}"
-      case "$stripped" in *[![:space:]]*) ;; *) continue ;; esac
+      case "$stripped" in
+        *[![:space:]]*) ;;
+        *) continue ;;
+      esac
       if _script_names_a_checker "$stripped" "$tools" "$((depth + 1))"; then
         return 0
       fi
-    done < "$has_target"
+    done < "$target"
     return 1
   fi
 
@@ -1296,9 +1408,43 @@ assert_no_persistent_filter() {
   # a `test` key was never the property worth asserting, exactly as it was not
   # for `typecheck`; this is that rule one script over.
   #
-  # Delegation is accepted because the script it hands to is either another
-  # package script this rule has already seen, or a shell script the gate does
-  # not read either way. A no-op is not delegation.
+  # Compositions whose outcome cannot be trusted, on either side of the runner.
+  #
+  # Asked here rather than left to the rules below, because those reached the
+  # right verdict for the wrong reason and said so out loud: `vitest run || true`
+  # was rejected with "'true' selects a subset, so the lane can exit 0 with the
+  # rest of the suite never collected", which is not what is wrong with it. The
+  # suite runs in full and its result is then discarded. A developer sent to
+  # look for a filter would find none.
+  #
+  # `true || vitest run` is the other half: the runner is never reached at all.
+  # `&` is the same lie with different timing -- the script exits before the
+  # suite it backgrounded has finished.
+  case " $cmd " in
+    *" || "*|*" & "*)
+      echo "Workspace ${CI_GATE_NODE_WORKSPACE} composes the '${script_name}' script so its result"
+      echo "  cannot be trusted:"
+      echo "    ${script_name}: ${cmd}"
+      echo "  '||' means one side or the other does not run: either the runner is"
+      echo "  never reached, or it ran and its failure was swallowed and the script"
+      echo "  exited 0 anyway. '&' backgrounds the runner and lets the script exit"
+      echo "  before it finishes. In each case the lane reports PASS without a"
+      echo "  suite result behind it. Use '&&', or ';', or split the script."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+      ;;
+  esac
+  case "$cmd" in
+    *" &")
+      echo "Workspace ${CI_GATE_NODE_WORKSPACE} backgrounds the '${script_name}' script:"
+      echo "    ${script_name}: ${cmd}"
+      echo "  The script exits before the runner it started has finished, so the"
+      echo "  lane reports PASS with no suite result behind it."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+      ;;
+  esac
+
+  # Delegation is accepted only when what it hands to can be read and reaches a
+  # checker. A no-op is not delegation.
   if [ "$is_test_runner" -ne 1 ]; then
     # Same question as the typecheck script, same answer: naming a tool, or
     # delegating to something it names. `"test": "bash -c true"` is the no-op
@@ -1340,8 +1486,21 @@ assert_no_persistent_filter() {
         *) continue ;;
       esac
       case "${tok%%=*}" in
+        # `--config`/`-c` and `--root` are gone from this list deliberately.
+        #
+        # They do not narrow what vitest collects; they change *which config
+        # declares* what it collects, which is worse. test-layout.sh validates
+        # frontend/vitest.config.ts and nothing else, so `vitest run --config
+        # vitest.narrow.config.ts` had the two checks reporting on two different
+        # files: one confirming a broad include that is not in force, the other
+        # running a config nobody inspected. `--root` moves the whole resolution
+        # base and does the same thing one level up.
+        #
+        # A flag that redirects the guard is not the same kind of thing as a
+        # flag that cannot reduce the run, and this list was only ever an
+        # allow-list for the second kind.
         --run|--watch|--no-watch|--coverage|--no-coverage|--reporter|--reporters \
-          |--outputFile|--outputTruncateLength|--config|-c|--root|--mode|--silent \
+          |--outputFile|--outputTruncateLength|--mode|--silent \
           |--color|--no-color|--logHeapUsage|--pool|--poolOptions|--isolate \
           |--no-isolate|--threads|--no-threads|--file-parallelism \
           |--no-file-parallelism|--maxWorkers|--minWorkers|--maxConcurrency \

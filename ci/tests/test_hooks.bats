@@ -274,3 +274,29 @@ SH
   [[ "$output" == *"do not form one chain"* ]]
   rm -rf "$HD_SB"
 }
+
+@test "hook: a deletion-only push is not gated as if it carried HEAD" {
+  # `git push --delete origin feature` sends an all-zero local sha for every
+  # record, so nothing set the new sha -- and ci::git::push_range defaults a
+  # missing one to HEAD. git-safety and the signature and linear-history checks
+  # then audited the checked-out branch, so deleting an unrelated ref could be
+  # blocked by commits that are not being pushed anywhere.
+  _hd_sandbox
+  local zero=0000000000000000000000000000000000000000
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/x %s refs/heads/feature %s\n' \
+    '$zero' '$HD_TIP' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -eq 0 ]
+  # No content, so no range is claimed for one.
+  [[ "$output" == *"NEW="* ]]
+  [[ "$output" != *"NEW=$HD_TIP"* ]]
+  # And the destination is still reported, because whether the ref may be
+  # deleted at all is branch protection's question and it still has to run.
+  [[ "$output" == *"DEST=feature"* ]]
+
+  # The control: a push that does carry content is unaffected.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\n' \
+    '$HD_TIP' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NEW=$HD_TIP"* ]]
+  rm -rf "$HD_SB"
+}

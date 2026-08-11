@@ -53,6 +53,16 @@ fi
 GATE_RANGE=""
 GATE_COMMITS=""
 GATE_WHAT="staged"
+if [ "${CI_GATE_MODE:-}" = "ship" ] && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
+  # `git push --delete origin feature` carries no content, so there is nothing
+  # here to scan. Without this the missing new sha defaulted to HEAD and every
+  # scan below reported on the checked-out branch -- commits that are not being
+  # pushed anywhere, blocking the deletion of an unrelated ref. Whether the ref
+  # may be deleted at all is branch-protection.sh's question, and it still runs.
+  echo "Push deletes refs and carries no content; nothing to scan."
+  exit "$CI_RESULT_PASS"
+fi
+
 if [ "${CI_GATE_MODE:-}" = "ship" ]; then
   GATE_RANGE="$(ci::git::push_range 2>/dev/null || true)"
   if [ -z "$GATE_RANGE" ]; then

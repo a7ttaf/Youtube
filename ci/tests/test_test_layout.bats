@@ -1434,3 +1434,104 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" != *"negates inside"* ]]
 }
+
+@test "test-layout: a top-level array value is not a computed key" {
+  # The round that added computed-key detection marked *any* `[` at the exported
+  # object own level as one -- and `[` does not change brace depth, so an
+  # ordinary `plugins: [react()]` sat at that level too. Adding a bare
+  # `plugins: []` to this repository's own config made the check exit 20 with
+  # "more than one top-level test block". A guard that fails correct work gets
+  # switched off, and then it guards nothing.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  plugins: [],
+  resolve: { alias: [] },
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"more than one top-level"* ]]
+}
+
+@test "test-layout: a computed key after a top-level array is still refused" {
+  # The control for the narrowing above. `[` is a computed key where a *key*
+  # would be -- after the brace or a comma -- and a value everywhere else, so
+  # the case the rule exists for has to survive sitting next to an array.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  plugins: [],
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  ["test"]: {
+    include: ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"computed"* ]]
+}
+
+@test "test-layout: a composed export is refused, not read as its first object" {
+  # This reader takes the first object literal after `export default` as the
+  # config. Object.assign hands it the *broad* object first and then replaces
+  # `test` wholesale with the second, so the guard validated a config that is
+  # not in force while vitest collected one file.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig(Object.assign({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+}, { test: { include: ["tests/only.test.ts"] } }));
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"composes its exported config"* ]]
+}
+
+@test "test-layout: a plain defineConfig export is still accepted" {
+  # The control. The wrapper allow-list is `defineConfig(` or nothing at all,
+  # and a rule that refused every wrapper would fail this repository outright.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"composes"* ]]
+}
+
+@test "test-layout: a spread at the exported object own level is refused" {
+  # The same failure as a computed key, one property over: `{ test: {...},
+  # ...narrow }` applies the spread last, so the block captured here is not the
+  # one vitest ends up using. The block reader already refuses a spread inside
+  # test; this level had never been asked.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+import narrow from "./narrow";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  ...narrow,
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+}

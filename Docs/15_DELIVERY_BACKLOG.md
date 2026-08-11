@@ -1510,7 +1510,63 @@ single P-tier above.
   Fixtures are wrappers that reach a runner now, via a `scripts/vitest` stand-in
   that marks the true boundary: the gate can see a script invoke something named
   `vitest` and cannot see what that binary does.
-  Combined suite: `bats ci/tests/` = 327 cases, 0 failures.
+  A thirty-third round found six, three P1, and the sharpest lesson is that one
+  rule had now been fixed five times while asking the wrong question every time.
+  `_script_names_a_checker` asked whether a command *contains* a checker; codex
+  supplied a third way for a string to contain one that never runs -- `"test":
+  "echo vitest"`, where the name is an argument -- after `bash -c true` and a
+  `scripts/test.sh` that does nothing. Presence is not execution, and widening
+  the token scan was never going to reach that. The predicate is rebuilt around
+  **command position**: a token counts only where a command starts, at the
+  beginning or after a separator. `echo bash scripts/test.sh` closes with it, a
+  hole one layer out that was not in the report. Compositions that cannot prove
+  the checker runs are refused: `true || vitest run` never reaches it, and
+  `vitest run || true` is worse -- the suite runs in full and its result is
+  discarded. `&&` stays accepted, because either the checker runs or the script
+  fails with what preceded it. And the composition case had been *rejected for
+  the wrong reason* before this, by the positional-filter rule, with "'true'
+  selects a subset" -- a diagnosis describing a filter that is not there; it has
+  its own check and its own message now, with a test asserting the old wording
+  is absent.
+  Two more were the guard failing correct work, which is the expensive kind
+  because a gate that blocks good commits gets switched off. Qodo caught the
+  round-30 computed-key rule marking *any* `[` at the exported object own level
+  as a computed key -- and `[` does not change brace depth, so an ordinary
+  `plugins: [react()]` sat at that level too. Adding a bare `plugins: []` to
+  this repository's vitest config made the check exit 20. It is a computed key
+  only where a *key* would be, after the brace or a comma. The nested-config
+  case was the same shape: `frontend/e2e/tsconfig.json` extending
+  `../tsconfig.json` was reported as an orphan because no `package.json` sat
+  beside it, and a full-mode run exited 20 before reaching the workspace. The
+  walk goes upward now and stops at the first manifest; a config that reaches
+  the root without finding one is still reported.
+  The rest: `--config`/`-c`/`--root` are out of the runner flag allow-list --
+  they do not narrow what vitest collects, they change which file *declares*
+  what it collects, while `test-layout.sh` validates one fixed path, so the two
+  checks were reporting on two different files. `defineConfig(Object.assign({
+  test: {broad} }, { test: {narrow} }))` validated the object composition had
+  already replaced, so what sits between `export default` and the brace is an
+  allow-list now -- nothing, or `defineConfig(` -- and a spread at that same
+  level went in beside it rather than waiting to be reported. And a
+  deletion-only push (`git push --delete`) set no tip, which
+  `ci::git::push_range` resolved to `HEAD`, so the content and history checks
+  audited the checked-out branch; `CI_GATE_PUSH_DELETIONS_ONLY` states that
+  case explicitly and those checks skip, while destination protection still
+  runs -- deleting `main` is the push that must still be refused.
+  The rewrite introduced two defects of its own before the suite caught them,
+  both worth recording because both are the direction that blocks correct work.
+  The token unquoting is a bracket expression matching a leading or trailing
+  quote; rewriting it dropped one backslash before the single-quote, and that
+  form matches any first character, so it strips one from every token. `tsc`
+  became `sc` and every TypeScript workspace was told it has no type checker.
+  Five acceptance cases failed at once; the quotes are matched one at a time
+  now, and pinned by a case of their own. The new depth-1 spread rule flagged
+  `{ ...shared, test: {...} }`, which is correct: the explicit `test:` comes
+  later and wins, so only a spread *after* the test key can override it.
+  `make` also left the runner list -- its argument is a Makefile target, not a
+  package script or a file, so `make test` had been resolving a `test` script
+  from the manifest and accepting whatever that ran.
+  Combined suite: `bats ci/tests/` = 338 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

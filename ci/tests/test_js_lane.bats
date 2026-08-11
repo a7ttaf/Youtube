@@ -2720,3 +2720,149 @@ ws_run() {
   cd "$REPO_ROOT"
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: a config-selecting flag is rejected" {
+  # `--config` does not narrow what vitest collects; it changes which file
+  # *declares* what it collects, and test-layout.sh validates
+  # frontend/vitest.config.ts and nothing else. So `vitest run --config
+  # vitest.narrow.config.ts` had the two checks reporting on two different
+  # files: one confirming a broad include that is not in force, the other
+  # running a config nobody inspected. The allow-list was only ever for flags
+  # that cannot reduce the run.
+  # Asserted on the message, not merely on the status. There is no vitest in
+  # this sandbox, so `vitest run ...` exits 20 whatever the validator decides --
+  # a status-only assertion here would pass for the wrong reason and keep
+  # passing if the rule were deleted.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --config vitest.narrow.config.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  [[ "$output" == *"--config"* ]]
+
+  # `-c` is the same flag spelled short, and `--root` redirects resolution one
+  # level further up. Enumerating one and not the others is how this rule lost
+  # three times before.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run -c other.config.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --root packages/other" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The control: flags that cannot reduce the run are still accepted, or the
+  # allow-list would have become a ban on flags. Same shape as the assertions
+  # above -- what is under test is the validator, and the sandbox cannot run
+  # vitest either way.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --reporter=dot --coverage" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a nested config under a workspace is not an orphan" {
+  # A nested TypeScript project config is ordinary: frontend/e2e/tsconfig.json
+  # extending ../tsconfig.json shares its package manager and dependencies with
+  # frontend. Requiring a second package.json beside it made a full-mode run
+  # exit 20 before reaching the workspace at all. The rule is meant to catch a
+  # workspace that *lost* its manifest, and a config with an ancestor workspace
+  # has lost nothing.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  mkdir -p "$NODE_SB/ws/e2e"
+  printf '{ "extends": "../tsconfig.json" }\n' > "$NODE_SB/ws/e2e/tsconfig.json"
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=full bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"no package.json beside it"* ]]
+
+  # The control, and the case the rule was written for: a config whose walk
+  # reaches the root without finding any manifest is still an orphan. Without
+  # this, walking upward would have quietly deleted the rule.
+  mkdir -p "$NODE_SB/stray"
+  printf '{}\n' > "$NODE_SB/stray/tsconfig.json"
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=full bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"stray/tsconfig.json"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a checker named as an argument does not count as running one" {
+  # The token scan accepted a tool name wherever it appeared, so `echo vitest`
+  # satisfied the rule while running echo and collecting nothing. A name is
+  # evidence that a checker runs only where a command starts.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo vitest" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # Same shape one layer out: a delegation target reached only as an argument.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a composition that cannot prove the checker runs is refused" {
+  # `true || vitest run` never reaches the runner. `vitest run || true` reaches
+  # it and throws the result away, which is worse -- the suite fails and the
+  # script still exits 0. Neither can be vouched for.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true || vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot be trusted"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run || true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot be trusted"* ]]
+  # And for the right reason. This was rejected before the fix too, by the
+  # positional-filter rule, with "'true' selects a subset" -- a diagnosis that
+  # describes a filter that is not there and sends the reader looking for one.
+  [[ "$output" != *"selects a subset"* ]]
+
+  # The control: `&&` is fine. Either the checker runs, or the thing before it
+  # failed and the script fails with it -- no outcome where the suite is
+  # silently skipped. Rejecting it would fail ordinary `tsc && vitest run`.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo start && bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unquoted checker token is not truncated by quote stripping" {
+  # The tokens are unquoted before they are compared, because `sh -c 'tsc
+  # --noEmit'` arrives with the quote clinging to the first one. Written as a
+  # bracket expression that differs by a single backslash -- `[\"\']` against
+  # `[\"']` -- the wrong form strips the first *character* of every token, so
+  # `tsc` became `sc`, matched nothing, and every TypeScript workspace was told
+  # it has no type checker. Silent, and in the direction that blocks correct
+  # work rather than admitting bad work, which is why it is pinned here rather
+  # than left to the cases that happened to catch it.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+
+  # And the case the stripping exists for: a quoted token still matches.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "'"'"'tsc'"'"' --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
