@@ -159,11 +159,22 @@ authorship. Neither direction of the comparison establishes it. The SPA does exa
 reports "the registry now matches this roster", stays on Preview, keeps Apply
 disabled, and points at the audit trail. The apply is all-or-nothing: any ERROR row —
 malformed id/name/token, a value containing a NUL character, a group_id over
-255 characters, a CONFLICTING duplicate id (copies that disagree on
-channel_name/view_revenue; repeating a channel once per group is legal and
-attaches every membership, the extra copies planning as UNCHANGED), row wider
+255 characters, either kind of duplicate id, row wider
 than the header, archived channel, or archived CMS group — rejects the file
-as 422 before any write. UPDATE and UNCHANGED rows both write through the
+as 422 before any write.
+Repeating a channel id is legal exactly once per DISTINCT `group_id`, which
+attaches every membership, the extra copies planning as UNCHANGED. **Two**
+duplicate shapes are ERRORs, and both fail every copy: copies that DISAGREE on
+`channel_name`/`view_revenue` (ambiguous about what to persist — no copy is
+privileged, so there is no non-arbitrary winner), and copies that RESTATE the
+same `(youtube_channel_id, group_id)` pair, including two rows carrying no
+group at all. The second exists because the write pass collapses a repeated
+pair into one membership: keeping both copies made the dry run promise the
+group work twice and count the channel twice for a single association, so the
+preview overstated its own effect (review #184). Rejecting it cannot lose an
+import that previously succeeded — the duplicate row never wrote anything —
+so a roster that used to apply persists exactly the same state once the
+restated line is removed. UPDATE and UNCHANGED rows both write through the
 registry at the apply boundary so a concurrent change committed after
 planning cannot survive the roster (the file wins); CHANNEL_UPDATED is
 recorded exactly when the write-boundary diff is non-empty, so healed drift
