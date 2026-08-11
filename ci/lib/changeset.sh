@@ -11,7 +11,9 @@ CI_GATEIGNORE="${CI_GATEIGNORE:-.ci-gateignore}"
 
 # Internal state (populated by ci::changeset::detect)
 _CI_CHANGESET_MODE=""
-_CI_CHANGESET_FILES_RAW=""   # newline-separated "STATUS\tPATH" entries
+_CI_CHANGESET_FILES_RAW=""   # newline-separated "STATUS\tPATH" entries,
+                             # paths %-escaped for tab, newline and % itself
+_CI_CHANGESET_PATH=""        # out-parameter of ci::changeset::_decode_path
 _CI_CHANGESET_LANGUAGES=""   # space-separated unique languages
 _CI_CHANGESET_CHECKS=""      # space-separated unique checks
 
@@ -327,6 +329,23 @@ ci::changeset::_workspace_checks() {
   ci::changeset::_checks_for_language javascript
 }
 
+ci::changeset::_encode_path() {
+  local p="$1"
+  p="${p//%/%25}"
+  p="${p//	/%09}"
+  p="${p//$'\n'/%0A}"
+  printf '%s' "$p"
+}
+
+# Sets _CI_CHANGESET_PATH rather than printing: a decoded path can end in a
+# newline, and `$(...)` strips exactly that.
+ci::changeset::_decode_path() {
+  local p="$1"
+  p="${p//%09/	}"
+  p="${p//%0A/$'\n'}"
+  _CI_CHANGESET_PATH="${p//%25/%}"
+}
+
 ci::changeset::_populate_state_from_raw() {
   local generated_languages="" generated_checks=""
   generated_checks="$_CI_CHANGESET_ALWAYS_CHECKS"
@@ -338,6 +357,8 @@ ci::changeset::_populate_state_from_raw() {
 
       while IFS= read -r p; do
         [ -z "$p" ] && continue
+        ci::changeset::_decode_path "$p"
+        p="$_CI_CHANGESET_PATH"
         ci::changeset::should_ignore "$p" && continue
 
         lang="$(ci::changeset::classify_file "$p")"
@@ -369,6 +390,15 @@ $(ci::changeset::_workspace_checks "$p")"
 #
 # Renames and copies carry two paths; both are kept, because a changeset that
 # lists only the destination describes a different change from the one gated.
+#
+# Reading NUL-delimited and then writing tab- and newline-delimited records gave
+# the quoting defect back in another spelling: a path is any byte sequence
+# without a NUL, so `backend/foo<newline>bar.py` split into two records, both
+# nonsense, and the commit's language came out `unknown` -- every Python lint,
+# typecheck, format and test check dropped from a change that is Python. The
+# internal format is kept, since two readers and the JSON report share it, and
+# the two bytes it cannot carry are escaped on the way in and restored on the
+# way out. `%` goes first so the escaping is reversible.
 ci::changeset::_read_name_status() {
   local st p1 p2 out=""
   while IFS= read -r -d '' st; do
@@ -377,11 +407,11 @@ ci::changeset::_read_name_status() {
     case "$st" in
       R*|C*)
         IFS= read -r -d '' p2 || break
-        out="${out}${st}	${p1}	${p2}
+        out="${out}${st}	$(ci::changeset::_encode_path "$p1")	$(ci::changeset::_encode_path "$p2")
 "
         ;;
       *)
-        out="${out}${st}	${p1}
+        out="${out}${st}	$(ci::changeset::_encode_path "$p1")
 "
         ;;
     esac
@@ -506,13 +536,15 @@ ${staged_entries}"
         rm -f "$_ls_tmp"
         return 1
       fi
+      local _enc
       while IFS= read -r -d '' f; do
         [ -n "$f" ] || continue
+        _enc="$(ci::changeset::_encode_path "$f")"
         if [ -n "$raw_entries" ]; then
           raw_entries="${raw_entries}
-M	${f}"
+M	${_enc}"
         else
-          raw_entries="M	${f}"
+          raw_entries="M	${_enc}"
         fi
       done < "$_ls_tmp"
       rm -f "$_ls_tmp"
@@ -557,6 +589,8 @@ ci::changeset::emit_json() {
 
       while IFS= read -r path; do
       [ -z "$path" ] && continue
+      ci::changeset::_decode_path "$path"
+      path="$_CI_CHANGESET_PATH"
       ci::changeset::should_ignore "$path" && continue
 
       lang="$(ci::changeset::classify_file "$path")"

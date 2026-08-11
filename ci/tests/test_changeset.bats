@@ -180,3 +180,47 @@ teardown() {
   # The record after the rename is still read as its own entry.
   [[ "$output" == *"after.ts"* ]]
 }
+
+@test "changeset: a path holding a tab or newline still classifies" {
+  # The reader takes git's NUL-delimited `--name-status -z` and immediately
+  # writes tab- and newline-delimited records. A path is any byte sequence
+  # without a NUL, so `backend/foo<newline>bar.py` split into two records --
+  # both nonsense -- and the language came out `unknown`, dropping every Python
+  # lint, typecheck, format and test check from a change that is Python.
+  #
+  # Driven through the reader directly rather than through git. This defect
+  # lives entirely between _read_name_status and _populate_state_from_raw, and
+  # the input cannot be staged on every platform the suite runs on: Windows
+  # substitutes U+F00A for a newline in a filename and `git update-index`
+  # refuses the path outright, so a filesystem-based case would pass against
+  # the broken reader too and assert nothing.
+  local nl=$'backend/foo\nbar.py'
+  local tb=$'backend/a\tb.py'
+
+  # The premise: the input really does carry the byte in question.
+  [[ "$nl" == *$'\n'* ]]
+  [[ "$tb" == *$'\t'* ]]
+
+  _CI_CHANGESET_FILES_RAW="$(printf 'A\000%s\000' "$nl" | ci::changeset::_read_name_status)"
+  ci::changeset::_populate_state_from_raw
+  [[ "$(ci::changeset::get_languages)" == *python* ]]
+
+  _CI_CHANGESET_FILES_RAW="$(printf 'A\000%s\000' "$tb" | ci::changeset::_read_name_status)"
+  ci::changeset::_populate_state_from_raw
+  [[ "$(ci::changeset::get_languages)" == *python* ]]
+
+  # The controls: ordinary paths are unaffected, and a literal `%` survives the
+  # escaping rather than being read back as an escape.
+  _CI_CHANGESET_FILES_RAW="$(printf 'A\000%s\000' 'backend/plain.py' | ci::changeset::_read_name_status)"
+  ci::changeset::_populate_state_from_raw
+  [[ "$(ci::changeset::get_languages)" == *python* ]]
+
+  _CI_CHANGESET_FILES_RAW="$(printf 'A\000%s\000' 'frontend/src/a.ts' | ci::changeset::_read_name_status)"
+  ci::changeset::_populate_state_from_raw
+  [[ "$(ci::changeset::get_languages)" == *javascript* ]]
+
+  ci::changeset::_decode_path "$(ci::changeset::_encode_path 'backend/100%_done.py')"
+  [ "$_CI_CHANGESET_PATH" = 'backend/100%_done.py' ]
+  ci::changeset::_decode_path "$(ci::changeset::_encode_path "$nl")"
+  [ "$_CI_CHANGESET_PATH" = "$nl" ]
+}

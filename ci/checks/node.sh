@@ -269,9 +269,26 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
           # install, typecheck, test or build had run. A commit that cleanly
           # deletes a workspace file is the ordinary case, so the gate broke on
           # correct work and did not even say so.
+          #
+          # The log walk finds candidates; what makes one drift is that the
+          # pushed tree does not carry the path. Existing on disk is not
+          # enough, because `git log --diff-filter=D` lists every path any
+          # commit in the range deleted, including one a later commit in the
+          # same push puts back -- and a delete-then-re-add pair then reported
+          # the re-added file as drift, exiting 20 before a check ran over a
+          # worktree matching HEAD exactly.
+          #
+          # Asked against HEAD rather than by diffing the range's endpoints,
+          # because the range is not always a range: `push_range` returns a bare
+          # tip for a genuine first push, and an endpoint diff there compares
+          # the worktree to the tip -- a different question with a
+          # plausible-looking answer, which silently dropped this whole scan on
+          # every push without a remote base. HEAD is the pushed tree:
+          # `worktree_covers_push` above has already refused anything else.
           while IFS= read -r _d; do
             [ -n "$_d" ] || continue
-            if [ -e "$_d" ]; then
+            [ -e "$_d" ] || continue
+            if ! git cat-file -e "HEAD:$_d" 2>/dev/null; then
               printf '%s\n' "$_d"
             fi
           done <<< "$(git -c core.quotepath=false log --diff-filter=D --name-only --format= "$_gate_range" -- "$_scope" 2>/dev/null || true)"
@@ -1279,11 +1296,69 @@ _unquote_tok() {
 # command *ends*, not only at the end of the string: `bash scripts/test.sh ;
 # exit 0` had its target cleared by the separator before anything asked what
 # was in the script, and an ordinary wrapper-then-exit was rejected.
+# Quoted text is data, not code, and the structure reader below counts braces
+# and control keywords -- both of which can be spelled inside a string. `echo
+# "}"` closed a function body a line early, and `echo "using profile"` closed an
+# `if` block, because `profile` contains `fi`. Either one makes a checker the
+# shell may never reach read as top level, so the lane reports PASS on a suite
+# that never runs.
+#
+# Every quoted span becomes spaces, one character for one, so an offset into the
+# blanked line still addresses the same character of the original. `_bq_state`
+# carries an unterminated quote into the next line, because a string spanning
+# lines makes those lines data as well; `_bq_cont` reports a trailing backslash,
+# which makes the next line a continuation of this command rather than a new
+# one. Callers own all three as locals, so a nested resolution cannot disturb
+# the scan that invoked it.
+_blank_quoted() {
+  local _s="$1" _i=0 _n=${#1} _c _out=""
+  _bq_cont=0
+  # Nothing to blank and no state to carry: the overwhelmingly common line.
+  if [ -z "$_bq_state" ]; then
+    case "$_s" in
+      *[\'\"\\]*) ;;
+      *) _bq_out="$_s"; return 0 ;;
+    esac
+  fi
+  while [ "$_i" -lt "$_n" ]; do
+    _c="${_s:$_i:1}"
+    # A backslash escapes the next character -- which is therefore neither a
+    # quote nor structure. Inside single quotes it is literal and escapes
+    # nothing.
+    if [ "$_c" = '\' ] && [ "$_bq_state" != "'" ]; then
+      if [ "$((_i + 1))" -lt "$_n" ]; then
+        _out="$_out  "
+      else
+        _out="$_out "
+        _bq_cont=1
+      fi
+      _i=$((_i + 2))
+      continue
+    fi
+    if [ -n "$_bq_state" ]; then
+      if [ "$_c" = "$_bq_state" ]; then _bq_state=""; fi
+      _out="$_out "
+    else
+      case "$_c" in
+        \'|\") _bq_state="$_c"; _out="$_out " ;;
+        *) _out="$_out$_c" ;;
+      esac
+    fi
+    _i=$((_i + 1))
+  done
+  _bq_out="$_out"
+}
+
 _resolve_delegated_target() {
   local target="$1"
   local tools="$2"
   local depth="${3:-0}"
+  # Whether the command that named this target also carried `--test`, which is
+  # the only thing that makes `node` a runner. Passed rather than re-derived:
+  # the flag belongs to the invocation, and by here the invocation is gone.
+  local node_ok="${4:-0}"
   local t
+  local _bq_state="" _bq_out="" _bq_cont=0
 
 
   # For `npx`, `pnpm dlx` and friends the target *is* the executable, so a
@@ -1291,7 +1366,10 @@ _resolve_delegated_target() {
   # Reached only through a runner in command position, so `echo vitest` does
   # not arrive here.
   for t in $tools; do
-    [ "${target##*/}" = "$t" ] && return 0
+    if [ "${target##*/}" = "$t" ]; then
+      if [ "$t" = "node" ] && [ "$node_ok" -eq 0 ]; then continue; fi
+      return 0
+    fi
   done
 
   # Delegation is followed, not taken on trust. Accepting a runner plus a target
@@ -1310,9 +1388,10 @@ _resolve_delegated_target() {
   fi
 
   # A readable file, judged line by line: one line reaching a checker is enough,
-  # and a `-c` elsewhere does not condemn the whole script. Comments are
-  # stripped first, because a checker named in a comment is not one being run --
-  # and stripping can only ever cause a refusal, never an acceptance.
+  # and a `-c` elsewhere does not condemn the whole script. Only the code is
+  # judged -- comments, string bodies and here-document bodies are removed
+  # first, because a checker named in any of them is not one being run, and
+  # removing text can only ever cause a refusal, never an acceptance.
   if [ -f "$target" ] && [ -r "$target" ]; then
     # Only lines the script is bound to reach.
     #
@@ -1326,13 +1405,71 @@ _resolve_delegated_target() {
     # Deliberately strict, and the message says what to do about it: a workspace
     # whose invocation really is conditional can name its runner in the manifest
     # instead, which is the thing this gate can actually read.
-    local line stripped brace=0 block=0 opens closes _fn=0
+    local line real code toks tok pre opens closes
+    local brace=0 block=0 _fn=0 _kw=0 _cont=0 _cont_prev=0 state_in=""
+    local hd_end="" hd_dash=0 hd_rest
     while IFS= read -r line || [ -n "$line" ]; do
-      stripped="${line%%#*}"
-      case "$stripped" in
+      # A here-document body is data. A checker named inside one is text being
+      # written somewhere, not a command being run, and reading it as code is
+      # the same mistake as reading a quoted brace as structure.
+      if [ -n "$hd_end" ]; then
+        tok="$line"
+        if [ "$hd_dash" -eq 1 ]; then tok="${tok#"${tok%%[![:space:]]*}"}"; fi
+        if [ "$tok" = "$hd_end" ]; then hd_end=""; fi
+        continue
+      fi
+
+      state_in="$_bq_state"
+      _cont_prev="$_cont"
+      _blank_quoted "$line"
+      code="$_bq_out"
+      _cont="$_bq_cont"
+
+      # A `#` inside a string does not start a comment, so the comment comes off
+      # the blanked line and the same offset comes off the real one -- blanking
+      # preserves length precisely so this holds.
+      case "$code" in
+        '#'*) real=""; code="" ;;
+        *[[:space:]]'#'*)
+          pre="${code%%[[:space:]]#*}"
+          real="${line:0:$(( ${#pre} + 1 ))}"
+          code="${code:0:$(( ${#pre} + 1 ))}"
+          ;;
+        *) real="$line" ;;
+      esac
+
+      case "$code" in
         *[![:space:]]*) ;;
         *) continue ;;
       esac
+
+      # Split on every separator so control keywords are matched as whole
+      # tokens. Matching them as substrings is what let `well done` close a
+      # loop and `/opt/esaclib` close a `case`.
+      toks="$code"
+      toks="${toks//;/ }"
+      toks="${toks//&/ }"
+      toks="${toks//|/ }"
+      toks="${toks//(/ }"
+      toks="${toks//)/ }"
+      toks="${toks//\{/ }"
+      toks="${toks//\}/ }"
+
+      # A line carrying any control keyword is a compound statement this reader
+      # cannot evaluate -- `if [ -n "$CI" ]; then vitest run; fi` opens and
+      # closes on one line, so depth alone would call it top level. Refuse to
+      # judge it instead of guessing which branch runs.
+      _kw=0
+      set -f
+      for tok in $toks; do
+        case "$tok" in
+          if|then|elif|else|fi|for|while|until|do|done|case|esac|select|function)
+            _kw=1
+            break
+            ;;
+        esac
+      done
+      set +f
 
       # A function definition line is never itself a command being run. It is
       # not skipped outright, though: a multi-line `f() {` still opens a brace
@@ -1340,28 +1477,52 @@ _resolve_delegated_target() {
       # counting it left the body reading as top level -- which accepted the
       # very case this rule is for, one line lower down.
       _fn=0
-      case "$stripped" in
-        *'()'*'{'*) _fn=1 ;;
+      case "$code" in
         *'()'*) _fn=1 ;;
       esac
 
-      if [ "$_fn" -eq 0 ] && [ "$brace" -eq 0 ] && [ "$block" -eq 0 ]; then
-        if _script_names_a_checker "$stripped" "$tools" "$((depth + 1))"; then
+      if [ "$_fn" -eq 0 ] && [ "$brace" -eq 0 ] && [ "$block" -eq 0 ] &&
+         [ "$_kw" -eq 0 ] && [ "$_cont_prev" -eq 0 ] &&
+         [ -z "$state_in" ] && [ -z "$_bq_state" ]; then
+        if _script_names_a_checker "$real" "$tools" "$((depth + 1))"; then
           return 0
         fi
       fi
 
       # Track what this line opens or closes, after it has been judged.
-      opens="${stripped//[!\{]/}"
-      closes="${stripped//[!\}]/}"
+      opens="${code//[!\{]/}"
+      closes="${code//[!\}]/}"
       brace=$((brace + ${#opens} - ${#closes}))
-      [ "$brace" -lt 0 ] && brace=0
-      case "$stripped" in
-        *if\ *|*'if('*) block=$((block + 1)) ;;
-        *for\ *|*while\ *|*until\ *|*case\ *) block=$((block + 1)) ;;
-      esac
-      case "$stripped" in
-        *fi*|*done*|*esac*) [ "$block" -gt 0 ] && block=$((block - 1)) ;;
+      if [ "$brace" -lt 0 ]; then brace=0; fi
+      set -f
+      for tok in $toks; do
+        case "$tok" in
+          if|for|while|until|case|select) block=$((block + 1)) ;;
+          fi|done|esac) if [ "$block" -gt 0 ]; then block=$((block - 1)); fi ;;
+        esac
+      done
+      set +f
+
+      # `<<` starts a here-document whose body begins on the next line. Found on
+      # the blanked line so `echo "a << b"` does not arm it, but the delimiter
+      # is read from the real one, since `<<'EOF'` quotes its own delimiter.
+      case "$code" in
+        *\<\<*)
+          pre="${code%%\<\<*}"
+          hd_rest="${line:$(( ${#pre} + 2 ))}"
+          case "$hd_rest" in
+            '<'*) ;;
+            *)
+              hd_dash=0
+              case "$hd_rest" in -*) hd_dash=1; hd_rest="${hd_rest#-}" ;; esac
+              hd_rest="${hd_rest#"${hd_rest%%[![:space:]]*}"}"
+              hd_end="${hd_rest%%[[:space:];|&)]*}"
+              hd_end="${hd_end//\'/}"
+              hd_end="${hd_end//\"/}"
+              hd_end="${hd_end//\\/}"
+              ;;
+          esac
+          ;;
       esac
     done < "$target"
     return 1
@@ -1412,6 +1573,24 @@ _script_names_a_checker() {
     *"&"*) return 1 ;;
   esac
 
+  # `node` counts as a runner only in test mode, and the question has to be
+  # asked here as well as at the manifest. Otherwise the rule is right on the
+  # manifest and wrong one layer down: `"test": "bash scripts/test.sh"` over a
+  # script whose body is `node` reads an empty program from stdin and exits 0,
+  # which is the same pass the manifest form was giving.
+  #
+  # Answered per command rather than by pruning `node` out of the tools list.
+  # Pruning is inherited and cannot be undone: `"test": "bash scripts/nt.sh"`
+  # has no `--test` of its own, so the list handed to the script would arrive
+  # without `node` and the `node --test` inside it -- the correct form -- would
+  # be refused one layer down. `cmd` here is a single command, which is the
+  # scope `--test` belongs to.
+  local _nt=0 _t
+  # shellcheck disable=SC2086
+  for _t in $cmd; do
+    if [ "$_t" = "--test" ]; then _nt=1; break; fi
+  done
+
   # An inline shell command is judged as the command it is. `bash -c tsc` runs
   # a checker and is accepted; `bash -c true` names nothing and is not. Only
   # when the thing being handed `-c` is actually a shell -- `echo -c tsc` runs
@@ -1454,7 +1633,7 @@ _script_names_a_checker() {
         # asked what was in it, and a wrapper followed by an exit -- an entirely
         # ordinary script -- was rejected.
         if [ -n "$runner" ] && [ -n "$target" ]; then
-          if _resolve_delegated_target "$target" "$tools" "$depth"; then
+          if _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"; then
             return 0
           fi
         fi
@@ -1486,7 +1665,7 @@ _script_names_a_checker() {
         exit|return)
           # Same as a separator: whatever ran before this still ran.
           if [ -n "$runner" ] && [ -n "$target" ]; then
-            if _resolve_delegated_target "$target" "$tools" "$depth"; then
+            if _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"; then
               return 0
             fi
           fi
@@ -1494,7 +1673,11 @@ _script_names_a_checker() {
           ;;
       esac
       for t in $tools; do
-        [ "${tok##*/}" = "$t" ] && return 0
+        if [ "${tok##*/}" = "$t" ]; then
+          # `node` without `--test` runs an empty program from stdin.
+          if [ "$t" = "node" ] && [ "$_nt" -eq 0 ]; then continue; fi
+          return 0
+        fi
       done
       for t in $runners; do
         if [ "${tok##*/}" = "$t" ]; then
@@ -1520,7 +1703,7 @@ _script_names_a_checker() {
   done
 
   [ -n "$runner" ] && [ -n "$target" ] || return 1
-  _resolve_delegated_target "$target" "$tools" "$depth"
+  _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"
   return $?
 }
 
@@ -1549,7 +1732,21 @@ assert_no_persistent_filter() {
     esac
   done
   case "$runner" in
-    vitest|jest|mocha|ava|jasmine|tap|node) is_test_runner=1 ;;
+    vitest|jest|mocha|ava|jasmine|tap) is_test_runner=1 ;;
+    node)
+      # `node` is a runner only in test mode. Bare `node` takes its program
+      # from stdin, and under the gate stdin is already at EOF: it runs an
+      # empty program and exits 0. `"test": "node"` then satisfied every rule
+      # below by having no further tokens to inspect, so the whole suite left
+      # the gate on a one-word manifest edit with the lane reporting PASS.
+      #
+      # `node --test` is the mode that collects and runs anything, which is
+      # what the tools list means by `node`.
+      # shellcheck disable=SC2086
+      for tok in $cmd; do
+        if [ "$tok" = "--test" ]; then is_test_runner=1; break; fi
+      done
+      ;;
   esac
 
   # And if it is not a runner, it has to be something that could reach one.
@@ -1589,7 +1786,7 @@ assert_no_persistent_filter() {
         echo "    ${script_name}: ${cmd}"
         echo "  A script named ${script_name} that exits 0 without collecting anything"
         echo "  removes the whole suite from the gate while the lane still reports"
-        echo "  PASS. Recognised: vitest, jest, mocha, ava, jasmine, tap, node, a"
+        echo "  PASS. Recognised: vitest, jest, mocha, ava, jasmine, tap, node --test, a"
       echo "  wrapper script, or a runner that delegates to one. Add yours here"
       echo "  if it belongs."
       exit "$CI_RESULT_FAIL_NEW_ISSUE"
@@ -1608,6 +1805,19 @@ assert_no_persistent_filter() {
   # `--passWithNoTests` is the sharpest of them and would be excluded by name
   # even if the list were kept: it converts "collected nothing" into success,
   # which is the precise failure this whole lane exists to catch.
+  #
+  # `--allowOnly` was on this list and does not belong on it. Vitest defaults
+  # `allowOnly` to off under CI, so a committed `it.only` fails the run; the
+  # flag turns that back on, and an accidental `.only` then reduces the suite to
+  # one test while the run exits 0. That is narrowing, applied to the whole
+  # suite by a single stray edit somewhere else in the tree. `--no-allowOnly`
+  # stays: it asks for the CI default and cannot reduce anything.
+  #
+  # Node's own runner flags are here because `node --test` is the only spelling
+  # of that runner this gate accepts, and rejecting the flag that makes it a
+  # runner left the correct form failing the lane. The narrowing ones --
+  # `--test-name-pattern`, `--test-only`, `--test-skip-pattern`, `--test-shard`
+  # -- are absent, which under an allow-list is all that is needed.
   if [ "$is_test_runner" -eq 1 ]; then
     # shellcheck disable=SC2086
     for tok in $cmd; do
@@ -1634,10 +1844,12 @@ assert_no_persistent_filter() {
           |--color|--no-color|--logHeapUsage|--pool|--poolOptions|--isolate \
           |--no-isolate|--threads|--no-threads|--file-parallelism \
           |--no-file-parallelism|--maxWorkers|--minWorkers|--maxConcurrency \
-          |--environment|--globals|--allowOnly|--no-allowOnly|--testTimeout \
+          |--environment|--globals|--no-allowOnly|--testTimeout \
           |--hookTimeout|--teardownTimeout|--sequence|--update|--no-update \
           |--disable-console-intercept|--printConsoleTrace|--typecheck \
-          |--no-typecheck|--yes|-y)
+          |--no-typecheck|--yes|-y \
+          |--test|--test-reporter|--test-reporter-destination \
+          |--test-concurrency|--experimental-test-coverage)
           ;;
         *)
           _filter_reject "$script_name" "$cmd" "$tok"

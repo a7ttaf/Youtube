@@ -3002,6 +3002,202 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "node lane: a quoted brace or keyword cannot make a line read as top level" {
+  # The reachability rule counted braces and control keywords in raw line text,
+  # so both could be spelled inside a string. `echo "}"` closed a function body
+  # a line early and `echo "using profile"` closed an `if` block -- `profile`
+  # contains `fi` -- and the unreachable runner below each of them then read as
+  # top level, passing the lane on a suite that never runs.
+  ws_setup
+
+  # The premise: this exact runner line at top level is accepted, so every
+  # rejection below is about the line being unreachable and not about the line
+  # going unrecognised.
+  printf '#!/usr/bin/env bash\n./scripts/vitest run\n' > "$NODE_SB/ws/scripts/x.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/x.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+
+  # `fi` as a substring of a word inside a string, closing the block early.
+  printf '#!/usr/bin/env bash\nif [ -n "$NOPE" ]; then\n  echo "using profile"\n  ./scripts/vitest run\nfi\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # `done` as a substring, closing a loop early.
+  printf '#!/usr/bin/env bash\nfor f in a b; do\n  echo "well done"\n  ./scripts/vitest run\ndone\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # A quoted closing brace balancing a function body out early.
+  printf '#!/usr/bin/env bash\nunused() {\n  echo "}"\n  ./scripts/vitest run\n}\nexit 0\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # A here-document body is data, not code; the runner named in one is text.
+  printf '#!/usr/bin/env bash\ncat > /dev/null <<EOF\n./scripts/vitest run\nEOF\nexit 0\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # The controls, and the reason the rule is token-exact rather than a ban on
+  # quotes: ordinary scripts that merely *contain* these spellings still pass.
+  printf '#!/usr/bin/env bash\necho "modified files"\necho "abandoned"\n./scripts/vitest run\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+
+  printf '#!/usr/bin/env bash\nif [ -z "$SKIP" ]; then\n  echo "}"\nfi\ncat > /dev/null <<EOF\nnothing\nEOF\n./scripts/vitest run\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: node counts as a runner only in test mode" {
+  # `"test": "node"` was accepted. Bare node takes its program from stdin, and
+  # under the gate stdin is at EOF: it runs an empty program and exits 0, and
+  # with no further tokens every rule below the runner check was satisfied by
+  # having nothing to inspect. The whole suite left the gate on a one-word
+  # manifest edit.
+  #
+  # Asserted on the guard's own message rather than the exit status: an
+  # accepted command goes on to actually run, and the sandbox's stand-in runner
+  # is not on bun's path, so status 20 arrives either way.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "node" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The same one layer down, which is where a rule fixed only at the manifest
+  # would still be wrong.
+  printf '#!/usr/bin/env bash\nnode\n' > "$NODE_SB/ws/scripts/bare.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/bare.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The control, and the other half of the finding: `node --test` is the form
+  # that collects anything, and it was being rejected -- `--test` was not on the
+  # flag allow-list, so the gate refused the spelling that runs and accepted the
+  # one that does not.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "node --test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  printf '#!/usr/bin/env bash\nnode --test\n' > "$NODE_SB/ws/scripts/nt.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/nt.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+
+  # And node's own narrowing flags are still refused, which is what keeps the
+  # allow-list an allow-list.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "node --test --test-name-pattern=x" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: --allowOnly is narrowing and is not on the allow-list" {
+  # Vitest defaults allowOnly to off under CI, so a committed `it.only` fails
+  # the run. `--allowOnly` turns that back on, and an accidental `.only`
+  # anywhere in the tree then reduces the suite to one test while the run exits
+  # 0 -- narrowing applied to the whole suite by an edit somewhere else.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --allowOnly" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The controls: asking for the CI default is not narrowing, and the ordinary
+  # command is untouched.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --no-allowOnly" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a path deleted and re-added in one push is not drift" {
+  # The ship-mode scan asked `git log --diff-filter=D` over the whole outgoing
+  # range, so a path any commit in it deleted counted -- including one a later
+  # commit in the same push put back. A delete-then-re-add pair reported the
+  # re-added file as drift and the lane exited 20 before running a check, over a
+  # worktree matching HEAD exactly.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  printf 'export const a = 1;\n' > "$NODE_SB/ws/src.ts"
+  printf '.ci-gate/\n' > "$NODE_SB/.gitignore"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  local base
+  base="$(git rev-parse HEAD)"
+  git rm -q ws/src.ts >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm delete >/dev/null 2>&1
+  printf 'export const a = 1;\n' > "$NODE_SB/ws/src.ts"
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm readd >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  # The premises: the worktree matches HEAD, and the range really does contain a
+  # deletion of that path -- so a commit-by-commit scan has something to find
+  # and an endpoint one does not.
+  run bash -c "cd '$NODE_SB' && git status --porcelain | wc -l"
+  [ "$(echo "$output" | tr -d ' ')" -eq 0 ]
+  run bash -c "cd '$NODE_SB' && git log --diff-filter=D --name-only --format= '$base..HEAD' | grep -c 'ws/src.ts'"
+  [ "$output" -eq 1 ]
+
+  # Not pinning CI_GATE_NODE_WORKSPACE: the drift scan lives in the discovery
+  # pass, which node.sh skips entirely when the workspace is pinned.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' \
+    bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *"src.ts"* ]]
+
+  # And with no push base at all, which is a different range shape through the
+  # same code: `push_range` returns a bare tip there, so a fix written as an
+  # endpoint diff would answer a different question -- and did, dropping this
+  # whole scan on every push without a remote base. What decides it is that the
+  # pushed tree carries the path, which does not depend on the shape.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *"src.ts"* ]]
+
+  # The control: a push that genuinely removes the file, with an ignored copy
+  # left on disk to shadow it, is still caught -- the case this scan is for.
+  git rm -q ws/src.ts >/dev/null 2>&1
+  printf '.ci-gate/\nws/src.ts\n' > "$NODE_SB/.gitignore"
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete and ignore" >/dev/null 2>&1
+  printf 'export const a = 999;\n' > "$NODE_SB/ws/src.ts"
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' \
+    bash ci/checks/node.sh 2>&1"
+  [[ "$output" == *"src.ts"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: deleting the whole suite cannot pass by becoming the new HEAD" {
   # The lost-suite guard compared the worktree against HEAD. In ship mode the
   # deletion is already committed, so HEAD carries no tests either, nothing
