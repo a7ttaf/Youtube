@@ -117,6 +117,7 @@ with the pinned toolchain:
 | `uv run ruff check backend tests scripts` | **All checks passed** |
 | `uv run pytest -q` | **2813 passed**, 15 warnings (8m04s) |
 | `git diff --check` | clean (exit 0) |
+| `uv run mypy backend` | clean for this PR's files (see note) |
 
 Frontend, and the PR-scope analyzer:
 
@@ -135,6 +136,15 @@ prerequisite. The figure above is the documented command with that variable
 set against a disposable Postgres container. Recorded rather than smoothed
 over, because "2811 passed" and "21 failed" are the same command on the same
 commit, and the difference is entirely environmental.
+
+**`mypy` is not one of the four gates, but DeepSource enforces it.** The
+"DeepSource: Python" check runs mypy and reports TYP-050 as a failure, so a
+type regression passes all four baseline gates and turns the PR red only after
+the push — which is exactly what happened once on this branch. `uv run mypy` is
+therefore run here after every backend edit. Full-tree it leaves ONE error, in
+`backend/ums_smart_revenue/devtools/pytest_policy_gate.py:597`, which is
+byte-identical to `origin/main` and untouched by this PR (verified with
+`git show origin/main:<path> | diff -`).
 
 Running `ruff` the documented way also caught something a narrower invocation
 had not: `uv run --project backend ruff check backend/ tests/` reported clean
