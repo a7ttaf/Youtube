@@ -2995,7 +2995,76 @@ ws_run() {
 
   # The control, and the reason this is `break` and not a ban on `exit`: a
   # runner that has already been reached is not undone by exiting afterwards.
+  #
+  # The control used to be `bash scripts/test.sh ; exit 0`, and that was a
+  # mistake -- it is itself the shape this lane must refuse, since the script's
+  # failure is discarded by the `exit 0` after it. It passed because reaching a
+  # checker ended the scan. `exit $?` makes the same point about separators
+  # without throwing the result away.
+  # Asserted on the guard's message, not the status: what this control is about
+  # is that the scan still resolves the delegation across the separator, and
+  # the script's own exit status here depends on how bun's runner spells `$?`.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh ; exit $?" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+
   ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh ; exit 0" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a checker whose status is overwritten afterwards does not count" {
+  # Reaching a checker ended the scan, so anything after it was unread. `tsc
+  # --noEmit ; true` reaches the compiler and discards its result -- the shell
+  # reports the last command's status -- and a delegated script running the
+  # suite and then `true` exits 0 however the suite went. Both passed.
+  ws_setup
+  # The typecheck guard only runs where there is a tsconfig.json. Without one
+  # the script is executed unguarded -- which is how this was confirmed
+  # end to end: `tsc` failed to load and the lane still reported "Node lane
+  # passed", because `; true` supplied the exit status.
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit ; true", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"appear to run a type checker"* ]]
+  rm -f "$NODE_SB/ws/tsconfig.json"
+
+  # `;` binds to the token before it, so `run;` was never seen as a separator
+  # at all -- the same bypass the `||` rule had before it stopped requiring
+  # spaces around the operator.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run;true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  printf '#!/usr/bin/env bash\n./scripts/vitest run\ntrue\n' > "$NODE_SB/ws/scripts/mask.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/mask.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # The controls. `&&` short-circuits, so the checker's failure survives it;
+  # `set -e` leaves on that failure before the trailing line runs; and `exit 1`
+  # forces a failure, which cannot become a false pass. The rule is that
+  # nothing may turn a failure into a pass -- not that nothing may follow.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run && echo done" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+
+  printf '#!/usr/bin/env bash\nset -e\n./scripts/vitest run\ntrue\n' > "$NODE_SB/ws/scripts/ok1.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/ok1.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+
+  printf '#!/usr/bin/env bash\n./scripts/vitest run\nexit $?\n' > "$NODE_SB/ws/scripts/ok2.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/ok2.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]

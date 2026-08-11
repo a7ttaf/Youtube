@@ -159,7 +159,19 @@ _changeset_content_hash() {
     case "$status" in
       R*|C*) [ -n "$extra" ] && path="$extra" ;;
     esac
-    [ -f "$path" ] && files+=("$path")
+    # The record spells a path in the changeset's internal form, where a tab or
+    # a newline in a filename is escaped. Hashing that spelling hashes a name
+    # no file has: `[ -f ]` was false, the file dropped out of the key, and a
+    # cacheable lane could restore an earlier PASS over contents nothing had
+    # scanned. The key has to name the file on disk.
+    ci::changeset::_decode_path "$path"
+    path="$_CI_CHANGESET_PATH"
+    # `if`, not `&&`. A final record whose path is not a regular file -- a
+    # deletion, which is an ordinary entry -- leaves the test false, and that
+    # becomes the status of the loop, of this function, and of the assignment
+    # calling it. Under this script's `set -e` the gate aborts there, before a
+    # check has run.
+    if [ -f "$path" ]; then files+=("$path"); fi
   done <<< "$entries"
   ci::cache::_sha256 "${entries}:$(ci::cache::hash_files "${files[@]}")"
 }

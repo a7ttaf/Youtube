@@ -1407,6 +1407,7 @@ _resolve_delegated_target() {
     # instead, which is the thing this gate can actually read.
     local line real code toks tok pre opens closes
     local brace=0 block=0 _fn=0 _kw=0 _cont=0 _cont_prev=0 state_in=""
+    local hit=0 errexit=0 _tail=""
     local hd_end="" hd_dash=0 hd_rest
     while IFS= read -r line || [ -n "$line" ]; do
       # A here-document body is data. A checker named inside one is text being
@@ -1489,8 +1490,35 @@ _resolve_delegated_target() {
       if [ "$_fn" -eq 0 ] && [ "$brace" -eq 0 ] && [ "$block" -eq 0 ] &&
          [ "$_kw" -eq 0 ] && [ "$_cont_prev" -eq 0 ] &&
          [ -z "$state_in" ] && [ -z "$_bq_state" ]; then
+        # A top-level line after the one that reached the checker replaces the
+        # script's status with its own, exactly as a `;` does inside a command:
+        # `vitest run` followed by `true` exits 0 however the suite went. So
+        # the scan does not stop at the runner -- it keeps reading, and another
+        # command below refuses.
+        #
+        # Unless the script asked for `set -e`, which is the whole point of
+        # that line: the shell leaves on the runner's failure and the lines
+        # below never execute. Read before the runner, since it only governs
+        # what follows it.
+        if [ "$hit" -eq 1 ] && [ "$errexit" -eq 0 ]; then
+          # The rule is not "nothing may follow" -- it is that nothing may turn
+          # a failure into a pass. A bare `exit` and `exit $?` both leave with
+          # the status already there, and `exit 1` forces a failure, which is
+          # the safe direction. `true`, `exit 0` and anything whose status this
+          # reader cannot know are what the rule is for.
+          _tail="${real#"${real%%[![:space:]]*}"}"
+          _tail="${_tail%"${_tail##*[![:space:]]}"}"
+          case "$_tail" in
+            'exit'|'exit $?'|'exit "$?"'|'return'|'return $?') return 0 ;;
+            exit\ [1-9]*|return\ [1-9]*) return 0 ;;
+          esac
+          return 1
+        fi
+        case "$real" in
+          *set\ -*e*) errexit=1 ;;
+        esac
         if _script_names_a_checker "$real" "$tools" "$((depth + 1))"; then
-          return 0
+          hit=1
         fi
       fi
 
@@ -1532,6 +1560,7 @@ _resolve_delegated_target() {
           ;;
       esac
     done < "$target"
+    if [ "$hit" -eq 1 ]; then return 0; fi
     return 1
   fi
 
@@ -1552,6 +1581,25 @@ _script_names_a_checker() {
   local tok t
 
   [ "$depth" -ge 8 ] && return 1
+
+  # `;` binds to the token before it. `vitest run; echo done` tokenizes as
+  # `run;`, so the separator arm below never saw a `;` at all and the
+  # status-preservation rule could be stepped past by deleting one space --
+  # the same bypass the `||` rule had before it stopped requiring spaces.
+  # Spaced out here, and only where it is really a separator: the blanked copy
+  # marks quoted spans, so a `;` inside an argument is left where it is.
+  local _bq_state="" _bq_out="" _bq_cont=0
+  _blank_quoted "$cmd"
+  local _mask="$_bq_out" _norm="" _ci=0 _cn=${#cmd}
+  while [ "$_ci" -lt "$_cn" ]; do
+    if [ "${_mask:$_ci:1}" = ";" ]; then
+      _norm="$_norm ; "
+    else
+      _norm="$_norm${cmd:$_ci:1}"
+    fi
+    _ci=$((_ci + 1))
+  done
+  cmd="$_norm"
 
   # Compositions that prove nothing. `true || vitest run` never reaches the
   # checker; `vitest run || true` reaches it and throws the result away, which
@@ -1628,7 +1676,19 @@ _script_names_a_checker() {
   esac
 
   # One pass, tracking whether the next token starts a command.
-  local expect_cmd=1 runner="" target=""
+  #
+  # Reaching a checker is necessary and not sufficient: its status has to
+  # survive to become the script's. `tsc --noEmit ; true` reaches the compiler
+  # and then throws its result away, because the shell reports the *last*
+  # command's status -- so a failing tsc arrived as a pass, satisfying every
+  # rule here by a token that runs after the one being vouched for.
+  #
+  # `;` is therefore not the same separator as `&&`. After `&&` the checker's
+  # failure short-circuits and the composite fails with it; after `;` the next
+  # command's status replaces it. So the scan no longer returns the moment it
+  # sees a checker -- it records the hit and keeps reading, and a command
+  # sequenced after one with `;` refuses.
+  local expect_cmd=1 runner="" target="" found=0 seq_after=0 hit=0 pending_exit=0
   # shellcheck disable=SC2086
   for tok in $cmd; do
     _unquote_tok
@@ -1641,9 +1701,10 @@ _script_names_a_checker() {
         # ordinary script -- was rejected.
         if [ -n "$runner" ] && [ -n "$target" ]; then
           if _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"; then
-            return 0
+            found=1
           fi
         fi
+        if [ "$found" -eq 1 ] && [ "$tok" = ";" ]; then seq_after=1; fi
         expect_cmd=1
         runner=""
         target=""
@@ -1652,6 +1713,26 @@ _script_names_a_checker() {
     esac
 
     if [ "$expect_cmd" -eq 1 ]; then
+      # A command sequenced after the checker with `;` replaces its status.
+      # Asked before anything else here, because the question is not what this
+      # token runs -- it is that it runs at all.
+      #
+      # The exception is the same one the script reader makes: a bare `exit`
+      # and `exit $?` leave with the status already there, and `exit 1` forces
+      # a failure, which cannot become a false pass. `exit 0` and everything
+      # else cannot be vouched for.
+      if [ "$seq_after" -eq 1 ]; then
+        if [ "$pending_exit" -eq 1 ]; then
+          case "$tok" in
+            '$?'|'"$?"'|[1-9]*) break ;;
+          esac
+          return 1
+        fi
+        case "${tok##*/}" in
+          exit|return) pending_exit=1; continue ;;
+        esac
+        return 1
+      fi
       # `NODE_ENV=test vitest run` still starts with vitest.
       case "$tok" in
         [A-Za-z_]*=*) continue ;;
@@ -1673,19 +1754,26 @@ _script_names_a_checker() {
           # Same as a separator: whatever ran before this still ran.
           if [ -n "$runner" ] && [ -n "$target" ]; then
             if _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"; then
-              return 0
+              found=1
             fi
           fi
           break
           ;;
       esac
+      hit=0
       for t in $tools; do
         if [ "${tok##*/}" = "$t" ]; then
           # `node` without `--test` runs an empty program from stdin.
           if [ "$t" = "node" ] && [ "$_nt" -eq 0 ]; then continue; fi
-          return 0
+          hit=1
+          break
         fi
       done
+      if [ "$hit" -eq 1 ]; then
+        found=1
+        expect_cmd=0
+        continue
+      fi
       for t in $runners; do
         if [ "${tok##*/}" = "$t" ]; then
           runner="$tok"
@@ -1709,6 +1797,7 @@ _script_names_a_checker() {
     target="$tok"
   done
 
+  if [ "$found" -eq 1 ]; then return 0; fi
   [ -n "$runner" ] && [ -n "$target" ] || return 1
   _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"
   return $?

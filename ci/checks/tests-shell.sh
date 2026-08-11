@@ -49,9 +49,18 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
     # above — HEAD does not carry the path, and --exclude-standard drops
     # exactly this file — so the suites ran the replacement for a commit that
     # removes their own coverage. Nothing under ci/ or .githooks/ is
-    # legitimately ignored except the gate's own generated cache.
+    # legitimately ignored except the gate's own generated state.
+    #
+    # Which is more than `.ci-gate`. `ci/.gitignore` also declares `reports/*`
+    # and `artifacts/*`, and the parallel runner writes its job state and
+    # per-check logs into `ci/reports/` *before* this lane runs -- so on every
+    # ship run this scan reported the gate's own output as drift and exited 20
+    # before a single suite executed. The pre-push gate blocking itself, and
+    # the remedy it printed -- "commit the rest" -- is one git-safety.sh
+    # forbids. Anchored at `ci/`, so only these two directories are pruned and
+    # not any directory that happens to share their name.
     git ls-files --others --ignored --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null \
-      | grep -Ev '(^|/)(\.ci-gate|node_modules)/' || true
+      | grep -Ev '(^|/)(\.ci-gate|node_modules)/|^ci/(reports|artifacts)/' || true
   } | sort -u | sed '/^$/d')"
   if [ -n "$SHELL_DRIFT" ]; then
     echo "Gate inputs differ between HEAD and the worktree:"

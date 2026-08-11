@@ -119,7 +119,15 @@ _gs_commits_readable() {
   [ -n "$GATE_RANGE" ] || return 0
   while IFS= read -r sha; do
     [ -n "$sha" ] || continue
-    git show --format= --name-only "$sha" >/dev/null 2>&1 || return 1
+    # `--numstat`, not `--name-only`. Names come from the trees alone, so a
+    # repository whose trees are present and whose blobs are not -- a partial
+    # clone whose promisor remote is unreachable -- passed this probe. The
+    # scans below then loaded the content, failed there, and the whitespace
+    # check reported "conflict markers or whitespace errors" and exit 20 for an
+    # object it could not read: a diagnostic naming the wrong problem, and a
+    # new-issue verdict for what is infrastructure. Counting changed lines
+    # needs the blobs, so this now fails where the scans would.
+    git show --format= --numstat "$sha" >/dev/null 2>&1 || return 1
   done <<< "$GATE_COMMITS"
   return 0
 }

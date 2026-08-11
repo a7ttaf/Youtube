@@ -591,8 +591,44 @@ extract_test_block() {
 # worktree leaves a commit that collects almost nothing while a worktree-only
 # read reports the layout declared. Both copies are checked, so a bad include in
 # either fails.
+# Emit a temporary copy of the config as one revision spells it, or refuse.
+#
+# `_rev` is a git object prefix -- `:` for the index, `HEAD:` for the pushed
+# tree. The failure arms are the point: an object the revision lists and git
+# cannot produce is infrastructure, because dropping it silently leaves the
+# caller validating the remaining copies and reporting PASS over a config that
+# was never inspected.
+_emit_config_copy() {
+  local _rev="$1" _what="$2" _tmp
+  git cat-file -e "${_rev}${VITEST_CONFIG}" 2>/dev/null || return 0
+  _tmp="$(mktemp 2>/dev/null)" || _tmp=""
+  if [ -z "$_tmp" ]; then
+    echo "Cannot create a private temporary file to read the ${_what} ${VITEST_CONFIG}." >&2
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
+  if git show "${_rev}${VITEST_CONFIG}" > "$_tmp" 2>/dev/null; then
+    printf '%s\n' "$_tmp"
+    return 0
+  fi
+  rm -f "$_tmp"
+  echo "The ${_what} lists ${VITEST_CONFIG} but git cannot read that blob." >&2
+  echo "  Refusing to validate the remaining copies alone: the config this" >&2
+  echo "  commit would carry has not been inspected." >&2
+  exit "$CI_RESULT_FAIL_INFRA"
+}
+
 config_sources() {
   printf '%s\n' "$VITEST_CONFIG"
+  # In ship mode the commit already exists, so the index and the worktree can
+  # both hold a repair the pushed tree does not. `git show :path` reads the
+  # index, so a HEAD whose include is narrowed -- or absent -- was never looked
+  # at, and with the configurable Node lanes disabled nothing else looks at it
+  # either. The pushed tree is what the gate is vouching for, so it is a source.
+  if [ "${CI_GATE_MODE:-}" = "ship" ] \
+    && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    _emit_config_copy "HEAD:" "pushed commit"
+  fi
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
     if git cat-file -e ":$VITEST_CONFIG" 2>/dev/null; then
       local staged
@@ -883,6 +919,24 @@ elif config_missing_from_index; then
   echo "  Stage the config (git add ${VITEST_CONFIG}), or restore it if the"
   echo "  deletion was staged by mistake."
 else
+  # The producer's status is taken before its output is used.
+  #
+  # `done <<< "$(config_sources)"` discarded it: the function's `exit
+  # FAIL_INFRA` ends only the command substitution, the here-string then
+  # carries whatever reached stdout first, and the loop's own success became
+  # the script's. So the arm added for an unreadable staged config printed its
+  # diagnostic and the check went on to report "Test layout OK" and exit 0 --
+  # the guard against a config nobody could read, reporting PASS.
+  #
+  # The case covering that arm called `config_sources` directly, so it proved
+  # the function and not the path through it. There is a case for the path now.
+  _CFG_SOURCES=""
+  _CFG_RC=0
+  _CFG_SOURCES="$(config_sources)" || _CFG_RC=$?
+  if [ "$_CFG_RC" -ne 0 ]; then
+    exit "$_CFG_RC"
+  fi
+
   # Each source is checked independently: a bad include in the staged copy or in
   # the worktree copy is drift either way.
   while IFS= read -r _cfg; do
@@ -983,7 +1037,7 @@ else
 
     # Drop the temp copy of the staged config.
     [ "$_cfg" = "$VITEST_CONFIG" ] || rm -f "$_cfg"
-  done <<< "$(config_sources)"
+  done <<< "$_CFG_SOURCES"
 fi
 
 # ---------------------------------------------------------------------------

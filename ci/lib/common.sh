@@ -102,6 +102,7 @@ ci::common::node_workspaces() {
   # because its name resembles the sentinel being filtered. `${found%"/$manifest"}`
   # is a literal suffix strip and cannot do that.
   local candidate
+  local _cands=() _n=0 _i=0 _j=0 _nested=0
   while IFS= read -r found; do
     [ -n "$found" ] || continue
     found="${found#./}"
@@ -111,12 +112,53 @@ ci::common::node_workspaces() {
     candidate="${found%"/$manifest"}"
     [ "$candidate" != "$found" ] || continue
     ci::common::is_vendored_path "$candidate" && continue
-    printf '%s\n' "$candidate"
+    _cands[$_n]="$candidate"
+    _n=$((_n + 1))
   done < <(
     find . -name 'node_modules' -prune -o -name '.git' -prune -o \
       -type f -name "$manifest" -print 2>/dev/null \
       | sort -u
   )
+
+  # A manifest nested under another manifest is the same ambiguity the root
+  # branch reports, and it was only ever asked about the repository root. A
+  # repository with no root manifest but a subtree that is itself a monorepo
+  # root -- frontend/package.json beside frontend/packages/app/package.json --
+  # had both emitted as independent workspaces, and the lane then entered the
+  # child and returned FAIL_INFRA, because a workspaces monorepo keeps its
+  # lockfile only at its own root. Neither reading is safe to guess here for
+  # exactly the reason it is not safe to guess there, so it is reported.
+  _i=0
+  while [ "$_i" -lt "$_n" ]; do
+    _j=0
+    while [ "$_j" -lt "$_n" ]; do
+      if [ "$_i" -ne "$_j" ]; then
+        case "${_cands[$_i]}" in
+          "${_cands[$_j]}"/*)
+            printf '  %s (nested under %s)\n' "${_cands[$_i]}" "${_cands[$_j]}" >&2
+            _nested=$((_nested + 1))
+            ;;
+        esac
+      fi
+      _j=$((_j + 1))
+    done
+    _i=$((_i + 1))
+  done
+  if [ "$_nested" -gt 0 ]; then
+    {
+      echo "A ${manifest} coexists with ${_nested} nested one(s), listed above."
+      echo "  Running only the parent silently skips their scripts; running them"
+      echo "  separately fails on the lockfile a workspaces monorepo keeps only"
+      echo "  at its own root. Declare which this is before the lane can cover it."
+    } >&2
+    return 1
+  fi
+
+  _i=0
+  while [ "$_i" -lt "$_n" ]; do
+    printf '%s\n' "${_cands[$_i]}"
+    _i=$((_i + 1))
+  done
   return 0
 }
 

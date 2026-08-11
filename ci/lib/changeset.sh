@@ -171,6 +171,16 @@ ci::changeset::_json_escape() {
   s="${s//$'\t'/\\t}"
   s="${s//$'\b'/\\b}"
   s="${s//$'\f'/\\f}"
+  # JSON forbids every unescaped byte below 0x20, not only the five that have
+  # short names. A path may legally carry any of them, and one literal control
+  # byte makes the entire report unparseable -- the audit artifact lost over a
+  # filename. The remainder go out as \u00XX, after the backslash escape above
+  # so the escapes this introduces are not escaped again.
+  local cc ch
+  for cc in 01 02 03 04 05 06 07 0b 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f; do
+    printf -v ch "\\x${cc}"
+    s="${s//"$ch"/\\u00${cc}}"
+  done
   printf '%s' "$s"
 }
 
