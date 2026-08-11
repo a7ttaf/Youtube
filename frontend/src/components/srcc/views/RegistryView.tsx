@@ -1247,6 +1247,15 @@ const RegistryView = ({
           }}
           onAcknowledgeUnsettled={() => {
             unsettledImport.acknowledge(warnedApplyIdsRef.current);
+            // RE-CAPTURE what remains. The effect only fires on a false -> true
+            // transition, so if one apply settles while another is still
+            // pending the flag never drops and the ref would stay pinned to
+            // the settled id — every further acknowledgement replaying a list
+            // that retires nothing, leaving the operator blocked until a
+            // reload. Refreshing here keeps the exclusion (the later apply
+            // survives THIS click) while letting the next click acknowledge
+            // the warning that is still on screen (review #184, codex P2).
+                      warnedApplyIdsRef.current = unsettledImport.snapshotPendingIds();
           }}
           hasTraceNav={Boolean(onOpenTrace)}
           onMap={onMap}

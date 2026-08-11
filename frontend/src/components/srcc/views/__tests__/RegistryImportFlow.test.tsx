@@ -1016,6 +1016,42 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     ).toEqual([]);
   });
 
+  it("stays acknowledgeable when one apply settles while another is pending", async () => {
+    // The lockout the id-capture fix could produce. The capture effect only
+    // fires on a false -> true transition, so with A warned and B admitted
+    // afterwards, A settling leaves the flag UP and the captured list pinned
+    // to A. Every further acknowledgement then replays a list that retires
+    // nothing, and the operator cannot import until a reload (review #184,
+    // codex P2). The handler re-captures what remains, so the second click
+    // acknowledges the warning still on screen.
+    const scope = UNSCOPED_IMPORT_SCOPE;
+    const keyFor = (id: string) => `ums.unsettledChannelImport.${scope}.${id}`;
+    // A is outstanding before the view mounts: the warning goes up capturing A.
+    globalThis.localStorage.setItem(keyFor("apply-A"), "1");
+    routeFetch();
+    renderRegistry();
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    expect(screen.getByText(/may still be committing/i)).toBeInTheDocument();
+
+    // Another tab admits B, then A settles. jsdom shares localStorage but does
+    // not synthesise the cross-document event, so raise it explicitly.
+    globalThis.localStorage.setItem(keyFor("apply-B"), "1");
+    fireEvent(globalThis.window, new StorageEvent("storage", { key: keyFor("apply-B") }));
+    globalThis.localStorage.removeItem(keyFor("apply-A"));
+    fireEvent(globalThis.window, new StorageEvent("storage", { key: keyFor("apply-A") }));
+
+    // First acknowledgement: B is deliberately preserved, so the warning stays.
+    fireEvent.click(screen.getByRole("button", { name: /this import is accounted for/i }));
+    expect(screen.getByText(/may still be committing/i)).toBeInTheDocument();
+
+    // Second acknowledgement clears it — no reload needed.
+    fireEvent.click(screen.getByRole("button", { name: /this import is accounted for/i }));
+    await waitFor(() =>
+      expect(screen.queryByText(/may still be committing/i)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /import csv/i })).toBeEnabled();
+  });
+
   it("points an AUDIT-capable operator at the audit trail instead", async () => {
     // The other half of the capability branch. An operator who can open
     // AuditView gets the evidence that actually settles authorship; one who
