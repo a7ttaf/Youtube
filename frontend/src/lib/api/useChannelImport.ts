@@ -134,9 +134,19 @@ const isCmsStatus = (value: unknown): boolean => {
 // outcome would silently move a group label.
 const GROUP_ACTIONS = ["CREATE", "JOIN"] as const;
 
-/** A present, non-empty string — the backend never emits a blank for these. */
+/**
+ * A reason the operator can actually READ. Non-empty is not enough: an ERROR
+ * row disables Apply and its `reason` is the only row-specific remediation, so
+ * `"   "` renders an effectively blank Note cell and leaves them unable to tell
+ * what to fix while the payload stays trusted (review #184, codex P2).
+ *
+ * JS `trim()` is the right test here, unlike isParserText: this asks whether
+ * the string RENDERS as blank, not whether it matches the parser's
+ * normalization -- and a reason is composed by the backend, never parsed from
+ * the operator's CSV.
+ */
 const isNonBlankString = (value: unknown): boolean => {
-  return typeof value === "string" && value !== "";
+  return typeof value === "string" && value.trim() !== "";
 };
 
 /**
@@ -153,6 +163,29 @@ const isChannelId = (value: unknown): boolean => {
 };
 
 /**
+ * The characters Python's `str.strip()` removes -- Py_UNICODE_ISSPACE, which is
+ * NOT the set `String.prototype.trim()` removes.
+ *
+ * The two disagree in both directions, and one direction breaks a valid import:
+ * JS trims U+FEFF and Python does not, so `_parse_text_fields` accepts and
+ * emits a BOM-prefixed name verbatim while `value === value.trim()` judged it
+ * untrimmed and refused the whole payload. Such a roster works through the API
+ * and leaves the SPA unable to reach Preview (review #184, codex P2).
+ * Measured, not assumed:
+ *
+ *   python: "﻿Alpha".strip() -> unchanged
+ *   node:   "﻿Alpha".trim()  -> "Alpha"
+ *
+ * The other direction is harmless: U+001C-U+001F are Python-space and not
+ * JS-space, but the parser has already stripped them from the ends, so no
+ * emitted value can carry one there.
+ */
+const PYTHON_SPACE = "\\t\\n\\v\\f\\r\\u001c-\\u001f \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+
+/** Leading or trailing Python-whitespace -- text `strip()` would have cut. */
+const PYTHON_UNSTRIPPED = new RegExp(`^[${PYTHON_SPACE}]|[${PYTHON_SPACE}]$`, "u");
+
+/**
  * Text as the PARSER would have left it. `_parse_text_fields` strips the cell,
  * ERRORs an empty result, and ERRORs a NUL-bearing one — so a writable row's
  * text is always trimmed, non-empty and NUL-free.
@@ -166,7 +199,7 @@ const isChannelId = (value: unknown): boolean => {
 const isParserText = (value: unknown): boolean => {
   return (
     typeof value === "string" &&
-    value === value.trim() &&
+    !PYTHON_UNSTRIPPED.test(value) &&
     value !== "" &&
     !value.includes("\u0000")
   );
@@ -252,8 +285,29 @@ const isChangeMap = (value: unknown): boolean => {
  * refreshed preview could reuse or mis-show a row (review #184, codex P2).
  * Uniqueness is checked across the plan in isPlanRows.
  */
+/**
+ * The largest row number `parse_channel_import_csv` can emit.
+ *
+ * `enumerate(reader, start=1)` counts every line of the data section, and the
+ * route caps BOTH tallies at MAX_IMPORT_ROWS (channels.py:111) -- 5000 data
+ * rows and 5000 blank rows -- so 10000 is the ceiling, reached only by a file
+ * that alternates them.
+ *
+ * Without a bound, `Number.isInteger` accepts 1e100: a malformed response could
+ * keep the real fingerprint, ascend through absurd numbers, pass every other
+ * check, and point the operator at CSV lines that do not exist (review #184,
+ * codex P2).
+ */
+const MAX_IMPORT_ROWS = 5000;
+const MAX_PLAN_ROW_NUMBER = MAX_IMPORT_ROWS * 2;
+
 const isRowNumber = (value: unknown): boolean => {
-  return typeof value === "number" && Number.isInteger(value) && value >= 1;
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 1 &&
+    value <= MAX_PLAN_ROW_NUMBER
+  );
 };
 
 const isNullableString = (value: unknown): boolean => {

@@ -123,7 +123,7 @@ Frontend, and the PR-scope analyzer:
 
 | Suite | Result |
 | --- | --- |
-| `bun run test` (frontend) | **466 passed**, 41 files |
+| `bun run test` (frontend) | **471 passed**, 41 files |
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
 | DeepSource (PR scope) | `[]` |
@@ -134,7 +134,7 @@ it: the repository's no-skip policy makes the Postgres-tier tests raise, so a
 bare run reports 21 failures and 103 errors that are all the same missing
 prerequisite. The figure above is the documented command with that variable
 set against a disposable Postgres container. Recorded rather than smoothed
-over, because "2811 passed" and "21 failed" are the same command on the same
+over, because a passing total and "21 failed" are the same command on the same
 commit, and the difference is entirely environmental.
 
 **`mypy` is not one of the four gates, but DeepSource enforces it.** The
@@ -143,8 +143,13 @@ type regression passes all four baseline gates and turns the PR red only after
 the push — which is exactly what happened once on this branch. `uv run mypy` is
 therefore run here after every backend edit. Full-tree it leaves ONE error, in
 `backend/ums_smart_revenue/devtools/pytest_policy_gate.py:597`, which is
-byte-identical to `origin/main` and untouched by this PR (verified with
-`git show origin/main:<path> | diff -`).
+byte-identical to `origin/main` and untouched by this PR. Verified with a
+command that actually runs -- the earlier draft wrote `diff -` with no second
+operand, and the placeholder was swallowed as an HTML tag:
+
+```bash
+git show origin/main:backend/ums_smart_revenue/devtools/pytest_policy_gate.py | diff - backend/ums_smart_revenue/devtools/pytest_policy_gate.py
+```
 
 Running `ruff` the documented way also caught something a narrower invocation
 had not: `uv run --project backend ruff check backend/ tests/` reported clean
@@ -156,8 +161,11 @@ those arguments.
 The backend suite has been re-run in full after every backend change rather
 than assumed — twice over, when the first pass after the round-51 write-boundary
 change surfaced a Postgres failure (a monkeypatched `update_inventory` wrapper
-that had not grown the new keyword). 2807 -> 2811 is the review rounds' added
-tests.
+that had not grown the new keyword). The total has climbed with each round's
+added tests -- 2807 at the first full run, 2813 at the figure in the gate table
+above, which is the only one that describes the current commit. Earlier numbers
+appear in this document only inside sentences about the round that produced
+them.
 
 **Failures encountered and fixed during review**, recorded because they are the
 useful part: twenty-two fixtures across five files carried shapes the backend
@@ -242,7 +250,7 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1593 insertions across eight files** (`git diff --stat
+backend diff is **1661 insertions across eight files** (`git diff --stat
 $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a frontend revert
 leaves all of it running. That figure moves with every review round that
 touches backend code — re-measure it rather than trusting this line if the

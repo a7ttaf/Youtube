@@ -843,6 +843,129 @@ describe("useChannelImport", () => {
     ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
 
+  it("accepts a BOM-prefixed name, which Python strip() does NOT remove", async () => {
+    // JS trim() and Python strip() disagree, and this direction breaks a valid
+    // import: Python keeps U+FEFF, so _parse_text_fields emits the name
+    // verbatim, while a `value === value.trim()` check judged it untrimmed and
+    // refused the whole payload -- a roster that works through the API and
+    // leaves the SPA unable to reach Preview (review #184, codex P2).
+    const bomName = "\uFEFFAlpha Channel";
+    expect(bomName.trim()).not.toBe(bomName);
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+        rows: [{ ...DRY_RUN_RESULT.rows[0], channel_name: bomName }],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ rows: [{ channel_name: bomName }] });
+  });
+
+  it("still rejects padding Python WOULD have stripped", async () => {
+    // The rule must keep refusing real padding. NBSP and the ideographic space
+    // are both Py_UNICODE_ISSPACE, so the parser strips them and a name
+    // carrying one at an end is unemittable.
+    for (const channelName of [" Alpha Channel", "Alpha Channel ", "　Alpha Channel"]) {
+      fetchMock().mockResolvedValue(
+        jsonResponse({
+          ...DRY_RUN_RESULT,
+          counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+          rows: [{ ...DRY_RUN_RESULT.rows[0], channel_name: channelName }],
+        }),
+      );
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+      ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+    }
+  });
+
+  it("rejects a row number the parser could never reach", async () => {
+    // enumerate(reader, start=1) counts data AND blank lines, both capped at
+    // MAX_IMPORT_ROWS = 5000, so 10000 is the ceiling. Number.isInteger alone
+    // accepted 1e100, which ascends past every other check and points the
+    // operator at CSV lines that do not exist (review #184, codex P2).
+    for (const rowNumber of [10001, 1e100]) {
+      fetchMock().mockResolvedValue(
+        jsonResponse({
+          ...DRY_RUN_RESULT,
+          counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+          rows: [{ ...DRY_RUN_RESULT.rows[0], row_number: rowNumber }],
+        }),
+      );
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+      ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+    }
+  });
+
+  it("accepts the LAST row number the parser can reach", async () => {
+    // 10000 exactly: a file alternating 5000 data rows with 5000 blank ones.
+    // Pinned so the bound cannot be tightened to the data-row cap alone.
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+        rows: [{ ...DRY_RUN_RESULT.rows[0], row_number: 10000 }],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ rows: [{ row_number: 10000 }] });
+  });
+
+  it("rejects an ERROR row whose reason renders blank", async () => {
+    // The ERROR outcome disables Apply and the reason is the ONLY row-specific
+    // remediation, so whitespace leaves the operator unable to tell what to fix
+    // while the payload stays trusted (review #184, codex P2).
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...BLOCKED_APPLY_DETAIL,
+        dry_run: true,
+        rows: [{ ...BLOCKED_APPLY_DETAIL.rows[0], reason: "   " }],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
   it("rejects a PRE-DISCLOSURE payload that omits the fields entirely", async () => {
     // The rejections above pin `null`; this one pins ABSENT, which is the
     // shape a backend WITHOUT this PR emits — the fields do not exist there.

@@ -370,6 +370,33 @@ def apply_channel_import(
     )
 
 
+# ============================================================================
+# Purpose: Decide whether one plan entry is group work at all, and hand back the
+#   pair that work is made of — its CMS group key and the channel joining it.
+# Database/ORM: None — pure over the entry. It performs no read and no write;
+#   the group pass and its pre-flight both act on what this returns.
+# Standards: ONE definition, used by both halves, and that is the whole point.
+#   The pre-flight judges the labels the write boundary will enforce, so a
+#   filter WIDER than the batcher's refuses a plan over an entry the write pass
+#   then skips — a stale label on an ERROR row taking down a valid JOIN. The two
+#   drifting apart is exactly how that reappears (review #184).
+#   Returns the narrowed PAIR rather than a bool: `str | None` narrowing does not
+#   survive a boolean helper, so both callers went back to re-proving what they
+#   had just asked, and mypy failed them for it (DeepSource TYP-050).
+#   A row is group work only with a key AND a channel identity, because
+#   _attach_group_memberships is handed `channel_ids` — an entry missing either
+#   contributes nothing for the group pass to do.
+# Blast Radius: Which rows reach the group write, and — through the pre-flight —
+#   whether a whole import is refused before any channel row is written. No
+#   writes and no audit rows of its own; over-inclusion costs a false refusal,
+#   under-inclusion costs an unchecked group effect.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _require_planned_group_actions, the pre-flight, and _group_write_batches,
+#     the batcher — the two callers this exists to keep in step.
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     ChannelImportPlanEntry, whose optional fields make the narrowing necessary.
+# ============================================================================
 def _group_write_target(entry: ChannelImportPlanEntry) -> tuple[str, str] | None:
     """The ``(group key, channel id)`` this entry's group write acts on, or None.
 
