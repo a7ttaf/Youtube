@@ -19,12 +19,15 @@ from ums_smart_revenue.org.channel_import import (
     ChannelImportOutcome,
     ChannelImportPlan,
     ChannelImportPlanEntry,
+    parse_channel_import_csv,
+    plan_channel_import,
 )
 from ums_smart_revenue.org.channel_import_apply import (
     ChannelImportAdoptableGroupError,
     ChannelImportArchivedGroupError,
     ChannelImportGroupActionDivergedError,
     ChannelImportGroupOwnerMismatchError,
+    _group_write_batches,
     apply_channel_import,
 )
 from ums_smart_revenue.org.channel_registry import ChannelRegistry, ChannelRegistryEntry
@@ -725,3 +728,41 @@ def test_a_stale_label_on_a_non_actionable_entry_is_not_refused() -> None:
 
     # The JOIN happened; nothing was refused.
     assert groups.get_group_by_cms_id("cms-tv").channel_ids == (CHANNEL_ID,)
+
+
+def test_no_plan_promises_a_group_effect_the_write_pass_will_not_perform() -> None:
+    """Every row disclosing a group effect must map to a membership write.
+
+    The batcher collapses a repeated ``(channel, group)`` pair so one channel
+    is never handed to ``add_members`` twice. Planning has to refuse that
+    repeat rather than emit a second row carrying the same ``group_action``,
+    or the preview counts group work the apply does once (review #184).
+    """
+    csv_text = (
+        "youtube_channel_id,channel_name,group_id\n"
+        f"{CHANNEL_ID},Alpha News,cms-tv\n"
+        f"{CHANNEL_ID},Alpha News,cms-tv\n"
+        f"{CHANNEL_ID},Alpha News,cms-radio\n"
+    )
+    parsed = parse_channel_import_csv(csv_text)
+    plan = plan_channel_import(
+        rows=parsed.rows,
+        errors=parsed.errors,
+        existing={},
+        content_owner_id="OWNER1",
+        cms_status="INSIDE_CMS",
+        owned_group_ids=frozenset(),
+    )
+
+    claimed = [entry for entry in plan.entries if entry.group_action is not None]
+    written = [entry for _, entries in _group_write_batches(plan.entries) for entry in entries]
+
+    assert len(claimed) == len(written)
+    # Only the repeated pair is refused: making the counts agree by dropping
+    # the legal cms-radio association would satisfy the assertion above while
+    # losing the roster's actual intent.
+    assert plan.counts[ChannelImportOutcome.ERROR.value] == 2
+    surviving = [
+        entry for entry in plan.entries if entry.outcome is not ChannelImportOutcome.ERROR
+    ]
+    assert [entry.group_id for entry in surviving] == ["cms-radio"]

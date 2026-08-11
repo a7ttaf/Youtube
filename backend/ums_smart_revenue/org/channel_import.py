@@ -288,38 +288,100 @@ def _parse_row(
 def _flag_duplicates(
     rows: list[ChannelImportRow],
 ) -> tuple[list[ChannelImportRow], list[ChannelImportRowError]]:
-    """Reject only CONFLICTING copies of a repeated channel id.
+    """Reject CONFLICTING copies of a repeated channel id, and exact repeats.
 
     CMS group membership is many-to-many, so a roster legitimately repeats a
-    ``youtube_channel_id`` once per group (the singular ``group_id`` column
-    carries one association per row). Copies must agree on the inventory
-    fields (``channel_name``, ``view_revenue``): a conflicting duplicate is
-    ambiguous about what to persist and fails every copy closed, but
-    agreeing copies all survive so the planner can attach each row's group.
+    ``youtube_channel_id`` once per DISTINCT group (the singular ``group_id``
+    column carries one association per row). Two things break that contract
+    and both fail closed:
+
+    * copies that disagree on the inventory fields (``channel_name``,
+      ``view_revenue``) are ambiguous about what to persist, and fail every
+      copy — no copy is privileged, so there is no non-arbitrary winner;
+    * copies that repeat the SAME ``(youtube_channel_id, group_id)`` pair —
+      including two rows carrying no group at all — say nothing the first
+      copy did not already say.
+
+    Rejecting the exact repeat is what keeps the preview honest. The write
+    side already collapses it (``_group_write_batches`` refuses to hand one
+    channel to ``add_members`` twice), but planning does not: the second copy
+    plans UNCHANGED and repeats the first's ``group_action``, so a dry run
+    promises group work twice and counts a channel twice while the apply does
+    it once. Rejecting cannot lose a successful import — the duplicate row
+    never wrote anything — it only turns a preview that overstated its own
+    effect into a row error naming the line to delete.
     """
+    conflicted = _conflicting_channel_ids(rows)
+    repeated = _repeated_associations(rows)
+    kept: list[ChannelImportRow] = []
+    errors: list[ChannelImportRowError] = []
+    for row in rows:
+        reason = _duplicate_reason(row, conflicted=conflicted, repeated=repeated)
+        if reason is None:
+            kept.append(row)
+        else:
+            errors.append(ChannelImportRowError(row_number=row.row_number, reason=reason))
+    return kept, errors
+
+
+def _conflicting_channel_ids(rows: list[ChannelImportRow]) -> set[str]:
+    """Channel ids whose copies disagree about what to persist."""
     first_signature: dict[str, tuple[str, bool | None]] = {}
     conflicted: set[str] = set()
     for row in rows:
         signature = (row.channel_name, row.view_revenue)
         if first_signature.setdefault(row.youtube_channel_id, signature) != signature:
             conflicted.add(row.youtube_channel_id)
-    kept: list[ChannelImportRow] = []
-    errors: list[ChannelImportRowError] = []
+    return conflicted
+
+
+def _repeated_associations(rows: list[ChannelImportRow]) -> set[tuple[str, str | None]]:
+    """The ``(channel id, group key)`` pairs the file states more than once.
+
+    ``group_id`` is part of the key because repeating a channel is only
+    meaningful ACROSS groups; ``None`` participates as an ordinary value, so a
+    channel listed twice with no group is a repeat like any other.
+    """
+    seen: set[tuple[str, str | None]] = set()
+    repeated: set[tuple[str, str | None]] = set()
     for row in rows:
-        if row.youtube_channel_id in conflicted:
-            errors.append(
-                ChannelImportRowError(
-                    row_number=row.row_number,
-                    reason=(
-                        "conflicting duplicate youtube_channel_id in file: "
-                        f"{row.youtube_channel_id} (copies disagree on "
-                        "channel_name/view_revenue)"
-                    ),
-                )
-            )
-        else:
-            kept.append(row)
-    return kept, errors
+        association = (row.youtube_channel_id, row.group_id)
+        if association in seen:
+            repeated.add(association)
+        seen.add(association)
+    return repeated
+
+
+def _duplicate_reason(
+    row: ChannelImportRow,
+    *,
+    conflicted: set[str],
+    repeated: set[tuple[str, str | None]],
+) -> str | None:
+    """The row error this duplicate earns, or None if the row is admissible.
+
+    Conflict is reported ahead of repetition: a channel whose copies disagree
+    has no settled inventory to attach a group to, so naming the repeat first
+    would send the operator to fix the lesser defect.
+    """
+    if row.youtube_channel_id in conflicted:
+        return (
+            "conflicting duplicate youtube_channel_id in file: "
+            f"{row.youtube_channel_id} (copies disagree on "
+            "channel_name/view_revenue)"
+        )
+    if (row.youtube_channel_id, row.group_id) not in repeated:
+        return None
+    if row.group_id is None:
+        return (
+            f"duplicate youtube_channel_id in file: {row.youtube_channel_id} "
+            "with no group_id; repeat a channel only to add it to a distinct group"
+        )
+    return (
+        f"duplicate youtube_channel_id in file: {row.youtube_channel_id} "
+        f"is already associated with group_id {row.group_id}; "
+        "repeat a channel only to add it to a distinct group"
+    )
 
 
 class ChannelImportOutcome(StrEnum):
@@ -396,34 +458,35 @@ class ChannelImportPlan:
 
 
 # ============================================================================
-# Purpose: Decide every row's outcome for a bulk channel import — CREATE,
-#   UPDATE (with its field diff), UNCHANGED, or ERROR — by diffing the parsed
-#   roster against the registry snapshot the caller supplies.
-# Database/ORM: None. Pure function over caller-supplied data; the store reads
-#   happen in channel_import_apply.plan_channel_import_with_stores. Keeping
-#   this I/O-free is what makes the outcome rules unit-testable.
-# Standards: Fail closed per row, never per file — every invalid row is
-#   reported so an operator fixes one file rather than one row at a time, and
-#   the route rejects the whole apply if any ERROR remains. Archived registry
-#   rows and archived CMS groups are ERRORs, never silent creates or
-#   reactivations, and so is an EXISTING owner-NULL CMS group: only that
-#   group's content owner may claim it, and a CSV cell is not that owner
-#   speaking. `revenue_required` is finance-sensitive: an absent
-#   view_revenue column defaults to required, and turning it ON is separately
-#   guarded against LOCKED months at the registry write boundary. A repeated
-#   channel id is an ADDITIONAL group membership (many-to-many) when its
-#   copies agree on inventory fields — the first copy owns the inventory
-#   outcome, later copies plan UNCHANGED to carry their group; an archived
-#   channel fails every copy.
-# Blast Radius: Every apply-time write decision, and therefore connector
-#   ingest targeting via cms_status/content_owner_id. No writes of its own,
-#   no audit, no finance totals.
+# Purpose: Decide whether a row's group key is UNATTACHABLE and say why —
+#   the group is archived, belongs to another content owner, or exists with
+#   no owner at all — so planning refuses the row instead of leaving it for
+#   the apply to reject.
+# Database/ORM: None — pure over the three key sets the caller already read in
+#   bulk (ChannelGroupORM keys); the reads happen in
+#   channel_import_apply.plan_channel_import_with_stores.
+# Standards: Fail closed, and fail at PLAN time. All three conditions are
+#   knowable from stored state, so a dry run that reports a clean plan for an
+#   import the write boundary will reject is a preview that lies — the write
+#   boundary still rechecks each one under the group row lock, and the two
+#   together are the disclosure and its enforcement. Only keys resolving to an
+#   EXISTING group are blocked: an absent key is created here and stamped at
+#   birth with the request's owner, which is a claim the request already
+#   carries. The owner-NULL case is deliberately a refusal and NOT an
+#   adoption — stamping an existing group's content_owner_id decides whose CMS
+#   sync governs it from then on, and a CSV cell is not that owner speaking.
+#   Returns the operator-facing reason rather than a bool so every refusal
+#   names its own remedy.
+# Blast Radius: Which rows become ERROR, and therefore whether the import is
+#   refused as a whole — any surviving ERROR row rejects the entire apply. No
+#   writes of its own, no audit, no finance totals.
 # Connections:
 #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
-#     plan_channel_import_with_stores supplies the store state; the apply
-#     executes these entries.
-#   - File: backend/ums_smart_revenue/api/channels.py -> renders the plan as
-#     the dry-run/apply response payload.
+#     plan_channel_import_with_stores supplies the archived/foreign/adoptable
+#     key sets, and the group pass rechecks the same conditions under lock.
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     _planned_group_action labels only the keys this function has cleared.
+# ============================================================================
 def _blocked_group_reason(
     group_id: str | None,
     *,
@@ -641,11 +704,15 @@ def plan_channel_import(
         if current is None or current.active:
             if row.youtube_channel_id in seen_channels:
                 # A repeated channel id carries an ADDITIONAL group membership
-                # (many-to-many; one association per row — the parser already
-                # rejected copies that disagree on inventory fields). The first
-                # copy owns the inventory outcome; membership rows plan as
-                # UNCHANGED so the apply attaches their group without a second
-                # inventory decision.
+                # (many-to-many; one association per row). The parser rejected
+                # both copies that disagree on inventory fields and copies that
+                # restate one (channel, group) pair, so every copy reaching
+                # here names a DISTINCT group — which is what makes this row's
+                # group_action a promise the apply actually keeps rather than a
+                # second claim on work the batcher has already collapsed. The
+                # first copy owns the inventory outcome; membership rows plan
+                # as UNCHANGED so the apply attaches their group without a
+                # second inventory decision.
                 entries.append(
                     ChannelImportPlanEntry(
                         row_number=row.row_number,
