@@ -353,6 +353,40 @@ describe("useChannelImport", () => {
     ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
 
+  it("rejects a PRE-DISCLOSURE payload that omits the fields entirely", async () => {
+    // The rejections above pin `null`; this one pins ABSENT, which is the
+    // shape a backend WITHOUT this PR emits — the fields do not exist there.
+    // It is the evidence behind the handoff's rollback ordering rule: revert
+    // the backend under a deployed stepper and every preview dies here, so the
+    // frontend must come down FIRST.
+    //
+    // Measured, not assumed: FOUR independent gates reject this payload — the
+    // two PLAN_ROW_FIELDS entries, hasConsistentGroupEffect, and both source
+    // predicates — so loosening any ONE of them leaves it rejected. It fails
+    // only against a client that requires none of the disclosure, which is
+    // precisely the pre-PR client this pins the incompatibility with.
+    const preDisclosure = {
+      ...DRY_RUN_RESULT,
+      rows: DRY_RUN_RESULT.rows.map((row) => {
+        const { group_action, revenue_source_status, ...rest } = row;
+        void group_action;
+        void revenue_source_status;
+        return rest;
+      }),
+    };
+    fetchMock().mockResolvedValue(jsonResponse(preDisclosure));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
   it("rejects a 2xx describing a DIFFERENT content owner", async () => {
     // The fingerprint cannot police this alone: the digest is computed
     // server-side over the request's actual owner, and the client cannot

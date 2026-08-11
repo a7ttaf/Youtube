@@ -1199,6 +1199,38 @@ export const RegistryImportFlow = ({
     }
   };
 
+  // ==========================================================================
+  // Purpose: Produce the VERDICT on an indeterminate apply — read a refreshed
+  //   plan and choose the strongest claim it supports: the roster matches, it
+  //   diverges, or its group effects cannot be checked at all.
+  // Database/ORM: None (frontend) — pure over an already-fetched dry-run
+  //   result; it issues no request and writes nothing. The read that produced
+  //   its input belongs to reconcileIndeterminate.
+  // Standards: NO AUTHORSHIP, in both directions, because a re-plan observes
+  //   end state and nothing else. All-UNCHANGED proves the registry matches
+  //   the roster, not that THIS request made it match — so the flow stays on
+  //   Preview and points at the audit trail rather than advancing to Applied.
+  //   Remaining CREATE/UPDATE work is the mirror image: it proves divergence,
+  //   not failure, since a completed import followed by another writer's edit
+  //   produces exactly this plan; the copy says "check again", never "it did
+  //   not commit". Fails CLOSED on the third case — the backend labels group
+  //   effects without loading membership, so a group-bearing roster's
+  //   all-UNCHANGED inventory cannot speak for its group writes, and that is
+  //   reported as unverifiable instead of being folded into the match branch.
+  //   Every branch sets the banner only; none clears the pending record, which
+  //   settles on the apply's own outcome.
+  // Blast Radius: What the operator is told about a write whose outcome is
+  //   unknown, and therefore whether they re-import. Over-claiming a match
+  //   invites a duplicate CHANNEL_IMPORTED; over-claiming failure sends them
+  //   to reconcile a registry that is already correct. No requests, no
+  //   authorization meaning.
+  // Connections:
+  //   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+  //       reconcileIndeterminate, the only caller, which supplies the dry run.
+  //   - File: backend/ums_smart_revenue/org/channel_import.py -> the
+  //       membership-free group labelling that makes the third branch
+  //       necessary.
+  // ==========================================================================
   /**
    * Turn a refreshed plan into the strongest claim it actually supports.
    *

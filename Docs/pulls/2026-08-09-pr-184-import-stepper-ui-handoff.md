@@ -20,11 +20,15 @@ The planner, the write boundary, the permission model and the audit contract
 are untouched except where a review finding required the API response
 *contract* to be corrected. No revenue math, no allocation, no month-close.
 
-## Files changed (29)
+## Files changed (30)
+
+Counted from `git diff --name-only $(git merge-base origin/main HEAD)..HEAD`,
+not from memory.
 
 - **Backend (6)** — `api/channels.py` (fingerprint widened to include the
-  server-resolved tenant; contract corrections), `api/session.py`
-  (`can_import_channels`), `org/channel_import.py`,
+  server-resolved tenant; `expected_plan_fingerprint`; `group_action` and
+  `revenue_source_status` on every plan row; contract corrections),
+  `api/session.py` (`can_import_channels`), `org/channel_import.py`,
   `org/channel_import_apply.py`, `org/channel_groups.py`,
   `org/sql_channel_groups.py`.
 - **Frontend (13)** — the stepper (`views/RegistryImportFlow.tsx`), its host
@@ -32,7 +36,13 @@ are untouched except where a review finding required the API response
   boundary (`lib/api/useChannelImport.ts`, `lib/api/types.ts`), two contexts
   (`UnsettledImportContext.tsx`, `WriteInFlightContext.tsx`),
   `ActionStepper.tsx`, and five test files.
-- **Backend tests (6)**, **Docs (4)**.
+- **Backend tests (6)** — `tests/api/` (`test_channels_import_api.py`,
+  `test_channels_import_postgres.py`, `test_channel_group_sync_postgres.py`,
+  `test_session_api.py`) and `tests/org/` (`test_channel_import_planner.py`,
+  `test_sql_channel_groups.py`).
+- **Docs (5)** — `01_IMPLEMENTATION_PLAN.md`, `12_BACKEND_API_SPEC.md`,
+  `15_DELIVERY_BACKLOG.md`, the pre-implementation plan under
+  `Docs/superpowers/plans/`, and this handoff.
 
 ## Behaviour changes
 
@@ -145,24 +155,82 @@ The backend files this PR does change are read/write **paths**, not schema:
 
 Tables written by this PR's code path — `youtube_channels`, `channel_groups`,
 `channel_group_members`, `audit_logs` — all pre-date it and are unchanged in
-shape. The one behavioural change that touches persisted data is that an apply
-now writes through for UPDATE **and** UNCHANGED rows for unbound callers, which
-is the "the file wins" rule established in review #159; it writes existing
-columns with values the roster already supplies and needs no backfill.
+shape.
+
+The write-through of UPDATE **and** UNCHANGED rows for unbound callers — "the
+file wins", review #159 — **predates this PR** and is unchanged by it; it is
+present at the merge base. What this PR changes about persisted data is
+subtractive in both cases, so neither can require a backfill:
+
+- A **bound** apply (one carrying `expected_plan_fingerprint`) 409s instead of
+  writing when the locked pre-state is not the one the operator reviewed.
+- **Any** apply 409s instead of writing when the group effect observed under
+  the row lock contradicts the previewed one.
+
+Both refuse the entire transaction; neither writes a value, a column or a row
+that the pre-PR code would not have written.
 
 ## Rollback / reset
 
-Frontend-only revert is safe and sufficient for the UI: the stepper is additive
-and reached solely through Registry's "Import CSV", which is itself gated on
-`can_import_channels`. Reverting the frontend leaves the backend route exactly
-as it was before this PR.
+This PR is **not** frontend-only, and the rollback story has to say so: the
+backend diff is 1295 insertions across six files, and a frontend revert leaves
+all of it running.
 
-The backend changes are the fingerprint widening and the `can_import_channels`
-capability. Reverting the fingerprint widening **weakens** the apply guard
-(a preview approved for one owner or tenant would again satisfy an apply
-directed at another), so it should not be reverted independently to fix a
-frontend problem.
+### Reverting the frontend only
 
+Safe and sufficient to withdraw the **UI**: the stepper is additive and reached
+solely through Registry's "Import CSV", itself gated on `can_import_channels`.
+No other view imports it, and the pending-import guard is confined to the two
+contexts and the shell.
+
+What **remains active** on the API afterwards, because nothing in it depends on
+the stepper being deployed:
+
+- `can_import_channels` continues to be derived in the session payload.
+- `plan_fingerprint` keeps its widened inputs, so tokens differ from pre-PR
+  ones for the same roster. Nothing persists a fingerprint, so this strands no
+  stored value — only in-flight previews, which a reload re-fetches.
+- `expected_plan_fingerprint` is still **accepted**, and a bound apply still
+  409s on a drifted reviewed pre-state. No client sends it once the frontend is
+  reverted, so applies fall back to the unbound "the file wins" behaviour of
+  review #159 — unchanged by this PR.
+- Every plan row still carries `group_action` and `revenue_source_status`.
+  These are additive response fields; a pre-PR client ignores them.
+- **The one behaviour a reverted frontend cannot opt out of**: the write
+  boundary re-checks the planned group effect under the group row lock for
+  *every* caller, bound or unbound, because the route always performs the
+  `list_owned_cms_group_ids` read. A group that appears or vanishes between
+  preview and apply now aborts the whole import (409) where it previously
+  proceeded. Group writes are also batched one-resolve-per-key rather than
+  per-row.
+
+### Reverting the backend
+
+**Order matters: revert the frontend first.** A backend-only revert breaks the
+deployed stepper at its shape gate: a payload whose rows omit `group_action`
+and `revenue_source_status` — the pre-PR wire shape — is rejected with
+`ChannelImportShapeError`, so every preview would fail and the import would be
+unusable rather than merely un-improved. Four independent checks reject it (the
+two `PLAN_ROW_FIELDS` entries, `hasConsistentGroupEffect`, and the two source
+predicates), so this is not a single guard that could be relaxed in passing.
+Pinned by `rejects a PRE-DISCLOSURE payload that omits the fields entirely`
+in `useChannelImport.test.tsx`, which fails only against a client requiring
+none of the disclosure.
+
+Two pieces should **not** be reverted independently to fix a frontend problem:
+
+- **The fingerprint widening.** Reverting it *weakens* the apply guard — a
+  preview approved for one content owner or tenant would again satisfy an apply
+  directed at another.
+- **The reviewed-pre-state enforcement.** Reverting it silently downgrades
+  every bound apply to "the file wins", which is the opposite of what an
+  operator who reviewed a diff approved.
+
+`api/session.py` is the one backend change that is independently and safely
+revertible: it removes a derived boolean, the frontend gate closes, and the
+route's own permission checks are untouched.
+
+Nothing here requires a data fix — see **Migration / backfill** above.
 Operators holding a stale pending-import record after a rollback can clear it
 from `localStorage` under the `ums.unsettledChannelImport.` prefix; no server
 state is involved.

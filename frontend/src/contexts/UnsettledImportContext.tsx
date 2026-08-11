@@ -525,6 +525,35 @@ const scopeParts = (scope: string): readonly [string, string] => {
   return [scope.slice(0, separator), scope.slice(separator + 1)];
 };
 
+// ============================================================================
+// Purpose: Decide whether a scope change is the ONE transition that may carry
+//   pending audited-import records forward — the same principal's tenant
+//   becoming known — as opposed to a change of who is looking.
+// Database/ORM: None (frontend) — a pure comparison of two scope strings. It
+//   moves nothing itself; it is the predicate adoptPendingApplies obeys.
+// Standards: Fail closed by CONJUNCTION, and each conjunct is load-bearing.
+//   `fromTenant === MISSING` and `toTenant !== MISSING` together admit only
+//   the forward direction: a tenant regressing to unresolved, or moving from
+//   one known tenant to another, is refused, because either would let a record
+//   written under tenant A be adopted into tenant B's namespace. `fromUser ===
+//   toUser` is the cross-OPERATOR half: two people on one browser profile
+//   resolve the same tenant, and without this conjunct one operator's pending
+//   import would be adopted into the other's scope. Both halves are compared
+//   over the strict-alphabet encoding scopeParts splits, so neither can be
+//   spoofed by a `~` inside a tenant or user id.
+// Blast Radius: Whether a pending-import warning crosses a namespace boundary.
+//   A false NEGATIVE strands a warning in the pre-resolution scope (the guard
+//   stands, over-warning); a false POSITIVE is the cross-operator leak — one
+//   operator warned about, and blocked by, another's write. Neither direction
+//   grants a write: admission is a separate gate, and the audit trail remains
+//   the authority on what committed.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx ->
+//       adoptPendingApplies, the only caller, which performs the move this
+//       predicate authorises.
+//   - File: frontend/src/components/srcc/AppShell.tsx -> resolveImportScope,
+//       which builds both operands as `tenant~user`.
+// ============================================================================
 /**
  * Whether `to` is the SAME principal as `from` with the tenant newly resolved.
  * That is the one scope transition which is not a change of who is looking:
