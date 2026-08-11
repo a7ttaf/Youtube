@@ -787,6 +787,62 @@ describe("useChannelImport", () => {
     ).resolves.toMatchObject({ counts: { UPDATE: 1 } });
   });
 
+  it("accepts a group key the BACKEND accepts, counted in code points", async () => {
+    // The backend caps len(group_id) at 255 code points; JS .length counts
+    // UTF-16 units, so 200 non-BMP characters are 200 to Python and 400 here.
+    // The plain .length check refused a roster the backend had already planned,
+    // which does not merely warn -- it fails the whole preview and takes the
+    // import UI down (review #184, qodo).
+    const astralKey = "\u{1F600}".repeat(200);
+    expect(astralKey.length).toBe(400);
+    expect([...astralKey].length).toBe(200);
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+        rows: [{ ...DRY_RUN_RESULT.rows[1], group_id: astralKey, group_action: "JOIN" }],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ rows: [{ group_id: astralKey }] });
+  });
+
+  it("still rejects a group key past the cap in CODE POINTS", async () => {
+    // The other half: switching units must not remove the cap. 256 astral
+    // characters are 256 code points, which the backend ERRORs.
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+        rows: [
+          {
+            ...DRY_RUN_RESULT.rows[1],
+            group_id: "\u{1F600}".repeat(256),
+            group_action: "JOIN",
+          },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
   it("rejects a PRE-DISCLOSURE payload that omits the fields entirely", async () => {
     // The rejections above pin `null`; this one pins ABSENT, which is the
     // shape a backend WITHOUT this PR emits — the fields do not exist there.

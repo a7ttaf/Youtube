@@ -115,14 +115,14 @@ with the pinned toolchain:
 | --- | --- |
 | `uv sync --extra dev --extra test --extra lint` | 87 resolved, 85 checked |
 | `uv run ruff check backend tests scripts` | **All checks passed** |
-| `uv run pytest -q` | **2811 passed**, 15 warnings (7m54s) |
+| `uv run pytest -q` | **2813 passed**, 15 warnings (8m04s) |
 | `git diff --check` | clean (exit 0) |
 
 Frontend, and the PR-scope analyzer:
 
 | Suite | Result |
 | --- | --- |
-| `bun run test` (frontend) | **464 passed**, 41 files |
+| `bun run test` (frontend) | **466 passed**, 41 files |
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
 | DeepSource (PR scope) | `[]` |

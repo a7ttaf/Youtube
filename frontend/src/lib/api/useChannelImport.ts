@@ -98,12 +98,15 @@ const INVENTORY_FIELDS = [
   REVENUE_REQUIRED_FIELD,
 ] as const;
 
-// The two outcome literals this module reasons about by NAME, rather than only
-// membership-testing. Named because a typo in either silently disables a rule
-// instead of failing it.
+// Every outcome literal this module reasons about by NAME. All four are named,
+// not just the two that happened to need it first: a typo in a comparison
+// silently DISABLES the rule containing it rather than failing, so the set that
+// is safe to spell inline is empty.
+const OUTCOME_CREATE = "CREATE";
+const OUTCOME_UPDATE = "UPDATE";
 const OUTCOME_UNCHANGED = "UNCHANGED";
 const OUTCOME_ERROR = "ERROR";
-const PLAN_OUTCOMES = ["CREATE", "UPDATE", OUTCOME_UNCHANGED, OUTCOME_ERROR] as const;
+const PLAN_OUTCOMES = [OUTCOME_CREATE, OUTCOME_UPDATE, OUTCOME_UNCHANGED, OUTCOME_ERROR] as const;
 
 /**
  * The three literals `ck_youtube_channels_cms_status` permits. A diff side is a
@@ -113,12 +116,22 @@ const PLAN_OUTCOMES = ["CREATE", "UPDATE", OUTCOME_UNCHANGED, OUTCOME_ERROR] as 
  * while the bound apply wrote from the real one they never reviewed (review
  * #184, codex P2).
  */
-const CMS_STATUSES = ["INSIDE_CMS", "OUTSIDE_CMS", "UNKNOWN"] as const;
+// The status this client imports under, declared BEFORE the set so the set can
+// be built from it. Neither is derived by index: CMS_STATUSES[0] tied the value
+// actually sent on /channels/import — and the echo it is checked against — to
+// array order, so a reordering for readability would have silently changed the
+// protocol (review #184, qodo).
+const IMPORT_CMS_STATUS = "INSIDE_CMS";
+const CMS_STATUSES = [IMPORT_CMS_STATUS, "OUTSIDE_CMS", "UNKNOWN"] as const;
 
 const isCmsStatus = (value: unknown): boolean => {
   return CMS_STATUSES.some((status) => status === value);
 };
 
+// Deliberately NOT reusing OUTCOME_CREATE: ChannelImportGroupAction and
+// ChannelImportOutcome are independent backend enums that happen to spell one
+// member the same way. Sharing a constant would couple them, so renaming an
+// outcome would silently move a group label.
 const GROUP_ACTIONS = ["CREATE", "JOIN"] as const;
 
 /** A present, non-empty string — the backend never emits a blank for these. */
@@ -287,10 +300,10 @@ const isSourceStatusChange = (value: unknown): boolean => {
  * there would reject payloads the backend does emit.
  */
 const disclosesSourceStatus = (row: Record<string, unknown>): boolean => {
-  if (row.outcome === "ERROR") {
+  if (row.outcome === OUTCOME_ERROR) {
     return row.revenue_source_status === null;
   }
-  if (row.outcome !== "CREATE") {
+  if (row.outcome !== OUTCOME_CREATE) {
     return true;
   }
   const change = row.revenue_source_status;
@@ -332,7 +345,7 @@ const hasConsistentGroupEffect = (row: Record<string, unknown>): boolean => {
   // alone is satisfied by both being non-null, which told the operator a
   // rejected row would create or join a group, on the same screen that says
   // error rows write nothing (review #184, codex P2).
-  if (row.outcome === "ERROR") {
+  if (row.outcome === OUTCOME_ERROR) {
     return row.group_id === null && row.group_action === null;
   }
   // For a writable row the relation is the biconditional: null is reserved for
@@ -362,7 +375,13 @@ const isGroupKey = (value: unknown): boolean => {
   // the index-size cap that applies to the KEY alone; a channel name has no
   // equivalent bound. No interior-space rule either: the parser strips only
   // the ENDS, so "Music EMEA" is a legal key the backend can emit.
-  return isParserText(value) && (value as string).length <= MAX_GROUP_ID_CHARS;
+  // CODE POINTS, not UTF-16 units. The backend caps `len(group_id)`, which
+  // counts code points, while JS `.length` counts UTF-16 units — so a key of
+  // 200 non-BMP characters is 200 to Python and 400 here, and the plain
+  // `.length` check refused a roster the backend had already accepted, taking
+  // the import UI down with it (review #184, qodo). Spreading iterates code
+  // points, which is the same unit Python measures.
+  return isParserText(value) && [...(value as string)].length <= MAX_GROUP_ID_CHARS;
 };
 
 /** Null (no group write) or a key the parser could have emitted. */
@@ -387,7 +406,7 @@ const carriesUsableGroupKey = (row: Record<string, unknown>): boolean => {
  * authorises the real plan (review #184, codex P2).
  */
 const errorRowClaimsNothing = (row: Record<string, unknown>): boolean => {
-  if (row.outcome !== "ERROR") {
+  if (row.outcome !== OUTCOME_ERROR) {
     return true;
   }
   return (
@@ -416,7 +435,7 @@ const errorRowClaimsNothing = (row: Record<string, unknown>): boolean => {
  * to name.
  */
 const hasWriteFields = (row: Record<string, unknown>): boolean => {
-  if (row.outcome === "ERROR") {
+  if (row.outcome === OUTCOME_ERROR) {
     return true;
   }
   return (
@@ -449,7 +468,7 @@ const outcomeMatchesChanges = (row: Record<string, unknown>): boolean => {
     return false;
   }
   // CREATE, UNCHANGED and ERROR all carry an empty diff; UPDATE never does.
-  return row.outcome === "UPDATE" ? names.length > 0 : names.length === 0;
+  return row.outcome === OUTCOME_UPDATE ? names.length > 0 : names.length === 0;
 };
 
 /**
@@ -475,7 +494,7 @@ const outcomeMatchesChanges = (row: Record<string, unknown>): boolean => {
  * reason is a shape the planner cannot produce (review #184, codex P2).
  */
 const explainsErrorRows = (row: Record<string, unknown>): boolean => {
-  return row.outcome === "ERROR" ? isNonBlankString(row.reason) : row.reason === null;
+  return row.outcome === OUTCOME_ERROR ? isNonBlankString(row.reason) : row.reason === null;
 };
 
 /**
@@ -519,7 +538,7 @@ const sourceTransitionIsValid = (row: Record<string, unknown>): boolean => {
   if (change.from === change.to) {
     return false;
   }
-  if (row.outcome === "CREATE") {
+  if (row.outcome === OUTCOME_CREATE) {
     return true;
   }
   // The transition EXISTS only because the flag flipped. derive_revenue_source_status
@@ -635,7 +654,7 @@ const channelRowsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolean
   const copies = new Map<string, Array<Record<string, unknown>>>();
   for (const row of rows) {
     const id = row.youtube_channel_id;
-    if (row.outcome === "ERROR" || typeof id !== "string") {
+    if (row.outcome === OUTCOME_ERROR || typeof id !== "string") {
       continue;
     }
     const group = copies.get(id);
@@ -864,10 +883,7 @@ export const isChannelImportResult = (payload: unknown): payload is ChannelImpor
  * cannot check the echo against. Import is CMS-only by design — the roster is
  * a CMS content-owner roster — so there is one value, not a choice.
  */
-// The status this client always imports under. Drawn from CMS_STATUSES rather
-// than respelled: it is one of the column's three values, and a divergence
-// between the value sent and the value checked would be invisible.
-const IMPORT_CMS_STATUS = CMS_STATUSES[0];
+
 
 
 /**

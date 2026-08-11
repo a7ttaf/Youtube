@@ -370,6 +370,25 @@ def apply_channel_import(
     )
 
 
+def _performs_group_write(entry: ChannelImportPlanEntry) -> bool:
+    """Whether the group pass will actually act on this entry.
+
+    Shared with _group_write_batches deliberately. The pre-flight judges the
+    labels the write boundary is going to enforce, so judging a WIDER set would
+    refuse a plan over an entry the write pass then skips — an over-refusal that
+    the two filters drifting apart is exactly how you get (review #184).
+
+    A row needs a group key, and it needs the channel identity the membership
+    write is made of: ``_attach_group_memberships`` is handed ``channel_ids``,
+    so an entry missing either is not group work at all.
+    """
+    return (
+        bool(entry.group_id)
+        and entry.youtube_channel_id is not None
+        and entry.channel_name is not None
+    )
+
+
 # ============================================================================
 # Purpose: Refuse a whole import whose reviewed group effects no longer match
 #   reality, BEFORE any channel row is written — a pre-flight for the locked
@@ -404,14 +423,23 @@ def _require_planned_group_actions(
     content_owner_id: str,
 ) -> None:
     """Re-check every planned group effect against a fresh bulk read."""
-    planned = {
-        entry.group_id: entry.group_action
+    # Every ENTRY the write pass will act on, not a dict keyed by group id.
+    # Collapsing was last-wins, while the locked pass takes its action from
+    # ``entries[0]`` of the batch — the FIRST — so a plan carrying two actions
+    # for one key had the two halves judging different labels, and the
+    # pre-flight could approve the one the write boundary was not going to use.
+    #
+    # Checking each entry also removes the need to detect the contradiction
+    # separately: existence is one fact per key, so of two disagreeing labels
+    # exactly one must contradict it, and that one raises here (review #184).
+    planned = [
+        (entry.group_id, entry.group_action)
         for entry in plan.entries
-        if entry.group_id is not None and entry.group_action is not None
-    }
+        if entry.group_action is not None and _performs_group_write(entry)
+    ]
     if not planned:
         return
-    keys = set(planned)
+    keys = {group_id for group_id, _ in planned}
     # EXISTENCE, not ownership. The locked check judges what
     # get_group_by_cms_id returns, and that resolves a key regardless of who
     # owns it — so asking only "is it mine" leaves a CREATE label passing here
@@ -425,7 +453,7 @@ def _require_planned_group_actions(
         | set(groups.list_foreign_owner_cms_group_ids(keys, content_owner_id=content_owner_id))
         | set(groups.list_adoptable_cms_group_ids(keys))
     )
-    for cms_group_id, action in planned.items():
+    for cms_group_id, action in planned:
         _require_planned_group_action(
             action,
             observed_exists=cms_group_id in observed,
@@ -788,9 +816,10 @@ def _group_write_batches(
     batches: dict[str, list[ChannelImportPlanEntry]] = {}
     seen: set[tuple[str, str]] = set()
     for entry in _group_write_order(entries):
-        channel_id = entry.youtube_channel_id
-        if channel_id is None or entry.channel_name is None or not entry.group_id:
+        if not _performs_group_write(entry):
             continue
+        # Narrowed by _performs_group_write, which requires both.
+        channel_id = entry.youtube_channel_id or ""
         if (entry.group_id, channel_id) in seen:
             continue
         seen.add((entry.group_id, channel_id))
