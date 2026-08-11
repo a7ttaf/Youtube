@@ -1137,6 +1137,56 @@ script_command() {
 #
 # Matched as whole arguments so a path or a test name containing "-t" is not
 # mistaken for the flag.
+# _script_names_a_checker <command> [runner-list-name] – 0 when the command
+# either invokes a known tool or delegates to something it names.
+#
+# Two ways to be acceptable, and the second is where the first attempt at this
+# went wrong. Naming a tool is obvious. Delegating is legitimate too — the
+# script it hands to is one the gate cannot read either way — but only when it
+# *names* what it hands to. Accepting any token from a runner list meant
+# `bash -c true` satisfied the guard: the exact no-op the rule exists to
+# reject, one wrapper out.
+#
+# So an inline `-c` command disqualifies delegation. `bash scripts/check.sh`
+# and `npm run check:all` name a target; `bash -c true` names nothing, and its
+# contents are then judged as the command they are.
+_script_names_a_checker() {
+  local cmd="$1" tok has_runner=0 has_target=0
+  local tools="${2:-tsc tsc.cmd tsgo vue-tsc svelte-check astro tsd attw}"
+  local runners="npm pnpm yarn bun npx pnpx turbo nx lerna make bash sh zsh"
+  local t
+
+  # shellcheck disable=SC2086
+  for tok in $cmd; do
+    # Quotes cling to the token when the command is split on whitespace, so
+    # `sh -c 'tsc --noEmit'` yields `'tsc` and would miss its own checker.
+    tok="${tok#[\"\']}"
+    tok="${tok%[\"\']}"
+    for t in $tools; do
+      [ "${tok##*/}" = "$t" ] && return 0
+    done
+  done
+
+  # An inline shell command names no target; it just ran, and nothing above
+  # found a tool in it.
+  case " $cmd " in
+    *" -c "*) return 1 ;;
+  esac
+
+  # shellcheck disable=SC2086
+  for tok in $cmd; do
+    case "$tok" in -*) continue ;; esac
+    for t in $runners; do
+      [ "${tok##*/}" = "$t" ] && has_runner=1 && continue 2
+    done
+    case "$tok" in
+      run|exec|dlx|--) continue ;;
+    esac
+    [ "$has_runner" -eq 1 ] && has_target=1 && break
+  done
+  [ "$has_runner" -eq 1 ] && [ "$has_target" -eq 1 ]
+}
+
 _filter_reject() {
   echo "Workspace ${CI_GATE_NODE_WORKSPACE} narrows its own suite in the '$1' script:"
   echo "    $1: $2"
@@ -1176,23 +1226,24 @@ assert_no_persistent_filter() {
   # package script this rule has already seen, or a shell script the gate does
   # not read either way. A no-op is not delegation.
   if [ "$is_test_runner" -ne 1 ]; then
-    case "$runner" in
-      bash|sh|zsh|make|turbo|nx|lerna|cross-env|dotenv|env|concurrently \
-        |npm-run-all|run-s|run-p|tsx|ts-node|deno|playwright|cypress|wdio|karma \
-        |*.sh|*.js|*.mjs|*.cjs|*.ts)
-        ;;
-      *)
+    # Same question as the typecheck script, same answer: naming a tool, or
+    # delegating to something it names. `"test": "bash -c true"` is the no-op
+    # this rule rejects wearing a wrapper, so an inline `-c` command does not
+    # count as delegation.
+    if _script_names_a_checker "$cmd" \
+      "vitest jest mocha ava jasmine tap node playwright cypress wdio karma tsx ts-node deno"; then
+      : # names a runner, or delegates to a script it names
+    else
         echo "Workspace ${CI_GATE_NODE_WORKSPACE} defines a '${script_name}' script that does"
         echo "  not appear to run a test runner:"
         echo "    ${script_name}: ${cmd}"
         echo "  A script named ${script_name} that exits 0 without collecting anything"
         echo "  removes the whole suite from the gate while the lane still reports"
         echo "  PASS. Recognised: vitest, jest, mocha, ava, jasmine, tap, node, a"
-        echo "  wrapper script, or a runner that delegates to one. Add yours here"
-        echo "  if it belongs."
-        exit "$CI_RESULT_FAIL_NEW_ISSUE"
-        ;;
-    esac
+      echo "  wrapper script, or a runner that delegates to one. Add yours here"
+      echo "  if it belongs."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+    fi
   fi
 
   # The flags are an allow-list for a known runner, not a deny-list.
@@ -1314,25 +1365,22 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
   #
   # An allow-list, like the test-script filter: a command that cannot typecheck
   # is not something to classify, and a checker this does not know about stops
-  # the lane until someone says which it is. Nested runners are accepted because
-  # the script they delegate to is itself a package script this rule has already
-  # seen, or a shell script the gate does not read either way.
+  # the lane until someone says which it is.
+  #
+  # Delegation counts only when it delegates to something. Accepting any token
+  # from a runner list meant `typecheck: "bash -c true"` satisfied the guard --
+  # the same no-op the rule was written to reject, one wrapper out. So a
+  # delegation has to *name* what it hands to: a script path, or a package
+  # script by name. `bash scripts/typecheck.sh` and `npm run typecheck:all`
+  # both do; `bash -c true` and `npm --version` do not, and an inline `-c`
+  # command is judged on its own contents like any other.
   _tc_cmd="$(script_command typecheck)"
   _tc_ok=0
   # Word-splitting is the point; globbing is not. `tsc -p tsconfig.*.json` would
   # otherwise expand against the workspace and be matched as filenames — the
   # same reason the range splitter in _semver_satisfies disables it.
   set -f
-  # shellcheck disable=SC2086
-  for _tc_tok in $_tc_cmd; do
-    case "${_tc_tok##*/}" in
-      tsc|tsc.cmd|tsgo|vue-tsc|svelte-check|astro|tsd|attw)
-        _tc_ok=1 ; break ;;
-      # Delegation: the work happens in another script or binary runner.
-      npm|pnpm|yarn|bun|npx|pnpx|turbo|nx|lerna|make|bash|sh)
-        _tc_ok=1 ; break ;;
-    esac
-  done
+  _script_names_a_checker "$_tc_cmd" && _tc_ok=1
   set +f
   if [ "$_tc_ok" -ne 1 ]; then
     echo "Workspace ${CI_GATE_NODE_WORKSPACE} defines a 'typecheck' script that does not"

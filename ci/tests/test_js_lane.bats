@@ -183,6 +183,17 @@ ws_setup() {
      "$REPO_ROOT/ci/lib/git.sh" "$NODE_SB/ci/lib/"
   printf 'it("x", () => {});\n' > "$NODE_SB/ws/tests/a.test.ts"
   printf '{}\n' > "$NODE_SB/ws/bun.lock"
+  # Real wrapper scripts for the fixtures to name.
+  #
+  # The stub was `"test": "true"`, then `"test": "bash scripts/test.sh"`, and the lane
+  # now rejects both — neither runs anything, and neither *names* anything that
+  # could. A script on disk is what a workspace wrapping its suite actually
+  # has, so the fixtures say that rather than standing in for it with a command
+  # that ignores its arguments.
+  mkdir -p "$NODE_SB/ws/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/test.sh"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$NODE_SB/ws/scripts/fail.sh"
+  printf '#!/usr/bin/env bash\nexit 10\n' > "$NODE_SB/ws/scripts/fail10.sh"
 }
 
 ws_manifest() {
@@ -236,7 +247,7 @@ ws_run() {
 
 @test "node lane: a test script satisfies the requirement" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -245,7 +256,7 @@ ws_run() {
 
 @test "node lane: test:unit also satisfies the requirement" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test:unit": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test:unit": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -262,7 +273,7 @@ ws_run() {
 
 @test "node lane: an unsatisfied engines.node stops the workspace" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0" }, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0" }, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -273,7 +284,7 @@ ws_run() {
 
 @test "node lane: a satisfied engines.node is not in the way" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1" }, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1" }, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -284,7 +295,7 @@ ws_run() {
   # Failing open here would be the whole finding again: an exotic range read as
   # "fine" is indistinguishable from no check at all.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "engines": { "node": "1.2.3 - 2.3.4" }, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": "1.2.3 - 2.3.4" }, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -298,7 +309,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=0.0.1 <${major}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=0.0.1 <${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -309,7 +320,7 @@ ws_run() {
 @test "node lane: a packageManager pin that the host misses stops the workspace" {
   command -v bun >/dev/null 2>&1 || skip "bun is not installed on this host"
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "packageManager": "bun@0.0.1", "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "packageManager": "bun@0.0.1", "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -319,7 +330,7 @@ ws_run() {
 
 @test "node lane: the declared packageManager must be the one the lockfile selects" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "packageManager": "pnpm@9.0.0", "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "packageManager": "pnpm@9.0.0", "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -334,7 +345,7 @@ ws_run() {
   bunv="$(bun --version)"
   # The integrity suffix corepack appends must not be compared as part of the
   # version, or every real-world manifest would fail this check.
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"packageManager\": \"bun@${bunv}+abc123\", \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"packageManager\": \"bun@${bunv}+abc123\", \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -343,7 +354,7 @@ ws_run() {
 
 @test "node lane: a manifest declaring no toolchain is left alone" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -357,7 +368,7 @@ ws_run() {
   # toolchain has already produced the tree the run would be judged on.
   ws_setup
   rm -f "$NODE_SB/.ci-gate/node_modules-ws.hash"
-  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0" }, "scripts": { "test": "bash -c \"exit 1\"" } }'
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0" }, "scripts": { "test": "bash scripts/fail.sh" } }'
   run ws_run
   [ "$status" -eq 30 ]
   [[ "$output" != *"Installing dependencies"* ]]
@@ -371,7 +382,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"${major}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -382,7 +393,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"$((major + 1))\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"$((major + 1))\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -396,7 +407,7 @@ ws_run() {
   # its untouched ok flag, so ">=999.0.0 ||" reported satisfied — the
   # enforcement boundary switched off by a typo.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0 ||" }, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0 ||" }, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -408,7 +419,7 @@ ws_run() {
   # Malformed input is unverifiable however well one alternative matches. This
   # is the case an early return on the first satisfied alternative would hide.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1 ||" }, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1 ||" }, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -421,7 +432,7 @@ ws_run() {
   # range form this comparator does not implement must not reject a runtime that
   # a sibling alternative plainly accepts.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1 || 1.2.3 - 2.3.4" }, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1 || 1.2.3 - 2.3.4" }, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -449,10 +460,10 @@ ws_run() {
   # succeeded, and b — lockfile and all — was never looked at.
   ws_setup
   mkdir -p "$NODE_SB/wb"
-  printf '{ "name": "b", "private": true, "scripts": { "test": "bash -c true" } }\n' > "$NODE_SB/wb/package.json"
+  printf '{ "name": "b", "private": true, "scripts": { "test": "bash scripts/test.sh" } }\n' > "$NODE_SB/wb/package.json"
   printf '{}\n' > "$NODE_SB/wb/bun.lock"
   printf '{}\n' > "$NODE_SB/wb/tsconfig.json"
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   rm -f "$NODE_SB/wb/package.json"
   run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
@@ -466,7 +477,7 @@ ws_run() {
   # The control: a manifest that exists in the index but not yet on disk is a
   # workspace being added, not configuration left behind by a deletion.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   cd "$NODE_SB"
   git init -q .
@@ -485,7 +496,7 @@ ws_run() {
   # healthy workspace and every check below read it. Both pre-commit and
   # pre-push passed for a commit carrying no manifest at all.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
@@ -504,7 +515,7 @@ ws_run() {
   # The lane also runs from a plain export with no .git. Failing there would be
   # a false positive, not a finding.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   if git -C "$NODE_SB" rev-parse --git-dir >/dev/null 2>&1; then
     rm -rf "$NODE_SB"
@@ -519,7 +530,7 @@ ws_run() {
   # _semver_part strips non-numeric text and defaults to 0, so ">=banana" and a
   # bare ">=" both became >=0.0.0 and admitted every version there is.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=banana" }, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=banana" }, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -529,7 +540,7 @@ ws_run() {
 
 @test "node lane: a comparator with no operand is unverifiable" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=" }, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=" }, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -543,7 +554,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -556,7 +567,7 @@ ws_run() {
   local major minor
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
   minor="$(node --version | sed 's/^v//' | cut -d. -f2)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.$((minor + 1))\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.$((minor + 1))\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -570,7 +581,7 @@ ws_run() {
   # manifest on disk ran the restored script and exited 0 for a commit that
   # ships tests with no way to run them.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
@@ -578,7 +589,7 @@ ws_run() {
   # Stage a manifest with no test script, then restore the healthy one on disk.
   printf '%s\n' '{ "name": "w", "private": true, "scripts": {} }' > ws/package.json
   git add ws/package.json >/dev/null 2>&1
-  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }' > ws/package.json
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }' > ws/package.json
   run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
   [ "$status" -eq 20 ]
   [[ "$output" == *"staged but changed again in the worktree"* ]]
@@ -592,7 +603,7 @@ ws_run() {
   # restoring the passing copy on disk reported "Node lane passed" for a commit
   # whose code fails once checked out.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
   cd "$NODE_SB"
   git init -q .
@@ -614,7 +625,7 @@ ws_run() {
   # content only, so the intersection stayed empty and the lane tested the
   # recreated file for a commit that deletes it.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
   cd "$NODE_SB"
   git init -q .
@@ -635,7 +646,7 @@ ws_run() {
   # The rule still has to stay on files that are part of this commit. A new
   # file nobody has staged is the normal way work starts.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
@@ -655,7 +666,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=20banana || >=${major}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=20banana || >=${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -670,7 +681,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=${major} || 1.2.3 - 2.3.4\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=${major} || 1.2.3 - 2.3.4\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -684,12 +695,12 @@ ws_run() {
   # the first version of this check compared package.json against the index
   # unconditionally, so every uncommitted manifest edit failed the lane.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
   git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
-  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash -c true", "build": "true" } }' > ws/package.json
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "build": "true" } }' > ws/package.json
   ws_seed_fingerprint
   run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
   [ "$status" -eq 0 ]
@@ -699,7 +710,7 @@ ws_run() {
 
 @test "node lane: an index that matches the worktree is not in the way" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   cd "$NODE_SB"
   git init -q .
@@ -715,7 +726,7 @@ ws_run() {
   # test-layout reports "0 file(s)" quite happily, and a successful build
   # carries the gate to exit 0 after the suite has disappeared.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
@@ -755,7 +766,7 @@ ws_run() {
   # that contract, so vitest — or any tool it wraps — exiting 10 was recorded as
   # a passing lane, the remaining scripts were skipped, and preflight exited 0.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c \"exit 10\"" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fail10.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 20 ]
@@ -765,7 +776,7 @@ ws_run() {
 
 @test "node lane: an ordinary script failure is still a new issue" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c \"exit 1\"" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fail.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 20 ]
@@ -779,7 +790,7 @@ ws_run() {
   ws_setup
   local bad
   for bad in '>=20banana' '>=20..1' '>=20.1.2.3'; do
-    ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"${bad}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"${bad}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
     ws_seed_fingerprint
     run ws_run
     [ "$status" -eq 30 ] || { echo "accepted malformed range: $bad" >&2; return 1; }
@@ -795,7 +806,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"=${major}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"=${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -806,7 +817,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"=$((major + 1)).0.0\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"=$((major + 1)).0.0\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -820,7 +831,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"<=${major}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"<=${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -833,7 +844,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">${major}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -847,7 +858,7 @@ ws_run() {
   ws_setup
   local ver
   ver="$(node --version | sed 's/^v//')"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">${ver}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">${ver}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -859,13 +870,13 @@ ws_run() {
   # never entered NODE_WORKSPACES: the commit adds it, with a failing test
   # script, and the lane never looks at it.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
   git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
   mkdir -p added
-  printf '%s\n' '{ "name": "a", "private": true, "scripts": { "test": "bash -c \"exit 1\"" } }' > added/package.json
+  printf '%s\n' '{ "name": "a", "private": true, "scripts": { "test": "bash scripts/fail.sh" } }' > added/package.json
   printf '{}\n' > added/bun.lock
   git add added >/dev/null 2>&1
   rm -rf added
@@ -883,7 +894,7 @@ ws_run() {
   # logs "Skipping missing script" and the lane exits 0 having checked no types.
   ws_setup
   printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 20 ]
@@ -903,7 +914,7 @@ ws_run() {
   # but a different question from the one in the title.
   ws_setup
   printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true", "typecheck": "tsc --noEmit" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc --noEmit" } }'
   ws_seed_fingerprint
   run ws_run
   [[ "$output" != *"defines no 'typecheck' script"* ]]
@@ -915,7 +926,7 @@ ws_run() {
   # The negative control: the rule is keyed on the workspace declaring
   # TypeScript, not on every workspace everywhere.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -929,7 +940,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">= ${major}\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">= ${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -940,7 +951,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">= $((major + 1))\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">= $((major + 1))\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -1129,9 +1140,9 @@ ws_run() {
   # reuse a stale node_modules, so the frozen install that would catch it never
   # runs.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" }, "dependencies": { "x": "1.0.0" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" }, "dependencies": { "x": "1.0.0" } }'
   run ws_run
   [[ "$output" != *"up to date"* ]]
   [[ "$output" == *"Installing dependencies"* ]]
@@ -1140,7 +1151,7 @@ ws_run() {
 
 @test "node lane: an unchanged workspace still skips the install" {
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -1675,7 +1686,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.x\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.x\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -1689,7 +1700,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"^${major}.x\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"^${major}.x\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -1702,7 +1713,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~$((major - 1)).0\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~$((major - 1)).0\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 30 ]
@@ -1722,7 +1733,7 @@ ws_run() {
   git add -A >/dev/null 2>&1
   git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
   # Repair on disk only. HEAD still ships a workspace with no test script.
-  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }' > ws/package.json
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }' > ws/package.json
   ws_seed_fingerprint
   run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
   [ "$status" -eq 20 ]
@@ -1736,7 +1747,7 @@ ws_run() {
   # A file that exists only on disk is not in the commits being pushed either,
   # and `git diff HEAD` says nothing about it.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
@@ -1753,7 +1764,7 @@ ws_run() {
 @test "node lane: in ship mode a worktree matching HEAD passes" {
   # The control: the rule must fail a divergent tree, not every ship run.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
@@ -1769,12 +1780,12 @@ ws_run() {
   # The reference tree follows the gate, so the stricter HEAD rule must not leak
   # into the pre-commit gate, where working on a dirty tree is the normal case.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
   git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
-  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash -c true", "build": "true" } }' > ws/package.json
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "build": "true" } }' > ws/package.json
   ws_seed_fingerprint
   run bash -c "cd '$NODE_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
   [ "$status" -eq 0 ]
@@ -1944,7 +1955,7 @@ ws_run() {
   # rule now asks each staged path directly: whether a path is ignored has
   # nothing to do with whether the lane is about to read it.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
   cd "$NODE_SB"
   git init -q .
@@ -1971,7 +1982,7 @@ ws_run() {
   # `vitest run --passWithNoTests` exits 0 on an empty collection, so the lane
   # reported a pass over a suite that no longer exists.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
@@ -2010,7 +2021,7 @@ ws_run() {
   ws_setup
   local major
   major="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.x.1\" }, \"scripts\": { \"test\": \"bash -c true\" } }"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.x.1\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -2071,7 +2082,7 @@ exit 0
   # exactly that file — so the lane ran the replacement for a commit that
   # removes it. Same defect as the pre-commit branch had, one mode over.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
   cd "$NODE_SB"
   git init -q .
@@ -2098,7 +2109,7 @@ exit 0
   # whole: node_modules and dist are ignored on purpose, and reporting them
   # would mean the ship gate never passes for any Node workspace.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   printf 'ws/node_modules/\nws/dist/\n' > .gitignore
@@ -2169,7 +2180,7 @@ exit 0
   # untracked, and every staged path matched the index while the lane passed on
   # the strength of a file the commit does not contain.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   git add -A >/dev/null 2>&1
@@ -2229,7 +2240,7 @@ exit 0
   # exact thing git-safety.sh blocks. An ignored file is drift only where it
   # shadows a path the push removes.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   cd "$NODE_SB"
   git init -q .
   printf 'ws/.env.local\nws/*.tsbuildinfo\nws/test-results/\nws/src/build/\n' > .gitignore
@@ -2248,7 +2259,7 @@ exit 0
 @test "node lane: ship mode still catches an ignored file shadowing a deletion" {
   # And the case the ignored list exists for, which the deletion key preserves.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
   cd "$NODE_SB"
   git init -q .
@@ -2272,7 +2283,7 @@ exit 0
   # frontend/src/build/ was swallowed and the lane tested a replacement for a
   # file the push deletes.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
   mkdir -p "$NODE_SB/ws/src/build"
   printf 'export const tokens = 1;\n' > "$NODE_SB/ws/src/build/tokens.js"
   cd "$NODE_SB"
@@ -2397,7 +2408,7 @@ exit 0
   # Editing the command reaches the same place as deleting the key.
   ws_setup
   printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "true", "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "true", "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 20 ]
@@ -2411,7 +2422,7 @@ exit 0
   # A rule that rejected it would fail the workspace it was written to protect.
   ws_setup
   printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit", "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit", "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [[ "$output" != *"type checker"* ]]
@@ -2424,7 +2435,7 @@ exit 0
   # either way. Rejecting it would fail every workspace that wraps its build.
   ws_setup
   printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "npm run typecheck:all", "test": "bash -c true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "npm run typecheck:all", "test": "bash scripts/test.sh" } }'
   ws_seed_fingerprint
   run ws_run
   [[ "$output" != *"type checker"* ]]
@@ -2523,5 +2534,58 @@ exit 0
   run ws_run
   [[ "$output" != *"narrows its own suite"* ]]
   [[ "$output" != *"test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck that only wraps a no-op is rejected" {
+  # The first attempt at this rule accepted any token from a runner list as
+  # evidence of delegation, so `bash -c true` satisfied it -- the exact no-op
+  # the rule exists to reject, one wrapper out. Delegation counts only when it
+  # names what it delegates to; an inline `-c` command names nothing and is
+  # judged on its own contents.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bash -c true", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck delegating to a named script is accepted" {
+  # The control, and the reason delegation is allowed at all: the script it
+  # hands to is one the gate cannot read either way, and rejecting it would
+  # fail every workspace that wraps its checks.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tc.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bash scripts/tc.sh", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an inline shell command naming a checker is accepted" {
+  # `bash -c` disqualifies *delegation*, not the command: if the inline text
+  # names a checker, that is the checker being invoked.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bash -c tsc", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a test script that only wraps a no-op is rejected" {
+  # Same rule, same wrapper, the other script.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"test runner"* ]]
   rm -rf "$NODE_SB"
 }

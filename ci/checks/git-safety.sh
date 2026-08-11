@@ -202,11 +202,30 @@ fi
 
 while IFS= read -r -d '' path; do
   [ -z "$path" ] && continue
-  case "$path" in
-    .env|.env.*|.env-*|env.local|env.local.*|*.env|*.env.*|*.env-*|*.pem|*.key|*.p12|*.pfx|*id_rsa|*id_ed25519|*.jks|.npmrc|.pypirc|*.gpg)
+  # Matched on the basename as well as the whole path.
+  #
+  # The list was written in repository-root spellings, and a case pattern like
+  # `.npmrc` matches the string ".npmrc" and nothing else -- so a package
+  # manager credential staged at `frontend/.npmrc` or `packages/app/.pypirc`
+  # went straight through. The content scan is not a backstop for these: an
+  # `//registry.npmjs.org/:_authToken=` line matches none of the canonical
+  # token prefixes in CI_CHECKS_SECRET_PATTERN, so nothing else was going to
+  # catch it either. `.env` survived only by accident, because `*.env` happens
+  # to match a nested path; the ones without a leading-wildcard twin did not.
+  #
+  # Names are matched where they mean something -- a credential file is
+  # sensitive wherever it sits, and nested workspaces are the layout this PR
+  # spent rounds teaching the rest of the gate to expect.
+  base="${path##*/}"
+  case "$base" in
+    .env|.env.*|.env-*|env.local|env.local.*|*.env|*.env.*|*.env-* \
+      |*.pem|*.key|*.p12|*.pfx|id_rsa|id_ed25519|*id_rsa|*id_ed25519 \
+      |*.jks|.npmrc|.pypirc|.netrc|_netrc|.pgpass|credentials|*.gpg)
       echo "Sensitive file ${GATE_WHAT}: $path"
       SENSITIVE_FILE_MATCH=1
       ;;
+  esac
+  case "$path" in
     node_modules/*|*/node_modules/*)
       echo "node_modules path ${GATE_WHAT}: $path"
       VENV_OR_NODE_MODULES_MATCH=1

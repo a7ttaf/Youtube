@@ -420,6 +420,17 @@ extract_test_block() {
         if (ch == "{") { depth++; p++; continue }
         if (ch == "}") { depth--; p++; continue }
 
+        # A computed key at the exported object own level. `["test"]: {...}` is
+        # applied by JavaScript exactly like `test:`, and applied *later* if it
+        # comes later -- but the quoted token is skipped by the string handling
+        # above, so the scan counted only the plain block and reported a broad
+        # include as live while vitest collected the narrowed one. This reader
+        # works on text and cannot evaluate a computed key in general, so any
+        # computed property at this level stops it rather than being guessed at.
+        if (depth == 1 && ch == "[") {
+          computed = 1
+        }
+
         # Only a key at the exported object own level counts.
         if (depth == 1 && substr(all, p, 4) == "test") {
           before = (p > 1) ? substr(all, p - 1, 1) : " "
@@ -443,6 +454,10 @@ extract_test_block() {
       # whichever one wins, and guessing which was meant is how the first
       # reading of this got it backwards.
       if (seen > 1) exit 2
+      # A computed property can be `["test"]`, and there is no way to tell from
+      # the text which one it is. Reported as the duplicate case, because the
+      # remedy is the same: say it plainly in one `test: { ... }` block.
+      if (computed) exit 2
       if (seen == 1) { print block; exit 0 }
 
       # No test property on the exported config. Signalled by status, because an
@@ -762,7 +777,7 @@ else
         echo "  The layout must be declared under test.include, where vitest reads it."
         ;;
       duplicate-test-block)
-        fail "${_label} declares more than one top-level 'test: { ... }' block."
+        fail "${_label} declares more than one top-level 'test: { ... }' block, or a computed one."
         echo "  JavaScript keeps the later property, so the first one is not the"
         echo "  config vitest uses: a broad include followed by"
         echo "  test: { include: [\"tests/only.test.ts\"] } reads as fully covered"

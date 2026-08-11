@@ -1335,3 +1335,47 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" != *"more than one top-level"* ]]
 }
+
+@test "test-layout: a computed test key is refused, not skipped over" {
+  # `["test"]: {...}` is applied by JavaScript exactly like `test:`, and later
+  # if it comes later -- but the quoted token is consumed by the string handling
+  # in the scan, so a broad plain block followed by a narrow computed one was
+  # counted once and reported as fully covered while vitest collected the
+  # narrowed file. This reader works on text and cannot evaluate a computed key,
+  # so it stops rather than guessing.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  ["test"]: {
+    include: ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"computed"* ]]
+}
+
+@test "test-layout: an array value elsewhere is not read as a computed key" {
+  # The control: `[` appears constantly in ordinary configs -- every include is
+  # an array. Only a `[` at the exported object's own level, where a key would
+  # be, is a computed property, and treating any bracket as one would fail
+  # every config there is.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    setupFiles: ["tests/setup.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"computed"* ]]
+}

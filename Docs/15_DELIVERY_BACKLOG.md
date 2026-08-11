@@ -1387,7 +1387,41 @@ single P-tier above.
   actually run what the manifest names rather than relying on a command that
   ignores its arguments. Cases that assert the *rejection* keep the bare stub,
   since that is the thing under test.
-  Combined suite: `bats ci/tests/` = 307 cases, 0 failures.
+  A thirtieth round found four, one P1, and the sharpest is a hole opened by the
+  round-twenty-nine fix rather than closed by it. That fix accepted any token
+  from a runner list as evidence of delegation, so `"typecheck": "bash -c true"`
+  satisfied the guard — the exact no-op the rule was written to reject, one
+  wrapper out, and the same for `"test"`. Delegation counts only when it *names*
+  what it delegates to: `bash scripts/check.sh` and `npm run check:all` name a
+  target, `bash -c true` names nothing, and an inline `-c` command is judged on
+  its own contents (so `bash -c tsc` is still accepted, because that is a
+  checker being invoked). Both scripts share one predicate now.
+  That in turn condemned the fixtures a second time. `bash -c true`, adopted one
+  round earlier to replace `true`, is itself a wrapped no-op — so `ws_setup`
+  creates real `scripts/test.sh`, `scripts/fail.sh` and `scripts/fail10.sh`, and
+  the 74 fixtures name one of those. A workspace wrapping its suite has a script
+  on disk; the fixtures say that now rather than standing in for it twice over
+  with a command that ignores its arguments.
+  The P1 was a security gap: the sensitive-filename list was written in
+  repository-root spellings, and a case pattern like `.npmrc` matches that
+  string and nothing else — so `frontend/.npmrc` and `packages/app/.pypirc`
+  passed. The content scan is no backstop, since
+  `//registry.npmjs.org/:_authToken=` matches none of the canonical token
+  prefixes; `.env` survived only because `*.env` happens to match a nested path,
+  and the entries without a leading-wildcard twin did not. Names are matched on
+  the basename at any depth now, with `.netrc`, `.pgpass` and `credentials`
+  added, and a control asserting that an ordinary `frontend/src/lib/env.ts` is
+  still allowed. Nested workspaces are the layout this PR spent rounds teaching
+  the rest of the gate to expect, and this list had not been told.
+  `["test"]: { ... }` was the third: a computed key JavaScript applies exactly
+  like `test:`, and later if it comes later, but the quoted token is consumed by
+  the scanner's string handling — so a broad plain block followed by a narrow
+  computed one was counted once and reported as fully covered. A computed
+  property at the exported object's own level now stops the guard, with a
+  control asserting that ordinary array *values* are not mistaken for one.
+  The fourth was the predictable temp path in `all` mode, already removed with
+  the other two the round before it was reported.
+  Combined suite: `bats ci/tests/` = 315 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

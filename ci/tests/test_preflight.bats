@@ -784,3 +784,42 @@ YML
   [[ "$output" != *"is not a number"* ]]
   rm -rf "$sb"
 }
+
+@test "git-safety: a credential file inside a nested workspace is caught" {
+  # The list was written in repository-root spellings, and a case pattern like
+  # `.npmrc` matches that string and nothing else -- so `frontend/.npmrc` and
+  # `packages/app/.pypirc` went straight through. The content scan is no
+  # backstop here: an `//registry.npmjs.org/:_authToken=` line matches none of
+  # the canonical token prefixes, so nothing else was going to catch it either.
+  # `.env` survived only because `*.env` happens to match a nested path.
+  gs_setup
+  mkdir -p "$GS_SB/frontend" "$GS_SB/packages/app"
+  printf '//registry.npmjs.org/:_authToken=abc123\n' > "$GS_SB/frontend/.npmrc"
+  printf '[pypi]\npassword=hunter2\n' > "$GS_SB/packages/app/.pypirc"
+  ( cd "$GS_SB" && git add -A ) >/dev/null 2>&1
+
+  # The premise: the content scan really does not match these, so this case is
+  # about the filename rule and not about a token pattern catching it anyway.
+  run bash -c "cd '$GS_SB' && grep -E '(ghp_|github_pat_|AKIA|sk-)' frontend/.npmrc packages/app/.pypirc"
+  [ "$status" -ne 0 ]
+
+  run gs_run quick
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"frontend/.npmrc"* ]]
+  [[ "$output" == *"packages/app/.pypirc"* ]]
+  [[ "$output" == *"sensitive-files"* ]]
+  rm -rf "$GS_SB"
+}
+
+@test "git-safety: an ordinary nested file is still allowed" {
+  # The control. Matching on basenames at any depth must not start blocking
+  # ordinary source files that happen to sit deep in a tree.
+  gs_setup
+  mkdir -p "$GS_SB/frontend/src/lib"
+  printf 'export const x = 1;\n' > "$GS_SB/frontend/src/lib/env.ts"
+  printf 'export const y = 2;\n' > "$GS_SB/frontend/src/lib/keyboard.ts"
+  ( cd "$GS_SB" && git add -A ) >/dev/null 2>&1
+  run gs_run quick
+  [ "$status" -eq 0 ]
+  rm -rf "$GS_SB"
+}
