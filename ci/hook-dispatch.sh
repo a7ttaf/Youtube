@@ -29,11 +29,21 @@ case "$HOOK_NAME" in
     ;;
   pre-push)
     export CI_GATE_HOOK=pre-push
-    # git passes the destination remote as the hook's first argument. It was
-    # dropped, and the tag-publication check then asked whether *any*
-    # remote-tracking branch contained the commit -- so a commit published
-    # only to `upstream` counted as published when pushing to `origin`.
-    export CI_GATE_PUSH_REMOTE="${2:-}"
+    # The destination remote *name*, which is what scopes the tag-publication
+    # check: without it that check asked whether any remote-tracking branch
+    # contained the commit, so a commit published only to `upstream` counted as
+    # published when pushing to `origin`.
+    #
+    # `$1`, and the offset is worth stating because I got it wrong once here.
+    # git hands the pre-push hook `<remote-name> <remote-url>` and
+    # .githooks/pre-push prepends the hook name, but this script consumes that
+    # with `shift` above -- so by here `$1` is the remote name and `$2` is the
+    # URL. Exporting `$2` put the URL in, `${remote}/` then matched no
+    # remote-tracking branch, and every tag push was refused. Fail-closed, and
+    # still wrong. Asserted by `hooks: the pre-push dispatcher exports the
+    # remote name, not the URL`, which drives the real hook rather than reading
+    # this comment.
+    export CI_GATE_PUSH_REMOTE="${1:-}"
     # git feeds a pre-push hook one `<local ref> <local sha> <remote ref>
     # <remote sha>` record per ref on stdin. Nothing read it, so every ship-mode
     # check fell back to deriving a range from the checked-out HEAD — and

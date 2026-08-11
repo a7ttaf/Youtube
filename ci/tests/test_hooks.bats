@@ -300,3 +300,34 @@ SH
   [[ "$output" == *"NEW=$HD_TIP"* ]]
   rm -rf "$HD_SB"
 }
+
+@test "hooks: the pre-push dispatcher exports the remote name, not the URL" {
+  # The offset is easy to misread and has been misread once in review. git hands
+  # the pre-push hook `<remote-name> <remote-url>`, but .githooks/pre-push runs
+  # `exec ci/hook-dispatch.sh pre-push "$@"`, so inside the dispatcher $1 is the
+  # hook name, $2 the remote name and $3 the URL.
+  #
+  # CI_GATE_PUSH_REMOTE scopes the tag-publication check to `${remote}/`, so
+  # exporting "pre-push" or the URL would match no remote-tracking branch and
+  # refuse every tag push. Driven through the real script with preflight stubbed,
+  # rather than asserting on the source text.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci" "$sb/.githooks"
+  cp "$REPO_ROOT/ci/hook-dispatch.sh" "$sb/ci/"
+  cp "$REPO_ROOT/.githooks/pre-push" "$sb/.githooks/"
+  printf '#!/usr/bin/env bash\nprintf "REMOTE=[%%s]\n" "${CI_GATE_PUSH_REMOTE-unset}"\nexit 0\n' \
+    > "$sb/ci/preflight.sh"
+  chmod +x "$sb/ci/preflight.sh" "$sb/ci/hook-dispatch.sh" "$sb/.githooks/pre-push"
+
+  # The premise: the hook really does prepend its own name before git's args.
+  run grep -c 'pre-push "\$@"' "$sb/.githooks/pre-push"
+  [ "$output" -eq 1 ]
+
+  # Exactly as git invokes it: hook args are <remote-name> <remote-url>.
+  run bash -c "cd '$sb' && printf '' | bash .githooks/pre-push origin https://example.invalid/r.git 2>&1"
+  [[ "$output" == *"REMOTE=[origin]"* ]]
+  [[ "$output" != *"REMOTE=[pre-push]"* ]]
+  [[ "$output" != *"example.invalid"* ]]
+  rm -rf "$sb"
+}
