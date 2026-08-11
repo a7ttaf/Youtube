@@ -370,23 +370,26 @@ def apply_channel_import(
     )
 
 
-def _performs_group_write(entry: ChannelImportPlanEntry) -> bool:
-    """Whether the group pass will actually act on this entry.
+def _group_write_target(entry: ChannelImportPlanEntry) -> tuple[str, str] | None:
+    """The ``(group key, channel id)`` this entry's group write acts on, or None.
 
-    Shared with _group_write_batches deliberately. The pre-flight judges the
-    labels the write boundary is going to enforce, so judging a WIDER set would
-    refuse a plan over an entry the write pass then skips — an over-refusal that
-    the two filters drifting apart is exactly how you get (review #184).
+    Shared by the pre-flight and _group_write_batches deliberately. The
+    pre-flight judges the labels the write boundary is going to enforce, so
+    judging a WIDER set would refuse a plan over an entry the write pass then
+    skips — an over-refusal that the two filters drifting apart is exactly how
+    you get (review #184).
 
     A row needs a group key, and it needs the channel identity the membership
     write is made of: ``_attach_group_memberships`` is handed ``channel_ids``,
     so an entry missing either is not group work at all.
+
+    Returns the pair rather than a bool so both callers get the values already
+    narrowed out of ``str | None``. A predicate would have left each of them
+    re-proving what it had just asked.
     """
-    return (
-        bool(entry.group_id)
-        and entry.youtube_channel_id is not None
-        and entry.channel_name is not None
-    )
+    if not entry.group_id or entry.youtube_channel_id is None or entry.channel_name is None:
+        return None
+    return entry.group_id, entry.youtube_channel_id
 
 
 # ============================================================================
@@ -432,11 +435,12 @@ def _require_planned_group_actions(
     # Checking each entry also removes the need to detect the contradiction
     # separately: existence is one fact per key, so of two disagreeing labels
     # exactly one must contradict it, and that one raises here (review #184).
-    planned = [
-        (entry.group_id, entry.group_action)
-        for entry in plan.entries
-        if entry.group_action is not None and _performs_group_write(entry)
-    ]
+    planned: list[tuple[str, ChannelImportGroupAction]] = []
+    for entry in plan.entries:
+        target = _group_write_target(entry)
+        if target is None or entry.group_action is None:
+            continue
+        planned.append((target[0], entry.group_action))
     if not planned:
         return
     keys = {group_id for group_id, _ in planned}
@@ -816,14 +820,14 @@ def _group_write_batches(
     batches: dict[str, list[ChannelImportPlanEntry]] = {}
     seen: set[tuple[str, str]] = set()
     for entry in _group_write_order(entries):
-        if not _performs_group_write(entry):
+        target = _group_write_target(entry)
+        if target is None:
             continue
-        # Narrowed by _performs_group_write, which requires both.
-        channel_id = entry.youtube_channel_id or ""
-        if (entry.group_id, channel_id) in seen:
+        group_id, channel_id = target
+        if (group_id, channel_id) in seen:
             continue
-        seen.add((entry.group_id, channel_id))
-        batches.setdefault(entry.group_id, []).append(entry)
+        seen.add((group_id, channel_id))
+        batches.setdefault(group_id, []).append(entry)
     return list(batches.items())
 
 
