@@ -317,6 +317,18 @@ def apply_channel_import(
     # import that recorded no channel update at all — the summary and the
     # per-row CHANNEL_UPDATED events would disagree in the same trail (review
     # #159 r3715617737). Same rule the per-row audit already follows.
+    # BEFORE the first inventory write. The authoritative group-effect check
+    # runs under each group's row lock in the second pass, and it must — but by
+    # then every channel row has been written, and a store without a
+    # transaction has no way to take those back when the group pass raises
+    # (review #184, codex P2). One bulk, LOCK-FREE read here refuses the whole
+    # import while nothing has been written yet.
+    #
+    # Lock-free deliberately: taking group locks in this position would put
+    # them BEFORE the channel locks, inverting the order the two passes exist
+    # to establish and re-opening the deadlock against a concurrent
+    # POST /groups/{id}/members that review #159 r3714644431 closed.
+    _require_planned_group_actions(plan, groups=groups, content_owner_id=content_owner_id)
     applied_counts = _apply_inventory_writes(
         plan,
         registry=registry,
@@ -382,6 +394,53 @@ def apply_channel_import(
 #     row-locked update_inventory whose (previous, updated) pair is audited.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> the write-boundary audit contract.
 # ============================================================================
+# ============================================================================
+# Purpose: Refuse a whole import whose reviewed group effects no longer match
+#   reality, BEFORE any channel row is written — a pre-flight for the locked
+#   per-key check the group pass performs.
+# Database/ORM: ChannelGroupORM, read-only: ONE bulk list_owned_cms_group_ids
+#   for every key in the plan, no locks and no writes.
+# Standards: ADVISORY, not the guarantee. It cannot be the guarantee — a
+#   lock-free read can be raced, and locking here would invert the channels-
+#   before-groups order the two passes exist to establish. The authoritative
+#   check stays in _require_planned_group_action under the group row lock; this
+#   one exists so the common case fails closed while the registry is still
+#   untouched, which is the only protection a NON-TRANSACTIONAL store has
+#   (the SQL adapter's transaction covers the rest). Asserts nothing for rows
+#   that disclosed no action, matching the locked check exactly — the two must
+#   not be able to disagree about what a null label means.
+# Blast Radius: Turns a diverged import into a 409 earlier and with no writes
+#   to undo. It can only REFUSE: a pass here still leaves every later guard in
+#   place, so it cannot admit anything the locked check would reject.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _require_planned_group_action, the locked authority this mirrors.
+#   - File: backend/ums_smart_revenue/org/channel_groups.py ->
+#     list_owned_cms_group_ids, the same read planning used.
+# ============================================================================
+def _require_planned_group_actions(
+    plan: ChannelImportPlan,
+    *,
+    groups: ChannelGroupRegistryStore,
+    content_owner_id: str,
+) -> None:
+    """Re-check every planned group effect against a fresh bulk read."""
+    planned = {
+        entry.group_id: entry.group_action
+        for entry in plan.entries
+        if entry.group_id is not None and entry.group_action is not None
+    }
+    if not planned:
+        return
+    owned = set(groups.list_owned_cms_group_ids(set(planned), content_owner_id=content_owner_id))
+    for cms_group_id, action in planned.items():
+        _require_planned_group_action(
+            action,
+            observed_exists=cms_group_id in owned,
+            cms_group_id=cms_group_id,
+        )
+
+
 def _apply_inventory_writes(
     plan: ChannelImportPlan,
     *,
@@ -1246,7 +1305,15 @@ def _attach_group_memberships(
             f"{group.content_owner_id!r}, not {content_owner_id!r}; "
             "import that group's channels under its own content owner"
         )
-    return _add_members(groups, group, [cid for cid in channel_ids if cid not in group.channel_ids])
+    # Hashed ONCE for the batch. `group.channel_ids` is a tuple carrying the
+    # group's full membership, so a per-candidate `in` is a linear scan: the
+    # supported 5000-row roster joining a 5000-member group would pay ~25M
+    # string comparisons here and give back exactly the quadratic cost the
+    # batching change removed (review #184, codex P2). add_members filters
+    # again on its own side; this keeps the batch it receives honest without
+    # racing that.
+    existing_members = set(group.channel_ids)
+    return _add_members(groups, group, [cid for cid in channel_ids if cid not in existing_members])
 
 
 # ============================================================================

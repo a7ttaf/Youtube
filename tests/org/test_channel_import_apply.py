@@ -15,6 +15,7 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistry
 from ums_smart_revenue.org.channel_import import (
+    ChannelImportGroupAction,
     ChannelImportOutcome,
     ChannelImportPlan,
     ChannelImportPlanEntry,
@@ -22,6 +23,7 @@ from ums_smart_revenue.org.channel_import import (
 from ums_smart_revenue.org.channel_import_apply import (
     ChannelImportAdoptableGroupError,
     ChannelImportArchivedGroupError,
+    ChannelImportGroupActionDivergedError,
     ChannelImportGroupOwnerMismatchError,
     apply_channel_import,
 )
@@ -467,3 +469,69 @@ def test_group_unstamped_between_plan_and_apply_fails_closed() -> None:
     assert stored.channel_ids == ()
     assert stored.content_owner_id == CONTENT_OWNER
     assert sink.records == []
+
+
+def test_a_diverged_group_effect_is_refused_before_any_channel_is_written() -> None:
+    """Refuse while there is still nothing to roll back.
+
+    The authoritative group-effect check runs under each group's row lock, in
+    the SECOND pass — after every channel row has already been written. A store
+    with no transaction cannot take those back, so the caller saw a refusal
+    while the registry held the roster values that refusal said were not
+    applied (review #184, codex P2).
+
+    Called directly rather than through the route, because that is the shape
+    this protects: the route re-plans inside the apply request and puts
+    `group_action` in the fingerprint, so a bound apply catches most of this at
+    the fingerprint compare. A DIRECT caller — tests, bootstrap, any future
+    domain-side caller — hands over a plan built earlier, and this plan's
+    CREATE label is already wrong when apply_channel_import is entered.
+
+    Asserting the REGISTRY, not just the raise: the raise was already correct
+    before the pre-flight existed.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Old Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    groups = ChannelGroupRegistry()
+    # The group the plan says will be CREATED already exists, and belongs to
+    # this owner — so the reviewed effect is a JOIN and the label is stale.
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    sink = InMemoryAuditSink()
+    plan = _plan(
+        ChannelImportPlanEntry(
+            row_number=1,
+            youtube_channel_id=CHANNEL_ID,
+            outcome=ChannelImportOutcome.UPDATE,
+            channel_name="Renamed By Import",
+            group_id="cms-tv",
+            group_action=ChannelImportGroupAction.CREATE,
+            revenue_required=True,
+            changes={"channel_name": ("Old Name", "Renamed By Import")},
+        )
+    )
+
+    with pytest.raises(ChannelImportGroupActionDivergedError):
+        _apply(plan, registry, groups, sink)
+
+    assert sink.records == []
+    stored = registry.get_channel(CHANNEL_ID)
+    assert stored is not None
+    # The refusal cost no write: the roster's name never landed.
+    assert stored.channel_name == "Old Name"
+    assert groups.get_group_by_cms_id("cms-tv").channel_ids == ()

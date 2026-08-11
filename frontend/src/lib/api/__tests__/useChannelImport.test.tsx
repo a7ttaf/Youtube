@@ -427,6 +427,111 @@ describe("useChannelImport", () => {
     ).resolves.toMatchObject({ rows: [{ group_id: "Music EMEA" }] });
   });
 
+  it("rejects a writable name the parser would have normalized away", async () => {
+    // _parse_text_fields strips every name and ERRORs a NUL-bearing row, so
+    // " Alpha " and "Alpha\u0000" are values the backend cannot emit on a
+    // writable row. A non-blank TRIM is not enough: a padded name renders on
+    // the preview while the bound apply writes the normalized real one — the
+    // same substitution as a blank cell, just quieter (review #184, codex P2).
+    for (const channelName of [" Alpha Channel ", "Alpha\u0000Channel", "Alpha "]) {
+      fetchMock().mockResolvedValue(
+        jsonResponse({
+          ...DRY_RUN_RESULT,
+          counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+          rows: [{ ...DRY_RUN_RESULT.rows[0], channel_name: channelName }],
+        }),
+      );
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+      ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+    }
+  });
+
+  it("still accepts a name carrying INTERIOR spaces and punctuation", async () => {
+    // The parser strips only the ENDS, so these are names it emits every day.
+    // Pinned because the obvious over-tightening — no spaces, or an alphabet —
+    // would refuse most of a real catalogue.
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+        rows: [{ ...DRY_RUN_RESULT.rows[0], channel_name: "قناة الدراما - UMS" }],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ rows: [{ channel_name: "قناة الدراما - UMS" }] });
+  });
+
+  it("rejects two rows claiming DIFFERENT effects for one group key", async () => {
+    // Every per-row predicate is row-local, so this passes all of them: two
+    // writable rows share cms-tv, one promising a NEW SECTOR group and the
+    // other a join of an existing one. The backend derives the action from
+    // that key's existence for the request owner — one fact per key — and the
+    // apply batches the key into a single group operation, so a plan showing
+    // two effects is showing one the import will not perform, while the
+    // retained fingerprint authorises the one real effect (review #184).
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 0, UPDATE: 2, UNCHANGED: 0, ERROR: 0 },
+        rows: [
+          { ...DRY_RUN_RESULT.rows[1], row_number: 1, group_id: "cms-tv", group_action: "CREATE" },
+          { ...DRY_RUN_RESULT.rows[1], row_number: 2, group_id: "cms-tv", group_action: "JOIN" },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("accepts many rows AGREEING on one group key", async () => {
+    // The anti-vacuity half: a roster listing several channels under one new
+    // key is the ordinary case, and all of them are legitimately CREATE.
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 0, UPDATE: 2, UNCHANGED: 0, ERROR: 0 },
+        rows: [
+          { ...DRY_RUN_RESULT.rows[1], row_number: 1, group_id: "cms-tv", group_action: "CREATE" },
+          { ...DRY_RUN_RESULT.rows[1], row_number: 2, group_id: "cms-tv", group_action: "CREATE" },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { UPDATE: 2 } });
+  });
+
   it("rejects a PRE-DISCLOSURE payload that omits the fields entirely", async () => {
     // The rejections above pin `null`; this one pins ABSENT, which is the
     // shape a backend WITHOUT this PR emits — the fields do not exist there.

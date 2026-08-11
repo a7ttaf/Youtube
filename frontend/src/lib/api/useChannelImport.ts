@@ -120,12 +120,23 @@ const isChannelId = (value: unknown): boolean => {
 };
 
 /**
- * Non-blank AFTER trimming. The parser strips the name and rejects an empty
- * result, so a whitespace-only name never reaches a writable row — and it
- * renders as a blank cell, which is exactly as unreviewable as an absent one.
+ * Text as the PARSER would have left it. `_parse_text_fields` strips the cell,
+ * ERRORs an empty result, and ERRORs a NUL-bearing one — so a writable row's
+ * text is always trimmed, non-empty and NUL-free.
+ *
+ * Trim-EQUALITY, not merely a non-blank trim: `" Alpha "` is a value the
+ * backend cannot emit, and accepting it lets a malformed response render a
+ * padded name on the preview while the bound apply writes the normalized real
+ * one — the same substitution, just quieter than a blank cell (review #184,
+ * codex P2).
  */
-const isTrimmedNonBlankString = (value: unknown): boolean => {
-  return typeof value === "string" && value.trim() !== "";
+const isParserText = (value: unknown): boolean => {
+  return (
+    typeof value === "string" &&
+    value === value.trim() &&
+    value !== "" &&
+    !value.includes("\u0000")
+  );
 };
 
 const isOutcome = (value: unknown): boolean => {
@@ -327,16 +338,11 @@ const hasConsistentGroupEffect = (row: Record<string, unknown>): boolean => {
 const MAX_GROUP_ID_CHARS = 255;
 
 const isGroupKey = (value: unknown): boolean => {
-  return (
-    typeof value === "string" &&
-    value.trim() === value &&
-    value !== "" &&
-    // A NUL-bearing key is an ERROR row upstream, so it never reaches a
-    // writable one. No interior-space rule: the parser strips only the
-    // ENDS, so "Music EMEA" is a legal key the backend can emit.
-    !value.includes("\u0000") &&
-    value.length <= MAX_GROUP_ID_CHARS
-  );
+  // Everything isParserText requires — trimmed, non-empty, NUL-free — plus
+  // the index-size cap that applies to the KEY alone; a channel name has no
+  // equivalent bound. No interior-space rule either: the parser strips only
+  // the ENDS, so "Music EMEA" is a legal key the backend can emit.
+  return isParserText(value) && (value as string).length <= MAX_GROUP_ID_CHARS;
 };
 
 /** Null (no group write) or a key the parser could have emitted. */
@@ -368,7 +374,7 @@ const hasWriteFields = (row: Record<string, unknown>): boolean => {
   }
   return (
     isChannelId(row.youtube_channel_id) &&
-    isTrimmedNonBlankString(row.channel_name) &&
+    isParserText(row.channel_name) &&
     typeof row.revenue_required === "boolean"
   );
 };
@@ -502,6 +508,39 @@ const isPlanRow = (row: unknown): boolean => {
 };
 
 /**
+ * ONE effect per group key, across the whole plan.
+ *
+ * Every per-row predicate is row-local, so two writable rows carrying the same
+ * `group_id` with different `group_action`s pass all of them, tally correctly,
+ * and render side by side — one cell promising a NEW SECTOR group and the
+ * other promising a join of an existing one, for the same key.
+ *
+ * The backend cannot emit that: `_planned_group_action` derives the label from
+ * that key's existence for the request's content owner, which is one fact per
+ * key, and the apply then batches the key into a SINGLE group operation. So a
+ * plan showing two effects is showing at least one effect the import will not
+ * perform, while the retained fingerprint authorises the one real effect
+ * (review #184, codex P2).
+ */
+const groupActionsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolean => {
+  const actionByKey = new Map<string, unknown>();
+  for (const row of rows) {
+    const key = row.group_id;
+    if (typeof key !== "string") {
+      continue;
+    }
+    if (!actionByKey.has(key)) {
+      actionByKey.set(key, row.group_action);
+      continue;
+    }
+    if (actionByKey.get(key) !== row.group_action) {
+      return false;
+    }
+  }
+  return true;
+};
+
+/**
  * A successful plan always has at least ONE row: parse_channel_import_csv
  * rejects a header-only or blank-only roster outright ("CSV contains no data
  * rows"), which is a format error carrying a string detail, never a plan. An
@@ -517,7 +556,10 @@ const isPlanRows = (value: unknown): boolean => {
     return false;
   }
   const numbers = value.map((row: { row_number: number }) => row.row_number);
-  return new Set(numbers).size === numbers.length;
+  if (new Set(numbers).size !== numbers.length) {
+    return false;
+  }
+  return groupActionsAgree(value as ReadonlyArray<Record<string, unknown>>);
 };
 
 /**

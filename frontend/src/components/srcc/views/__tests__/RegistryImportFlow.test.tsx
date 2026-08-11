@@ -934,6 +934,47 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     );
   });
 
+  it("reports a NON-DISPATCH when admission itself throws", async () => {
+    // navigator.locks.request() rejects before ever invoking its callback in a
+    // restricted or opaque-origin document (SecurityError) and in a detached
+    // one. No key is written and no request is sent — but the rejection used to
+    // reach handleApplyFailure, where a non-ApiError classifies as
+    // INDETERMINATE: the flow would say the import may have committed, freeze
+    // Back, and offer to reconcile a write that never left the browser
+    // (review #184, codex P2).
+    const locks = {
+      request: () => Promise.reject(new DOMException("denied", "SecurityError")),
+    };
+    Object.defineProperty(globalThis.navigator, "locks", {
+      value: locks,
+      configurable: true,
+    });
+    try {
+      routeFetch({ importPost: () => jsonResponse(DRY_RUN_PLAN) });
+      render(registryTree(DEFAULT_WRITE_LATCH, false, true));
+      await openImport();
+      await fillUpload();
+      fireEvent.click(within(uploadPanel()).getByRole("button", { name: /^preview$/i }));
+      await waitFor(() =>
+        expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+
+      // Told plainly that nothing was sent...
+      await waitFor(() => expect(screen.getByText(/nothing was sent/i)).toBeInTheDocument());
+      // ...and NOT told the opposite. No indeterminate copy, no reconcile offer.
+      expect(screen.queryByText(/may still be committing/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /check the registry/i })).toBeNull();
+      // The dry run is the only POST: admission failed before the apply.
+      expect(importPosts()).toHaveLength(1);
+      // Still on Preview, and retryable rather than wedged.
+      expect(screen.getByRole("button", { name: /^apply$/i })).toBeEnabled();
+    } finally {
+      Reflect.deleteProperty(globalThis.navigator, "locks");
+    }
+  });
+
   it("settles an apply whose SCOPE migrated while it was in flight", async () => {
     // A tenant that resolves after a failed bootstrap migrates the pending
     // record to the new scope. The in-flight continuation used to hold a

@@ -709,15 +709,53 @@ const IMPORT_SCOPE_UNSETTLED_NOTE =
   "reload the page: importing without a confirmed workspace could let the " +
   "same roster be submitted twice from different tabs without either knowing.";
 
+// A FOURTH refusal, and the one that is not a decision at all: admission
+// itself threw. navigator.locks.request() rejects before ever invoking its
+// callback in a restricted or opaque-origin document (SecurityError) and in a
+// detached one — so no key was written and, crucially, NO REQUEST WAS SENT.
+// It needs its own words because the alternative is far worse than unhelpful:
+// routed through handleApplyFailure, a non-ApiError classifies as
+// INDETERMINATE, and the flow would tell the operator their import may have
+// committed, freeze Back, and offer to reconcile a write that provably never
+// left the browser (review #184, codex P2).
+const ADMISSION_FAILED_NOTE =
+  "Could not start the import: this browser refused the lock that keeps two " +
+  "tabs from submitting the same roster. Nothing was sent, so nothing was " +
+  "imported. Reload the page, or open it in a normal window if this is a " +
+  "restricted or embedded one, then try again.";
+
 /**
  * Which refusal the operator is looking at. Named rather than inlined at the
- * dispatch site: the two have genuinely different remedies — go back to the
- * other tab, versus change this browser's storage setting — and keeping the
- * choice here also keeps `apply` under the analyzer's complexity threshold
+ * dispatch site: the remedies are genuinely different — go back to the other
+ * tab, versus change this browser's storage setting — and keeping the choice
+ * here also keeps `apply` under the analyzer's complexity threshold
  * (DeepSource JS-R1005), conformed rather than suppressed.
  */
 const admissionRefusalNote = (admission: AdmissionResult): string => {
   return admission === "not-durable" ? APPLY_NOT_DURABLE_NOTE : OTHER_APPLY_PENDING_NOTE;
+};
+
+/**
+ * Admit, with a THROW folded into the result rather than left to propagate.
+ *
+ * Returning a note instead of raising is what keeps a failure to ADMIT from
+ * being classified as a failure to WRITE. Admission runs before the POST, so
+ * its failure modes all share one fact — nothing was dispatched — and that is
+ * the opposite of the indeterminate default every other error in `apply`
+ * correctly falls into.
+ */
+const admitForApply = async (
+  admit: (applyId: string) => Promise<AdmissionResult>,
+  applyId: string,
+): Promise<{ admitted: boolean; note: string }> => {
+  try {
+    const admission = await admit(applyId);
+    return admission === "admitted"
+      ? { admitted: true, note: "" }
+      : { admitted: false, note: admissionRefusalNote(admission) };
+  } catch {
+    return { admitted: false, note: ADMISSION_FAILED_NOTE };
+  }
 };
 
 // The outcome literal both reconciliation predicates key off. Named because
@@ -1530,11 +1568,11 @@ export const RegistryImportFlow = ({
       // the record were two steps, so two tabs could both see "nothing
       // pending" and both dispatch; this checks and records under one
       // cross-document lock. A refusal writes nothing and sends no request.
-      const admission = await unsettledImport.admit(applyId);
-      if (admission !== "admitted") {
+      const admission = await admitForApply(unsettledImport.admit, applyId);
+      if (!admission.admitted) {
         applyIdRef.current = null;
         admittedScopeRef.current = null;
-        setError(admissionRefusalNote(admission));
+        setError(admission.note);
         return;
       }
       // The claim was made under THIS scope; remember it so settlement can
