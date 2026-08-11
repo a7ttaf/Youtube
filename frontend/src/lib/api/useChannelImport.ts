@@ -80,13 +80,22 @@ const SOURCE_STATUSES = [
   REVENUE_REQUIRED_STATUS,
 ] as const;
 
+/**
+ * The one inventory name this module spells OUTSIDE the field tables:
+ * `sourceTransitionIsValid` asks whether a row's diff mentions it, which is a
+ * third site the other three names do not have. Named once for the same reason
+ * OWNER_FIELD and its two neighbours are — a typo at one site and the check
+ * silently stops firing (review #184, qodo).
+ */
+const REVENUE_REQUIRED_FIELD = "revenue_required";
+
 /** The inventory fields an UPDATE's diff may mention — _inventory_changes
  * compares exactly these four and emits only the ones that differ. */
 const INVENTORY_FIELDS = [
   "channel_name",
   "cms_status",
   "content_owner_id",
-  "revenue_required",
+  REVENUE_REQUIRED_FIELD,
 ] as const;
 
 const PLAN_OUTCOMES = ["CREATE", "UPDATE", "UNCHANGED", "ERROR"] as const;
@@ -273,7 +282,7 @@ const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boole
   ["group_id", isNullableString],
   ["group_action", isGroupAction],
   ["reason", isNullableString],
-  ["revenue_required", (value) => value === null || typeof value === "boolean"],
+  [REVENUE_REQUIRED_FIELD, (value) => value === null || typeof value === "boolean"],
   ["revenue_source_status", isSourceStatusChange],
 ];
 
@@ -434,7 +443,7 @@ const sourceTransitionIsValid = (row: Record<string, unknown>): boolean => {
   const changes = row.changes as Record<string, unknown>;
   return (
     SOURCE_STATUSES.some((status) => status === change.from) &&
-    Object.hasOwn(changes, "revenue_required")
+    Object.hasOwn(changes, REVENUE_REQUIRED_FIELD)
   );
 };
 
@@ -493,8 +502,9 @@ const isPlanRows = (value: unknown): boolean => {
 /**
  * The three wire names that appear on BOTH sides of this boundary — named once
  * so the request builder and the response checks cannot drift apart on a
- * spelling. The response-only names stay inline in the tables: there is no
- * second site for them to disagree with (review #184, qodo).
+ * spelling. A response-only name stays inline in its table while the table is
+ * its only site; `revenue_required` earned REVENUE_REQUIRED_FIELD above when a
+ * later check gave it a second one (review #184, qodo).
  */
 const OWNER_FIELD = "content_owner_id";
 const CMS_STATUS_FIELD = "cms_status";
