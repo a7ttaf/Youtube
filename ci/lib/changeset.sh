@@ -103,13 +103,33 @@ ci::changeset::_in_node_workspace() {
     && ci::common::is_vendored_path "$1"; then
     return 1
   fi
+  # The index counts as well as the disk.
+  #
+  # A filesystem-only walk answers "is there a manifest there now", and what
+  # decides whether the Node lane is scheduled for a commit is whether the
+  # commit has one. Delete ws/package.json from the worktree while it is still
+  # tracked, stage a change to ws/data.json, and the asset stopped being a
+  # workspace input: the changeset emitted `json` alone, preflight filtered the
+  # Node lane out, and the lane's own missing-worktree guards -- which exist for
+  # exactly this state and would have failed it -- never got the chance to run.
+  # A guard removed from the schedule by the condition it detects.
+  local _git=0
+  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    _git=1
+  fi
   dir="$(dirname "$1")"
   while [ -n "$dir" ] && [ "$dir" != "." ] && [ "$dir" != "/" ]; do
     if [ -f "$dir/package.json" ]; then
       return 0
     fi
+    if [ "$_git" -eq 1 ] && git cat-file -e ":$dir/package.json" 2>/dev/null; then
+      return 0
+    fi
     dir="$(dirname "$dir")"
   done
+  if [ "$_git" -eq 1 ] && git cat-file -e ":package.json" 2>/dev/null; then
+    return 0
+  fi
   # The walk stopped one directory short of the only one it never examined.
   # ci::common::node_workspaces treats a root package.json as the workspace ".",
   # so in a repository laid out that way every path is inside a Node workspace
@@ -178,7 +198,10 @@ ci::changeset::_json_escape() {
   # so the escapes this introduces are not escaped again.
   local cc ch
   for cc in 01 02 03 04 05 06 07 0b 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f; do
-    printf -v ch "\\x${cc}"
+    # The byte comes from the argument, not the format. A format string built
+    # from a variable is a format string that can carry directives, and this
+    # one is a loop away from taking its value from somewhere else.
+    printf -v ch '%b' "\\x${cc}"
     s="${s//"$ch"/\\u00${cc}}"
   done
   printf '%s' "$s"

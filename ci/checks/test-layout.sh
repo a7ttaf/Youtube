@@ -114,7 +114,13 @@ candidate_files() {
       # while node.sh, on the identical state, reported drift. Two checks, one
       # file, opposite answers, and this is the one on the always-run list.
       if [ "${CI_GATE_MODE:-}" = "ship" ] && git rev-parse --verify HEAD >/dev/null 2>&1; then
-        git ls-tree -r -z --name-only HEAD -- "$FRONTEND_DIR" 2>/dev/null || true
+        # `|| true` turned "cannot enumerate the pushed tree" into "the pushed
+        # tree carries no test files", and those are not the same answer. With
+        # an unavailable subtree -- a partial clone -- HEAD's stray test simply
+        # vanished from the candidate list and the guard reported "Test layout
+        # OK" for a tree it never read. Failing to look is infrastructure.
+        git ls-tree -r -z --name-only HEAD -- "$FRONTEND_DIR" 2>/dev/null \
+          || return 1
       fi
     fi
   }
@@ -152,6 +158,27 @@ path_is_pruned() {
 # repository, so at most a few thousand string compares done by the shell
 # itself, against three subprocesses and a pipe for the sort it replaces.
 ALL_CANDIDATES=()
+# Through a temp file rather than `< <(candidate_files)`.
+#
+# A process substitution is a subshell, so a producer that fails there fails
+# invisibly: the loop reads whatever reached the pipe and reports its own
+# success, which is the identical defect this check just had at
+# `done <<< "$(config_sources)"`. Writing the stream out first is what makes
+# the producer status something the caller can act on -- and it has to be a
+# file, because the stream is NUL-delimited and a command substitution cannot
+# carry a NUL byte.
+_CAND_TMP="$(mktemp 2>/dev/null)" || _CAND_TMP=""
+if [ -z "$_CAND_TMP" ]; then
+  echo "Cannot create a private temporary file to enumerate candidate tests." >&2
+  exit "$CI_RESULT_FAIL_INFRA"
+fi
+if ! candidate_files > "$_CAND_TMP"; then
+  rm -f "$_CAND_TMP"
+  echo "Cannot enumerate the test files ${CI_GATE_MODE:-this gate} is reporting on." >&2
+  echo "  Refusing to validate the sources that did answer: a tree that could" >&2
+  echo "  not be read is not a tree with nothing in it." >&2
+  exit "$CI_RESULT_FAIL_INFRA"
+fi
 while IFS= read -r -d '' _cand; do
   [ -n "$_cand" ] || continue
   _dup=0
@@ -163,7 +190,8 @@ while IFS= read -r -d '' _cand; do
   done
   [ "$_dup" -eq 1 ] && continue
   ALL_CANDIDATES+=("$_cand")
-done < <(candidate_files)
+done < "$_CAND_TMP"
+rm -f "$_CAND_TMP"
 
 # Arrays throughout, for the same reason the candidate list is one: a path
 # holding a newline cannot survive being joined into a string and split again.
@@ -600,7 +628,23 @@ extract_test_block() {
 # was never inspected.
 _emit_config_copy() {
   local _rev="$1" _what="$2" _tmp
-  git cat-file -e "${_rev}${VITEST_CONFIG}" 2>/dev/null || return 0
+  if ! git cat-file -e "${_rev}${VITEST_CONFIG}" 2>/dev/null; then
+    # Absent is not "nothing to check" for the pushed tree, for the same reason
+    # it is not for the index: a commit with no vitest config declares no
+    # layout at all. Returning 0 here validated the staged and worktree
+    # repairs and reported PASS for a push whose tree carries neither the
+    # config nor anything that defines what vitest collects.
+    case "$_rev" in
+      'HEAD:')
+        echo "The pushed commit does not carry ${VITEST_CONFIG}." >&2
+        echo "  A repair present only in the index or the worktree is not in" >&2
+        echo "  the tree being pushed, which would then declare no test layout" >&2
+        echo "  at all. Commit the config with it." >&2
+        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        ;;
+    esac
+    return 0
+  fi
   _tmp="$(mktemp 2>/dev/null)" || _tmp=""
   if [ -z "$_tmp" ]; then
     echo "Cannot create a private temporary file to read the ${_what} ${VITEST_CONFIG}." >&2

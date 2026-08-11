@@ -1977,9 +1977,26 @@ assert_no_persistent_filter() {
         prev="$tok" ; shift ; continue ;;
     esac
     # A bare word: the value of the flag before it, or a filter.
+    #
+    # Which one it is depends on whether that flag takes a value, and assuming
+    # every flag does gave the positional back: `vitest run --run
+    # tests/lib/confidence.test.ts` read the path as the value of `--run`,
+    # which is a boolean, and collected four tests instead of the suite. The
+    # rule inverted here for the flags themselves has to be inverted for their
+    # arguments too -- the value-taking flags are named, and after anything
+    # else a bare word is a filter.
+    #
+    # `--reporter=json` does not appear here on purpose: its value is already
+    # attached, so a bare word after it is a filter, and the exact-match arms
+    # below let it fall through to the rejection.
     case "$prev" in
-      -*) case "$prev" in *=*) _filter_reject "$script_name" "$cmd" "$tok" ;; esac ;;
-      *)  _filter_reject "$script_name" "$cmd" "$tok" ;;
+      --reporter|--reporters|--outputFile|--outputTruncateLength|--mode \
+        |--pool|--poolOptions|--maxWorkers|--minWorkers|--maxConcurrency \
+        |--environment|--testTimeout|--hookTimeout|--teardownTimeout \
+        |--sequence|--test-reporter|--test-reporter-destination \
+        |--test-concurrency)
+        ;;
+      *) _filter_reject "$script_name" "$cmd" "$tok" ;;
     esac
     prev=""
     shift

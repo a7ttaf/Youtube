@@ -112,7 +112,7 @@ ci::common::node_workspaces() {
     candidate="${found%"/$manifest"}"
     [ "$candidate" != "$found" ] || continue
     ci::common::is_vendored_path "$candidate" && continue
-    _cands[$_n]="$candidate"
+    _cands[_n]="$candidate"
     _n=$((_n + 1))
   done < <(
     find . -name 'node_modules' -prune -o -name '.git' -prune -o \
@@ -133,9 +133,9 @@ ci::common::node_workspaces() {
     _j=0
     while [ "$_j" -lt "$_n" ]; do
       if [ "$_i" -ne "$_j" ]; then
-        case "${_cands[$_i]}" in
-          "${_cands[$_j]}"/*)
-            printf '  %s (nested under %s)\n' "${_cands[$_i]}" "${_cands[$_j]}" >&2
+        case "${_cands[_i]}" in
+          "${_cands[_j]}"/*)
+            printf '  %s (nested under %s)\n' "${_cands[_i]}" "${_cands[_j]}" >&2
             _nested=$((_nested + 1))
             ;;
         esac
@@ -156,7 +156,7 @@ ci::common::node_workspaces() {
 
   _i=0
   while [ "$_i" -lt "$_n" ]; do
-    printf '%s\n' "${_cands[$_i]}"
+    printf '%s\n' "${_cands[_i]}"
     _i=$((_i + 1))
   done
   return 0
