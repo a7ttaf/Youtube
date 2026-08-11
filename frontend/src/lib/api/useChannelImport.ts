@@ -573,6 +573,29 @@ const groupActionsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolea
   return true;
 };
 
+/** The three invariants, for ONE channel's writable rows. */
+const channelCopiesAgree = (group: ReadonlyArray<Record<string, unknown>>): boolean => {
+  const [first] = group;
+  if (
+    !group.every(
+      (row) =>
+        row.channel_name === first.channel_name &&
+        row.revenue_required === first.revenue_required,
+    )
+  ) {
+    return false;
+  }
+  const deciding = group.filter((row) => row.outcome !== OUTCOME_UNCHANGED);
+  if (deciding.length > 1) {
+    return false;
+  }
+  if (deciding.length === 0) {
+    return true;
+  }
+  const lowest = Math.min(...group.map((row) => row.row_number as number));
+  return deciding[0].row_number === lowest;
+};
+
 /**
  * The planner's REPEATED-CHANNEL contract, which no row-local rule can see.
  *
@@ -610,29 +633,6 @@ const channelRowsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolean
   return [...copies.values()].every(channelCopiesAgree);
 };
 
-/** The three invariants, for ONE channel's writable rows. */
-const channelCopiesAgree = (group: ReadonlyArray<Record<string, unknown>>): boolean => {
-  const [first] = group;
-  if (
-    !group.every(
-      (row) =>
-        row.channel_name === first.channel_name &&
-        row.revenue_required === first.revenue_required,
-    )
-  ) {
-    return false;
-  }
-  const deciding = group.filter((row) => row.outcome !== OUTCOME_UNCHANGED);
-  if (deciding.length > 1) {
-    return false;
-  }
-  if (deciding.length === 0) {
-    return true;
-  }
-  const lowest = Math.min(...group.map((row) => row.row_number as number));
-  return deciding[0].row_number === lowest;
-};
-
 /**
  * A successful plan always has at least ONE row: parse_channel_import_csv
  * rejects a header-only or blank-only roster outright ("CSV contains no data
@@ -644,16 +644,31 @@ const channelCopiesAgree = (group: ReadonlyArray<Record<string, unknown>>): bool
  * Row numbers must also be DISTINCT — they are the preview's React keys, and
  * the parser emits exactly one per input row.
  */
+/** Row numbers are the preview's React keys, and the parser emits one per
+ * input row. */
+const rowNumbersAreDistinct = (rows: ReadonlyArray<Record<string, unknown>>): boolean => {
+  return new Set(rows.map((row) => row.row_number)).size === rows.length;
+};
+
+/**
+ * The checks a plan's ROWS must satisfy together, as a list for the same
+ * reason ROW_CHECKS is one: each has the identical consequence — this is not a
+ * plan the backend could have produced — and naming them keeps isPlanRows
+ * under the analyzer's complexity threshold (DeepSource JS-R1005), conformed
+ * rather than suppressed.
+ */
+const PLAN_CHECKS: ReadonlyArray<(rows: ReadonlyArray<Record<string, unknown>>) => boolean> = [
+  rowNumbersAreDistinct,
+  groupActionsAgree,
+  channelRowsAgree,
+];
+
 const isPlanRows = (value: unknown): boolean => {
   if (!Array.isArray(value) || value.length === 0 || !value.every(isPlanRow)) {
     return false;
   }
-  const numbers = value.map((row: { row_number: number }) => row.row_number);
-  if (new Set(numbers).size !== numbers.length) {
-    return false;
-  }
   const rows = value as ReadonlyArray<Record<string, unknown>>;
-  return groupActionsAgree(rows) && channelRowsAgree(rows);
+  return PLAN_CHECKS.every((holds) => holds(rows));
 };
 
 /**
