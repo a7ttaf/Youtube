@@ -285,6 +285,34 @@ def _parse_row(
     )
 
 
+# ============================================================================
+# Purpose: The file-level DUPLICATE boundary — decide which copies of a
+#   repeated youtube_channel_id may survive parsing, and reject the rest as
+#   row errors before any of them reach the planner.
+# Database/ORM: None — pure over the already-parsed rows; the parser performs
+#   no I/O and holds no session.
+# Standards: A roster legitimately repeats a channel once per DISTINCT group,
+#   because CMS membership is many-to-many and the singular group_id column
+#   carries one association per row. Two ways to break that, both fail closed:
+#   copies that DISAGREE on the inventory fields are ambiguous about what to
+#   persist and fail every copy (no copy is privileged, so there is no
+#   non-arbitrary winner), and copies that RESTATE one (channel, group) pair
+#   say nothing the first copy did not. Conflict is reported ahead of
+#   repetition on purpose: a channel whose copies disagree has no settled
+#   inventory to attach a group to, so naming the repeat first would send the
+#   operator to fix the lesser defect. Every rejected row is reported with its
+#   own 1-based row number, per the module's fail-per-row rule.
+# Blast Radius: Which rosters are admissible at all, and therefore whether the
+#   preview can overstate group work. Any surviving ERROR row rejects the whole
+#   apply. No writes of its own, no audit, no finance totals.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     plan_channel_import consumes the surviving rows; its repeated-channel
+#     shortcut relies on every copy naming a distinct group.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _group_write_batches collapses a repeated pair at write time, which is
+#     the divergence the repeat rule exists to prevent.
+# ============================================================================
 def _flag_duplicates(
     rows: list[ChannelImportRow],
 ) -> tuple[list[ChannelImportRow], list[ChannelImportRowError]]:
@@ -335,6 +363,30 @@ def _conflicting_channel_ids(rows: list[ChannelImportRow]) -> set[str]:
     return conflicted
 
 
+# ============================================================================
+# Purpose: Find the (channel id, group key) associations a roster states more
+#   than once — the parser-level rule that decides a repeated channel row is
+#   redundant rather than an additional membership.
+# Database/ORM: None — pure over the parsed rows, no I/O.
+# Standards: The key is the PAIR, never the channel alone. Repeating a channel
+#   is only meaningful ACROSS groups, so keying on the channel would refuse
+#   every legitimate many-to-many roster, and keying on the group would refuse
+#   unrelated channels sharing one. ``group_id`` of None participates as an
+#   ordinary value: a channel listed twice with no group is a repeat like any
+#   other, and treating absence as a wildcard would let exactly that case
+#   through. The key matches _group_write_target's, which is what makes the
+#   guarantee hold — the pairs this refuses are precisely the pairs the write
+#   pass would have collapsed.
+# Blast Radius: Which rosters are admissible, and therefore whether the dry-run
+#   preview can promise group work the apply performs once. No writes, no
+#   audit, no finance totals.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py -> _duplicate_reason
+#     turns a hit here into the operator-facing row error.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _group_write_target keys the write pass on the same pair; the two must
+#     not drift apart.
+# ============================================================================
 def _repeated_associations(rows: list[ChannelImportRow]) -> set[tuple[str, str | None]]:
     """The ``(channel id, group key)`` pairs the file states more than once.
 
