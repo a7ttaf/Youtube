@@ -25,6 +25,8 @@
 # ============================================================================
 """Execute a bulk channel import plan with registry writes and audit trail."""
 
+from collections.abc import Mapping
+
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -40,9 +42,18 @@ from ums_smart_revenue.org.channel_import import (
     ParsedChannelImport,
     plan_channel_import,
 )
-from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry, ChannelRegistryStore
+from ums_smart_revenue.org.channel_registry import (
+    ChannelRegistryEntry,
+    ChannelRegistryStore,
+    derive_revenue_source_status,
+    normalize_optional_content_owner,
+)
 
-_INVENTORY_FIELDS = ("channel_name", "cms_status", "content_owner_id", "revenue_required")
+# The one inventory field name this module also spells outside the tuple:
+# _reviewed_source_status asks whether a row's diff flips it, because that flip
+# is the only trigger that re-derives revenue_source_status.
+_REVENUE_REQUIRED_FIELD = "revenue_required"
+_INVENTORY_FIELDS = ("channel_name", "cms_status", "content_owner_id", _REVENUE_REQUIRED_FIELD)
 # Provenance marker on every audit record this module writes: it is how an
 # auditor separates bulk-import changes from single-channel API edits, so both
 # call sites must emit the identical value.
@@ -493,26 +504,46 @@ def _write_inventory_row(
     # change cannot be hidden from the trail — and an UNCHANGED classification
     # cannot preserve a concurrent writer's value over the roster's (review
     # #159 r3713841231).
+    # The four values this write will install, needed by the pre-state guard
+    # BEFORE the write happens. They are exactly what `updated` will carry —
+    # update_inventory assigns each from these arguments — with the store's own
+    # normalization applied to the owner so the comparison stays like-for-like.
+    written: dict[str, object] = {
+        "channel_name": channel_name,
+        "cms_status": cms_status,
+        "content_owner_id": normalize_optional_content_owner(content_owner_id),
+        "revenue_required": bool(entry.revenue_required),
+    }
+
+    def require_pre_state(previous: ChannelRegistryEntry) -> None:
+        """Judge the locked pre-state before a single field is assigned.
+
+        Runs INSIDE update_inventory rather than on its return value: a raise
+        here must leave the row untouched, and a store without a transaction
+        cannot undo a mutation the caller then rejects (review #184).
+        """
+        # EVERY apply, bound or not. "The file wins" (review #159) is a
+        # decision about inventory FIELDS the roster asserts — it never
+        # licensed resurrecting a channel an operator retired, and the roster
+        # does not carry `active` to assert in the first place. The planner
+        # ERRORs archived channels for all callers, so an unbound apply that
+        # races an archive would write and audit a retired row and carry a
+        # Group_ID row on into the membership pass (review #184).
+        _require_reviewed_active(entry, previous)
+        # Only for a plan-bound apply: the pre-state the operator reviewed must
+        # still be the stored one, or the diff on their screen is not the diff
+        # this write performs.
+        if enforce_reviewed_pre_state:
+            _require_reviewed_pre_state(entry, previous, written)
+
     previous, updated = registry.update_inventory(
         youtube_channel_id=channel_id,
         channel_name=channel_name,
         cms_status=cms_status,
         content_owner_id=content_owner_id,
         revenue_required=bool(entry.revenue_required),
+        require_pre_state=require_pre_state,
     )
-    # EVERY apply, bound or not. "The file wins" (review #159) is a decision
-    # about inventory FIELDS the roster asserts — it never licensed
-    # resurrecting a channel an operator retired, and the roster does not carry
-    # `active` to assert in the first place. The planner ERRORs archived
-    # channels for all callers, so an unbound apply that races an archive would
-    # write and audit a retired row and carry a Group_ID row on into the
-    # membership pass (review #184).
-    _require_reviewed_active(entry, previous)
-    # Only for a plan-bound apply: the pre-state the operator reviewed must
-    # still be the stored one, or the diff on their screen is not the diff
-    # this write performs.
-    if enforce_reviewed_pre_state:
-        _require_reviewed_pre_state(entry, previous, updated)
     applied_changes = _entry_changes(previous, updated)
     # The audit rule is the same for planned UPDATE and UNCHANGED: record
     # CHANNEL_UPDATED only when the write-boundary diff is non-empty. A planned
@@ -780,7 +811,7 @@ def _channel_audit_details(
 def _require_reviewed_pre_state(
     entry: ChannelImportPlanEntry,
     previous: ChannelRegistryEntry,
-    updated: ChannelRegistryEntry,
+    written: Mapping[str, object],
 ) -> None:
     """Fail closed when the locked pre-state is not the one the operator read.
 
@@ -792,13 +823,21 @@ def _require_reviewed_pre_state(
     operator bound to a diff that never mentioned the field (review #184,
     raised independently by qodo and codex).
 
-    The reviewed pre-state of each field is recoverable without threading the
-    roster values in. ``entry.changes`` omits a field precisely when planning
-    found stored == roster (see ``_inventory_changes``), so for an omitted
-    field the reviewed pre-state IS the value just written — ``updated``:
+    The reviewed pre-state of each field is recoverable from the plan plus the
+    values this write is ABOUT to install. ``entry.changes`` omits a field
+    precisely when planning found stored == roster (see ``_inventory_changes``),
+    so for an omitted field the reviewed pre-state IS the value being written:
 
         expected(f) = entry.changes[f].from   if planning saw a difference
-                      getattr(updated, f)     otherwise
+                      written[f]              otherwise
+
+    ``written`` rather than the post-write entry, because this now runs BEFORE
+    the write — there is no post-write entry yet, and asking for one is what
+    forced the mutate-then-validate ordering this guard used to depend on. The
+    two are the same values: update_inventory assigns each inventory field from
+    the argument ``written`` mirrors. Taking an unlisted field's expected value
+    from the write (not the plan) is also what keeps a channel repeated across
+    several group rows from tripping on its OWN first write.
 
     ``previous`` is what the row-locked read actually found. Any mismatch means
     a registry writer committed in the plan-to-apply window, so the diff on the
@@ -812,7 +851,7 @@ def _require_reviewed_pre_state(
     _require_reviewed_source_status(entry, previous)
     for field in _INVENTORY_FIELDS:
         reviewed = entry.changes.get(field)
-        expected = reviewed[0] if reviewed is not None else getattr(updated, field)
+        expected = reviewed[0] if reviewed is not None else written[field]
         actual = getattr(previous, field)
         if actual == expected:
             continue
@@ -913,22 +952,79 @@ def _require_reviewed_source_status(
     ``OFFICIAL_CMS_REVENUE -> PERFORMANCE_ONLY`` — a different finance-source
     mutation than the one on screen (review #184).
 
-    Only checks rows whose plan actually promised a transition: a None
-    disclosure means the write leaves the classification alone, and a CREATE's
-    ``from`` is None because there is no prior status to have moved.
+    A None disclosure is NOT an exemption. The planner returns None when the
+    derived destination already equals the stored status, and that happens on
+    flag-FLIPPING rows too: a channel stored PERFORMANCE_ONLY with
+    revenue_required=true is a combination the column permits, so a roster
+    turning the flag off derives PERFORMANCE_ONLY, matches, and discloses
+    nothing. Concurrent imports flipping the flag away and back then leave the
+    four inventory fields at their reviewed values while the classification
+    underneath has moved to MISSING_REVENUE_SOURCE, and this write re-derives
+    it back to PERFORMANCE_ONLY — a finance-source transition the bound preview
+    never showed. Exempting those rows made the guard cover only the cases that
+    happened to be visible (review #184).
+
+    So the reviewed pre-state is RECOVERED rather than required to be present;
+    see ``_reviewed_source_status``. Rows whose write cannot re-derive at all
+    still assert nothing, which is what keeps an ordinary re-import quiet.
     """
-    disclosed = entry.revenue_source_status
-    if disclosed is None:
-        return
-    reviewed_from = disclosed[0]
+    reviewed_from = _reviewed_source_status(entry)
     if reviewed_from is None or reviewed_from == previous.revenue_source_status:
         return
+    disclosed = entry.revenue_source_status
+    shown = (
+        f"{reviewed_from!r} -> {disclosed[1]!r}"
+        if disclosed is not None
+        else f"no change to revenue_source_status (already {reviewed_from!r})"
+    )
     raise ChannelImportRowStateDivergedError(
         f"channel {entry.youtube_channel_id} changed during the import: the "
-        f"preview showed revenue_source_status {reviewed_from!r} -> "
-        f"{disclosed[1]!r}, but the stored value is now "
-        f"{previous.revenue_source_status!r}; re-run the preview and review "
-        "the change"
+        f"preview showed revenue_source_status {shown}, but the stored value "
+        f"is now {previous.revenue_source_status!r}; re-run the preview and "
+        "review the change"
+    )
+
+
+def _reviewed_source_status(entry: ChannelImportPlanEntry) -> str | None:
+    """The revenue_source_status the operator reviewed, or None to assert none.
+
+    Three cases, and only the middle one is new:
+
+    - A DISCLOSED transition carries its own ``from`` — None for a CREATE,
+      which has no prior status to have moved.
+    - No disclosure on a row whose diff FLIPS revenue_required. The planner
+      returned None because the derived destination equalled the stored status,
+      so that destination IS the reviewed pre-state. It is re-derived here
+      rather than hardcoded: with the flag flipping,
+      ``derive_revenue_source_status`` ignores ``current_status`` entirely and
+      returns the constant for the new flag, so the value passed for it does
+      not matter and no literal is duplicated.
+    - No disclosure and no flag flip. The write cannot re-derive the status at
+      all, so there is nothing to assert — asserting anyway would 409 ordinary
+      re-imports of a channel whose classification another writer legitimately
+      changed without touching the roster's fields.
+    """
+    disclosed = entry.revenue_source_status
+    if disclosed is not None:
+        return disclosed[0]
+    reviewed = entry.changes.get(_REVENUE_REQUIRED_FIELD)
+    if reviewed is None:
+        return None
+    reviewed_flag = bool(reviewed[0])
+    roster_flag = bool(entry.revenue_required)
+    if reviewed_flag == roster_flag:
+        # Unreachable from this planner: _inventory_changes emits a pair only
+        # when the values DIFFER. Assert nothing rather than trust the sentinel
+        # below, so a future planner that widened the diff would lose the guard
+        # rather than 409 every row with a fabricated pre-state.
+        return None
+    return derive_revenue_source_status(
+        # Ignored: with the flag flipping, the derivation returns the constant
+        # for the new flag and never consults this. Passing the empty string
+        # rather than a plausible status keeps that from reading as a claim.
+        current_status="",
+        current_revenue_required=reviewed_flag,
+        revenue_required=roster_flag,
     )
 
 

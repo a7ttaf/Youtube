@@ -16,6 +16,7 @@
 # ============================================================================
 """Channel registry domain contract, errors, and in-memory implementation."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
@@ -142,6 +143,7 @@ class ChannelRegistryStore(Protocol):
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
     ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Replace a channel's inventory fields from an authoritative import row.
 
@@ -149,6 +151,16 @@ class ChannelRegistryStore(Protocol):
         observed at the write boundary (re-read under a row lock where the
         backend supports it), NOT the caller's possibly-stale planning
         snapshot — audit trails must record the values actually replaced.
+
+        ``require_pre_state`` makes this a COMPARE-AND-UPDATE. An implementation
+        must call it with the write-boundary pre-state after its locked re-read
+        and BEFORE mutating anything, letting it raise to refuse the write. The
+        ordering is the whole contract: a caller that validates the returned
+        ``previous`` afterwards is relying on the store's transaction to undo
+        the mutation, which a non-transactional implementation cannot do — it
+        would leave the roster values written under a request that answered 409
+        (review #184). Policy stays with the caller; implementations owe only
+        the ordering.
         """
 
 
@@ -278,6 +290,7 @@ class ChannelRegistry:
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
     ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Replace a channel's inventory fields from an authoritative import row.
 
@@ -288,6 +301,12 @@ class ChannelRegistry:
         current = self._channels.get(youtube_channel_id)
         if current is None:
             raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
+        # BEFORE the mutation, and for this store that ordering is the only
+        # protection there is: a dict has no transaction to roll back, so a
+        # caller that validated `previous` after the fact would answer 409 with
+        # the roster values already installed (review #184).
+        if require_pre_state is not None:
+            require_pre_state(current)
         updated = replace(
             current,
             channel_name=channel_name,

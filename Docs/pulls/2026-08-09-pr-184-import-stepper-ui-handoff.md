@@ -20,7 +20,16 @@ silently repeated.
 **Non-goals.** No new backend route, no new persisted field, no migration, and
 no widening of what the import may write — every backend behaviour this PR adds
 is a **refusal**. No revenue math, no allocation, no month-close. The permission
-model and the audit contract are untouched.
+model is untouched.
+
+The **audit contract is not** — `_channel_audit_details()` now adds
+`revenue_source_status: {from, to}` to `CHANNEL_CREATED` / `CHANNEL_UPDATED`
+details when the write re-classified the source. It is additive to a persisted
+JSON payload, and it exists so the trail can reconstruct the finance-source
+transition the preview discloses; without it a `CHANNEL_UPDATED` event could
+record the `revenue_required` flip while omitting the classification that flip
+replaced. A reader of older events sees the key absent, which is the same thing
+it means on a write that re-classified nothing.
 
 The planner and the write boundary are **not** among the non-goals, and an
 earlier draft of this section wrongly said they were. Both changed
@@ -81,7 +90,12 @@ not from memory.
    namespaced by tenant + principal, keeps the warning across a reload, a
    second tab, and a sidebar exit. Admission is atomic under a Web Lock where
    available.
-7. **Imports are withheld until the workspace is known.** A session without a
+7. **The audit trail records the source transition.** `CHANNEL_CREATED` and
+   `CHANNEL_UPDATED` details gain `revenue_source_status: {from, to}` when the
+   write re-derived it, kept out of `changes` because it is derived by the
+   registry rather than asserted by the roster. Additive: the key is absent on
+   events that reclassified nothing, and on every event written before this PR.
+8. **Imports are withheld until the workspace is known.** A session without a
    tenant waits for `/tenants/me` to succeed; a failure does not settle it,
    because two tabs disagreeing about the tenant build different namespaces and
    both would dispatch. A reload re-runs the bootstrap, so this is a retry, not
@@ -94,12 +108,14 @@ not from memory.
 | `bun run test` (frontend) | **451 passed**, 41 files |
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
-| `uv run --project backend pytest -q` | **2807 passed**, 15 warnings (8m38s) |
+| `uv run --project backend pytest -q` | **2809 passed**, 15 warnings (8m22s) |
 | DeepSource (PR scope) | `[]` |
 | CI checks | 6 pass, 1 skipping |
 
-The backend suite was re-run after the last backend edit rather than assumed;
-that edit was comment-only and the result was unchanged at 2807.
+The backend suite was re-run in full after the round-51 write-boundary change
+rather than assumed, and re-run again after the first pass surfaced a Postgres
+failure (a monkeypatched `update_inventory` wrapper that had not grown the new
+keyword). 2807 -> 2809 is this round's two new tests.
 
 **Failures encountered and fixed during review**, recorded because they are the
 useful part: twenty-two fixtures across five files carried shapes the backend
@@ -207,6 +223,11 @@ the stepper being deployed:
   review #159 — unchanged by this PR.
 - Every plan row still carries `group_action` and `revenue_source_status`.
   These are additive response fields; a pre-PR client ignores them.
+- New `CHANNEL_UPDATED` / `CHANNEL_CREATED` audit rows keep carrying
+  `revenue_source_status` in their details JSON. Reverting the backend stops
+  new events carrying it but cannot un-write the ones already recorded, so any
+  consumer of that payload must treat the key as optional — which it already is
+  for every event written before this PR.
 - **The one behaviour a reverted frontend cannot opt out of**: the write
   boundary re-checks the planned group effect under the group row lock for
   *every* caller, bound or unbound, because the route always performs the

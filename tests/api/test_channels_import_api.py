@@ -1,6 +1,7 @@
 """API tests for the bulk channel inventory import (POST /channels/import)."""
 
 import dataclasses
+from collections.abc import Callable
 
 from fastapi.testclient import TestClient
 
@@ -726,6 +727,7 @@ class _ChannelDriftsAtWriteBoundary(ChannelRegistry):
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
     ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Land a concurrent rename once, just before the locked write."""
         if not self._drifted:
@@ -745,6 +747,7 @@ class _ChannelDriftsAtWriteBoundary(ChannelRegistry):
             cms_status=cms_status,
             content_owner_id=content_owner_id,
             revenue_required=revenue_required,
+            require_pre_state=require_pre_state,
         )
 
 
@@ -785,6 +788,7 @@ class _ChannelArchivedAtWriteBoundary(ChannelRegistry):
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
     ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Retire the row once, just before the locked write reads it."""
         if not self._archived:
@@ -797,6 +801,7 @@ class _ChannelArchivedAtWriteBoundary(ChannelRegistry):
             cms_status=cms_status,
             content_owner_id=content_owner_id,
             revenue_required=revenue_required,
+            require_pre_state=require_pre_state,
         )
 
 
@@ -969,6 +974,7 @@ class _RevenueFlagDriftsAtWriteBoundary(ChannelRegistry):
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
     ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Turn revenue_required off once, just before the locked write."""
         if not self._drifted:
@@ -988,6 +994,7 @@ class _RevenueFlagDriftsAtWriteBoundary(ChannelRegistry):
             cms_status=cms_status,
             content_owner_id=content_owner_id,
             revenue_required=revenue_required,
+            require_pre_state=require_pre_state,
         )
 
 
@@ -1401,6 +1408,7 @@ class _SourceStatusDriftsAtWriteBoundary(ChannelRegistry):
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
     ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Rewrite the stored classification once, just before the locked write."""
         if not self._drifted:
@@ -1416,6 +1424,7 @@ class _SourceStatusDriftsAtWriteBoundary(ChannelRegistry):
             cms_status=cms_status,
             content_owner_id=content_owner_id,
             revenue_required=revenue_required,
+            require_pre_state=require_pre_state,
         )
 
 
@@ -1458,6 +1467,93 @@ def test_plan_bound_apply_refuses_a_drifted_revenue_source_pre_state():
     assert "revenue_source_status" in detail
     assert "OFFICIAL_CMS_REVENUE" in detail
     assert audit_sink.records == []
+
+
+def test_plan_bound_apply_refuses_an_undisclosed_source_drift():
+    """A None disclosure is not an exemption, it is a recoverable pre-state.
+
+    The stored pair here — PERFORMANCE_ONLY with revenue_required=True — is one
+    the column permits, so a roster turning the flag OFF derives
+    PERFORMANCE_ONLY, matches what is stored, and the planner discloses no
+    transition at all. Two concurrent imports flipping the flag away and back
+    then leave all four inventory fields at their reviewed values while the
+    classification underneath has moved to MISSING_REVENUE_SOURCE.
+
+    Without recovering the reviewed pre-state, the write re-derives
+    PERFORMANCE_ONLY and performs MISSING_REVENUE_SOURCE -> PERFORMANCE_ONLY
+    under a preview that promised no source change whatsoever.
+    """
+    drifting = _SourceStatusDriftsAtWriteBoundary(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Alpha News",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+                revenue_source_status="PERFORMANCE_ONLY",
+            )
+        ],
+        drift_to="MISSING_REVENUE_SOURCE",
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},Alpha News,No")
+
+    preview = post_import(client, body, dry_run="true").json()
+    # The premise: nothing disclosed, yet the write CAN re-derive, because the
+    # row's diff flips the flag.
+    assert preview["rows"][0]["revenue_source_status"] is None
+    assert preview["rows"][0]["changes"]["revenue_required"] == {"from": True, "to": False}
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "revenue_source_status" in detail
+    assert "PERFORMANCE_ONLY" in detail
+    assert "MISSING_REVENUE_SOURCE" in detail
+    assert audit_sink.records == []
+
+
+def test_a_refused_bound_apply_leaves_a_nontransactional_store_untouched():
+    """The 409 must not be paid for with a write that already happened.
+
+    apply_channel_import's all-or-nothing promise is a TRANSACTION statement,
+    and the in-memory registry has none: if the pre-state were judged on
+    update_inventory's return value, the roster values would already be
+    installed by the time the guard raised, and this store has nothing to roll
+    back. The request would answer 409 while the drifted row now held the
+    values the operator was told were NOT applied (review #184).
+
+    Asserting the STORE, not just the response, is the point — the response
+    was already 409 before the ordering was fixed.
+    """
+    drifting = _ChannelDriftsAtWriteBoundary(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Old Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ],
+        drift_to="Concurrent Rename",
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},New Name,Yes")
+
+    preview = post_import(client, body, dry_run="true").json()
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    assert audit_sink.records == []
+    stored = drifting.get_channel(CHANNEL_ID)
+    assert stored is not None
+    # The concurrent writer's value survives; the roster's does NOT.
+    assert stored.channel_name == "Concurrent Rename"
 
 
 def test_preview_claims_no_source_change_when_the_flag_holds():

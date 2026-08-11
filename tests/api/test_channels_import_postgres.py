@@ -23,7 +23,7 @@ is unset, preserving the repository's no-skip policy.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Annotated
 from unittest.mock import patch
@@ -528,6 +528,7 @@ def test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres(
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
     ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Commit an outside rename once, then run the real locked write."""
         if not drifted:
@@ -547,6 +548,7 @@ def test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres(
             cms_status=cms_status,
             content_owner_id=content_owner_id,
             revenue_required=revenue_required,
+            require_pre_state=require_pre_state,
         )
 
     before = _audit_log_count(owner_engine)

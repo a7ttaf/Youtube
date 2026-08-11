@@ -16,6 +16,7 @@
 # ============================================================================
 """SQL-backed tenant-scoped channel registry."""
 
+from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -387,6 +388,7 @@ class SqlAlchemyChannelRegistry:
         cms_status: str,
         content_owner_id: str | None,
         revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
     ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
         """Replace a channel's inventory fields from an authoritative import row.
 
@@ -394,6 +396,11 @@ class SqlAlchemyChannelRegistry:
         observed at the write boundary — re-read under a row lock, not the
         caller's possibly-stale planning snapshot — so audit trails can record
         the values actually replaced.
+
+        ``require_pre_state`` runs against that locked pre-state before any
+        assignment, so a refusal leaves the row untouched rather than relying on
+        the surrounding transaction to undo it. Here the rollback would in fact
+        happen, but the guarantee belongs to the protocol, not to this backend.
         """
         row = self._get_row(youtube_channel_id)
         if row is None:
@@ -431,6 +438,13 @@ class SqlAlchemyChannelRegistry:
         # unchanged.
         self._session.refresh(row, with_for_update={"key_share": True})
         previous = self._to_entry(row)
+        # Inside the row lock, before any assignment: "is this still the row the
+        # operator reviewed?" is asked ahead of "is this write permitted?" (the
+        # locked-month guard below), because a plan that no longer applies
+        # should send them back to re-review rather than report a month lock on
+        # a diff they would no longer approve.
+        if require_pre_state is not None:
+            require_pre_state(previous)
         # Flipping revenue_required ON is guarded against LOCKED months: month-
         # close readiness evaluates the CURRENT flag, so enabling it while a
         # locked month has no fact for this channel would retroactively make
