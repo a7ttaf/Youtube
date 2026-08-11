@@ -309,7 +309,7 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1894 insertions across eight files as of `14778020`**,
+backend diff is **1894 insertions across eight files as of `921a252a`**,
 the commit that last changed `backend/`
 (`git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a
 frontend revert leaves all of it running.
@@ -326,7 +326,7 @@ The anchor is the commit that last changed `backend/`, **not** the branch tip,
 and that distinction is what stops this line going stale on its own: `Docs/` is
 outside the `-- backend/` pathspec, so any number of later documentation
 commits — including this one — leave both the figure and its anchor correct.
-If `backend/` has changed since `14778020`, this is a measurement of an earlier
+If `backend/` has changed since `921a252a`, this is a measurement of an earlier
 tree rather than a wrong one, and the command above re-derives it.
 
 ### Reverting the frontend only
