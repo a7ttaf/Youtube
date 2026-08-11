@@ -105,6 +105,18 @@ apply test.
    because two tabs disagreeing about the tenant build different namespaces and
    both would dispatch. A reload re-runs the bootstrap, so this is a retry, not
    a wedge.
+9. **A repeated `(youtube_channel_id, group_id)` pair is now a row error.**
+   Repeating a channel is only meaningful ACROSS groups — the many-to-many
+   roster the singular `group_id` column exists to express. Restating one pair,
+   including two rows carrying no group at all, kept both copies: the second
+   planned UNCHANGED and repeated the first's `group_action`, while the write
+   pass collapses the pair, so the preview promised the group work twice and
+   counted the channel twice for one membership. This is the only behaviour
+   change here that **rejects input the previous code accepted**, and it cannot
+   lose a successful import: the duplicate row never wrote anything, so the
+   persisted result of a roster that used to import is unchanged — only the
+   misleading preview becomes an explicit error naming the line to delete.
+   Rosters listing one channel under several **distinct** groups are unaffected.
 
 ## Tests run
 
@@ -115,7 +127,7 @@ with the pinned toolchain:
 | --- | --- |
 | `uv sync --extra dev --extra test --extra lint` | 87 resolved, 85 checked |
 | `uv run ruff check backend tests scripts` | **All checks passed** |
-| `uv run pytest -q` | **2813 passed**, 15 warnings (8m04s) |
+| `uv run pytest -q` | **2817 passed**, 15 warnings (7m55s) |
 | `git diff --check` | clean (exit 0) |
 | `uv run mypy backend` | clean for this PR's files (see note) |
 
@@ -127,7 +139,16 @@ Frontend, and the PR-scope analyzer:
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
 | DeepSource (PR scope) | `[]` |
-| CI checks | 6 pass, 1 skipping |
+| CI checks | 6 required contexts, all SUCCESS |
+
+The six are the whole required set — `main`'s branch protection lists exactly
+`DeepSource: Docker / JavaScript / Python / SQL / Secrets / Shell`. Worth
+stating because the head commit reports **zero** check-runs where earlier
+commits on this branch reported 24, 8 and 2, which looks like a gate that
+stopped running. It is not: every one of those check-runs is named `claude`
+(the `claude.yml` bot workflow, which fires on comment and review events rather
+than on push), `.github/workflows/` contains no test workflow, and the six
+statuses are present on every commit on this branch.
 
 **`uv run pytest -q` needs `UMS_TEST_DATABASE_URL`** and does not skip without
 it: the repository's no-skip policy makes the Postgres-tier tests raise, so a
@@ -162,10 +183,18 @@ The backend suite has been re-run in full after every backend change rather
 than assumed — twice over, when the first pass after the round-51 write-boundary
 change surfaced a Postgres failure (a monkeypatched `update_inventory` wrapper
 that had not grown the new keyword). The total has climbed with each round's
-added tests -- 2807 at the first full run, 2813 at the figure in the gate table
+added tests -- 2807 at the first full run, 2817 at the figure in the gate table
 above, which is the only one that describes the current commit. Earlier numbers
 appear in this document only inside sentences about the round that produced
 them.
+
+One caveat that cost a full run to learn: this total is only trustworthy
+against a **fresh** Postgres container. Re-running the suite against a reused
+one reported 23 failures — every one of them an RLS/migration test, none of
+them touching the code under review — because the container carried a stray
+schema from an earlier round. A disposable container returns 2817. A stale
+container fails loudly enough to look like a regression, so the number above is
+recorded together with the condition that produces it.
 
 **Failures encountered and fixed during review**, recorded because they are the
 useful part: twenty-two fixtures across five files carried shapes the backend
@@ -250,7 +279,7 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1688 insertions across eight files** (`git diff --stat
+backend diff is **1808 insertions across eight files** (`git diff --stat
 $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a frontend revert
 leaves all of it running.
 
