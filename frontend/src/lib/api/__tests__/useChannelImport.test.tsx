@@ -1181,6 +1181,27 @@ describe("useChannelImport", () => {
     ).resolves.toMatchObject({ content_owner_id: "\uFEFFCOabc" });
   });
 
+  it("accepts the echo of an owner the multipart encoder rewrote in transit", async () => {
+    // The encoder turns every lone LF into CRLF before the value leaves the
+    // browser, so the route strips and echoes "CO\r\nabc" for a field this
+    // module holds as "CO\nabc". Comparing the LOCAL string refuses a preview
+    // the backend accepted -- _validated_content_owner_id rejects only blank,
+    // NUL and over-length, so an interior newline round-trips.
+    fetchMock().mockResolvedValue(
+      jsonResponse({ ...DRY_RUN_RESULT, content_owner_id: "CO\r\nabc" }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "CO\nabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ content_owner_id: "CO\r\nabc" });
+  });
+
   it("rejects a writable row missing the values it would write", async () => {
     // Each of these three fields is independently nullable because an ERROR
     // row carries none of them, so an outcome-blind check passes a CREATE with

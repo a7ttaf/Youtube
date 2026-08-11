@@ -221,6 +221,34 @@ const PYTHON_STRIPPABLE = new RegExp(`^[${PYTHON_SPACE}]+|[${PYTHON_SPACE}]+$`, 
 
 const pythonStrip = (value: string): string => value.replace(PYTHON_STRIPPABLE, "");
 
+// ============================================================================
+// Purpose: A text field as the SERVER receives it, not as this module holds
+//   it. The multipart encoder does not transmit string field values verbatim:
+//   it rewrites every lone CR and every lone LF to CRLF before they leave the
+//   browser. So the route strips and echoes a value this module never had, and
+//   any client-side model of the route's normalization has to start here.
+// Database/ORM: None (frontend) — a pure string function over a request field.
+// Standards: The alternation is ordered `\r\n` first so an existing CRLF is
+//   consumed whole rather than matched as a lone CR; that is the HTML
+//   multipart normalization, not an approximation of it. Measured, not read —
+//   `new Request(url, {method: "POST", body: formData})` serialized
+//   `"CO\nabc"` as `CO\r\nabc` on the wire.
+// Blast Radius: Only ends-of-string whitespace survives `pythonStrip`, so this
+//   changes nothing for any value without an INTERIOR lone newline. For one
+//   that has it, the owner echo is an equality check against a value the route
+//   ACCEPTED — `_validated_content_owner_id` rejects only blank, NUL and
+//   over-length — so a mismatch is not a warning: it raises
+//   ChannelImportShapeError and refuses the whole preview.
+// Connections:
+//   - File: frontend/src/lib/api/useChannelImport.ts -> echoesRequestedTarget,
+//       which compares against the echo of the transmitted value.
+//   - File: backend/ums_smart_revenue/api/channels.py ->
+//       _validated_content_owner_id, which strips what arrives (channels.py:830).
+// ============================================================================
+const WIRE_NEWLINE = /\r\n|\r|\n/gu;
+
+const toWireText = (value: string): string => value.replace(WIRE_NEWLINE, "\r\n");
+
 /**
  * Text as the PARSER would have left it. `_parse_text_fields` strips the cell,
  * ERRORs an empty result, and ERRORs a NUL-bearing one — so a writable row's
@@ -1081,14 +1109,17 @@ export const isChannelImportResult = (payload: unknown): payload is ChannelImpor
  * value the route accepted, which fails the WHOLE preview rather than
  * warning, and takes the import UI down for a roster the API handles fine
  * (review #184, codex P2). Same divergence, same consequence, as the
- * `isParserText` case above.
+ * `isParserText` case in this file.
+ *
+ * `toWireText` first, because the route strips what ARRIVES, not what this
+ * module holds — see its block for the newline the encoder rewrites in transit.
  */
 export const echoesRequestedTarget = (
   result: ChannelImportResult,
   contentOwnerId: string,
 ): boolean => {
   return (
-    result.content_owner_id === pythonStrip(contentOwnerId) &&
+    result.content_owner_id === pythonStrip(toWireText(contentOwnerId)) &&
     result.cms_status === IMPORT_CMS_STATUS
   );
 };
