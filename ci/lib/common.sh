@@ -33,7 +33,6 @@ ci::common::command_exists() {
 # $1: manifest filename to look for (package.json, tsconfig.json, ...)
 ci::common::node_workspaces() {
   local manifest="${1:-package.json}"
-  local dir
 
   if [ -f "$manifest" ]; then
     printf '%s\n' "."
