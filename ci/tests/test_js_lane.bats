@@ -3300,3 +3300,225 @@ ws_run() {
   cd "$REPO_ROOT"
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: a negated runner cannot satisfy the gate" {
+  # `!` is a reserved word in command position and inverts the status of the
+  # command it prefixes, so `! ./scripts/vitest run` leaves a failing suite as a
+  # zero. The scan read `!` as a command separator, which made it look like an
+  # empty command followed by a runner in command position -- every rule
+  # satisfied by a token whose result the shell then reversed.
+  ws_setup
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\nexit 77\n' > "$NODE_SB/ws/scripts/f77.sh"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "! ./scripts/vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"negates a checker"* ]]
+
+  # And one layer down, where the same rule has had to be re-applied four times.
+  printf '#!/usr/bin/env bash\n! vitest run\n' > "$NODE_SB/ws/scripts/neg.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/neg.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"negates a checker"* ]]
+
+  # A negated *delegation* is the same statement with a wrapper in front of it.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "! bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"negates a checker"* ]]
+
+  # The controls. The negation binds to one command, so a negated *lookup*
+  # followed by the runner is ordinary shell and must still pass -- refusing it
+  # would be the tightening overshooting into correct work, which this lane has
+  # already done twice.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "! command -v nosuchtool && vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"negates a checker"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"negates a checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a wrapper prefix does not hide the runner's own flags" {
+  # Runner discovery and the checker resolver disagreed about `command`, `time`
+  # and `nohup`: the resolver stepped over them and accepted vitest, while
+  # discovery recorded the prefix as the runner, left is_test_runner at zero and
+  # never applied the argument rules at all. `command vitest run
+  # --exclude=tests/a.test.ts` exited 0 with the exclusion uninspected.
+  ws_setup
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "command vitest run --exclude=tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "time vitest run --exclude=tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # A positional filter behind a prefix is the same hole with the other rule.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "nohup vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The control: the prefix on its own is not a filter.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "command vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an EXIT trap that can replace the runner's status is refused" {
+  # An EXIT handler runs after the runner and leaves with its own status if it
+  # exits: `trap 'exit 0' EXIT` in front of a failing suite exits 0. The action
+  # is quoted, so the quote blanker -- which exists precisely because quoted
+  # text is data -- had already removed it, and the scan walked past to the
+  # runner and reported a hit.
+  ws_setup
+
+  printf '#!/usr/bin/env bash\ntrap %s EXIT\n./scripts/vitest run\nexit 77\n' "'exit 0'" \
+    > "$NODE_SB/ws/scripts/trap.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/trap.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"installs an EXIT trap"* ]]
+
+  # Installed inside a block the structure reader refuses to judge, and still
+  # installed at run time. Restricting the question to top-level lines would
+  # have left this accepted -- the rule right on one spelling and absent on the
+  # one beside it.
+  printf '#!/usr/bin/env bash\nif [ -n "${CI:-}" ]; then trap %s EXIT; fi\n./scripts/vitest run\n' "'exit 0'" \
+    > "$NODE_SB/ws/scripts/trapif.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/trapif.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"installs an EXIT trap"* ]]
+
+  # And in the manifest itself, which runs in a shell like any other script.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "trap \"exit 0\" EXIT ; vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"installs an EXIT trap"* ]]
+
+  # The controls. `trap - EXIT` removes a handler rather than installing one; a
+  # handler on other signals cannot replace an exit status; and a trap inside a
+  # string is text being printed, not a handler being installed -- the same
+  # distinction the blanker draws for a checker named in a string.
+  printf '#!/usr/bin/env bash\ntrap - EXIT\n./scripts/vitest run\n' > "$NODE_SB/ws/scripts/treset.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/treset.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"installs an EXIT trap"* ]]
+
+  printf '#!/usr/bin/env bash\ntrap %s INT TERM\n./scripts/vitest run\n' "'echo bye'" \
+    > "$NODE_SB/ws/scripts/tint.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/tint.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"installs an EXIT trap"* ]]
+
+  printf '#!/usr/bin/env bash\necho "trap %s EXIT"\n./scripts/vitest run\n' "'exit 0'" \
+    > "$NODE_SB/ws/scripts/techo.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/techo.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"installs an EXIT trap"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a delegated typecheck is judged by the compiler's rules" {
+  # Every resolved delegation was handed to the *test-runner* validator. A
+  # typecheck script delegating to `tsc --noEmit` therefore met an allow-list
+  # that has never contained `--noEmit`, and `tsc -p tsconfig.json` was reported
+  # as pointing at "individual files" that are its project -- the gate refusing
+  # the two most ordinary spellings of a correct typecheck. Worse, that
+  # validator read `is_test_runner` out of its caller's scope, and on this path
+  # the name does not exist: `set -u` aborted the lane.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+  printf '#!/usr/bin/env bash\ntsc -p tsconfig.json --noEmit\n' > "$NODE_SB/ws/scripts/tc.sh"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "npm run tc", "tc": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" != *"unbound variable"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "bash scripts/tc.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" != *"unbound variable"* ]]
+
+  # And the compiler's own rules do reach the delegated command, which is the
+  # other half: dispatching by tool is not the same as skipping the check.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "npm run tc", "tc": "tsc --noEmit --noCheck" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: tsc modes that do not typecheck are refused whatever their case" {
+  # `--noCheck` is documented as processing the project without full type
+  # checking, so `tsc --noEmit --noCheck` walks everything, reports nothing and
+  # exits 0 over code that does not compile. The catch-all `-*` arm accepted it.
+  #
+  # And tsc matches its options case-insensitively, so every mode named by this
+  # rule could be reached by changing a letter: `--showconfig` is the same
+  # option to the compiler and was a different string to the guard.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit --noCheck" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noemit --showconfig" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # Watch mode never returns, so the lane is killed by the runner timeout and a
+  # manifest edit is reported as broken infrastructure rather than a result --
+  # the reason the same flag left the test-runner allow-list.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit --watch" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The controls: the two correct spellings still pass, which is what keeps this
+  # an enumeration of what cannot check rather than of what may run.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}

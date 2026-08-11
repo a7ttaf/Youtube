@@ -14,6 +14,7 @@ _CI_CHANGESET_MODE=""
 _CI_CHANGESET_FILES_RAW=""   # newline-separated "STATUS\tPATH" entries,
                              # paths %-escaped for tab, newline and % itself
 _CI_CHANGESET_PATH=""        # out-parameter of ci::changeset::_decode_path
+_CI_CHANGESET_ESC=""         # out-parameter of ci::changeset::_escape_non_utf8
 _CI_CHANGESET_LANGUAGES=""   # space-separated unique languages
 _CI_CHANGESET_CHECKS=""      # space-separated unique checks
 
@@ -182,6 +183,90 @@ ci::changeset::_add_unique() {
   printf '%s' "$current"
 }
 
+# JSON is defined over text and a Git path is defined over bytes, and the two do
+# not always meet: `bad\xff.py` is a perfectly legal POSIX filename that no
+# sequence of Unicode characters encodes. Written through unchanged it makes the
+# whole of changeset.json invalid UTF-8, and `python3 -m json.tool` refuses to
+# read the report -- the entire audit artifact lost to one byte in one name.
+#
+# Well-formed UTF-8 goes through untouched, so `café.ts` stays readable and
+# stays itself. Only the bytes that cannot be text are escaped, as \u00XX --
+# their Latin-1 code point, which is a lossy rendering of something that was
+# never text and is marked as such by being escaped at all. The alternative,
+# refusing to write the report, throws away the record of every other file over
+# a name the gate has no other complaint about.
+#
+# Well-formed means strictly well-formed: the ranges below reject an overlong
+# encoding and a lone surrogate as well as a stray byte, because a strict
+# decoder -- which is what reads this file -- rejects all three.
+#
+# Sets _CI_CHANGESET_ESC rather than printing, so escaping a path costs no
+# process; emit_json already spends one subshell per field.
+ci::changeset::_escape_non_utf8() {
+  # Byte-oriented deliberately: ${#s} and ${s:i:1} count *characters* in a UTF-8
+  # locale, and the bytes this has to find are precisely the ones that do not
+  # form characters. `local` restores the caller's locale on return.
+  #
+  # Read by the shell itself rather than by this code, which is what the
+  # unused-variable warning cannot see.
+  # shellcheck disable=SC2034
+  local LC_ALL=C LANG=C LC_CTYPE=C
+  local s="$1"
+  # Every ordinary path, and no walk for it.
+  case "${s//[$'\001'-$'\177']/}" in
+    '') _CI_CHANGESET_ESC="$s"; return 0 ;;
+  esac
+  local n=${#s} i=0 out="" c v need lo hi j ok cv hex
+  while [ "$i" -lt "$n" ]; do
+    c="${s:$i:1}"
+    printf -v v '%d' "'$c"
+    if [ "$v" -lt 128 ]; then
+      out="$out$c"
+      i=$((i + 1))
+      continue
+    fi
+    # How many continuation bytes this lead announces, and what the first of
+    # them is allowed to be. C0/C1 and F5..FF announce nothing: they cannot
+    # begin a sequence at all.
+    need=0 lo=128 hi=191
+    if   [ "$v" -ge 194 ] && [ "$v" -le 223 ]; then need=1
+    elif [ "$v" -eq 224 ]; then need=2 lo=160
+    elif [ "$v" -ge 225 ] && [ "$v" -le 236 ]; then need=2
+    elif [ "$v" -eq 237 ]; then need=2 hi=159
+    elif [ "$v" -ge 238 ] && [ "$v" -le 239 ]; then need=2
+    elif [ "$v" -eq 240 ]; then need=3 lo=144
+    elif [ "$v" -ge 241 ] && [ "$v" -le 243 ]; then need=3
+    elif [ "$v" -eq 244 ]; then need=3 hi=143
+    fi
+    ok=0
+    if [ "$need" -gt 0 ] && [ "$((i + need))" -lt "$n" ]; then
+      ok=1
+      j=1
+      while [ "$j" -le "$need" ]; do
+        printf -v cv '%d' "'${s:$((i + j)):1}"
+        if [ "$j" -eq 1 ]; then
+          if [ "$cv" -lt "$lo" ] || [ "$cv" -gt "$hi" ]; then ok=0; break; fi
+        elif [ "$cv" -lt 128 ] || [ "$cv" -gt 191 ]; then
+          ok=0
+          break
+        fi
+        j=$((j + 1))
+      done
+    fi
+    if [ "$ok" -eq 1 ]; then
+      out="$out${s:$i:$((need + 1))}"
+      i=$((i + need + 1))
+      continue
+    fi
+    # One byte at a time on failure, so the walk resynchronises on the next
+    # lead byte instead of swallowing whatever followed a bad one.
+    printf -v hex '%02x' "$v"
+    out="$out\\u00$hex"
+    i=$((i + 1))
+  done
+  _CI_CHANGESET_ESC="$out"
+}
+
 ci::changeset::_json_escape() {
   local s="$1"
   s="${s//\\/\\\\}"
@@ -204,7 +289,10 @@ ci::changeset::_json_escape() {
     printf -v ch '%b' "\\x${cc}"
     s="${s//"$ch"/\\u00${cc}}"
   done
-  printf '%s' "$s"
+  # Last, so the escapes it introduces are not escaped again by the passes
+  # above -- and so it only ever sees bytes that are still the argument's own.
+  ci::changeset::_escape_non_utf8 "$s"
+  printf '%s' "$_CI_CHANGESET_ESC"
 }
 
 # ---------------------------------------------------------------------------

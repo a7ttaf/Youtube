@@ -244,7 +244,29 @@ while IFS= read -r -d '' path; do
       # cannot measure must not silently measure zero -- and because leaving it
       # to the slow path is what stops a file named with a newline from being
       # a way to push the gate back over its budget on purpose.
-      _GS_NL_PATHS+=("$path")
+      #
+      # Deduplicated here rather than through _gs_seen, and this arm was
+      # bypassing that set entirely: a newline path modified by forty of the
+      # pushed commits arrived forty times and was sized forty times, each call
+      # walking every outgoing commit again. That is the quadratic cost the
+      # batch below exists to remove, reintroduced on the one path that cannot
+      # use it -- and it is reachable on purpose, since the name is the
+      # attacker's to choose.
+      #
+      # _gs_seen cannot answer it: that set is newline-delimited, so a path
+      # containing a newline can match the join of two unrelated records --
+      # "a\nb" reads as already seen once `a` and `b` have been. A linear scan
+      # over the list itself has no separator to be confused by, and the list is
+      # empty in every ordinary push.
+      _gs_dup=0
+      if [ "${#_GS_NL_PATHS[@]}" -gt 0 ]; then
+        for _gs_prev in "${_GS_NL_PATHS[@]}"; do
+          if [ "$_gs_prev" = "$path" ]; then _gs_dup=1; break; fi
+        done
+      fi
+      if [ "$_gs_dup" -eq 0 ]; then
+        _GS_NL_PATHS+=("$path")
+      fi
       continue
       ;;
   esac

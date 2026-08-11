@@ -52,6 +52,7 @@ echo "OLD=${CI_GATE_PUSH_OLD_SHA:-}"
 # `-` not `:-`, because set-and-empty is a different statement from unset and
 # the check downstream is required to tell them apart.
 echo "DEST=${CI_GATE_PUSH_REMOTE_REFS-<unset>}"
+echo "TIPS=${CI_GATE_PUSH_BRANCH_TIPS-<unset>}"
 exit 0
 SH
   chmod +x "$HD_SB/ci/preflight.sh"
@@ -330,4 +331,88 @@ SH
   [[ "$output" != *"REMOTE=[pre-push]"* ]]
   [[ "$output" != *"example.invalid"* ]]
   rm -rf "$sb"
+}
+
+@test "hooks: every branch tip in a push is collected, not just the widest" {
+  # The records are collapsed to one A..B range, which is right for the history
+  # checks and says nothing about the trees at the other tips. The tips are
+  # collected distinctly so ci::git::worktree_covers_push can ask about each.
+  _hd_sandbox
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\nrefs/heads/old %s refs/heads/old %s\n' \
+    '$HD_TIP' '$HD_ROOT' '$HD_BASE' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TIPS="* ]]
+  [[ "$output" == *"$HD_TIP"* ]]
+  [[ "$output" == *"$HD_BASE"* ]]
+
+  # One branch pushed to two names is one tip, not two: the same commit twice
+  # would otherwise read as a multi-tip push and refuse an ordinary mirror.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\nrefs/heads/main %s refs/heads/release %s\n' \
+    '$HD_TIP' '$HD_ROOT' '$HD_TIP' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TIPS=$HD_TIP"* ]]
+
+  # A tag alongside a branch is not a second tip. It names a commit inside the
+  # history being pushed, which the range checks already cover, and treating it
+  # as a destination would refuse `git push origin main v1.0`.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\nrefs/tags/v1 %s refs/tags/v1 %s\n' \
+    '$HD_TIP' '$HD_ROOT' '$HD_BASE' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TIPS=$HD_TIP"* ]]
+
+  # A deletion carries no tree, so it contributes no tip to validate.
+  local zero=0000000000000000000000000000000000000000
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\n(delete) %s refs/heads/gone %s\n' \
+    '$HD_TIP' '$HD_ROOT' '$zero' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TIPS=$HD_TIP"* ]]
+  rm -rf "$HD_SB"
+}
+
+@test "git: one worktree cannot vouch for two branch tips" {
+  # `git push origin broken:staging fixed:main`, where the repair descends from
+  # the break, collapsed to the descendant: the lanes validated that tree,
+  # reported a pass, and `staging` was left at the commit whose suite fails.
+  # Ancestry proves the range covers the chain; it proves nothing about the
+  # ancestor's tree having been checked, and there is only one worktree.
+  _hd_sandbox
+  source "$REPO_ROOT/ci/lib/git.sh"
+  cd "$HD_SB"
+
+  # The premise: HEAD is one of the two tips, so the old rule was satisfied by
+  # the collapsed sha alone.
+  [ "$(git rev-parse --verify HEAD)" = "$HD_TIP" ]
+
+  export CI_GATE_PUSH_NEW_SHA="$HD_TIP"
+  export CI_GATE_PUSH_REMOTE_REFS="main"
+
+  export CI_GATE_PUSH_BRANCH_TIPS="$HD_TIP"
+  run ci::git::worktree_covers_push
+  [ "$status" -eq 0 ]
+
+  export CI_GATE_PUSH_BRANCH_TIPS="$HD_TIP $HD_BASE"
+  run ci::git::worktree_covers_push
+  [ "$status" -ne 0 ]
+
+  # An unreadable tip is not evidence that it matches, as everywhere else here.
+  export CI_GATE_PUSH_BRANCH_TIPS="$HD_TIP deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  run ci::git::worktree_covers_push
+  [ "$status" -ne 0 ]
+
+  # And the diagnostic names the condition rather than printing a collapsed sha
+  # that does match HEAD against a HEAD that does.
+  export CI_GATE_PUSH_BRANCH_TIPS="$HD_TIP $HD_BASE"
+  run ci::git::explain_push_tip_drift
+  [[ "$output" == *"more than one commit"* ]]
+  [[ "$output" == *"$HD_BASE"* ]]
+
+  # Unset is nobody-said, which is CI and every direct invocation: those run
+  # against whatever is checked out by design.
+  unset CI_GATE_PUSH_BRANCH_TIPS
+  run ci::git::worktree_covers_push
+  [ "$status" -eq 0 ]
+
+  unset CI_GATE_PUSH_NEW_SHA CI_GATE_PUSH_REMOTE_REFS
+  cd "$REPO_ROOT"
+  rm -rf "$HD_SB"
 }

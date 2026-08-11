@@ -146,6 +146,30 @@ ci::git::worktree_covers_push() {
   # an unreadable sha is the same fail-closed direction as everywhere else.
   [ -n "$pushed" ] || return 1
   [ -n "$head" ] || return 1
+
+  # *Every* branch destination, not just the widest of them.
+  #
+  # The hook collapses the records to one A..B range, which is right for the
+  # history checks -- one chain, one range. It is wrong for everything that
+  # reads content, because there is one worktree and it can only be one of the
+  # tips. `git push origin broken:staging fixed:main`, where the repair
+  # descends from the break, collapsed to `fixed`: the lanes validated that
+  # tree, reported a pass, and `staging` was left at the commit whose suite
+  # fails. Ancestry proves the range covers the chain; it proves nothing about
+  # the ancestor's tree having been checked.
+  #
+  # Unset is the same statement as everywhere else here -- nobody said, so there
+  # is no second tree to be wrong about, and CI keeps working.
+  local _wc_tip _wc_res
+  # Word-splitting is how the list is carried; the shas cannot hold whitespace.
+  # shellcheck disable=SC2086
+  for _wc_tip in ${CI_GATE_PUSH_BRANCH_TIPS:-}; do
+    _wc_res="$(git rev-parse --verify "${_wc_tip}^{commit}" 2>/dev/null || true)"
+    # An unreadable tip is not evidence that it matches, as above.
+    [ -n "$_wc_res" ] || return 1
+    [ "$_wc_res" = "$head" ] || return 1
+  done
+
   [ "$pushed" = "$head" ] && return 0
 
   # A push that names no branch destination at all is a tag push. Two reviewers
@@ -197,6 +221,26 @@ ci::git::worktree_covers_push() {
 # The message, in one place, because two callers print it.
 ci::git::explain_push_tip_drift() {
   local tip="${CI_GATE_PUSH_NEW_SHA:-<unknown>}"
+  # More than one branch tip is a different sentence from ordinary drift, and
+  # printing the collapsed one alone sends people to compare a sha that does
+  # match HEAD against a HEAD that does.
+  case "${CI_GATE_PUSH_BRANCH_TIPS:-}" in
+    *' '*)
+      local _d_tip
+      echo "This push updates branches to more than one commit:"
+      # shellcheck disable=SC2086
+      for _d_tip in ${CI_GATE_PUSH_BRANCH_TIPS}; do
+        echo "    ${_d_tip}"
+      done
+      echo "  Everything that runs content — the node lane, the build, the"
+      echo "  test-layout guard — reads the worktree, and there is one of those,"
+      echo "  so it can vouch for one of these commits and not the other. That"
+      echo "  holds even when they are ancestor and descendant: the history"
+      echo "  checks cover the chain, the content checks cover one end of it."
+      echo "  Push the branches separately so each is gated against its own tree."
+      return 0
+      ;;
+  esac
   echo "The commit being pushed is not the commit checked out."
   echo "  pushed: ${tip}"
   echo "  HEAD:   $(git rev-parse --verify HEAD 2>/dev/null || echo '<none>')"

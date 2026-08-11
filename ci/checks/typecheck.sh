@@ -68,7 +68,23 @@ typecheck::run_js() {
     ( _tc_js_workspace "$ws" ) || rc=$?
 
     if [ "$rc" -eq 127 ]; then
-      _tc_tool_missing "workspace-local tsc in ${ws}/node_modules/.bin (a global tsc is deliberately not used)"
+      # A detected TypeScript workspace with no compiler is broken
+      # infrastructure, not a skip. Reaching here means ci::common::node_workspaces
+      # found a tsconfig.json and this lane was scheduled for it, so "no tsc"
+      # does not mean "nothing to check" -- it means the project that exists
+      # could not be checked, and logging a skip left OVERALL_RESULT at PASS.
+      # An uninstalled node_modules then took an enabled typecheck-js lane green
+      # over a tree nothing compiled.
+      #
+      # The same rule ci/checks/tests.sh applies to a missing workspace-local
+      # test runner, and ci/checks/tests-shell.sh to a missing bats: an enabled
+      # blocker that cannot find its tool has not passed.
+      OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+      ci::log::error "No workspace-local tsc in ${ws}/node_modules/.bin"
+      ci::log::error "  (a global tsc is deliberately not used: it is not the version this"
+      ci::log::error "  workspace pins). This workspace declares tsconfig.json and was"
+      ci::log::error "  scheduled, so reporting PASS here would mean its types were never"
+      ci::log::error "  checked. Install its dependencies, or remove the workspace."
       continue
     fi
 

@@ -224,3 +224,63 @@ teardown() {
   ci::changeset::_decode_path "$(ci::changeset::_encode_path "$nl")"
   [ "$_CI_CHANGESET_PATH" = "$nl" ]
 }
+
+@test "changeset: a path byte that is not UTF-8 does not make the report unreadable" {
+  # JSON is defined over text and a Git path is defined over bytes. `bad\xff.py`
+  # is a legal POSIX filename that no sequence of Unicode characters encodes,
+  # and written through unchanged it made the whole of changeset.json invalid
+  # UTF-8 -- the entire audit record lost to one byte in one name.
+  #
+  # setup() has already sourced the library.
+  local ff cafe trunc surrogate overlong cjk
+  ff="$(printf 'bad\377.py')"
+  cafe="$(printf 'caf\303\251.ts')"
+  trunc="$(printf 'a\303.ts')"
+  surrogate="$(printf 'a\355\240\200b')"
+  overlong="$(printf 'a\300\257b')"
+  cjk="$(printf 'a\350\252\236b')"
+
+  # The bytes that cannot be text are escaped, one at a time, so the walk
+  # resynchronises on the next lead byte instead of swallowing what followed.
+  [ "$(ci::changeset::_json_escape "$ff")" = 'bad\u00ff.py' ]
+  [ "$(ci::changeset::_json_escape "$trunc")" = 'a\u00c3.ts' ]
+
+  # Strictly well-formed means strictly: an overlong encoding and a lone
+  # surrogate are rejected by the decoder that reads this file, so they are
+  # rejected here too rather than passed through as "high bytes".
+  [ "$(ci::changeset::_json_escape "$surrogate")" = 'a\u00ed\u00a0\u0080b' ]
+  [ "$(ci::changeset::_json_escape "$overlong")" = 'a\u00c0\u00afb' ]
+
+  # The control, and the reason this is not simply "escape every high byte":
+  # real UTF-8 goes through untouched and stays itself.
+  [ "$(ci::changeset::_json_escape "$cafe")" = "$cafe" ]
+  [ "$(ci::changeset::_json_escape "$cjk")" = "$cjk" ]
+  [ "$(ci::changeset::_json_escape 'frontend/src/a.ts')" = 'frontend/src/a.ts' ]
+
+  # And the escaping that was already there is unchanged by the new pass, which
+  # runs last precisely so it cannot escape its own output.
+  [ "$(ci::changeset::_json_escape "$(printf 'q"\\w\tx')")" = 'q\"\\w\tx' ]
+
+  # The property the whole rule is for, checked rather than reasoned about: the
+  # document a strict decoder is handed actually parses. Skipped only where
+  # there is no decoder to ask.
+  if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+    skip "no python available to parse the artifact"
+  fi
+  local py=python3
+  command -v python3 >/dev/null 2>&1 || py=python
+  local sb
+  sb="$(mktemp -d)"
+  cat > "$sb/check.py" <<'PY'
+import io, json, sys
+with io.open(sys.argv[1], encoding='utf-8') as fh:
+    json.load(fh)
+PY
+  local bad
+  for bad in "$ff" "$trunc" "$surrogate" "$overlong" "$cafe" "$cjk"; do
+    printf '%s' "{\"path\":\"$(ci::changeset::_json_escape "$bad")\"}" > "$sb/changeset.json"
+    run "$py" "$sb/check.py" "$sb/changeset.json"
+    [ "$status" -eq 0 ]
+  done
+  rm -rf "$sb"
+}

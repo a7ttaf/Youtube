@@ -1066,3 +1066,80 @@ YML
   [ "$status" -eq 0 ]
   rm -f "$cfg"
 }
+
+@test "typecheck: a TypeScript workspace with no tsc is infrastructure, not a skip" {
+  # _tc_js_workspace returns 127 when nothing under node_modules/.bin can be
+  # executed -- the deliberate refusal to fall back to a global tsc, which would
+  # be a different version from the one the lockfile pins. The caller logged
+  # "skipped" and left OVERALL_RESULT at PASS, so an enabled typecheck-js lane
+  # reported success over a project no compiler ever looked at. Reaching here
+  # means discovery found a tsconfig.json and this lane was scheduled for it, so
+  # "no tsc" does not mean "nothing to check".
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ws/node_modules/.bin"
+  cp "$REPO_ROOT/ci/checks/typecheck.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$sb/ws/tsconfig.json"
+  printf '{ "name": "w", "private": true }\n' > "$sb/ws/package.json"
+
+  # The premise: a workspace is discovered, and it has no compiler.
+  run bash -c "cd '$sb' && . ci/lib/common.sh && ci::common::node_workspaces tsconfig.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *ws* ]]
+  [ ! -e "$sb/ws/node_modules/.bin/tsc" ]
+
+  run bash -c "cd '$sb' && CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"No workspace-local tsc"* ]]
+
+  # The control: with a compiler present the lane reports on what it ran.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/ws/node_modules/.bin/tsc"
+  chmod +x "$sb/ws/node_modules/.bin/tsc"
+  run bash -c "cd '$sb' && CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [ "$status" -eq 0 ]
+
+  # And a failing compiler is still a new issue, not infrastructure -- the two
+  # verdicts have to stay apart or the distinction the contract draws is lost.
+  printf '#!/usr/bin/env bash\nexit 2\n' > "$sb/ws/node_modules/.bin/tsc"
+  chmod +x "$sb/ws/node_modules/.bin/tsc"
+  run bash -c "cd '$sb' && CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [ "$status" -eq 20 ]
+  rm -rf "$sb"
+}
+
+@test "git-safety: a newline path repeated across commits is collected once" {
+  # _gs_content_files emits one record per commit per modification, and the
+  # newline arm appended every one of them before reaching the _gs_seen dedup
+  # below it. The slow path then called _gs_max_blob_size once per duplicate,
+  # and each call walks every outgoing commit again -- the quadratic cost the
+  # batch exists to remove, reintroduced on the one path that cannot use the
+  # batch. The name is the pusher's to choose, so it is reachable on purpose.
+  #
+  # The real collector is extracted and driven, rather than a transcription of
+  # it: a filename holding a newline cannot be staged on every platform this
+  # suite runs on -- git on Windows refuses the path outright ("Ignoring path")
+  # -- so a fixture built through git would pass against the broken code too and
+  # assert nothing. The producer is the only thing replaced.
+  local sb
+  sb="$(mktemp -d)"
+  {
+    printf '%s\n' 'set -Eeuo pipefail'
+    printf '%s\n' '_gs_content_files() { printf "%s\0" "$NL1" "$NL1" "plain.py" "plain.py" "$NL2" "$NL1"; }'
+    sed -n '/^_GS_PATHS=()/,/^done < <(_gs_content_files)/p' "$REPO_ROOT/ci/checks/git-safety.sh"
+    printf '%s\n' 'printf "nl=%s ordinary=%s\n" "${#_GS_NL_PATHS[@]}" "${#_GS_PATHS[@]}"'
+  } > "$sb/drive.sh"
+
+  # The premise: the extraction found the arm under test.
+  run grep -c '_GS_NL_PATHS+=' "$sb/drive.sh"
+  [ "$output" -eq 1 ]
+
+  run bash -c "NL1=\$'a\nb.py' NL2=\$'c\nd.py' bash '$sb/drive.sh'"
+  [ "$status" -eq 0 ]
+  # Six records in, three distinct paths out: two newline paths and one
+  # ordinary one, which is what _gs_seen was already doing for the ordinary
+  # half all along.
+  [[ "$output" == *"nl=2"* ]]
+  [[ "$output" == *"ordinary=1"* ]]
+  rm -rf "$sb"
+}

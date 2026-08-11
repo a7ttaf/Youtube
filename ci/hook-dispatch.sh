@@ -58,6 +58,7 @@ case "$HOOK_NAME" in
     # HEAD — and here that means leaving the base empty so it can.
     if [ ! -t 0 ]; then
       _push_old="" _push_new="" _push_nobase=0 _push_unrelated="" _push_dests="" _push_any_content=0
+      _push_btips=""
       while read -r _lref _lsha _rref _rsha; do
         [ -n "${_lsha:-}" ] || continue
 
@@ -91,6 +92,35 @@ case "$HOOK_NAME" in
           continue
         fi
         _push_any_content=1
+
+        # Every commit a branch destination is being moved to, distinctly.
+        #
+        # Ancestry is the right relation for the *history* checks -- one A..B
+        # range covers a chain -- and the wrong one for everything that reads
+        # content. The node lane, the build and test-layout run against the
+        # worktree, once, so they can vouch for exactly one tree; collapsing an
+        # ancestor/descendant pair to the descendant left the other branch
+        # receiving a tree nothing validated. `git push origin broken:staging
+        # fixed:main`, where the repair descends from the break, gated `fixed`
+        # and moved `staging` to the commit whose suite fails.
+        #
+        # Collected here and judged by ci::git::worktree_covers_push, which is
+        # where "can this worktree stand in for what is being pushed" already
+        # lives. The range this hook builds still has to be widest-chain and
+        # order-independent for the history checks, so the collector does not
+        # refuse anything.
+        #
+        # Only branch destinations, and only content-bearing ones. A tag in the
+        # same push names a commit inside the history being pushed, which the
+        # range checks already cover, and a deletion has no tip to validate.
+        case "${_rref:-}" in
+          refs/heads/*)
+            case " ${_push_btips} " in
+              *" ${_lsha} "*) ;;
+              *) _push_btips="${_push_btips} ${_lsha}" ;;
+            esac
+            ;;
+        esac
 
         # The tip is chosen by ancestry, not by arrival. `_push_new="$_lsha"`
         # on every record meant "whichever ref git happened to list last",
@@ -173,6 +203,7 @@ case "$HOOK_NAME" in
       # for the sole reason that you were standing on main. Unset means nobody
       # said, which is every caller that is not this hook.
       export CI_GATE_PUSH_REMOTE_REFS="${_push_dests# }"
+      export CI_GATE_PUSH_BRANCH_TIPS="${_push_btips# }"
       # A push that carries no content at all is a deletion, and there is
       # nothing for a content or history check to report on. Stated explicitly
       # rather than left as "no new sha", because that is indistinguishable from

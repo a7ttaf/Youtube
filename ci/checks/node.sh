@@ -1430,17 +1430,14 @@ _resolve_delegated_target() {
       # shellcheck disable=SC2086
       for _sub_tok in $sub; do
         case "${_sub_tok##*/}" in
-          npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run) continue ;;
+          npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run) continue ;;
           -*) continue ;;
           *) _sub_rt="${_sub_tok##*/}"; break ;;
         esac
       done
       set +f
       case " $tools " in
-        *" $_sub_rt "*)
-          _reject_narrowing_flags "$target" "$sub"
-          _reject_positional_filters "$target" "$sub" "$_sub_rt"
-          ;;
+        *" $_sub_rt "*) _reject_tool_args "$target" "$sub" "$_sub_rt" ;;
       esac
       return 0
     fi
@@ -1512,6 +1509,13 @@ _resolve_delegated_target() {
         *[![:space:]]*) ;;
         *) continue ;;
       esac
+
+      # Asked of every line, not only the ones judged below. A handler is
+      # installed wherever it is written -- inside a function, inside an `if`,
+      # anywhere the structure reader refuses to judge -- and it still fires at
+      # exit. Restricting this to top-level lines would have left
+      # `if [ -n "$CI" ]; then trap "exit 0" EXIT; fi` accepted.
+      _reject_status_trap "$real" "$code"
 
       # Split on every separator so control keywords are matched as whole
       # tokens. Matching them as substrings is what let `well done` close a
@@ -1602,18 +1606,25 @@ _resolve_delegated_target() {
           # Only when this line starts with a known runner: a positional means
           # something else for `bash scripts/inner.sh`, which is delegation and
           # is resolved rather than filtered.
+          #
+          # The flag rule travels with it. Applying only the positional one here
+          # left `--exclude=tests/a.test.ts` accepted in a delegated shell
+          # script while the identical spelling was refused in a delegated
+          # package script -- the same rule holding for one spelling of a
+          # delegation and not the other, which is the shape this lane has now
+          # had to fix five times. One dispatcher, both rules, every site.
           _rt=""
           set -f
           for _rw in $real; do
             case "${_rw##*/}" in
-              npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run) continue ;;
+              npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run) continue ;;
               -*) continue ;;
               *) _rt="${_rw##*/}"; break ;;
             esac
           done
           set +f
           case " $tools " in
-            *" $_rt "*) _reject_positional_filters "$target" "$real" "$_rt" ;;
+            *" $_rt "*) _reject_tool_args "$target" "$real" "$_rt" ;;
           esac
         fi
       fi
@@ -1663,6 +1674,96 @@ _resolve_delegated_target() {
   return 1
 }
 
+# A handler that fires on EXIT runs after everything else and can replace the
+# status the whole lane is asking about: `trap 'exit 0' EXIT` in front of a
+# failing runner leaves the script with a zero, and the suite's result never
+# reaches the gate at all.
+#
+# Judged on the blanked copy, so `echo "trap 'exit 0' EXIT"` -- text being
+# printed -- does not arm it. That is also why the action itself cannot be
+# read: quoted text is exactly what _blank_quoted removes, deliberately, and a
+# reader that cannot see what a handler does cannot vouch for it. So the
+# allow-list is the one spelling that installs nothing: `trap - EXIT`, which
+# restores the default and removes any handler already set.
+#
+# Everything else naming EXIT (or signal 0, its numeric spelling) is refused,
+# including an ordinary `trap 'rm -f "$tmp"' EXIT` cleanup: the shell preserves
+# the status across a handler that does not exit, but nothing here can tell
+# that handler apart from one that does, and "cannot tell" is refused in this
+# file rather than assumed benign.
+_reject_status_trap() {
+  local _what="$1" _mask="$2" _tok _state=0 _sig _t
+  case "$_mask" in
+    *trap*) ;;
+    *) return 0 ;;
+  esac
+  # Separators are split off the words they are attached to, so `trap 'x' EXIT;`
+  # ends the trap command at the `;` exactly as the shell does.
+  _t="$_mask"
+  _t="${_t//;/ ; }"
+  _t="${_t//&/ & }"
+  _t="${_t//|/ | }"
+  set -f
+  # shellcheck disable=SC2086
+  for _tok in $_t; do
+    if [ "$_state" -eq 0 ]; then
+      case "$_tok" in trap) _state=1 ;; esac
+      continue
+    fi
+    if [ "$_state" -eq 1 ]; then
+      # `-` reinstates the default handler, which is the one form that cannot
+      # introduce a status.
+      case "$_tok" in
+        '-') _state=0 ; continue ;;
+      esac
+      # Anything else is *not* consumed as the action, and getting that wrong is
+      # what made the first version of this rule inert: in `trap 'exit 0' EXIT`
+      # the action is quoted, so it has already been blanked away and the first
+      # word still visible here is the signal. Skipping one token skipped the
+      # only evidence there was.
+      _state=2
+    fi
+    case "$_tok" in
+      ';'|'&'|'|') _state=0 ; continue ;;
+    esac
+    _sig="$(printf '%s' "$_tok" | tr '[:lower:]' '[:upper:]')"
+    _sig="${_sig#SIG}"
+    case "$_sig" in
+      EXIT|0)
+        set +f
+        echo "Workspace ${CI_GATE_NODE_WORKSPACE} installs an EXIT trap around a checker:"
+        echo "    ${_what}"
+        echo "  An EXIT handler runs after the runner and can leave with its own"
+        echo "  status -- 'trap \"exit 0\" EXIT' in front of a failing suite exits"
+        echo "  0, and the lane reports PASS on a suite that failed. The handler"
+        echo "  is quoted text, which this gate reads as data and cannot"
+        echo "  evaluate, so it cannot be shown to preserve the result."
+        echo "  Move the cleanup into whatever invokes this script, or name the"
+        echo "  runner in package.json where there is no handler to reason about."
+        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        ;;
+    esac
+  done
+  set +f
+}
+
+# A checker whose status is inverted is not a checker this gate can report on.
+#
+# Said out loud rather than answered with "does not appear to run a test
+# runner", which is what falling through to the caller's message would have
+# printed: it names one and runs it, and then reverses the answer. Two
+# diagnostics in this lane have already had to be fixed for being right about
+# the outcome and wrong about the cause.
+_reject_negated_checker() {
+  echo "Workspace ${CI_GATE_NODE_WORKSPACE} negates a checker:"
+  echo "    $1"
+  echo "  '!' inverts the status of the command it prefixes, so a failing suite"
+  echo "  leaves the script with a zero and the lane reports PASS on it. A"
+  echo "  passing suite fails the same way round. Remove the negation, or move"
+  echo "  it into a script this gate does not run."
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+}
+
 _script_names_a_checker() {
   local cmd="$1"
   local tools="${2:-tsc tsc.cmd tsgo vue-tsc svelte-check astro tsd attw}"
@@ -1687,6 +1788,7 @@ _script_names_a_checker() {
   local _bq_state="" _bq_out="" _bq_cont=0
   _blank_quoted "$cmd"
   local _mask="$_bq_out" _norm="" _ci=0 _cn=${#cmd}
+  _reject_status_trap "$1" "$_mask"
   while [ "$_ci" -lt "$_cn" ]; do
     if [ "${_mask:$_ci:1}" = ";" ]; then
       _norm="$_norm ; "
@@ -1785,11 +1887,16 @@ _script_names_a_checker() {
   # sees a checker -- it records the hit and keeps reading, and a command
   # sequenced after one with `;` refuses.
   local expect_cmd=1 runner="" target="" found=0 seq_after=0 hit=0 pending_exit=0
+  # Whether the command now being read is prefixed by `!`, which inverts its
+  # status. Per command, cleared at every separator, because that is the scope
+  # the shell gives it: in `! command -v foo && vitest run` the negation belongs
+  # to the lookup and not to the suite.
+  local neg=0
   # shellcheck disable=SC2086
   for tok in $cmd; do
     _unquote_tok
     case "$tok" in
-      ";"|"&&"|"|"|"("|")"|"{"|"}"|"!")
+      ";"|"&&"|"|"|"("|")"|"{"|"}")
         # A separator ends the current command, so any delegation it was
         # carrying has to be resolved *here*. Clearing it first meant
         # `bash scripts/test.sh ; exit 0` threw away the target before anything
@@ -1797,6 +1904,7 @@ _script_names_a_checker() {
         # ordinary script -- was rejected.
         if [ -n "$runner" ] && [ -n "$target" ]; then
           if _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"; then
+            if [ "$neg" -eq 1 ]; then _reject_negated_checker "$1"; fi
             found=1
           fi
         fi
@@ -1804,6 +1912,7 @@ _script_names_a_checker() {
         expect_cmd=1
         runner=""
         target=""
+        neg=0
         continue
         ;;
     esac
@@ -1829,6 +1938,20 @@ _script_names_a_checker() {
         esac
         return 1
       fi
+      # `!` is a reserved word in command position, and it inverts the status of
+      # the command it prefixes. Read as a separator -- which it was -- `!
+      # ./scripts/vitest run` looked like an empty command followed by a runner
+      # in command position, and every rule here was satisfied while the shell
+      # turned the suite's failure into a zero. A negated checker is the plainest
+      # form of the thing this whole function is for: the result that reaches the
+      # lane is not the result the checker produced.
+      #
+      # Recorded rather than refused outright, because the negation binds to one
+      # command. It condemns the command it prefixes, and nothing after the next
+      # separator.
+      case "$tok" in
+        '!') neg=1; continue ;;
+      esac
       # `NODE_ENV=test vitest run` still starts with vitest.
       case "$tok" in
         [A-Za-z_]*=*) continue ;;
@@ -1850,6 +1973,7 @@ _script_names_a_checker() {
           # Same as a separator: whatever ran before this still ran.
           if [ -n "$runner" ] && [ -n "$target" ]; then
             if _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"; then
+              if [ "$neg" -eq 1 ]; then _reject_negated_checker "$1"; fi
               found=1
             fi
           fi
@@ -1866,6 +1990,7 @@ _script_names_a_checker() {
         fi
       done
       if [ "$hit" -eq 1 ]; then
+        if [ "$neg" -eq 1 ]; then _reject_negated_checker "$1"; fi
         found=1
         expect_cmd=0
         continue
@@ -1895,8 +2020,11 @@ _script_names_a_checker() {
 
   if [ "$found" -eq 1 ]; then return 0; fi
   [ -n "$runner" ] && [ -n "$target" ] || return 1
-  _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"
-  return $?
+  _resolve_delegated_target "$target" "$tools" "$depth" "$_nt" || return 1
+  # `! bash scripts/test.sh` reaches the end of the string with the delegation
+  # still pending, so the negation has to be answered here too.
+  if [ "$neg" -eq 1 ]; then _reject_negated_checker "$1"; fi
+  return 0
 }
 
 _filter_reject() {
@@ -1915,10 +2043,17 @@ assert_no_persistent_filter() {
 
   # Which program is this script actually running? Skip the package-manager
   # wrappers a script may be written through, then take the first real word.
+  #
+  # `command`, `nohup` and `time` are on that list because the checker resolver
+  # already steps over them, and the two disagreeing is the whole bug: `"test":
+  # "command vitest run --exclude=tests/a.test.ts"` recorded `command` as the
+  # runner here, so is_test_runner stayed 0 and the argument rules never ran,
+  # while _script_names_a_checker skipped the prefix and accepted vitest. The
+  # lane exited 0 with the exclusion never inspected.
   # shellcheck disable=SC2086
   for tok in $cmd; do
     case "$tok" in
-      npx|pnpm|bun|yarn|npm|exec|run|dlx|--yes|-y) continue ;;
+      npx|pnpm|bun|yarn|npm|exec|run|dlx|command|nohup|time|--yes|-y) continue ;;
       -*) continue ;;
       *) runner="${tok##*/}"; break ;;
     esac
@@ -2025,7 +2160,7 @@ assert_no_persistent_filter() {
   # `--test-name-pattern`, `--test-only`, `--test-skip-pattern`, `--test-shard`
   # -- are absent, which under an allow-list is all that is needed.
   if [ "$is_test_runner" -eq 1 ]; then
-    _reject_narrowing_flags "$script_name" "$cmd"
+    _reject_tool_args "$script_name" "$cmd" "$runner"
   fi
 }
 
@@ -2033,55 +2168,167 @@ assert_no_persistent_filter() {
 # reached through another one is read the same way as a direct command.
 _reject_narrowing_flags() {
   local script_name="$1" cmd="$2" tok
-  if true; then
-    # shellcheck disable=SC2086
-    for tok in $cmd; do
-      case "$tok" in
-        -*) ;;
-        *) continue ;;
-      esac
-      case "${tok%%=*}" in
-        # `--config`/`-c` and `--root` are gone from this list deliberately.
-        #
-        # They do not narrow what vitest collects; they change *which config
-        # declares* what it collects, which is worse. test-layout.sh validates
-        # frontend/vitest.config.ts and nothing else, so `vitest run --config
-        # vitest.narrow.config.ts` had the two checks reporting on two different
-        # files: one confirming a broad include that is not in force, the other
-        # running a config nobody inspected. `--root` moves the whole resolution
-        # base and does the same thing one level up.
-        #
-        # A flag that redirects the guard is not the same kind of thing as a
-        # flag that cannot reduce the run, and this list was only ever an
-        # allow-list for the second kind.
-        --run|--no-watch|--coverage|--no-coverage|--reporter|--reporters \
-          |--outputFile|--outputTruncateLength|--mode|--silent \
-          |--color|--no-color|--logHeapUsage|--pool|--poolOptions|--isolate \
-          |--no-isolate|--threads|--no-threads|--file-parallelism \
-          |--no-file-parallelism|--maxWorkers|--minWorkers|--maxConcurrency \
-          |--environment|--globals|--no-allowOnly|--testTimeout \
-          |--hookTimeout|--teardownTimeout|--sequence|--no-update \
-          |--disable-console-intercept|--printConsoleTrace|--typecheck \
-          |--no-typecheck|--yes|-y \
-          |--test|--test-reporter|--test-reporter-destination \
-          |--test-concurrency|--experimental-test-coverage)
-          ;;
-        *)
-          _filter_reject "$script_name" "$cmd" "$tok"
-          ;;
-      esac
-    done
-  fi
+  # shellcheck disable=SC2086
+  for tok in $cmd; do
+    case "$tok" in
+      -*) ;;
+      *) continue ;;
+    esac
+    case "${tok%%=*}" in
+      # `--config`/`-c` and `--root` are gone from this list deliberately.
+      #
+      # They do not narrow what vitest collects; they change *which config
+      # declares* what it collects, which is worse. test-layout.sh validates
+      # frontend/vitest.config.ts and nothing else, so `vitest run --config
+      # vitest.narrow.config.ts` had the two checks reporting on two different
+      # files: one confirming a broad include that is not in force, the other
+      # running a config nobody inspected. `--root` moves the whole resolution
+      # base and does the same thing one level up.
+      #
+      # A flag that redirects the guard is not the same kind of thing as a
+      # flag that cannot reduce the run, and this list was only ever an
+      # allow-list for the second kind.
+      --run|--no-watch|--coverage|--no-coverage|--reporter|--reporters \
+        |--outputFile|--outputTruncateLength|--mode|--silent \
+        |--color|--no-color|--logHeapUsage|--pool|--poolOptions|--isolate \
+        |--no-isolate|--threads|--no-threads|--file-parallelism \
+        |--no-file-parallelism|--maxWorkers|--minWorkers|--maxConcurrency \
+        |--environment|--globals|--no-allowOnly|--testTimeout \
+        |--hookTimeout|--teardownTimeout|--sequence|--no-update \
+        |--disable-console-intercept|--printConsoleTrace|--typecheck \
+        |--no-typecheck|--yes|-y \
+        |--test|--test-reporter|--test-reporter-destination \
+        |--test-concurrency|--experimental-test-coverage)
+        ;;
+      *)
+        _filter_reject "$script_name" "$cmd" "$tok"
+        ;;
+    esac
+  done
+}
 
-  # A positional argument to a test runner *is* a filter — `vitest run [...filters]`
-  # is the documented syntax, and `vitest run tests/lib/confidence.test.ts` ran 4
-  # tests instead of 314 while every token in the deny-list above was absent. An
-  # enumerated list of narrowing flags loses this race by construction, so the
-  # rule is inverted here: for a known runner, nothing but flags and their values
-  # may follow. Restricted to known runners because a positional means something
-  # else entirely for `bash scripts/test.sh`, which is a legitimate test script.
-  [ "$is_test_runner" -eq 1 ] || return 0
-  _reject_positional_filters "$script_name" "$cmd" "$runner"
+# Which argument rules apply to a resolved command, chosen by the tool it runs.
+#
+# The dispatch is the fix for handing every resolved command to the test-runner
+# validator: `"typecheck": "npm run tc"` over `"tc": "tsc --noEmit"` resolves to
+# a compiler, and the allow-list above does not contain `--noEmit` -- so an
+# ordinary project-wide typecheck was rejected for narrowing a suite it has
+# nothing to do with, and `tsc -p tsconfig.json` for pointing at "individual
+# files" that are its project. Worse, `_reject_narrowing_flags` used to read
+# `is_test_runner` and `runner` out of its caller's scope; reached from the
+# typecheck path those names are not in scope at all, so `set -u` aborted the
+# lane. The rules are per tool, so the choice of rules has to be too.
+_reject_tool_args() {
+  local script_name="$1" cmd="$2" runner="$3"
+  case "$runner" in
+    tsc|tsc.cmd|tsgo|vue-tsc)
+      _reject_tsc_args "$script_name" "$cmd" "$runner"
+      ;;
+    svelte-check|astro|tsd|attw)
+      # Type checkers whose argument grammars this gate does not model. Named
+      # rather than left to fall through, because falling through hands them the
+      # test-runner allow-list and refuses every ordinary invocation.
+      :
+      ;;
+    *)
+      _reject_narrowing_flags "$script_name" "$cmd"
+      # A positional argument to a test runner *is* a filter — `vitest run
+      # [...filters]` is the documented syntax, and `vitest run
+      # tests/lib/confidence.test.ts` ran 4 tests instead of 314 while every
+      # token in the deny-list above was absent. An enumerated list of narrowing
+      # flags loses this race by construction, so the rule is inverted here: for
+      # a known runner, nothing but flags and their values may follow.
+      _reject_positional_filters "$script_name" "$cmd" "$runner"
+      ;;
+  esac
+}
+
+# The compiler's own argument rules: the modes that do not typecheck, and the
+# positionals that make it ignore tsconfig.json.
+_reject_tsc_args() {
+  local script_name="$1" cmd="$2" runner="$3" tok prev low
+  prev=""
+  set -f
+  # shellcheck disable=SC2086
+  set -- $cmd
+  set +f
+  while [ "$#" -gt 0 ]; do
+    tok="$1"
+    if [ "${tok##*/}" = "$runner" ]; then
+      prev="" ; shift ; continue
+    fi
+    # tsc matches its options case-insensitively: `--showconfig` and
+    # `--showConfig` are one option to the compiler and were two different
+    # things to this rule, so every mode named below could be reached by
+    # changing a letter's case. Lowered once, here, and compared lowered
+    # everywhere after.
+    case "$tok" in
+      -*) low="$(printf '%s' "$tok" | tr '[:upper:]' '[:lower:]')" ;;
+      *) low="$tok" ;;
+    esac
+    case "$low" in
+      # Modes that print instead of compiling. `tsc --showConfig` resolves the
+      # configuration and writes it out; it does not typecheck, so a workspace
+      # holding `const n: number = "bad"` passed the lane with the compiler
+      # never having looked at it. Naming the compiler is not running it, and
+      # neither is running it in a mode that does not check.
+      #
+      # `--noCheck` is the sharpest of them and is the same statement in one
+      # flag: TypeScript documents it as emitting without full type checking, so
+      # `tsc --noEmit --noCheck` walks the project, reports nothing and exits 0
+      # over code that does not compile.
+      #
+      # `--watch`/`-w` is here for the reason the same flag left the test-runner
+      # allow-list: watch mode does not exit, so the lane is killed by the
+      # gate's timeout and a manifest edit is reported as broken infrastructure
+      # rather than as a result.
+      --showconfig|--listfilesonly|--listfiles|--init|--help|-h|--version|-v \
+        |--all|--nocheck|--watch|-w)
+        echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a non-compiling tsc mode in its"
+        echo "  '${script_name}' script:"
+        echo "    ${script_name}: ${cmd}"
+        echo "    offending argument: ${tok}"
+        echo "  That mode does not type check the project, so the lane reports"
+        echo "  PASS having checked nothing. Use 'tsc --noEmit' or"
+        echo "  'tsc -p <tsconfig> --noEmit'."
+        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        ;;
+      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run|'&&'|';')
+        prev="" ; shift ; continue ;;
+      -*)
+        prev="$low" ; shift ; continue ;;
+    esac
+    # Naming the compiler is not enough: it has to be pointed at the project.
+    #
+    # `tsc src/known-good.ts --noEmit` names tsc and passes every rule above,
+    # and tsc documents that listing files ignores tsconfig.json entirely -- so
+    # the lane typechecks one file, reports PASS, and every error in every
+    # unlisted source is simply not looked for. The build does not typecheck
+    # either, so nothing else catches it. That is the test-filter defect on the
+    # typecheck script, and it is refused the same way: the value-taking options
+    # are named, and after anything else a bare word is a source file.
+    case "$prev" in
+      -p|--project|--outdir|--outfile|--target|--module|--moduleresolution \
+        |--lib|--jsx|--jsxfactory|--jsxfragmentfactory|--typeroots|--types \
+        |--rootdir|--rootdirs|--baseurl|--tsbuildinfofile|--declarationdir \
+        |--maxnodemoduledepth|--maxnodemodulejsdepth|--charset|--locale \
+        |--newline|--reactnamespace)
+        ;;
+      *)
+        echo "Workspace ${CI_GATE_NODE_WORKSPACE} points its '${script_name}' script at"
+        echo "  individual files:"
+        echo "    ${script_name}: ${cmd}"
+        echo "    offending argument: ${tok}"
+        echo "  Naming files on the command line makes tsc ignore tsconfig.json,"
+        echo "  so only those files are compiled and every error elsewhere goes"
+        echo "  unreported while the lane exits 0. Point it at the project"
+        echo "  instead -- 'tsc --noEmit', or 'tsc -p <tsconfig>'."
+        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        ;;
+    esac
+    prev=""
+    shift
+  done
 }
 
 # Whether a known runner is handed a positional, which is a filter.
@@ -2144,7 +2391,8 @@ _reject_positional_filters() {
         echo "  result. Use the one-shot form -- 'vitest run'."
         exit "$CI_RESULT_FAIL_NEW_ISSUE"
         ;;
-      npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run|related|"$runner"|'&&'|'||'|';'|'|')
+      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run|related \
+        |"$runner"|'&&'|'||'|';'|'|')
         prev="" ; shift ; continue ;;
       # Argument forwarding is not a filter. `vitest run "$@"` is how a wrapper
       # script passes on what it was given, and under `bun run test` it is
@@ -2261,7 +2509,7 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
   # shellcheck disable=SC2086
   for _tc_tok in $_tc_cmd; do
     case "$_tc_tok" in
-      npx|pnpm|bun|yarn|npm|exec|run|dlx|--yes|-y) continue ;;
+      npx|pnpm|bun|yarn|npm|exec|run|dlx|command|nohup|time|--yes|-y) continue ;;
       -*) continue ;;
       *) _tc_runner="${_tc_tok##*/}"; break ;;
     esac
@@ -2285,73 +2533,17 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
   fi
 
-  # Naming the compiler is not enough: it has to be pointed at the project.
-  #
-  # `tsc src/known-good.ts --noEmit` names tsc and passes every rule above, and
-  # tsc documents that listing files ignores tsconfig.json entirely -- so the
-  # lane typechecks one file, reports PASS, and every error in every unlisted
-  # source is simply not looked for. The build does not typecheck either, so
-  # nothing else catches it. That is the test-filter defect on the typecheck
-  # script, and it is refused the same way: the value-taking options are named,
-  # and after anything else a bare word is a source file.
+  # The compiler's own argument rules -- the non-compiling modes and the
+  # positional source files -- applied through the same dispatcher a delegated
+  # command goes through, so the direct spelling and the delegated one cannot
+  # drift apart.
   #
   # Only for a direct compiler invocation. `bash scripts/typecheck.sh` and
-  # `npm run typecheck:all` are delegation, whose target is resolved rather
-  # than read as a file list.
+  # `npm run typecheck:all` are delegation, whose target is resolved and then
+  # validated at the point of resolution.
   case "${_tc_runner:-}" in
     tsc|tsc.cmd|tsgo|vue-tsc)
-      _tc_prev=""
-      set -f
-      # shellcheck disable=SC2086
-      set -- $_tc_cmd
-      set +f
-      while [ "$#" -gt 0 ]; do
-        _tc_tok="$1"
-        if [ "${_tc_tok##*/}" = "$_tc_runner" ]; then
-          _tc_prev="" ; shift ; continue
-        fi
-        case "$_tc_tok" in
-          # Modes that print instead of compiling. `tsc --showConfig` resolves
-          # the configuration and writes it out; it does not typecheck, so a
-          # workspace holding `const n: number = "bad"` passed the lane with the
-          # compiler never having looked at it. Naming the compiler is not
-          # running it, and neither is running it in a mode that does not check.
-          --showConfig|--listFilesOnly|--listFiles|--init|--help|-h|--version|-v|--all)
-            echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a non-compiling tsc mode in its"
-            echo "  'typecheck' script:"
-            echo "    typecheck: ${_tc_cmd}"
-            echo "    offending argument: ${_tc_tok}"
-            echo "  That mode prints information and performs no type checking, so"
-            echo "  the lane reports PASS having checked nothing. Use 'tsc --noEmit'"
-            echo "  or 'tsc -p <tsconfig> --noEmit'."
-            exit "$CI_RESULT_FAIL_NEW_ISSUE"
-            ;;
-          npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run|'&&'|';')
-            _tc_prev="" ; shift ; continue ;;
-          -*)
-            _tc_prev="$_tc_tok" ; shift ; continue ;;
-        esac
-        case "$_tc_prev" in
-          -p|--project|--outDir|--outFile|--target|--module|--moduleResolution \
-            |--lib|--jsx|--jsxFactory|--jsxFragmentFactory|--typeRoots|--types \
-            |--rootDir|--rootDirs|--baseUrl|--tsBuildInfoFile|--declarationDir \
-            |--maxNodeModuleJsDepth|--charset|--locale|--newLine|--reactNamespace)
-            ;;
-          *)
-            echo "Workspace ${CI_GATE_NODE_WORKSPACE} points its 'typecheck' script at"
-            echo "  individual files:"
-            echo "    typecheck: ${_tc_cmd}"
-            echo "    offending argument: ${_tc_tok}"
-            echo "  Naming files on the command line makes tsc ignore tsconfig.json,"
-            echo "  so only those files are compiled and every error elsewhere goes"
-            echo "  unreported while the lane exits 0. Point it at the project"
-            echo "  instead -- 'tsc --noEmit', or 'tsc -p <tsconfig>'."
-            exit "$CI_RESULT_FAIL_NEW_ISSUE"
-            ;;
-        esac
-        _tc_prev=""
-        shift
-      done
+      _reject_tsc_args typecheck "$_tc_cmd" "$_tc_runner"
       ;;
   esac
 fi
