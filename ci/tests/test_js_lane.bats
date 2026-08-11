@@ -3522,3 +3522,204 @@ ws_run() {
   [[ "$output" != *"individual files"* ]]
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: a word spelled with a backslash escape is refused, not read past" {
+  # `\trap` is the trap command to the shell and `rap` to this gate: an escaped
+  # character is blanked, and it has to be, since keeping it would let `echo
+  # \done` close a block the reader is standing inside. So the word vanished
+  # from every rule that reads that mask at once -- the EXIT-trap rule added
+  # this round was defeated by one character.
+  ws_setup
+  cat > "$NODE_SB/ws/scripts/esc.sh" <<'SH'
+#!/usr/bin/env bash
+\trap 'exit 0' EXIT
+./scripts/vitest run
+exit 77
+SH
+
+  # The premise: the shell really does run that as `trap`, and the handler
+  # really does replace the failure.
+  run bash -c "cd '$NODE_SB/ws' && bash scripts/esc.sh >/dev/null 2>&1"
+  [ "$status" -eq 0 ]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/esc.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"backslash escape"* ]]
+
+  # And in the manifest, where the same escape hides the runner itself.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "\\vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"backslash escape"* ]]
+
+  # The controls, and they matter: a line continuation is a backslash at the end
+  # of a line with no character after it to hide, and an escaped space is not a
+  # word. Refusing either would break ordinary wrapper scripts.
+  cat > "$NODE_SB/ws/scripts/cont.sh" <<'SH'
+#!/usr/bin/env bash
+./scripts/vitest \
+  run
+SH
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/cont.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"backslash escape"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"backslash escape"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an inline -c command is judged by the same argument rules" {
+  # `bash -c 'vitest run tests/only.test.ts'` recursed into the predicate and
+  # returned its answer, so the command inside the string reached a runner and
+  # was accepted with nothing asked about its arguments. Four ways to spell one
+  # delegation -- direct, shell script, package script, inline string -- and the
+  # rule had been carried to three of them.
+  ws_setup
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c \"vitest run tests/a.test.ts\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c \"vitest run --exclude=tests/a.test.ts\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The compiler's rules reach into the string too, by the same dispatcher.
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "bash -c \"tsc --noEmit --noCheck\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The control: an inline command that narrows nothing is still accepted.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "bash -c \"tsc --noEmit\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the argument rules stop at a command boundary" {
+  # The rules were applied to the whole string, so `vitest run && echo done` had
+  # `echo` read as a vitest argument and refused as a filter -- a script that
+  # runs the full suite and whose status is the suite's, since `&&`
+  # short-circuits, which is exactly why _reject_untrustworthy_composition
+  # allows it. Two rules in one file giving contradictory answers about the same
+  # composition.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run && echo done", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit && echo ok" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+
+  # And the other half, which is what stops this being a hole rather than a fix:
+  # every command in the string is judged, not just the first. A filter before
+  # the separator is still a filter, a second runner after it is still checked,
+  # and a separator inside quotes is an argument rather than a boundary.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --exclude=tests/a.test.ts && echo done", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run && jest --testPathPattern=x", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo hi && vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run \"a && b\"", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # An environment assignment in front of the runner is not a filter either, and
+  # it used to hide the runner from discovery exactly as `command` did.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "NODE_ENV=test vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "NODE_ENV=test vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ignored file beside a staged one is not staging drift" {
+  # The quick-mode scan added the whole ignored list, filtered only by a prune
+  # list of directory names. So staging any workspace file at all failed the
+  # commit gate over `frontend/.env.local` -- and the remedy it printed, stage
+  # it or discard it, means committing a secrets file that git-safety.sh then
+  # blocks. Ship mode was fixed by keying on deletions and this branch was not:
+  # one rule, two trees.
+  ws_setup
+  cd "$NODE_SB"
+  printf 'ci/\n.ci-gate/\n*.local\nnode_modules/\n' > .gitignore
+  printf 'console.log(1)\n' > ws/app.js
+  printf 'console.log(9)\n' > ws/doomed.js
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  git init -q -b main . >/dev/null 2>&1
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  printf 'SECRET=1\n' > ws/.env.local
+  printf 'console.log(2)\n' > ws/app.js
+  git add ws/app.js >/dev/null 2>&1
+
+  # The premises: the file really is ignored, and it really is the only thing
+  # beside the staged change.
+  run git check-ignore -q ws/.env.local
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$NODE_SB' && git diff --cached --name-only"
+  [ "$output" = "ws/app.js" ]
+
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *".env.local"* ]]
+  [[ "$output" != *"staged but changed again"* ]]
+
+  # And the case the ignored list is there for, which must still fire: a staged
+  # deletion shadowed by an ignored file of the same name. The commit removes
+  # the path, `git diff HEAD` is silent about it, --exclude-standard hides the
+  # replacement, and the lane would run it.
+  git rm -q --cached ws/doomed.js >/dev/null 2>&1
+  printf 'doomed.js\n' >> .gitignore
+  git add .gitignore >/dev/null 2>&1
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"staged but changed again"* ]]
+  [[ "$output" == *"ws/doomed.js"* ]]
+  [[ "$output" != *".env.local"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}

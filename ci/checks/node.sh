@@ -341,14 +341,34 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       # The three lists are one question asked three ways, and each was needed
       # in turn: `git diff` compares tracked content and misses a path staged
       # for deletion and recreated; `--others` finds that one but `.gitignore`
-      # hides it; `--ignored` finds it but drags in every build artifact, so it
-      # is pruned to the directories a workspace is expected to ignore.
+      # hides it; `--ignored` finds it, and finds everything else with it.
       _diverged="$( {
         git -c core.quotepath=false diff --name-only -- "$_scope" 2>/dev/null || printf '%s\n' "$_SCAN_UNREADABLE"
         git -c core.quotepath=false ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || printf '%s\n' "$_SCAN_UNREADABLE"
-        git -c core.quotepath=false ls-files --others --ignored --exclude-standard -- "$_scope" 2>/dev/null \
-          | grep -Ev '(^|/)(node_modules|dist|build|coverage|\.next|\.turbo|\.vite|\.git|\.ci-gate)/' \
-          || true
+        # And the ignored ones -- but only where an ignored file *shadows a path
+        # this commit removes*, which is the same rule the ship-mode scan above
+        # settled on and the same argument for it.
+        #
+        # This branch still carried the earlier version: the whole ignored list,
+        # filtered through a prune list of directory names. That reports
+        # `frontend/.env.local`, a tsbuildinfo and Playwright output as
+        # divergence, so staging any workspace file at all failed the commit
+        # gate over a file the repository deliberately ignores -- and the remedy
+        # it printed, stage it or discard it, means committing a secrets file
+        # that git-safety.sh then blocks. Two checks in one repository giving
+        # contradictory instructions, which is exactly why ship mode stopped
+        # doing this. Fixed there and left here: one rule, two trees.
+        #
+        # In quick mode the index *is* the commit, so a path staged for deletion
+        # that still exists on disk is the whole of the case: the commit removes
+        # it and the lane would run it. A path deleted and re-added in the index
+        # is not filter=D and does not appear.
+        while IFS= read -r _d; do
+          [ -n "$_d" ] || continue
+          if [ -e "$_d" ]; then
+            printf '%s\n' "$_d"
+          fi
+        done <<< "$(git -c core.quotepath=false diff --cached --diff-filter=D --name-only -- "$_scope" 2>/dev/null || printf '%s\n' "$_SCAN_UNREADABLE")"
       } | sort -u | sed '/^$/d')"
       case "$_diverged" in
         *"$_SCAN_UNREADABLE"*)
@@ -1349,6 +1369,7 @@ _unquote_tok() {
 _blank_quoted() {
   local _s="$1" _i=0 _n=${#1} _c _out=""
   _bq_cont=0
+  _bq_esc=0
   # Nothing to blank and no state to carry: the overwhelmingly common line.
   if [ -z "$_bq_state" ]; then
     case "$_s" in
@@ -1363,6 +1384,18 @@ _blank_quoted() {
     # nothing.
     if [ "$_c" = "\\" ] && [ "$_bq_state" != "'" ]; then
       if [ "$((_i + 1))" -lt "$_n" ]; then
+        # An escaped *word* character is reported, because blanking it hides a
+        # word from every rule that reads this mask while the shell still runs
+        # it: `\trap 'exit 0' EXIT` is the trap command, spelled so that the
+        # scan sees `rap`, and the EXIT handler was installed with the guard
+        # none the wiser. Reported rather than kept -- keeping the character
+        # would make `echo \done` close a loop the reader is inside, which is
+        # the same defect pointing the other way. Callers refuse the line.
+        if [ -z "$_bq_state" ]; then
+          case "${_s:$((_i + 1)):1}" in
+            [A-Za-z0-9_]) _bq_esc=1 ;;
+          esac
+        fi
         _out="$_out  "
       else
         _out="$_out "
@@ -1394,7 +1427,7 @@ _resolve_delegated_target() {
   # the flag belongs to the invocation, and by here the invocation is gone.
   local node_ok="${4:-0}"
   local t
-  local _bq_state="" _bq_out="" _bq_cont=0
+  local _bq_state="" _bq_out="" _bq_cont=0 _bq_esc=0
 
 
   # For `npx`, `pnpm dlx` and friends the target *is* the executable, so a
@@ -1425,20 +1458,7 @@ _resolve_delegated_target() {
       # "bun run verify"` over `"verify": "vitest run --exclude=..."` passed
       # with the exclusion never inspected -- the flag and positional rules held
       # for the command in the `test` key and for nothing it delegated to.
-      _sub_rt=""
-      set -f
-      # shellcheck disable=SC2086
-      for _sub_tok in $sub; do
-        case "${_sub_tok##*/}" in
-          npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run) continue ;;
-          -*) continue ;;
-          *) _sub_rt="${_sub_tok##*/}"; break ;;
-        esac
-      done
-      set +f
-      case " $tools " in
-        *" $_sub_rt "*) _reject_tool_args "$target" "$sub" "$_sub_rt" ;;
-      esac
+      _reject_tool_args "$target" "$sub" "$tools"
       return 0
     fi
     return 1
@@ -1464,8 +1484,7 @@ _resolve_delegated_target() {
     # instead, which is the thing this gate can actually read.
     local line real code toks tok pre opens closes
     local brace=0 block=0 _fn=0 _kw=0 _cont=0 _cont_prev=0 state_in=""
-    local hit=0 errexit=0 _tail="" _rt="" _rw="" _body=""
-    local _sub_rt="" _sub_tok=""
+    local hit=0 errexit=0 _tail="" _body=""
     local hd_end="" hd_dash=0 hd_rest
     # The body is read once, up front, rather than kept open across the loop.
     #
@@ -1515,6 +1534,7 @@ _resolve_delegated_target() {
       # anywhere the structure reader refuses to judge -- and it still fires at
       # exit. Restricting this to top-level lines would have left
       # `if [ -n "$CI" ]; then trap "exit 0" EXIT; fi` accepted.
+      if [ "$_bq_esc" -eq 1 ]; then _reject_escaped_word "$real"; fi
       _reject_status_trap "$real" "$code"
 
       # Split on every separator so control keywords are matched as whole
@@ -1613,19 +1633,7 @@ _resolve_delegated_target() {
           # package script -- the same rule holding for one spelling of a
           # delegation and not the other, which is the shape this lane has now
           # had to fix five times. One dispatcher, both rules, every site.
-          _rt=""
-          set -f
-          for _rw in $real; do
-            case "${_rw##*/}" in
-              npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run) continue ;;
-              -*) continue ;;
-              *) _rt="${_rw##*/}"; break ;;
-            esac
-          done
-          set +f
-          case " $tools " in
-            *" $_rt "*) _reject_tool_args "$target" "$real" "$_rt" ;;
-          esac
+          _reject_tool_args "$target" "$real" "$tools"
         fi
       fi
 
@@ -1747,6 +1755,51 @@ _reject_status_trap() {
   set +f
 }
 
+# The program a command actually runs: the first word that is not an
+# environment assignment, a package-manager wrapper, a wrapper prefix or a flag,
+# taken by basename so a runner named by path still matches.
+#
+# One function because there were four copies of this loop, and the four
+# disagreeing is a defect in its own right -- `command` was in the resolver's
+# copy and not in discovery's, so `command vitest run --exclude=...` had the
+# argument rules skipped entirely while the resolver accepted vitest one
+# function over. `NODE_ENV=test vitest run --exclude=...` was the same bypass
+# with an assignment instead of a prefix, and is closed by the same list.
+_command_runner() {
+  local _tok
+  _cr=""
+  set -f
+  # shellcheck disable=SC2086
+  for _tok in $1; do
+    case "${_tok##*/}" in
+      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run) continue ;;
+      -*) continue ;;
+      [A-Za-z_]*=*) continue ;;
+      *) _cr="${_tok##*/}"; break ;;
+    esac
+  done
+  set +f
+}
+
+# A command name spelled with a backslash escape is one this reader cannot see.
+#
+# `\trap` is the `trap` command to the shell and `rap` to the mask, because an
+# escaped character is blanked -- it has to be, since keeping it would let
+# `echo \done` close a block the reader is standing inside. So the escape is
+# refused rather than resolved: every word rule in this file reads that mask,
+# and a word hidden from all of them is a bypass of all of them at once.
+_reject_escaped_word() {
+  echo "Workspace ${CI_GATE_NODE_WORKSPACE} spells a word with a backslash escape:"
+  echo "    $1"
+  echo "  A backslash before a word character hides that word from this gate"
+  echo "  while the shell still runs it: the trap command written with one"
+  echo "  reads here as 'rap', and the handler was installed with this guard"
+  echo "  none the wiser. Nothing that has to be read through an escape can be"
+  echo "  vouched for, so it is refused rather than guessed at. Write the word"
+  echo "  plainly, or move the line into a script this gate does not read."
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+}
+
 # A checker whose status is inverted is not a checker this gate can report on.
 #
 # Said out loud rather than answered with "does not appear to run a test
@@ -1785,9 +1838,10 @@ _script_names_a_checker() {
   # the same bypass the `||` rule had before it stopped requiring spaces.
   # Spaced out here, and only where it is really a separator: the blanked copy
   # marks quoted spans, so a `;` inside an argument is left where it is.
-  local _bq_state="" _bq_out="" _bq_cont=0
+  local _bq_state="" _bq_out="" _bq_cont=0 _bq_esc=0
   _blank_quoted "$cmd"
   local _mask="$_bq_out" _norm="" _ci=0 _cn=${#cmd}
+  if [ "$_bq_esc" -eq 1 ]; then _reject_escaped_word "$1"; fi
   _reject_status_trap "$1" "$_mask"
   while [ "$_ci" -lt "$_cn" ]; do
     if [ "${_mask:$_ci:1}" = ";" ]; then
@@ -1866,8 +1920,17 @@ _script_names_a_checker() {
           tok="$inline"
           _unquote_tok
           inline="$tok"
-          _script_names_a_checker "$inline" "$tools" "$((depth + 1))"
-          return $?
+          _script_names_a_checker "$inline" "$tools" "$((depth + 1))" || return 1
+          # The argument rules travel into the string as well. Recursing and
+          # returning meant `bash -c 'vitest run tests/only.test.ts'` reached
+          # the runner, satisfied every composition rule and ran four tests --
+          # accepted here while the identical command spelled directly, or
+          # through a shell script, or through a package script, was refused.
+          # Fourth spelling of one delegation, fourth time the rule had to be
+          # carried to it; the dispatcher is shared now so there is one place
+          # left to carry it to.
+          _reject_tool_args "$inline" "$inline" "$tools"
+          return 0
           ;;
       esac
       ;;
@@ -2037,7 +2100,7 @@ _filter_reject() {
 }
 
 assert_no_persistent_filter() {
-  local script_name="$1" cmd tok runner="" prev="" is_test_runner=0
+  local script_name="$1" cmd tok runner="" is_test_runner=0 _cr=""
   cmd="$(script_command "$script_name")"
   [ -n "$cmd" ] || return 0
 
@@ -2050,14 +2113,8 @@ assert_no_persistent_filter() {
   # runner here, so is_test_runner stayed 0 and the argument rules never ran,
   # while _script_names_a_checker skipped the prefix and accepted vitest. The
   # lane exited 0 with the exclusion never inspected.
-  # shellcheck disable=SC2086
-  for tok in $cmd; do
-    case "$tok" in
-      npx|pnpm|bun|yarn|npm|exec|run|dlx|command|nohup|time|--yes|-y) continue ;;
-      -*) continue ;;
-      *) runner="${tok##*/}"; break ;;
-    esac
-  done
+  _command_runner "$cmd"
+  runner="$_cr"
   case "$runner" in
     vitest|jest|mocha|ava|jasmine|tap) is_test_runner=1 ;;
     node)
@@ -2099,25 +2156,44 @@ assert_no_persistent_filter() {
 
   # Delegation is accepted only when what it hands to can be read and reaches a
   # checker. A no-op is not delegation.
-  if [ "$is_test_runner" -ne 1 ]; then
-    # Same question as the typecheck script, same answer: naming a tool, or
-    # delegating to something it names. `"test": "bash -c true"` is the no-op
-    # this rule rejects wearing a wrapper, so an inline `-c` command does not
-    # count as delegation.
-    if _script_names_a_checker "$cmd" \
-      "vitest jest mocha ava jasmine tap node playwright cypress wdio karma tsx ts-node deno"; then
-      : # names a runner, or delegates to a script it names
-    else
-        echo "Workspace ${CI_GATE_NODE_WORKSPACE} defines a '${script_name}' script that does"
-        echo "  not appear to run a test runner:"
-        echo "    ${script_name}: ${cmd}"
-        echo "  A script named ${script_name} that exits 0 without collecting anything"
-        echo "  removes the whole suite from the gate while the lane still reports"
-        echo "  PASS. Recognised: vitest, jest, mocha, ava, jasmine, tap, node --test, a"
-      echo "  wrapper script, or a runner that delegates to one. Add yours here"
-      echo "  if it belongs."
-      exit "$CI_RESULT_FAIL_NEW_ISSUE"
-    fi
+  #
+  # Asked of every script, not only of the ones whose first word is not a
+  # runner. This predicate answers two questions at once -- is a runner reached,
+  # and does its status survive to become the script's -- and skipping it for a
+  # direct invocation skipped the second one with it. `"test": "vitest run;true"`
+  # was then caught only by the *filter* rule, which read `run;true` as a
+  # positional and refused it for narrowing a suite it does not narrow. An
+  # accidental protection, and it stopped being one the moment that rule learned
+  # where a command ends.
+  #
+  # `"test": "bash -c true"` is the no-op this rule rejects wearing a wrapper,
+  # so an inline `-c` command is judged on its own contents like any other.
+  if _script_names_a_checker "$cmd"     "vitest jest mocha ava jasmine tap node playwright cypress wdio karma tsx ts-node deno"; then
+    : # names a runner whose result survives, or delegates to one
+  elif [ "$is_test_runner" -eq 1 ]; then
+    # A runner *is* named here, so "does not appear to run a test runner" would
+    # be false and would send a developer looking for a missing runner that is
+    # sitting in front of them. What failed is the second half.
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a test runner in the '${script_name}'"
+    echo "  script whose result does not become the script's:"
+    echo "    ${script_name}: ${cmd}"
+    echo "  A command sequenced after the runner with ';' replaces its status,"
+    echo "  so the suite can fail and the script still exit 0."
+    echo "  '&&' is the composition that keeps it: either the runner passes and"
+    echo "  the next command runs, or the script fails with it. A bare 'exit',"
+    echo '  `exit $?` and `exit 1` are fine for the same reason -- none of them'
+    echo "  can turn a failure into a pass."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  else
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} defines a '${script_name}' script that does"
+    echo "  not appear to run a test runner:"
+    echo "    ${script_name}: ${cmd}"
+    echo "  A script named ${script_name} that exits 0 without collecting anything"
+    echo "  removes the whole suite from the gate while the lane still reports"
+    echo "  PASS. Recognised: vitest, jest, mocha, ava, jasmine, tap, node --test, a"
+    echo "  wrapper script, or a runner that delegates to one. Add yours here"
+    echo "  if it belongs."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
   fi
 
   # The flags are an allow-list for a known runner, not a deny-list.
@@ -2159,9 +2235,13 @@ assert_no_persistent_filter() {
   # runner left the correct form failing the lane. The narrowing ones --
   # `--test-name-pattern`, `--test-only`, `--test-skip-pattern`, `--test-shard`
   # -- are absent, which under an allow-list is all that is needed.
-  if [ "$is_test_runner" -eq 1 ]; then
-    _reject_tool_args "$script_name" "$cmd" "$runner"
-  fi
+  # Unconditionally, and not only when the *first* command is a runner: the
+  # dispatcher asks per command now, so `"test": "echo hi && vitest run
+  # --exclude=x"` -- which leaves is_test_runner at zero and is accepted by the
+  # predicate above, since the runner is there after the separator -- has its
+  # exclusion inspected like any other.
+  _reject_tool_args "$script_name" "$cmd" \
+    "vitest jest mocha ava jasmine tap node playwright cypress wdio karma tsx ts-node deno"
 }
 
 # The non-narrowing flag allow-list, as its own function so a package script
@@ -2218,7 +2298,78 @@ _reject_narrowing_flags() {
 # `is_test_runner` and `runner` out of its caller's scope; reached from the
 # typecheck path those names are not in scope at all, so `set -u` aborted the
 # lane. The rules are per tool, so the choice of rules has to be too.
+# Which command in a script the argument rules are talking about.
+#
+# The rules were applied to the whole string, so `vitest run && echo done` had
+# `echo` and `done` read as vitest arguments and refused as filters -- a script
+# that runs the full suite and whose status is the suite's, since `&&`
+# short-circuits, which is exactly why _reject_untrustworthy_composition allows
+# it. The composition rules decide whether a script may be composed at all; that
+# question is already answered by the time this runs, and what is left is which
+# words belong to which command.
+#
+# Split on the unquoted separators, then each piece is judged by the tool *it*
+# runs. Judging only the piece that runs the runner we were handed would have
+# been the looser half of the same mistake: `vitest run && jest -t x` would then
+# have had the second command unvalidated, where today the flat scan catches it
+# for the wrong reason.
 _reject_tool_args() {
+  local script_name="$1" cmd="$2" tools="$3"
+  local _bq_state="" _bq_out="" _bq_cont=0 _bq_esc=0 _cr=""
+  _blank_quoted "$cmd"
+  local _m="$_bq_out" _i=0 _n=${#cmd} _seg="" _segs="" _sr
+  # A separator in the mask is a separator in the command; one inside a quoted
+  # argument has been blanked and is left where it is. `&&` is two characters
+  # and produces an empty piece between them, which is skipped below.
+  while [ "$_i" -lt "$_n" ]; do
+    case "${_m:$_i:1}" in
+      ';'|'&'|'|')
+        _segs="${_segs}${_seg}"$'
+'
+        _seg=""
+        ;;
+      *) _seg="${_seg}${cmd:$_i:1}" ;;
+    esac
+    _i=$((_i + 1))
+  done
+  _segs="${_segs}${_seg}"
+
+  while IFS= read -r _seg; do
+    case "$_seg" in
+      *[![:space:]]*) ;;
+      *) continue ;;
+    esac
+    _command_runner "$_seg"
+    _sr="$_cr"
+    [ -n "$_sr" ] || continue
+    # Only the tools the caller is asking about. The membership test used to sit
+    # at the call sites, applied to the *first* command in the string, so
+    # `echo hi && vitest run --exclude=x` derived `echo`, found it in no tool
+    # list and validated nothing -- while _script_names_a_checker, reading the
+    # same string, found the runner after the separator and accepted it. Asked
+    # per command, it is asked of the command that actually runs the tool.
+    case " $tools " in
+      *" $_sr "*) _reject_tool_args_one "$script_name" "$_seg" "$_sr" ;;
+    esac
+  done <<< "$_segs"
+}
+
+# The rules for one command, chosen by the tool it runs.
+#
+# The dispatch is the fix for handing every resolved command to the test-runner
+# validator: `"typecheck": "npm run tc"` over `"tc": "tsc --noEmit"` resolves to
+# a compiler, and the allow-list above does not contain `--noEmit` -- so an
+# ordinary project-wide typecheck was rejected for narrowing a suite it has
+# nothing to do with, and `tsc -p tsconfig.json` for pointing at "individual
+# files" that are its project. Worse, `_reject_narrowing_flags` used to read
+# `is_test_runner` and `runner` out of its caller's scope; reached from the
+# typecheck path those names are not in scope at all, so `set -u` aborted the
+# lane. The rules are per tool, so the choice of rules has to be too.
+#
+# A command running something else entirely -- `echo done` after the suite --
+# has no rules here and gets none. Whether it is allowed to be there at all is
+# the composition question, answered before this runs.
+_reject_tool_args_one() {
   local script_name="$1" cmd="$2" runner="$3"
   case "$runner" in
     tsc|tsc.cmd|tsgo|vue-tsc)
@@ -2230,7 +2381,7 @@ _reject_tool_args() {
       # test-runner allow-list and refuses every ordinary invocation.
       :
       ;;
-    *)
+    vitest|jest|mocha|ava|jasmine|tap|node|playwright|cypress|wdio|karma       |tsx|ts-node|deno)
       _reject_narrowing_flags "$script_name" "$cmd"
       # A positional argument to a test runner *is* a filter — `vitest run
       # [...filters]` is the documented syntax, and `vitest run
@@ -2239,6 +2390,10 @@ _reject_tool_args() {
       # flags loses this race by construction, so the rule is inverted here: for
       # a known runner, nothing but flags and their values may follow.
       _reject_positional_filters "$script_name" "$cmd" "$runner"
+      ;;
+    *)
+      # Not a tool this file has rules for.
+      :
       ;;
   esac
 }
@@ -2295,6 +2450,8 @@ _reject_tsc_args() {
         ;;
       npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run|'&&'|';')
         prev="" ; shift ; continue ;;
+      [A-Za-z_]*=*)
+        prev="" ; shift ; continue ;;
       -*)
         prev="$low" ; shift ; continue ;;
     esac
@@ -2311,7 +2468,7 @@ _reject_tsc_args() {
       -p|--project|--outdir|--outfile|--target|--module|--moduleresolution \
         |--lib|--jsx|--jsxfactory|--jsxfragmentfactory|--typeroots|--types \
         |--rootdir|--rootdirs|--baseurl|--tsbuildinfofile|--declarationdir \
-        |--maxnodemoduledepth|--maxnodemodulejsdepth|--charset|--locale \
+        |--maxnodemodulejsdepth|--charset|--locale \
         |--newline|--reactnamespace)
         ;;
       *)
@@ -2401,6 +2558,10 @@ _reject_positional_filters() {
       # scripts. What the caller actually forwards is not visible here either
       # way, and was not visible before this rule existed.
       '"$@"'|'$@'|'"$*"'|'$*')
+        prev="" ; shift ; continue ;;
+      # `NODE_ENV=test vitest run` still starts with vitest, and the assignment
+      # in front of it is not a file the runner was pointed at.
+      [A-Za-z_]*=*)
         prev="" ; shift ; continue ;;
       -*)
         prev="$tok" ; shift ; continue ;;
@@ -2504,17 +2665,8 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
   # Which program the typecheck script actually runs, by the same rule the
   # test-script guard uses: skip the package-manager wrappers, take the first
   # real word.
-  _tc_runner=""
-  set -f
-  # shellcheck disable=SC2086
-  for _tc_tok in $_tc_cmd; do
-    case "$_tc_tok" in
-      npx|pnpm|bun|yarn|npm|exec|run|dlx|command|nohup|time|--yes|-y) continue ;;
-      -*) continue ;;
-      *) _tc_runner="${_tc_tok##*/}"; break ;;
-    esac
-  done
-  set +f
+  _command_runner "$_tc_cmd"
+  _tc_runner="$_cr"
   _tc_ok=0
   # Word-splitting is the point; globbing is not. `tsc -p tsconfig.*.json` would
   # otherwise expand against the workspace and be matched as filenames — the
@@ -2541,11 +2693,8 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
   # Only for a direct compiler invocation. `bash scripts/typecheck.sh` and
   # `npm run typecheck:all` are delegation, whose target is resolved and then
   # validated at the point of resolution.
-  case "${_tc_runner:-}" in
-    tsc|tsc.cmd|tsgo|vue-tsc)
-      _reject_tsc_args typecheck "$_tc_cmd" "$_tc_runner"
-      ;;
-  esac
+  _reject_tool_args typecheck "$_tc_cmd" \
+    "tsc tsc.cmd tsgo vue-tsc svelte-check astro tsd attw"
 fi
 
 # A workspace that ships tests must be able to run them. run_script only logs
