@@ -1429,8 +1429,16 @@ _resolve_delegated_target() {
     # instead, which is the thing this gate can actually read.
     local line real code toks tok pre opens closes
     local brace=0 block=0 _fn=0 _kw=0 _cont=0 _cont_prev=0 state_in=""
-    local hit=0 errexit=0 _tail="" _rt="" _rw=""
+    local hit=0 errexit=0 _tail="" _rt="" _rw="" _body=""
     local hd_end="" hd_dash=0 hd_rest
+    # The body is read once, up front, rather than kept open across the loop.
+    #
+    # The scan calls out to the filter validator with this same path as its
+    # label while the file is the loop input, which is the shape SC2094
+    # exists to catch -- and the analyser cannot tell that the callee only
+    # prints the name. Reading first removes the coupling rather than
+    # arguing about it, and a wrapper script is a few lines.
+    _body="$(cat "$target" 2>/dev/null)" || return 1
     while IFS= read -r line || [ -n "$line" ]; do
       # A here-document body is data. A checker named inside one is text being
       # written somewhere, not a command being run, and reading it as code is
@@ -1536,7 +1544,12 @@ _resolve_delegated_target() {
           esac
           return 1
         fi
+        # `set +e` turns it back off, and a wrapper that does so is exactly
+        # where the trailing-command rule has to apply again: `set -e`, then
+        # `set +e`, then a failing runner, then `true` exits 0 while this
+        # reader believed errexit was still protecting it.
         case "$real" in
+          *'set +e'*|*'set +o errexit'*) errexit=0 ;;
           *set\ -*e*) errexit=1 ;;
         esac
         if _script_names_a_checker "$real" "$tools" "$((depth + 1))"; then
@@ -1603,7 +1616,7 @@ _resolve_delegated_target() {
           esac
           ;;
       esac
-    done < "$target"
+    done <<< "$_body"
     if [ "$hit" -eq 1 ]; then return 0; fi
     return 1
   fi
@@ -2069,7 +2082,21 @@ _reject_positional_filters() {
     case "$tok" in
       # Wrapper words, the runner itself, subcommands, and shell operators are
       # not filters.
-      npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run|watch|related|"$runner"|'&&'|'||'|';'|'|')
+      # `watch` is not on this list. It is the subcommand spelling of the flag
+      # removed from the allow-list last round, and it does the same thing:
+      # `vitest watch` never returns, so the lane is killed by the runner
+      # timeout and a manifest edit is reported as broken infrastructure.
+      # Exempting it here left that spelling accepted while the flag was
+      # refused -- the rule right on one form and absent on the other.
+      watch)
+        echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs watch mode in the '${script_name}' script:"
+        echo "    ${script_name}: ${cmd}"
+        echo "  Watch mode does not exit, so this lane is killed by the gate's"
+        echo "  timeout and reported as infrastructure failure rather than a"
+        echo "  result. Use the one-shot form -- 'vitest run'."
+        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        ;;
+      npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run|related|"$runner"|'&&'|'||'|';'|'|')
         prev="" ; shift ; continue ;;
       # Argument forwarding is not a filter. `vitest run "$@"` is how a wrapper
       # script passes on what it was given, and under `bun run test` it is
@@ -2321,7 +2348,19 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
       esac
       git rev-parse --verify "${_lost_ref}^{commit}" >/dev/null 2>&1 || _lost_ref="HEAD"
     fi
-    HEAD_TESTS="$(git ls-tree -r --name-only "$_lost_ref" -- . 2>/dev/null \
+    # "Could not inspect the previous tree" is not "the previous tree had no
+    # tests", and reading it the second way lets a deleted suite through: the
+    # guard sees nothing to have lost and continues. The producer status is
+    # taken before its output is filtered.
+    _lost_rc=0
+    _lost_raw="$(git ls-tree -r --name-only "$_lost_ref" -- . 2>/dev/null)" || _lost_rc=$?
+    if [ "$_lost_rc" -ne 0 ]; then
+      echo "Cannot read ${_lost_ref} to find out which tests this push had."
+      echo "  Refusing to conclude the suite was never there from a listing"
+      echo "  that failed to produce one."
+      exit "$CI_RESULT_FAIL_INFRA"
+    fi
+    HEAD_TESTS="$(printf '%s\n' "$_lost_raw" \
       | grep -E '\.(test|spec)\.[cm]?[jt]sx?$' | head -5 || true)"
     if [ -n "$HEAD_TESTS" ]; then
       echo "Workspace ${CI_GATE_NODE_WORKSPACE} has lost its entire test suite."
