@@ -778,6 +778,33 @@ const rowNumbersAscend = (rows: ReadonlyArray<Record<string, unknown>>): boolean
 };
 
 /**
+ * The parser's ROW BUDGET, which no per-row bound can express.
+ *
+ * `isRowNumber` caps a single number at 10000 because that is the largest the
+ * parser can reach, but reaching it COSTS something: `row_number` counts every
+ * record, and only 5000 of them may be blank. So a row at (zero-based) index
+ * `i` has at most `i` data records and 5000 blank records ahead of it, which
+ * bounds it at `i + 5001`. And because every plan entry comes from a data row,
+ * there can never be more than MAX_IMPORT_ROWS entries at all.
+ *
+ * Per-row checks cannot see either limit. Without them a malformed response can
+ * keep the real fingerprint and either pad the plan to 10000 plausible rows or
+ * hand back a single row numbered 10000 — a line no 1-row file has — sending
+ * the operator to a CSV line that does not exist while the bound apply executes
+ * the real file (review #184, codex P2).
+ *
+ * Reads `index` as the sorted position, which `rowNumbersAscend` has already
+ * established: it runs FIRST in PLAN_CHECKS and `.every` short-circuits, so a
+ * non-ascending plan is refused before this check is reached.
+ */
+const rowBudgetHolds = (rows: ReadonlyArray<Record<string, unknown>>): boolean => {
+  if (rows.length > MAX_IMPORT_ROWS) {
+    return false;
+  }
+  return rows.every((row, index) => (row.row_number as number) <= index + MAX_IMPORT_ROWS + 1);
+};
+
+/**
  * The checks a plan's ROWS must satisfy together, as a list for the same
  * reason ROW_CHECKS is one: each has the identical consequence — this is not a
  * plan the backend could have produced — and naming them keeps isPlanRows
@@ -786,6 +813,7 @@ const rowNumbersAscend = (rows: ReadonlyArray<Record<string, unknown>>): boolean
  */
 const PLAN_CHECKS: ReadonlyArray<(rows: ReadonlyArray<Record<string, unknown>>) => boolean> = [
   rowNumbersAscend,
+  rowBudgetHolds,
   groupActionsAgree,
   channelRowsAgree,
 ];

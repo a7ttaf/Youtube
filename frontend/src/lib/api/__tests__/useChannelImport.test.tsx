@@ -963,14 +963,21 @@ describe("useChannelImport", () => {
     }
   });
 
-  it("accepts the LAST row number the parser can reach", async () => {
-    // 10000 exactly: a file alternating 5000 data rows with 5000 blank ones.
-    // Pinned so the bound cannot be tightened to the data-row cap alone.
+  it("accepts the LAST row number reachable by a ONE-row plan", async () => {
+    // 5001: 5000 blank records, then the single data row. That is the most a
+    // first row can cost, and it is still above the 5000 data-row cap, so the
+    // bound cannot be tightened to MAX_IMPORT_ROWS alone.
+    //
+    // NOT 10000. Reaching 10000 needs 9999 preceding records and at most 5000
+    // may be blank, so at least 4999 data rows come first — a plan numbered
+    // 10000 has thousands of rows, never one. An earlier version of this test
+    // asserted the one-row case and pinned a shape the parser cannot emit
+    // (review #184, codex P2).
     fetchMock().mockResolvedValue(
       jsonResponse({
         ...DRY_RUN_RESULT,
         counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
-        rows: [{ ...DRY_RUN_RESULT.rows[0], row_number: 10000 }],
+        rows: [{ ...DRY_RUN_RESULT.rows[0], row_number: 5001 }],
       }),
     );
     const { result } = renderHook(() => useChannelImport(), { wrapper });
@@ -982,7 +989,58 @@ describe("useChannelImport", () => {
         dryRun: true,
         reason: "monthly roster import",
       }),
-    ).resolves.toMatchObject({ rows: [{ row_number: 10000 }] });
+    ).resolves.toMatchObject({ rows: [{ row_number: 5001 }] });
+  });
+
+  it("rejects a plan that outruns the parser's blank-record budget", async () => {
+    // Per-row bounds cannot see this: 5002 is a legal row_number in isolation
+    // (under the 10000 ceiling) but not at index 0, because reaching it costs
+    // 5001 preceding records and only 5000 of them may be blank.
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+        rows: [{ ...DRY_RUN_RESULT.rows[0], row_number: 5002 }],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("rejects a plan carrying more rows than the parser accepts", async () => {
+    // Every plan entry comes from a DATA row, and the route caps those at
+    // MAX_IMPORT_ROWS, so 5001 entries is a shape the backend cannot emit
+    // however plausible each row looks on its own.
+    const rows = Array.from({ length: 5001 }, (_unused, index) => ({
+      ...DRY_RUN_RESULT.rows[0],
+      row_number: index + 1,
+      youtube_channel_id: `UC${String(index).padStart(22, "0")}`,
+    }));
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: rows.length, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+        rows,
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
 
   it("rejects an ERROR row whose reason renders blank", async () => {

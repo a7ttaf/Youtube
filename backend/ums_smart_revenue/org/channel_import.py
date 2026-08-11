@@ -384,6 +384,29 @@ def _flag_duplicates(
     return kept, errors
 
 
+# ============================================================================
+# Purpose: Decide which repeated channel ids are CONFLICTED — copies that
+#   disagree on the inventory fields — so the caller can fail every copy of
+#   each rather than pick one.
+# Database/ORM: None — pure over the parsed rows, no I/O.
+# Standards: The signature is (channel_name, view_revenue), the two fields a
+#   copy can disagree about; group_id is deliberately absent because differing
+#   groups are the LEGAL repeat this module exists to permit. Verdict is per
+#   channel id, not per row, and it condemns EVERY copy: the roster states two
+#   incompatible things about one channel and no copy is privileged, so there
+#   is no non-arbitrary winner and healing by picking the first would persist a
+#   value the operator never singled out. `view_revenue` is finance-sensitive —
+#   it drives revenue_required and the derived revenue_source_status — which is
+#   why a disagreement about it fails closed rather than defaulting.
+# Blast Radius: Turns a whole channel's rows into ERRORs, and any surviving
+#   ERROR row rejects the entire all-or-nothing apply. No writes, no audit.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py -> _duplicate_reason
+#     reports this verdict AHEAD of the repeat rule, because a channel with no
+#     settled inventory has no group to attach.
+#   - File: backend/ums_smart_revenue/org/channel_registry.py ->
+#     derive_revenue_source_status consumes the revenue flag this guards.
+# ============================================================================
 def _conflicting_channel_ids(rows: list[ChannelImportRow]) -> set[str]:
     """Channel ids whose copies disagree about what to persist."""
     first_signature: dict[str, tuple[str, bool | None]] = {}

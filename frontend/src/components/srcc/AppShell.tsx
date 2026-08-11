@@ -855,20 +855,37 @@ const TenantProofTag = ({ label }: { label: string }) => {
   );
 };
 
-/**
- * Namespace for this operator's unsettled-import records.
- *
- * tenant.ID, never the slug: a slug is routing metadata and can be renamed,
- * which would mint a fresh scope while an apply is still unsettled — hiding
- * the warning and handing admission an empty bucket for a request whose
- * outcome nobody knows. SessionMe.tenant is nullable, so the RESOLVED tenant
- * from /tenants/me is the fallback: without it every tenant for one operator
- * collapses into a single bucket and one acknowledgement retires them all
- * (review #184).
- *
- * Extracted from AppShell so the shell stays under the analyzer's complexity
- * threshold (DeepSource JS-R1005) — conformed, not suppressed.
- */
+// ============================================================================
+// Purpose: Choose the tenant identity that NAMES this operator's
+//   unsettled-import namespace — the session's own tenant when it carries one,
+//   otherwise the tenant resolved asynchronously from /tenants/me.
+// Database/ORM: None (frontend) — a pure choice between two identity sources.
+//   What it namespaces is localStorage, and through it which pending audited
+//   import the duplicate-write guard can see.
+// Standards: The tenant **ID**, never the slug. A slug is routing metadata and
+//   can be renamed, which would mint a fresh scope while an apply is still
+//   unsettled — hiding the warning and handing admission an empty bucket for a
+//   request whose outcome nobody knows. `SessionMe.tenant` is nullable, so the
+//   resolved tenant is the fallback rather than an equal alternative: without
+//   it every tenant for one operator collapses into a single bucket and one
+//   acknowledgement retires them all (review #184). Preferring the session
+//   value keeps the scope STABLE across the bootstrap, which is what
+//   isImportScopeSettled below depends on — the two are one decision split in
+//   half, and changing the preference here silently changes what that gate
+//   admits.
+// Blast Radius: Cross-tenant isolation of the duplicate-import guard. Picking
+//   the wrong source can hide a pending import from the operator who owns it,
+//   or let one operator acknowledge another namespace's record away — and an
+//   acknowledgement is what re-enables dispatch. No authorization meaning: the
+//   backend's permission and tenant scoping are unaffected either way.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> importScopeFor
+//     encodes this pair into the storage key prefix.
+//   - File: frontend/src/contexts/TenantContext.tsx -> supplies the resolved
+//     tenant used when the session body carries none.
+// ============================================================================
+// Extracted from AppShell so the shell stays under the analyzer's complexity
+// threshold (DeepSource JS-R1005) — conformed, not suppressed.
 const resolveImportScope = (
   session: SessionMe,
   resolvedTenant: { id: string | null },
