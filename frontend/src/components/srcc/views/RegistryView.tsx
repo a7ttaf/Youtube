@@ -515,6 +515,29 @@ const RegistryTable = ({
 //   - File: Docs/12_BACKEND_API_SPEC.md -> the dry run is the reconciliation
 //       tool for an apply whose response was lost.
 // ============================================================================
+/**
+ * Which applies an acknowledgement retires: the ids CAPTURED when the warning
+ * went up, or the live set when nothing was captured.
+ *
+ * The capture runs in an effect, so an acknowledgement dispatched before that
+ * effect — a programmatic or synthetic click in the same tick — would pass an
+ * empty list and retire nothing, leaving the notice and the Apply refusal up
+ * with no way to clear them (review #184, qodo). An empty capture means
+ * nothing has been excluded yet, so the live set IS what the operator is
+ * looking at.
+ *
+ * Extracted rather than inlined because the empty-capture branch is not
+ * reachable from a rendered click: Testing Library flushes effects before the
+ * event, so a component test of it passes with the branch removed. Pinning the
+ * rule directly is the only honest way to cover it.
+ */
+export const warnedIdsForAcknowledgement = (
+  captured: readonly string[],
+  livePendingIds: readonly string[],
+): readonly string[] => {
+  return captured.length > 0 ? captured : livePendingIds;
+};
+
 const UnsettledImportNotice = ({
   canViewAudit,
   onReload,
@@ -1246,7 +1269,11 @@ const RegistryView = ({
             // never reaches it, and neither does a closed tab.
           }}
           onAcknowledgeUnsettled={() => {
-            unsettledImport.acknowledge(warnedApplyIdsRef.current);
+            const warned = warnedIdsForAcknowledgement(
+              warnedApplyIdsRef.current,
+              unsettledImport.snapshotPendingIds(),
+            );
+            unsettledImport.acknowledge(warned);
             // RE-CAPTURE what remains. The effect only fires on a false -> true
             // transition, so if one apply settles while another is still
             // pending the flag never drops and the ref would stay pinned to

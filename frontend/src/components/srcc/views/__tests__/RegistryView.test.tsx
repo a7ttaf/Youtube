@@ -1,11 +1,40 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import RegistryView from "@/components/srcc/views/RegistryView";
+import RegistryView, {
+  warnedIdsForAcknowledgement,
+} from "@/components/srcc/views/RegistryView";
 import type { ChannelRegistryEntry, OrgUnit } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
+
+
+describe("acknowledgement id selection", () => {
+  // The capture effect fills the ref AFTER the render that raises the notice.
+  // Testing Library flushes effects before dispatching an event, so the
+  // empty-capture branch is unreachable from a rendered click — a component
+  // test of it passes with the branch removed, which is why the rule is pinned
+  // here directly (review #184, qodo).
+
+  it("retires the CAPTURED ids when the warning was captured", () => {
+    // The exclusion that matters: an apply admitted after the warning went up
+    // was never represented by it and must survive the acknowledgement.
+    expect(warnedIdsForAcknowledgement(["apply-warned"], ["apply-warned", "apply-later"])).toEqual([
+      "apply-warned",
+    ]);
+  });
+
+  it("falls back to the LIVE set when nothing was captured", () => {
+    // Otherwise the click retires nothing and the notice — plus the Apply
+    // refusal behind it — cannot be cleared at all.
+    expect(warnedIdsForAcknowledgement([], ["apply-live"])).toEqual(["apply-live"]);
+  });
+
+  it("retires nothing when neither has anything", () => {
+    expect(warnedIdsForAcknowledgement([], [])).toEqual([]);
+  });
+});
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());

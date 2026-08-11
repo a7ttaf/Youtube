@@ -58,6 +58,15 @@ const rosterFile = () => {
   return new File([CSV_TEXT], "roster.csv", { type: "text/csv" });
 };
 
+// The revenue_source_status literals this suite asserts on. Declared HERE and
+// not imported from the module under test on purpose: a test that reuses the
+// source's own constant cannot catch the source changing the value. Naming
+// them once keeps the file internally consistent while still pinning the wire
+// contract independently.
+const REQUIRED_STATUS = "MISSING_REVENUE_SOURCE";
+const OPTIONAL_STATUS = "PERFORMANCE_ONLY";
+const OFFICIAL_STATUS = "OFFICIAL_CMS_REVENUE";
+
 const DRY_RUN_RESULT: ChannelImportResult = {
   dry_run: true,
   content_owner_id: "COabc",
@@ -73,7 +82,7 @@ const DRY_RUN_RESULT: ChannelImportResult = {
       group_id: null,
       group_action: null,
       revenue_required: true,
-      revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
+      revenue_source_status: { from: null, to: REQUIRED_STATUS },
       changes: {},
       reason: null,
     },
@@ -515,7 +524,7 @@ describe("useChannelImport", () => {
     // entirely). OFFICIAL_CMS_REVENUE can be a `from`, never a `to`.
     await rejectsPlan(
       onlyRow({
-        revenue_source_status: { from: "PERFORMANCE_ONLY", to: "OFFICIAL_CMS_REVENUE" },
+        revenue_source_status: { from: OPTIONAL_STATUS, to: OFFICIAL_STATUS },
       }),
     );
   });
@@ -624,13 +633,13 @@ describe("useChannelImport", () => {
     await rejectsPlan(
       onlyRow({
         revenue_required: true,
-        revenue_source_status: { from: "PERFORMANCE_ONLY", to: "PERFORMANCE_ONLY" },
+        revenue_source_status: { from: OPTIONAL_STATUS, to: OPTIONAL_STATUS },
       }),
     );
     await rejectsPlan(
       onlyRow({
         revenue_required: false,
-        revenue_source_status: { from: "PERFORMANCE_ONLY", to: "MISSING_REVENUE_SOURCE" },
+        revenue_source_status: { from: OPTIONAL_STATUS, to: REQUIRED_STATUS },
       }),
     );
   });
@@ -641,7 +650,7 @@ describe("useChannelImport", () => {
       jsonResponse(
         onlyRow({
           revenue_required: true,
-          revenue_source_status: { from: "PERFORMANCE_ONLY", to: "MISSING_REVENUE_SOURCE" },
+          revenue_source_status: { from: OPTIONAL_STATUS, to: REQUIRED_STATUS },
         }),
       ),
     );
@@ -719,7 +728,7 @@ describe("useChannelImport", () => {
     await rejectsPlan(
       onlyUpdateRow({
         revenue_required: true,
-        revenue_source_status: { from: "PERFORMANCE_ONLY", to: "MISSING_REVENUE_SOURCE" },
+        revenue_source_status: { from: OPTIONAL_STATUS, to: REQUIRED_STATUS },
         changes: { revenue_required: { from: false, to: false } },
       }),
     );
@@ -750,7 +759,7 @@ describe("useChannelImport", () => {
         onlyUpdateRow({
           channel_name: "Beta Channel",
           revenue_required: true,
-          revenue_source_status: { from: "PERFORMANCE_ONLY", to: "MISSING_REVENUE_SOURCE" },
+          revenue_source_status: { from: OPTIONAL_STATUS, to: REQUIRED_STATUS },
           changes: {
             channel_name: { from: "Old Beta", to: "Beta Channel" },
             revenue_required: { from: false, to: true },
@@ -780,7 +789,7 @@ describe("useChannelImport", () => {
     await rejectsPlan(
       onlyRow({
         revenue_required: true,
-        revenue_source_status: { from: "GARBAGE", to: "MISSING_REVENUE_SOURCE" },
+        revenue_source_status: { from: "GARBAGE", to: REQUIRED_STATUS },
       }),
     );
   });
@@ -793,8 +802,8 @@ describe("useChannelImport", () => {
       onlyRow({
         revenue_required: true,
         revenue_source_status: {
-          from: "MISSING_REVENUE_SOURCE",
-          to: "MISSING_REVENUE_SOURCE",
+          from: REQUIRED_STATUS,
+          to: REQUIRED_STATUS,
         },
       }),
     );
@@ -806,7 +815,7 @@ describe("useChannelImport", () => {
     await rejectsPlan(
       onlyRow({
         revenue_required: true,
-        revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
+        revenue_source_status: { from: null, to: REQUIRED_STATUS },
       }),
     );
   });
@@ -818,7 +827,7 @@ describe("useChannelImport", () => {
       jsonResponse(
         onlyRow({
           revenue_required: false,
-          revenue_source_status: { from: "OFFICIAL_CMS_REVENUE", to: "PERFORMANCE_ONLY" },
+          revenue_source_status: { from: OFFICIAL_STATUS, to: OPTIONAL_STATUS },
         }),
       ),
     );
