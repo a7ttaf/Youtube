@@ -581,6 +581,37 @@ export const adoptPendingApplies = (from: string, to: string): void => {
   }
 };
 
+// ============================================================================
+// Purpose: Retire one pending apply in a NAMED scope, rather than in whatever
+//   scope a hook binding happens to hold. The dispatch site captures the scope
+//   its claim was made under and settles there as well as in the current one.
+// Database/ORM: None (frontend) — removes one localStorage key and notifies
+//   subscribers. It issues no request; what it clears is the client-side
+//   duplicate-import guard over a write that has already been answered.
+// Standards: Exists because the record and the binding can move APART, in two
+//   opposite ways. A same-user tenant RESOLUTION adopts the record into the new
+//   scope, so the binding captured at dispatch would no longer find it; any
+//   OTHER scope change does not adopt, so the latest binding is the one that
+//   misses it. The dispatch site therefore settles in BOTH, and neither call
+//   can overreach: removal touches exactly one key, so whichever scope does not
+//   hold the record is a no-op.
+//   Getting this wrong is bidirectional and both directions are bad — strand a
+//   completed apply and the operator is warned about a write that demonstrably
+//   landed and blocked from the next import; retire the wrong key and the guard
+//   comes down over a request that may still be committing.
+//   Named-scope, never scope-scanning: it removes only the id it is given in
+//   the scope it is given, so it cannot reach across into another operator's
+//   namespace even if two documents mint colliding ids.
+// Blast Radius: Whether a settled import stops warning, and whether a live one
+//   keeps its protection. No requests, no authorization meaning; the audit
+//   trail remains the authority on what committed.
+// Connections:
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       settleThisApply, which holds the captured scope and calls this.
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx ->
+//       adoptPendingApplies, the transition that makes the captured scope and
+//       the current one disagree.
+// ============================================================================
 /**
  * Retire one apply in a NAMED scope, rather than in whatever scope a hook
  * binding happens to hold.

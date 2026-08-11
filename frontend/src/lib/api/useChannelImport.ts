@@ -390,7 +390,20 @@ const sourceTransitionIsValid = (row: Record<string, unknown>): boolean => {
   if (change.from === change.to) {
     return false;
   }
-  return row.outcome === "CREATE" || SOURCE_STATUSES.some((status) => status === change.from);
+  if (row.outcome === "CREATE") {
+    return true;
+  }
+  // The transition EXISTS only because the flag flipped. derive_revenue_source_status
+  // returns the current status untouched when revenue_required is unchanged, and
+  // _planned_revenue_source_status turns that into None — so a non-CREATE
+  // transition without a `revenue_required` diff beside it is one the planner
+  // cannot emit, and it would ask the operator to approve a finance-source
+  // reclassification the backend will not perform (review #184, codex P2).
+  const changes = row.changes as Record<string, unknown>;
+  return (
+    SOURCE_STATUSES.some((status) => status === change.from) &&
+    Object.hasOwn(changes, "revenue_required")
+  );
 };
 
 const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [

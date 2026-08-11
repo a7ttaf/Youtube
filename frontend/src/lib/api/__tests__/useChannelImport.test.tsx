@@ -646,11 +646,14 @@ describe("useChannelImport", () => {
 
   it("accepts the source status that MATCHES the revenue flag", async () => {
     // The complement, so the rule cannot be over-applied to a legitimate flip.
+    // An UPDATE carrying the flag diff that PRODUCES the transition — the only
+    // shape the planner emits one in.
     fetchMock().mockResolvedValue(
       jsonResponse(
-        onlyRow({
+        onlyUpdateRow({
           revenue_required: true,
           revenue_source_status: { from: OPTIONAL_STATUS, to: REQUIRED_STATUS },
+          changes: { revenue_required: { from: false, to: true } },
         }),
       ),
     );
@@ -662,7 +665,7 @@ describe("useChannelImport", () => {
         dryRun: true,
         reason: "monthly roster import",
       }),
-    ).resolves.toMatchObject({ counts: { UNCHANGED: 1 } });
+    ).resolves.toMatchObject({ counts: { UPDATE: 1 } });
   });
 
   it("rejects an APPLY answered 2xx over a plan holding ERROR rows", async () => {
@@ -825,9 +828,10 @@ describe("useChannelImport", () => {
     // legitimate `from`, which is why only `to` is narrowed.
     fetchMock().mockResolvedValue(
       jsonResponse(
-        onlyRow({
+        onlyUpdateRow({
           revenue_required: false,
           revenue_source_status: { from: OFFICIAL_STATUS, to: OPTIONAL_STATUS },
+          changes: { revenue_required: { from: true, to: false } },
         }),
       ),
     );
@@ -839,7 +843,22 @@ describe("useChannelImport", () => {
         dryRun: true,
         reason: "monthly roster import",
       }),
-    ).resolves.toMatchObject({ counts: { UNCHANGED: 1 } });
+    ).resolves.toMatchObject({ counts: { UPDATE: 1 } });
+  });
+
+  it("rejects a source transition with no revenue-flag diff behind it", async () => {
+    // _planned_revenue_source_status only emits a transition when the flag
+    // FLIPS: derive returns the current status untouched otherwise, which
+    // becomes None. So a transition beside a diff that changes only the name
+    // is unemittable — and it asks the operator to approve a finance-source
+    // reclassification the backend will not perform (review #184, codex P2).
+    await rejectsPlan(
+      onlyUpdateRow({
+        revenue_required: true,
+        revenue_source_status: { from: OPTIONAL_STATUS, to: REQUIRED_STATUS },
+        changes: { channel_name: { from: "Old Beta", to: "Beta Channel" } },
+      }),
+    );
   });
 
   it("rejects a 2xx describing a plan other than the one bound", async () => {
