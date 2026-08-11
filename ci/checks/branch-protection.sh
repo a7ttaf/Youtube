@@ -38,6 +38,30 @@ _bp_infra() {
   OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
 }
 
+# Somewhere for git's stderr to go that is not the variable being parsed.
+#
+# `2>&1` put diagnostics into the same string as the records: `git log
+# --pretty='%G? %H'` output is read as "<signature status> <sha>" pairs, and a
+# warning line -- dubious ownership, a replace-ref advisory, anything git
+# decides to mention -- arrives as a record whose first word is not one of
+# G/U/X/Y, so it is reported as an unsigned commit whose sha is the rest of the
+# warning. The merge count has the sharper version of the same problem: one
+# warning line and `[ "$merge_count" -gt 0 ]` is comparing prose to an integer.
+# git succeeds in both cases, so this is a false failure, not a missed one.
+#
+# stderr is still reported -- it is the useful part of an infra message -- just
+# not parsed.
+_BP_ERR_FILE=""
+_bp_err_setup() {
+  _BP_ERR_FILE="$(mktemp 2>/dev/null || printf '/tmp/bp-err.%s' "$$")"
+  # shellcheck disable=SC2064
+  trap "rm -f '$_BP_ERR_FILE'" EXIT
+}
+_bp_err_text() {
+  [ -n "$_BP_ERR_FILE" ] && [ -f "$_BP_ERR_FILE" ] || return 0
+  tr '\n' ' ' < "$_BP_ERR_FILE"
+}
+
 # The range this check reasons about is the same one git-safety.sh scans for
 # staged-content problems, so it is computed in one place. Kept as a name here
 # because the call sites below read better with it.
@@ -100,8 +124,8 @@ _bp_check_signed_commits() {
   # both, and this is the check that decides whether every pushed commit is
   # signed — the one place a silent empty result must not read as a pass.
   local log_out
-  if ! log_out="$(git log --pretty='%G? %H' "$range" 2>&1)"; then
-    _bp_infra "Cannot walk the push range ${range}: ${log_out}"
+  if ! log_out="$(git log --pretty='%G? %H' "$range" 2>"$_BP_ERR_FILE")"; then
+    _bp_infra "Cannot walk the push range ${range}: $(_bp_err_text)"
     return 0
   fi
   while IFS=' ' read -r sig_status commit; do
@@ -143,10 +167,18 @@ _bp_check_linear_history() {
 
   ci::log::info "Checking for merge commits in range: ${range}"
   local merge_count
-  if ! merge_count="$(git rev-list --count --merges "$range" 2>&1)"; then
-    _bp_infra "Cannot count merge commits in ${range}: ${merge_count}"
+  if ! merge_count="$(git rev-list --count --merges "$range" 2>"$_BP_ERR_FILE")"; then
+    _bp_infra "Cannot count merge commits in ${range}: $(_bp_err_text)"
     return 0
   fi
+  # A count that is not a number is not a count. Left unchecked, `[ "$x" -gt 0 ]`
+  # aborts the shell under errexit rather than reporting anything.
+  case "$merge_count" in
+    ''|*[!0-9]*)
+      _bp_infra "Merge count for ${range} is not a number: '${merge_count}'"
+      return 0
+      ;;
+  esac
   if [ "${merge_count:-0}" -gt 0 ]; then
     _bp_fail "Linear history required: ${merge_count} merge commit(s) found. Use rebase instead of merge."
   fi
@@ -158,6 +190,11 @@ _bp_check_linear_history() {
 
 _branch_protection_main() {
   ci::log::section "Check: branch-protection"
+
+  # Before any check, because an unset _BP_ERR_FILE makes `2>"$_BP_ERR_FILE"`
+  # an ambiguous redirect and the walk would fail for a reason of our own
+  # making.
+  _bp_err_setup
 
   _bp_check_protected_branch
   _bp_check_signed_commits

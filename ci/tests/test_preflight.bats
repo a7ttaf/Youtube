@@ -342,12 +342,27 @@ gs_run() {
 
   # And a range that resolves but cannot be walked is infrastructure failure,
   # not a pass. `refs/heads/nope..HEAD` names a ref that does not exist.
-  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship bash -c '
-    source ci/lib/common.sh; source ci/lib/git.sh
-    ci::git::push_range() { printf \"refs/heads/nope..HEAD\"; }
-    export -f ci::git::push_range
-    bash ci/checks/git-safety.sh' 2>&1"
+  #
+  # The stub is written into the sandbox's own ci/lib/git.sh rather than
+  # exported. Two separate things defeated `export -f` here, and the case was
+  # green throughout: bash will not carry a function whose name contains `::`
+  # into a child, and git-safety.sh sources ci/lib/git.sh itself, which
+  # redefines push_range over anything the environment supplied. What the
+  # second run actually measured was the ordinary secret scan — exit 20, the
+  # secret found — and `[ "$status" -ne 0 ]` accepted it, so the assertion
+  # named the fail-closed path while exercising the path beside it.
+  cat >> "$GS_SB/ci/lib/git.sh" <<'SH'
+ci::git::push_range() { printf 'refs/heads/nope..HEAD'; }
+SH
+  # The premise: the range really is unwalkable.
+  run bash -c "cd '$GS_SB' && git rev-list refs/heads/nope..HEAD"
   [ "$status" -ne 0 ]
+
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship bash ci/checks/git-safety.sh 2>&1"
+  # 30, not merely non-zero: 20 is the answer this used to get, and the whole
+  # point is that a failed walk must not look like a finding or like a pass.
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"refs/heads/nope..HEAD"* ]]
   rm -rf "$GS_SB"
 }
 
@@ -712,4 +727,60 @@ YML
     [ "$rc" -eq 0 ] || bad="${bad} real:${id}(declared false, got ${rc})"
   done
   [ -z "$bad" ] || { echo "real checks.yml mismatches:${bad}" >&2; return 1; }
+}
+
+@test "branch-protection: a git warning on stderr is not read as a signature record" {
+  # `2>&1` merged git's diagnostics into the string that is then parsed as
+  # "<signature status> <sha>" pairs. git *succeeds* while warning -- dubious
+  # ownership, a replace-ref advisory -- so the warning arrived as a record
+  # whose first word is not G/U/X/Y and was reported as an unsigned commit
+  # whose sha is the rest of the warning text. A false failure on the check
+  # that decides whether a push may proceed.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/bin"
+  cp "$REPO_ROOT/ci/checks/branch-protection.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  (
+    cd "$sb"
+    git init -q -b feature/x .
+    printf 'x\n' > a.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+  ) >/dev/null 2>&1
+
+  local real_git
+  real_git="$(command -v git)"
+  [ -n "$real_git" ]
+  # A git that works but chatters on stderr, which is the shape of the real
+  # thing: exit status 0, output correct, a warning alongside it.
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'if [ "$1" = "log" ]; then\n'
+    printf '  echo "warning: detected dubious ownership in repository" >&2\n'
+    printf 'fi\n'
+    printf 'exec %s "$@"\n' "$real_git"
+  } > "$sb/bin/git"
+  chmod +x "$sb/bin/git"
+
+  # The premise, both halves: the shim still succeeds, and it really does warn.
+  run env PATH="$sb/bin:$PATH" bash -c "cd '$sb' && git log --pretty='%G? %H' HEAD 2>/dev/null"
+  [ "$status" -eq 0 ]
+  run env PATH="$sb/bin:$PATH" bash -c "cd '$sb' && git log --pretty='%G? %H' HEAD 2>&1 >/dev/null"
+  [[ "$output" == *"dubious ownership"* ]]
+
+  run env PATH="$sb/bin:$PATH" bash -c "cd '$sb' && CI_GATE_REQUIRE_SIGNED_COMMITS=1 \
+    CI_GATE_REQUIRE_LINEAR_HISTORY=1 bash ci/checks/branch-protection.sh 2>&1"
+  # The commits here are genuinely unsigned, so a signature complaint is
+  # expected -- but it must name a commit, never the warning text. Before the
+  # fix this printed, verbatim: "Unsigned or unverified commit detected dubious
+  # ownership in repository (status: warning:)" -- the sha field holding the
+  # warning and the status field holding the word "warning:".
+  [[ "$output" != *"ownership"* ]]
+  [[ "$output" != *"status: warning"* ]]
+  # And the merge count must not have been prose.
+  [[ "$output" != *"merge commit(s) found"* ]]
+  [[ "$output" != *"is not a number"* ]]
+  rm -rf "$sb"
 }

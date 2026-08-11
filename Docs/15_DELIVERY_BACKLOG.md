@@ -1262,7 +1262,35 @@ single P-tier above.
   decision. Separately, `ws_setup` never copied `ci/lib/git.sh` into its
   sandbox, so every case in that file aborted on the missing source before its
   first assertion.
-  Combined suite: `bats ci/tests/` = 288 cases, 0 failures.
+  A twenty-seventh round, from the pinned Qodo review and from DeepSource, found
+  three — and two of them are the reason a threads-only audit is not an audit.
+  Qodo files its findings in a **pinned issue comment**, not in review threads,
+  so the GraphQL `reviewThreads` sweep that showed zero unresolved was reporting
+  on a surface those two findings do not live on. One was a **weak test of
+  mine**: the case asserting that an unwalkable push range fails closed stubbed
+  `ci::git::push_range` with `export -f`, and two separate things defeated that
+  — bash will not carry a function whose name contains `::` into a child, and
+  `git-safety.sh` sources `ci/lib/git.sh` itself, redefining the function over
+  whatever the environment supplied. What the case actually measured was the
+  ordinary secret scan, exit 20, and `[ "$status" -ne 0 ]` accepted it; the
+  assertion named the fail-closed path while exercising the path beside it. The
+  stub is written into the sandbox's own `git.sh` now, the premise is asserted
+  (`git rev-list` on that range really does fail), and the expectation is **30**
+  rather than merely non-zero — 20 being precisely the answer it used to get.
+  The second was live code: `branch-protection.sh` captured `2>&1` into the
+  string it then parses as `%G? %H` records, so a git *warning* — dubious
+  ownership, a replace-ref advisory, anything git chooses to mention while
+  succeeding — arrived as a record whose first word is not `G/U/X/Y`. Measured
+  against the pre-fix script, verbatim: `Unsigned or unverified commit detected
+  dubious ownership in repository (status: warning:)`. A false failure on the
+  check that decides whether a push may proceed, and the merge count had the
+  sharper form of it, comparing prose to an integer. stderr goes to its own file
+  now — still reported, since it is the useful part of an infra message, just
+  not parsed — and a non-numeric count is `FAIL_INFRA` rather than an arithmetic
+  abort. DeepSource supplied the third: `local dir` in
+  `ci::common::node_workspaces` survived the rewrite from a one-level scan to a
+  recursive find, naming nothing.
+  Combined suite: `bats ci/tests/` = 290 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
