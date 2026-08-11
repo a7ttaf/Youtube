@@ -368,10 +368,12 @@ describe("useChannelImport", () => {
     const preDisclosure = {
       ...DRY_RUN_RESULT,
       rows: DRY_RUN_RESULT.rows.map((row) => {
-        const { group_action, revenue_source_status, ...rest } = row;
-        void group_action;
-        void revenue_source_status;
-        return rest;
+        // Deleted, not set to undefined: `{a: undefined}` still answers
+        // Object.hasOwn, and the shape under test is a key that never existed.
+        const stripped: Record<string, unknown> = { ...row };
+        delete stripped.group_action;
+        delete stripped.revenue_source_status;
+        return stripped;
       }),
     };
     fetchMock().mockResolvedValue(jsonResponse(preDisclosure));
