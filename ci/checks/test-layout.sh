@@ -117,7 +117,7 @@ candidate_files() {
         git ls-tree -r -z --name-only HEAD -- "$FRONTEND_DIR" 2>/dev/null || true
       fi
     fi
-  } | sort -z -u
+  }
 }
 
 # find applies PRUNE itself; git ls-files does not, so the predicates below are
@@ -143,9 +143,25 @@ path_is_pruned() {
 
 # Held in an array, because a command substitution cannot carry NUL bytes --
 # bash drops them -- which would put the newline problem straight back.
+#
+# Deduplicated here rather than with `sort -z -u`. That flag is a GNU extension,
+# and this repository states a Bash 3.2 floor in ci/lib/runner.sh, which is the
+# platform whose sort is least likely to have it -- a gate that dies on the
+# machine it is meant to protect is not portable in any useful sense. The scan
+# is quadratic in the number of candidates and the number is small: 219 in this
+# repository, so at most a few thousand string compares done by the shell
+# itself, against three subprocesses and a pipe for the sort it replaces.
 ALL_CANDIDATES=()
 while IFS= read -r -d '' _cand; do
   [ -n "$_cand" ] || continue
+  _dup=0
+  for _seen in ${ALL_CANDIDATES[@]+"${ALL_CANDIDATES[@]}"}; do
+    if [ "$_seen" = "$_cand" ]; then
+      _dup=1
+      break
+    fi
+  done
+  [ "$_dup" -eq 1 ] && continue
   ALL_CANDIDATES+=("$_cand")
 done < <(candidate_files)
 
@@ -489,6 +505,23 @@ extract_test_block() {
           computed = 1
         }
 
+        # A shorthand, method or getter `test` at this level overrides the
+        # colon-form block, and only the colon form was ever recognised.
+        # `const test = { include: ["one.test.ts"] }` followed by
+        # `defineConfig({ test: { include: [broad] }, test })` reported all 38
+        # files runnable while vitest listed four. `test()` and `get test()`
+        # reach the same place by two more spellings, so the test is what
+        # *follows* the identifier: anything other than a colon is a form this
+        # reader cannot evaluate, and it stops rather than guessing.
+        if (depth == 1 && substr(all, p, 4) == "test") {
+          before = (p > 1) ? substr(all, p - 1, 1) : " "
+          rest = substr(all, p + 4)
+          if (before !~ /[A-Za-z0-9_$]/ && rest !~ /^[[:space:]]*:/ \
+              && rest ~ /^[[:space:]]*[,}(]/) {
+            computed = 1
+          }
+        }
+
         # Only a key at the exported object own level counts.
         if (depth == 1 && substr(all, p, 4) == "test") {
           before = (p > 1) ? substr(all, p - 1, 1) : " "
@@ -563,11 +596,25 @@ config_sources() {
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
     if git cat-file -e ":$VITEST_CONFIG" 2>/dev/null; then
       local staged
-      staged="$(mktemp)"
+      staged="$(mktemp 2>/dev/null)" || staged=""
+      if [ -z "$staged" ]; then
+        echo "Cannot create a private temporary file to read the staged ${VITEST_CONFIG}." >&2
+        exit "$CI_RESULT_FAIL_INFRA"
+      fi
       if git show ":$VITEST_CONFIG" > "$staged" 2>/dev/null; then
         printf '%s\n' "$staged"
       else
+        # The index says the blob is there and git cannot produce it. Dropping
+        # it silently left the caller validating the worktree copy alone and
+        # reporting PASS -- approving a commit whose active include was never
+        # inspected, which is the same "could not look" read as "found nothing"
+        # this whole check exists to remove. A corrupt or transiently
+        # unavailable object is infrastructure, not a clean tree.
         rm -f "$staged"
+        echo "The index lists ${VITEST_CONFIG} but git cannot read that blob." >&2
+        echo "  Refusing to validate the worktree copy alone: the config this" >&2
+        echo "  commit would carry has not been inspected." >&2
+        exit "$CI_RESULT_FAIL_INFRA"
       fi
     fi
   fi

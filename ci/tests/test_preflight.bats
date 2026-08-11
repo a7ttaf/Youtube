@@ -934,61 +934,73 @@ YML
   rm -rf "$GS_SB"
 }
 
-@test "git: a tag on an ancestor is covered by the worktree; an unrelated one is not" {
-  # The first version of this check asked "is the pushed tip the checkout",
-  # which refused `git tag v1.0 <older commit>; git push origin v1.0` -- an
-  # ordinary release workflow -- and failed the whole ship gate on it. A tag on
-  # an ancestor is content the worktree already contains, so the lanes report on
-  # a descendant of what is going out rather than on something unrelated.
+@test "git: a tag push is covered only when its commit is already published" {
+  # Two reviewers pulled this in opposite directions and both were right about
+  # their own failure. Refusing every tag push failed the whole ship gate on
+  # `git tag v1.0 <older commit>; git push origin v1.0`, an ordinary release
+  # workflow. But allowing any tag on an *ancestor* of HEAD was too loose: a
+  # failing commit can be tagged, repaired in a descendant, and the tag pushed
+  # while the lanes validate the repaired HEAD. Ancestry says the worktree
+  # contains that history; it says nothing about the tagged tree being checked.
+  #
+  # What settles it is publication. A commit a remote branch already contains
+  # went out with a branch push and was gated then, so the tag adds a label and
+  # no content. A commit no remote branch contains is carried out by the tag
+  # itself, and nothing has ever checked that tree.
   local sb
   sb="$(mktemp -d)"
-  mkdir -p "$sb/ci/lib"
+  mkdir -p "$sb/ci/lib" "$sb/remote"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
      "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  ( cd "$sb/remote" && git init -q --bare . ) >/dev/null 2>&1
   (
     cd "$sb"
     git init -q -b main .
     printf 'a\n' > a.txt && git add -A
     git -c user.email=t@t -c user.name=t commit -qm c1
+    git remote add origin ./remote
+    git push -q origin main
     printf 'b\n' > b.txt && git add -A
     git -c user.email=t@t -c user.name=t commit -qm c2
-    git checkout -q -b side HEAD~1
-    printf 's\n' > s.txt && git add -A
-    git -c user.email=t@t -c user.name=t commit -qm side1
-    git checkout -q main
-    printf '%s %s %s\n' "$(git rev-parse HEAD~1)" "$(git rev-parse HEAD)" "$(git rev-parse side)" > .shas
+    printf 'c\n' > c.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c3
+    printf '%s %s\n' "$(git rev-parse HEAD~2)" "$(git rev-parse HEAD~1)" > .shas
   ) >/dev/null 2>&1
-  local old head side
-  read -r old head side < "$sb/.shas"
+  local published unpublished
+  read -r published unpublished < "$sb/.shas"
 
-  # The premise: old really is an ancestor of HEAD and side really is not.
-  run bash -c "cd '$sb' && git merge-base --is-ancestor '$old' '$head'"
-  [ "$status" -eq 0 ]
-  run bash -c "cd '$sb' && git merge-base --is-ancestor '$side' '$head'"
-  [ "$status" -ne 0 ]
+  # The premises: one commit is on a remote branch and the other is not, and
+  # neither is HEAD -- otherwise the exact-match arm answers before this rule.
+  run bash -c "cd '$sb' && git branch -r --contains '$published'"
+  [ -n "$output" ]
+  run bash -c "cd '$sb' && git branch -r --contains '$unpublished'"
+  [ -z "$output" ]
+  run bash -c "cd '$sb' && git rev-parse HEAD"
+  [ "$output" != "$published" ]
+  [ "$output" != "$unpublished" ]
 
   # A tag push names no branch destination: set-and-empty, not unset.
   run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
-    && CI_GATE_PUSH_NEW_SHA='$old' CI_GATE_PUSH_REMOTE_REFS= ci::git::worktree_covers_push"
+    && CI_GATE_PUSH_NEW_SHA='$published' CI_GATE_PUSH_REMOTE_REFS= ci::git::worktree_covers_push"
   [ "$status" -eq 0 ]
 
-  # A tag pointing somewhere HEAD does not contain is still refused: that is a
-  # tree the lanes genuinely cannot speak for.
+  # A tag carrying an unpublished commit is refused, ancestor or not.
   run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
-    && CI_GATE_PUSH_NEW_SHA='$side' CI_GATE_PUSH_REMOTE_REFS= ci::git::worktree_covers_push"
+    && CI_GATE_PUSH_NEW_SHA='$unpublished' CI_GATE_PUSH_REMOTE_REFS= ci::git::worktree_covers_push"
   [ "$status" -ne 0 ]
 
-  # And a *branch* push of an ancestor is still refused -- the relaxation is for
-  # tags only, or `git push origin other-branch` would walk straight back in.
+  # And a *branch* push of the published commit is still refused -- the
+  # relaxation is for tags only, or `git push origin other-branch` walks back in.
   run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
-    && CI_GATE_PUSH_NEW_SHA='$old' CI_GATE_PUSH_REMOTE_REFS=other ci::git::worktree_covers_push"
+    && CI_GATE_PUSH_NEW_SHA='$published' CI_GATE_PUSH_REMOTE_REFS=other ci::git::worktree_covers_push"
   [ "$status" -ne 0 ]
 
   # A destination list that is *unset* is not the tag case: it means nobody told
   # us what this push targets, and a tip that is set and unequal is still a tree
-  # the lanes cannot speak for.
+  # the lanes cannot speak for -- even for a commit that is published, since
+  # without a destination there is nothing to say this is a tag at all.
   run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
-    && CI_GATE_PUSH_NEW_SHA='$side' ci::git::worktree_covers_push"
+    && CI_GATE_PUSH_NEW_SHA='$published' ci::git::worktree_covers_push"
   [ "$status" -ne 0 ]
 
   # No tip at all is the real "nobody said": CI and every direct invocation run
@@ -998,4 +1010,39 @@ YML
     && ci::git::worktree_covers_push"
   [ "$status" -eq 0 ]
   rm -rf "$sb"
+}
+
+@test "runner: a malformed timeout_sec is rejected, not stripped into a number" {
+  # `gsub(/[^0-9]/, "")` deleted the non-digits and joined what was left, so
+  # `1e3` became 13 and `-1` became 1. The runner then killed a blocking check
+  # seconds in and reported an infrastructure timeout the configuration never
+  # asked for -- a lane that does not finish is a lane that does not run.
+  local cfg
+  cfg="$(mktemp)"
+  printf 'checks:\n  alpha:\n    timeout_sec: 1e3\n  beta:\n    timeout_sec: -1\n  gamma:\n    timeout_sec: 900\n' > "$cfg"
+
+  run bash -c ". '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    CI_CHECKS_CONFIG='$cfg' ci::runner::_declared_timeout alpha 2>/dev/null"
+  [ -z "$output" ]
+
+  run bash -c ". '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    CI_CHECKS_CONFIG='$cfg' ci::runner::_declared_timeout beta 2>/dev/null"
+  [ -z "$output" ]
+
+  # It must also say so rather than failing silently.
+  run bash -c ". '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    CI_CHECKS_CONFIG='$cfg' ci::runner::_declared_timeout alpha 2>&1 >/dev/null"
+  [[ "$output" == *"not a positive whole number"* ]]
+
+  # The control: a well-formed value is still read, or this would have turned
+  # every declared timeout off.
+  run bash -c ". '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    CI_CHECKS_CONFIG='$cfg' ci::runner::_declared_timeout gamma 2>/dev/null"
+  [ "$output" = "900" ]
+
+  # And the real checks.yml still parses, since that is what actually runs.
+  run bash -c "cd '$REPO_ROOT' && . ci/lib/runner.sh >/dev/null 2>&1; \
+    ci::runner::_declared_timeout tests-shell 2>/dev/null"
+  [ "$status" -eq 0 ]
+  rm -f "$cfg"
 }

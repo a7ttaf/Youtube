@@ -1272,130 +1272,19 @@ _unquote_tok() {
   esac
 }
 
-_script_names_a_checker() {
-  local cmd="$1"
-  local tools="${2:-tsc tsc.cmd tsgo vue-tsc svelte-check astro tsd attw}"
+# _resolve_delegated_target <target> <tool-list> <depth> – 0 when the thing a
+# runner hands to can be shown to reach a checker.
+#
+# Split out of the scan because a delegation has to be resolved wherever the
+# command *ends*, not only at the end of the string: `bash scripts/test.sh ;
+# exit 0` had its target cleared by the separator before anything asked what
+# was in the script, and an ordinary wrapper-then-exit was rejected.
+_resolve_delegated_target() {
+  local target="$1"
+  local tools="$2"
   local depth="${3:-0}"
-  # `make` is deliberately absent. Its argument is a Makefile target, not a
-  # package script and not a file, so resolving it the way the others are
-  # resolved is simply wrong -- `make test` looked up a `test` *script* in the
-  # manifest and accepted whatever that ran, which is not what make would do.
-  # A Makefile is not something this gate reads, so `make test` is delegation it
-  # cannot follow, and unresolvable delegation is refused like any other.
-  local runners="npm pnpm yarn bun npx pnpx turbo nx lerna bash sh zsh"
-  local tok t
+  local t
 
-  [ "$depth" -ge 8 ] && return 1
-
-  # Compositions that prove nothing. `true || vitest run` never reaches the
-  # checker; `vitest run || true` reaches it and throws the result away, which
-  # is worse -- the suite fails and the script still exits 0. Neither can be
-  # vouched for, so `||` is refused outright rather than reasoned about
-  # case by case. `&` backgrounds the checker and lets the script exit before
-  # it finishes, which is the same lie with different timing.
-  # Matched without requiring spaces around them. `a||b` is the same shell
-  # operator as `a || b`, and a rule that only recognised the spaced spelling
-  # was a bypass anyone could reach by deleting two characters.
-  #
-  # A pipeline goes with them. `tsc --noEmit | cat` puts the checker in command
-  # position and then throws its status away -- the shell reports the *last*
-  # command's, so tsc printing TS2322 arrives as a pass. Whether `pipefail` is
-  # set inside the package script is not something this reader can know, so a
-  # pipeline is refused for the same reason as everything else here: the result
-  # cannot be shown to come from the checker.
-  # `&&` is removed before the `&` test rather than enumerated around it: it is
-  # the one form that is safe, since either the checker runs or the thing before
-  # it failed and the script fails with it.
-  local _comp="${cmd//&&/}"
-  case "$cmd" in
-    *"|"*) return 1 ;;
-  esac
-  case "$_comp" in
-    *"&"*) return 1 ;;
-  esac
-
-  # An inline shell command is judged as the command it is. `bash -c tsc` runs
-  # a checker and is accepted; `bash -c true` names nothing and is not. Only
-  # when the thing being handed `-c` is actually a shell -- `echo -c tsc` runs
-  # echo.
-  local first=""
-  # shellcheck disable=SC2086
-  for tok in $cmd; do
-    _unquote_tok
-    case "$tok" in
-      [A-Za-z_]*=*) continue ;;
-    esac
-    first="${tok##*/}"
-    break
-  done
-  case " $first " in
-    " bash "|" sh "|" zsh ")
-      case " $cmd " in
-        *" -c "*)
-          local inline="${cmd#* -c }"
-          tok="$inline"
-          _unquote_tok
-          inline="$tok"
-          _script_names_a_checker "$inline" "$tools" "$((depth + 1))"
-          return $?
-          ;;
-      esac
-      ;;
-  esac
-
-  # One pass, tracking whether the next token starts a command.
-  local expect_cmd=1 runner="" target=""
-  # shellcheck disable=SC2086
-  for tok in $cmd; do
-    _unquote_tok
-    case "$tok" in
-      ";"|"&&"|"|"|"("|")"|"{"|"}"|"!")
-        expect_cmd=1
-        runner=""
-        target=""
-        continue
-        ;;
-    esac
-
-    if [ "$expect_cmd" -eq 1 ]; then
-      # `NODE_ENV=test vitest run` still starts with vitest.
-      case "$tok" in
-        [A-Za-z_]*=*) continue ;;
-      esac
-      # And so does `exec vitest run`, which is how a wrapper script normally
-      # hands over. These replace the current process or merely prefix it; the
-      # token after them is still where the command starts, so `continue`
-      # without clearing expect_cmd.
-      case "${tok##*/}" in
-        exec|command|nohup|time) continue ;;
-      esac
-      for t in $tools; do
-        [ "${tok##*/}" = "$t" ] && return 0
-      done
-      for t in $runners; do
-        if [ "${tok##*/}" = "$t" ]; then
-          runner="$tok"
-          expect_cmd=0
-          continue 2
-        fi
-      done
-      # Some other command. Its arguments are arguments, not commands.
-      expect_cmd=0
-      continue
-    fi
-
-    # Arguments of whatever is currently running. Only a runner has a
-    # delegation target worth resolving.
-    [ -n "$runner" ] || continue
-    [ -n "$target" ] && continue
-    case "$tok" in
-      -*) continue ;;
-      run|exec|dlx|--) continue ;;
-    esac
-    target="$tok"
-  done
-
-  [ -n "$runner" ] && [ -n "$target" ] || return 1
 
   # For `npx`, `pnpm dlx` and friends the target *is* the executable, so a
   # checker there is a checker being run and needs no further resolution.
@@ -1479,6 +1368,160 @@ _script_names_a_checker() {
   fi
 
   return 1
+}
+
+_script_names_a_checker() {
+  local cmd="$1"
+  local tools="${2:-tsc tsc.cmd tsgo vue-tsc svelte-check astro tsd attw}"
+  local depth="${3:-0}"
+  # `make` is deliberately absent. Its argument is a Makefile target, not a
+  # package script and not a file, so resolving it the way the others are
+  # resolved is simply wrong -- `make test` looked up a `test` *script* in the
+  # manifest and accepted whatever that ran, which is not what make would do.
+  # A Makefile is not something this gate reads, so `make test` is delegation it
+  # cannot follow, and unresolvable delegation is refused like any other.
+  local runners="npm pnpm yarn bun npx pnpx turbo nx lerna bash sh zsh"
+  local tok t
+
+  [ "$depth" -ge 8 ] && return 1
+
+  # Compositions that prove nothing. `true || vitest run` never reaches the
+  # checker; `vitest run || true` reaches it and throws the result away, which
+  # is worse -- the suite fails and the script still exits 0. Neither can be
+  # vouched for, so `||` is refused outright rather than reasoned about
+  # case by case. `&` backgrounds the checker and lets the script exit before
+  # it finishes, which is the same lie with different timing.
+  # Matched without requiring spaces around them. `a||b` is the same shell
+  # operator as `a || b`, and a rule that only recognised the spaced spelling
+  # was a bypass anyone could reach by deleting two characters.
+  #
+  # A pipeline goes with them. `tsc --noEmit | cat` puts the checker in command
+  # position and then throws its status away -- the shell reports the *last*
+  # command's, so tsc printing TS2322 arrives as a pass. Whether `pipefail` is
+  # set inside the package script is not something this reader can know, so a
+  # pipeline is refused for the same reason as everything else here: the result
+  # cannot be shown to come from the checker.
+  # `&&` is removed before the `&` test rather than enumerated around it: it is
+  # the one form that is safe, since either the checker runs or the thing before
+  # it failed and the script fails with it.
+  local _comp="${cmd//&&/}"
+  case "$cmd" in
+    *"|"*) return 1 ;;
+  esac
+  case "$_comp" in
+    *"&"*) return 1 ;;
+  esac
+
+  # An inline shell command is judged as the command it is. `bash -c tsc` runs
+  # a checker and is accepted; `bash -c true` names nothing and is not. Only
+  # when the thing being handed `-c` is actually a shell -- `echo -c tsc` runs
+  # echo.
+  local first=""
+  # shellcheck disable=SC2086
+  for tok in $cmd; do
+    _unquote_tok
+    case "$tok" in
+      [A-Za-z_]*=*) continue ;;
+    esac
+    first="${tok##*/}"
+    break
+  done
+  case " $first " in
+    " bash "|" sh "|" zsh ")
+      case " $cmd " in
+        *" -c "*)
+          local inline="${cmd#* -c }"
+          tok="$inline"
+          _unquote_tok
+          inline="$tok"
+          _script_names_a_checker "$inline" "$tools" "$((depth + 1))"
+          return $?
+          ;;
+      esac
+      ;;
+  esac
+
+  # One pass, tracking whether the next token starts a command.
+  local expect_cmd=1 runner="" target=""
+  # shellcheck disable=SC2086
+  for tok in $cmd; do
+    _unquote_tok
+    case "$tok" in
+      ";"|"&&"|"|"|"("|")"|"{"|"}"|"!")
+        # A separator ends the current command, so any delegation it was
+        # carrying has to be resolved *here*. Clearing it first meant
+        # `bash scripts/test.sh ; exit 0` threw away the target before anything
+        # asked what was in it, and a wrapper followed by an exit -- an entirely
+        # ordinary script -- was rejected.
+        if [ -n "$runner" ] && [ -n "$target" ]; then
+          if _resolve_delegated_target "$target" "$tools" "$depth"; then
+            return 0
+          fi
+        fi
+        expect_cmd=1
+        runner=""
+        target=""
+        continue
+        ;;
+    esac
+
+    if [ "$expect_cmd" -eq 1 ]; then
+      # `NODE_ENV=test vitest run` still starts with vitest.
+      case "$tok" in
+        [A-Za-z_]*=*) continue ;;
+      esac
+      # And so does `exec vitest run`, which is how a wrapper script normally
+      # hands over. These replace the current process or merely prefix it; the
+      # token after them is still where the command starts, so `continue`
+      # without clearing expect_cmd.
+      case "${tok##*/}" in
+        exec|command|nohup|time) continue ;;
+      esac
+      # A command that ends the shell ends the scan with it. `"test": "exit 0 ;
+      # vitest run"` put the runner in command position after a separator, so
+      # every rule above was satisfied by a token the shell never reaches. The
+      # separator resets *where a command starts*, which is not the same as
+      # whether one runs.
+      case "${tok##*/}" in
+        exit|return)
+          # Same as a separator: whatever ran before this still ran.
+          if [ -n "$runner" ] && [ -n "$target" ]; then
+            if _resolve_delegated_target "$target" "$tools" "$depth"; then
+              return 0
+            fi
+          fi
+          break
+          ;;
+      esac
+      for t in $tools; do
+        [ "${tok##*/}" = "$t" ] && return 0
+      done
+      for t in $runners; do
+        if [ "${tok##*/}" = "$t" ]; then
+          runner="$tok"
+          expect_cmd=0
+          continue 2
+        fi
+      done
+      # Some other command. Its arguments are arguments, not commands.
+      expect_cmd=0
+      continue
+    fi
+
+    # Arguments of whatever is currently running. Only a runner has a
+    # delegation target worth resolving.
+    [ -n "$runner" ] || continue
+    [ -n "$target" ] && continue
+    case "$tok" in
+      -*) continue ;;
+      run|exec|dlx|--) continue ;;
+    esac
+    target="$tok"
+  done
+
+  [ -n "$runner" ] && [ -n "$target" ] || return 1
+  _resolve_delegated_target "$target" "$tools" "$depth"
+  return $?
 }
 
 _filter_reject() {
@@ -1760,14 +1803,32 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
   WORKTREE_TESTS="$(find . \( -name 'node_modules' -o -name 'dist' -o -name 'build' \) -prune -o \
     -type f \( -name '*.test.*' -o -name '*.spec.*' \) -print 2>/dev/null | head -1 || true)"
   if [ -z "$WORKTREE_TESTS" ]; then
-    HEAD_TESTS="$(git ls-tree -r --name-only HEAD -- . 2>/dev/null \
+    # Which commit is "before"? HEAD is right for the pre-commit gate, where the
+    # deletion is still only staged. In ship mode the deletion is already
+    # committed, so HEAD carries no tests either, this comparison found nothing
+    # missing, and a push that removes every test file and the test script with
+    # them exited 0 -- the suite disappearing by becoming the new HEAD.
+    #
+    # The push base is what the remote still has, so it is what "before" means
+    # for a push. Falls back to HEAD when no base is available, which is the
+    # pre-commit gate and a first push; a first push that carries no tests at
+    # all has no earlier state to have lost them from.
+    _lost_ref="HEAD"
+    if [ "${CI_GATE_MODE:-}" = "ship" ] && type ci::git::push_range >/dev/null 2>&1; then
+      _lost_range="$(ci::git::push_range 2>/dev/null || true)"
+      case "$_lost_range" in
+        *..*) _lost_ref="${_lost_range%%..*}" ;;
+      esac
+      git rev-parse --verify "${_lost_ref}^{commit}" >/dev/null 2>&1 || _lost_ref="HEAD"
+    fi
+    HEAD_TESTS="$(git ls-tree -r --name-only "$_lost_ref" -- . 2>/dev/null \
       | grep -E '\.(test|spec)\.[cm]?[jt]sx?$' | head -5 || true)"
     if [ -n "$HEAD_TESTS" ]; then
       echo "Workspace ${CI_GATE_NODE_WORKSPACE} has lost its entire test suite."
-      echo "  HEAD carries test files here and this tree has none, so the lane"
-      echo "  would pass having run no tests at all -- a test script left behind"
-      echo "  does not change that, because there is nothing for it to run."
-      echo "  Present at HEAD, for example:"
+      echo "  ${_lost_ref} carries test files here and this tree has none, so the"
+      echo "  lane would pass having run no tests at all -- a test script left"
+      echo "  behind does not change that, there being nothing for it to run."
+      echo "  Present at ${_lost_ref}, for example:"
       while IFS= read -r _gone; do
         [ -n "$_gone" ] || continue
         echo "    $_gone"

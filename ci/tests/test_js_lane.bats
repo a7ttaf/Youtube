@@ -2980,3 +2980,58 @@ ws_run() {
   [ "$status" -eq 0 ]
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: a checker after a terminating command does not count" {
+  # `"test": "exit 0 ; vitest run"` puts the runner in command position after a
+  # separator, so every rule was satisfied by a token the shell never reaches.
+  # A separator resets *where a command starts*, which is not the same question
+  # as whether one runs.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "exit 0 ; vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The control, and the reason this is `break` and not a ban on `exit`: a
+  # runner that has already been reached is not undone by exiting afterwards.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh ; exit 0" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: deleting the whole suite cannot pass by becoming the new HEAD" {
+  # The lost-suite guard compared the worktree against HEAD. In ship mode the
+  # deletion is already committed, so HEAD carries no tests either, nothing
+  # looked missing, and a push that removes every test file and the test script
+  # with them exited 0 -- the suite disappearing by becoming the new HEAD.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  local base
+  base="$(git rev-parse HEAD)"
+  git rm -q -r ws/tests >/dev/null 2>&1
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": {} }' > ws/package.json
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "remove the suite" >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  # The premises: the base carried tests and HEAD carries none, so a comparison
+  # against HEAD has nothing to notice.
+  run bash -c "cd '$NODE_SB' && git ls-tree -r --name-only '$base' -- ws | grep -c '\.test\.'"
+  [ "$output" -ge 1 ]
+  run bash -c "cd '$NODE_SB' && git ls-tree -r --name-only HEAD -- ws | grep -c '\.test\.' || true"
+  [ "$output" -eq 0 ]
+
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' \
+    CI_GATE_NODE_WORKSPACE=ws bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"lost its entire test suite"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}

@@ -1567,3 +1567,45 @@ frontend/tests"
   [[ "$output" == *"stray.test.ts"* ]]
   rm -f "$SANDBOX/frontend/src/stray.test.ts"
 }
+
+@test "test-layout: a shorthand test property overrides the block and is refused" {
+  # `const test = {...}` plus `defineConfig({ test: { include: [broad] }, test })`
+  # applies the shorthand last, so vitest used the narrow one while the guard
+  # read the broad one and reported every file runnable. Only the colon form was
+  # ever recognised as a `test` key.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const test = { include: ["tests/only.test.ts"] };
+
+export default defineConfig({ test: { include: ["tests/**/*.test.{ts,tsx}"] }, test });
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+
+  # A method form reaches the same place by another spelling.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+  test() { return { include: ["tests/only.test.ts"] }; },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+}
+
+@test "test-layout: an unreadable staged config is infrastructure, not a pass" {
+  # The index lists the blob and git cannot produce it. Dropping it silently
+  # left the caller validating the worktree copy alone and reporting PASS --
+  # approving a commit whose active include was never inspected.
+  run grep -n 'cannot read that blob' "$REPO_ROOT/ci/checks/test-layout.sh"
+  [ "$status" -eq 0 ]
+  run bash -c "sed -n '/^config_sources()/,/^}/p' '$REPO_ROOT/ci/checks/test-layout.sh'"
+  [[ "$output" == *"CI_RESULT_FAIL_INFRA"* ]]
+  # And it must not be reachable only through the mktemp arm: the git-show
+  # failure has its own exit.
+  run bash -c "sed -n '/^config_sources()/,/^}/p' '$REPO_ROOT/ci/checks/test-layout.sh' | grep -c 'exit \"\$CI_RESULT_FAIL_INFRA\"'"
+  [ "$output" -eq 2 ]
+}

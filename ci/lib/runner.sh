@@ -142,13 +142,23 @@ ci::runner::_declared_timeout() {
   local want="$1"
   local file="${CI_CHECKS_CONFIG:-ci/config/checks.yml}"
   [ -f "$file" ] || return 0
-  awk -v want="  ${want}:" '
-    $0 == want { found = 1; next }
+  awk -v want="${want}" -v wantkey="  ${want}:" '
+    $0 == wantkey { found = 1; next }
     found && $0 ~ /^[[:space:]]*timeout_sec:/ {
       sub(/^[[:space:]]*timeout_sec:[[:space:]]*/, "")
       sub(/[[:space:]]*#.*$/, "")
-      gsub(/[^0-9]/, "")
-      if ($0 != "") print
+      sub(/[[:space:]]+$/, "")
+      # Validated, not filtered. `gsub(/[^0-9]/, "")` deleted the non-digits and
+      # joined what was left, so `1e3` became 13 and `-1` became 1: the runner
+      # then killed a blocking check seconds in and reported an infrastructure
+      # timeout that the configuration never asked for. A value that is not a
+      # whole number of seconds is a configuration error, and silently turning
+      # it into a different number is the worst of the available answers.
+      if ($0 ~ /^[0-9]+$/ && $0 + 0 > 0) {
+        print
+      } else {
+        print "timeout_sec for " want " is not a positive whole number: " $0 > "/dev/stderr"
+      }
       exit
     }
     found && $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { exit }

@@ -1616,7 +1616,36 @@ single P-tier above.
   in; then because `ws_setup` copies the current `ci/lib/git.sh` beside an older
   `node.sh`, whose renamed helper no longer exists, so the run died on a missing
   function instead. A refutation that passes is not the same as code that works.
-  Combined suite: `bats ci/tests/` = 345 cases, 0 failures.
+  A thirty-sixth round found seven, three P1, and one was two reviewers
+  disagreeing about the same rule. codex and Qodo pulled the tag exception in
+  opposite directions and both were right about their own failure: refusing
+  every tag push failed the ship gate on an ordinary release workflow, while
+  allowing any tag on an *ancestor* of HEAD let a failing commit be tagged,
+  repaired in a descendant, and pushed while the lanes validated the repaired
+  tree. Ancestry says the worktree contains that history; it says nothing about
+  the tagged tree having been checked. **Publication** settles it — a commit a
+  remote branch already contains was gated when its branch went out, so the tag
+  adds a label and no content; one no remote branch contains is carried out by
+  the tag itself. Stale remote-tracking refs make that stricter, not looser.
+  The lost-suite guard compared against HEAD, and in ship mode the deletion is
+  already committed — so HEAD carried no tests either, nothing looked missing,
+  and a push removing every test file and the test script exited **0** with
+  "Node lane passed". It compares against the push base now. `"test": "exit 0 ;
+  vitest run"` was the checker rule again: a separator resets where a command
+  *starts*, which is not whether one runs. Fixing that broke a control —
+  `bash scripts/test.sh ; exit 0` was rejected because the separator cleared the
+  pending delegation before anything resolved it — so resolution moved into its
+  own function that runs wherever a command ends.
+  Three more: a shorthand, method or getter `test` overrides the colon-form
+  block and only the colon form was recognised (38 files reported runnable while
+  vitest listed four); an index entry whose blob git cannot produce was dropped
+  silently, leaving the worktree copy validated alone, now FAIL_INFRA; and
+  `timeout_sec` was filtered rather than validated, so `1e3` became 13 and `-1`
+  became 1 and the runner killed a blocking check seconds in. Qodo's portability
+  finding went with them — `sort -z -u` is a GNU extension against a stated Bash
+  3.2 floor, so the dedupe is done in the shell, quadratic over 219 candidates
+  and cheaper than the subprocess it replaces.
+  Combined suite: `bats ci/tests/` = 350 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

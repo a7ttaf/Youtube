@@ -148,21 +148,34 @@ ci::git::worktree_covers_push() {
   [ -n "$head" ] || return 1
   [ "$pushed" = "$head" ] && return 0
 
-  # A push that names no branch destination at all is a tag push, and refusing
-  # those broke a workflow that is entirely ordinary: `git tag v1.0 <older
-  # commit>; git push origin v1.0`. The tip is then the tagged commit, not
-  # HEAD, and the first version of this check failed the whole ship gate on it.
+  # A push that names no branch destination at all is a tag push. Two reviewers
+  # pulled this in opposite directions and both were right about their own
+  # failure, so the rule is narrower than either.
   #
-  # A tag on an *ancestor* of HEAD is content the worktree already contains, so
-  # the lanes are reporting on a descendant of what is going out rather than on
-  # something unrelated -- that is coverage, which is the question this function
-  # is actually asking. A tag pointing somewhere HEAD does not contain is not,
-  # and is still refused.
+  # Refusing every tag push blocks `git tag v1.0 <older commit>; git push origin
+  # v1.0`, an ordinary release workflow, and failed the whole ship gate on it.
+  # But "the tag is an ancestor of HEAD" is not enough either: a failing commit
+  # can be tagged, repaired in a descendant, and the tag pushed while the lanes
+  # validate the repaired HEAD. Ancestry says the worktree contains the tagged
+  # commit's history; it says nothing about the tagged *tree* having been
+  # checked.
+  #
+  # What settles it is whether the tagged commit has already been published. A
+  # commit contained in a remote-tracking branch went out as part of a branch
+  # push and was gated then, so the tag adds a label and no content -- there is
+  # nothing here for a content lane to vouch for. A tag on a commit no remote
+  # branch contains is carrying that commit out with it, and that is a tree
+  # nothing has ever checked.
+  #
+  # Remote-tracking refs can be stale, and stale makes this stricter rather than
+  # looser: fewer refs contain the commit, so the answer is refuse.
   #
   # Set-and-empty, not unset: unset means nobody told us and there is no second
   # tree to be wrong about, which the early return above already handles.
   if [ -n "${CI_GATE_PUSH_REMOTE_REFS+set}" ] && [ -z "${CI_GATE_PUSH_REMOTE_REFS}" ]; then
-    git merge-base --is-ancestor "$pushed" "$head" 2>/dev/null && return 0
+    local contained
+    contained="$(git branch -r --contains "$pushed" 2>/dev/null | head -1 || true)"
+    [ -n "$contained" ] && return 0
   fi
   return 1
 }
