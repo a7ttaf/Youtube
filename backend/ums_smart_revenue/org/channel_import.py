@@ -305,6 +305,13 @@ def _parse_row(
 # Blast Radius: Which rosters are admissible at all, and therefore whether the
 #   preview can overstate group work. Any surviving ERROR row rejects the whole
 #   apply. No writes of its own, no audit, no finance totals.
+#   BREAKING for one roster shape, stated plainly because the rest of this
+#   branch only adds refusals to races: a file restating a (channel, group)
+#   pair used to return 200 and now returns 422, so existing rosters carrying
+#   a restated line must be deduped before they apply again. What is preserved
+#   is the PERSISTED result, not the request outcome — the restated row
+#   performed no write, so the deduped file lands exactly the state the old
+#   code landed, and nothing already in the registry changes.
 # Connections:
 #   - File: backend/ums_smart_revenue/org/channel_import.py ->
 #     plan_channel_import consumes the surviving rows; its repeated-channel
@@ -335,9 +342,13 @@ def _flag_duplicates(
     channel to ``add_members`` twice), but planning does not: the second copy
     plans UNCHANGED and repeats the first's ``group_action``, so a dry run
     promises group work twice and counts a channel twice while the apply does
-    it once. Rejecting cannot lose a successful import — the duplicate row
-    never wrote anything — it only turns a preview that overstated its own
-    effect into a row error naming the line to delete.
+    it once.
+
+    This rejection IS a breaking change, and the contract block above says so:
+    a roster carrying a restated pair used to apply and now 422s until the
+    operator deletes the line. What it cannot change is any PERSISTED result —
+    the duplicate row performed no write, so the deduped file lands exactly
+    the state the old code landed. The cost is a corrected file, not lost data.
     """
     conflicted = _conflicting_channel_ids(rows)
     repeated = _repeated_associations(rows)

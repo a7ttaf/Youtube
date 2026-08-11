@@ -804,6 +804,12 @@ single P-tier above.
   render hint — a group-bearing roster needs both, so a channels-only
   principal never sees a control that 403s mid-flow) gating the header
   action — hidden, not disabled, without it. No new endpoint; no migration.
+  `can_import_channels` is the **Python field name**; `SessionCapabilities`
+  sets `alias_generator=to_camel`, so the key a client actually reads from
+  `/session/me` is **`canImportChannels`**. Both names are given because this
+  is the repo's frontend/backend casing seam, and a consumer that checks the
+  snake_case key finds `undefined` and silently hides Import CSV for everyone
+  (review #184, qodo).
   Review round (2026-08-09, PR #184) added four corrections, all about the
   preview telling the truth: (1) **both exits fail closed mid-request** —
   Cancel and Preview's Back were live while an apply POST was in flight, and
@@ -823,7 +829,7 @@ single P-tier above.
   no new endpoint and no migration.
   **Backend scope correction (2026-08-11).** The two "additive touch" notes
   above were written early and undercount what the PR ships: the final diff
-  is **1866 insertions across eight backend files as of `e30c56ba`**, and
+  is **1877 insertions across eight backend files**, and
   calling it additive reads as frontend-with-a-flag. Beyond
   `can_import_channels` and `group_action`, the route gained
   `expected_plan_fingerprint` — a **plan-bound apply** that 409s with the
@@ -837,9 +843,13 @@ single P-tier above.
   group — because the write pass collapses such a pair into one membership,
   so keeping both copies made the preview promise the group work twice and
   count the channel twice for a single association. It is the only change on
-  this branch that refuses input the previous code accepted, and it cannot
-  lose an import that previously succeeded: the duplicate row never wrote
-  anything. All three new behaviours are refusals, so the no-endpoint and
+  this branch that refuses input the previous code accepted, and it is
+  therefore **BREAKING**: such a roster returned 200 before and returns 422
+  now, so an existing file carrying a restated line must be deduped before it
+  applies again. What is preserved is the PERSISTED result, not the request
+  outcome — the restated row performed no write, so the deduped file lands
+  exactly the state the old code landed. All three new behaviours are
+  refusals, so the no-endpoint and
   no-migration claims still hold, and the unbound "the file wins" rule of
   #159 is untouched. Scope, rollback ordering and the per-file evidence live
   in `Docs/pulls/2026-08-09-pr-184-import-stepper-ui-handoff.md`.

@@ -473,8 +473,10 @@ on real ingestion (Phase 2) and the inventory load workflow.
   pre-state, a write-boundary recheck of the previewed group effect that binds
   unbound callers too, and a parser rejection of rosters restating one
   `(youtube_channel_id, group_id)` pair — the only change here that refuses
-  input the previous code accepted, and one that cannot lose a successful
-  import because the duplicate row never wrote anything. No new endpoint and
+  input the previous code accepted, and therefore the only BREAKING one: such
+  a roster returned 200 before and returns 422 now, and must be deduped to
+  apply again. No persisted result changes, because the restated row performed
+  no write. No new endpoint and
   no migration; #159's unbound "the file wins" rule is untouched. The
   import/sync UI arc is complete.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.

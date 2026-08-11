@@ -171,10 +171,15 @@ same `(youtube_channel_id, group_id)` pair, including two rows carrying no
 group at all. The second exists because the write pass collapses a repeated
 pair into one membership: keeping both copies made the dry run promise the
 group work twice and count the channel twice for a single association, so the
-preview overstated its own effect (review #184). Rejecting it cannot lose an
-import that previously succeeded — the duplicate row never wrote anything —
-so a roster that used to apply persists exactly the same state once the
-restated line is removed. UPDATE and UNCHANGED rows both write through the
+preview overstated its own effect (review #184).
+**This second shape is a BREAKING change for clients** and is the only one on
+this branch: a roster restating a pair previously returned **200** and now
+returns **422**, so an existing roster carrying such a line must be deduped
+before it will apply again. What is preserved is the PERSISTED result, not the
+request outcome — the restated row performed no write, so the deduped file
+lands exactly the state the old code landed and nothing already in the registry
+changes. A client holding a roster it applied successfully before should expect
+a 422 naming the restated row number, and remove that line. UPDATE and UNCHANGED rows both write through the
 registry at the apply boundary so a concurrent change committed after
 planning cannot survive the roster (the file wins); CHANNEL_UPDATED is
 recorded exactly when the write-boundary diff is non-empty, so healed drift

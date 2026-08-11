@@ -114,10 +114,16 @@ apply test, then 34 when the duplicate-repeat rule brought
    planned UNCHANGED and repeated the first's `group_action`, while the write
    pass collapses the pair, so the preview promised the group work twice and
    counted the channel twice for one membership. This is the only behaviour
-   change here that **rejects input the previous code accepted**, and it cannot
-   lose a successful import: the duplicate row never wrote anything, so the
-   persisted result of a roster that used to import is unchanged — only the
-   misleading preview becomes an explicit error naming the line to delete.
+   change here that **rejects input the previous code accepted**, which makes
+   it the branch's only **BREAKING** change and the one an operator can be
+   surprised by: a roster restating a pair returned 200 before and returns 422
+   now, and must have that line removed before it applies again. What is
+   preserved is the PERSISTED result, not the request outcome — the restated
+   row performed no write, so the deduped file lands exactly the state the old
+   code landed and nothing already in the registry moves. Worth stating in
+   those terms because an earlier draft of this entry said the rejection
+   "cannot lose a successful import", which conflated the two and read as
+   "nothing changes for existing rosters" (review #184, qodo).
    Rosters listing one channel under several **distinct** groups are unaffected.
    The client's plan validator enforces the same uniqueness, because a check
    the backend applies to the CSV says nothing about a malformed *response*:
@@ -286,7 +292,7 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1866 insertions across eight files as of `9a0ac728`**
+backend diff is **1877 insertions across eight files**
 (`git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a
 frontend revert leaves all of it running.
 
