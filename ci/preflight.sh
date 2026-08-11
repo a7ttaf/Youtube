@@ -726,8 +726,8 @@ export CI_GATE_MODE="$MODE"
 # which is a much larger change than this is a bug, and one that fails badly
 # on a dirty tree. Declining to answer is the honest option, and the remedy is
 # one command for the developer.
-if [ "$MODE" = "ship" ] && type ci::git::push_tip_is_checkout >/dev/null 2>&1 \
-  && ! ci::git::push_tip_is_checkout; then
+if [ "$MODE" = "ship" ] && type ci::git::worktree_covers_push >/dev/null 2>&1 \
+  && ! ci::git::worktree_covers_push; then
   ci::git::explain_push_tip_drift >&2
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi

@@ -110,8 +110,15 @@ ci::git::has_conflict_markers_in_changed() {
   git diff -U0 | grep -E '^\+[[:space:]]*(<{7}|={7}|>{7})([[:space:]]|$)' >/dev/null 2>&1
 }
 
-# ci::git::push_tip_is_checkout – 0 when the commit being pushed is the one the
-# worktree is standing on.
+# ci::git::worktree_covers_push – 0 when the worktree can stand in for what is
+# being pushed.
+#
+# Named for the question rather than for one way of answering it. The first
+# version asked "is the pushed tip the checkout", which is the common case and
+# not the whole of it: a tag pointing at an ancestor of HEAD is content the
+# worktree already contains, and refusing that failed `git tag v1.0 <older
+# commit>; git push origin v1.0` -- an ordinary release workflow -- on a gate
+# whose whole point is to not block correct work.
 #
 # Ranges are resolved from the hook's SHAs, so the *history* checks read the
 # right commits. Everything that runs content — the node lane, the test-layout
@@ -129,7 +136,7 @@ ci::git::has_conflict_markers_in_changed() {
 # Unset means nobody said, which is CI and every direct invocation: those run
 # against whatever is checked out by design, and there is no second tree to be
 # wrong about.
-ci::git::push_tip_is_checkout() {
+ci::git::worktree_covers_push() {
   local tip="${CI_GATE_PUSH_NEW_SHA:-}"
   [ -n "$tip" ] || return 0
   local pushed head
@@ -139,7 +146,25 @@ ci::git::push_tip_is_checkout() {
   # an unreadable sha is the same fail-closed direction as everywhere else.
   [ -n "$pushed" ] || return 1
   [ -n "$head" ] || return 1
-  [ "$pushed" = "$head" ]
+  [ "$pushed" = "$head" ] && return 0
+
+  # A push that names no branch destination at all is a tag push, and refusing
+  # those broke a workflow that is entirely ordinary: `git tag v1.0 <older
+  # commit>; git push origin v1.0`. The tip is then the tagged commit, not
+  # HEAD, and the first version of this check failed the whole ship gate on it.
+  #
+  # A tag on an *ancestor* of HEAD is content the worktree already contains, so
+  # the lanes are reporting on a descendant of what is going out rather than on
+  # something unrelated -- that is coverage, which is the question this function
+  # is actually asking. A tag pointing somewhere HEAD does not contain is not,
+  # and is still refused.
+  #
+  # Set-and-empty, not unset: unset means nobody told us and there is no second
+  # tree to be wrong about, which the early return above already handles.
+  if [ -n "${CI_GATE_PUSH_REMOTE_REFS+set}" ] && [ -z "${CI_GATE_PUSH_REMOTE_REFS}" ]; then
+    git merge-base --is-ancestor "$pushed" "$head" 2>/dev/null && return 0
+  fi
+  return 1
 }
 
 # The message, in one place, because two callers print it.

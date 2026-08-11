@@ -1566,7 +1566,57 @@ single P-tier above.
   `make` also left the runner list -- its argument is a Makefile target, not a
   package script or a file, so `make test` had been resolving a `test` script
   from the manifest and accepting whatever that ran.
-  Combined suite: `bats ci/tests/` = 338 cases, 0 failures.
+  A thirty-fourth round found one, and it was a regression from the round
+  before it. The ship-mode guard asked "is the pushed tip the checkout" and
+  refused otherwise -- correct for `git push origin other-branch`, wrong for
+  `git tag v1.0 <older commit>; git push origin v1.0`, where the tip is the
+  tagged commit and the whole ship gate failed on an ordinary release workflow.
+  Qodo caught it. The question being asked is whether the worktree can stand in
+  for what is going out, and "is it the checkout" is the common answer rather
+  than the whole of it: a tag on an ancestor of HEAD is content the worktree
+  already contains. Renamed `ci::git::worktree_covers_push`, since the old name
+  described one way of answering rather than the question. The relaxation is
+  narrow -- only when the push names no branch destination at all, so `git push
+  origin other-branch` walks straight back into the refusal, and a tag pointing
+  somewhere HEAD does not contain is still refused.
+  A thirty-fifth round found five, three P1, and one of them broke the lane
+  outright. `[ -e "$_d" ] && printf ...` left the test's false status as the
+  status of the deletion loop whenever the last deleted path was genuinely
+  gone -- the ordinary case for a clean deletion commit -- and that propagated
+  through the command substitution, the assignment and `set -e`. Reproduced:
+  the pre-fix lane exits **raw 1 with 39 bytes of output**, the section header
+  and nothing else, before install, typecheck, test or build. An `if` makes the
+  loop end successfully.
+  Two more were the checker rule again, now five and six. A pipeline reports its
+  *last* command's status, so `tsc --noEmit | cat` prints errors and exits 0
+  while the command-position rule returned success without looking past the
+  checker; and `unused() { node --test; }` followed by `exit 0` named a runner,
+  in command position, inside a function nobody calls. Pipelines join `||` and
+  `&` as compositions whose result cannot be attributed to the checker, and a
+  delegated script now counts a line only at its top level, outside every brace
+  group and block. Qodo added the third: `a||b` is the same operator as `a || b`,
+  and matching only the spaced spelling was a bypass two keystrokes wide.
+  The fifth was a fail-open on the layout guard. Its candidate list was
+  line-oriented, so a path containing a newline arrived as two and the tail could
+  be spelled to sit under `frontend/tests/`. Reproduced: **exit 0, "Test layout
+  OK: 1 file(s)"** on a stray test vitest will never collect. find, ls-files and
+  ls-tree are NUL-delimited now and the candidates are held in arrays, because a
+  command substitution cannot carry NUL bytes.
+  Three defects of my own turned up while fixing these, all caught before they
+  landed: `exec vitest run` was rejected by the new control-flow rule (that is
+  how a wrapper normally hands over); a multi-line function body was accepted
+  because the definition line was skipped before its braces were counted; and
+  the typecheck path rejected the pipeline as "does not appear to run a type
+  checker", which is false -- it names tsc and runs it, then discards the
+  answer. The composition check is one shared function now, so both paths give
+  the same reason.
+  Worth recording about the refutations rather than the fixes: the deletion case
+  passed twice against the broken code before it reproduced. First because
+  setting `CI_GATE_NODE_WORKSPACE` skips the discovery pass the drift scan lives
+  in; then because `ws_setup` copies the current `ci/lib/git.sh` beside an older
+  `node.sh`, whose renamed helper no longer exists, so the run died on a missing
+  function instead. A refutation that passes is not the same as code that works.
+  Combined suite: `bats ci/tests/` = 345 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

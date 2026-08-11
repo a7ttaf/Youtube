@@ -91,11 +91,21 @@ CANDIDATE_PRUNE=(
   ')' -prune -o
 )
 
+# NUL-delimited, from every source, and read that way by the caller.
+#
+# A line-oriented list cannot represent a path containing a newline: one such
+# path arrives as two, and the tail of it can be spelled to look like it sits
+# under frontend/tests/. A file whose name embeds a newline followed by
+# "frontend/tests/evil.test.ts" therefore reported "Test layout OK: 0 file(s)"
+# while vitest collects nothing
+# of the sort -- a fail-open on the guard whose entire job is to notice tests
+# that will never run. git already emits its own quoted spelling for these
+# unless told otherwise, so the two sources did not even agree about the path.
 candidate_files() {
   {
-    find "$FRONTEND_DIR" "${CANDIDATE_PRUNE[@]}" -type f "${TEST_SUFFIXES[@]}" -print 2>/dev/null || true
+    find "$FRONTEND_DIR" "${CANDIDATE_PRUNE[@]}" -type f "${TEST_SUFFIXES[@]}" -print0 2>/dev/null || true
     if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
-      git ls-files -- "$FRONTEND_DIR" 2>/dev/null || true
+      git ls-files -z -- "$FRONTEND_DIR" 2>/dev/null || true
       # And HEAD, in ship mode. The union above is worktree plus index, which
       # describes the pre-commit gate; the pre-push gate stands behind HEAD, and
       # this file had no notion of that at all. Remove a stray test from the
@@ -104,10 +114,10 @@ candidate_files() {
       # while node.sh, on the identical state, reported drift. Two checks, one
       # file, opposite answers, and this is the one on the always-run list.
       if [ "${CI_GATE_MODE:-}" = "ship" ] && git rev-parse --verify HEAD >/dev/null 2>&1; then
-        git ls-tree -r --name-only HEAD -- "$FRONTEND_DIR" 2>/dev/null || true
+        git ls-tree -r -z --name-only HEAD -- "$FRONTEND_DIR" 2>/dev/null || true
       fi
     fi
-  } | sort -u
+  } | sort -z -u
 }
 
 # find applies PRUNE itself; git ls-files does not, so the predicates below are
@@ -131,24 +141,30 @@ path_is_pruned() {
   return 1
 }
 
-ALL_CANDIDATES="$(candidate_files)"
+# Held in an array, because a command substitution cannot carry NUL bytes --
+# bash drops them -- which would put the newline problem straight back.
+ALL_CANDIDATES=()
+while IFS= read -r -d '' _cand; do
+  [ -n "$_cand" ] || continue
+  ALL_CANDIDATES+=("$_cand")
+done < <(candidate_files)
 
-STRAY=""
-while IFS= read -r f; do
+# Arrays throughout, for the same reason the candidate list is one: a path
+# holding a newline cannot survive being joined into a string and split again.
+STRAY=()
+for f in ${ALL_CANDIDATES[@]+"${ALL_CANDIDATES[@]}"}; do
   [ -z "$f" ] && continue
   path_is_test_like "$f" || continue
   path_is_pruned "$f" && continue
   case "$f" in "$TESTS_DIR"/*) continue ;; esac
-  STRAY="${STRAY}${f}"$'\n'
-done <<< "$ALL_CANDIDATES"
-STRAY="$(printf '%s' "$STRAY" | sed '/^$/d')"
+  STRAY+=("$f")
+done
 
-if [ -n "$STRAY" ]; then
+if [ "${#STRAY[@]}" -gt 0 ]; then
   fail "Test files found outside ${TESTS_DIR}/. vitest include is '${DECLARED_GLOB}', so these would NEVER RUN:"
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
+  for f in "${STRAY[@]}"; do
     echo "  $f"
-  done <<< "$STRAY"
+  done
   echo ""
   echo "  Move each to ${TESTS_DIR}/, mirroring src/ without the __tests__ segment:"
   echo "    frontend/src/lib/api/__tests__/useThing.test.tsx"
@@ -162,13 +178,13 @@ LEGACY_DIRS="$( {
   find "$FRONTEND_DIR" "${PRUNE[@]}" -type d -name '__tests__' -print 2>/dev/null || true
   # Index side: a staged file under a __tests__/ path names the directory even
   # when the directory no longer exists on disk.
-  while IFS= read -r f; do
+  for f in ${ALL_CANDIDATES[@]+"${ALL_CANDIDATES[@]}"}; do
     [ -z "$f" ] && continue
     path_is_pruned "$f" && continue
     case "$f" in
       */__tests__/*) printf '%s\n' "${f%%/__tests__/*}/__tests__" ;;
     esac
-  done <<< "$ALL_CANDIDATES"
+  done
 } | sort -u | sed '/^$/d')"
 
 if [ -n "$LEGACY_DIRS" ]; then
@@ -185,22 +201,20 @@ fi
 #    this is the silent-skip failure mode the guard exists to catch.
 # ---------------------------------------------------------------------------
 #    Everything test-looking except the two suffixes the glob actually collects.
-UNRUNNABLE=""
-while IFS= read -r f; do
+UNRUNNABLE=()
+for f in ${ALL_CANDIDATES[@]+"${ALL_CANDIDATES[@]}"}; do
   [ -z "$f" ] && continue
   case "$f" in "$TESTS_DIR"/*) ;; *) continue ;; esac
   path_is_test_like "$f" || continue
   case "$f" in *.test.ts | *.test.tsx) continue ;; esac
-  UNRUNNABLE="${UNRUNNABLE}${f}"$'\n'
-done <<< "$ALL_CANDIDATES"
-UNRUNNABLE="$(printf '%s' "$UNRUNNABLE" | sed '/^$/d')"
+  UNRUNNABLE+=("$f")
+done
 
-if [ -n "$UNRUNNABLE" ]; then
+if [ "${#UNRUNNABLE[@]}" -gt 0 ]; then
   fail "Files under ${TESTS_DIR}/ that do not match '${DECLARED_GLOB}' and are therefore silently skipped:"
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
+  for f in "${UNRUNNABLE[@]}"; do
     echo "  $f"
-  done <<< "$UNRUNNABLE"
+  done
   echo ""
   echo "  Rename to *.test.ts / *.test.tsx, or widen test.include in ${VITEST_CONFIG}"
   echo "  and DECLARED_GLOB in this script together."

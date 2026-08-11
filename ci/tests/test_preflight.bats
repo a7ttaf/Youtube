@@ -933,3 +933,69 @@ YML
   [[ "$output" != *"Large file detected"* ]]
   rm -rf "$GS_SB"
 }
+
+@test "git: a tag on an ancestor is covered by the worktree; an unrelated one is not" {
+  # The first version of this check asked "is the pushed tip the checkout",
+  # which refused `git tag v1.0 <older commit>; git push origin v1.0` -- an
+  # ordinary release workflow -- and failed the whole ship gate on it. A tag on
+  # an ancestor is content the worktree already contains, so the lanes report on
+  # a descendant of what is going out rather than on something unrelated.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  (
+    cd "$sb"
+    git init -q -b main .
+    printf 'a\n' > a.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c1
+    printf 'b\n' > b.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c2
+    git checkout -q -b side HEAD~1
+    printf 's\n' > s.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm side1
+    git checkout -q main
+    printf '%s %s %s\n' "$(git rev-parse HEAD~1)" "$(git rev-parse HEAD)" "$(git rev-parse side)" > .shas
+  ) >/dev/null 2>&1
+  local old head side
+  read -r old head side < "$sb/.shas"
+
+  # The premise: old really is an ancestor of HEAD and side really is not.
+  run bash -c "cd '$sb' && git merge-base --is-ancestor '$old' '$head'"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$sb' && git merge-base --is-ancestor '$side' '$head'"
+  [ "$status" -ne 0 ]
+
+  # A tag push names no branch destination: set-and-empty, not unset.
+  run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
+    && CI_GATE_PUSH_NEW_SHA='$old' CI_GATE_PUSH_REMOTE_REFS= ci::git::worktree_covers_push"
+  [ "$status" -eq 0 ]
+
+  # A tag pointing somewhere HEAD does not contain is still refused: that is a
+  # tree the lanes genuinely cannot speak for.
+  run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
+    && CI_GATE_PUSH_NEW_SHA='$side' CI_GATE_PUSH_REMOTE_REFS= ci::git::worktree_covers_push"
+  [ "$status" -ne 0 ]
+
+  # And a *branch* push of an ancestor is still refused -- the relaxation is for
+  # tags only, or `git push origin other-branch` would walk straight back in.
+  run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
+    && CI_GATE_PUSH_NEW_SHA='$old' CI_GATE_PUSH_REMOTE_REFS=other ci::git::worktree_covers_push"
+  [ "$status" -ne 0 ]
+
+  # A destination list that is *unset* is not the tag case: it means nobody told
+  # us what this push targets, and a tip that is set and unequal is still a tree
+  # the lanes cannot speak for.
+  run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
+    && CI_GATE_PUSH_NEW_SHA='$side' ci::git::worktree_covers_push"
+  [ "$status" -ne 0 ]
+
+  # No tip at all is the real "nobody said": CI and every direct invocation run
+  # against whatever is checked out by design, and there is no second tree to be
+  # wrong about.
+  run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
+    && ci::git::worktree_covers_push"
+  [ "$status" -eq 0 ]
+  rm -rf "$sb"
+}

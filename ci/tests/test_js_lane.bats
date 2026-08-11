@@ -2866,3 +2866,117 @@ ws_run() {
   [[ "$output" != *"type checker"* ]]
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: a clean deletion does not abort the lane" {
+  # `[ -e "$_d" ] && printf ...` leaves the test's false status as the status of
+  # the loop when the last deleted path is genuinely gone -- which is the
+  # ordinary case -- and that propagated through the command substitution, the
+  # assignment, and this script's `set -e`. The lane exited raw 1 with no
+  # diagnostic, before install, typecheck, test or build had run.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  printf 'x\n' > ws/gone.ts
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  local base
+  base="$(git rev-parse HEAD)"
+  git rm -q ws/gone.ts >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete it" >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  # The premise: the deletion is clean -- the path really is gone from the tree.
+  [ ! -e "$NODE_SB/ws/gone.ts" ]
+
+  # Deliberately without CI_GATE_NODE_WORKSPACE. The drift scan lives in the
+  # discovery pass, and setting that variable skips discovery entirely -- an
+  # earlier version of this case did exactly that and passed against the broken
+  # code, which is the whole reason a refutation is run before a case is kept.
+  #
+  # Refuting this one by swapping ci/checks/node.sh alone does not work and is
+  # worth writing down: ws_setup copies the *current* ci/lib/git.sh beside it,
+  # and the older node.sh calls a helper that has since been renamed, so the run
+  # dies on a missing function and the case passes for the wrong reason. The
+  # reproduction that stands behind it swaps both files together, and shows the
+  # pre-fix lane exiting raw 1 with 39 bytes of output -- the section header and
+  # nothing else.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' \
+    bash ci/checks/node.sh 2>&1"
+  # Whatever the verdict, it must be one of the gate's own and must have a
+  # diagnostic behind it. Raw 1 with no output is the bug.
+  [ "$status" -ne 1 ]
+  [ -n "$output" ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a pipeline hides the checker's status and is refused" {
+  # A pipeline reports its *last* command's status, so `tsc --noEmit | cat`
+  # prints TS errors and exits 0. The checker is in command position, so the
+  # command-position rule returned success without ever looking at the pipe.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit | cat", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"pipes or branches"* ]]
+  rm -rf "$NODE_SB"
+
+  # A fresh sandbox for the test script: leaving the tsconfig behind would make
+  # the run fail on the missing typecheck script first, and this case would then
+  # be asserting on a verdict it did not cause.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run | tee out.log" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"pipes or branches"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: || without spaces is the same operator and is refused" {
+  # `case " $cmd " in *" || "*)` only recognised the spaced spelling, so the
+  # guard was two keystrokes wide.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run||true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"pipes or branches"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true||vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a runner the delegated script never reaches does not count" {
+  # `unused() { node --test; }` followed by `exit 0` names a runner, in command
+  # position, inside a function nobody calls. The line-by-line scan accepted it.
+  ws_setup
+  printf '#!/usr/bin/env bash\nunused() { node --test; }\nexit 0\n' > "$NODE_SB/ws/scripts/dead.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/dead.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The same one line lower, inside a conditional this reader cannot evaluate.
+  printf '#!/usr/bin/env bash\nif [ -n "$NOPE" ]; then\n  vitest run\nfi\n' > "$NODE_SB/ws/scripts/cond.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/cond.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # The control: a wrapper that plainly hands over is still accepted, including
+  # via `exec`, which is how a wrapper normally does it.
+  printf '#!/usr/bin/env bash\nset -e\nexec ./scripts/vitest run "$@"\n' > "$NODE_SB/ws/scripts/live.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/live.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}

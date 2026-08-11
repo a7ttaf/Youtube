@@ -18,7 +18,7 @@ ci::common::section "Check: node lane"
 # only report on the wrong tree. Checked here as well as in preflight.sh because
 # the lane is invoked directly too, and both call the one helper rather than
 # each carrying its own copy of the comparison.
-if [ "${CI_GATE_MODE:-}" = "ship" ] && ! ci::git::push_tip_is_checkout; then
+if [ "${CI_GATE_MODE:-}" = "ship" ] && ! ci::git::worktree_covers_push; then
   ci::git::explain_push_tip_drift
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi
@@ -261,9 +261,19 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
           # ordinary development — while its printed remedy, "commit the rest",
           # is precisely what git-safety.sh blocks. Two checks, one file,
           # contradictory instructions. Keying on deletions needs no prune list.
+          # `if`, not `[ -e ] && printf`. A deletion whose path is genuinely
+          # gone leaves the test false, and on the *last* iteration that becomes
+          # the status of the loop, then of the command substitution, then of
+          # the `_drift` assignment -- and under this script's `set -e` the node
+          # lane aborted with a raw status 1 and no diagnostic at all, before
+          # install, typecheck, test or build had run. A commit that cleanly
+          # deletes a workspace file is the ordinary case, so the gate broke on
+          # correct work and did not even say so.
           while IFS= read -r _d; do
             [ -n "$_d" ] || continue
-            [ -e "$_d" ] && printf '%s\n' "$_d"
+            if [ -e "$_d" ]; then
+              printf '%s\n' "$_d"
+            fi
           done <<< "$(git -c core.quotepath=false log --diff-filter=D --name-only --format= "$_gate_range" -- "$_scope" 2>/dev/null || true)"
         } | sort -u | sed '/^$/d')"
         [ -n "$_drift" ] && PARTIAL="${PARTIAL}${_drift}"$'\n'
@@ -1204,6 +1214,45 @@ script_command() {
 # This rule has now been fixed five times, and every previous attempt lost for
 # the same reason -- it asked whether a string contains something rather than
 # whether the shell would execute it. Presence is not execution.
+# _reject_untrustworthy_composition <script name> <command> – exits the lane
+# when the command composes in a way whose result cannot be attributed to the
+# checker. Shared by the typecheck and test paths so both give the same reason.
+#
+# Spelled without spaces on purpose: `a||b` is the same operator as `a || b`,
+# and matching only the spaced form was a bypass two keystrokes wide.
+_reject_untrustworthy_composition() {
+  local _name="$1" _cmd="$2"
+  # `&&` is removed before the `&` test rather than enumerated around it: it is
+  # the one composition that is safe, since either the checker runs or the thing
+  # before it failed and the script fails with it.
+  local _cmp="${_cmd//&&/}"
+  case "$_cmd" in
+    *"|"*)
+      echo "Workspace ${CI_GATE_NODE_WORKSPACE} pipes or branches the '${_name}' script, so its"
+      echo "  result cannot be trusted:"
+      echo "    ${_name}: ${_cmd}"
+      echo "  A pipeline reports the status of its *last* command, so"
+      echo "  'vitest run | tee out.log' exits 0 with a failing suite behind it,"
+      echo "  and 'tsc --noEmit | cat' reports success while printing errors."
+      echo "  '||' is the other half: either the checker is never reached, or it"
+      echo "  ran and its failure was swallowed. Whether 'pipefail' is set inside"
+      echo "  the script is not something this gate can see."
+      echo "  Use '&&', or ';', or move the composition into a script this gate"
+      echo "  does not have to reason about."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+      ;;
+  esac
+  case "$_cmp" in
+    *"&"*)
+      echo "Workspace ${CI_GATE_NODE_WORKSPACE} backgrounds the '${_name}' script:"
+      echo "    ${_name}: ${_cmd}"
+      echo "  The script exits before the checker it started has finished, so the"
+      echo "  lane reports PASS with no result behind it."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+      ;;
+  esac
+}
+
 # Strip one leading and one trailing quote from $tok, in place.
 #
 # A bracket expression is the obvious way to write this and is treacherous:
@@ -1244,12 +1293,25 @@ _script_names_a_checker() {
   # vouched for, so `||` is refused outright rather than reasoned about
   # case by case. `&` backgrounds the checker and lets the script exit before
   # it finishes, which is the same lie with different timing.
-  case " $cmd " in
-    *" || "*) return 1 ;;
-    *" & "*) return 1 ;;
-  esac
+  # Matched without requiring spaces around them. `a||b` is the same shell
+  # operator as `a || b`, and a rule that only recognised the spaced spelling
+  # was a bypass anyone could reach by deleting two characters.
+  #
+  # A pipeline goes with them. `tsc --noEmit | cat` puts the checker in command
+  # position and then throws its status away -- the shell reports the *last*
+  # command's, so tsc printing TS2322 arrives as a pass. Whether `pipefail` is
+  # set inside the package script is not something this reader can know, so a
+  # pipeline is refused for the same reason as everything else here: the result
+  # cannot be shown to come from the checker.
+  # `&&` is removed before the `&` test rather than enumerated around it: it is
+  # the one form that is safe, since either the checker runs or the thing before
+  # it failed and the script fails with it.
+  local _comp="${cmd//&&/}"
   case "$cmd" in
-    *" &") return 1 ;;
+    *"|"*) return 1 ;;
+  esac
+  case "$_comp" in
+    *"&"*) return 1 ;;
   esac
 
   # An inline shell command is judged as the command it is. `bash -c tsc` runs
@@ -1299,6 +1361,13 @@ _script_names_a_checker() {
       # `NODE_ENV=test vitest run` still starts with vitest.
       case "$tok" in
         [A-Za-z_]*=*) continue ;;
+      esac
+      # And so does `exec vitest run`, which is how a wrapper script normally
+      # hands over. These replace the current process or merely prefix it; the
+      # token after them is still where the command starts, so `continue`
+      # without clearing expect_cmd.
+      case "${tok##*/}" in
+        exec|command|nohup|time) continue ;;
       esac
       for t in $tools; do
         [ "${tok##*/}" = "$t" ] && return 0
@@ -1356,16 +1425,55 @@ _script_names_a_checker() {
   # stripped first, because a checker named in a comment is not one being run --
   # and stripping can only ever cause a refusal, never an acceptance.
   if [ -f "$target" ] && [ -r "$target" ]; then
-    local line stripped
+    # Only lines the script is bound to reach.
+    #
+    # A flat line-by-line scan accepted `unused() { node --test; }` followed by
+    # `exit 0`: the runner is named, in command position, inside a function
+    # nobody calls. Same for a checker buried in an `if` branch or a loop -- the
+    # shell may or may not reach it, and this reader cannot evaluate shell
+    # control flow to find out. So a line counts only at the top level of the
+    # script, outside every brace group and every block.
+    #
+    # Deliberately strict, and the message says what to do about it: a workspace
+    # whose invocation really is conditional can name its runner in the manifest
+    # instead, which is the thing this gate can actually read.
+    local line stripped brace=0 block=0 opens closes _fn=0
     while IFS= read -r line || [ -n "$line" ]; do
       stripped="${line%%#*}"
       case "$stripped" in
         *[![:space:]]*) ;;
         *) continue ;;
       esac
-      if _script_names_a_checker "$stripped" "$tools" "$((depth + 1))"; then
-        return 0
+
+      # A function definition line is never itself a command being run. It is
+      # not skipped outright, though: a multi-line `f() {` still opens a brace
+      # that the accounting below has to see, and skipping the line before
+      # counting it left the body reading as top level -- which accepted the
+      # very case this rule is for, one line lower down.
+      _fn=0
+      case "$stripped" in
+        *'()'*'{'*) _fn=1 ;;
+        *'()'*) _fn=1 ;;
+      esac
+
+      if [ "$_fn" -eq 0 ] && [ "$brace" -eq 0 ] && [ "$block" -eq 0 ]; then
+        if _script_names_a_checker "$stripped" "$tools" "$((depth + 1))"; then
+          return 0
+        fi
       fi
+
+      # Track what this line opens or closes, after it has been judged.
+      opens="${stripped//[!\{]/}"
+      closes="${stripped//[!\}]/}"
+      brace=$((brace + ${#opens} - ${#closes}))
+      [ "$brace" -lt 0 ] && brace=0
+      case "$stripped" in
+        *if\ *|*'if('*) block=$((block + 1)) ;;
+        *for\ *|*while\ *|*until\ *|*case\ *) block=$((block + 1)) ;;
+      esac
+      case "$stripped" in
+        *fi*|*done*|*esac*) [ "$block" -gt 0 ] && block=$((block - 1)) ;;
+      esac
     done < "$target"
     return 1
   fi
@@ -1420,28 +1528,7 @@ assert_no_persistent_filter() {
   # `true || vitest run` is the other half: the runner is never reached at all.
   # `&` is the same lie with different timing -- the script exits before the
   # suite it backgrounded has finished.
-  case " $cmd " in
-    *" || "*|*" & "*)
-      echo "Workspace ${CI_GATE_NODE_WORKSPACE} composes the '${script_name}' script so its result"
-      echo "  cannot be trusted:"
-      echo "    ${script_name}: ${cmd}"
-      echo "  '||' means one side or the other does not run: either the runner is"
-      echo "  never reached, or it ran and its failure was swallowed and the script"
-      echo "  exited 0 anyway. '&' backgrounds the runner and lets the script exit"
-      echo "  before it finishes. In each case the lane reports PASS without a"
-      echo "  suite result behind it. Use '&&', or ';', or split the script."
-      exit "$CI_RESULT_FAIL_NEW_ISSUE"
-      ;;
-  esac
-  case "$cmd" in
-    *" &")
-      echo "Workspace ${CI_GATE_NODE_WORKSPACE} backgrounds the '${script_name}' script:"
-      echo "    ${script_name}: ${cmd}"
-      echo "  The script exits before the runner it started has finished, so the"
-      echo "  lane reports PASS with no suite result behind it."
-      exit "$CI_RESULT_FAIL_NEW_ISSUE"
-      ;;
-  esac
+  _reject_untrustworthy_composition "$script_name" "$cmd"
 
   # Delegation is accepted only when what it hands to can be read and reaches a
   # checker. A no-op is not delegation.
@@ -1608,6 +1695,15 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
   # both do; `bash -c true` and `npm --version` do not, and an inline `-c`
   # command is judged on its own contents like any other.
   _tc_cmd="$(script_command typecheck)"
+  # The composition check runs here too, and before the predicate, so the
+  # message describes what is actually wrong. `tsc --noEmit | cat` is refused
+  # either way -- the predicate returns 1 for a pipeline -- but the verdict that
+  # came out was "does not appear to run a type checker", which is false: it
+  # names tsc and runs it, and then throws the answer away. This PR has already
+  # had to fix two diagnostics that were right about the outcome and wrong about
+  # the cause; that is worth one shared function.
+  _reject_untrustworthy_composition typecheck "$_tc_cmd"
+
   _tc_ok=0
   # Word-splitting is the point; globbing is not. `tsc -p tsconfig.*.json` would
   # otherwise expand against the workspace and be matched as filenames — the

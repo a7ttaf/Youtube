@@ -1535,3 +1535,35 @@ EOF
   run_guard
   [ "$status" -eq 20 ]
 }
+
+@test "test-layout: a newline in a path cannot fake a tests/ location" {
+  # The candidate list was line-oriented, so a path containing a newline arrived
+  # as two, and the tail could be spelled to look like it sits under
+  # frontend/tests/. The stray test then reported as covered: "Test layout OK",
+  # exit 0, while vitest collects nothing of the sort.
+  local evil="$SANDBOX/frontend/foo
+frontend/tests"
+  if ! mkdir -p "$evil" 2>/dev/null; then
+    skip "this filesystem refuses a newline in a directory name"
+  fi
+  printf 'it("y", () => {});\n' > "$evil/evil.test.ts"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"NEVER RUN"* ]]
+  rm -rf "$evil"
+}
+
+@test "test-layout: ordinary paths are unaffected by the NUL-delimited scan" {
+  # The control. Reading NUL-delimited from find, ls-files and ls-tree is a
+  # change to every path this guard sees, so the ordinary layout has to keep
+  # passing -- and a stray test with a perfectly normal name has to keep being
+  # caught.
+  run_guard
+  [ "$status" -eq 0 ]
+
+  printf 'it("z", () => {});\n' > "$SANDBOX/frontend/src/stray.test.ts"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"stray.test.ts"* ]]
+  rm -f "$SANDBOX/frontend/src/stray.test.ts"
+}
