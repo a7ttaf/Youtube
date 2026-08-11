@@ -475,8 +475,9 @@ on real ingestion (Phase 2) and the inventory load workflow.
   `(youtube_channel_id, group_id)` pair — the only change here that refuses
   input the previous code accepted, and therefore the only BREAKING one: such
   a roster returned 200 before and returns 422 now, and must be deduped to
-  apply again. No persisted result changes, because the restated row performed
-  no write. No new endpoint and
+  apply again. The registry lands the same rows and memberships either way;
+  the one persisted difference is the durable `CHANNEL_IMPORTED` tally, which
+  the restated row inflated. No new endpoint and
   no migration; #159's unbound "the file wins" rule is untouched. The
   import/sync UI arc is complete.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.

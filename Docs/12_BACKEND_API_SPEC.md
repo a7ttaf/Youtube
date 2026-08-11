@@ -168,18 +168,28 @@ duplicate shapes are ERRORs, and both fail every copy: copies that DISAGREE on
 `channel_name`/`view_revenue` (ambiguous about what to persist — no copy is
 privileged, so there is no non-arbitrary winner), and copies that RESTATE the
 same `(youtube_channel_id, group_id)` pair, including two rows carrying no
-group at all. The second exists because the write pass collapses a repeated
-pair into one membership: keeping both copies made the dry run promise the
-group work twice and count the channel twice for a single association, so the
-preview overstated its own effect (review #184).
+group at all. The second exists for a reason that **differs by shape**. When
+the restated pair names a group, the write pass collapses it into one
+membership while planning does not, so the dry run promised the group work
+twice for a single association. When both copies carry **no** group there is no
+membership and nothing to collapse — that shape is refused because the second
+copy is a phantom `UNCHANGED` row, reporting two outcomes for a channel the
+roster named once (review #184).
 **This second shape is a BREAKING change for clients** and is the only one on
 this branch: a roster restating a pair previously returned **200** and now
 returns **422**, so an existing roster carrying such a line must be deduped
-before it will apply again. What is preserved is the PERSISTED result, not the
-request outcome — the restated row performed no write, so the deduped file
-lands exactly the state the old code landed and nothing already in the registry
-changes. A client holding a roster it applied successfully before should expect
-a 422 naming the restated row number, and remove that line. UPDATE and UNCHANGED rows both write through the
+before it will apply again. What is preserved is the **registry** result, not
+the request outcome: the restated row is not a no-op — `UNCHANGED` rows write
+through the boundary — but it only re-wrote values its first copy had already
+installed, so the deduped file lands the same channel rows and the same
+memberships. Exactly one persisted thing does change, and it is the point of
+the rule: the restated row also incremented the durable `CHANNEL_IMPORTED`
+`counts`, so the deduped file's summary is one lower. The double count this
+removes was in the audit tally, not only in the preview.
+A client holding a roster it applied successfully before should expect a 422
+naming **every** row of the restated pair — the first occurrence included,
+since no copy is privileged — and should delete copies until exactly one
+remains, or give them distinct `group_id` values. UPDATE and UNCHANGED rows both write through the
 registry at the apply boundary so a concurrent change committed after
 planning cannot survive the roster (the file wins); CHANNEL_UPDATED is
 recorded exactly when the write-boundary diff is non-empty, so healed drift

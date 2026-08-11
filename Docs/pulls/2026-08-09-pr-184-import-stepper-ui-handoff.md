@@ -1,10 +1,16 @@
 # PR #184 — CSV import stepper in Registry (PR-B) — delivery handoff
 
-Branch `feat/import-stepper-ui`. Written at head `01aa2b58`; every figure
-below was re-measured at the head that carries it, most recently after the
-round-50 test additions. They are measured, not planned — and the frontend
-count moves whenever a review round adds a test, so it is refreshed with the
-tests rather than at the end.
+Branch `feat/import-stepper-ui`. First written at head `01aa2b58`, and revised
+in every review round since — the round-50 reference this header used to carry
+was long out of date by the time rounds 51–58 changed the scope, the figures
+and the behaviour list below.
+
+Rather than name a head here that goes stale on the next commit, each figure
+now carries its own provenance where it appears: the backend insertion count
+names the commit that last changed `backend/`, the file count cites the command
+that derives it, and the gate table describes the tree stated in that section.
+They are measured, not planned. Treat any figure without an adjacent anchor as
+a defect in this document and re-derive it.
 
 ## Scope
 
@@ -109,21 +115,32 @@ apply test, then 34 when the duplicate-repeat rule brought
    a wedge.
 9. **A repeated `(youtube_channel_id, group_id)` pair is now a row error.**
    Repeating a channel is only meaningful ACROSS groups — the many-to-many
-   roster the singular `group_id` column exists to express. Restating one pair,
-   including two rows carrying no group at all, kept both copies: the second
-   planned UNCHANGED and repeated the first's `group_action`, while the write
-   pass collapses the pair, so the preview promised the group work twice and
-   counted the channel twice for one membership. This is the only behaviour
-   change here that **rejects input the previous code accepted**, which makes
-   it the branch's only **BREAKING** change and the one an operator can be
-   surprised by: a roster restating a pair returned 200 before and returns 422
-   now, and must have that line removed before it applies again. What is
-   preserved is the PERSISTED result, not the request outcome — the restated
-   row performed no write, so the deduped file lands exactly the state the old
-   code landed and nothing already in the registry moves. Worth stating in
-   those terms because an earlier draft of this entry said the rejection
-   "cannot lose a successful import", which conflated the two and read as
-   "nothing changes for existing rosters" (review #184, qodo).
+   roster the singular `group_id` column exists to express. The rule covers two
+   shapes with **different** defects, and conflating them is how the earlier
+   drafts of this entry went wrong. A pair naming a group diverges plan from
+   write: the second copy repeats the first's `group_action` while
+   `_group_write_batches` collapses the pair, so the dry run promised the group
+   work twice for one membership. A pair carrying **no** group never reaches
+   that pass — both copies have `group_action: null` and are filtered out — and
+   is refused because the second copy is a phantom `UNCHANGED` row reporting
+   two outcomes for a channel the roster named once.
+
+   This is the only behaviour change here that **rejects input the previous
+   code accepted**, which makes it the branch's only **BREAKING** change: a
+   roster restating a pair returned 200 before and returns 422 now, and must be
+   deduped before it applies again. What is preserved is the **registry**
+   result — the restated row is not a no-op, since `UNCHANGED` rows write
+   through the boundary, but it only re-wrote what its first copy installed, so
+   the same channel rows and memberships land. Exactly one persisted thing
+   changes, and it is the point: the restated row also incremented the durable
+   `CHANNEL_IMPORTED` `counts`, so the deduped summary is one lower.
+
+   Spelled out at that length because this entry has been wrong twice. It first
+   said the rejection "cannot lose a successful import" (it 422s an existing
+   roster — review #184, qodo), then said "the restated row performed no write"
+   and "no persisted result changes" — both false: `UNCHANGED` rows write, and
+   the durable tally moves. Each correction came from a measurement, not a
+   re-reading, which is the only method that has actually worked here.
    Rosters listing one channel under several **distinct** groups are unaffected.
    The client's plan validator enforces the same uniqueness, because a check
    the backend applies to the CSV says nothing about a malformed *response*:
@@ -292,7 +309,7 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1877 insertions across eight files as of `92b32db6`**,
+backend diff is **1894 insertions across eight files as of `92b32db6`**,
 the commit that last changed `backend/`
 (`git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a
 frontend revert leaves all of it running.

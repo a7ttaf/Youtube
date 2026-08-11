@@ -309,16 +309,23 @@ def _parse_row(
 #   branch only adds refusals to races: a file restating a (channel, group)
 #   pair used to return 200 and now returns 422, so existing rosters carrying
 #   a restated line must be deduped before they apply again. What is preserved
-#   is the PERSISTED result, not the request outcome — the restated row
-#   performed no write, so the deduped file lands exactly the state the old
-#   code landed, and nothing already in the registry changes.
+#   is the REGISTRY result — the restated row is NOT a no-op (UNCHANGED rows
+#   write through the boundary), but it only re-wrote the values its first
+#   copy had already installed, so the deduped file lands the same channel
+#   rows and the same memberships and nothing already stored changes. One
+#   persisted thing DOES change, and it is the point: the restated row also
+#   incremented the durable CHANNEL_IMPORTED counts, so the deduped file's
+#   summary is one lower. The double count this rule removes was in the audit
+#   tally, not only in the preview.
 # Connections:
 #   - File: backend/ums_smart_revenue/org/channel_import.py ->
 #     plan_channel_import consumes the surviving rows; its repeated-channel
 #     shortcut relies on every copy naming a distinct group.
 #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
 #     _group_write_batches collapses a repeated pair at write time, which is
-#     the divergence the repeat rule exists to prevent.
+#     the divergence the repeat rule prevents for pairs that CARRY a group;
+#     _apply_inventory_writes tallies per plan entry, which is why a repeat
+#     double-counts the durable summary whether or not it names a group.
 # ============================================================================
 def _flag_duplicates(
     rows: list[ChannelImportRow],
@@ -337,18 +344,28 @@ def _flag_duplicates(
       including two rows carrying no group at all — say nothing the first
       copy did not already say.
 
-    Rejecting the exact repeat is what keeps the preview honest. The write
-    side already collapses it (``_group_write_batches`` refuses to hand one
-    channel to ``add_members`` twice), but planning does not: the second copy
-    plans UNCHANGED and repeats the first's ``group_action``, so a dry run
-    promises group work twice and counts a channel twice while the apply does
-    it once.
+    Rejecting the exact repeat keeps the import honest, for a reason that
+    DIFFERS BY SHAPE — the two halves are not the same defect:
 
-    This rejection IS a breaking change, and the contract block above says so:
-    a roster carrying a restated pair used to apply and now 422s until the
-    operator deletes the line. What it cannot change is any PERSISTED result —
-    the duplicate row performed no write, so the deduped file lands exactly
-    the state the old code landed. The cost is a corrected file, not lost data.
+    * a pair that names a GROUP diverges plan from write. The write side
+      collapses it (``_group_write_batches`` refuses to hand one channel to
+      ``add_members`` twice) but planning does not, so the second copy repeats
+      the first's ``group_action`` and the dry run promises the group work
+      twice while one membership is written;
+    * a pair carrying NO group reaches the batcher at all — ``group_action``
+      is None on both copies and ``_group_write_target`` filters them out. It
+      is refused because the second copy is a phantom UNCHANGED row: it makes
+      the preview AND the durable CHANNEL_IMPORTED tally report two outcomes
+      for a channel the roster named once.
+
+    Deliberately NOT claimed: that the apply performs the work once while the
+    plan counts it twice. ``_apply_inventory_writes`` tallies per plan entry,
+    so the applied counts equal the plan counts for both shapes — the repeat
+    is double-counted consistently, which is why the fix belongs in the parser
+    rather than in a reconciliation between the two tallies.
+
+    This rejection IS a breaking change; the contract block above states the
+    compatibility position in full.
     """
     conflicted = _conflicting_channel_ids(rows)
     repeated = _repeated_associations(rows)

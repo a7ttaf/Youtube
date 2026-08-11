@@ -829,7 +829,7 @@ single P-tier above.
   no new endpoint and no migration.
   **Backend scope correction (2026-08-11).** The two "additive touch" notes
   above were written early and undercount what the PR ships: the final diff
-  is **1877 insertions across eight backend files as of `92b32db6`**, the
+  is **1894 insertions across eight backend files as of `92b32db6`**, the
   commit that last changed `backend/`, and
   calling it additive reads as frontend-with-a-flag. Beyond
   `can_import_channels` and `group_action`, the route gained
@@ -840,16 +840,20 @@ single P-tier above.
   write-boundary recheck of the previewed group effect under the group row
   lock that applies to **unbound callers too**. A later round added a third
   refusal: the parser now rejects a roster that **restates the same
-  `(youtube_channel_id, group_id)` pair** — including two rows carrying no
-  group — because the write pass collapses such a pair into one membership,
-  so keeping both copies made the preview promise the group work twice and
-  count the channel twice for a single association. It is the only change on
-  this branch that refuses input the previous code accepted, and it is
-  therefore **BREAKING**: such a roster returned 200 before and returns 422
-  now, so an existing file carrying a restated line must be deduped before it
-  applies again. What is preserved is the PERSISTED result, not the request
-  outcome — the restated row performed no write, so the deduped file lands
-  exactly the state the old code landed. All three new behaviours are
+  `(youtube_channel_id, group_id)` pair**, for a reason that differs by shape:
+  a pair naming a group is collapsed into one membership by the write pass
+  while planning promises it twice, and a pair carrying **no** group never
+  reaches that pass at all — it is refused because the second copy is a
+  phantom `UNCHANGED` row reporting two outcomes for a channel named once. It
+  is the only change on this branch that refuses input the previous code
+  accepted, and it is therefore **BREAKING**: such a roster returned 200
+  before and returns 422 now, so an existing file carrying a restated line
+  must be deduped before it applies again. What is preserved is the REGISTRY
+  result — the restated row is not a no-op (`UNCHANGED` rows write through the
+  boundary) but only re-wrote what its first copy installed, so the same
+  channel rows and memberships land. The one persisted change is the durable
+  `CHANNEL_IMPORTED` `counts`, one lower without the restated row, which is
+  the double count the rule exists to remove. All three new behaviours are
   refusals, so the no-endpoint and
   no-migration claims still hold, and the unbound "the file wins" rule of
   #159 is untouched. Scope, rollback ordering and the per-file evidence live

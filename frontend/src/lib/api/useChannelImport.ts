@@ -704,10 +704,18 @@ const channelCopiesAgree = (group: ReadonlyArray<Record<string, unknown>>): bool
  * Each copy must also name a DISTINCT group, because repeating a channel is
  * only meaningful ACROSS groups. The parser rejects a repeated
  * `(youtube_channel_id, group_id)` pair outright, so a plan carrying one did
- * not come from a roster: the write pass collapses the pair to a single
- * membership, which means Preview would promise the group work twice while the
- * retained fingerprint authorises the one real association (review #184, codex
- * P2). Checked here rather than per-row for the usual reason — no row-local
+ * not come from a roster — which is the whole reason to refuse it here, on a
+ * boundary whose job is malformed RESPONSES rather than malformed files.
+ *
+ * The backend's reason differs by shape and only one half is about groups: a
+ * repeated pair that NAMES a group is collapsed by the write pass to a single
+ * membership, so Preview would promise the group work twice while the retained
+ * fingerprint authorises the one real association; a repeated pair carrying NO
+ * group produces no membership at all and is refused because the second copy
+ * is a phantom UNCHANGED row (review #184, codex P2). This check covers both
+ * because it keys on the pair, with absence as an ordinary value.
+ *
+ * Checked here rather than per-row for the usual reason — no row-local
  * predicate can see another row.
  *
  * Without this, a malformed response can repeat one valid id with two names or
