@@ -371,30 +371,6 @@ def apply_channel_import(
 
 
 # ============================================================================
-# Purpose: Execute the import's FIRST write pass — one registry write per
-#   CREATE/UPDATE/UNCHANGED row plus its audit event — and return the tally
-#   the CHANNEL_IMPORTED summary must carry.
-# Database/ORM: YouTubeChannelORM via ChannelRegistryStore (create_channel /
-#   update_inventory); AuditLogORM rows via the supplied sink. No group or
-#   finance tables.
-# Standards: Runs inside the caller's single transaction, so any raise here
-#   rolls back every row already written in this pass. Rows are visited in
-#   _channel_write_order so overlapping imports take channel locks in one
-#   consistent order. The tally is accumulated from what the write boundary
-#   actually did, never from plan.counts. ERROR rows and rows missing an id or
-#   name are skipped without a write.
-# Blast Radius: Channel registry inventory (name, cms_status,
-#   content_owner_id, revenue_required) and the per-channel audit trail;
-#   through cms_status/content_owner_id it steers connector ingest targeting.
-#   No revenue math, no allocation, no month-close.
-# Connections:
-#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
-#     apply_channel_import owns the pass ORDER this half depends on.
-#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
-#     row-locked update_inventory whose (previous, updated) pair is audited.
-#   - File: Docs/12_BACKEND_API_SPEC.md -> the write-boundary audit contract.
-# ============================================================================
-# ============================================================================
 # Purpose: Refuse a whole import whose reviewed group effects no longer match
 #   reality, BEFORE any channel row is written — a pre-flight for the locked
 #   per-key check the group pass performs.
@@ -457,6 +433,30 @@ def _require_planned_group_actions(
         )
 
 
+# ============================================================================
+# Purpose: Execute the import's FIRST write pass — one registry write per
+#   CREATE/UPDATE/UNCHANGED row plus its audit event — and return the tally
+#   the CHANNEL_IMPORTED summary must carry.
+# Database/ORM: YouTubeChannelORM via ChannelRegistryStore (create_channel /
+#   update_inventory); AuditLogORM rows via the supplied sink. No group or
+#   finance tables.
+# Standards: Runs inside the caller's single transaction, so any raise here
+#   rolls back every row already written in this pass. Rows are visited in
+#   _channel_write_order so overlapping imports take channel locks in one
+#   consistent order. The tally is accumulated from what the write boundary
+#   actually did, never from plan.counts. ERROR rows and rows missing an id or
+#   name are skipped without a write.
+# Blast Radius: Channel registry inventory (name, cms_status,
+#   content_owner_id, revenue_required) and the per-channel audit trail;
+#   through cms_status/content_owner_id it steers connector ingest targeting.
+#   No revenue math, no allocation, no month-close.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     apply_channel_import owns the pass ORDER this half depends on.
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+#     row-locked update_inventory whose (previous, updated) pair is audited.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the write-boundary audit contract.
+# ============================================================================
 def _apply_inventory_writes(
     plan: ChannelImportPlan,
     *,
@@ -813,6 +813,41 @@ def _group_write_order(
     )
 
 
+# ============================================================================
+# Purpose: Build ONE channel write's audit details — the durable, field-level
+#   record of what that write actually replaced, including the finance-source
+#   transition it performed.
+# Database/ORM: None directly; the mapping returned becomes AuditLogORM.details
+#   (JSONB) for a CHANNEL_CREATED or CHANNEL_UPDATED event.
+# Standards: Provenance over convenience. `changes` is built from the write
+#   BOUNDARY re-read, never from the plan's snapshot, so the trail records what
+#   was replaced rather than what was predicted; `view_revenue_raw` preserves
+#   the operator's original CSV token, because the derived boolean alone cannot
+#   tell an explicit permission from the required-by-default rule. Every record
+#   carries AUDIT_SOURCE_BULK_IMPORT, which is how an auditor separates import
+#   changes from single-channel API edits, so the value must stay identical at
+#   both call sites. `revenue_source_status` is recorded SEPARATELY from
+#   `changes` and only when the write re-classified: it is derived by the
+#   registry rather than asserted by the roster, so it is not one of
+#   _INVENTORY_FIELDS — but omitting it let a CHANNEL_UPDATED event record the
+#   revenue_required flip while hiding the classification that flip replaced
+#   (review #184). Its ABSENCE is meaningful and must stay so: it means the
+#   write left the classification alone, which is also what it means on every
+#   event written before this key existed.
+# Blast Radius: AUDIT + FINANCE. This payload is the authoritative record of a
+#   bulk import's effect on a channel — the one the operator is told to consult
+#   when an apply's outcome is unknown — and revenue_source_status is what lets
+#   it reconstruct a missing-official-revenue transition after the fact. It
+#   writes nothing itself; a mistake here is a trail that misdescribes a write
+#   that did happen, which is worse than a missing one.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _write_inventory_row, which supplies the boundary diff and the transition.
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> record_audit_event,
+#     which persists this mapping.
+#   - File: Docs/pulls/2026-08-09-pr-184-import-stepper-ui-handoff.md -> records
+#     revenue_source_status as an additive audit-contract change.
+# ============================================================================
 def _channel_audit_details(
     entry: ChannelImportPlanEntry,
     *,

@@ -104,6 +104,21 @@ const INVENTORY_FIELDS = [
 const OUTCOME_UNCHANGED = "UNCHANGED";
 const OUTCOME_ERROR = "ERROR";
 const PLAN_OUTCOMES = ["CREATE", "UPDATE", OUTCOME_UNCHANGED, OUTCOME_ERROR] as const;
+
+/**
+ * The three literals `ck_youtube_channels_cms_status` permits. A diff side is a
+ * value of that column — `from` the stored one, `to` the request target — so
+ * "any string" was never the constraint. `cms_status: {from: "GARBAGE", to:
+ * "INSIDE_CMS"}` showed the operator a prior state the database cannot hold,
+ * while the bound apply wrote from the real one they never reviewed (review
+ * #184, codex P2).
+ */
+const CMS_STATUSES = ["INSIDE_CMS", "OUTSIDE_CMS", "UNKNOWN"] as const;
+
+const isCmsStatus = (value: unknown): boolean => {
+  return CMS_STATUSES.some((status) => status === value);
+};
+
 const GROUP_ACTIONS = ["CREATE", "JOIN"] as const;
 
 /** A present, non-empty string — the backend never emits a blank for these. */
@@ -644,10 +659,25 @@ const channelRowsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolean
  * Row numbers must also be DISTINCT — they are the preview's React keys, and
  * the parser emits exactly one per input row.
  */
-/** Row numbers are the preview's React keys, and the parser emits one per
- * input row. */
-const rowNumbersAreDistinct = (rows: ReadonlyArray<Record<string, unknown>>): boolean => {
-  return new Set(rows.map((row) => row.row_number)).size === rows.length;
+/**
+ * Row numbers ASCEND strictly — distinct, and in the order the backend sorted
+ * them (`entries.sort(key=row_number)`), which is the order the preview renders.
+ *
+ * Strictly ascending rather than merely distinct: an out-of-order payload puts
+ * the operator's rows on screen in an order their file does not have, so a
+ * remediation reason lands beside the wrong line even though every number is
+ * individually plausible.
+ *
+ * Deliberately NOT `1..rows.length`. `enumerate(reader, start=1)` numbers every
+ * line of the data section and blank lines are skipped after consuming their
+ * index, so a roster with a blank line between records legitimately produces
+ * 1, 2, 4. The number names the operator's LINE, which is the whole point of
+ * showing it; requiring contiguity would refuse those rosters outright.
+ */
+const rowNumbersAscend = (rows: ReadonlyArray<Record<string, unknown>>): boolean => {
+  return rows.every(
+    (row, index) => index === 0 || (rows[index - 1].row_number as number) < (row.row_number as number),
+  );
 };
 
 /**
@@ -658,7 +688,7 @@ const rowNumbersAreDistinct = (rows: ReadonlyArray<Record<string, unknown>>): bo
  * rather than suppressed.
  */
 const PLAN_CHECKS: ReadonlyArray<(rows: ReadonlyArray<Record<string, unknown>>) => boolean> = [
-  rowNumbersAreDistinct,
+  rowNumbersAscend,
   groupActionsAgree,
   channelRowsAgree,
 ];
@@ -731,7 +761,7 @@ const CHANGE_FIELD_RULES: Record<
     side: (value) => typeof value === "boolean",
     target: (row) => row.revenue_required,
   },
-  cms_status: { side: (value) => typeof value === "string", target: (_row, plan) => plan.cms_status },
+  cms_status: { side: isCmsStatus, target: (_row, plan) => plan.cms_status },
   content_owner_id: { side: isNullableString, target: (_row, plan) => plan.content_owner_id },
 };
 
@@ -834,7 +864,11 @@ export const isChannelImportResult = (payload: unknown): payload is ChannelImpor
  * cannot check the echo against. Import is CMS-only by design — the roster is
  * a CMS content-owner roster — so there is one value, not a choice.
  */
-const IMPORT_CMS_STATUS = "INSIDE_CMS";
+// The status this client always imports under. Drawn from CMS_STATUSES rather
+// than respelled: it is one of the column's three values, and a divergence
+// between the value sent and the value checked would be invisible.
+const IMPORT_CMS_STATUS = CMS_STATUSES[0];
+
 
 /**
  * The echoed target must be the target that was ASKED for. `plan_fingerprint`

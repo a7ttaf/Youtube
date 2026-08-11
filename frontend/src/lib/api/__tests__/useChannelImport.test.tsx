@@ -670,6 +670,123 @@ describe("useChannelImport", () => {
     ).resolves.toMatchObject({ counts: { UNCHANGED: 1 } });
   });
 
+  it("rejects rows arriving out of row_number order", async () => {
+    // plan_channel_import sorts its entries, so a descending payload is one no
+    // response can carry — and it puts the operator's rows on screen in an
+    // order their file does not have, landing a remediation reason beside the
+    // wrong line while every number is individually plausible (review #184).
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        rows: [
+          { ...DRY_RUN_RESULT.rows[1], row_number: 2 },
+          { ...DRY_RUN_RESULT.rows[0], row_number: 1 },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("still accepts row numbers with GAPS, which a blank CSV line produces", async () => {
+    // `enumerate(reader, start=1)` numbers every line of the data section and
+    // blank lines are skipped AFTER consuming their index, so 1, 2, 4 is what a
+    // roster with a blank line between records emits. The number names the
+    // operator's line, which is the point of showing it — requiring 1..N would
+    // refuse those rosters outright.
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        rows: [
+          { ...DRY_RUN_RESULT.rows[0], row_number: 1 },
+          { ...DRY_RUN_RESULT.rows[1], row_number: 4 },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ rows: [{ row_number: 1 }, { row_number: 4 }] });
+  });
+
+  it("rejects a cms_status the column cannot hold", async () => {
+    // Both sides are values of a column constrained to three literals, so
+    // "any string" was never the rule. A GARBAGE prior state renders as the
+    // reviewed pre-state while the bound apply writes from the real one
+    // (review #184, codex P2).
+    for (const change of [
+      { from: "GARBAGE", to: "INSIDE_CMS" },
+      { from: "OUTSIDE_CMS", to: "ALSO_GARBAGE" },
+    ]) {
+      fetchMock().mockResolvedValue(
+        jsonResponse({
+          ...DRY_RUN_RESULT,
+          counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+          rows: [
+            {
+              ...DRY_RUN_RESULT.rows[1],
+              revenue_source_status: null,
+              changes: { cms_status: change },
+            },
+          ],
+        }),
+      );
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+      ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+    }
+  });
+
+  it("accepts the cms_status transition an import actually performs", async () => {
+    // OUTSIDE_CMS -> INSIDE_CMS is the ordinary case: a channel the CMS now
+    // carries. Pinned so the literal set cannot be narrowed to the one value
+    // this client sends.
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+        rows: [
+          {
+            ...DRY_RUN_RESULT.rows[1],
+            revenue_source_status: null,
+            changes: { cms_status: { from: "OUTSIDE_CMS", to: "INSIDE_CMS" } },
+          },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { UPDATE: 1 } });
+  });
+
   it("rejects a PRE-DISCLOSURE payload that omits the fields entirely", async () => {
     // The rejections above pin `null`; this one pins ABSENT, which is the
     // shape a backend WITHOUT this PR emits — the fields do not exist there.

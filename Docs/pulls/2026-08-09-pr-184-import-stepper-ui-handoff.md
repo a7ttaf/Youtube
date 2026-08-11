@@ -122,7 +122,7 @@ Frontend, and the PR-scope analyzer:
 
 | Suite | Result |
 | --- | --- |
-| `bun run test` (frontend) | **460 passed**, 41 files |
+| `bun run test` (frontend) | **464 passed**, 41 files |
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
 | DeepSource (PR scope) | `[]` |
@@ -232,9 +232,11 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1577 insertions across eight files** (`git diff --stat
+backend diff is **1593 insertions across eight files** (`git diff --stat
 $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a frontend revert
-leaves all of it running.
+leaves all of it running. That figure moves with every review round that
+touches backend code — re-measure it rather than trusting this line if the
+branch has advanced.
 
 ### Reverting the frontend only
 

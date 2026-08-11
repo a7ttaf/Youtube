@@ -1566,7 +1566,14 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // a finance-source mutation nothing on screen mentions.
     const plan: ChannelImportResult = {
       ...DRY_RUN_PLAN,
+      // In row_number order, because the backend sorts its entries and this
+      // fixture had them reversed — a shape no response can carry.
       rows: [
+        // A CREATE has no prior status, so only the value it is born with.
+        {
+          ...DRY_RUN_PLAN.rows[0],
+          revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
+        },
         // A flip OFF: a proven official classification is being replaced.
         {
           ...DRY_RUN_PLAN.rows[1],
@@ -1574,11 +1581,6 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
             from: "OFFICIAL_CMS_REVENUE",
             to: "PERFORMANCE_ONLY",
           },
-        },
-        // A CREATE has no prior status, so only the value it is born with.
-        {
-          ...DRY_RUN_PLAN.rows[0],
-          revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
         },
       ],
     };
