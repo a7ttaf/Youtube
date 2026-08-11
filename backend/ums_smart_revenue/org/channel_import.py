@@ -374,9 +374,15 @@ def _conflicting_channel_ids(rows: list[ChannelImportRow]) -> set[str]:
 #   unrelated channels sharing one. ``group_id`` of None participates as an
 #   ordinary value: a channel listed twice with no group is a repeat like any
 #   other, and treating absence as a wildcard would let exactly that case
-#   through. The key matches _group_write_target's, which is what makes the
-#   guarantee hold — the pairs this refuses are precisely the pairs the write
-#   pass would have collapsed.
+#   through. The ASSOCIATION identified here is the one _group_write_target
+#   names at write time, which is what makes the guarantee hold: a pair
+#   refused here is a pair the batcher would otherwise have collapsed. The two
+#   TUPLES are not interchangeable and must never be compared or reused
+#   directly — this one is (channel, group) and that one is (group, channel),
+#   and that one additionally drops rows with a falsy group key or no
+#   channel_name. Rows carrying NO group never reach the batcher at all; they
+#   are refused here for the other half of the reason, the phantom UNCHANGED
+#   row that inflates the counts.
 # Blast Radius: Which rosters are admissible, and therefore whether the dry-run
 #   preview can promise group work the apply performs once. No writes, no
 #   audit, no finance totals.
