@@ -1325,7 +1325,7 @@ _blank_quoted() {
     # A backslash escapes the next character -- which is therefore neither a
     # quote nor structure. Inside single quotes it is literal and escapes
     # nothing.
-    if [ "$_c" = '\' ] && [ "$_bq_state" != "'" ]; then
+    if [ "$_c" = "\\" ] && [ "$_bq_state" != "'" ]; then
       if [ "$((_i + 1))" -lt "$_n" ]; then
         _out="$_out  "
       else
@@ -1461,9 +1461,14 @@ _resolve_delegated_target() {
       # judge it instead of guessing which branch runs.
       _kw=0
       set -f
+      # Quoted patterns, and not only for the two that need it. `esac` and
+      # `done` are keywords a `case` arm cannot carry bare -- bash tolerates
+      # them after a `|`, other shells terminate the statement there -- and
+      # quoting also says what these arms mean: the literal word, never a glob.
       for tok in $toks; do
         case "$tok" in
-          if|then|elif|else|fi|for|while|until|do|done|case|esac|select|function)
+          'if'|'then'|'elif'|'else'|'fi'|'for'|'while'|'until'|'do'|'done' \
+            |'case'|'esac'|'select'|'function')
             _kw=1
             break
             ;;
@@ -1497,8 +1502,10 @@ _resolve_delegated_target() {
       set -f
       for tok in $toks; do
         case "$tok" in
-          if|for|while|until|case|select) block=$((block + 1)) ;;
-          fi|done|esac) if [ "$block" -gt 0 ]; then block=$((block - 1)); fi ;;
+          'if'|'for'|'while'|'until'|'case'|'select') block=$((block + 1)) ;;
+          'fi'|'done'|'esac')
+            if [ "$block" -gt 0 ]; then block=$((block - 1)); fi
+            ;;
         esac
       done
       set +f
