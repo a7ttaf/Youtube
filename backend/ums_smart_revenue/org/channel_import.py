@@ -352,11 +352,11 @@ def _flag_duplicates(
       ``add_members`` twice) but planning does not, so the second copy repeats
       the first's ``group_action`` and the dry run promises the group work
       twice while one membership is written;
-    * a pair carrying NO group reaches the batcher at all — ``group_action``
-      is None on both copies and ``_group_write_target`` filters them out. It
-      is refused because the second copy is a phantom UNCHANGED row: it makes
-      the preview AND the durable CHANNEL_IMPORTED tally report two outcomes
-      for a channel the roster named once.
+    * a pair carrying NO group never reaches the batcher at all —
+      ``group_action`` is None on both copies and ``_group_write_target``
+      filters them out. It is refused because the second copy is a phantom
+      UNCHANGED row: it makes the preview AND the durable CHANNEL_IMPORTED
+      tally report two outcomes for a channel the roster named once.
 
     Deliberately NOT claimed: that the apply performs the work once while the
     plan counts it twice. ``_apply_inventory_writes`` tallies per plan entry,
