@@ -135,6 +135,36 @@ class ChannelRegistryStore(Protocol):
     ) -> ChannelRegistryEntry:
         pass
 
+    # ========================================================================
+    # Purpose: The registry's inventory WRITE, declared as a compare-and-update:
+    #   re-read the row at the write boundary, let the caller judge that
+    #   pre-state, and only then replace the four inventory fields — returning
+    #   what was actually replaced so the caller can audit it.
+    # Database/ORM: YouTubeChannelORM in the SQL adapter (row-locked re-read,
+    #   then assignment); a dict entry in the in-memory one. Both also re-derive
+    #   revenue_source_status when revenue_required flips.
+    # Standards: ORDERING IS THE CONTRACT, not an implementation detail.
+    #   ``require_pre_state`` MUST be invoked with the write-boundary pre-state
+    #   after the locked re-read and BEFORE any mutation, and it may raise to
+    #   refuse the write. Calling it afterwards — or judging the returned
+    #   ``previous`` in the caller — makes correctness depend on the store
+    #   having a transaction to roll back, which a non-transactional adapter
+    #   does not: the row keeps the roster values under a request that answered
+    #   409 (review #184). ``previous`` must be the RE-READ state, never the
+    #   caller's planning snapshot, or an audit trail records a diff that did
+    #   not happen. Policy belongs to the caller; adapters owe only the
+    #   ordering.
+    # Blast Radius: FINANCE-SCOPE. The four inventory fields drive connector
+    #   ingest targeting (cms_status/content_owner_id) and, through the
+    #   revenue_required flip, the revenue_source_status classification that
+    #   feeds missing-official-revenue state. An adapter that ignores the
+    #   ordering reintroduces a partial write on a refused import.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     _write_inventory_row, which supplies the guard closure.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+    #     row-locked adapter (lock order: tenant guard before channel row).
+    # ========================================================================
     def update_inventory(
         self,
         *,

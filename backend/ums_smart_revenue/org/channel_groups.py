@@ -366,6 +366,30 @@ class ChannelGroupRegistry:
             if group.cms_group_id in cms_group_ids and group.content_owner_id is None
         }
 
+    # ========================================================================
+    # Purpose: In-memory implementation of the "this owner already holds it"
+    #   lookup — the read that lets the preview label a roster's Group_ID rows
+    #   CREATE or JOIN.
+    # Database/ORM: None — a scan of the in-memory group map. The SQL adapter
+    #   is the one that issues the bounded, tenant-scoped SELECT; this exists
+    #   so the planner and its guards can be exercised without a database.
+    # Standards: Must answer IDENTICALLY to sql_channel_groups.py, because the
+    #   planner's CREATE label is decided by ABSENCE from this set. Two
+    #   conditions carry that: membership in the requested key set, and an
+    #   EXACT content_owner_id match — an owner-NULL group is deliberately not
+    #   "mine", so it stays absent here and is refused by the adoptable lookup
+    #   rather than silently planned as a CREATE that then collides on the
+    #   per-tenant unique cms_group_id. Read-only, no membership loading, and
+    #   unknown keys are simply absent (review #184).
+    # Blast Radius: Whether the preview promises "new group" or "adds to
+    #   existing", and — because the write boundary re-checks that promise —
+    #   whether a diverged effect 409s the whole import. No writes.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the SQL
+    #     adapter this must agree with.
+    #   - File: backend/ums_smart_revenue/org/channel_import.py ->
+    #     _planned_group_action, the sole consumer of the returned set.
+    # ========================================================================
     def list_owned_cms_group_ids(
         self, cms_group_ids: set[str], *, content_owner_id: str
     ) -> set[str]:

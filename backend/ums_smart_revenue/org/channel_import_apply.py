@@ -985,6 +985,36 @@ def _require_reviewed_source_status(
     )
 
 
+# ============================================================================
+# Purpose: Recover the revenue_source_status the operator actually reviewed for
+#   one row — from the plan's disclosure when there is one, and by re-deriving
+#   it when there is not — so the bound apply can enforce a classification the
+#   preview never had to name.
+# Database/ORM: None — pure over the plan entry. It reads no row and writes
+#   none; its caller compares the answer against the locked pre-state.
+# Standards: Three cases, and the middle one is why this exists. A disclosed
+#   transition carries its own `from` (None for a CREATE, which has no prior
+#   status). No disclosure on a row whose diff FLIPS revenue_required means the
+#   planner found the derived destination already stored, so that destination
+#   IS the reviewed pre-state — re-derived through derive_revenue_source_status
+#   rather than hardcoded, since with the flag flipping that function ignores
+#   `current_status` entirely and no literal need be duplicated. No disclosure
+#   and no flip asserts NOTHING: such a write cannot re-derive the status at
+#   all, and asserting anyway would 409 ordinary re-imports of a channel whose
+#   classification another writer legitimately changed. Returning None is
+#   therefore "make no claim", never "the status is unknown, refuse" — the
+#   fail-closed decision belongs to the caller, which only raises on a
+#   recovered value that DISAGREES with the stored one.
+# Blast Radius: FINANCE-SCOPE, in both directions. Recovering too little lets a
+#   bound apply perform an undisclosed source transition the operator never
+#   approved; recovering too much 409s imports that diverged in nothing the
+#   preview spoke about. No writes and no audit rows of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     _planned_revenue_source_status, whose None result this reconstructs.
+#   - File: backend/ums_smart_revenue/org/channel_registry.py ->
+#     derive_revenue_source_status, the single derivation both sides share.
+# ============================================================================
 def _reviewed_source_status(entry: ChannelImportPlanEntry) -> str | None:
     """The revenue_source_status the operator reviewed, or None to assert none.
 

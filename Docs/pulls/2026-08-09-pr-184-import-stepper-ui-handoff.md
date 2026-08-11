@@ -40,17 +40,20 @@ guard that runs for **all** callers, and batched per-key group writes. See
 **Behaviour changes** and **Rollback / reset** below; the unbound "the file
 wins" rule of review #159 is what remains untouched.
 
-## Files changed (30)
+## Files changed (32)
 
 Counted from `git diff --name-only $(git merge-base origin/main HEAD)..HEAD`,
-not from memory.
+not from memory. It was 30 until round 51 added the two registry files below.
 
-- **Backend (6)** — `api/channels.py` (fingerprint widened to include the
+- **Backend (8)** — `api/channels.py` (fingerprint widened to include the
   server-resolved tenant; `expected_plan_fingerprint`; `group_action` and
   `revenue_source_status` on every plan row; contract corrections),
   `api/session.py` (`can_import_channels`), `org/channel_import.py`,
   `org/channel_import_apply.py`, `org/channel_groups.py`,
-  `org/sql_channel_groups.py`.
+  `org/sql_channel_groups.py`, and — from the compare-and-update change —
+  `org/channel_registry.py` (the `require_pre_state` ordering contract on the
+  `ChannelRegistryStore` protocol, plus the in-memory adapter) and
+  `org/sql_channel_registry.py` (the same guard inside the row lock).
 - **Frontend (13)** — the stepper (`views/RegistryImportFlow.tsx`), its host
   (`views/RegistryView.tsx`), the shell (`AppShell.tsx`), the typed API
   boundary (`lib/api/useChannelImport.ts`, `lib/api/types.ts`), two contexts
@@ -200,8 +203,9 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is 1295 insertions across six files, and a frontend revert leaves
-all of it running.
+backend diff is **1426 insertions across eight files** (`git diff --stat
+$(git merge-base origin/main HEAD)..HEAD -- backend/`), and a frontend revert
+leaves all of it running.
 
 ### Reverting the frontend only
 
@@ -228,6 +232,10 @@ the stepper being deployed:
   new events carrying it but cannot un-write the ones already recorded, so any
   consumer of that payload must treat the key as optional — which it already is
   for every event written before this PR.
+- The registry write boundary stays a **compare-and-update**: the
+  `ChannelRegistryStore` protocol requires `require_pre_state` to run before
+  any mutation. This is invisible to callers that pass nothing, so a reverted
+  frontend neither uses nor is affected by it.
 - **The one behaviour a reverted frontend cannot opt out of**: the write
   boundary re-checks the planned group effect under the group row lock for
   *every* caller, bound or unbound, because the route always performs the
