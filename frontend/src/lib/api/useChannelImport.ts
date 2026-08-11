@@ -185,15 +185,38 @@ const PYTHON_SPACE = "\\t\\n\\v\\f\\r\\u001c-\\u001f \\u0085\\u00a0\\u1680\\u200
 /** Leading or trailing Python-whitespace -- text `strip()` would have cut. */
 const PYTHON_UNSTRIPPED = new RegExp(`^[${PYTHON_SPACE}]|[${PYTHON_SPACE}]$`, "u");
 
-/**
- * What Python's `str.strip()` would return, for the times this file has to
- * REPRODUCE the backend's normalization rather than merely detect it.
- *
- * `String.prototype.trim` is not a substitute in either direction, and the
- * difference is not cosmetic: it cuts U+FEFF, which `strip()` keeps. A value
- * the route normalized and echoed verbatim would come back looking altered,
- * and an equality check against `trim()` reads that as a mismatch.
- */
+// ============================================================================
+// Purpose: What Python's `str.strip()` would return — for the times this file
+//   must REPRODUCE the backend's normalization rather than merely detect it.
+//   PYTHON_UNSTRIPPED above answers "would strip() have cut this?"; this
+//   answers "what would strip() have left?", and the two must never disagree.
+// Database/ORM: None (frontend) — a pure string function. It issues no
+//   request, reads no state, and is safe to call on any decoded field.
+// Standards: Built from the SAME PYTHON_SPACE class as the detector, so the
+//   two cannot drift into two different notions of whitespace; that class is
+//   exactly the 29 codepoints `str.strip()` removes, verified by set equality
+//   in both directions, not by inspection. `String.prototype.trim` is not a
+//   substitute in either direction and the difference is not cosmetic: trim()
+//   cuts U+FEFF, which strip() KEEPS. Anchored at both ends only — `$` without
+//   the `m` flag is end-of-STRING, so an interior run survives exactly as it
+//   does in Python. The `g` flag on a module-level RegExp is deliberate and
+//   safe HERE because `String.prototype.replace` resets `lastIndex` around the
+//   call; reusing this same object with `.test()` or `.exec()` would NOT be
+//   safe, which is why the detector above is a separate, non-global RegExp.
+// Blast Radius: Whether a preview the backend ACCEPTED is refused. The owner
+//   echo is an equality check, so normalizing differently from the route does
+//   not warn — assertUsableResult raises ChannelImportShapeError and the whole
+//   import UI stops for a roster the API handles fine. No finance math, no
+//   write; the damage is availability of the operator's only preview.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/channels.py ->
+//       _validated_content_owner_id, whose `raw.strip()` this mirrors and
+//       whose normalized value is what the route echoes back.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> echoesRequestedTarget,
+//       the equality this exists to make correct.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> the import contract that documents
+//       the echoed target fields.
+// ============================================================================
 const PYTHON_STRIPPABLE = new RegExp(`^[${PYTHON_SPACE}]+|[${PYTHON_SPACE}]+$`, "gu");
 
 const pythonStrip = (value: string): string => value.replace(PYTHON_STRIPPABLE, "");
@@ -584,19 +607,40 @@ const sourceStatusMatchesRevenueFlag = (row: Record<string, unknown>): boolean =
   return change.to === (row.revenue_required ? REVENUE_REQUIRED_STATUS : REVENUE_OPTIONAL_STATUS);
 };
 
-/**
- * The FROM-state of a source transition. `_planned_revenue_source_status` takes
- * it from `current.revenue_source_status`, which the database constrains to the
- * five declared literals and which is never null on an existing row — and it
- * returns None outright when `planned == current`, so the two sides always
- * differ.
- *
- * Accepting any string let a row present `GARBAGE -> MISSING_REVENUE_SOURCE`,
- * or a fake no-op transition, while Apply stayed enabled and the retained
- * fingerprint authorised the backend's real source mutation (review #184,
- * codex P2). CREATE is exempt because it has no prior status: its `from` is
- * null, which disclosesSourceStatus already requires.
- */
+// ============================================================================
+// Purpose: Whether a row's `revenue_source_status` transition is one the
+//   planner could have emitted. `_planned_revenue_source_status` takes the
+//   FROM-state from `current.revenue_source_status`, which the database
+//   constrains to the five declared literals and which is never null on an
+//   existing row, and it returns None outright when `planned == current` — so
+//   a real transition always names a known literal and always differs.
+// Database/ORM: None directly (frontend), but it mirrors the
+//   `revenue_source_status` column's CHECK-constrained literal set; the five
+//   values in SOURCE_STATUSES are that set, not a UI convenience list.
+// Standards: Fails CLOSED on anything unrecognised. A non-CREATE transition
+//   must ALSO carry a `revenue_required` diff, because the transition exists
+//   only when the flag flipped — derive_revenue_source_status returns the
+//   current status untouched otherwise. CREATE is exempt because it has no
+//   prior status: its `from` is null, which disclosesSourceStatus already
+//   requires, so the exemption cannot be used to smuggle in a null FROM on an
+//   UPDATE. Runs as one of ROW_CHECKS, before the plan becomes trusted state.
+// Blast Radius: FINANCE + AUDIT. This is the classification the operator
+//   approves. Accepting any string let a row present
+//   `GARBAGE -> MISSING_REVENUE_SOURCE`, or a fake no-op transition, while
+//   Apply stayed enabled and the retained fingerprint authorised the backend's
+//   REAL source mutation — the operator signs off on one reclassification and
+//   a different one is persisted and audited (review #184, codex P2).
+// Connections:
+//   - File: backend/ums_smart_revenue/org/channel_import.py ->
+//       _planned_revenue_source_status and _created_revenue_source_status,
+//       the only producers of the transitions accepted here.
+//   - File: backend/ums_smart_revenue/org/channel_registry.py ->
+//       derive_revenue_source_status, the rule tying the status to
+//       revenue_required that the paired-diff requirement enforces.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> the
+//       preview that renders this transition for approval.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> the documented plan-row contract.
+// ============================================================================
 const sourceTransitionIsValid = (row: Record<string, unknown>): boolean => {
   const change = row.revenue_source_status;
   if (!isPlainObject(change)) {
@@ -608,12 +652,9 @@ const sourceTransitionIsValid = (row: Record<string, unknown>): boolean => {
   if (row.outcome === OUTCOME_CREATE) {
     return true;
   }
-  // The transition EXISTS only because the flag flipped. derive_revenue_source_status
-  // returns the current status untouched when revenue_required is unchanged, and
-  // _planned_revenue_source_status turns that into None — so a non-CREATE
-  // transition without a `revenue_required` diff beside it is one the planner
-  // cannot emit, and it would ask the operator to approve a finance-source
-  // reclassification the backend will not perform (review #184, codex P2).
+  // Both halves of the Standards clause above, in the order they are checked:
+  // a FROM the planner could have read, and the `revenue_required` diff that is
+  // the only thing able to produce a transition at all.
   const changes = row.changes as Record<string, unknown>;
   return (
     SOURCE_STATUSES.some((status) => status === change.from) &&
@@ -790,26 +831,38 @@ const rowNumbersAscend = (rows: ReadonlyArray<Record<string, unknown>>): boolean
   );
 };
 
-/**
- * The parser's ROW BUDGET, which no per-row bound can express.
- *
- * `isRowNumber` caps a single number at 10000 because that is the largest the
- * parser can reach, but reaching it COSTS something: `row_number` counts every
- * record, and only 5000 of them may be blank. So a row at (zero-based) index
- * `i` has at most `i` data records and 5000 blank records ahead of it, which
- * bounds it at `i + 5001`. And because every plan entry comes from a data row,
- * there can never be more than MAX_IMPORT_ROWS entries at all.
- *
- * Per-row checks cannot see either limit. Without them a malformed response can
- * keep the real fingerprint and either pad the plan to 10000 plausible rows or
- * hand back a single row numbered 10000 — a line no 1-row file has — sending
- * the operator to a CSV line that does not exist while the bound apply executes
- * the real file (review #184, codex P2).
- *
- * Reads `index` as the sorted position, which `rowNumbersAscend` has already
- * established: it runs FIRST in PLAN_CHECKS and `.every` short-circuits, so a
- * non-ascending plan is refused before this check is reached.
- */
+// ============================================================================
+// Purpose: The parser's ROW BUDGET, which no per-row bound can express.
+//   `isRowNumber` caps a single number at 10000 because that is the largest
+//   the parser can reach, but reaching it COSTS something: `row_number` counts
+//   every record and only 5000 of them may be blank, so a row at (zero-based)
+//   index `i` has at most `i` data records and 5000 blank records ahead of it
+//   — bounding it at `i + 5001`. And because every plan entry comes from a
+//   data row, a plan can never carry more than MAX_IMPORT_ROWS entries at all.
+// Database/ORM: None (frontend) — a structural predicate over a decoded JSON
+//   body, run before that body is allowed to become trusted UI state.
+// Standards: Reads `index` as the SORTED position, which rowNumbersAscend has
+//   already established — it runs first in PLAN_CHECKS and `.every`
+//   short-circuits, so a non-ascending plan is refused before this is reached.
+//   That ordering is load-bearing: reversing PLAN_CHECKS would leave this
+//   check comparing row numbers against arbitrary array positions. Both limits
+//   mirror the parser's own constants; if MAX_IMPORT_ROWS or the blank-record
+//   budget moves in channel_import.py, this moves with it. Fails CLOSED — an
+//   over-budget plan is refused, never truncated to fit.
+// Blast Radius: Which CSV LINE the operator is sent to. A malformed response
+//   can keep the real fingerprint and either pad the plan to 10000 plausible
+//   rows or hand back a single row numbered 10000 — a line no one-row file has
+//   — so the operator reviews and remediates a line that does not exist while
+//   the bound apply executes the real roster (review #184, codex P2). No
+//   finance math; the damage is that the reviewed plan is not the applied one.
+// Connections:
+//   - File: backend/ums_smart_revenue/org/channel_import.py -> the parser
+//       whose 5000-data-row and 5000-blank-record caps produce this bound.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> rowNumbersAscend,
+//       which must stay ahead of this in PLAN_CHECKS, and isRowNumber, whose
+//       per-row ceiling this completes.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> the documented import row limits.
+// ============================================================================
 const rowBudgetHolds = (rows: ReadonlyArray<Record<string, unknown>>): boolean => {
   if (rows.length > MAX_IMPORT_ROWS) {
     return false;

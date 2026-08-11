@@ -163,7 +163,7 @@ with the pinned toolchain:
 | --- | --- |
 | `uv sync --extra dev --extra test --extra lint` | 87 resolved, 85 checked |
 | `uv run ruff check backend tests scripts` | **All checks passed** |
-| `uv run pytest -q` | **2817 passed**, 15 warnings (8m22s) — re-run at `4c70c599` |
+| `uv run pytest -q` | **2817 passed**, 15 warnings (11m58s) — re-run at `c92d260c` |
 | `git diff --check` | clean (exit 0) |
 | `uv run mypy backend` | clean for this PR's files (see note) |
 
@@ -223,6 +223,21 @@ added tests -- 2807 at the first full run, 2817 at the figure in the gate table
 above, which is the only one that describes the current commit. Earlier numbers
 appear in this document only inside sentences about the round that produced
 them.
+
+**The gate-table figure names the commit the run was EXECUTED at, not the last
+commit that changed `backend/`.** It previously named `4c70c599` while three
+later commits had touched `backend/` (`921a252a`, `59e96d68`, `be5c955d`),
+which left the mandatory pytest gate evidenced against an earlier tree even
+though all three deltas were docstring-only — 16 changed non-comment lines, all
+of them inside a `"""` block (review #184, codex P1). Re-run at `c92d260c`
+rather than argued about: same 2817, same 15 warnings, fresh container.
+
+The two anchoring conventions in this document differ on purpose, because the
+two figures support different claims. A **gate result** names the commit it was
+executed at — that is the only tree it observed. The **diff-size figure** below
+names the last commit that changed `backend/`, because that is the commit whose
+tree it measured, and re-anchoring it to a docs-only commit would imply a
+re-measurement that never happened.
 
 One caveat that cost a full run to learn: this total is only trustworthy
 against a **fresh** Postgres container. Re-running the suite against a reused
