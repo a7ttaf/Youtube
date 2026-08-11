@@ -186,6 +186,19 @@ const PYTHON_SPACE = "\\t\\n\\v\\f\\r\\u001c-\\u001f \\u0085\\u00a0\\u1680\\u200
 const PYTHON_UNSTRIPPED = new RegExp(`^[${PYTHON_SPACE}]|[${PYTHON_SPACE}]$`, "u");
 
 /**
+ * What Python's `str.strip()` would return, for the times this file has to
+ * REPRODUCE the backend's normalization rather than merely detect it.
+ *
+ * `String.prototype.trim` is not a substitute in either direction, and the
+ * difference is not cosmetic: it cuts U+FEFF, which `strip()` keeps. A value
+ * the route normalized and echoed verbatim would come back looking altered,
+ * and an equality check against `trim()` reads that as a mismatch.
+ */
+const PYTHON_STRIPPABLE = new RegExp(`^[${PYTHON_SPACE}]+|[${PYTHON_SPACE}]+$`, "gu");
+
+const pythonStrip = (value: string): string => value.replace(PYTHON_STRIPPABLE, "");
+
+/**
  * Text as the PARSER would have left it. `_parse_text_fields` strips the cell,
  * ERRORs an empty result, and ERRORs a NUL-bearing one — so a writable row's
  * text is always trimmed, non-empty and NUL-free.
@@ -1003,17 +1016,26 @@ export const isChannelImportResult = (payload: unknown): payload is ChannelImpor
  * Apply still sends the captured owner, so the write lands somewhere other
  * than what the operator reviewed (review #184, codex P2).
  *
- * The owner is compared trimmed because that is exactly what the route echoes:
- * `_validated_import_form` strips it once at the boundary and returns the
- * normalized value, so a padded " owner-1 " legitimately comes back as
- * "owner-1" and must not be read as a mismatch.
+ * The owner is compared STRIPPED because that is exactly what the route
+ * echoes: `_validated_content_owner_id` calls `raw.strip()` once at the
+ * boundary (channels.py:830) and returns the normalized value, so a padded
+ * " owner-1 " legitimately comes back as "owner-1" and must not be read as a
+ * mismatch.
+ *
+ * `pythonStrip`, never `trim()`. They disagree on U+FEFF, which `strip()`
+ * keeps and `trim()` cuts, so an owner id carrying a BOM is echoed verbatim by
+ * the backend and compared against a shortened string here — a mismatch on a
+ * value the route accepted, which fails the WHOLE preview rather than
+ * warning, and takes the import UI down for a roster the API handles fine
+ * (review #184, codex P2). Same divergence, same consequence, as the
+ * `isParserText` case above.
  */
 export const echoesRequestedTarget = (
   result: ChannelImportResult,
   contentOwnerId: string,
 ): boolean => {
   return (
-    result.content_owner_id === contentOwnerId.trim() &&
+    result.content_owner_id === pythonStrip(contentOwnerId) &&
     result.cms_status === IMPORT_CMS_STATUS
   );
 };

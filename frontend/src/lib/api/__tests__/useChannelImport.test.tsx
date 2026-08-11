@@ -1160,6 +1160,27 @@ describe("useChannelImport", () => {
     ).resolves.toMatchObject({ content_owner_id: "COabc" });
   });
 
+  it("accepts the echo of a BOM-bearing owner, which strip() KEEPS", async () => {
+    // Python's str.strip() does not remove U+FEFF; JavaScript's trim() does.
+    // So the route echoes "\uFEFFCOabc" verbatim while a trim()-based
+    // comparison expects "COabc" -- a mismatch on a value the backend
+    // ACCEPTED, which fails the WHOLE preview instead of warning (review #184,
+    // codex P2).
+    fetchMock().mockResolvedValue(
+      jsonResponse({ ...DRY_RUN_RESULT, content_owner_id: "\uFEFFCOabc" }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "\uFEFFCOabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ content_owner_id: "\uFEFFCOabc" });
+  });
+
   it("rejects a writable row missing the values it would write", async () => {
     // Each of these three fields is independently nullable because an ERROR
     // row carries none of them, so an outcome-blind check passes a CREATE with
