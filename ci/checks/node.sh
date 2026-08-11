@@ -1165,14 +1165,72 @@ assert_no_persistent_filter() {
     vitest|jest|mocha|ava|jasmine|tap|node) is_test_runner=1 ;;
   esac
 
-  # shellcheck disable=SC2086
-  for tok in $cmd; do
-    case "$tok" in
-      -t|--testNamePattern|--testNamePattern=*|--shard|--shard=*|--bail|--bail=*|--related|--changed|--changed=*|--testPathPattern|--testPathPattern=*|--onlyFailures|--findRelatedTests|--grep|--grep=*|--fgrep|--fgrep=*|--match|--match=*)
-        _filter_reject "$script_name" "$cmd" "$tok"
+  # And if it is not a runner, it has to be something that could reach one.
+  # `"test": "true"` runs, exits 0, and collects nothing -- the whole suite
+  # removed from the gate by a one-word manifest edit, with the lane still
+  # reporting PASS over a workspace that still contains tests. The presence of
+  # a `test` key was never the property worth asserting, exactly as it was not
+  # for `typecheck`; this is that rule one script over.
+  #
+  # Delegation is accepted because the script it hands to is either another
+  # package script this rule has already seen, or a shell script the gate does
+  # not read either way. A no-op is not delegation.
+  if [ "$is_test_runner" -ne 1 ]; then
+    case "$runner" in
+      bash|sh|zsh|make|turbo|nx|lerna|cross-env|dotenv|env|concurrently \
+        |npm-run-all|run-s|run-p|tsx|ts-node|deno|playwright|cypress|wdio|karma \
+        |*.sh|*.js|*.mjs|*.cjs|*.ts)
+        ;;
+      *)
+        echo "Workspace ${CI_GATE_NODE_WORKSPACE} defines a '${script_name}' script that does"
+        echo "  not appear to run a test runner:"
+        echo "    ${script_name}: ${cmd}"
+        echo "  A script named ${script_name} that exits 0 without collecting anything"
+        echo "  removes the whole suite from the gate while the lane still reports"
+        echo "  PASS. Recognised: vitest, jest, mocha, ava, jasmine, tap, node, a"
+        echo "  wrapper script, or a runner that delegates to one. Add yours here"
+        echo "  if it belongs."
+        exit "$CI_RESULT_FAIL_NEW_ISSUE"
         ;;
     esac
-  done
+  fi
+
+  # The flags are an allow-list for a known runner, not a deny-list.
+  #
+  # Enumerating the narrowing ones lost this race three times: -t, then a bare
+  # positional file, then `--exclude` and `--passWithNoTests`, which together
+  # make `vitest run` print "No test files found", exit 0 and satisfy every
+  # earlier rule. So the question is inverted, as it already was for the config
+  # properties: a flag that cannot reduce what is collected or run is named
+  # here, and anything else stops the guard until someone decides which it is.
+  #
+  # `--passWithNoTests` is the sharpest of them and would be excluded by name
+  # even if the list were kept: it converts "collected nothing" into success,
+  # which is the precise failure this whole lane exists to catch.
+  if [ "$is_test_runner" -eq 1 ]; then
+    # shellcheck disable=SC2086
+    for tok in $cmd; do
+      case "$tok" in
+        -*) ;;
+        *) continue ;;
+      esac
+      case "${tok%%=*}" in
+        --run|--watch|--no-watch|--coverage|--no-coverage|--reporter|--reporters \
+          |--outputFile|--outputTruncateLength|--config|-c|--root|--mode|--silent \
+          |--color|--no-color|--logHeapUsage|--pool|--poolOptions|--isolate \
+          |--no-isolate|--threads|--no-threads|--file-parallelism \
+          |--no-file-parallelism|--maxWorkers|--minWorkers|--maxConcurrency \
+          |--environment|--globals|--allowOnly|--no-allowOnly|--testTimeout \
+          |--hookTimeout|--teardownTimeout|--sequence|--update|--no-update \
+          |--disable-console-intercept|--printConsoleTrace|--typecheck \
+          |--no-typecheck|--yes|-y)
+          ;;
+        *)
+          _filter_reject "$script_name" "$cmd" "$tok"
+          ;;
+      esac
+    done
+  fi
 
   # A positional argument to a test runner *is* a filter — `vitest run [...filters]`
   # is the documented syntax, and `vitest run tests/lib/confidence.test.ts` ran 4

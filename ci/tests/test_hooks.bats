@@ -64,15 +64,23 @@ SH
     printf 'c\n' > c.txt && git add -A
     git -c user.email=t@t -c user.name=t commit -qm c3
     HD_TIP="$(git rev-parse HEAD)"
+    # A fork: shares HD_BASE with main, but neither contains the other. This is
+    # the case the "unrelated histories" wording described wrongly — there is a
+    # perfectly good merge base here.
+    git checkout -q -b fork "$HD_BASE"
+    printf 'f\n' > f.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm fork1
+    HD_FORK="$(git rev-parse HEAD)"
+    git checkout -q main
     git checkout -q --orphan orphan
     git rm -rqf . 2>/dev/null || true
     printf 'z\n' > z.txt && git add -A
     git -c user.email=t@t -c user.name=t commit -qm orphan
     HD_ORPHAN="$(git rev-parse HEAD)"
     git checkout -q main
-    printf '%s %s %s %s\n' "$HD_ROOT" "$HD_BASE" "$HD_TIP" "$HD_ORPHAN" > .shas
+    printf '%s %s %s %s %s\n' "$HD_ROOT" "$HD_BASE" "$HD_TIP" "$HD_ORPHAN" "$HD_FORK" > .shas
   ) >/dev/null 2>&1
-  read -r HD_ROOT HD_BASE HD_TIP HD_ORPHAN < "$HD_SB/.shas"
+  read -r HD_ROOT HD_BASE HD_TIP HD_ORPHAN HD_FORK < "$HD_SB/.shas"
 }
 
 @test "hook: the pre-push tip is the descendant, whatever order git lists refs" {
@@ -129,9 +137,60 @@ SH
   run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\nrefs/heads/orphan %s refs/heads/orphan %s\n' \
     '$HD_TIP' '$zero' '$HD_ORPHAN' '$zero' | bash ci/hook-dispatch.sh pre-push 2>&1"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unrelated histories"* ]]
+  [[ "$output" == *"do not form one chain"* ]]
   [[ "$output" == *"orphan"* ]]
   # And it never reached the gate, so it cannot have reported on half the push.
+  [[ "$output" != *"NEW="* ]]
+  rm -rf "$HD_SB"
+}
+
+@test "hook: two diverged refs are refused, and the message says why" {
+  # The wording mattered enough to be its own case. What the hook tests is
+  # whether one ref *contains* the other; two branches forked from a shared
+  # base fail that while having a perfectly good merge base, so a message
+  # about "unrelated histories" sent people looking for a rootless history
+  # that is not there.
+  _hd_sandbox
+  # The premise: these two do share a base, and neither contains the other.
+  run bash -c "cd '$HD_SB' && git merge-base '$HD_TIP' '$HD_FORK'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$HD_BASE" ]
+  run bash -c "cd '$HD_SB' && git merge-base --is-ancestor '$HD_TIP' '$HD_FORK'"
+  [ "$status" -ne 0 ]
+  run bash -c "cd '$HD_SB' && git merge-base --is-ancestor '$HD_FORK' '$HD_TIP'"
+  [ "$status" -ne 0 ]
+
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\nrefs/heads/fork %s refs/heads/fork %s\n' \
+    '$HD_TIP' '$HD_ROOT' '$HD_FORK' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"do not form one chain"* ]]
+  [[ "$output" != *"unrelated histories"* ]]
+  [[ "$output" != *"NEW="* ]]
+  rm -rf "$HD_SB"
+}
+
+@test "hook: incomparable remote bases are refused, not collapsed to one" {
+  # The tip was fixed by ancestry, and the base beside it was left choosing
+  # "the older, else whichever arrived first". Two remote tips that are not
+  # each other's ancestors therefore made the range order-dependent again --
+  # A0..tip re-walks everything reachable from the discarded B0, so the gate
+  # can block a push over a secret, an unsigned commit or a merge the remote
+  # already has.
+  _hd_sandbox
+  # Local tips form one chain, so the tip selection cannot be what refuses it.
+  run bash -c "cd '$HD_SB' && git merge-base --is-ancestor '$HD_BASE' '$HD_TIP'"
+  [ "$status" -eq 0 ]
+  # The two remote bases do not.
+  run bash -c "cd '$HD_SB' && git merge-base --is-ancestor '$HD_FORK' '$HD_ROOT'"
+  [ "$status" -ne 0 ]
+  run bash -c "cd '$HD_SB' && git merge-base --is-ancestor '$HD_ROOT' '$HD_FORK'"
+  [ "$status" -eq 0 ]
+
+  # remote bases: HD_FORK and HD_TIP -- neither contains the other.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/a %s refs/heads/a %s\nrefs/heads/b %s refs/heads/b %s\n' \
+    '$HD_TIP' '$HD_FORK' '$HD_TIP' '$HD_TIP' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"do not form one chain"* ]]
   [[ "$output" != *"NEW="* ]]
   rm -rf "$HD_SB"
 }

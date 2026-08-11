@@ -68,9 +68,21 @@ case "$HOOK_NAME" in
 
         case "${_rsha:-}" in
           *[!0]*)
-            if [ -z "$_push_old" ] \
-              || git merge-base --is-ancestor "$_rsha" "$_push_old" 2>/dev/null; then
+            # The base is widened only along one chain. Two remote tips that are
+            # each other's ancestors collapse to the older; two that are not do
+            # not collapse at all, and keeping whichever arrived first makes the
+            # range order-dependent again — `A0..tip` then re-walks everything
+            # reachable from the discarded `B0`, so the gate can block a push on
+            # a secret, an unsigned commit or a merge the remote already has.
+            # Reported rather than picked, for the same reason as the tip.
+            if [ -z "$_push_old" ]; then
               _push_old="$_rsha"
+            elif git merge-base --is-ancestor "$_rsha" "$_push_old" 2>/dev/null; then
+              _push_old="$_rsha"
+            elif git merge-base --is-ancestor "$_push_old" "$_rsha" 2>/dev/null; then
+              : # already the older of the two; keep it
+            else
+              _push_unrelated="${_push_unrelated} ${_rref:-<remote ref>}"
             fi
             ;;
           # A new branch has no base. Recorded rather than `break`-ed: breaking
@@ -81,10 +93,18 @@ case "$HOOK_NAME" in
       done
 
       if [ -n "$_push_unrelated" ]; then
-        echo "pre-push: refusing to gate a push spanning unrelated histories." >&2
-        echo "  Refs with no ancestry in common:${_push_unrelated}" >&2
-        echo "  The gate validates one commit range per run, and no single range" >&2
-        echo "  covers these. Push them as separate invocations so each is scanned." >&2
+        # "Unrelated histories" was the wrong words for the test performed. What
+        # is checked is whether one ref contains the other, and two branches
+        # forked from a shared base fail that while having a perfectly good
+        # merge base — so the old message sent people looking for a rootless
+        # history that is not there. Refusing is still right; the diagnostic has
+        # to describe the actual condition.
+        echo "pre-push: refusing to gate a push of refs that do not form one chain." >&2
+        echo "  Not contained by the ref already selected:${_push_unrelated}" >&2
+        echo "  These may well share a merge base — the point is that neither" >&2
+        echo "  contains the other, so no single A..B range covers both, and" >&2
+        echo "  collapsing them would either skip commits or re-scan commits the" >&2
+        echo "  remote already has. Push the refs separately so each is gated." >&2
         exit 1
       fi
       # Any ref without a base means the push carries history the remote has

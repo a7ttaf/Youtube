@@ -53,7 +53,17 @@ _bp_infra() {
 # not parsed.
 _BP_ERR_FILE=""
 _bp_err_setup() {
-  _BP_ERR_FILE="$(mktemp 2>/dev/null || printf '/tmp/bp-err.%s' "$$")"
+  # No predictable fallback. `/tmp/bp-err.$$` is guessable, and this path is
+  # then opened for *writing* -- a symlink planted there by any user on the box
+  # redirects git's stderr onto whatever the symlink names, with this process's
+  # privileges. A gate that cannot obtain a private temp file has no business
+  # continuing; there is nothing to fall back to that is not worse.
+  _BP_ERR_FILE="$(mktemp 2>/dev/null)" || _BP_ERR_FILE=""
+  if [ -z "$_BP_ERR_FILE" ]; then
+    ci::log::error "Cannot create a private temporary file (mktemp failed)."
+    OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+    exit "$OVERALL_RESULT"
+  fi
   # shellcheck disable=SC2064
   trap "rm -f '$_BP_ERR_FILE'" EXIT
 }

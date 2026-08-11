@@ -1346,7 +1346,48 @@ single P-tier above.
   itself, written down as an expectation. The fixture is a real command now,
   and the case asserts what it can honestly claim (neither declared-TypeScript
   rule fires) rather than an exit of 0, since the sandbox has no tsc to run.
-  Combined suite: `bats ci/tests/` = 301 cases, 0 failures.
+  A twenty-ninth round found five, two P1, and three of them are the previous
+  round's reasoning applied where it had not been carried. The `test` script had
+  the defect the `typecheck` script had just been fixed for: `"test": "true"`
+  runs, exits 0 and collects nothing, so a one-word manifest edit removed the
+  whole suite from the gate while the lane reported PASS over a workspace that
+  still contained tests. Same allow-list, one script over. The vitest **flag**
+  rule was still a deny-list, and it was missing `--exclude` and
+  `--passWithNoTests`, which together make `vitest run` print "No test files
+  found" and exit 0 while being neither a name filter nor a positional — the
+  fourth time enumerating the dangerous options lost this race, so the flags are
+  now inverted the way the config properties already were: a flag that cannot
+  reduce what is collected is named, and anything else stops the guard.
+  `--passWithNoTests` would be excluded by name regardless, since it converts
+  "collected nothing" into success.
+  The other two were defects in the round-twenty-seven fix itself. The pre-push
+  **base** was still chosen by "the older, else whichever arrived first", so two
+  remote tips that are not each other's ancestors made the range order-dependent
+  again — `A0..tip` re-walks everything reachable from the discarded `B0`, and
+  the gate can then block a push over a secret, an unsigned commit or a merge
+  the remote already has. Refused now, like the tip. And the refusal message
+  said "unrelated histories / no ancestry in common" while the test performed is
+  containment: two branches forked from a shared base fail it and have a
+  perfectly good merge base, so the diagnostic sent people looking for a
+  rootless history that is not there. Refusing is still right; the words now
+  describe the condition. Qodo also caught a predictable `/tmp/bp-err.$$`
+  fallback opened for writing — a symlink target waiting to happen — introduced
+  in the same round; there were three of them once the changeset temp files were
+  counted, and a gate that cannot obtain a private temp file now stops rather
+  than falling back to something worse.
+  The fixtures followed the typecheck one, and at a scale worth recording: **51
+  cases** used `"test": "true"` as their stub, because the sandbox has no real
+  runner and `true` was the shortest thing that exits 0. The suite had therefore
+  been writing down the exact defect codex reported, 51 times, as the normal way
+  to declare a test script. They are `bash -c true` now — a wrapper, which is
+  what they always meant — and the three `exit 1`/`exit 10` variants with them.
+  Two controls needed more than a rename: `an ordinary test script is not read
+  as a filter` and `a wrapper script with a positional argument is not a filter`
+  both now create a real `scripts/test.sh` in the sandbox, so the lane can
+  actually run what the manifest names rather than relying on a command that
+  ignores its arguments. Cases that assert the *rejection* keep the bare stub,
+  since that is the thing under test.
+  Combined suite: `bats ci/tests/` = 307 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
