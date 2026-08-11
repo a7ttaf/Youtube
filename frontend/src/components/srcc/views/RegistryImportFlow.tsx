@@ -202,6 +202,40 @@ const refreshedPlanMessage = (status: number): string => {
  */
 const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 403, 404, 409, 413, 422]);
 
+// ============================================================================
+// Purpose: Classify a FAILED apply as "definitely wrote nothing" or "outcome
+//   unknown" — the decision that keeps the durable pending-write guard up, or
+//   retires it and re-enables Apply.
+// Database/ORM: None (frontend) — a pure read of the caught error. It performs
+//   no request and settles nothing itself; the caller acts on the verdict.
+// Standards: Fail-safe BY CONSTRUCTION, and the construction is the point.
+//   It is an allowlist of statuses that establish rejection, not a
+//   `status < 500` test, so an unanticipated failure mode defaults to
+//   indeterminate rather than to "safe to retry". Two cases make that
+//   difference concrete: a 2xx carrying malformed JSON (client.ts raises with
+//   the ORIGINAL 2xx status, so the server said OK and the import almost
+//   certainly committed), and a gateway 502/503/504 (the request may have
+//   reached the backend and committed with the response lost on the way home).
+//   A rejected fetch is never an ApiError at all, so no response means unknown.
+//   Every status ON the list is one the route raises before
+//   apply_channel_import runs, or one that aborts the single transaction
+//   wrapping it — see DEFINITE_REJECTION_STATUSES for the per-status warrant,
+//   including why 404 belongs there.
+// Blast Radius: Both errors are real and opposite. Calling an indeterminate
+//   apply definite retires the guard over a write that may still be
+//   committing, so the operator can dispatch a DUPLICATE audited import;
+//   calling a definite rejection indeterminate strands them on a retry lockout
+//   for a request that provably wrote nothing. No authorization meaning and no
+//   revenue math; the CHANNEL_IMPORTED audit event remains the authority on
+//   what committed.
+// Connections:
+//   - File: frontend/src/lib/api/client.ts -> ApiError, and the 2xx-with-bad-
+//       body case that keeps the original status.
+//   - File: backend/ums_smart_revenue/api/channels.py -> import_channels,
+//       which raises every status on the definite list.
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> the pending
+//       record this verdict decides the fate of.
+// ============================================================================
 /**
  * True when an apply failure leaves the outcome UNKNOWN: no response at all
  * (a rejected fetch is never an ApiError), or a response that does not

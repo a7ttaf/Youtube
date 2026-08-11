@@ -1,8 +1,10 @@
 # PR #184 — CSV import stepper in Registry (PR-B) — delivery handoff
 
-Branch `feat/import-stepper-ui`. Written at head `01aa2b58`, figures refreshed
-at `842946d1+`; the validation
-figures below were measured, not planned.
+Branch `feat/import-stepper-ui`. Written at head `01aa2b58`; every figure
+below was re-measured at the head that carries it, most recently after the
+round-50 test additions. They are measured, not planned — and the frontend
+count moves whenever a review round adds a test, so it is refreshed with the
+tests rather than at the end.
 
 ## Scope
 
@@ -15,10 +17,19 @@ The session gains a `can_import_channels` capability, and the shell gains a
 cross-document guard so an import whose outcome was never established cannot be
 silently repeated.
 
-**Non-goals.** No new backend route and no change to what the import writes.
-The planner, the write boundary, the permission model and the audit contract
-are untouched except where a review finding required the API response
-*contract* to be corrected. No revenue math, no allocation, no month-close.
+**Non-goals.** No new backend route, no new persisted field, no migration, and
+no widening of what the import may write — every backend behaviour this PR adds
+is a **refusal**. No revenue math, no allocation, no month-close. The permission
+model and the audit contract are untouched.
+
+The planner and the write boundary are **not** among the non-goals, and an
+earlier draft of this section wrongly said they were. Both changed
+substantially: the planner gained `group_action` and `revenue_source_status`
+disclosure plus a fourth bulk group lookup, and the write boundary gained
+reviewed-pre-state enforcement for bound applies, a group-effect divergence
+guard that runs for **all** callers, and batched per-key group writes. See
+**Behaviour changes** and **Rollback / reset** below; the unbound "the file
+wins" rule of review #159 is what remains untouched.
 
 ## Files changed (30)
 
@@ -80,7 +91,7 @@ not from memory.
 
 | Suite | Result |
 | --- | --- |
-| `bun run test` (frontend) | **447 passed**, 41 files |
+| `bun run test` (frontend) | **451 passed**, 41 files |
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
 | `uv run --project backend pytest -q` | **2807 passed**, 15 warnings (8m38s) |

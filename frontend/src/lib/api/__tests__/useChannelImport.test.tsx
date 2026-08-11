@@ -353,6 +353,80 @@ describe("useChannelImport", () => {
     ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
 
+  it("rejects a writable row whose group key the parser could not have emitted", async () => {
+    // `_text_fields` normalizes the cell before anything else sees it: a blank
+    // or whitespace-only Group_ID becomes null, so a non-null key on a writable
+    // row is always trimmed and non-blank. `" "` is a string, so it satisfies
+    // isNullableString, and it pairs with a non-null group_action so the
+    // biconditional passes too — the Group cell then renders a blank identifier
+    // with Apply enabled, while the bound request writes the REAL CSV group the
+    // retained fingerprint stands for (review #184, codex P2).
+    const blankKey = {
+      ...DRY_RUN_RESULT,
+      rows: [{ ...DRY_RUN_RESULT.rows[1], group_id: "   ", group_action: "JOIN" }],
+      counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+    };
+    fetchMock().mockResolvedValue(jsonResponse(blankKey));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("rejects a group key the parser would have turned into an ERROR row", async () => {
+    // The other two normalizations, which are ERROR rows upstream rather than
+    // nulls: a NUL-bearing key, and one past MAX_GROUP_ID_CHARS (255).
+    for (const groupId of ["mus\u0000ic", "g".repeat(256)]) {
+      fetchMock().mockResolvedValue(
+        jsonResponse({
+          ...DRY_RUN_RESULT,
+          rows: [{ ...DRY_RUN_RESULT.rows[1], group_id: groupId, group_action: "JOIN" }],
+          counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+        }),
+      );
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+      ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+    }
+  });
+
+  it("still accepts a group key carrying INTERIOR spaces", async () => {
+    // The parser strips only the ENDS, so "Music EMEA" is a key the backend can
+    // emit. Pinned because the obvious over-tightening — no spaces at all —
+    // would refuse legitimate plans, and nothing else in the suite would catch
+    // it.
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        rows: [{ ...DRY_RUN_RESULT.rows[1], group_id: "Music EMEA", group_action: "JOIN" }],
+        counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ rows: [{ group_id: "Music EMEA" }] });
+  });
+
   it("rejects a PRE-DISCLOSURE payload that omits the fields entirely", async () => {
     // The rejections above pin `null`; this one pins ABSENT, which is the
     // shape a backend WITHOUT this PR emits — the fields do not exist there.

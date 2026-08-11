@@ -310,6 +310,41 @@ const hasConsistentGroupEffect = (row: Record<string, unknown>): boolean => {
 };
 
 /**
+ * A group key the PARSER would have produced. `_text_fields` in
+ * channel_import.py normalizes the cell before anything else sees it:
+ * `group_raw.strip() if group_raw and group_raw.strip() else None` maps a
+ * blank or whitespace-only cell to null, a NUL-bearing key becomes an ERROR
+ * row, and one over MAX_GROUP_ID_CHARS (255) does too. So a non-null key on a
+ * writable row is always trimmed, non-blank, NUL-free and within the cap.
+ *
+ * Without this, `group_id: " "` satisfies isNullableString and pairs happily
+ * with a non-null `group_action`, so the biconditional passes: the Group cell
+ * renders a blank identifier, Apply stays enabled, and the bound request goes
+ * on to write the REAL CSV group the retained fingerprint stands for — the
+ * same substitution hasWriteFields closes for the channel columns (review
+ * #184, codex P2).
+ */
+const MAX_GROUP_ID_CHARS = 255;
+
+const isGroupKey = (value: unknown): boolean => {
+  return (
+    typeof value === "string" &&
+    value.trim() === value &&
+    value !== "" &&
+    // A NUL-bearing key is an ERROR row upstream, so it never reaches a
+    // writable one. No interior-space rule: the parser strips only the
+    // ENDS, so "Music EMEA" is a legal key the backend can emit.
+    !value.includes("\u0000") &&
+    value.length <= MAX_GROUP_ID_CHARS
+  );
+};
+
+/** Null (no group write) or a key the parser could have emitted. */
+const carriesUsableGroupKey = (row: Record<string, unknown>): boolean => {
+  return row.group_id === null || isGroupKey(row.group_id);
+};
+
+/**
  * A WRITABLE row must CARRY the values it will write. The field checks above
  * are outcome-blind — `youtube_channel_id`, `channel_name` and
  * `revenue_required` are each independently nullable, because an ERROR row
@@ -450,6 +485,7 @@ const sourceTransitionIsValid = (row: Record<string, unknown>): boolean => {
 const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [
   (row) => PLAN_ROW_FIELDS.every(([field, isValid]) => isValid(row[field])),
   hasConsistentGroupEffect,
+  carriesUsableGroupKey,
   hasWriteFields,
   outcomeMatchesChanges,
   disclosesSourceStatus,
