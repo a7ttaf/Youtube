@@ -103,9 +103,9 @@ CANDIDATE_PRUNE=(
 # unless told otherwise, so the two sources did not even agree about the path.
 candidate_files() {
   {
-    find "$FRONTEND_DIR" "${CANDIDATE_PRUNE[@]}" -type f "${TEST_SUFFIXES[@]}" -print0 2>/dev/null || true
+    find "$FRONTEND_DIR" "${CANDIDATE_PRUNE[@]}" -type f "${TEST_SUFFIXES[@]}" -print0 2>/dev/null || return 1
     if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
-      git ls-files -z -- "$FRONTEND_DIR" 2>/dev/null || true
+      git ls-files -z -- "$FRONTEND_DIR" 2>/dev/null || return 1
       # And HEAD, in ship mode. The union above is worktree plus index, which
       # describes the pre-commit gate; the pre-push gate stands behind HEAD, and
       # this file had no notion of that at all. Remove a stray test from the

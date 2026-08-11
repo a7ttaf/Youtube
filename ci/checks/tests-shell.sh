@@ -40,10 +40,16 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
   # all three — the tracked scan sees a deletion, and the scan that would have
   # seen the replacement was not looking there. Three scopes for one question
   # is how they came to disagree.
+  # A scan that cannot read its reference tree has not found a clean one.
+  # `|| true` made those the same answer, so an unreadable HEAD blob left the
+  # drift list empty and these suites ran the worktree against a reference
+  # nothing had compared them to. The sentinel survives the pipeline and is
+  # checked before the output is read as a list of paths.
+  SCAN_UNREADABLE="__ci_gate_unreadable__"
   SHELL_INPUTS=(ci .githooks .gitignore frontend/README.md)
   SHELL_DRIFT="$( {
-    git diff --name-only HEAD -- "${SHELL_INPUTS[@]}" 2>/dev/null || true
-    git ls-files --others --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null || true
+    git diff --name-only HEAD -- "${SHELL_INPUTS[@]}" 2>/dev/null || printf '%s\n' "$SCAN_UNREADABLE"
+    git ls-files --others --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null || printf '%s\n' "$SCAN_UNREADABLE"
     # And the ignored ones. A commit that deletes a bats file and adds its path
     # to .gitignore leaves the worktree replacement invisible to both lists
     # above — HEAD does not carry the path, and --exclude-standard drops
@@ -62,6 +68,14 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
     git ls-files --others --ignored --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null \
       | grep -Ev '(^|/)(\.ci-gate|node_modules)/|^ci/(reports|artifacts)/' || true
   } | sort -u | sed '/^$/d')"
+  case "$SHELL_DRIFT" in
+    *"$SCAN_UNREADABLE"*)
+      echo "Cannot read the tree these suites are being compared against."
+      echo "  Refusing to report on the worktree alone: a reference that could"
+      echo "  not be read is not a reference that matches."
+      exit "$CI_RESULT_FAIL_INFRA"
+      ;;
+  esac
   if [ -n "$SHELL_DRIFT" ]; then
     echo "Gate inputs differ between HEAD and the worktree:"
     while IFS= read -r _p; do

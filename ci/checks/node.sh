@@ -230,6 +230,12 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     # vouches for is the gate's, not the changeset's, so the reference follows
     # CI_GATE_MODE: ship stands behind HEAD, everything else behind the index.
     # The range this push carries, resolved once for the deletion lookup below.
+    # A scan that cannot read its reference has not found a clean one. `|| true`
+    # made those the same answer, so an unreadable object left the drift list
+    # empty and the lane installed, typechecked, tested and built a worktree
+    # nothing had compared it against. The sentinel survives the pipeline and is
+    # checked before the output is read as a list of paths.
+    _SCAN_UNREADABLE="__ci_gate_unreadable__"
     _gate_range=""
     if [ "${CI_GATE_MODE:-}" = "ship" ] && type ci::git::push_range >/dev/null 2>&1; then
       _gate_range="$(ci::git::push_range 2>/dev/null || true)"
@@ -244,8 +250,8 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
 
       if [ "${CI_GATE_MODE:-}" = "ship" ]; then
         _drift="$( {
-          git -c core.quotepath=false diff --name-only HEAD -- "$_scope" 2>/dev/null || true
-          git -c core.quotepath=false ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || true
+          git -c core.quotepath=false diff --name-only HEAD -- "$_scope" 2>/dev/null || printf '%s\n' "$_SCAN_UNREADABLE"
+          git -c core.quotepath=false ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || printf '%s\n' "$_SCAN_UNREADABLE"
           # And the ignored ones — but only where an ignored file *shadows a
           # path this push removes*. That is the whole of the reported defect: a
           # commit deletes a script and adds its path to .gitignore, so HEAD no
@@ -291,13 +297,21 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
             if ! git cat-file -e "HEAD:$_d" 2>/dev/null; then
               printf '%s\n' "$_d"
             fi
-          done <<< "$(git -c core.quotepath=false log --diff-filter=D --name-only --format= "$_gate_range" -- "$_scope" 2>/dev/null || true)"
+          done <<< "$(git -c core.quotepath=false log --diff-filter=D --name-only --format= "$_gate_range" -- "$_scope" 2>/dev/null || printf '%s\n' "$_SCAN_UNREADABLE")"
         } | sort -u | sed '/^$/d')"
+        case "$_drift" in
+          *"$_SCAN_UNREADABLE"*)
+            echo "Cannot read the tree this push is being compared against."
+            echo "  Refusing to report on the worktree alone: a reference that"
+            echo "  could not be read is not a reference that matches."
+            exit "$CI_RESULT_FAIL_INFRA"
+            ;;
+        esac
         [ -n "$_drift" ] && PARTIAL="${PARTIAL}${_drift}"$'\n'
         continue
       fi
 
-      _staged="$(git diff --cached --name-only -- "$_scope" 2>/dev/null | sort || true)"
+      _staged="$(git diff --cached --name-only -- "$_scope" 2>/dev/null | sort || printf '%s\n' "$_SCAN_UNREADABLE")"
       [ -n "$_staged" ] || continue
 
       # Something here is part of this commit, so the whole workspace has to
@@ -316,12 +330,20 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       # hides it; `--ignored` finds it but drags in every build artifact, so it
       # is pruned to the directories a workspace is expected to ignore.
       _diverged="$( {
-        git -c core.quotepath=false diff --name-only -- "$_scope" 2>/dev/null || true
-        git -c core.quotepath=false ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || true
+        git -c core.quotepath=false diff --name-only -- "$_scope" 2>/dev/null || printf '%s\n' "$_SCAN_UNREADABLE"
+        git -c core.quotepath=false ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || printf '%s\n' "$_SCAN_UNREADABLE"
         git -c core.quotepath=false ls-files --others --ignored --exclude-standard -- "$_scope" 2>/dev/null \
           | grep -Ev '(^|/)(node_modules|dist|build|coverage|\.next|\.turbo|\.vite|\.git|\.ci-gate)/' \
           || true
       } | sort -u | sed '/^$/d')"
+      case "$_diverged" in
+        *"$_SCAN_UNREADABLE"*)
+          echo "Cannot read the index or the worktree for ${_scope}."
+          echo "  Refusing to report a clean comparison from a listing that"
+          echo "  failed to produce one."
+          exit "$CI_RESULT_FAIL_INFRA"
+          ;;
+      esac
       [ -n "$_diverged" ] && PARTIAL="${PARTIAL}${_diverged}"$'\n'
     done <<< "$NODE_WORKSPACES"
     PARTIAL="$(printf '%s' "$PARTIAL" | sed '/^$/d')"
@@ -1407,7 +1429,7 @@ _resolve_delegated_target() {
     # instead, which is the thing this gate can actually read.
     local line real code toks tok pre opens closes
     local brace=0 block=0 _fn=0 _kw=0 _cont=0 _cont_prev=0 state_in=""
-    local hit=0 errexit=0 _tail=""
+    local hit=0 errexit=0 _tail="" _rt="" _rw=""
     local hd_end="" hd_dash=0 hd_rest
     while IFS= read -r line || [ -n "$line" ]; do
       # A here-document body is data. A checker named inside one is text being
@@ -1519,6 +1541,28 @@ _resolve_delegated_target() {
         esac
         if _script_names_a_checker "$real" "$tools" "$((depth + 1))"; then
           hit=1
+          # The filter rule holds one layer down as well. `"test": "bash
+          # scripts/test.sh"` leaves is_test_runner at zero, so a script whose
+          # body is `vitest run tests/only.test.ts` skipped positional
+          # validation entirely -- accepted here while the identical direct
+          # command was refused.
+          #
+          # Only when this line starts with a known runner: a positional means
+          # something else for `bash scripts/inner.sh`, which is delegation and
+          # is resolved rather than filtered.
+          _rt=""
+          set -f
+          for _rw in $real; do
+            case "${_rw##*/}" in
+              npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run) continue ;;
+              -*) continue ;;
+              *) _rt="${_rw##*/}"; break ;;
+            esac
+          done
+          set +f
+          case " $tools " in
+            *" $_rt "*) _reject_positional_filters "$target" "$real" "$_rt" ;;
+          esac
         fi
       fi
 
@@ -1962,16 +2006,64 @@ assert_no_persistent_filter() {
   # may follow. Restricted to known runners because a positional means something
   # else entirely for `bash scripts/test.sh`, which is a legitimate test script.
   [ "$is_test_runner" -eq 1 ] || return 0
+  _reject_positional_filters "$script_name" "$cmd" "$runner"
+}
+
+# Whether a known runner is handed a positional, which is a filter.
+#
+# Its own function because the delegated path needs it too. A `test` script
+# reading `bash scripts/test.sh` leaves is_test_runner at zero, so a script
+# whose body is `vitest run tests/only.test.ts` skipped this entirely -- the
+# rule held for the direct spelling and not for the one layer down, which is
+# the same right-rule-wrong-tree shape this lane has had to fix twice.
+_reject_positional_filters() {
+  local script_name="$1" cmd="$2" runner="$3" tok prev _q
   prev=""
   # shellcheck disable=SC2086
   set -- $cmd
   shift                                  # the runner or its wrapper
   while [ "$#" -gt 0 ]; do
     tok="$1"
+    # A quoted value holding whitespace arrives here as several tokens, because
+    # this scan word-splits and the shell does not reinterpret the quotes.
+    # `--reporter "my reporter"` becomes `--reporter`, `"my`, `reporter"`, and
+    # the tail word has no flag in front of it -- so a legitimate script failed
+    # the lane for narrowing a suite it does not narrow.
+    #
+    # Rejoined before the rule is applied rather than skipped past, so the
+    # verdict is unchanged for a value and for a filter alike: the run is one
+    # token, and whether that token is a filter is the same question as for any
+    # other. `vitest run "tests/a b.test.ts"` is still refused.
+    case "$tok" in
+      \"*|\'*)
+        _q="${tok:0:1}"
+        while [ "${#tok}" -lt 2 ] || [ "${tok: -1}" != "$_q" ]; do
+          [ "$#" -gt 1 ] || break
+          shift
+          tok="$tok $1"
+        done
+        ;;
+    esac
+    # The runner compared by basename, because a delegated script names it by
+    # path: `exec ./scripts/vitest run` puts `./scripts/vitest` here, which the
+    # literal arm below cannot match, and the runner itself was then read as a
+    # positional filter. The direct path never saw this because it shifts the
+    # runner off before the scan starts.
+    if [ -n "$runner" ] && [ "${tok##*/}" = "$runner" ]; then
+      prev="" ; shift ; continue
+    fi
     case "$tok" in
       # Wrapper words, the runner itself, subcommands, and shell operators are
       # not filters.
       npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run|watch|related|"$runner"|'&&'|'||'|';'|'|')
+        prev="" ; shift ; continue ;;
+      # Argument forwarding is not a filter. `vitest run "$@"` is how a wrapper
+      # script passes on what it was given, and under `bun run test` it is
+      # given nothing -- reading it as a positional refused every ordinary
+      # wrapper in the repository the moment this rule reached delegated
+      # scripts. What the caller actually forwards is not visible here either
+      # way, and was not visible before this rule existed.
+      '"$@"'|'$@'|'"$*"'|'$*')
         prev="" ; shift ; continue ;;
       -*)
         prev="$tok" ; shift ; continue ;;
