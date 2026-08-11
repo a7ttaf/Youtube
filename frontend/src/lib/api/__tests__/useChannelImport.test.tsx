@@ -52,7 +52,7 @@ const requireFormDataBody = (init: unknown): FormData => {
   return body;
 };
 
-const CSV_TEXT = "youtube_channel_id,channel_name\nUCa,Alpha Channel\n";
+const CSV_TEXT = "youtube_channel_id,channel_name\nUCaaaaaaaaaaaaaaaaaaaaaa,Alpha Channel\n";
 
 const rosterFile = () => {
   return new File([CSV_TEXT], "roster.csv", { type: "text/csv" });
@@ -76,7 +76,7 @@ const DRY_RUN_RESULT: ChannelImportResult = {
   rows: [
     {
       row_number: 1,
-      youtube_channel_id: "UCa",
+      youtube_channel_id: "UCaaaaaaaaaaaaaaaaaaaaaa",
       outcome: "CREATE",
       channel_name: "Alpha Channel",
       group_id: null,
@@ -88,7 +88,7 @@ const DRY_RUN_RESULT: ChannelImportResult = {
     },
     {
       row_number: 2,
-      youtube_channel_id: "UCb",
+      youtube_channel_id: "UCbbbbbbbbbbbbbbbbbbbbbb",
       outcome: "UPDATE",
       channel_name: "Beta Channel",
       group_id: "g1",
@@ -859,6 +859,47 @@ describe("useChannelImport", () => {
         changes: { channel_name: { from: "Old Beta", to: "Beta Channel" } },
       }),
     );
+  });
+
+  it("rejects a writable row whose channel id is not a channel id", async () => {
+    // CHANNEL_ID_PATTERN is ^UC[A-Za-z0-9_-]{22}$ and a row failing it becomes
+    // an ERROR, so any other shape on a writable row is unemittable — and it
+    // would put a misidentified channel on the preview while the bound apply
+    // wrote the real one (review #184, codex P2).
+    await rejectsPlan(onlyRow({ youtube_channel_id: "UC-too-short" }));
+    await rejectsPlan(onlyRow({ youtube_channel_id: " " }));
+  });
+
+  it("rejects a writable row whose name is only whitespace", async () => {
+    // The parser strips the name and rejects an empty result, so a blank name
+    // never reaches a writable row — and it renders as an empty cell, exactly
+    // as unreviewable as an absent one.
+    await rejectsPlan(onlyRow({ channel_name: "   " }));
+  });
+
+  it("rejects an ERROR row claiming a group effect", async () => {
+    // An ERROR row performs no writes, so the planner leaves both group fields
+    // null — it never computes group_action past the block check. Accepting a
+    // non-null pair told the operator a rejected row would create or join a
+    // group, on the same screen that says error rows write nothing.
+    await rejectsPlan({
+      ...DRY_RUN_RESULT,
+      counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 0, ERROR: 1 },
+      rows: [
+        {
+          row_number: 1,
+          youtube_channel_id: null,
+          outcome: "ERROR",
+          channel_name: null,
+          group_id: "g1",
+          group_action: "CREATE",
+          revenue_required: null,
+          revenue_source_status: null,
+          changes: {},
+          reason: "channel_name is empty",
+        },
+      ],
+    });
   });
 
   it("rejects a 2xx describing a plan other than the one bound", async () => {

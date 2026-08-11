@@ -59,7 +59,7 @@ const ownersResponse = (accountIds: string[]): ContentOwnersResponse => {
 const DEFAULT_OWNERS = ownersResponse(["OWNERaaa"]);
 
 const CSV_TEXT =
-  "youtube_channel_id,channel_name\nUCa,Alpha Channel\nUCb,Beta Channel\n";
+  "youtube_channel_id,channel_name\nUCaaaaaaaaaaaaaaaaaaaaaa,Alpha Channel\nUCbbbbbbbbbbbbbbbbbbbbbb,Beta Channel\n";
 
 const rosterFile = () => {
   return new File([CSV_TEXT], "roster.csv", { type: "text/csv" });
@@ -80,7 +80,7 @@ const DRY_RUN_PLAN: ChannelImportResult = {
   rows: [
     {
       row_number: 1,
-      youtube_channel_id: "UCa",
+      youtube_channel_id: "UCaaaaaaaaaaaaaaaaaaaaaa",
       outcome: "CREATE",
       channel_name: "Alpha Channel",
       group_id: null,
@@ -95,7 +95,7 @@ const DRY_RUN_PLAN: ChannelImportResult = {
     },
     {
       row_number: 2,
-      youtube_channel_id: "UCb",
+      youtube_channel_id: "UCbbbbbbbbbbbbbbbbbbbbbb",
       outcome: "UPDATE",
       channel_name: "Beta Channel",
       group_id: "g1",
@@ -426,9 +426,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // Both halves of the channel identity render: names are mutable and not
     // unique, so the durable youtube_channel_id must be visible for the
     // operator to tell which channel a CREATE/UPDATE will touch.
-    expect(screen.getByText("UCa")).toBeInTheDocument();
+    expect(screen.getByText("UCaaaaaaaaaaaaaaaaaaaaaa")).toBeInTheDocument();
     expect(screen.getByText("Beta Channel")).toBeInTheDocument();
-    expect(screen.getByText("UCb")).toBeInTheDocument();
+    expect(screen.getByText("UCbbbbbbbbbbbbbbbbbbbbbb")).toBeInTheDocument();
     expect(
       screen.getByText("channel_name: Old Beta → Beta Channel"),
     ).toBeInTheDocument();

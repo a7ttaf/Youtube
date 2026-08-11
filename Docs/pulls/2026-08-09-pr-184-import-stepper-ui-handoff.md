@@ -1,6 +1,7 @@
 # PR #184 — CSV import stepper in Registry (PR-B) — delivery handoff
 
-Branch `feat/import-stepper-ui`. Written at head `01aa2b58`; the validation
+Branch `feat/import-stepper-ui`. Written at head `01aa2b58`, figures refreshed
+at `842946d1+`; the validation
 figures below were measured, not planned.
 
 ## Scope
@@ -69,7 +70,7 @@ are untouched except where a review finding required the API response
 
 | Suite | Result |
 | --- | --- |
-| `bun run test` (frontend) | **443 passed**, 41 files |
+| `bun run test` (frontend) | **447 passed**, 41 files |
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
 | `uv run --project backend pytest -q` | **2807 passed**, 15 warnings (8m38s) |
@@ -80,10 +81,11 @@ The backend suite was re-run after the last backend edit rather than assumed;
 that edit was comment-only and the result was unchanged at 2807.
 
 **Failures encountered and fixed during review**, recorded because they are the
-useful part: nineteen fixtures across five files carried shapes the backend
+useful part: twenty-two fixtures across five files carried shapes the backend
 cannot emit — partial count maps, CREATE rows with no source-status
 disclosure, UPDATE/UNCHANGED rows spread from a CREATE (so `from: null`), an
-apply answered with a dry-run body, a 409 detail missing header fields. Each
+apply answered with a dry-run body, a 409 detail missing header fields, and
+stub channel ids no roster could contain. Each
 was corrected rather than worked around; several were only exposed *because* a
 validation tightening landed.
 
@@ -119,6 +121,34 @@ directly-pinned unit test of the extracted rule.
 - **Where `navigator.locks` is unavailable**, admission degrades to the same
   check-then-set without the lock — narrower than the race, not free of it.
   Stated in the store's contract rather than papered over.
+
+## Migration / backfill
+
+`No migration/backfill required.`
+
+Evidence: `git diff --name-only $(git merge-base main HEAD)..HEAD` returns no
+file under `backend/ums_smart_revenue/db/alembic/versions/`, and does not touch
+`backend/ums_smart_revenue/db/org_models.py`. No column, constraint, index or
+enum is added, altered or dropped, and no existing row is rewritten.
+
+The backend files this PR does change are read/write **paths**, not schema:
+
+- `api/channels.py` — the import route's request validation, the response
+  contract, and `_plan_fingerprint`'s inputs. No DDL, and the fingerprint is
+  computed in-process and never persisted.
+- `api/session.py` — derives `can_import_channels` from capabilities already
+  stored; no new persisted field.
+- `org/channel_import.py`, `org/channel_import_apply.py` — planning and the
+  write boundary, over existing columns.
+- `org/channel_groups.py`, `org/sql_channel_groups.py` — group queries and the
+  membership write, over existing tables.
+
+Tables written by this PR's code path — `youtube_channels`, `channel_groups`,
+`channel_group_members`, `audit_logs` — all pre-date it and are unchanged in
+shape. The one behavioural change that touches persisted data is that an apply
+now writes through for UPDATE **and** UNCHANGED rows for unbound callers, which
+is the "the file wins" rule established in review #159; it writes existing
+columns with values the roster already supplies and needs no backfill.
 
 ## Rollback / reset
 

@@ -771,7 +771,7 @@ const IMPORT_PLAN = {
   rows: [
     {
       row_number: 1,
-      youtube_channel_id: "UCa",
+      youtube_channel_id: "UCaaaaaaaaaaaaaaaaaaaaaa",
       outcome: "CREATE",
       channel_name: "Alpha Channel",
       group_id: null,
@@ -857,7 +857,7 @@ describe("AppShell navigation latch during an un-abortable write", () => {
     fireEvent.change(picker, { target: { value: "OWNERaaa" } });
     fireEvent.change(within(panel).getByLabelText("Roster CSV"), {
       target: {
-        files: [new File(["youtube_channel_id,channel_name\nUCa,Alpha\n"], "r.csv")],
+        files: [new File(["youtube_channel_id,channel_name\nUCaaaaaaaaaaaaaaaaaaaaaa,Alpha\n"], "r.csv")],
       },
     });
     fireEvent.change(within(panel).getByLabelText("Reason (required, audited)"), {

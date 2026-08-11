@@ -515,6 +515,38 @@ const RegistryTable = ({
 //   - File: Docs/12_BACKEND_API_SPEC.md -> the dry run is the reconciliation
 //       tool for an apply whose response was lost.
 // ============================================================================
+// ============================================================================
+// Purpose: Decide WHICH pending applies an acknowledgement retires — the ids
+//   captured when the warning went up, or the live set when nothing was
+//   captured yet.
+// Database/ORM: None (frontend) — a pure selection over two id lists. It
+//   issues no request; what the caller does with the result is remove durable
+//   pending-write records, which is what re-enables dispatch.
+// Standards: The operator's claim is "I have checked the audit trail for the
+//   imports this warning told me about". Retiring MORE than that clears the
+//   duplicate-import guard over a request the warning never mentioned and
+//   which may still be committing; retiring LESS leaves a notice that cannot
+//   be dismissed and an Apply that stays refused.
+//   The captured list wins whenever it has anything, so an apply admitted
+//   while the warning stands survives the click it was never part of. The
+//   fallback exists because the capture runs in an effect: an acknowledgement
+//   dispatched in the same tick as the raising render would otherwise pass an
+//   empty list and retire nothing (review #184, qodo). An empty capture means
+//   nothing has been excluded yet, so the live set IS what is on screen.
+//   Kept as a named export rather than inlined because that fallback branch is
+//   NOT reachable from a rendered click — Testing Library flushes effects
+//   before dispatching — so a component test of it passes with the branch
+//   removed. Pinning the rule directly is the only honest way to cover it.
+// Blast Radius: Whether the duplicate-import guard comes down over a live
+//   audited write, or refuses to come down at all. No authorization meaning
+//   and no financial mutation; the CHANNEL_IMPORTED audit event remains the
+//   authority on what committed.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> acknowledge()
+//       and snapshotPendingIds(), the store operations this feeds.
+//   - File: frontend/src/components/srcc/views/RegistryView.tsx ->
+//       UnsettledImportNotice, whose button dispatches the acknowledgement.
+// ============================================================================
 /**
  * Which applies an acknowledgement retires: the ids CAPTURED when the warning
  * went up, or the live set when nothing was captured.

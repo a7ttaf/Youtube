@@ -97,6 +97,28 @@ const isNonBlankString = (value: unknown): boolean => {
   return typeof value === "string" && value !== "";
 };
 
+/**
+ * A channel id the PARSER would have accepted. `CHANNEL_ID_PATTERN` in
+ * channel_import.py is `^UC[A-Za-z0-9_-]{22}$` and a row failing it becomes an
+ * ERROR, so any other shape on a writable row is unemittable — and it would
+ * put a misidentified channel on the preview while the bound apply wrote the
+ * real one (review #184, codex P2).
+ */
+const CHANNEL_ID_PATTERN = /^UC[A-Za-z0-9_-]{22}$/u;
+
+const isChannelId = (value: unknown): boolean => {
+  return typeof value === "string" && CHANNEL_ID_PATTERN.test(value);
+};
+
+/**
+ * Non-blank AFTER trimming. The parser strips the name and rejects an empty
+ * result, so a whitespace-only name never reaches a writable row — and it
+ * renders as a blank cell, which is exactly as unreviewable as an absent one.
+ */
+const isTrimmedNonBlankString = (value: unknown): boolean => {
+  return typeof value === "string" && value.trim() !== "";
+};
+
 const isOutcome = (value: unknown): boolean => {
   return typeof value === "string" && PLAN_OUTCOMES.some((outcome) => outcome === value);
 };
@@ -265,6 +287,16 @@ const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boole
  * group key either, so the relation is a biconditional (review #184).
  */
 const hasConsistentGroupEffect = (row: Record<string, unknown>): boolean => {
+  // An ERROR row performs NO writes, so the planner leaves BOTH fields null —
+  // it never even computes group_action past the block check. The biconditional
+  // alone is satisfied by both being non-null, which told the operator a
+  // rejected row would create or join a group, on the same screen that says
+  // error rows write nothing (review #184, codex P2).
+  if (row.outcome === "ERROR") {
+    return row.group_id === null && row.group_action === null;
+  }
+  // For a writable row the relation is the biconditional: null is reserved for
+  // rows with no group at all.
   return (row.group_id === null) === (row.group_action === null);
 };
 
@@ -291,8 +323,8 @@ const hasWriteFields = (row: Record<string, unknown>): boolean => {
     return true;
   }
   return (
-    isNonBlankString(row.youtube_channel_id) &&
-    isNonBlankString(row.channel_name) &&
+    isChannelId(row.youtube_channel_id) &&
+    isTrimmedNonBlankString(row.channel_name) &&
     typeof row.revenue_required === "boolean"
   );
 };
