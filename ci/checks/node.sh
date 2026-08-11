@@ -58,7 +58,21 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
   # in *both* directions -- the last round taught this scan to see as deep as
   # discovery, and left it seeing more than discovery too.
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
-    INDEXED_WS="$(git ls-files -- 'package.json' '*/package.json' 2>/dev/null \
+    # The listing status is taken before its output is shaped. `|| true` on the
+    # pipeline turned an unreadable index into "no workspaces are staged", so a
+    # workspace present only in the index -- the case this scan exists for --
+    # disappeared and the lane printed "No package.json found" and exited 0,
+    # never reaching its failing test script.
+    _idx_rc=0
+    _idx_raw="$(git ls-files -- 'package.json' '*/package.json' 2>/dev/null)" || _idx_rc=$?
+    if [ "$_idx_rc" -ne 0 ]; then
+      echo "Cannot read the index to find staged workspaces."
+      echo "  Refusing to conclude there are none from a listing that failed to"
+      echo "  produce one."
+      exit "$CI_RESULT_FAIL_INFRA"
+    fi
+    INDEXED_WS="$(printf '%s\n' "$_idx_raw" \
+      | sed '/^$/d' \
       | awk -F/ 'NF == 1 { print "."; next }
                  { d = $1; for (i = 2; i < NF; i++) d = d "/" $i; print d }' \
       | sort -u || true)"
@@ -1405,8 +1419,32 @@ _resolve_delegated_target() {
   local sub
   sub="$(script_command "$target" 2>/dev/null || true)"
   if [ -n "$sub" ]; then
-    _script_names_a_checker "$sub" "$tools" "$((depth + 1))"
-    return $?
+    if _script_names_a_checker "$sub" "$tools" "$((depth + 1))"; then
+      # A package script reached through another one gets the same reading as a
+      # direct command. Resolving it and stopping at the runner meant `"test":
+      # "bun run verify"` over `"verify": "vitest run --exclude=..."` passed
+      # with the exclusion never inspected -- the flag and positional rules held
+      # for the command in the `test` key and for nothing it delegated to.
+      _sub_rt=""
+      set -f
+      # shellcheck disable=SC2086
+      for _sub_tok in $sub; do
+        case "${_sub_tok##*/}" in
+          npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run) continue ;;
+          -*) continue ;;
+          *) _sub_rt="${_sub_tok##*/}"; break ;;
+        esac
+      done
+      set +f
+      case " $tools " in
+        *" $_sub_rt "*)
+          _reject_narrowing_flags "$target" "$sub"
+          _reject_positional_filters "$target" "$sub" "$_sub_rt"
+          ;;
+      esac
+      return 0
+    fi
+    return 1
   fi
 
   # A readable file, judged line by line: one line reaching a checker is enough,
@@ -1430,6 +1468,7 @@ _resolve_delegated_target() {
     local line real code toks tok pre opens closes
     local brace=0 block=0 _fn=0 _kw=0 _cont=0 _cont_prev=0 state_in=""
     local hit=0 errexit=0 _tail="" _rt="" _rw="" _body=""
+    local _sub_rt="" _sub_tok=""
     local hd_end="" hd_dash=0 hd_rest
     # The body is read once, up front, rather than kept open across the loop.
     #
@@ -1986,6 +2025,15 @@ assert_no_persistent_filter() {
   # `--test-name-pattern`, `--test-only`, `--test-skip-pattern`, `--test-shard`
   # -- are absent, which under an allow-list is all that is needed.
   if [ "$is_test_runner" -eq 1 ]; then
+    _reject_narrowing_flags "$script_name" "$cmd"
+  fi
+}
+
+# The non-narrowing flag allow-list, as its own function so a package script
+# reached through another one is read the same way as a direct command.
+_reject_narrowing_flags() {
+  local script_name="$1" cmd="$2" tok
+  if true; then
     # shellcheck disable=SC2086
     for tok in $cmd; do
       case "$tok" in
@@ -2263,6 +2311,21 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
           _tc_prev="" ; shift ; continue
         fi
         case "$_tc_tok" in
+          # Modes that print instead of compiling. `tsc --showConfig` resolves
+          # the configuration and writes it out; it does not typecheck, so a
+          # workspace holding `const n: number = "bad"` passed the lane with the
+          # compiler never having looked at it. Naming the compiler is not
+          # running it, and neither is running it in a mode that does not check.
+          --showConfig|--listFilesOnly|--listFiles|--init|--help|-h|--version|-v|--all)
+            echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a non-compiling tsc mode in its"
+            echo "  'typecheck' script:"
+            echo "    typecheck: ${_tc_cmd}"
+            echo "    offending argument: ${_tc_tok}"
+            echo "  That mode prints information and performs no type checking, so"
+            echo "  the lane reports PASS having checked nothing. Use 'tsc --noEmit'"
+            echo "  or 'tsc -p <tsconfig> --noEmit'."
+            exit "$CI_RESULT_FAIL_NEW_ISSUE"
+            ;;
           npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run|'&&'|';')
             _tc_prev="" ; shift ; continue ;;
           -*)

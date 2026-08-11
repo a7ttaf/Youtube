@@ -29,6 +29,11 @@ case "$HOOK_NAME" in
     ;;
   pre-push)
     export CI_GATE_HOOK=pre-push
+    # git passes the destination remote as the hook's first argument. It was
+    # dropped, and the tag-publication check then asked whether *any*
+    # remote-tracking branch contained the commit -- so a commit published
+    # only to `upstream` counted as published when pushing to `origin`.
+    export CI_GATE_PUSH_REMOTE="${2:-}"
     # git feeds a pre-push hook one `<local ref> <local sha> <remote ref>
     # <remote sha>` record per ref on stdin. Nothing read it, so every ship-mode
     # check fell back to deriving a range from the checked-out HEAD — and

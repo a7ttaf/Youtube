@@ -979,20 +979,40 @@ YML
   [ "$output" != "$published" ]
   [ "$output" != "$unpublished" ]
 
-  # A tag push names no branch destination: set-and-empty, not unset.
+  # A tag push names no branch destination: set-and-empty, not unset. The
+  # destination remote comes from the pre-push hook's first argument, and the
+  # question is whether *that* remote already carries the commit.
+  run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
+    && CI_GATE_PUSH_NEW_SHA='$published' CI_GATE_PUSH_REMOTE_REFS= \
+       CI_GATE_PUSH_REMOTE=origin ci::git::worktree_covers_push"
+  [ "$status" -eq 0 ]
+
+  # Published somewhere else is not published here. `git branch -r --contains`
+  # walks every remote-tracking branch, so a commit carried only by another
+  # remote counted as gated for a push to origin -- and the tag then uploads a
+  # tree origin has never seen while the lanes report on the repaired HEAD.
+  run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
+    && CI_GATE_PUSH_NEW_SHA='$published' CI_GATE_PUSH_REMOTE_REFS= \
+       CI_GATE_PUSH_REMOTE=upstream ci::git::worktree_covers_push"
+  [ "$status" -ne 0 ]
+
+  # With no destination remote there is nothing to scope the question to, and
+  # answering it from every remote is the defect. This refuses instead.
   run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
     && CI_GATE_PUSH_NEW_SHA='$published' CI_GATE_PUSH_REMOTE_REFS= ci::git::worktree_covers_push"
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
 
   # A tag carrying an unpublished commit is refused, ancestor or not.
   run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
-    && CI_GATE_PUSH_NEW_SHA='$unpublished' CI_GATE_PUSH_REMOTE_REFS= ci::git::worktree_covers_push"
+    && CI_GATE_PUSH_NEW_SHA='$unpublished' CI_GATE_PUSH_REMOTE_REFS= \
+       CI_GATE_PUSH_REMOTE=origin ci::git::worktree_covers_push"
   [ "$status" -ne 0 ]
 
   # And a *branch* push of the published commit is still refused -- the
   # relaxation is for tags only, or `git push origin other-branch` walks back in.
   run bash -c "cd '$sb' && . ci/lib/common.sh && . ci/lib/git.sh \
-    && CI_GATE_PUSH_NEW_SHA='$published' CI_GATE_PUSH_REMOTE_REFS=other ci::git::worktree_covers_push"
+    && CI_GATE_PUSH_NEW_SHA='$published' CI_GATE_PUSH_REMOTE_REFS=other \
+       CI_GATE_PUSH_REMOTE=origin ci::git::worktree_covers_push"
   [ "$status" -ne 0 ]
 
   # A destination list that is *unset* is not the tag case: it means nobody told

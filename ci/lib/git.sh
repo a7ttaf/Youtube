@@ -173,8 +173,22 @@ ci::git::worktree_covers_push() {
   # Set-and-empty, not unset: unset means nobody told us and there is no second
   # tree to be wrong about, which the early return above already handles.
   if [ -n "${CI_GATE_PUSH_REMOTE_REFS+set}" ] && [ -z "${CI_GATE_PUSH_REMOTE_REFS}" ]; then
-    local contained
-    contained="$(git branch -r --contains "$pushed" 2>/dev/null | head -1 || true)"
+    # Published *to the destination*, not published anywhere.
+    #
+    # `git branch -r --contains` walks every remote-tracking branch, so a
+    # commit that exists only on `upstream` counted as already gated when the
+    # push is going to `origin` -- and the tag then carries a tree origin has
+    # never seen, while the lanes report on the repaired HEAD. The remote is
+    # the destination this push named.
+    #
+    # Without a remote name there is nothing to scope to, and answering from
+    # every remote is the bug. Refuse instead: a tag push outside the pre-push
+    # hook has no destination this can verify.
+    local contained remote="${CI_GATE_PUSH_REMOTE:-}"
+    [ -n "$remote" ] || return 1
+    contained="$(git branch -r --contains "$pushed" 2>/dev/null \
+      | sed 's/^[[:space:]]*//' \
+      | grep "^${remote}/" | head -1 || true)"
     [ -n "$contained" ] && return 0
   fi
   return 1
