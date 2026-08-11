@@ -250,11 +250,13 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1661 insertions across eight files** (`git diff --stat
+backend diff is **1688 insertions across eight files** (`git diff --stat
 $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a frontend revert
-leaves all of it running. That figure moves with every review round that
-touches backend code — re-measure it rather than trusting this line if the
-branch has advanced.
+leaves all of it running.
+
+The figure is scoped to `backend/`, so editing this document does not move it —
+but any review round that changes backend code does, and several have. Re-run
+the command rather than trusting this line if the branch has advanced.
 
 ### Reverting the frontend only
 
