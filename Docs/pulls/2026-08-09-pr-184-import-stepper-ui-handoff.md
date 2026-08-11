@@ -239,6 +239,19 @@ names the last commit that changed `backend/`, because that is the commit whose
 tree it measured, and re-anchoring it to a docs-only commit would imply a
 re-measurement that never happened.
 
+Which makes the currency test explicit rather than a matter of reading dates:
+**the recorded run is current while no commit after it has touched `backend/`.**
+`be5c955d` is the last one that did, and it precedes the `c92d260c` run, so the
+figure describes the branch tip's backend tree even as later frontend and docs
+commits land on top. The single command that settles it:
+
+```bash
+git log --oneline c92d260c..HEAD -- backend/
+```
+
+Empty output means the gate row still holds. Any output is a re-run, not an
+argument about whether the delta looked harmless.
+
 One caveat that cost a full run to learn: this total is only trustworthy
 against a **fresh** Postgres container. Re-running the suite against a reused
 one reported 23 failures — every one of them an RLS/migration test, none of
