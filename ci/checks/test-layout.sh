@@ -96,6 +96,16 @@ candidate_files() {
     find "$FRONTEND_DIR" "${CANDIDATE_PRUNE[@]}" -type f "${TEST_SUFFIXES[@]}" -print 2>/dev/null || true
     if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
       git ls-files -- "$FRONTEND_DIR" 2>/dev/null || true
+      # And HEAD, in ship mode. The union above is worktree plus index, which
+      # describes the pre-commit gate; the pre-push gate stands behind HEAD, and
+      # this file had no notion of that at all. Remove a stray test from the
+      # index and the worktree without committing the removal, and the guard
+      # reported "Test layout OK" for a push whose tree still carries it —
+      # while node.sh, on the identical state, reported drift. Two checks, one
+      # file, opposite answers, and this is the one on the always-run list.
+      if [ "${CI_GATE_MODE:-}" = "ship" ] && git rev-parse --verify HEAD >/dev/null 2>&1; then
+        git ls-tree -r --name-only HEAD -- "$FRONTEND_DIR" 2>/dev/null || true
+      fi
     fi
   } | sort -u
 }
@@ -290,10 +300,40 @@ extract_test_block() {
     # usual test applies: a regex can only appear where a value can, so the
     # preceding token decides. `const mention = /export default/;` was read as
     # ordinary text, and the anchor landed inside it.
-    function is_regex_start(str, i,   c, w, j) {
+    # Whether the ")" immediately before i closes an `if (...)` / `while (...)` /
+    # `for (...)` head. Walks back to the matching "(" and reads the word before
+    # it. Anything else -- the arguments of a call, a parenthesised expression
+    # -- is a value, so a slash after it divides.
+    function _closes_control(str, i,   j, depth, c, w) {
+      j = i - 1
+      while (j >= 1 && substr(str, j, 1) ~ /[[:space:]]/) j--
+      if (substr(str, j, 1) != ")") return 0
+      depth = 0
+      while (j >= 1) {
+        c = substr(str, j, 1)
+        if (c == ")") depth++
+        else if (c == "(") { depth--; if (depth == 0) break }
+        j--
+      }
+      if (j < 1) return 0
+      j--
+      while (j >= 1 && substr(str, j, 1) ~ /[[:space:]]/) j--
+      w = ""
+      while (j >= 1 && substr(str, j, 1) ~ /[A-Za-z0-9_$]/) {
+        w = substr(str, j, 1) w
+        j--
+      }
+      return (w ~ /^(if|while|for|switch|catch|with)$/) ? 1 : 0
+    }
+    function is_regex_start(str, i,   c, w, j, depth) {
       c = prev_signif(str, i)
       if (c == "") return 1
-      if (c !~ /[A-Za-z0-9_$)\]]/) return 1
+      # A closing parenthesis is the ambiguous one. `(a + b) / c` divides;
+      # `if (cond) /re/.test(x)` does not, because that parenthesis closes a
+      # condition of a control statement rather than an expression. Match it back
+      # and look at the keyword in front of it.
+      if (c == ")") return _closes_control(str, i)
+      if (c !~ /[A-Za-z0-9_$\]]/) return 1
       # An identifier character does not settle it: `return /x/` ends in the "n"
       # of a keyword, and a keyword is a position where a value may start. Read
       # the whole word back and check it, or `function f() { return /export
@@ -544,6 +584,20 @@ value_is_literal_array() {
   awk '
     { v = v $0 " " }
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    # Index just past the closing quote of the string opening at i. Its own copy
+    # rather than the one in extract_test_block: these are two separate awk
+    # programs, and a function is only in scope in the one it is written in.
+    function str_end(s, i, n,   q, c) {
+      q = substr(s, i, 1)
+      i++
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == "\\") { i += 2; continue }
+        if (c == q) { return i + 1 }
+        i++
+      }
+      return n + 1
+    }
     function element_is_literal(s,   q) {
       s = trim(s)
       if (s == "") return 1          # trailing comma
@@ -551,6 +605,11 @@ value_is_literal_array() {
       if (q != "\"" && q != "'"'"'" && q != "`") return 0
       # The closing quote must be the last character: "a" + x is not a literal.
       if (substr(s, length(s), 1) != q || length(s) < 2) return 0
+      # Endpoints are not the element. `"a" && "b"` opens and closes with the
+      # same quote and is a boolean expression, so the closing quote of the
+      # FIRST string has to be the last character of the element -- one quoted
+      # token, nothing after it.
+      if (str_end(s, 1, length(s)) != length(s) + 1) return 0
       # A backtick-delimited value is only a literal while nothing inside it is
       # computed. `${false ? glob : "tests/one.test.ts"}` is a quoted value by
       # every test above and still hands vitest a string chosen at runtime, with

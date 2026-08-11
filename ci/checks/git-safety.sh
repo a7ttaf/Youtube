@@ -85,15 +85,33 @@ fi
 # --first-parent is deliberately absent: a merged side branch is part of what is
 # being pushed, and its commits carry their content into the remote too.
 _gs_diff() {
-  local sha
+  local sha rc=0
   if [ -n "$GATE_RANGE" ]; then
     while IFS= read -r sha; do
       [ -n "$sha" ] || continue
-      git show --format= "$@" "$sha" 2>/dev/null || true
+      # A commit whose blobs cannot be read -- a partial clone whose promisor
+      # remote is unavailable is the realistic case -- used to become an empty
+      # diff here, and an empty diff is indistinguishable from a clean one. The
+      # failure is recorded and turned into FAIL_INFRA by the caller rather than
+      # silently narrowing what was scanned.
+      git show --format= "$@" "$sha" || rc=1
     done <<< "$GATE_COMMITS"
   else
     git diff --cached "$@"
   fi
+  return "$rc"
+}
+
+# Whether every enumerated commit can actually be read. Asked once, up front, so
+# each individual scan below does not have to carry the error path.
+_gs_commits_readable() {
+  local sha
+  [ -n "$GATE_RANGE" ] || return 0
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    git show --format= --name-only "$sha" >/dev/null 2>&1 || return 1
+  done <<< "$GATE_COMMITS"
+  return 0
 }
 
 # The largest this path ever was anywhere in what is being reported on. `HEAD:`
@@ -114,13 +132,30 @@ _gs_max_blob_size() {
   printf '%s' "$max"
 }
 
+# Asked here rather than beside the enumeration above, because the function has
+# to be defined before it can be called.
+if ! _gs_commits_readable; then
+  echo "A commit in ${GATE_RANGE} cannot be read; its content was never scanned."
+  echo "  A partial clone with an unavailable promisor remote does this."
+  echo "  Refusing to report on commits that could not be inspected."
+  exit "$CI_RESULT_FAIL_INFRA"
+fi
+
+# NUL-delimited, and read that way by the caller.
+#
+# `--name-only` alone emits git's *quoted* representation for any path outside
+# plain ASCII: "cafÃ©.env" rather than cafe.env. The suffix patterns below
+# then match nothing, because the path they are matching ends in a quote
+# character, and `git cat-file -s "$sha:$path"` looks up a path that does not
+# exist. A sensitive file with an accent in its name walked straight through.
+# `-z` is git's documented way to get the literal bytes.
+#
+# Additions, copies, renames and modifications only. A path being *removed* is
+# not content this commit introduces, and listing deletions blocked the one
+# change that fixes the problem: committing `git rm secrets.env` failed the gate
+# for the file it deletes. The index form had the same flaw and the same cure.
 _gs_content_files() {
-  # Additions, copies, renames and modifications only. A path that is being
-  # *removed* is not content this commit introduces, and listing deletions here
-  # blocked the one change that fixes the problem: committing `git rm secrets.env`
-  # failed the gate for the file it deletes. The index form had the same flaw and
-  # the same cure.
-  _gs_diff --name-only --diff-filter=ACMR 2>/dev/null || true
+  _gs_diff --name-only -z --diff-filter=ACMR 2>/dev/null || true
 }
 
 # `--check` reports through its exit status, and _gs_diff swallows that: it runs
@@ -165,7 +200,7 @@ if [ -z "${CI_CHECKS_SECRET_PATTERN:-}" ]; then
   exit "$CI_RESULT_FAIL_INFRA"
 fi
 
-while IFS= read -r path; do
+while IFS= read -r -d '' path; do
   [ -z "$path" ] && continue
   case "$path" in
     .env|.env.*|.env-*|env.local|env.local.*|*.env|*.env.*|*.env-*|*.pem|*.key|*.p12|*.pfx|*id_rsa|*id_ed25519|*.jks|.npmrc|.pypirc|*.gpg)
@@ -199,16 +234,28 @@ secret_cleanup() {
 }
 trap secret_cleanup EXIT INT TERM
 printf '%s\n' "^\+.*(${CI_CHECKS_SECRET_PATTERN})" > "$secret_pattern_file"
-if ! grep -E -f "$secret_pattern_file" /dev/null >/dev/null 2>&1; then
-  rc=$?
-  if [ "$rc" -eq 2 ]; then
-    echo "CI_CHECKS_SECRET_PATTERN is not a valid extended regex."
-    exit "$CI_RESULT_FAIL_INFRA"
-  fi
+# `$?` after `! cmd` is the status of the *negation*, which is 0 whenever the
+# condition was taken — so this branch ran with rc=0, the test below was never
+# true, and a malformed pattern silently disabled secret detection for the whole
+# run. grep's own status is captured without the `!` in front of it: 0 matched,
+# 1 no match, 2 or more the pattern itself is broken.
+rc=0
+grep -E -f "$secret_pattern_file" /dev/null >/dev/null 2>&1 || rc=$?
+if [ "$rc" -ge 2 ]; then
+  echo "CI_CHECKS_SECRET_PATTERN is not a valid extended regex; the secret scan"
+  echo "  cannot run, and would otherwise report no match for every input."
+  exit "$CI_RESULT_FAIL_INFRA"
 fi
-if _gs_diff -U0 | grep -E -f "$secret_pattern_file" >/dev/null 2>&1; then
+secret_rc=0
+_gs_diff -U0 | grep -E -f "$secret_pattern_file" >/dev/null 2>&1 || secret_rc=$?
+if [ "$secret_rc" -eq 0 ]; then
   echo "Potential secret-like value detected in additions ${GATE_WHAT}."
   SECRET_PATTERN_MATCH=1
+elif [ "$secret_rc" -ge 2 ]; then
+  # The validation above should have caught this. The scan is the thing that
+  # matters, though, and "grep broke" must never arrive here as "nothing found".
+  echo "The secret scan failed to run (grep exited ${secret_rc})."
+  exit "$CI_RESULT_FAIL_INFRA"
 fi
 secret_cleanup
 

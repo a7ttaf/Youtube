@@ -32,16 +32,25 @@ cd "$ROOT_DIR"
 if [ "${CI_GATE_MODE:-}" = "ship" ] \
   && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
   && git rev-parse --verify HEAD >/dev/null 2>&1; then
+  # One list of inputs, consulted by all three commands.
+  #
+  # The tracked scan covered .gitignore and frontend/README.md; the untracked
+  # and ignored scans were scoped to ci and .githooks alone. So a commit that
+  # deleted .gitignore and left a worktree-only copy behind was invisible to
+  # all three — the tracked scan sees a deletion, and the scan that would have
+  # seen the replacement was not looking there. Three scopes for one question
+  # is how they came to disagree.
+  SHELL_INPUTS=(ci .githooks .gitignore frontend/README.md)
   SHELL_DRIFT="$( {
-    git diff --name-only HEAD -- ci .githooks .gitignore frontend/README.md 2>/dev/null || true
-    git ls-files --others --exclude-standard -- ci .githooks 2>/dev/null || true
+    git diff --name-only HEAD -- "${SHELL_INPUTS[@]}" 2>/dev/null || true
+    git ls-files --others --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null || true
     # And the ignored ones. A commit that deletes a bats file and adds its path
     # to .gitignore leaves the worktree replacement invisible to both lists
     # above — HEAD does not carry the path, and --exclude-standard drops
     # exactly this file — so the suites ran the replacement for a commit that
     # removes their own coverage. Nothing under ci/ or .githooks/ is
     # legitimately ignored except the gate's own generated cache.
-    git ls-files --others --ignored --exclude-standard -- ci .githooks 2>/dev/null \
+    git ls-files --others --ignored --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null \
       | grep -Ev '(^|/)(\.ci-gate|node_modules)/' || true
   } | sort -u | sed '/^$/d')"
   if [ -n "$SHELL_DRIFT" ]; then
@@ -68,6 +77,22 @@ if ! ci::common::command_exists bats; then
   echo "  reporting PASS here would mean the layout and node gates are unguarded."
   echo "  Install bats (e.g. 'npm i -g bats', or your platform's package manager)."
   exit "$CI_RESULT_FAIL_INFRA"
+fi
+
+# The dispatcher treats a missing ci/tests/ as a successful skip, which is right
+# for a generic lane in a repo that has no shell tests and wrong for this one.
+# This wrapper exists *because* those suites must run: with every file under
+# ci/tests/ deleted, the dispatcher logged "skipped: no ci/tests directory
+# found", reported PASS, and the gate approved the removal of the entire
+# regression net it was added to enforce. Asked here, before delegating, for the
+# same reason the bats-missing case is asked here.
+if [ ! -d "$ROOT_DIR/ci/tests" ] \
+  || [ -z "$(find "$ROOT_DIR/ci/tests" -type f -name '*.bats' -print -quit 2>/dev/null)" ]; then
+  echo "No .bats suites found under ci/tests/."
+  echo "  This lane is scheduled as a blocker precisely so those suites execute;"
+  echo "  reporting PASS with nothing to run would leave the layout, node and"
+  echo "  changeset gates unguarded — the state this check exists to prevent."
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi
 
 exec env CI_GATE_CHECK_ID=tests-shell bash "$SCRIPT_DIR/tests.sh" "$@"

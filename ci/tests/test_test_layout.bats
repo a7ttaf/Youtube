@@ -1208,3 +1208,88 @@ EOF
   run_guard
   [ "$status" -eq 0 ]
 }
+
+@test "test-layout: catches a compound expression inside the include array" {
+  # `["a" && "b"]` opens and closes with the same quote, so an endpoint-only
+  # check called it literal while vitest received only the second operand.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}" && "tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"computes test.include"* ]]
+}
+
+@test "test-layout: a regex after a control statement is not read as division" {
+  # `if (true) /re/.test(x)` ends in ")", and treating every ")" as an
+  # expression operand classified the slash as division — so the anchor landed
+  # inside the regex, one step past the keyword fix.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+if (true) /export default/.test("x");
+
+const base = {
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+};
+
+export default defineConfig({
+  test: {
+    include: ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
+}
+
+@test "test-layout: a parenthesised expression before a slash still divides" {
+  # The control the keyword-and-paren rule must not swallow: `(a + b) / c` ends
+  # in ")" too, and reading it as a regex consumes the rest of the config.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const a = 10;
+const b = 6;
+const each = (a + b) / 2;
+
+export default defineConfig({
+  test: {
+    testTimeout: 100 * each,
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: ship mode sees a stray test that only HEAD carries" {
+  # The union was worktree plus index, which describes the pre-commit gate. Take
+  # a stray test out of both without committing the removal and the guard
+  # reported OK for a push whose tree still carries it — while node.sh, on the
+  # identical state, reported drift.
+  ( cd "$SANDBOX" && git init -q -b f . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  printf 'it("stray", () => {});\n' > "$SANDBOX/frontend/src/probe.test.ts"
+  ( cd "$SANDBOX" && git add -A && git -c user.email=t@t -c user.name=t commit -qm stray ) >/dev/null 2>&1
+  ( cd "$SANDBOX" && git rm -q --cached frontend/src/probe.test.ts ) >/dev/null 2>&1
+  rm -f "$SANDBOX/frontend/src/probe.test.ts"
+  # The premise: HEAD still carries it.
+  run bash -c "cd '$SANDBOX' && git ls-tree -r --name-only HEAD -- frontend"
+  [[ "$output" == *"probe.test.ts"* ]]
+  run bash -c "cd '$SANDBOX' && bash ci/checks/test-layout.sh"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"probe.test.ts"* ]]
+}

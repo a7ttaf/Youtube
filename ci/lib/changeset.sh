@@ -93,6 +93,14 @@ ci::changeset::_sniff_content() {
 # still classified by the rules above (or left unknown).
 ci::changeset::_in_node_workspace() {
   local dir
+  # Scheduling has to mean the same thing by "workspace" as discovery does, or
+  # a lane is scheduled for a package node.sh will never look at — or, the way
+  # round this was found, run against a test fixture nobody meant as a package.
+  # ci::common::is_vendored_path is that shared definition.
+  if type ci::common::is_vendored_path >/dev/null 2>&1 \
+    && ci::common::is_vendored_path "$1"; then
+    return 1
+  fi
   dir="$(dirname "$1")"
   while [ -n "$dir" ] && [ "$dir" != "." ] && [ "$dir" != "/" ]; do
     if [ -f "$dir/package.json" ]; then
@@ -358,45 +366,50 @@ ci::changeset::detect() {
   _CI_CHANGESET_CHECKS=""
 
   local raw_entries=""
+  local _rc=0
   case "$mode" in
     pre-commit)
-      raw_entries="$(git diff --cached --name-status 2>/dev/null)" || true
+      # The status is kept rather than discarded. `|| true` made "git is
+      # broken" and "nothing is staged" the same observation, and the caller
+      # reads an empty changeset as "nothing relevant changed" and skips the
+      # whole gate. A detection failure has to be able to say so.
+      raw_entries="$(git diff --cached --name-status 2>/dev/null)" || _rc=$?
+      [ "$_rc" -eq 0 ] || return 1
       if [ -z "$raw_entries" ]; then
-        raw_entries="$(git diff --name-status 2>/dev/null)" || true
+        raw_entries="$(git diff --name-status 2>/dev/null)" || _rc=$?
+        [ "$_rc" -eq 0 ] || return 1
       fi
       ;;
     pre-push)
-      local push_range
+      local push_range=""
       local committed_entries="" staged_entries=""
-      set +e
-      push_range="$(git rev-parse --abbrev-ref '@{push}' 2>/dev/null)"
-      local rc=$?
-      set -e
-      if [ $rc -ne 0 ] || [ -z "$push_range" ]; then
-        local default_branch merge_base
-        default_branch="$(ci::changeset::_default_branch)"
-        set +e
-        merge_base="$(git merge-base HEAD "origin/${default_branch}" 2>/dev/null)"
-        rc=$?
-        set -e
-        if [ $rc -eq 0 ] && [ -n "$merge_base" ]; then
-          push_range="$merge_base"
-        else
-          set +e
-          merge_base="$(git merge-base HEAD "${default_branch}" 2>/dev/null)"
-          rc=$?
-          set -e
-          if [ $rc -eq 0 ] && [ -n "$merge_base" ]; then
-            push_range="$merge_base"
-          else
-            push_range=""
-          fi
-        fi
+      # ci::git::push_range, not a second hand-rolled resolution. git.sh's
+      # comment claimed this function "resolves the same question the same
+      # way"; it did not. push_range falls back to the whole of HEAD when it
+      # finds no base, this fell back to nothing — and nothing became an empty
+      # changeset, which the caller read as a pass. On a branch with no remote
+      # and no default-branch merge base, `ci/checks/git-safety.sh` exited 20
+      # on a commit carrying a token while the gate exited 0.
+      if type ci::git::push_range >/dev/null 2>&1; then
+        push_range="$(ci::git::push_range 2>/dev/null)" || push_range=""
       fi
-      if [ -n "$push_range" ]; then
-        committed_entries="$(git diff --name-status "${push_range}..HEAD" 2>/dev/null)" || true
-      fi
-      staged_entries="$(git diff --cached --name-status 2>/dev/null)" || true
+      case "$push_range" in
+        # Used whole, not split apart and re-joined to HEAD. The tip is not
+        # always HEAD -- the pre-push hook supplies the sha of the ref actually
+        # being pushed, which is the whole point of reading its stdin, and
+        # rebuilding the range against HEAD would scope the changeset to
+        # whichever branch the developer happens to be standing on.
+        *..*) ;;
+        # A bare tip means push_range found no base: every commit reachable
+        # from HEAD is being pushed. There is no diff that scopes that down, so
+        # the honest answer is that this changeset cannot narrow anything —
+        # reported as a failure so the caller runs the full set.
+        *) return 1 ;;
+      esac
+      committed_entries="$(git diff --name-status "$push_range" 2>/dev/null)" || _rc=$?
+      [ "$_rc" -eq 0 ] || return 1
+      staged_entries="$(git diff --cached --name-status 2>/dev/null)" || _rc=$?
+      [ "$_rc" -eq 0 ] || return 1
       raw_entries="$committed_entries"
       if [ -n "$staged_entries" ]; then
         if [ -n "$raw_entries" ]; then

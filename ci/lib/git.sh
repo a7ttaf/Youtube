@@ -57,11 +57,18 @@ ci::git::push_range() {
     return 0
   fi
 
+  # Everything below measures against the tip being pushed, not the literal
+  # HEAD. The hook can supply a new sha without an old one — a brand-new branch,
+  # or `git push origin some-other-branch` — and measuring that against HEAD
+  # reports on whichever branch the developer happens to be standing on.
+  local tip="$new_sha"
+  git rev-parse --verify "${tip}^{commit}" >/dev/null 2>&1 || tip="HEAD"
+
   # @{push} is the ref this branch would actually push to, which is not always
   # @{upstream} — triangular workflows differ, and this repository's own layout
   # is one push remote away from being such a case.
   for ref in '@{push}' '@{upstream}'; do
-    base="$(git merge-base HEAD "$ref" 2>/dev/null || true)"
+    base="$(git merge-base "$tip" "$ref" 2>/dev/null || true)"
     [ -n "$base" ] && break
   done
 
@@ -70,22 +77,33 @@ ci::git::push_range() {
       | sed 's|refs/remotes/origin/||' || true)"
     [ -n "$default_branch" ] || default_branch="main"
     for ref in "origin/${default_branch}" "$default_branch" origin/main main origin/master master; do
-      base="$(git merge-base HEAD "$ref" 2>/dev/null || true)"
-      [ -n "$base" ] && break
+      base="$(git merge-base "$tip" "$ref" 2>/dev/null || true)"
+      [ -n "$base" ] || continue
+      # A remote-tracking ref knows what the remote already has, so a base
+      # equal to the tip is a real answer: nothing new is being pushed.
+      case "$ref" in origin/*) break ;; esac
+      # A bare local name is a guess, and this one guessed us. On a branch
+      # named `main` with no remote configured, `merge-base HEAD main` is HEAD,
+      # the range is empty, and every ship-mode check reports "nothing changed"
+      # over a push carrying the whole branch — the pre-push gate self-skipping
+      # the last moment before the commits leave. Discard the guess and let the
+      # bare-tip fallback below walk all of HEAD, which is what that push is.
+      [ "$base" = "$(git rev-parse --verify "${tip}^{commit}" 2>/dev/null)" ] || break
+      base=""
     done
   fi
 
   if [ -z "$base" ]; then
-    git rev-parse --verify HEAD >/dev/null 2>&1 || return 1
-    # Every commit reachable from HEAD, which is what a genuine first push
-    # contains. Written as a plain rev rather than `<empty-tree>..HEAD`: the
+    git rev-parse --verify "$tip" >/dev/null 2>&1 || return 1
+    # Every commit reachable from the tip, which is what a genuine first push
+    # contains. Written as a plain rev rather than `<empty-tree>..<tip>`: the
     # empty tree is a tree object, not a commit, and handing a non-commit to a
     # revision walk is one `|| true` away from a silent empty result. Callers
     # pass this straight to `git rev-list` and `git log`, both of which take it.
-    printf 'HEAD'
+    printf '%s' "$tip"
     return 0
   fi
-  printf '%s..HEAD' "$base"
+  printf '%s..%s' "$base" "$tip"
 }
 
 ci::git::has_conflict_markers_in_changed() {

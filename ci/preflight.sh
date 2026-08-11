@@ -262,52 +262,63 @@ run_check() {
   _collect_check_result "$label" "$rc" "$output" "$check_start" "$check_end"
 }
 
+# _check_disabled_in_config <id> – 0 when checks.yml disables that id.
+#
+# One awk pass, where this used to be a `while read` loop that piped each line
+# into six separate greps and seds. The parse is unchanged, line for line; only
+# the number of processes is different, and it was the dominant cost of running
+# the gate at all. Measured on this repository's 213-line checks.yml: a single
+# call took 34 seconds, and _check_should_skip makes one per lane plus one per
+# related check, so a `quick` run spent minutes deciding what to run before it
+# ran anything -- against a mode that declares a pre-commit budget.
 _check_disabled_in_config() {
   local wanted="$1"
 
-  if [ -f "ci/config/checks.yml" ]; then
-    local in_checks=0 in_list_check=0 check_id="" enabled="true" line=""
-    while IFS= read -r line; do
-      case "$line" in
-        ''|'#'*) continue ;;  
-      esac
+  [ -f "ci/config/checks.yml" ] || return 1
 
-      if printf '%s\n' "$line" | grep -qE '^checks:[[:space:]]*$'; then
-        in_checks=1
-        continue
-      fi
+  awk -v want="$wanted" '
+    BEGIN { in_checks = 0; in_list = 0; id = ""; enabled = "true" }
+    {
+      line = $0
+      if (line == "" || substr(line, 1, 1) == "#") next
 
-      if [ "$in_checks" = "1" ] && printf '%s\n' "$line" | grep -qE '^[^[:space:]]'; then
-        in_checks=0
-        check_id=""
-      fi
+      if (line ~ /^checks:[[:space:]]*$/) { in_checks = 1; next }
 
-      if [ "$in_checks" = "1" ] && printf '%s\n' "$line" | grep -qE '^  [A-Za-z0-9_-]+:[[:space:]]*(#.*)?$'; then
-        check_id=$(printf '%s\n' "$line" | sed -E 's/^  ([A-Za-z0-9_-]+):[[:space:]]*(#.*)?$/\1/')
-        enabled="true"
-        in_list_check=0
-        continue
-      fi
+      if (in_checks == 1 && line ~ /^[^[:space:]]/) { in_checks = 0; id = "" }
 
-      if printf '%s\n' "$line" | grep -qE '^[[:space:]]*-[[:space:]]*id:[[:space:]]*(.*)$'; then
-        in_list_check=1
-        check_id=$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*-[[:space:]]*id:[[:space:]]*(.*)$/\1/')
-        check_id="$(echo "$check_id" | tr -d ' ' | tr -d '"')"
-        enabled="true"
-      fi
+      if (in_checks == 1 && line ~ /^  [A-Za-z0-9_-]+:[[:space:]]*(#.*)?$/) {
+        id = line
+        sub(/^  /, "", id)
+        sub(/:.*$/, "", id)
+        enabled = "true"
+        in_list = 0
+        next
+      }
 
-      if { [ "$in_checks" = "1" ] || [ "$in_list_check" = "1" ]; } && printf '%s\n' "$line" | grep -qE '^[[:space:]]*enabled:[[:space:]]*(.*)$'; then
-        enabled=$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*enabled:[[:space:]]*(.*)$/\1/')
-        enabled="$(echo "$enabled" | sed 's/[[:space:]]//g; s/#.*$//')"
-      fi
+      if (line ~ /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/) {
+        in_list = 1
+        id = line
+        sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", id)
+        gsub(/[ "]/, "", id)
+        enabled = "true"
+      }
 
-      if [ "$check_id" = "$wanted" ] && [ "$enabled" = "false" ]; then
-        return 0  # skip
-      fi
-    done < "ci/config/checks.yml"
-  fi
+      if ((in_checks == 1 || in_list == 1) \
+        && line ~ /^[[:space:]]*enabled:[[:space:]]*/) {
+        enabled = line
+        sub(/^[[:space:]]*enabled:[[:space:]]*/, "", enabled)
+        # Whitespace first, then the comment -- the order the sed pair used, so
+        # "true  # note" reduces the same way it always did.
+        gsub(/[[:space:]]/, "", enabled)
+        sub(/#.*$/, "", enabled)
+      }
 
-  return 1
+      # Flagged rather than `exit 0`: an exit inside a rule still runs END, and
+      # an END that exits with its own status overrides this one.
+      if (id == want && enabled == "false") { disabled = 1; exit }
+    }
+    END { exit(disabled ? 0 : 1) }
+  ' "ci/config/checks.yml"
 }
 
 _checks_for_lane_label() {
@@ -400,8 +411,19 @@ _check_should_skip() {
       # does not look like JavaScript — which is exactly when a misplaced test
       # goes unnoticed. The check is a pruned walk of one directory tree and
       # costs milliseconds.
+      # branch-protection belongs here for the same reason as test-layout, and
+      # its absence was total rather than conditional: nothing anywhere emits
+      # `branch-protection` as a changeset check id -- not the always-checks
+      # seed ("secrets commit-hygiene"), not the language mapping -- so the
+      # only arm that could set found=0 to 1 for this label was unreachable and
+      # the filter dropped the lane on every run, in every mode, including a
+      # direct commit on main. Reproduced: the check alone exits 20 on a
+      # protected branch, while the same tree through the gate prints
+      # "Skipping [branch-protection] (filtered)" and exits 0. Which branch you
+      # are on is not a function of the changed-file list, so no changeset can
+      # ever be the thing that decides whether this runs.
       case "$label" in
-        git-safety|changed-files|security|debt|test-layout) ;;
+        git-safety|changed-files|security|debt|test-layout|branch-protection) ;;
         *) return 0 ;;
       esac
     fi
@@ -439,6 +461,26 @@ _check_is_cacheable() {
     # has an identical key, and the lane is restored without executing
     # anything. Same argument as tests-shell, one lane over.
     node) return 1 ;;
+    # python is the same lane one language over, and it was left cacheable.
+    # It runs `ruff check`, `ruff format --check`, a bare `pytest` and
+    # `compileall` across the whole of PYTHON_PACKAGE_DIR, none of which is
+    # scoped to the changed files. Reproduced: with one .py staged so the lane
+    # is scheduled and a syntax error left *unstaged* in a second file — absent
+    # from the changeset, so invisible to the key — a cached run returned
+    # "[cache hit] python PASS" while the identical tree with CI_GATE_NO_CACHE=1
+    # returned FAIL_INFRA.
+    python) return 1 ;;
+    # git-safety and branch-protection read the outgoing commit *history*, and
+    # the cache key describes the endpoint changeset: the paths that differ and
+    # the worktree contents. Two branches with identical final files have
+    # identical keys, so a PASS cached for one is served for the other — and an
+    # amend or rebase can add and remove a secret in an intermediate commit, or
+    # replace a signed commit with an unsigned one, without changing a single
+    # final byte. That is precisely the history these two now walk per commit,
+    # and precisely what the key cannot see. Listing the commit identities in
+    # the key would work; not caching a check whose input is the history is
+    # simpler and cannot drift out of step with what the check reads.
+    git-safety | branch-protection) return 1 ;;
   esac
   return 0
 }
@@ -683,7 +725,32 @@ esac
 [ "$RUN_ALL" -eq 1 ] && CHANGESET_MODE="all"
 
 if type ci::changeset::detect >/dev/null 2>&1; then
-  ci::changeset::detect "$CHANGESET_MODE" || true
+  # The status matters. Detection failing and detection finding nothing produce
+  # the same empty result, and the fast-exit below reads an empty result as
+  # "nothing relevant changed" — so with `git diff` broken but everything else
+  # working, a tree with two staged secrets exited 0 with "No relevant changes
+  # detected. Skipping gate.", no check run and no report written, while
+  # git-safety.sh run directly against that same tree exited 20. Every
+  # per-check hardening sits downstream of this line; nothing downstream can
+  # recover from never being called.
+  #
+  # A failure here means the gate does not know what changed, which is not a
+  # licence to skip — it is the reason to run everything. RUN_ALL both
+  # suppresses the fast-exit and makes _check_should_skip stop filtering.
+  _changeset_rc=0
+  ci::changeset::detect "$CHANGESET_MODE" || _changeset_rc=$?
+  if [ "$_changeset_rc" -ne 0 ]; then
+    echo "Changeset detection failed (status ${_changeset_rc}); running the full set." >&2
+    RUN_ALL=1
+    # RUN_ALL alone only suppresses the fast-exit below. _check_should_skip
+    # filters on _CI_CHANGESET_CHECKS, and that list is seeded non-empty
+    # (_CI_CHANGESET_ALWAYS_CHECKS) even when nothing was detected — so leaving
+    # it set would keep the filter live and drop every lane it does not name,
+    # turning a detection failure into a near-silent skip by another route.
+    # Empty is what the filter's own guard treats as "do not filter".
+    _CI_CHANGESET_CHECKS=""
+    _CI_CHANGESET_LANGUAGES=""
+  fi
   if type ci::changeset::emit_json >/dev/null 2>&1; then
     ci::changeset::emit_json || true
   fi
@@ -695,7 +762,17 @@ if type ci::changeset::detect >/dev/null 2>&1; then
   # tests-shell path exception in _check_should_skip unreachable. That is how a
   # regression in the frontend lib/ negations could ship with its own test never
   # running.
-  if [ "$RUN_ALL" -eq 0 ] && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ] \
+  #
+  # And never in ship mode, whatever the changeset says. The changeset here is
+  # derived from an endpoint diff, and ship mode's safety checks are not: they
+  # walk every outgoing commit. Both ways the two disagree are live. A first
+  # push with no upstream and no default-branch merge base yields an empty
+  # changeset; and a secret added by one outgoing commit and removed by a later
+  # one leaves the endpoint diff clean while both commits are pushed. Either
+  # exits here with PASS, before git-safety.sh has run at all — the pre-push
+  # gate skipped on the strength of a diff that was never what it stands behind.
+  if [ "$RUN_ALL" -eq 0 ] && [ "$MODE" != "ship" ] \
+    && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ] \
     && ! printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" \
       | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|$))'; then
     echo "No relevant changes detected. Skipping gate."

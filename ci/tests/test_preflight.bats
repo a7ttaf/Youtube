@@ -363,3 +363,353 @@ gs_run() {
   [ "$status" -eq 0 ]
   rm -rf "$GS_SB"
 }
+
+@test "git-safety: a sensitive file whose name is not ASCII is still caught" {
+  # `--name-only` emits git's quoted representation for anything outside plain
+  # ASCII: "caf\303\251.env". The suffix patterns then match a string ending in
+  # a quote character, and `git cat-file -s "$sha:$path"` looks up a path that
+  # does not exist — so an accented .env walked straight through.
+  gs_setup
+  local base
+  base="$( cd "$GS_SB" && git rev-parse HEAD )"
+  printf 'SECRET=1\n' > "$GS_SB/café.env"
+  gs_commit "accented secret"
+  # The premise: git really does quote it.
+  run bash -c "cd '$GS_SB' && git show --name-only --format= HEAD"
+  [[ "$output" == *'\303\251'* ]]
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"sensitive-files"* ]]
+  rm -rf "$GS_SB"
+}
+
+@test "git-safety: a malformed secret pattern is infrastructure failure, not silence" {
+  # `$?` after `! cmd` is the status of the negation, so the guard read 0 where
+  # grep had returned 2 and the branch never fired. A pattern with an unmatched
+  # parenthesis then made every subsequent scan report no match — secret
+  # detection silently switched off for the whole run.
+  gs_setup
+  printf 'ordinary\n' > "$GS_SB/b.txt"
+  gs_commit "ordinary"
+  run bash -c "cd '$GS_SB' && CI_CHECKS_SECRET_PATTERN_OVERRIDE=1 bash -c '
+    sed -i \"s/^exec .*//\" /dev/null 2>/dev/null || true
+    CI_GATE_MODE=quick bash ci/checks/git-safety.sh' 2>&1"
+  # The real assertion is on the check invoked with a broken pattern directly.
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=quick bash -c '
+    source ci/lib/common.sh
+    source ci/lib/git.sh
+    CI_CHECKS_SECRET_PATTERN=\"unmatched(paren\"
+    export CI_CHECKS_SECRET_PATTERN
+    rc=0
+    grep -E -f <(printf \"%s\n\" \"^\\+.*(\$CI_CHECKS_SECRET_PATTERN)\") /dev/null >/dev/null 2>&1 || rc=\$?
+    echo \"grep-status=\$rc\"
+    [ \"\$rc\" -ge 2 ] && echo WOULD-FAIL-INFRA || echo WOULD-PASS-SILENTLY'"
+  [[ "$output" == *"WOULD-FAIL-INFRA"* ]]
+  # And the shipped script carries the corrected capture, not the `!` form.
+  run grep -n 'grep -E -f "$secret_pattern_file" /dev/null >/dev/null 2>&1 || rc=\$?' "$REPO_ROOT/ci/checks/git-safety.sh"
+  [ "$status" -eq 0 ]
+  run grep -c 'if ! grep -E -f "\$secret_pattern_file"' "$REPO_ROOT/ci/checks/git-safety.sh"
+  [ "$output" = "0" ]
+  rm -rf "$GS_SB"
+}
+
+@test "git-safety: an unreadable commit is infrastructure failure, not an empty diff" {
+  # `git show ... || true` turned a blob that cannot be read into an empty diff,
+  # and an empty diff is indistinguishable from a clean one. Simulated by
+  # pointing the range at a commit whose object is removed from the store.
+  gs_setup
+  printf 'ordinary\n' > "$GS_SB/b.txt"
+  gs_commit "ordinary"
+  run grep -n '_gs_commits_readable' "$REPO_ROOT/ci/checks/git-safety.sh"
+  [ "$status" -eq 0 ]
+  # The helper answers no when a commit in the list cannot be shown.
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship bash -c '
+    source ci/lib/common.sh; source ci/lib/git.sh
+    GATE_RANGE=HEAD
+    GATE_COMMITS=\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"
+    $(sed -n "/^_gs_commits_readable()/,/^}/p" "$REPO_ROOT/ci/checks/git-safety.sh")
+    _gs_commits_readable && echo READABLE || echo UNREADABLE'"
+  [[ "$output" == *"UNREADABLE"* ]]
+  rm -rf "$GS_SB"
+}
+
+@test "branch-protection: a range-walk failure is FAIL_INFRA, not a policy violation" {
+  # _bp_fail merges FAIL_NEW_ISSUE, which told the developer their commits break
+  # a rule when the check simply could not run — and disagreed with
+  # git-safety.sh, which returns FAIL_INFRA for the same condition.
+  run grep -n '_bp_infra "Cannot walk the push range' "$REPO_ROOT/ci/checks/branch-protection.sh"
+  [ "$status" -eq 0 ]
+  run grep -n '_bp_infra "Cannot count merge commits' "$REPO_ROOT/ci/checks/branch-protection.sh"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$REPO_ROOT' && sed -n '/^_bp_infra()/,/^}/p' ci/checks/branch-protection.sh"
+  [[ "$output" == *"CI_RESULT_FAIL_INFRA"* ]]
+}
+
+@test "preflight: ship mode never takes the empty-changeset fast exit" {
+  # ci::changeset::detect pre-push derives an endpoint diff. A first push with
+  # no merge base yields an empty changeset, and a secret added then removed
+  # within the push leaves the endpoint diff clean — either exits PASS before
+  # git-safety.sh has run at all.
+  run bash -c "cd '$REPO_ROOT' && grep -n 'MODE\" != \"ship\"' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$REPO_ROOT' && sed -n '/No relevant changes detected/,+2p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "preflight: the history-dependent checks are not cacheable" {
+  # The cache key describes the endpoint changeset. git-safety and
+  # branch-protection now walk the outgoing commits, which two branches with
+  # identical final files do not share — an amend can swap a signed commit for
+  # an unsigned one without changing a byte of the final tree.
+  run bash -c "cd '$REPO_ROOT' && sed -n '/^_check_is_cacheable/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"git-safety | branch-protection) return 1"* ]]
+  local id
+  for id in test-layout tests-shell node git-safety branch-protection; do
+    run bash -c "cd '$REPO_ROOT' && source ci/lib/common.sh 2>/dev/null; $(sed -n '/^_check_is_cacheable/,/^}/p' "$REPO_ROOT/ci/preflight.sh"); _check_is_cacheable $id && echo CACHEABLE || echo NO"
+    [[ "$output" == *"NO"* ]] || { echo "$id is still cacheable" >&2; return 1; }
+  done
+}
+
+# --- fail-open audit: the gate skipping itself -------------------------------
+#
+# Three of these are the same defect wearing different clothes: a guard that
+# cannot tell "I found nothing" from "I could not look", reported through a
+# channel whose only two values are empty and non-empty.
+
+_pf_fns() {
+  # Extract a preflight helper without executing the script. preflight.sh runs
+  # a gate when sourced, so the functions are lifted out the way the js lane
+  # suite lifts the semver comparator.
+  local out="$1" ; shift
+  : > "$out"
+  local fn
+  for fn in "$@"; do
+    sed -n "/^${fn}() {/,/^}/p" "$REPO_ROOT/ci/preflight.sh" >> "$out"
+    # A silent miss would leave the caller calling a function that is not
+    # there, which is the failure mode these cases exist to catch elsewhere.
+    grep -q "^${fn}() {" "$out" || {
+      echo "no such function in preflight.sh: ${fn}" >&2
+      return 1
+    }
+  done
+  bash -n "$out"
+}
+
+@test "preflight: branch-protection is never dropped by the changeset filter" {
+  # Nothing emits `branch-protection` as a changeset check id, so the only arm
+  # that could keep it scheduled was unreachable and the lane was filtered out
+  # on every run in every mode -- including a direct commit on a protected
+  # branch, which is the one thing it exists to catch. Which branch you are on
+  # is not a function of the changed-file list.
+  local fns="$BATS_TEST_TMPDIR/skip.sh"
+  # Every callee too. A helper missing from the extraction is "command not
+  # found" -> non-zero -> read as a decision, and the case would then pass
+  # without the code under test having run.
+  _pf_fns "$fns" _check_should_skip _check_disabled_in_config \
+    _all_related_checks_disabled _checks_for_lane_label
+  local rc=0
+  # shellcheck disable=SC1090
+  ( set +e
+    . "$fns"
+    CI_GATE_INCREMENTAL=1
+    _CI_CHANGESET_CHECKS="lint-js tests-js"   # a JavaScript-only changeset
+    _check_should_skip branch-protection
+    exit $?
+  ) || rc=$?
+  # 1 = do not skip. The premise: this changeset does filter something else.
+  [ "$rc" -eq 1 ]
+  local rc2=0
+  ( set +e
+    . "$fns"
+    CI_GATE_INCREMENTAL=1
+    _CI_CHANGESET_CHECKS="lint-js tests-js"
+    _check_should_skip python
+    exit $?
+  ) || rc2=$?
+  [ "$rc2" -eq 0 ]
+}
+
+@test "preflight: a lane that reads more than the changeset is not cacheable" {
+  # The cache key hashes the changed files. Any lane whose result depends on
+  # input outside that list can be served a PASS that was never true of this
+  # tree: python runs ruff, pytest and compileall over the whole package, and a
+  # syntax error in an unstaged file is invisible to the key.
+  local fns="$BATS_TEST_TMPDIR/cache.sh"
+  _pf_fns "$fns" _check_is_cacheable
+  local id rc
+  for id in test-layout tests-shell node python git-safety branch-protection; do
+    rc=0
+    # shellcheck disable=SC1090
+    ( set +e; . "$fns"; _check_is_cacheable "$id"; exit $? ) || rc=$?
+    [ "$rc" -eq 1 ] || { echo "cacheable but must not be: $id" >&2; return 1; }
+  done
+}
+
+@test "git: a local default-branch guess equal to the tip is discarded" {
+  # On a branch named main with no remote, merge-base HEAD main is HEAD, so the
+  # range was HEAD..HEAD -- empty. Every ship-mode check then reported "nothing
+  # changed" over a push carrying the whole branch: the pre-push gate skipping
+  # itself at the last moment before the commits leave.
+  local sb
+  sb="$(mktemp -d)"
+  (
+    cd "$sb"
+    git init -q -b main .
+    printf 'a\n' > a.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c1
+    printf 'b\n' > b.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c2
+  ) >/dev/null 2>&1
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' && ci::git::push_range"
+  [ "$status" -eq 0 ]
+  # The whole of HEAD, which is what that push contains -- not an empty range.
+  [[ "$output" != *".."* ]]
+  local head_sha
+  head_sha="$(cd "$sb" && git rev-parse HEAD)"
+  [[ "$output" != "${head_sha}..${head_sha}" ]]
+  # And the range it produces must actually contain both commits.
+  run bash -c "cd '$sb' && git rev-list --count $output"
+  [ "$output" -eq 2 ]
+  rm -rf "$sb"
+}
+
+@test "tests-shell: a suite deleted to nothing is a failure, not a green skip" {
+  # The generic dispatcher treats a missing ci/tests/ as a successful skip,
+  # which is right for a repo with no shell tests and exactly wrong for this
+  # lane: it is scheduled as a blocker *because* these suites must run. With
+  # every .bats file deleted the dispatcher logged "skipped: no ci/tests
+  # directory found" and reported PASS, so the gate would approve the removal
+  # of the whole regression net it exists to enforce.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  # The delegation target is stubbed so the premise below means something. Left
+  # absent, the wrapper reaches its `exec` and dies with 127 — which is neither
+  # 20 nor the message, so the premise would "hold" while proving nothing about
+  # the guard.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/ci/checks/tests.sh"
+  chmod +x "$sb/ci/checks/tests.sh"
+  # The premise: with a suite present this wrapper delegates rather than
+  # failing here, so the assertion below is about the empty case alone.
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  run bash -c "cd '$sb' && bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"No .bats suites found"* ]]
+
+  rm -f "$sb/ci/tests/t.bats"
+  run bash -c "cd '$sb' && bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"No .bats suites found"* ]]
+
+  # And the directory removed entirely, which is the same commit one step on.
+  rm -rf "$sb/ci/tests"
+  run bash -c "cd '$sb' && bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 20 ]
+  rm -rf "$sb"
+}
+
+@test "tests-shell: a deleted .gitignore replaced only on disk is drift" {
+  # Three scopes for one question is how they came to disagree: the tracked
+  # scan covered .gitignore, the untracked and ignored scans covered ci and
+  # .githooks alone. A commit deleting .gitignore while a worktree copy stays
+  # behind was therefore invisible to all three -- the tracked scan sees the
+  # deletion, and the scan that would have seen the replacement was not looking
+  # there. The suites then ran against rules the push removes.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  printf 'ignored-by-nothing\n' > "$sb/.gitignore"
+  (
+    cd "$sb"
+    git init -q -b feature/x .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+    git rm -q --cached .gitignore
+    git -c user.email=t@t -c user.name=t commit -qm "drop gitignore"
+  ) >/dev/null 2>&1
+  # The file is gone from HEAD but still on disk: the exact shape.
+  run bash -c "cd '$sb' && git cat-file -e HEAD:.gitignore 2>&1"
+  [ "$status" -ne 0 ]
+  [ -f "$sb/.gitignore" ]
+
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *".gitignore"* ]]
+  rm -rf "$sb"
+}
+
+@test "preflight: checks.yml parsing survives the shape of the real file" {
+  # _check_disabled_in_config was a `while read` loop piping every line into six
+  # separate greps and seds. On this repository's 213-line checks.yml a single
+  # call took 34 seconds, and _check_should_skip makes one per lane plus one per
+  # related check -- so `quick` mode, which declares a pre-commit budget, spent
+  # minutes deciding what to run before running anything. It is one awk pass
+  # now, and the parse has to be identical rather than merely close, so every
+  # branch of it is pinned here: nested and list forms, comments on the id line
+  # and on the value, a check with no `enabled:` at all, and a top-level key
+  # that ends the block mid-file.
+  local fns="$BATS_TEST_TMPDIR/cfg.sh"
+  _pf_fns "$fns" _check_disabled_in_config
+  local sb="$BATS_TEST_TMPDIR/cfgsb"
+  mkdir -p "$sb/ci/config"
+  cat > "$sb/ci/config/checks.yml" <<'YML'
+# a leading comment
+version: 1
+checks:
+  alpha:
+    enabled: true
+  bravo:
+    enabled: false
+  charlie:                       # trailing comment on the id line
+    enabled: false  # UMS: note
+  delta:
+    enabled: true   # note
+  echo:
+    severity: blocker
+top_level_again: 1
+  foxtrot:
+    enabled: false
+extra:
+  - id: golf
+    enabled: false
+  - id: "hotel"
+    enabled: true
+  - id: india
+    severity: blocker
+YML
+  # expected: 0 = disabled, 1 = enabled (an absent or unstated id is enabled).
+  local row id want rc bad=""
+  for row in alpha:1 bravo:0 charlie:0 delta:1 echo:1 foxtrot:1 \
+             golf:0 hotel:1 india:1 missing:1; do
+    id="${row%%:*}"; want="${row##*:}"
+    rc=0
+    # shellcheck disable=SC1090
+    ( set +e; cd "$sb"; . "$fns"; _check_disabled_in_config "$id"; exit $? ) || rc=$?
+    [ "$rc" -eq "$want" ] || bad="${bad} ${id}(want=${want} got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "checks.yml parse mismatches:${bad}" >&2; return 1; }
+
+  # foxtrot is the one worth naming: it sits at the same indentation as a real
+  # check but after a column-0 key, so the block has already ended and it is not
+  # a check at all. Reading it as one would let a stray top-level key silently
+  # disable whatever follows it.
+
+  # And against the real file, where the answer must match what the file says.
+  local declared
+  declared="$(awk '/^  [A-Za-z0-9_-]+:/{id=$0; sub(/^  /,"",id); sub(/:.*/,"",id)}
+                   /^[[:space:]]*enabled:[[:space:]]*false/{print id}' \
+              "$REPO_ROOT/ci/config/checks.yml" | sort -u)"
+  [ -n "$declared" ]
+  for id in $declared; do
+    rc=0
+    ( set +e; . "$fns"; _check_disabled_in_config "$id"; exit $? ) || rc=$?
+    [ "$rc" -eq 0 ] || bad="${bad} real:${id}(declared false, got ${rc})"
+  done
+  [ -z "$bad" ] || { echo "real checks.yml mismatches:${bad}" >&2; return 1; }
+}

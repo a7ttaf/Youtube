@@ -40,16 +40,65 @@ ci::common::node_workspaces() {
     return 0
   fi
 
-  for dir in */; do
-    dir="${dir%/}"
-    if [ ! -d "$dir" ] || [ "$dir" = "node_modules" ]; then
-      continue
-    fi
-    if [ -f "$dir/$manifest" ]; then
-      printf '%s\n' "$dir"
-    fi
-  done
+  # Below the root, search to any depth rather than the immediate children.
+  #
+  # Callers that decide *scheduling* rather than execution must agree with this
+  # about what a workspace is — see ci::common::is_vendored_path, which both
+  # sides consult — or a lane gets scheduled for a package it will never run,
+  # or run against a directory nobody meant as a package.
+  #
+  # One level was enough for this repository's own layout and for nothing else.
+  # ci::changeset::_in_node_workspace walks *up* from a changed file until it
+  # finds a manifest, so for packages/app/src/x.ts it says "yes, node lane" —
+  # and then discovery, looking only at the immediate children, found no
+  # workspace at all and node.sh printed "No package.json found" and exited 0.
+  # Scheduling and execution have to agree about what a workspace is, or the
+  # lane is scheduled for a package it will never run.
+  #
+  # Pruned at dependency and build directories: a manifest under node_modules
+  # belongs to a dependency, and one under dist/ or build/ is copied output.
+  # Neither is a workspace this gate installs, typechecks or tests.
+  local candidate
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    ci::common::is_vendored_path "$candidate" && continue
+    printf '%s\n' "$candidate"
+  done < <(
+    find . -name 'node_modules' -prune -o -name '.git' -prune -o \
+      -type f -name "$manifest" -print 2>/dev/null \
+      | sed 's|^\./||; s|/'"$manifest"'$||' \
+      | grep -v "^${manifest}$" \
+      | sort -u
+  )
   return 0
+}
+
+# ci::common::is_vendored_path <path> – 0 when the path is inside something no
+# gate lane should treat as first-party source.
+#
+# The single definition both workspace discovery and changeset scheduling read.
+# They had separate ideas of what a workspace is: discovery looked one level
+# down, scheduling walked up from any depth, and packages/app/ was scheduled but
+# never run. Recursive discovery fixes that half and creates the other one —
+# ci/tests/fixtures/node/package.json is a real manifest with no lockfile, and
+# treating it as a workspace made the lane refuse the install and report
+# FAIL_INFRA for a directory that exists to be a test fixture.
+#
+# Build output and dependency trees are pruned by name because those names are
+# universal. A fixture directory is pruned only *under a test tree*, so a
+# genuine packages/fixtures/ workspace is still discovered.
+ci::common::is_vendored_path() {
+  case "/$1/" in
+    */node_modules/* | */.git/* \
+      | */dist/* | */build/* | */coverage/* | */htmlcov/* \
+      | */.next/* | */.turbo/* | */.vite/* \
+      | */.venv/* | */venv/* \
+      | */tests/fixtures/* | */test/fixtures/* \
+      | */__fixtures__/* | */testdata/*)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 ci::common::hash_file() {

@@ -6,6 +6,8 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # shellcheck source=ci/lib/common.sh
 source "$ROOT_DIR/ci/lib/common.sh"
+# shellcheck source=ci/lib/git.sh
+source "$ROOT_DIR/ci/lib/git.sh"
 
 cd "$ROOT_DIR"
 
@@ -157,6 +159,13 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     # through the pre-push gate on the strength of the repair. The tree a run
     # vouches for is the gate's, not the changeset's, so the reference follows
     # CI_GATE_MODE: ship stands behind HEAD, everything else behind the index.
+    # The range this push carries, resolved once for the deletion lookup below.
+    _gate_range=""
+    if [ "${CI_GATE_MODE:-}" = "ship" ] && type ci::git::push_range >/dev/null 2>&1; then
+      _gate_range="$(ci::git::push_range 2>/dev/null || true)"
+    fi
+    [ -n "$_gate_range" ] || _gate_range="HEAD"
+
     PARTIAL=""
     while IFS= read -r _ws; do
       [ -n "$_ws" ] || continue
@@ -165,22 +174,27 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
 
       if [ "${CI_GATE_MODE:-}" = "ship" ]; then
         _drift="$( {
-          git diff --name-only HEAD -- "$_scope" 2>/dev/null || true
-          git ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || true
-          # And the ignored ones. An outgoing commit that deletes a script and
-          # adds its path to .gitignore makes the worktree replacement invisible
-          # to both lists above: HEAD does not carry the path, so `git diff
-          # HEAD` says nothing, and --exclude-standard is documented to drop
-          # exactly this file. The lane then ran the replacement.
+          git -c core.quotepath=false diff --name-only HEAD -- "$_scope" 2>/dev/null || true
+          git -c core.quotepath=false ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || true
+          # And the ignored ones — but only where an ignored file *shadows a
+          # path this push removes*. That is the whole of the reported defect: a
+          # commit deletes a script and adds its path to .gitignore, so HEAD no
+          # longer carries the path (`git diff HEAD` is silent) and
+          # --exclude-standard drops the replacement, and the lane runs it.
           #
-          # Pruned to the directories a Node workspace is *expected* to ignore,
-          # which are the same ones every scan in this file already treats as
-          # not-source. Without that every node_modules entry is drift and the
-          # ship gate never passes; with it, an ignored file anywhere a
-          # developer keeps source is reported, which is the intent.
-          git ls-files --others --ignored --exclude-standard -- "$_scope" 2>/dev/null \
-            | grep -Ev '(^|/)(node_modules|dist|build|coverage|\.next|\.turbo|\.vite|\.git|\.ci-gate)/' \
-            || true
+          # An earlier attempt filtered the whole ignored list through a prune
+          # list of directory names. That was wrong twice, and both ways were
+          # demonstrated rather than argued: the names matched at any depth, so
+          # it swallowed a genuine source file under `frontend/src/build/`; and
+          # it reported `frontend/.env.local`, a `tsbuildinfo` and Playwright
+          # output as drift, which makes the ship gate unpassable during
+          # ordinary development — while its printed remedy, "commit the rest",
+          # is precisely what git-safety.sh blocks. Two checks, one file,
+          # contradictory instructions. Keying on deletions needs no prune list.
+          while IFS= read -r _d; do
+            [ -n "$_d" ] || continue
+            [ -e "$_d" ] && printf '%s\n' "$_d"
+          done <<< "$(git -c core.quotepath=false log --diff-filter=D --name-only --format= "$_gate_range" -- "$_scope" 2>/dev/null || true)"
         } | sort -u | sed '/^$/d')"
         [ -n "$_drift" ] && PARTIAL="${PARTIAL}${_drift}"$'\n'
         continue
@@ -188,23 +202,30 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
 
       _staged="$(git diff --cached --name-only -- "$_scope" 2>/dev/null | sort || true)"
       [ -n "$_staged" ] || continue
-      # Asked of each staged path directly rather than by intersecting with a
-      # list of "other" files. Both list-based attempts had the same defect in
-      # different clothes: `git diff` compares tracked content and misses a path
-      # staged for deletion and recreated, and `git ls-files --others` adds the
-      # standard exclusions, so a recreated file that .gitignore now covers is
-      # `!!` rather than `??` and drops out of the list. Whether a path is
-      # ignored has nothing to do with whether the lane is about to read it.
-      while IFS= read -r _p; do
-        [ -n "$_p" ] || continue
-        if git cat-file -e ":$_p" 2>/dev/null; then
-          # Present in the index: the worktree copy must match it.
-          git diff --quiet -- "$_p" 2>/dev/null || PARTIAL="${PARTIAL}${_p}"$'\n'
-        else
-          # Staged for deletion: any file on disk here is one the commit removes.
-          [ -e "$_p" ] && PARTIAL="${PARTIAL}${_p}"$'\n'
-        fi
-      done <<< "$_staged"
+
+      # Something here is part of this commit, so the whole workspace has to
+      # match the index — not merely the staged paths.
+      #
+      # Restricting the comparison to staged paths made the rule per-file, and
+      # the lane is not per-file: it installs, typechecks, tests and builds the
+      # workspace as a unit. Stage a test that imports a new helper, leave the
+      # helper untracked, and every staged path matched the index while `tsc`
+      # passed only because of a file the commit does not contain. Checking out
+      # that commit gives an unresolved import.
+      #
+      # The three lists are one question asked three ways, and each was needed
+      # in turn: `git diff` compares tracked content and misses a path staged
+      # for deletion and recreated; `--others` finds that one but `.gitignore`
+      # hides it; `--ignored` finds it but drags in every build artifact, so it
+      # is pruned to the directories a workspace is expected to ignore.
+      _diverged="$( {
+        git -c core.quotepath=false diff --name-only -- "$_scope" 2>/dev/null || true
+        git -c core.quotepath=false ls-files --others --exclude-standard -- "$_scope" 2>/dev/null || true
+        git -c core.quotepath=false ls-files --others --ignored --exclude-standard -- "$_scope" 2>/dev/null \
+          | grep -Ev '(^|/)(node_modules|dist|build|coverage|\.next|\.turbo|\.vite|\.git|\.ci-gate)/' \
+          || true
+      } | sort -u | sed '/^$/d')"
+      [ -n "$_diverged" ] && PARTIAL="${PARTIAL}${_diverged}"$'\n'
     done <<< "$NODE_WORKSPACES"
     PARTIAL="$(printf '%s' "$PARTIAL" | sed '/^$/d')"
 
@@ -377,9 +398,160 @@ _semver_spec_part() {
 # ">=20banana", ">=20..1" and ">=20.1.2.3" all begin with a digit and carry only
 # legal characters, and node-semver rejects every one of them. Checking the
 # shape piecemeal let each of those through as >=20.0.0.
+# A numeric identifier is `0` or a digit string with no leading zero, and it has
+# to stay inside the range shell arithmetic can hold. Both matter here and both
+# were `[0-9]+`:
+#   * `020` is octal to `$(( 020 + 1 ))` (17) and decimal to `[ 020 -gt 20 ]`, so
+#     _semver_upper_bound and _semver_cmp read the same operand as two different
+#     numbers; `08` aborts the arithmetic outright, and the empty result is
+#     indistinguishable from "all three components stated", which silently
+#     reverts <= and > to the comparison the bound exists to replace.
+#   * 20 digits wraps: _semver_upper_bound 99999999999999999999 produced
+#     7766279631452241920, and >= against it came back satisfied for Node 20.
+# node-semver rejects both outright, which is the behaviour worth copying.
+# The ceiling is node-semver's, which is Number.MAX_SAFE_INTEGER —
+# 9007199254740991, sixteen digits. A flat 15-digit cap was neither that
+# boundary nor a shell one (bash counts to 9223372036854775807, nineteen
+# digits): it rejected the exact value node-semver documents and accepts, and
+# because an oversized operand is classed *malformed* rather than merely
+# unsupported, it poisoned every sibling — ">=20 || >=9007199254740991" stopped
+# the lane over a digit count in an alternative npm reads fine, while the first
+# alternative plainly admitted the runtime. Sixteen digits is well inside
+# bash arithmetic, so the real boundary can simply be compared.
+_semver_num_ok() {
+  case "$1" in
+    0) return 0 ;;
+    ''|*[!0-9]*|0*) return 1 ;;
+  esac
+  case "${#1}" in
+    [1-9]|1[0-5]) return 0 ;;
+    16) [ "$1" -le 9007199254740991 ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# node-semver's PRERELEASEIDENTIFIER and BUILDIDENTIFIER, which are not the
+# loose `[0-9A-Za-z.-]+` this used to accept. That looseness admitted a
+# leading-zero numeric identifier and empty identifiers — "1.2.3-01",
+# "1.2.3-a..b", "1.2.3+." — every one of which node-semver refuses to parse.
+# Unlike the cases above this one failed *open*: "1.2.3-01 || >=20" came back
+# SATISFIED against a range npm will not construct at all.
+_SEMVER_PRE_ID='(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)'
+_SEMVER_PRE="(-${_SEMVER_PRE_ID}([.]${_SEMVER_PRE_ID})*)?"
+_SEMVER_BUILD='([+][0-9A-Za-z-]+([.][0-9A-Za-z-]+)*)?'
+
+# _semver_is_version <string> [x_order_ok] – 0 when the string is a usable
+# semver operand. Pass a non-empty second argument to permit a stated component
+# to the right of a wildcard.
+#
+# That second argument exists because invalidXRangeOrder is not a property of
+# the operand, it is a property of where the operand sits. node-semver calls it
+# from replaceXRange only, so "20.x.3" throws on its own and after any of
+# = >= > < <=, and is accepted after ^ or ~ (replaceTilde and replaceCaret
+# rewrite the operand before any X-range pass sees it) and as a hyphen endpoint
+# (hyphenReplace never routes through it). Verified against semver 7.8.5:
+# ~20.x.3, ^20.x.3 and "20.x.3 - 22" all construct; 20.x.3 and >=20.x.3 throw.
+# Applying the rule to every operand made the gate refuse "~22.x.1", a range
+# every published version of node-semver accepts.
 _semver_is_version() {
-  printf '%s' "$1" | grep -Eq \
-    '^v?([0-9]+|[xX*])(\.([0-9]+|[xX*]))?(\.([0-9]+|[xX*]))?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+  local s="${1#v}" x_order_ok="${2:-}" core i part seen_wildcard=0
+  case "$s" in *' '*|'') return 1 ;; esac
+  core="${s%%[-+]*}"
+  # The grammar first: shape, characters, component count.
+  printf '%s' "$s" | grep -Eq \
+    "^([0-9]+|[xX*])([.]([0-9]+|[xX*]))?([.]([0-9]+|[xX*]))?${_SEMVER_PRE}${_SEMVER_BUILD}\$" \
+    || return 1
+  # A prerelease may only attach to a fully stated operand. node-semver's
+  # XRANGEPLAIN puts the prerelease inside the third component's group, so it
+  # is reachable only once all three are present -- and this holds whether they
+  # are numbers or wildcards. Measured on 7.8.5: `20.1.2-alpha`, `20.x.x-alpha`
+  # and `20.1.x-alpha` construct; `20-alpha`, `20.1-alpha`, `20.x-alpha` and
+  # `x-alpha` all throw, under every operator. Without this, "^20.x-alpha"
+  # passed the grammar, truncated at the wildcard to a bare "20", and came back
+  # SATISFIED for a range npm will not build -- the same fail-open the
+  # identifier grammar above closes, one component to the left. Build metadata
+  # carries no such rule: "20+b" and "20.x+b" are both fine.
+  if _semver_has_prerelease "$s"; then
+    case "$core" in
+      *.*.*) ;;
+      *) return 1 ;;
+    esac
+  fi
+  # Then each component, which the pattern above cannot express.
+  for i in 1 2 3; do
+    part="$(printf '%s' "$core" | cut -d. -f"$i" -s)"
+    [ "$i" -eq 1 ] && part="$(printf '%s' "$core" | cut -d. -f1)"
+    [ -n "$part" ] || break
+    case "$part" in
+      x|X|'*') seen_wildcard=1 ; continue ;;
+    esac
+    # A stated number to the right of a wildcard is an invalid X-range order.
+    # node-semver's invalidXRangeOrder rejects "20.x.3" outright rather than
+    # reading it as "20.x.x" -- it aborts the X-range rewrite and the untouched
+    # comparator then throws. This gate accepted it and evaluated a range npm
+    # will not install against.
+    if [ "$seen_wildcard" -eq 1 ] && [ -z "$x_order_ok" ]; then return 1; fi
+    _semver_num_ok "$part" || return 1
+  done
+  return 0
+}
+
+# _semver_has_prerelease <string> – 0 when the operand or version carries one.
+#
+# This comparator implements numeric precedence over major.minor.patch and
+# nothing else, and prerelease precedence is a genuinely different ordering:
+# 1.2.3-alpha.1 is *below* 1.2.3, and alpha.7 is above alpha.3 by identifier
+# rules, not by any comparison of the three numbers. Ignoring the tail did not
+# make those cases unsupported, it made them wrong in the fail-open direction —
+# measured against semver 7.8.5, `1.2.3-alpha.1` came back satisfied by 1.2.3
+# and by 1.2.3-alpha.2, `<=1.2.3-alpha.1` by 1.2.3, and a plain `20.1.0` by a
+# 20.1.0-rc.1 runtime. Every one of those is npm=false, bash=satisfied.
+#
+# So it is declared unsupported instead, on either side of the comparison, and
+# an unsupported form stops the lane rather than passing it. A sibling
+# alternative that plainly admits the runtime still wins, exactly as for a
+# hyphen range.
+_semver_has_prerelease() {
+  local s="${1#v}"
+  s="${s%%+*}"
+  case "$s" in *-*) return 0 ;; esac
+  return 1
+}
+
+# _semver_hyphen_endpoint_ok <string> – 0 when the string may sit either side of
+# the `-` in a hyphen range.
+#
+# node-semver's XRANGEPLAIN starts `[v=\s]*`, so an endpoint absorbs a redundant
+# leading `=` the way an operator's operand does, and hyphenReplace applies no
+# X-range order rule. Reusing the bare-operand predicate here rejected "= 20 -
+# 22", "20.x.3 - 22" and 16-digit endpoints — all three accepted by 7.8.5 — and
+# a missed hyphen range is classed malformed, which then poisons the sibling
+# alternative that the hyphen handling exists to let win.
+_semver_hyphen_endpoint_ok() {
+  local s="${1#v}"
+  _semver_is_version "${s#=}" x_order_ok
+}
+
+# _semver_is_concrete_version <string> – 0 when the string is a real version, as
+# opposed to a range operand: three numbers, no wildcards.
+#
+# Nothing validated the *runtime* at all. `_semver_part` strips non-digits and
+# defaults to 0, so "banana" became 0.0.0; and an empty string gives awk no
+# record at all, so it printed nothing, `[ "" -gt "20" ]` errored, and every
+# component compared equal — reporting a match. `node --version` emitting a shim
+# banner, a wrapper's noise, or nothing at all therefore turned a `>=` gate into
+# a pass, which is the one failure that defeats the whole check.
+_semver_is_concrete_version() {
+  local s="${1#v}" core i part
+  case "$s" in *' '*|'') return 1 ;; esac
+  core="${s%%[-+]*}"
+  printf '%s' "$s" | grep -Eq \
+    "^[0-9]+[.][0-9]+[.][0-9]+${_SEMVER_PRE}${_SEMVER_BUILD}\$" || return 1
+  for i in 1 2 3; do
+    part="$(printf '%s' "$core" | cut -d. -f"$i")"
+    _semver_num_ok "$part" || return 1
+  done
+  return 0
 }
 
 # _semver_upper_bound <operand> – echo the version one past everything a partial
@@ -479,11 +651,25 @@ _semver_token_ok() {
     '*'|'x'|'X'|'')
       return 0
       ;;
+    # A multi-component all-wildcard token is the same range written longer:
+    # `x.x`, `*.*.*`, `vx`, `v*`. The fast path above matched only the exact
+    # one-character spellings, and the bare-version branch below demands a
+    # leading digit, so these fell through to the catch-all and stopped the
+    # lane on a range npm reads as "any version".
+    [xX*]|v[xX*]|[xX*].*|v[xX*].*)
+      case "$(printf '%s' "${tok#v}" | tr -d 'xX*.')" in
+        '') return 0 ;;
+      esac
+      ;;
     '>='*) want="${tok#>=}" ;;
     '<='*) want="${tok#<=}" ;;
     '>'*)  want="${tok#>}" ;;
     '<'*)  want="${tok#<}" ;;
     '^'*)  want="${tok#^}" ;;
+    # LONETILDE is `~>?`, so `~>20` is `~20` — Ruby's spelling, which npm
+    # accepts. Stripping only the tilde left `>20`, which the grammar check
+    # then rejected, and a valid range came back unverifiable.
+    '~>'*) want="${tok#\~>}" ;;
     '~'*)  want="${tok#\~}" ;;
     '='*)  want="${tok#=}" ;;
     *)     want="" ;;
@@ -493,12 +679,36 @@ _semver_token_ok() {
   # _semver_part strips non-numeric text and defaults to 0, so ">=banana" and a
   # bare ">=" both became >=0.0.0 and admitted everything -- the boundary
   # switched off by a typo in a manifest.
+  # node-semver's XRANGEPLAIN begins `[v=\s]*`, so it absorbs a redundant `=`
+  # on the operand: `>==20` is `>=20`. Stripping only `>=` left `=20`, which the
+  # grammar check rejected.
   case "$tok" in
-    '>='*|'<='*|'>'*|'<'*|'^'*|'~'*|'='*)
+    '>='*|'<='*|'>'*|'<'*|'^'*|'~'*) want="${want#=}" ;;
+  esac
+
+  case "$tok" in
+    # ^ and ~ rewrite their operand before any X-range pass, so an X-range
+    # order that throws bare is legal after them. See _semver_is_version.
+    '^'*|'~'*)
+      if ! _semver_is_version "$want" x_order_ok; then return 3; fi
+      want="$(_semver_truncate_wildcard "$want")"
+      ;;
+    '>='*|'<='*|'>'*|'<'*|'='*)
       if ! _semver_is_version "$want"; then return 3; fi
       # Checked for grammar first, then normalised: "20..1" must still be
       # rejected rather than truncated into something legal.
       want="$(_semver_truncate_wildcard "$want")"
+      ;;
+  esac
+
+  # Valid, and not something this comparator can order. Deliberately after the
+  # grammar check, and only on the operator paths -- a bare operand is not
+  # validated until its own branch below, and testing it here classed the
+  # malformed "1.2.3-01" as merely unsupported, which is sibling-rescuable:
+  # "1.2.3-01 || >=20" came back satisfied for a range npm refuses to build.
+  case "$tok" in
+    '>='*|'<='*|'>'*|'<'*|'^'*|'~'*|'='*)
+      _semver_has_prerelease "$want" && return 2
       ;;
   esac
 
@@ -596,6 +806,8 @@ _semver_token_ok() {
       # starts with a digit, so it reached the loop, matched on the major and
       # returned satisfied on the unstated minor.
       if ! _semver_is_version "$spec"; then return 3; fi
+      # Grammar first, then orderability: see the operator paths above.
+      _semver_has_prerelease "$spec" && return 2
       for i in 1 2 3; do
         case "$(_semver_spec_part "$spec" "$i")" in
           ''|'x'|'X'|'*') return 0 ;;
@@ -607,7 +819,16 @@ _semver_token_ok() {
       return 0
       ;;
     *)
-      return 2
+      # An unsupported *form* and a typo are different failures, and only the
+      # first may lose to a satisfied sibling in a `||`. This catch-all returned
+      # 2 for both, so `banana || >=20` came back satisfied while
+      # `>=20banana || >=20` -- the same typo, one character further along --
+      # correctly refused. A hyphen range is the form this comparator does not
+      # implement; everything else here is malformed.
+      # `1.2.3 - 2.3.4` reaches here as three tokens, and its middle one is a
+      # bare `-`. That shape is recognised by the caller, which is the only
+      # place with enough context to tell it from a lone `-` typo.
+      return 3
       ;;
   esac
 }
@@ -617,6 +838,21 @@ _semver_token_ok() {
 # conjunctive, as npm defines them.
 _semver_satisfies() {
   local version="$1" rest="$2"
+  # The runtime is checked before any range is. An operand this comparator
+  # cannot read is reported unverifiable; a *version* it cannot read was
+  # coerced to 0.0.0, or worse to nothing at all, and quietly satisfied ">=".
+  # Reported as its own status. Folding it into "unverifiable range" sent an
+  # operator to stare at a perfectly good manifest while the actual fault was a
+  # runtime that printed a shim banner, or nothing at all.
+  if ! _semver_is_concrete_version "$version"; then
+    return 4
+  fi
+  # A prerelease runtime is readable but not orderable here; see
+  # _semver_has_prerelease. Reported separately so the message names the
+  # runtime rather than accusing the manifest.
+  if _semver_has_prerelease "$version"; then
+    return 5
+  fi
   local alt tok ok alt_tokens rc more=1
   local satisfied=0 malformed=0 unrecognised=0 seen_alt=0
   local -a alt_toks
@@ -653,6 +889,18 @@ _semver_satisfies() {
       alt_toks+=("$1")
       shift
     done
+    # A hyphen range is `A - B`: three tokens, versions on both sides. Detected
+    # here because a bare `-` is indistinguishable from a typo at token level,
+    # and the two must not share a status -- an unsupported form may lose to a
+    # satisfied sibling in a `||`, a typo may not.
+    if [ "${#alt_toks[@]}" -eq 3 ] && [ "${alt_toks[1]}" = "-" ] \
+      && _semver_hyphen_endpoint_ok "${alt_toks[0]}" \
+      && _semver_hyphen_endpoint_ok "${alt_toks[2]}"; then
+      unrecognised=1
+      set +f
+      continue
+    fi
+
     for tok in ${alt_toks[@]+"${alt_toks[@]}"}; do
       alt_tokens=$((alt_tokens + 1))
       rc=0
@@ -671,10 +919,22 @@ _semver_satisfies() {
       fi
     done
     set +f
-    # An empty alternative comes from a trailing or doubled "||". It is
-    # malformed input, not a wildcard: counting tokens across all alternatives
-    # let ">=999.0.0 ||" come back satisfied, because the empty alternative
-    # inherited the previous one's token count and its untouched ok=1.
+    # An empty alternative comes from a trailing or doubled "||", and this is a
+    # deliberate, evidence-backed divergence from node-semver.
+    #
+    # What npm does: Range keeps the empty comparator set (`.filter(c =>
+    # c.length)` runs over the *sets*, and an empty set parses to ANY), so the
+    # whole range collapses to "". Verified against 7.8.5, not reasoned:
+    # `new Range(">=999.0.0 ||").range` is "" and `.test("20.1.0")` is true.
+    #
+    # Why this gate refuses anyway: that reading nullifies the entire declared
+    # constraint. A manifest that says ">=999.0.0" and, because of one stray
+    # keystroke, admits every runtime in existence is the enforcement boundary
+    # switched off by a typo -- the exact failure this comparator was hardened
+    # against everywhere else. Copying npm here would be the single fail-open
+    # left in the file, and it would be the loudest one. So an empty
+    # alternative is classed malformed: not sibling-rescuable, reported as
+    # "Cannot evaluate", naming the manifest so the typo gets fixed.
     if [ "$alt_tokens" -eq 0 ]; then
       malformed=1
       continue
@@ -714,6 +974,19 @@ if [ -n "$DECLARED_NODE" ]; then
       echo "  declared by ${CI_GATE_NODE_WORKSPACE}/package.json: ${DECLARED_NODE}"
       echo "  Results produced under an undeclared runtime are not reproducible,"
       echo "  so the lane stops before installing or running anything."
+      exit "$CI_RESULT_FAIL_INFRA"
+      ;;
+    5)
+      echo "Node reports a prerelease version: '${ACTUAL_NODE}'"
+      echo "  Prerelease precedence is not implemented here, so this gate cannot"
+      echo "  say whether it satisfies ${CI_GATE_NODE_WORKSPACE}/package.json's"
+      echo "  engines.node (${DECLARED_NODE}). Run the lane on a release build."
+      exit "$CI_RESULT_FAIL_INFRA"
+      ;;
+    4)
+      echo "Node reported an unreadable version: '${ACTUAL_NODE}'"
+      echo "  The engines.node range declared by ${CI_GATE_NODE_WORKSPACE}/package.json"
+      echo "  (${DECLARED_NODE}) cannot be checked against it, so the lane stops."
       exit "$CI_RESULT_FAIL_INFRA"
       ;;
     *)
@@ -849,22 +1122,72 @@ script_command() {
 #
 # Matched as whole arguments so a path or a test name containing "-t" is not
 # mistaken for the flag.
+_filter_reject() {
+  echo "Workspace ${CI_GATE_NODE_WORKSPACE} narrows its own suite in the '$1' script:"
+  echo "    $1: $2"
+  echo "  '$3' selects a subset, so the lane can exit 0 with the rest of the"
+  echo "  suite never collected. Remove it, or move the selection into a"
+  echo "  separate script this gate does not run."
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+}
+
 assert_no_persistent_filter() {
-  local script_name="$1" cmd tok
+  local script_name="$1" cmd tok runner="" prev="" is_test_runner=0
   cmd="$(script_command "$script_name")"
   [ -n "$cmd" ] || return 0
+
+  # Which program is this script actually running? Skip the package-manager
+  # wrappers a script may be written through, then take the first real word.
   # shellcheck disable=SC2086
   for tok in $cmd; do
     case "$tok" in
-      -t|--testNamePattern|--testNamePattern=*|--shard|--shard=*|--bail|--bail=*|--related|--changed|--changed=*)
-        echo "Workspace ${CI_GATE_NODE_WORKSPACE} narrows its own suite in the '${script_name}' script:"
-        echo "    ${script_name}: ${cmd}"
-        echo "  '${tok}' selects a subset, so the lane can exit 0 with the rest of"
-        echo "  the suite never collected. Remove it, or move the selection to a"
-        echo "  separate script this gate does not run."
-        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+      npx|pnpm|bun|yarn|npm|exec|run|dlx|--yes|-y) continue ;;
+      -*) continue ;;
+      *) runner="${tok##*/}"; break ;;
+    esac
+  done
+  case "$runner" in
+    vitest|jest|mocha|ava|jasmine|tap|node) is_test_runner=1 ;;
+  esac
+
+  # shellcheck disable=SC2086
+  for tok in $cmd; do
+    case "$tok" in
+      -t|--testNamePattern|--testNamePattern=*|--shard|--shard=*|--bail|--bail=*|--related|--changed|--changed=*|--testPathPattern|--testPathPattern=*|--onlyFailures|--findRelatedTests|--grep|--grep=*|--fgrep|--fgrep=*|--match|--match=*)
+        _filter_reject "$script_name" "$cmd" "$tok"
         ;;
     esac
+  done
+
+  # A positional argument to a test runner *is* a filter — `vitest run [...filters]`
+  # is the documented syntax, and `vitest run tests/lib/confidence.test.ts` ran 4
+  # tests instead of 314 while every token in the deny-list above was absent. An
+  # enumerated list of narrowing flags loses this race by construction, so the
+  # rule is inverted here: for a known runner, nothing but flags and their values
+  # may follow. Restricted to known runners because a positional means something
+  # else entirely for `bash scripts/test.sh`, which is a legitimate test script.
+  [ "$is_test_runner" -eq 1 ] || return 0
+  prev=""
+  # shellcheck disable=SC2086
+  set -- $cmd
+  shift                                  # the runner or its wrapper
+  while [ "$#" -gt 0 ]; do
+    tok="$1"
+    case "$tok" in
+      # Wrapper words, the runner itself, subcommands, and shell operators are
+      # not filters.
+      npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run|watch|related|"$runner"|'&&'|'||'|';'|'|')
+        prev="" ; shift ; continue ;;
+      -*)
+        prev="$tok" ; shift ; continue ;;
+    esac
+    # A bare word: the value of the flag before it, or a filter.
+    case "$prev" in
+      -*) case "$prev" in *=*) _filter_reject "$script_name" "$cmd" "$tok" ;; esac ;;
+      *)  _filter_reject "$script_name" "$cmd" "$tok" ;;
+    esac
+    prev=""
+    shift
   done
 }
 

@@ -175,7 +175,12 @@ ws_setup() {
   mkdir -p "$NODE_SB/ci/checks" "$NODE_SB/ci/lib" \
            "$NODE_SB/ws/tests" "$NODE_SB/ws/node_modules" "$NODE_SB/.ci-gate"
   cp "$REPO_ROOT/ci/checks/node.sh" "$NODE_SB/ci/checks/"
-  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$NODE_SB/ci/lib/"
+  # git.sh too: node.sh sources it for the ship-mode push range, and a missing
+  # source under `set -e` aborts the script with status 1 before a single
+  # assertion runs. Every case here would then fail for a harness reason
+  # wearing the costume of the behaviour it claims to test.
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$NODE_SB/ci/lib/"
   printf 'it("x", () => {});\n' > "$NODE_SB/ws/tests/a.test.ts"
   printf '{}\n' > "$NODE_SB/ws/bun.lock"
 }
@@ -1862,13 +1867,29 @@ ws_run() {
   [ "$status" -eq 0 ]
 }
 
-@test "node lane: a component stated after a wildcard is ignored, as npm ignores it" {
-  # Reported in review as "20.*.3 should be rejected as malformed". node-semver
-  # accepts it and reads it as 20.x.x — any X makes everything to its right an X
-  # — so rejecting it would fail a manifest npm installs. The real defect was
-  # next door: _semver_upper_bound already stopped at the first wildcard, so
-  # "<=20.*.3" was right, while the operand handed to the numeric comparators
-  # kept the stated 3 and made ">=20.*.3" reject 20.0.1.
+@test "node lane: a component stated after a wildcard is rejected, except after ^ or ~" {
+  # This one turned over twice, so the evidence matters more than the rule.
+  #
+  # First reading: "20.*.3 should be rejected as malformed" — refuted, because
+  # node-semver read any X as making everything to its right an X.
+  # Second reading: accept it everywhere and truncate at the first wildcard.
+  # Both were measured against the semver of the day, and the answer moved:
+  # invalidXRangeOrder was added in 7.8.4 (confirmed by diffing classes/range.js
+  # across 7.8.0, 7.8.3, 7.8.4 and 7.8.5 — absent in the first two, present in
+  # the last two). From 7.8.4 on, `new Range("20.x.3")` throws.
+  #
+  # But it does not throw everywhere, and that is the part a rule stated as
+  # "reject X-order" gets wrong. invalidXRangeOrder is reached from
+  # replaceXRange only. replaceTilde and replaceCaret rewrite the operand
+  # before any X-range pass sees it, and hyphenReplace never routes through it
+  # at all. Measured on 7.8.5, over every operator crossed with every X-order
+  # shape: the 30 that throw are bare and = >= > < <=, the 34 that construct
+  # include every ^ and ~ form. Applying the rule uniformly made the gate
+  # refuse "~22.x.1" — a range every published semver accepts.
+  #
+  # So: version-dependent for the comparator forms, and this gate refuses them
+  # (fail-closed: npm >=7.8.4 will not install against them either); always
+  # valid after ^ or ~, and evaluated by truncating at the first wildcard.
   ws_setup
   source "$REPO_ROOT/ci/lib/common.sh"
   local fns="$NODE_SB/semver.sh"
@@ -1880,13 +1901,19 @@ ws_run() {
   . "$fns"
 
   local rc bad=""
-  # version:spec:expected — every comparator reads 20.*.3 as 20.x.x.
-  for triple in '20.0.1:>=20.*.3:0' '19.9.9:>=20.*.3:1' \
-                '20.11.1:<=20.*.3:0' '21.0.0:<=20.*.3:1' \
-                '20.11.1:>20.*.3:1'  '21.0.0:>20.*.3:0' \
-                '19.9.9:<20.*.3:0'   '20.0.0:<20.*.3:1' \
-                '20.0.1:20.*.3:0'    '21.0.0:20.*.3:1' \
+  # version:spec:expected — 0 satisfied, 1 unsatisfied, 3 malformed operand.
+  # The comparator forms are the ones 7.8.4+ throws on; ^ and ~ are the ones it
+  # keeps, and there the wildcard still truncates so the trailing 3 is dropped
+  # rather than compared against the runtime patch.
+  for triple in '20.0.1:>=20.*.3:3' '19.9.9:>=20.*.3:3' \
+                '20.11.1:<=20.*.3:3' '21.0.0:<=20.*.3:3' \
+                '20.11.1:>20.*.3:3'  '21.0.0:>20.*.3:3' \
+                '19.9.9:<20.*.3:3'   '20.0.0:<20.*.3:3' \
+                '20.0.1:20.*.3:3'    '21.0.0:20.*.3:3' \
+                '20.0.1:=20.*.3:3' \
                 '20.11.1:^20.*.3:0'  '20.11.1:~20.*.3:0' \
+                '21.0.0:^20.*.3:1'   '21.0.0:~20.*.3:1' \
+                '20.11.1:~22.x.1:1'  '22.12.0:~22.x.1:0' \
                 '20.11.1:20..1:3'    '20.11.1:>=20..1:3'; do
     local ver="${triple%%:*}" rest="${triple#*:}"
     local spec="${rest%:*}" want="${rest#*:}"
@@ -2067,5 +2094,271 @@ ws_run() {
   run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
   [ "$status" -eq 0 ]
   cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace nested below the first directory level is discovered" {
+  # Discovery looked one level down while ci::changeset::_in_node_workspace
+  # walked up from any depth, so packages/app/src/x.ts scheduled the node lane
+  # and node.sh then printed "No package.json found" and exited 0. Scheduling
+  # and execution have to mean the same thing by "workspace".
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/packages/app" "$sb/node_modules/dep" "$sb/packages/app/dist"
+  printf '{}\n' > "$sb/packages/app/package.json"
+  printf '{}\n' > "$sb/node_modules/dep/package.json"
+  printf '{}\n' > "$sb/packages/app/dist/package.json"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"packages/app"* ]]
+  [[ "$output" != *"node_modules"* ]]
+  [[ "$output" != *"dist"* ]]
+  rm -rf "$sb"
+}
+
+@test "node lane: a fixture package under a test tree is not a workspace" {
+  # The other half of recursive discovery. ci/tests/fixtures/node/package.json
+  # is a real manifest with no lockfile, and treating it as a workspace made the
+  # lane refuse the install and report FAIL_INFRA for a directory that exists to
+  # be a fixture. Pruned only under a test tree, so packages/fixtures/ survives.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/tests/fixtures/node" "$sb/packages/fixtures" "$sb/app/testdata/pkg"
+  printf '{}\n' > "$sb/ci/tests/fixtures/node/package.json"
+  printf '{}\n' > "$sb/packages/fixtures/package.json"
+  printf '{}\n' > "$sb/app/testdata/pkg/package.json"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"packages/fixtures"* ]]
+  [[ "$output" != *"ci/tests/fixtures"* ]]
+  [[ "$output" != *"testdata"* ]]
+  rm -rf "$sb"
+}
+
+@test "changeset: scheduling uses the same workspace definition as discovery" {
+  # One predicate, consulted by both. Two similar ones is how they disagreed.
+  run bash -c "
+    cd '$REPO_ROOT'
+    . ci/lib/common.sh
+    . ci/lib/changeset.sh
+    ci::changeset::_in_node_workspace ci/tests/fixtures/node/src/a.ts && echo SCHEDULED || echo SKIPPED
+  "
+  [[ "$output" == *"SKIPPED"* ]]
+}
+
+@test "node lane: an unstaged file the staged one depends on stops the workspace" {
+  # The rule was per-file and the lane is not: it installs, typechecks, tests
+  # and builds the workspace as a unit. Stage a file, leave the helper it needs
+  # untracked, and every staged path matched the index while the lane passed on
+  # the strength of a file the commit does not contain.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'import { helper } from "./helper";\nexport const x = helper;\n' > ws/uses-helper.ts
+  git add ws/uses-helper.ts >/dev/null 2>&1
+  printf 'export const helper = 1;\n' > ws/helper.ts   # deliberately NOT staged
+  ws_seed_fingerprint
+  # The premise: the staged path itself matches the index exactly.
+  run bash -c "cd '$NODE_SB' && git diff --name-only -- ws/uses-helper.ts"
+  [ -z "$output" ]
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/helper.ts"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a positional file filter in the test script is rejected" {
+  # `vitest run [...filters]` is documented syntax, so a bare path narrows the
+  # suite exactly as -t does while matching nothing in the flag deny-list. An
+  # enumerated list of narrowing flags loses this race by construction.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run tests/one.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a wrapper script with a positional argument is not a filter" {
+  # The control. A positional means "filter" only for a known test runner; for
+  # `bash scripts/test.sh` it is the script being run, and rejecting it would
+  # fail every workspace that wraps its suite.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true scripts/test.sh --ci" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: ship mode does not report ordinary ignored build output as drift" {
+  # The prune-list attempt reported frontend/.env.local, a tsbuildinfo and
+  # Playwright output as drift, which makes the ship gate unpassable during
+  # ordinary development — and its printed remedy, "commit the rest", is the
+  # exact thing git-safety.sh blocks. An ignored file is drift only where it
+  # shadows a path the push removes.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  cd "$NODE_SB"
+  git init -q .
+  printf 'ws/.env.local\nws/*.tsbuildinfo\nws/test-results/\nws/src/build/\n' > .gitignore
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'VITE_API=http://localhost:8000\n' > ws/.env.local
+  printf 'x\n' > ws/tsconfig.tsbuildinfo
+  mkdir -p ws/test-results && printf 'x\n' > ws/test-results/report.xml
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: ship mode still catches an ignored file shadowing a deletion" {
+  # And the case the ignored list exists for, which the deletion key preserves.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm -q ws/app.js >/dev/null 2>&1
+  printf 'ws/app.js\n' > .gitignore
+  git add .gitignore >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete and ignore" >/dev/null 2>&1
+  printf 'export const recreated = 1;\n' > ws/app.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a source file under a directory named build is not pruned away" {
+  # The prune list matched build/ dist/ coverage/ at any depth, so a genuine
+  # frontend/src/build/ was swallowed and the lane tested a replacement for a
+  # file the push deletes.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  mkdir -p "$NODE_SB/ws/src/build"
+  printf 'export const tokens = 1;\n' > "$NODE_SB/ws/src/build/tokens.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm -q ws/src/build/tokens.js >/dev/null 2>&1
+  printf 'ws/src/build/\n' > .gitignore
+  git add .gitignore >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete and ignore" >/dev/null 2>&1
+  mkdir -p ws/src/build && printf 'export const tokens = 2;\n' > ws/src/build/tokens.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/src/build/tokens.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unreadable runtime is reported against the runtime" {
+  # Nothing validated the runtime. _semver_part strips non-digits and defaults
+  # to 0, so "banana" became 0.0.0; an empty string gave awk no record at all,
+  # printed nothing, and every component compared equal — so a `>=` gate came
+  # back satisfied for a node --version that emitted a shim banner or nothing.
+  #
+  # Status 4, not the generic 2. Both stop the lane, so this is not a
+  # correctness change -- it is a message change, and the message was wrong in
+  # a way that costs an operator real time: a broken `node --version` printed
+  # "Cannot evaluate the engines.node range declared by <ws>/package.json",
+  # sending someone to stare at a perfectly good manifest. A prerelease runtime
+  # is readable but not orderable here, and gets its own status 5 for the same
+  # reason.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  bash -n "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+  local rc bad=""
+  for ver in '' 'v' 'banana' 'not-a-version' '20' '20.1'; do
+    rc=0
+    _semver_satisfies "$ver" ">=20" || rc=$?
+    [ "$rc" -eq 4 ] || bad="${bad} '${ver}'(got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "unreadable runtimes reported otherwise:${bad}" >&2; return 1; }
+  # A prerelease runtime is readable, so it is a different report -- and it
+  # must not be a pass. Measured against semver 7.8.5, ignoring the tail made
+  # `20.1.0` come back satisfied by a 20.1.0-rc.1 runtime, which npm calls
+  # false: the fail-open direction.
+  for ver in '20.1.0-rc.1' '21.0.0-nightly' '1.2.3-alpha.1'; do
+    rc=0
+    _semver_satisfies "$ver" ">=20" || rc=$?
+    [ "$rc" -eq 5 ] || bad="${bad} prerelease '${ver}'(got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "prerelease runtimes reported otherwise:${bad}" >&2; return 1; }
+  # And a real one still evaluates.
+  rc=0; _semver_satisfies 20.11.1 ">=20" || rc=$?
+  [ "$rc" -eq 0 ]
+  rc=0; _semver_satisfies 19.9.9 ">=20" || rc=$?
+  [ "$rc" -eq 1 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: comparator agreement with npm on the forms review found" {
+  # One table for the eight root causes an oracle-backed audit against
+  # node-semver 7.8.5 turned up. Statuses: 0 satisfied, 1 not, 2 unverifiable.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+  local rc bad="" spec ver want
+  # A typo must not be rescued by a satisfied sibling; a merely unsupported
+  # form must be. Leading zeros, oversized numbers and a number to the right of
+  # a wildcard are all invalid operands to npm.
+  #
+  # Two rows here are deliberate divergences from npm, both fail-closed and
+  # both measured rather than assumed:
+  #   * An empty alternative from a stray "||" is ANY to node-semver -- 7.8.5
+  #     gives `new Range(">=999.0.0 ||").range` == "" and .test("20.1.0") ==
+  #     true. Copying that would let one keystroke nullify a declared
+  #     constraint, so it is classed malformed here.
+  #   * A prerelease on either side is unsupported, not guessed. Ignoring it
+  #     returned SATISFIED for "1.2.3-alpha.1" @ 1.2.3 and "<=1.2.3-alpha.1" @
+  #     1.2.3, both npm=false.
+  # Everything else on this table agrees with 7.8.5 exactly; the full 585-case
+  # sweep behind it has zero rows where this comparator says satisfied and npm
+  # does not.
+  for row in \
+    'banana || >=20:20.1.0:2' '- || >=20:20.1.0:2' '>=20banana || >=20:20.1.0:2' \
+    '1.2.3 - 2.3.4 || >=20:20.1.0:0' '1.2.3 - 2.3.4:20.1.0:2' \
+    '>=020.1.0:20.1.0:2' '>=20.08.0:20.9.0:2' '>08:9.0.0:2' \
+    '>=99999999999999999999.0.0:20.1.0:2' \
+    '20.x.3:20.0.1:2' '>=20.*.3:20.0.1:2' \
+    '>=999.0.0 ||:20.1.0:2' '|| >=20:20.1.0:2' '||:20.1.0:2'     '~22.x.1:22.12.0:0' '~22.x.1:20.1.0:1' '^20.*.3:20.11.1:0'     '>=9007199254740991:20.1.0:1' '>=20 || >=9007199254740991:20.1.0:0'     '= 20 - 22 || >=20:20.1.0:0' '20.x.3 - 22 || >=20:20.1.0:0'     '1.2.3-01 || >=20:20.1.0:2' '1.2.3-a..b || >=20:20.1.0:2'     '1.2.3+. || >=20:20.1.0:2' '>=20.1.0-rc.1 || >=20:20.1.0:0'     '1.2.3-alpha.1:1.2.3:2' '<=1.2.3-alpha.1:1.2.3:2' \
+    '^20.x-alpha:20.11.1:2' '~20.1-alpha:20.11.1:2' '>=20-alpha:20.11.1:2' \
+    '^20.x.x-alpha:20.11.1:0' '~20.x.1-rc.1:20.11.1:0' '20.x+b:20.11.1:0' \
+    'x.x:20.1.0:0' '*.*.*:20.1.0:0' 'vx:20.1.0:0' 'v*:20.1.0:0' \
+    '~>20:20.1.0:0' '~>20.1:20.1.9:0' '>==20:20.1.0:0' \
+    '>=22.12.0:22.14.0:0' '>=22.12.0:20.1.0:1' '~20.x:20.11.1:0' \
+    '^0.0.3:0.0.9:1' '^0.0.3:0.0.3:0' '20.x:21.0.0:1' '>= 20:20.1.0:0'; do
+    spec="${row%%:*}"; ver="${row#*:}"; want="${ver#*:}"; ver="${ver%%:*}"
+    rc=0
+    _semver_satisfies "$ver" "$spec" || rc=$?
+    [ "$rc" -eq "$want" ] || bad="${bad} '${spec}'@${ver}(want=${want} got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "comparator disagrees with npm:${bad}" >&2; return 1; }
   rm -rf "$NODE_SB"
 }

@@ -28,6 +28,16 @@ _bp_fail() {
   OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"
 }
 
+# A repository or tooling failure is not a policy violation. Reporting "cannot
+# walk the range" as FAIL_NEW_ISSUE told the developer their commits break a
+# rule, when what actually happened is that the check could not run — and it
+# disagreed with git-safety.sh, which returns FAIL_INFRA for the same condition
+# on the same range. The result contract distinguishes them; so does this.
+_bp_infra() {
+  ci::log::error "$1"
+  OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+}
+
 # The range this check reasons about is the same one git-safety.sh scans for
 # staged-content problems, so it is computed in one place. Kept as a name here
 # because the call sites below read better with it.
@@ -91,7 +101,7 @@ _bp_check_signed_commits() {
   # signed — the one place a silent empty result must not read as a pass.
   local log_out
   if ! log_out="$(git log --pretty='%G? %H' "$range" 2>&1)"; then
-    _bp_fail "Cannot walk the push range ${range}: ${log_out}"
+    _bp_infra "Cannot walk the push range ${range}: ${log_out}"
     return 0
   fi
   while IFS=' ' read -r sig_status commit; do
@@ -134,7 +144,7 @@ _bp_check_linear_history() {
   ci::log::info "Checking for merge commits in range: ${range}"
   local merge_count
   if ! merge_count="$(git rev-list --count --merges "$range" 2>&1)"; then
-    _bp_fail "Cannot count merge commits in ${range}: ${merge_count}"
+    _bp_infra "Cannot count merge commits in ${range}: ${merge_count}"
     return 0
   fi
   if [ "${merge_count:-0}" -gt 0 ]; then

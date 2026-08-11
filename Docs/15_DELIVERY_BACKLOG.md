@@ -1171,7 +1171,98 @@ single P-tier above.
   object on the left of a revision walk, which is exactly the input that makes
   the walk fail; a first push is every commit reachable from `HEAD`, and it now
   says so.
-  Combined suite: `bats ci/tests/` = 259 cases, 0 failures.
+  A twenty-sixth round was self-found, by building the oracle the earlier
+  comparator rounds had been reasoning without: node-semver 7.8.5 itself, driven
+  over a 585-case table. It found five defects in the comparator, and the
+  headline one is that **prerelease precedence was never implemented and was
+  answered anyway**. Prerelease ordering is a different ordering — `1.2.3-alpha.1`
+  is *below* `1.2.3`, and `alpha.7` above `alpha.3` by identifier rules, not by
+  any comparison of three numbers — so ignoring the tail did not make those
+  cases unsupported, it made them wrong in the fail-open direction: measured,
+  `1.2.3-alpha.1` came back satisfied by `1.2.3`, `<=1.2.3-alpha.1` by `1.2.3`,
+  and a plain `20.1.0` by a `20.1.0-rc.1` runtime, all npm=false. It is declared
+  unsupported now, on both sides, and an unsupported form stops the lane.
+  The prerelease/build **grammar** was the loose charset rather than
+  node-semver's identifier rules, so `1.2.3-01`, `1.2.3-a..b` and `1.2.3+.` — every
+  one of which npm refuses to parse — were accepted, and `1.2.3-01 || >=20` came
+  back SATISFIED for a range that cannot be constructed at all. `_semver_num_ok`'s
+  15-digit cap was neither node-semver's boundary (`MAX_SAFE_INTEGER`, sixteen
+  digits) nor bash's (nineteen), so it rejected the exact value npm documents,
+  fail-closed across all of `[1e15, 2^53-1]`, and because an oversized operand
+  is classed *malformed* it poisoned siblings that plainly admitted the runtime.
+  Two findings were the previous round's own fix over-applied. `invalidXRangeOrder`
+  was put inside the operand predicate and therefore reached every operand — but
+  node-semver calls it from `replaceXRange` alone, so `~22.x.1` and `^20.*.3`
+  are valid in every published version and the gate refused them; `hyphenReplace`
+  never routes through it either, and hyphen endpoints also absorb a leading `=`
+  and admit 16-digit numbers, so `= 20 - 22`, `20.x.3 - 22` and
+  `1000000000000000 - 2000000000000000` were all read as typos rather than as the
+  hyphen ranges npm builds — and a missed hyphen range is malformed, which
+  poisons the sibling the hyphen handling exists to let win. The rule itself was
+  also dated: diffing `classes/range.js` across 7.8.0, 7.8.3, 7.8.4 and 7.8.5
+  shows `invalidXRangeOrder` arrives in **7.8.4**, so `20.x.3` is valid before it
+  and invalid after; the gate refuses it, which is the fail-closed reading.
+  One divergence from npm is deliberate and is documented as such at the code:
+  an empty alternative from a stray `||` is ANY to node-semver (7.8.5 gives
+  `new Range(">=999.0.0 ||").range == ""`, `.test("20.1.0") == true`), and
+  copying that would let one keystroke nullify a declared constraint, so it is
+  classed malformed. Finally the unreadable-runtime message was pointing at the
+  wrong thing — a broken `node --version` printed "Cannot evaluate the
+  engines.node range declared by …/package.json", sending an operator to stare
+  at a healthy manifest; unreadable and prerelease runtimes now each report
+  against the runtime. The comparator is re-measured at 585 cases with **zero
+  rows where it says satisfied and npm does not**, and zero shell errors; the
+  48 remaining disagreements are all `unverifiable`, which stops the lane.
+  A separate sweep for the same shape one layer up — a guard that cannot tell
+  "I found nothing" from "I could not look" — found four more, all fail-open and
+  all reproduced. `branch-protection` **could never be scheduled**: nothing
+  anywhere emits it as a changeset check id, so the only arm that could keep it
+  was unreachable and the filter dropped the lane on every run in every mode,
+  including a direct commit on `main` (the check alone exits 20 there; through
+  the gate it printed "Skipping [branch-protection] (filtered)" and exited 0).
+  Which branch you are on is not a function of the changed-file list, so it
+  joins the always-run set. `ci::changeset::detect` wrapped every git call in
+  `|| true`, making "git is broken" and "nothing is staged" the same empty
+  result — and the caller reads an empty result as "no relevant changes" and
+  exits 0 before a single check runs: with only `git diff` failing, a tree
+  carrying two staged secrets passed the gate while `git-safety.sh` run directly
+  against it exited 20. Detection failure is now reported, and the caller
+  answers it by running everything rather than nothing. Its pre-push branch also
+  resolved the push base a **second** way, contradicting the comment in `git.sh`
+  claiming otherwise: `push_range` falls back to the whole of `HEAD`, this fell
+  back to nothing. It calls `push_range` now. And `push_range` itself accepted a
+  *local* default-branch guess equal to the tip — on a branch named `main` with
+  no remote, `merge-base HEAD main` is `HEAD`, the range is empty, and every
+  ship-mode check reports "nothing changed" over a push carrying the whole
+  branch; a guess that resolves to ourselves is discarded, while a
+  remote-tracking ref equal to the tip still means what it says. `python` was
+  cacheable although it runs `ruff`, `pytest` and `compileall` over the whole
+  package: a syntax error in an unstaged file is invisible to a key built from
+  the changed-file list, and a cached run returned PASS where `CI_GATE_NO_CACHE=1`
+  returned `FAIL_INFRA` on the identical tree.
+  One more came out of fixing a test rather than reading the code.
+  `_check_disabled_in_config` was a `while read` loop piping every line of
+  `checks.yml` into six separate greps and seds, and on this repository's
+  213-line file **a single call took 34 seconds** — measured, after a new case
+  appeared to hang and turned out merely to be waiting. `_check_should_skip`
+  makes one call per lane plus one per related check, so `quick` mode spent
+  minutes deciding what to run before it ran anything, against a mode that
+  declares a pre-commit budget. It is one awk pass now: all 32 ids resolve in
+  **1 second**, the parse is unchanged line for line, and the two
+  implementations were run against each other over a fixture covering every
+  branch — nested and list forms, comments on the id line and on the value, a
+  check with no `enabled:`, and a top-level key that ends the block mid-file —
+  agreeing on all of them.
+  Two of the new cases were weak on their first draft and were fixed before
+  landing, which is the same discipline applied inward: the `git diff` shim test
+  passed on exit **127** — the shim could not find git, so it never exercised
+  the path it named — and now resolves the real binary and asserts the premise
+  both ways; and the preflight helper extractor silently produced a file whose
+  callees were missing, where "command not found" is non-zero and reads as a
+  decision. Separately, `ws_setup` never copied `ci/lib/git.sh` into its
+  sandbox, so every case in that file aborted on the missing source before its
+  first assertion.
+  Combined suite: `bats ci/tests/` = 288 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
