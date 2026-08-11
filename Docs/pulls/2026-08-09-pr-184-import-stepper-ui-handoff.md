@@ -163,7 +163,7 @@ with the pinned toolchain:
 | --- | --- |
 | `uv sync --extra dev --extra test --extra lint` | 87 resolved, 85 checked |
 | `uv run ruff check backend tests scripts` | **All checks passed** |
-| `uv run pytest -q` | **2817 passed**, 15 warnings (11m58s) — re-run at `c92d260c` |
+| `uv run pytest -q` | **2817 passed**, 15 warnings (9m55s) — re-run at `cdf61c6b` |
 | `git diff --check` | clean (exit 0) |
 | `uv run mypy backend` | clean for this PR's files (see note) |
 
@@ -241,12 +241,12 @@ re-measurement that never happened.
 
 Which makes the currency test explicit rather than a matter of reading dates:
 **the recorded run is current while no commit after it has touched `backend/`.**
-`be5c955d` is the last one that did, and it precedes the `c92d260c` run, so the
+`cdf61c6b` is the last one that did, and the run was executed AT it, so the
 figure describes the branch tip's backend tree even as later frontend and docs
 commits land on top. The single command that settles it:
 
 ```bash
-git log --oneline c92d260c..HEAD -- backend/
+git log --oneline cdf61c6b..HEAD -- backend/
 ```
 
 Empty output means the gate row still holds. Any output is a re-run, not an
@@ -343,7 +343,7 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1921 insertions across eight files as of `be5c955d`**,
+backend diff is **1987 insertions across eight files as of `cdf61c6b`**,
 the commit that last changed `backend/`
 (`git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a
 frontend revert leaves all of it running.
@@ -353,9 +353,11 @@ most review rounds since, because any change under `backend/` **can** move it �
 including **comment-only** rounds, which is the case that keeps catching it
 out: 1,808 became 1,860 when a round added nothing but contract blocks, 1,866
 when a later round corrected six lines of one of them, 1,877 when a further
-round corrected the wording of another, and 1,894 then 1,898 as the by-shape
-rewrite landed and was itself corrected. `--stat` counts lines, not behaviour,
-so "no executable change" is not a reason to skip re-running it.
+round corrected the wording of another, 1,894 then 1,898 as the by-shape
+rewrite landed and was itself corrected, 1,921 when `_conflicting_channel_ids`
+gained a block, and 1,987 for this round's two backend blocks. `--stat` counts
+lines, not behaviour, so "no executable change" is not a reason to skip
+re-running it.
 
 This sentence deliberately no longer counts the refreshes. It said "eight",
 then "nine", and both went stale the moment the figure moved again — a tally
@@ -364,8 +366,8 @@ and it produced two. The examples carry the lesson; the count only carried
 maintenance.
 
 "Can" rather than "does", because the converse also happens and this paragraph
-asserted otherwise until it was caught: `be5c955d` changed `backend/` and left
-the figure at 1,894, swapping five comment lines for five others. A commit
+asserted otherwise until it was caught: `921a252a` changed `backend/` and left
+the figure at 1,894, swapping one comment line for another. A commit
 touching `backend/` is a reason to re-derive the number, not evidence that it
 moved.
 
@@ -373,7 +375,7 @@ The anchor is the commit that last changed `backend/`, **not** the branch tip,
 and that distinction is what stops this line going stale on its own: `Docs/` is
 outside the `-- backend/` pathspec, so any number of later documentation
 commits — including this one — leave both the figure and its anchor correct.
-If `backend/` has changed since `be5c955d`, this is a measurement of an earlier
+If `backend/` has changed since `cdf61c6b`, this is a measurement of an earlier
 tree rather than a wrong one, and the command above re-derives it.
 
 ### Reverting the frontend only
