@@ -823,3 +823,113 @@ YML
   [ "$status" -eq 0 ]
   rm -rf "$GS_SB"
 }
+
+@test "branch-protection: the push destination is what is protected, not the checkout" {
+  # `git push origin feature:main` writes to main while HEAD says feature, and
+  # this check asked `git rev-parse --abbrev-ref HEAD` -- so the branch name it
+  # judged was the one nobody was pushing to. `git push origin HEAD:main` and
+  # `git push origin :main` (a deletion) went the same way. The pre-push hook is
+  # handed the destination for every ref on stdin and now passes it on.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks"
+  cp "$REPO_ROOT/ci/checks/branch-protection.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  (
+    cd "$sb"
+    git init -q -b feature/x .
+    printf 'x\n' > a.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+  ) >/dev/null 2>&1
+
+  # The premise: we are standing on a feature branch, so anything that refuses
+  # below refused on the destination and could not have refused on the checkout.
+  run bash -c "cd '$sb' && git rev-parse --abbrev-ref HEAD"
+  [ "$output" = "feature/x" ]
+
+  run bash -c "cd '$sb' && CI_GATE_PUSH_REMOTE_REFS=main bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected branch 'main'"* ]]
+
+  # One protected destination among several is still a protected destination.
+  run bash -c "cd '$sb' && CI_GATE_PUSH_REMOTE_REFS='topic main' bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected branch 'main'"* ]]
+
+  # Control: an ordinary destination passes. Without this the case would also
+  # be satisfied by a check that refuses everything.
+  run bash -c "cd '$sb' && CI_GATE_PUSH_REMOTE_REFS=topic bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"protected branch"* ]]
+
+  # Control: set-and-empty is a tag push -- the hook read stdin and no branch is
+  # being written. Falling back to HEAD here would refuse `git push origin v1.2`
+  # for the branch you happened to be standing on.
+  run bash -c "cd '$sb' && CI_GATE_PUSH_REMOTE_REFS= bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no branch ref"* ]]
+
+  # Control: unset means nobody said, which is every caller that is not the
+  # pre-push hook -- and only then is the checkout the best evidence there is.
+  ( cd "$sb" && git checkout -q -b main ) >/dev/null 2>&1
+  run bash -c "cd '$sb' && bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected branch 'main'"* ]]
+  rm -rf "$sb"
+}
+
+@test "git-safety: a path touched by many commits is sized once, by its largest version" {
+  # Sizing ran per emitted path, and _gs_content_files emits one record per
+  # commit per modification -- so a file touched by N of the pushed commits was
+  # sized N times, and each sizing walked all N commits again. Quadratic on any
+  # push with no resolvable base, where the commit list is the whole history.
+  # Measured at 419 commits: one path cost 19s and there were ~3800 emissions,
+  # against a 120s pre-push budget. Batched now, and this asserts the answer did
+  # not change with the method: the largest version anywhere in the range, even
+  # when a later commit shrinks the file back down.
+  gs_setup
+  local base
+  base="$( cd "$GS_SB" && git rev-parse HEAD )"
+  # 6MB in an intermediate commit, then shrunk. The blob is still in the push.
+  ( cd "$GS_SB" && head -c 6291456 /dev/zero | tr '\0' 'x' > big.bin ) 2>/dev/null
+  gs_commit "add big"
+  printf 'small\n' > "$GS_SB/big.bin"
+  gs_commit "shrink big"
+  printf 'more\n' >> "$GS_SB/big.bin"
+  gs_commit "touch big again"
+
+  # The premise, both halves: the path really is emitted more than once, and
+  # the current version really is small -- so a scan of the tip alone, or one
+  # that took the last emission, would report nothing.
+  run bash -c "cd '$GS_SB' && for s in \$(git rev-list '$base'..HEAD); do git show --format= --name-only --diff-filter=ACMR \$s; done | grep -c '^big.bin$'"
+  [ "$output" -ge 3 ]
+  run bash -c "cd '$GS_SB' && git cat-file -s HEAD:big.bin"
+  [ "$output" -lt 5242880 ]
+
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Large file detected"* ]]
+  [[ "$output" == *"big.bin"* ]]
+  # Reported once, not once per commit that touched it.
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' bash ci/checks/git-safety.sh 2>&1 | grep -c 'Large file detected'"
+  [ "$output" -eq 1 ]
+  rm -rf "$GS_SB"
+}
+
+@test "git-safety: an ordinary file is not reported as large" {
+  # The control for the case above: sizing that returned a wrong-but-large
+  # number, or that mismatched paths against results, would satisfy it too.
+  gs_setup
+  local base
+  base="$( cd "$GS_SB" && git rev-parse HEAD )"
+  printf 'ordinary\n' > "$GS_SB/b.txt"
+  gs_commit "one"
+  printf 'ordinary again\n' > "$GS_SB/b.txt"
+  gs_commit "two"
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Large file detected"* ]]
+  rm -rf "$GS_SB"
+}

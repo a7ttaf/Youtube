@@ -42,9 +42,26 @@ case "$HOOK_NAME" in
     # branch with no base, which push_range already handles by walking all of
     # HEAD — and here that means leaving the base empty so it can.
     if [ ! -t 0 ]; then
-      _push_old="" _push_new="" _push_nobase=0 _push_unrelated=""
+      _push_old="" _push_new="" _push_nobase=0 _push_unrelated="" _push_dests=""
       while read -r _lref _lsha _rref _rsha; do
         [ -n "${_lsha:-}" ] || continue
+
+        # The *destination* is collected before anything else, because a push
+        # names where it is going and the gate was reading where we happen to
+        # be standing. `git push origin feature:main` sends this hook
+        # `refs/heads/main` as the remote ref while HEAD is still `feature`,
+        # and branch-protection.sh -- asking `git rev-parse --abbrev-ref HEAD`
+        # -- approved it as an ordinary feature-branch push. `git push origin
+        # HEAD:main` does the same. The refspec is documented in `git push -h`
+        # and is not exotic.
+        #
+        # Collected for deletions too, above the `continue` below: `git push
+        # origin :main` deletes a protected branch outright, and that is the
+        # one push that must not be waved through for having no content.
+        case "${_rref:-}" in
+          refs/heads/*) _push_dests="${_push_dests} ${_rref#refs/heads/}" ;;
+        esac
+
         # A deletion pushes the zero sha as the local one; there is no content.
         case "$_lsha" in *[!0]*) ;; *) continue ;; esac
 
@@ -75,7 +92,18 @@ case "$HOOK_NAME" in
             # reachable from the discarded `B0`, so the gate can block a push on
             # a secret, an unsigned commit or a merge the remote already has.
             # Reported rather than picked, for the same reason as the tip.
-            if [ -z "$_push_old" ]; then
+            #
+            # A remote sha this repository does not have is not a divergence.
+            # `merge-base --is-ancestor` exits 128 for an unknown object and 1
+            # for "genuinely not contained", and both were read as the latter,
+            # so a base that had merely never been fetched -- the remote moved,
+            # or this is a shallow or partial clone -- collapsed into
+            # _push_unrelated and hard-refused the push. It is the same
+            # statement as a new branch: no base is available locally, so
+            # nothing narrows the range and the run walks all of HEAD.
+            if ! git rev-parse --verify --quiet "${_rsha}^{commit}" >/dev/null 2>&1; then
+              _push_nobase=1
+            elif [ -z "$_push_old" ]; then
               _push_old="$_rsha"
             elif git merge-base --is-ancestor "$_rsha" "$_push_old" 2>/dev/null; then
               _push_old="$_rsha"
@@ -110,6 +138,14 @@ case "$HOOK_NAME" in
       # Any ref without a base means the push carries history the remote has
       # never seen, so there is no common base for the run as a whole.
       [ "$_push_nobase" -eq 1 ] && _push_old=""
+      # Exported even when empty, because empty and unset are different
+      # statements and only one of them may fall back to HEAD. Set-and-empty
+      # means the hook read stdin and this push names no branch destination at
+      # all -- pushing a tag, say -- and there is then no branch to protect;
+      # falling back to the checkout there would refuse `git push origin v1.2`
+      # for the sole reason that you were standing on main. Unset means nobody
+      # said, which is every caller that is not this hook.
+      export CI_GATE_PUSH_REMOTE_REFS="${_push_dests# }"
       if [ -n "$_push_new" ]; then
         export CI_GATE_PUSH_NEW_SHA="$_push_new"
         [ -n "$_push_old" ] && export CI_GATE_PUSH_OLD_SHA="$_push_old"

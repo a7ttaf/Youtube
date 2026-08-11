@@ -736,6 +736,19 @@ check_one_config() {
     # `cond ? [glob] : ["tests/only.test.ts"]` the glob is present and inactive,
     # so a substring match passes while vitest collects the other branch.
     printf 'include-not-literal\t%s' "$active_include"
+  elif [ -n "$active_include" ] && printf '%s\n' "$active_include" | grep -qF '!'; then
+    # A negated entry subtracts inside include, where the exclude rule cannot
+    # see it. `['tests/**/*.test.{ts,tsx}', '!tests/lib/**']` is a literal array
+    # and does contain the declared glob, so every check above passed while
+    # vitest collected no tests/lib file at all -- the same silent drop as
+    # `exclude`, spelled one property over.
+    #
+    # Any `!`, not a leading one. Globs subtract in two shapes: `!pattern` at
+    # the front of an entry, and picomatch's extglob `tests/**/!(lib)/*.ts`
+    # in the middle of one. Matching only the first would be the same partial
+    # cover that let this through, and an additive test glob has no other use
+    # for the character.
+    printf 'include-negated\t%s' "$active_include"
   elif [ -z "$active_include" ] || ! printf '%s\n' "$active_include" | grep -qF "$DECLARED_GLOB"; then
     printf 'no-include'
   elif [ -n "$active_exclude" ]; then
@@ -810,6 +823,17 @@ else
         echo "  expression is not something it can decide."
         echo "  Declare a literal array, or teach this guard to evaluate the"
         echo "  expression in the same commit."
+        printf '%s\n' "$_detail" | sed 's/^/    /'
+        ;;
+      include-negated)
+        fail "${_label} negates inside test.include, which subtracts tests silently."
+        echo "  A '!' entry removes what an earlier entry added, so include can"
+        echo "  carry '${DECLARED_GLOB}' and still collect none of a subtree:"
+        echo "  [\"${DECLARED_GLOB}\", \"!tests/lib/**\"] reports as fully covered"
+        echo "  here while vitest lists no tests/lib file at all. It is the same"
+        echo "  silent drop as test.exclude, written one property over."
+        echo "  State the layout additively, or move the subtraction into"
+        echo "  exclude where it is at least visible as one."
         printf '%s\n' "$_detail" | sed 's/^/    /'
         ;;
       unknown-prop)

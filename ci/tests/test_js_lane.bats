@@ -2589,3 +2589,61 @@ exit 0
   [[ "$output" == *"test runner"* ]]
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: a vendored manifest in the index is not a workspace" {
+  # The two sources of workspaces have to agree in both directions. Discovery
+  # drops ci/tests/fixtures/node through ci::common::is_vendored_path; the index
+  # scan added it straight back, and being alphabetically first it was the
+  # workspace the lane entered before any real one -- with no lockfile, so
+  # `CI_GATE_MODE=full bash ci/checks/node.sh` exited FAIL_INFRA on a fixture and
+  # never reached the workspace anybody meant. The round before this taught the
+  # scan to look as deep as discovery and left it looking wider too.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  # A fixture manifest, tracked, with no lockfile beside it -- exactly the
+  # shape that made the real lane exit 30.
+  mkdir -p ci/tests/fixtures/node
+  printf '%s\n' '{ "name": "fixture", "private": true }' > ci/tests/fixtures/node/package.json
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  # The premise: it really is in the index, and filesystem discovery really
+  # does drop it -- so anything the lane does with it came from the index scan.
+  run bash -c "cd '$NODE_SB' && git ls-files -- '*/package.json' | grep -c 'fixtures/node/package.json'"
+  [ "$output" -eq 1 ]
+  run bash -c "cd '$NODE_SB' && source ci/lib/common.sh && ci::common::node_workspaces package.json"
+  [[ "$output" != *"fixtures"* ]]
+
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"fixtures/node"* ]]
+  [[ "$output" != *"No lockfile"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a real staged workspace is still found through the index" {
+  # The control. Pruning the index scan by the vendored rule must not prune the
+  # thing that scan exists for -- a workspace that is in the commit and not on
+  # disk, which is the case the scan was added for one round earlier.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  mkdir -p packages/app
+  printf '%s\n' '{ "name": "a", "private": true, "scripts": { "test": "bash scripts/fail.sh" } }' > packages/app/package.json
+  printf '{}\n' > packages/app/bun.lock
+  git add packages >/dev/null 2>&1
+  rm -rf packages
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"packages/app/package.json"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}

@@ -1421,7 +1421,62 @@ single P-tier above.
   control asserting that ordinary array *values* are not mistaken for one.
   The fourth was the predictable temp path in `all` mode, already removed with
   the other two the round before it was reported.
-  Combined suite: `bats ci/tests/` = 315 cases, 0 failures.
+  A thirty-first round found five, two P1, and three are the same mistake in
+  different files: a rule fixed in one direction and left wrong in the other.
+  (1) The round-thirty fix taught the index-side workspace scan to walk to any
+  depth, so it would agree with filesystem discovery about *depth* — and left it
+  disagreeing about *vendoring*. Discovery drops `ci/tests/fixtures/node`
+  through `ci::common::is_vendored_path`; the index scan added it straight back,
+  and alphabetically first it was the workspace the lane entered before any real
+  one. With no lockfile beside it, `CI_GATE_MODE=full bash ci/checks/node.sh`
+  exited **30** on a fixture and never reached `frontend` — every scheduled
+  full-mode Node lane was failing. Indexed candidates go through the same
+  predicate now: the predicate itself, not a second copy of its rules, since a
+  second copy is how the two drifted apart to begin with.
+  (2) The pre-push hook read the destination ref off stdin and exported only the
+  SHAs, so `branch-protection.sh` kept asking `git rev-parse --abbrev-ref HEAD`
+  and approved `git push origin feature:main` as an ordinary feature-branch
+  push. Destinations are exported and enforced now, collected *above* the
+  zero-sha skip so `git push origin :main` — deleting a protected branch,
+  carrying no content — is not waved through for being empty. Set-and-empty is
+  kept distinct from unset: empty means the push names no branch (a tag), and
+  falling back to the checkout there would refuse `git push origin v1.2` for the
+  branch you happened to be standing on.
+  (3) `test.include` could subtract. `['tests/**/*.test.{ts,tsx}',
+  '!tests/lib/**']` is a literal array containing the declared glob, so every
+  check passed while vitest collected no `tests/lib/` file — the silent drop the
+  `exclude` rule exists to prevent, written one property over and out of its
+  reach. Any `!` in an include entry stops the guard, not a leading one only,
+  since picomatch's `!(...)` subtracts from the middle of a pattern just as well.
+  The fourth was a performance failure severe enough to be a correctness one.
+  `git-safety.sh` sized blobs per *emitted* path, and `_gs_content_files` emits
+  one record per commit per modification — so a file touched by forty pushed
+  commits was sized forty times, each sizing walking every commit again.
+  Invisible on an ordinary push, quadratic on one with no resolvable base, where
+  the commit list is the whole history. Measured on a clone of this tree with
+  its remote removed: 419 commits, **19s to size one path**, 15 paths costing
+  **371s**, extrapolating to **6,711s** for the 271 unique paths — against a 120s
+  pre-push budget. Paths are deduplicated, and the per-pair `git cat-file -s` is
+  replaced by one `git cat-file --batch-check`: **113,549 pairs in 3.2s**. The
+  question asked is deliberately unchanged — the max of `<commit>:<path>` over
+  the enumerated commits — and that was checked rather than assumed: old and new
+  return byte-identical sizes. `diff-tree`'s post-image blobs would have been
+  cheaper still and *not* equivalent, since a path that was 40MB before the
+  range and is modified down inside it is still 40MB in the pushed trees.
+  The symptom was checked end to end, not just the term that caused it: on a
+  synthetic 419-commit first push the fixed check completes in **82s**, and the
+  previous one was still running when a 300s cap killed it. The five remaining
+  per-commit `git show` loops are linear and untouched — 18.7s each here, ~96s
+  in total — so the budget is met with room, and reducing it further would mean
+  restructuring the read helpers earlier rounds hardened for fail-closed
+  semantics.
+  The fifth came from the pinned comment: `merge-base --is-ancestor` exits 128
+  for an object the repository does not have and 1 for "genuinely not
+  contained", and the hook read both as the second — so a remote base that had
+  merely never been fetched hard-refused the push. A missing remote object is
+  now the same statement as a new branch: no base, so nothing narrows the range
+  and ship mode walks all of HEAD. Scanning more, never less.
+  Combined suite: `bats ci/tests/` = 325 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

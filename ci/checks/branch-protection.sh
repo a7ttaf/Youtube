@@ -95,6 +95,49 @@ _is_protected_branch() {
 
 _bp_check_protected_branch() {
   local branch
+
+  # Where the push is going, when that is known, rather than where the working
+  # tree happens to be standing.
+  #
+  # A refspec separates the two: `git push origin feature:main` writes to main
+  # while HEAD says `feature`, so asking HEAD approved a direct push to a
+  # protected branch. So did `git push origin HEAD:main`, and so did `git push
+  # origin :main`, which deletes it. The pre-push hook is handed the
+  # destination for every ref on stdin and now passes it on.
+  #
+  # Set-but-empty is a real answer and is not the same as unset: it means the
+  # hook read the push and it names no branch destination -- a tag, say -- and
+  # a tag push must not be refused for the branch you were standing on. Unset
+  # means nobody told us, which is the pre-commit hook and every direct
+  # invocation, and only then is the checkout the best available evidence.
+  if [ -n "${CI_GATE_PUSH_REMOTE_REFS+set}" ]; then
+    local ref blocked=0 seen=0
+    # Unquoted for the word split, so globbing is turned off around it. git's
+    # own ref-format rules forbid `*`, `?` and `[` in a branch name, so this
+    # cannot fire today -- but if it ever did, an expanded pattern would arrive
+    # as some filename and compare unequal to `main`, and this check would
+    # approve the push. A fail-open is not the direction to leave to a
+    # guarantee made somewhere else.
+    set -f
+    for ref in ${CI_GATE_PUSH_REMOTE_REFS}; do
+      seen=1
+      if _is_protected_branch "$ref"; then
+        _bp_fail "Push to protected branch '${ref}' is not allowed. Use a feature branch and pull request."
+        blocked=1
+      fi
+    done
+    set +f
+    if [ "$seen" -eq 0 ]; then
+      ci::log::info "Push targets no branch ref; branch protection does not apply."
+    elif [ "$blocked" -eq 0 ]; then
+      # Deliberately not the words "protected branch": that phrase appearing in
+      # this check's output has to mean a refusal and nothing else, or an
+      # assertion looking for it passes on the run that allowed the push.
+      ci::log::info "Push targets '${CI_GATE_PUSH_REMOTE_REFS}'; none is protected. OK."
+    fi
+    return 0
+  fi
+
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
 
   if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then

@@ -38,11 +38,29 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
   # staged packages/app/package.json was dropped here exactly as it was dropped
   # by the filesystem walk before that was made recursive — the two sources have
   # to agree about what a workspace is or the lane covers the intersection.
+  #
+  # Pruned by the same rule the filesystem walk uses. Discovery drops
+  # ci/tests/fixtures/node via ci::common::is_vendored_path; this scan added it
+  # straight back, and being alphabetically first it was the workspace the lane
+  # entered before any real one. It has no lockfile, so `CI_GATE_MODE=full bash
+  # ci/checks/node.sh` exited FAIL_INFRA on a fixture and never reached
+  # frontend. Two sources of workspaces have to agree about what a workspace is
+  # in *both* directions -- the last round taught this scan to see as deep as
+  # discovery, and left it seeing more than discovery too.
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
     INDEXED_WS="$(git ls-files -- 'package.json' '*/package.json' 2>/dev/null \
       | awk -F/ 'NF == 1 { print "."; next }
                  { d = $1; for (i = 2; i < NF; i++) d = d "/" $i; print d }' \
       | sort -u || true)"
+    if [ -n "$INDEXED_WS" ]; then
+      _kept_ws=""
+      while IFS= read -r _iw; do
+        [ -n "$_iw" ] || continue
+        ci::common::is_vendored_path "$_iw" && continue
+        _kept_ws="${_kept_ws}${_iw}"$'\n'
+      done <<< "$INDEXED_WS"
+      INDEXED_WS="$(printf '%s' "$_kept_ws")"
+    fi
     if [ -n "$INDEXED_WS" ]; then
       NODE_WORKSPACES="$(printf '%s\n%s\n' "$NODE_WORKSPACES" "$INDEXED_WS" \
         | sed '/^$/d' | sort -u)"

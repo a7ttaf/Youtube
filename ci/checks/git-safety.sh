@@ -200,8 +200,106 @@ if [ -z "${CI_CHECKS_SECRET_PATTERN:-}" ]; then
   exit "$CI_RESULT_FAIL_INFRA"
 fi
 
+# Collected once, and deduplicated, before anything is asked about them.
+#
+# _gs_content_files emits a record per commit per modification, so a file
+# touched by forty of the pushed commits arrived forty times -- and every
+# arrival called _gs_max_blob_size, which walks the whole commit list again.
+# That is |emissions| x |commits| separate `git cat-file` processes. It is
+# invisible on an ordinary push, where the base is one commit back, and
+# quadratic on a push with no resolvable base: a first push, or any branch the
+# remote has never seen, makes GATE_COMMITS the entire history. Measured in
+# this tree at 419 commits and ~3800 emissions, with one path costing 19s, and
+# the pre-push budget is 120s.
+_GS_PATHS=()
+_GS_SIZES=()
+_GS_NL_PATHS=()
+_gs_lf=$'\n'
+_gs_seen="$_gs_lf"
 while IFS= read -r -d '' path; do
   [ -z "$path" ] && continue
+  case "$path" in
+    *"$_gs_lf"*)
+      # A newline inside a path cannot survive the line-oriented batch below;
+      # it would split into two records and desynchronise every result after
+      # it. Sized one at a time instead of dropped, because a path this gate
+      # cannot measure must not silently measure zero -- and because leaving it
+      # to the slow path is what stops a file named with a newline from being
+      # a way to push the gate back over its budget on purpose.
+      _GS_NL_PATHS+=("$path")
+      continue
+      ;;
+  esac
+  case "$_gs_seen" in *"${_gs_lf}${path}${_gs_lf}"*) continue ;; esac
+  _gs_seen="${_gs_seen}${path}${_gs_lf}"
+  _GS_PATHS+=("$path")
+done < <(_gs_content_files)
+
+# One `git cat-file --batch-check` for every (commit, path) pair in the run,
+# rather than one `git cat-file -s` per pair. Identical question, identical
+# answer -- the max of `<commit>:<path>` over the enumerated commits, missing
+# objects counting zero exactly as `|| echo 0` did -- asked in one process.
+# 113,549 pairs answer in 3.2s here; the same pairs cost hours one at a time.
+if [ "${#_GS_PATHS[@]}" -gt 0 ]; then
+  if [ -z "$GATE_RANGE" ]; then
+    for path in "${_GS_PATHS[@]}"; do
+      _GS_SIZES+=("$(_gs_max_blob_size "$path")")
+    done
+  else
+    _gs_ncommits="$(printf '%s\n' "$GATE_COMMITS" | grep -c '[^[:space:]]' || true)"
+    if [ "${_gs_ncommits:-0}" -gt 0 ]; then
+      _gs_rc=0
+      # Pairs are emitted path-major, so the answers arrive in groups of
+      # _gs_ncommits and the n-th group is the n-th path. batch-check prints
+      # exactly one line per input line, which is what makes that hold; the
+      # count check below refuses to trust the mapping if it ever stops holding.
+      _gs_sizes_out="$(printf '%s\n' "${_GS_PATHS[@]}" \
+        | awk -v commits="$GATE_COMMITS" '
+            BEGIN { n = split(commits, c, "\n") }
+            { for (i = 1; i <= n; i++) if (c[i] != "") print c[i] ":" $0 }' \
+        | git cat-file --batch-check 2>/dev/null \
+        | awk -v n="$_gs_ncommits" '
+            { size = (NF == 3 && $2 == "blob" && $3 ~ /^[0-9]+$/) ? $3 + 0 : 0
+              if (size > max) max = size
+              if (FNR % n == 0) { print max + 0; max = 0 } }')" || _gs_rc=$?
+      if [ "$_gs_rc" -ne 0 ]; then
+        echo "Could not size the blobs in ${GATE_RANGE} (git cat-file exited ${_gs_rc})."
+        echo "  Refusing to report on file sizes that were never measured."
+        exit "$CI_RESULT_FAIL_INFRA"
+      fi
+      while IFS= read -r _gs_sz; do
+        [ -n "$_gs_sz" ] || continue
+        _GS_SIZES+=("$_gs_sz")
+      done <<< "$_gs_sizes_out"
+      # An answer per path, or the positional mapping is not one. Silently
+      # short output would shift every later path onto another path's size,
+      # which is the same class of wrong answer as not measuring at all.
+      if [ "${#_GS_SIZES[@]}" -ne "${#_GS_PATHS[@]}" ]; then
+        echo "Blob sizing returned ${#_GS_SIZES[@]} results for ${#_GS_PATHS[@]} paths."
+        echo "  The results cannot be matched to the paths they describe."
+        exit "$CI_RESULT_FAIL_INFRA"
+      fi
+    else
+      while [ "${#_GS_SIZES[@]}" -lt "${#_GS_PATHS[@]}" ]; do
+        _GS_SIZES+=(0)
+      done
+    fi
+  fi
+fi
+
+# Appended after the batch, sized the original way. Same checks, same verdict.
+if [ "${#_GS_NL_PATHS[@]}" -gt 0 ]; then
+  for path in "${_GS_NL_PATHS[@]}"; do
+    _GS_PATHS+=("$path")
+    _GS_SIZES+=("$(_gs_max_blob_size "$path")")
+  done
+fi
+
+_gs_idx=0
+while [ "$_gs_idx" -lt "${#_GS_PATHS[@]}" ]; do
+  path="${_GS_PATHS[$_gs_idx]}"
+  size_bytes="${_GS_SIZES[$_gs_idx]}"
+  _gs_idx=$((_gs_idx + 1))
   # Matched on the basename as well as the whole path.
   #
   # The list was written in repository-root spellings, and a case pattern like
@@ -240,12 +338,11 @@ while IFS= read -r -d '' path; do
       ;;
   esac
 
-  size_bytes="$(_gs_max_blob_size "$path")"
   if [ "${size_bytes:-0}" -gt 5242880 ]; then
     echo "Large file detected ${GATE_WHAT} (>5MB): $path (${size_bytes} bytes)"
     LARGE_ARTIFACT_MATCH=1
   fi
-done < <(_gs_content_files)
+done
 
 secret_pattern_file="$(mktemp)"
 secret_cleanup() {

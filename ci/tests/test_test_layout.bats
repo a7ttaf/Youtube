@@ -1379,3 +1379,58 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" != *"computed"* ]]
 }
+
+@test "test-layout: a negated include entry is refused" {
+  # `['tests/**/*.test.{ts,tsx}', '!tests/lib/**']` is a literal array and does
+  # contain the declared glob, so every check above it passed -- while vitest
+  # collected no tests/lib file at all. It is the same silent drop as
+  # test.exclude, written one property over, and out of reach of the rule that
+  # catches exclude.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}", "!tests/lib/**"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"negates inside test.include"* ]]
+}
+
+@test "test-layout: a negation in the middle of an include entry is refused too" {
+  # Globs subtract in two shapes. Matching only a leading `!` would leave
+  # picomatch's extglob `!(...)` doing the same thing from inside the pattern --
+  # the same partial cover that let the first shape through.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/!(lib)/*.test.{ts,tsx}", "tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"negates inside test.include"* ]]
+}
+
+@test "test-layout: an ordinary additive include is still accepted" {
+  # The control. A rule that refuses every include would satisfy both cases
+  # above, and this repository's own config has to keep passing.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}", "tests/**/*.spec.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"negates inside"* ]]
+}
