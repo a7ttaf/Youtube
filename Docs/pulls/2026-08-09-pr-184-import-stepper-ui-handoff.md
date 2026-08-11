@@ -292,21 +292,25 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1877 insertions across eight files**
+backend diff is **1877 insertions across eight files as of `92b32db6`**,
+the commit that last changed `backend/`
 (`git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a
 frontend revert leaves all of it running.
 
-The figure names the commit it measured on purpose. It has been refreshed eight
+The figure names the commit it measured on purpose. It has been refreshed nine
 times under review, because it moves whenever backend code does — including
 **comment-only** rounds, which is the case that keeps catching it out: 1,808
-became 1,860 when a round added nothing but contract blocks, and 1,866 when a
-later round corrected six lines of one of them. `--stat` counts lines, not
-behaviour, so "no executable change" is not a reason to skip re-running it.
+became 1,860 when a round added nothing but contract blocks, 1,866 when a later
+round corrected six lines of one of them, and 1,877 when a further round
+corrected the wording of another. `--stat` counts lines, not behaviour, so "no
+executable change" is not a reason to skip re-running it.
 
-Naming the commit is what makes the line trustworthy between rounds: if HEAD is
-no longer `9a0ac728`, this is a measurement of an earlier tree rather than a
-wrong one, and the command above re-derives it. `Docs/` is outside the
-`-- backend/` pathspec, so editing this document never moves it.
+The anchor is the commit that last changed `backend/`, **not** the branch tip,
+and that distinction is what stops this line going stale on its own: `Docs/` is
+outside the `-- backend/` pathspec, so any number of later documentation
+commits — including this one — leave both the figure and its anchor correct.
+If `backend/` has changed since `92b32db6`, this is a measurement of an earlier
+tree rather than a wrong one, and the command above re-derives it.
 
 ### Reverting the frontend only
 
