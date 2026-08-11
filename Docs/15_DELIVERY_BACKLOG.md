@@ -1290,7 +1290,21 @@ single P-tier above.
   abort. DeepSource supplied the third: `local dir` in
   `ci::common::node_workspaces` survived the rewrite from a one-level scan to a
   recursive find, naming nothing.
-  Combined suite: `bats ci/tests/` = 290 cases, 0 failures.
+  A fourth arrived from Qodo on the next push, in the stdin reader added two
+  rounds earlier: the pre-push **tip was chosen by arrival order**.
+  `_push_new="$_lsha"` ran on every record, so the tip was whichever ref git
+  happened to list last — while the base beside it was already being widened by
+  ancestry. The two halves of one range therefore described different pushes,
+  and the answer changed when git reordered its input. The tip is chosen by
+  ancestry now, keeping the descendant. Reading the code for that turned up a
+  second order dependency in the same loop: a zero remote sha (a new branch)
+  did `break`, which stopped reading stdin altogether, so any ref listed after
+  it was never seen — it is recorded and the loop continues instead. And where
+  two pushed refs have no ancestry in common, one `A..B` range cannot describe
+  both and picking either leaves the other unscanned; that is refused with a
+  message naming the refs rather than silently gated on half the push. All
+  three cases fail against the previous dispatcher.
+  Combined suite: `bats ci/tests/` = 292 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

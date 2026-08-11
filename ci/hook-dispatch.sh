@@ -42,12 +42,30 @@ case "$HOOK_NAME" in
     # branch with no base, which push_range already handles by walking all of
     # HEAD — and here that means leaving the base empty so it can.
     if [ ! -t 0 ]; then
-      _push_old="" _push_new=""
+      _push_old="" _push_new="" _push_nobase=0 _push_unrelated=""
       while read -r _lref _lsha _rref _rsha; do
         [ -n "${_lsha:-}" ] || continue
         # A deletion pushes the zero sha as the local one; there is no content.
         case "$_lsha" in *[!0]*) ;; *) continue ;; esac
-        _push_new="$_lsha"
+
+        # The tip is chosen by ancestry, not by arrival. `_push_new="$_lsha"`
+        # on every record meant "whichever ref git happened to list last",
+        # while the base beside it was already being widened properly — so the
+        # two halves of the same range disagreed about which push they
+        # described, and the answer changed when git reordered its input.
+        if [ -z "$_push_new" ]; then
+          _push_new="$_lsha"
+        elif git merge-base --is-ancestor "$_push_new" "$_lsha" 2>/dev/null; then
+          _push_new="$_lsha"
+        elif git merge-base --is-ancestor "$_lsha" "$_push_new" 2>/dev/null; then
+          : # already the descendant; keep it
+        else
+          # Neither contains the other. One `A..B` range cannot describe two
+          # unrelated histories, and picking either one leaves the other
+          # unscanned — which is the fail-open this gate exists to remove.
+          _push_unrelated="${_push_unrelated} ${_lref:-<ref>}"
+        fi
+
         case "${_rsha:-}" in
           *[!0]*)
             if [ -z "$_push_old" ] \
@@ -55,9 +73,23 @@ case "$HOOK_NAME" in
               _push_old="$_rsha"
             fi
             ;;
-          *) _push_old="" ; break ;;
+          # A new branch has no base. Recorded rather than `break`-ed: breaking
+          # stopped reading stdin, so any ref listed after it was never seen at
+          # all and the tip was decided by however git ordered the records.
+          *) _push_nobase=1 ;;
         esac
       done
+
+      if [ -n "$_push_unrelated" ]; then
+        echo "pre-push: refusing to gate a push spanning unrelated histories." >&2
+        echo "  Refs with no ancestry in common:${_push_unrelated}" >&2
+        echo "  The gate validates one commit range per run, and no single range" >&2
+        echo "  covers these. Push them as separate invocations so each is scanned." >&2
+        exit 1
+      fi
+      # Any ref without a base means the push carries history the remote has
+      # never seen, so there is no common base for the run as a whole.
+      [ "$_push_nobase" -eq 1 ] && _push_old=""
       if [ -n "$_push_new" ]; then
         export CI_GATE_PUSH_NEW_SHA="$_push_new"
         [ -n "$_push_old" ] && export CI_GATE_PUSH_OLD_SHA="$_push_old"
