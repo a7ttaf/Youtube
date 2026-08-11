@@ -1953,6 +1953,20 @@ assert_no_persistent_filter() {
   # suite by a single stray edit somewhere else in the tree. `--no-allowOnly`
   # stays: it asks for the CI default and cannot reduce anything.
   #
+  # `--watch` and `--update` were on this list and do not belong on it.
+  #
+  # Watch mode does not end. The suite reaches "Waiting for file changes"
+  # and stays alive until the timeout in ci/lib/runner.sh kills it, so the
+  # lane reports infrastructure failure instead of a result -- a blocking
+  # check that can never complete. `--no-watch` stays: it asks for the
+  # behaviour this gate needs.
+  #
+  # `--update` rewrites snapshots to match whatever the code now produces
+  # and exits 0, so a mismatched inline snapshot -- a real regression -- is
+  # recorded as the new expectation and reported as a pass. That is
+  # narrowing of a different kind: not fewer tests, but tests that cannot
+  # fail. `--no-update` stays for the same reason `--no-allowOnly` does.
+  #
   # Node's own runner flags are here because `node --test` is the only spelling
   # of that runner this gate accepts, and rejecting the flag that makes it a
   # runner left the correct form failing the lane. The narrowing ones --
@@ -1979,13 +1993,13 @@ assert_no_persistent_filter() {
         # A flag that redirects the guard is not the same kind of thing as a
         # flag that cannot reduce the run, and this list was only ever an
         # allow-list for the second kind.
-        --run|--watch|--no-watch|--coverage|--no-coverage|--reporter|--reporters \
+        --run|--no-watch|--coverage|--no-coverage|--reporter|--reporters \
           |--outputFile|--outputTruncateLength|--mode|--silent \
           |--color|--no-color|--logHeapUsage|--pool|--poolOptions|--isolate \
           |--no-isolate|--threads|--no-threads|--file-parallelism \
           |--no-file-parallelism|--maxWorkers|--minWorkers|--maxConcurrency \
           |--environment|--globals|--no-allowOnly|--testTimeout \
-          |--hookTimeout|--teardownTimeout|--sequence|--update|--no-update \
+          |--hookTimeout|--teardownTimeout|--sequence|--no-update \
           |--disable-console-intercept|--printConsoleTrace|--typecheck \
           |--no-typecheck|--yes|-y \
           |--test|--test-reporter|--test-reporter-destination \
@@ -2164,6 +2178,20 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
   # the cause; that is worth one shared function.
   _reject_untrustworthy_composition typecheck "$_tc_cmd"
 
+  # Which program the typecheck script actually runs, by the same rule the
+  # test-script guard uses: skip the package-manager wrappers, take the first
+  # real word.
+  _tc_runner=""
+  set -f
+  # shellcheck disable=SC2086
+  for _tc_tok in $_tc_cmd; do
+    case "$_tc_tok" in
+      npx|pnpm|bun|yarn|npm|exec|run|dlx|--yes|-y) continue ;;
+      -*) continue ;;
+      *) _tc_runner="${_tc_tok##*/}"; break ;;
+    esac
+  done
+  set +f
   _tc_ok=0
   # Word-splitting is the point; globbing is not. `tsc -p tsconfig.*.json` would
   # otherwise expand against the workspace and be matched as filenames — the
@@ -2181,6 +2209,61 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
     echo "  runner that delegates to one. Add yours here if it belongs."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
   fi
+
+  # Naming the compiler is not enough: it has to be pointed at the project.
+  #
+  # `tsc src/known-good.ts --noEmit` names tsc and passes every rule above, and
+  # tsc documents that listing files ignores tsconfig.json entirely -- so the
+  # lane typechecks one file, reports PASS, and every error in every unlisted
+  # source is simply not looked for. The build does not typecheck either, so
+  # nothing else catches it. That is the test-filter defect on the typecheck
+  # script, and it is refused the same way: the value-taking options are named,
+  # and after anything else a bare word is a source file.
+  #
+  # Only for a direct compiler invocation. `bash scripts/typecheck.sh` and
+  # `npm run typecheck:all` are delegation, whose target is resolved rather
+  # than read as a file list.
+  case "${_tc_runner:-}" in
+    tsc|tsc.cmd|tsgo|vue-tsc)
+      _tc_prev=""
+      set -f
+      # shellcheck disable=SC2086
+      set -- $_tc_cmd
+      set +f
+      while [ "$#" -gt 0 ]; do
+        _tc_tok="$1"
+        if [ "${_tc_tok##*/}" = "$_tc_runner" ]; then
+          _tc_prev="" ; shift ; continue
+        fi
+        case "$_tc_tok" in
+          npx|pnpm|bun|yarn|npm|exec|dlx|--yes|-y|run|'&&'|';')
+            _tc_prev="" ; shift ; continue ;;
+          -*)
+            _tc_prev="$_tc_tok" ; shift ; continue ;;
+        esac
+        case "$_tc_prev" in
+          -p|--project|--outDir|--outFile|--target|--module|--moduleResolution \
+            |--lib|--jsx|--jsxFactory|--jsxFragmentFactory|--typeRoots|--types \
+            |--rootDir|--rootDirs|--baseUrl|--tsBuildInfoFile|--declarationDir \
+            |--maxNodeModuleJsDepth|--charset|--locale|--newLine|--reactNamespace)
+            ;;
+          *)
+            echo "Workspace ${CI_GATE_NODE_WORKSPACE} points its 'typecheck' script at"
+            echo "  individual files:"
+            echo "    typecheck: ${_tc_cmd}"
+            echo "    offending argument: ${_tc_tok}"
+            echo "  Naming files on the command line makes tsc ignore tsconfig.json,"
+            echo "  so only those files are compiled and every error elsewhere goes"
+            echo "  unreported while the lane exits 0. Point it at the project"
+            echo "  instead -- 'tsc --noEmit', or 'tsc -p <tsconfig>'."
+            exit "$CI_RESULT_FAIL_NEW_ISSUE"
+            ;;
+        esac
+        _tc_prev=""
+        shift
+      done
+      ;;
+  esac
 fi
 
 # A workspace that ships tests must be able to run them. run_script only logs
