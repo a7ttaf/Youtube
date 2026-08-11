@@ -40,12 +40,13 @@ guard that runs for **all** callers, and batched per-key group writes. See
 **Behaviour changes** and **Rollback / reset** below; the unbound "the file
 wins" rule of review #159 is what remains untouched.
 
-## Files changed (33)
+## Files changed (34)
 
 Counted from `git diff --name-only $(git merge-base origin/main HEAD)..HEAD`,
-not from memory. It has moved twice under review — 30, then 32 when round 51
-added the two registry files below, then 33 when round 53 added a domain-side
-apply test.
+not from memory. It has moved repeatedly under review — 30, then 32 when round
+51 added the two registry files below, then 33 when round 53 added a domain-side
+apply test, then 34 when the duplicate-repeat rule brought
+`tests/org/test_channel_import_parser.py` into the diff.
 
 - **Backend (8)** — `api/channels.py` (fingerprint widened to include the
   server-resolved tenant; `expected_plan_fingerprint`; `group_action` and
@@ -61,10 +62,11 @@ apply test.
   boundary (`lib/api/useChannelImport.ts`, `lib/api/types.ts`), two contexts
   (`UnsettledImportContext.tsx`, `WriteInFlightContext.tsx`),
   `ActionStepper.tsx`, and five test files.
-- **Backend tests (7)** — `tests/api/` (`test_channels_import_api.py`,
+- **Backend tests (8)** — `tests/api/` (`test_channels_import_api.py`,
   `test_channels_import_postgres.py`, `test_channel_group_sync_postgres.py`,
   `test_session_api.py`) and `tests/org/` (`test_channel_import_planner.py`,
-  `test_sql_channel_groups.py`, `test_channel_import_apply.py`).
+  `test_sql_channel_groups.py`, `test_channel_import_apply.py`,
+  `test_channel_import_parser.py`).
 - **Docs (5)** — `01_IMPLEMENTATION_PLAN.md`, `12_BACKEND_API_SPEC.md`,
   `15_DELIVERY_BACKLOG.md`, the pre-implementation plan under
   `Docs/superpowers/plans/`, and this handoff.
@@ -117,6 +119,11 @@ apply test.
    persisted result of a roster that used to import is unchanged — only the
    misleading preview becomes an explicit error naming the line to delete.
    Rosters listing one channel under several **distinct** groups are unaffected.
+   The client's plan validator enforces the same uniqueness, because a check
+   the backend applies to the CSV says nothing about a malformed *response*:
+   without it the trusted boundary would accept a plan duplicating a pair,
+   Preview would promise the group work twice, and the retained fingerprint
+   would authorise the single real association.
 
 ## Tests run
 
@@ -135,7 +142,7 @@ Frontend, and the PR-scope analyzer:
 
 | Suite | Result |
 | --- | --- |
-| `bun run test` (frontend) | **471 passed**, 41 files |
+| `bun run test` (frontend) | **472 passed**, 41 files |
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
 | DeepSource (PR scope) | `[]` |

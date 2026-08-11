@@ -661,7 +661,7 @@ const groupActionsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolea
   return true;
 };
 
-/** The three invariants, for ONE channel's writable rows. */
+/** The four invariants, for ONE channel's writable rows. */
 const channelCopiesAgree = (group: ReadonlyArray<Record<string, unknown>>): boolean => {
   const [first] = group;
   if (
@@ -671,6 +671,13 @@ const channelCopiesAgree = (group: ReadonlyArray<Record<string, unknown>>): bool
         row.revenue_required === first.revenue_required,
     )
   ) {
+    return false;
+  }
+  // Each copy must name a DISTINCT group. Absence is a value, not a wildcard:
+  // the parser rejects a repeated null group key exactly as it rejects a
+  // repeated real one, so anything that is not a string collapses to one slot.
+  const groupKeys = group.map((row) => (typeof row.group_id === "string" ? row.group_id : null));
+  if (new Set(groupKeys).size !== groupKeys.length) {
     return false;
   }
   const deciding = group.filter((row) => row.outcome !== OUTCOME_UNCHANGED);
@@ -693,6 +700,15 @@ const channelCopiesAgree = (group: ReadonlyArray<Record<string, unknown>>): bool
  * copy agrees on `channel_name` and `revenue_required`. And only the FIRST
  * copy owns the inventory decision: later copies plan as UNCHANGED so the
  * apply attaches their group without a second inventory outcome.
+ *
+ * Each copy must also name a DISTINCT group, because repeating a channel is
+ * only meaningful ACROSS groups. The parser rejects a repeated
+ * `(youtube_channel_id, group_id)` pair outright, so a plan carrying one did
+ * not come from a roster: the write pass collapses the pair to a single
+ * membership, which means Preview would promise the group work twice while the
+ * retained fingerprint authorises the one real association (review #184, codex
+ * P2). Checked here rather than per-row for the usual reason — no row-local
+ * predicate can see another row.
  *
  * Without this, a malformed response can repeat one valid id with two names or
  * two revenue flags, or give several copies their own CREATE/UPDATE diffs.

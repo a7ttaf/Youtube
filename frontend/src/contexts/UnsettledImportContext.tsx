@@ -97,18 +97,36 @@ const MISSING = "0";
  */
 export const UNSCOPED_IMPORT_SCOPE = `${MISSING}~${MISSING}`;
 
-/**
- * Percent-encode everything outside an unreserved alphabet, INCLUDING the
- * characters `encodeURIComponent` leaves alone: `.` `~` `!` `*` `'` `(` `)`.
- *
- * That matters because the scope is used as a key PREFIX and matched with
- * `startsWith`. With `.` and `~` surviving encoding, a tenant slug shaped like
- * `ums~.child` produced keys beginning with `ums~.` — the prefix of a
- * DIFFERENT operator's scope — so that operator would see, block on, and
- * `acknowledgeAll()` away someone else's pending imports (review #184).
- * After this, no encoded component can contain the separator or the delimiter,
- * so a prefix match cannot cross a scope boundary.
- */
+// ============================================================================
+// Purpose: Percent-encode ONE scope component down to an alphabet that cannot
+//   contain the scope separator (`~`) or the storage key delimiter (`.`),
+//   deliberately encoding the characters `encodeURIComponent` leaves alone:
+//   `.` `~` `!` `*` `'` `(` `)`.
+// Database/ORM: None (frontend) — a pure string function. What it protects is
+//   the localStorage key namespace built by importScopeFor.
+// Standards: This is the function that ENFORCES the isolation invariant the
+//   scope only describes, so the encoding lives here rather than at the call
+//   site. Scopes are matched as key PREFIXES with `startsWith`, so a component
+//   that keeps a `~` or `.` can straddle a boundary: a tenant slug shaped like
+//   `ums~.child` produced keys beginning with `ums~.`, the prefix of a
+//   DIFFERENT operator's scope, and that operator would see, block on, and
+//   `acknowledgeAll()` away someone else's pending imports (review #184). An
+//   allowlist, not a denylist — every character outside `[A-Za-z0-9_-]` is
+//   encoded — because a denylist has to be re-audited each time the key format
+//   grows a delimiter, and this one silently would not be. Encoded per UTF-8
+//   byte, so non-ASCII identities survive round-tripping unambiguously.
+// Blast Radius: Cross-tenant and cross-operator isolation of the duplicate-
+//   import guard. Weakening this lets one operator acknowledge away another's
+//   unsettled import, and an acknowledgement is what re-enables dispatch — so
+//   it decides whether a duplicate audited write becomes reachable. No
+//   authorization meaning: the backend's own permission and tenant checks are
+//   unaffected either way.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> importScopeFor
+//       joins two encoded components with `~`; the record keys append `.`.
+//   - File: frontend/src/components/srcc/AppShell.tsx -> supplies the tenant
+//       and user values that reach this function.
+// ============================================================================
 const encodeScopePart = (value: string): string => {
   return [...value]
     .map((character) =>

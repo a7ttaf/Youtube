@@ -636,6 +636,48 @@ describe("useChannelImport", () => {
     }
   });
 
+  it("rejects one channel repeated under the SAME group key", async () => {
+    // The parser rejects a repeated (youtube_channel_id, group_id) pair, so a
+    // plan carrying one did not come from a roster. The write pass collapses
+    // the pair to a single membership, so Preview would promise the group work
+    // twice while the fingerprint authorises the one real association.
+    // Absence is a value: two copies with NO group repeat the pair too.
+    const first = { ...DRY_RUN_RESULT.rows[1], row_number: 1, group_id: "g1" };
+    for (const [label, groupId, groupAction] of [
+      ["a repeated real group key", "g1", "CREATE"],
+      ["a repeated ABSENT group key", null, null],
+    ] as const) {
+      fetchMock().mockResolvedValue(
+        jsonResponse({
+          ...DRY_RUN_RESULT,
+          counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 1, ERROR: 0 },
+          rows: [
+            { ...first, group_id: groupId, group_action: groupAction },
+            {
+              ...first,
+              row_number: 2,
+              outcome: "UNCHANGED",
+              changes: {},
+              group_id: groupId,
+              group_action: groupAction,
+            },
+          ],
+        }),
+      );
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+        `expected ${label} to be refused`,
+      ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+    }
+  });
+
   it("accepts one channel repeated across GROUPS, the way a roster does", async () => {
     // The shape this must not break: many-to-many membership, one association
     // per row, the first copy owning the inventory outcome and the rest
@@ -1676,9 +1718,20 @@ describe("useChannelImport", () => {
       // test — the check must not confuse "empty" with "malformed".
       jsonResponse({
         ...DRY_RUN_RESULT,
+        // Two DISTINCT channels, both UNCHANGED. Repeating one channel under
+        // the same group key is its own violation, so reusing a single row
+        // twice would make this test fail for a reason that has nothing to do
+        // with zero counts.
         rows: [
           { ...DRY_RUN_RESULT.rows[1], outcome: "UNCHANGED", changes: {} },
-          { ...DRY_RUN_RESULT.rows[1], row_number: 3, outcome: "UNCHANGED", changes: {} },
+          {
+            ...DRY_RUN_RESULT.rows[1],
+            row_number: 3,
+            youtube_channel_id: `UC${"c".repeat(22)}`,
+            channel_name: "Gamma Channel",
+            outcome: "UNCHANGED",
+            changes: {},
+          },
         ],
         counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
       }),
