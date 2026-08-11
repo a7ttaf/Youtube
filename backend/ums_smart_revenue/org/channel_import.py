@@ -351,7 +351,11 @@ def _flag_duplicates(
       collapses it (``_group_write_batches`` refuses to hand one channel to
       ``add_members`` twice) but planning does not, so the second copy repeats
       the first's ``group_action`` and the dry run promises the group work
-      twice while one membership is written;
+      twice for ONE association — which the write performs at most once, and
+      not at all when the channel is already in that group
+      (``_attach_group_memberships`` filters the batch against the existing
+      members, so a re-import writes and audits nothing). The divergence is
+      therefore 2-vs-1 at best and 2-vs-0 on a re-import;
     * a pair carrying NO group never reaches the batcher at all —
       ``group_action`` is None on both copies and ``_group_write_target``
       filters them out. It is refused because the second copy is a phantom

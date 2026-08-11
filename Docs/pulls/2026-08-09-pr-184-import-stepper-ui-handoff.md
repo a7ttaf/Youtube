@@ -120,7 +120,11 @@ apply test, then 34 when the duplicate-repeat rule brought
    drafts of this entry went wrong. A pair naming a group diverges plan from
    write: the second copy repeats the first's `group_action` while
    `_group_write_batches` collapses the pair, so the dry run promised the group
-   work twice for one membership. A pair carrying **no** group never reaches
+   work twice for a single association — which the write performs at most once,
+   and **not at all** when the channel is already in that group, since
+   `_attach_group_memberships` filters the batch against existing members. The
+   divergence is 2-vs-1 at best and 2-vs-0 on a re-import. A pair carrying
+   **no** group never reaches
    that pass — both copies have `group_action: null` and are filtered out — and
    is refused because the second copy is a phantom `UNCHANGED` row reporting
    two outcomes for a channel the roster named once.
@@ -135,12 +139,14 @@ apply test, then 34 when the duplicate-repeat rule brought
    changes, and it is the point: the restated row also incremented the durable
    `CHANNEL_IMPORTED` `counts`, so the deduped summary is one lower.
 
-   Spelled out at that length because this entry has been wrong twice. It first
-   said the rejection "cannot lose a successful import" (it 422s an existing
-   roster — review #184, qodo), then said "the restated row performed no write"
-   and "no persisted result changes" — both false: `UNCHANGED` rows write, and
-   the durable tally moves. Each correction came from a measurement, not a
-   re-reading, which is the only method that has actually worked here.
+   Spelled out at that length because this entry has been wrong repeatedly. It
+   first said the rejection "cannot lose a successful import" (it 422s an
+   existing roster), then said "the restated row performed no write" and "no
+   persisted result changes" — both false: `UNCHANGED` rows write, and the
+   durable tally moves. Neither method caught everything: review re-reading
+   found the first claim and, later, an inverted `never` that the measurement
+   pass had itself introduced into the paragraph above; the write and the
+   durable tally were settled only by running probes against the real apply.
    Rosters listing one channel under several **distinct** groups are unaffected.
    The client's plan validator enforces the same uniqueness, because a check
    the backend applies to the CSV says nothing about a malformed *response*:
@@ -309,18 +315,31 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1894 insertions across eight files as of `921a252a`**,
+backend diff is **1898 insertions across eight files as of `921a252a`**,
 the commit that last changed `backend/`
 (`git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a
 frontend revert leaves all of it running.
 
-The figure names the commit it measured on purpose. It has been refreshed nine
-times under review, because it moves whenever backend code does — including
-**comment-only** rounds, which is the case that keeps catching it out: 1,808
-became 1,860 when a round added nothing but contract blocks, 1,866 when a later
-round corrected six lines of one of them, and 1,877 when a further round
-corrected the wording of another. `--stat` counts lines, not behaviour, so "no
-executable change" is not a reason to skip re-running it.
+The figure names the commit it measured on purpose. It has been refreshed in
+most review rounds since, because any change under `backend/` **can** move it —
+including **comment-only** rounds, which is the case that keeps catching it
+out: 1,808 became 1,860 when a round added nothing but contract blocks, 1,866
+when a later round corrected six lines of one of them, 1,877 when a further
+round corrected the wording of another, and 1,894 then 1,898 as the by-shape
+rewrite landed and was itself corrected. `--stat` counts lines, not behaviour,
+so "no executable change" is not a reason to skip re-running it.
+
+This sentence deliberately no longer counts the refreshes. It said "eight",
+then "nine", and both went stale the moment the figure moved again — a tally
+that has to be incremented by the same edit it describes is a defect generator,
+and it produced two. The examples carry the lesson; the count only carried
+maintenance.
+
+"Can" rather than "does", because the converse also happens and this paragraph
+asserted otherwise until it was caught: `921a252a` changed `backend/` and left
+the figure at 1,894, swapping five comment lines for five others. A commit
+touching `backend/` is a reason to re-derive the number, not evidence that it
+moved.
 
 The anchor is the commit that last changed `backend/`, **not** the branch tip,
 and that distinction is what stops this line going stale on its own: `Docs/` is
