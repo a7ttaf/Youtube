@@ -98,7 +98,12 @@ const INVENTORY_FIELDS = [
   REVENUE_REQUIRED_FIELD,
 ] as const;
 
-const PLAN_OUTCOMES = ["CREATE", "UPDATE", "UNCHANGED", "ERROR"] as const;
+// The two outcome literals this module reasons about by NAME, rather than only
+// membership-testing. Named because a typo in either silently disables a rule
+// instead of failing it.
+const OUTCOME_UNCHANGED = "UNCHANGED";
+const OUTCOME_ERROR = "ERROR";
+const PLAN_OUTCOMES = ["CREATE", "UPDATE", OUTCOME_UNCHANGED, OUTCOME_ERROR] as const;
 const GROUP_ACTIONS = ["CREATE", "JOIN"] as const;
 
 /** A present, non-empty string — the backend never emits a blank for these. */
@@ -351,6 +356,33 @@ const carriesUsableGroupKey = (row: Record<string, unknown>): boolean => {
 };
 
 /**
+ * An ERROR row makes NO claim about the write it is refusing.
+ *
+ * Being exempt from the writable-row rules is not the same as being exempt
+ * from every rule, and the fields below are the ones that reach the operator's
+ * eyes. The planner never sets `channel_name` or `revenue_required` on an
+ * ERROR entry — all three constructions leave them at their `None` defaults —
+ * and the `youtube_channel_id` it does keep comes from a row whose id already
+ * cleared CHANNEL_ID_PATTERN in the parser, so it is either null (a parse
+ * failure, with no channel to name) or a real id.
+ *
+ * Accepting anything else lets a malformed response print a channel and a
+ * revenue flag beside the remediation text, sending the operator to correct
+ * the wrong line of their CSV — while the retained fingerprint still
+ * authorises the real plan (review #184, codex P2).
+ */
+const errorRowClaimsNothing = (row: Record<string, unknown>): boolean => {
+  if (row.outcome !== "ERROR") {
+    return true;
+  }
+  return (
+    (row.youtube_channel_id === null || isChannelId(row.youtube_channel_id)) &&
+    row.channel_name === null &&
+    row.revenue_required === null
+  );
+};
+
+/**
  * A WRITABLE row must CARRY the values it will write. The field checks above
  * are outcome-blind — `youtube_channel_id`, `channel_name` and
  * `revenue_required` are each independently nullable, because an ERROR row
@@ -493,6 +525,7 @@ const ROW_CHECKS: ReadonlyArray<(row: Record<string, unknown>) => boolean> = [
   hasConsistentGroupEffect,
   carriesUsableGroupKey,
   hasWriteFields,
+  errorRowClaimsNothing,
   outcomeMatchesChanges,
   disclosesSourceStatus,
   sourceStatusMatchesRevenueFlag,
@@ -541,6 +574,66 @@ const groupActionsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolea
 };
 
 /**
+ * The planner's REPEATED-CHANNEL contract, which no row-local rule can see.
+ *
+ * A roster legitimately lists one channel several times — CMS membership is
+ * many-to-many and `group_id` carries one association per row — but the parser
+ * rejects copies that disagree on the inventory fields, so every surviving
+ * copy agrees on `channel_name` and `revenue_required`. And only the FIRST
+ * copy owns the inventory decision: later copies plan as UNCHANGED so the
+ * apply attaches their group without a second inventory outcome.
+ *
+ * Without this, a malformed response can repeat one valid id with two names or
+ * two revenue flags, or give several copies their own CREATE/UPDATE diffs.
+ * Every per-row predicate and the count tally still pass, so the operator
+ * approves a plan showing inventory work the import will not do — twice over —
+ * while the retained fingerprint authorises the real one (review #184).
+ *
+ * Keyed on the LOWEST row_number rather than array position: the backend sorts
+ * its entries, but nothing here requires the array to arrive sorted, and "the
+ * first copy" is a statement about the operator's file.
+ */
+const channelRowsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolean => {
+  const copies = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of rows) {
+    const id = row.youtube_channel_id;
+    if (row.outcome === "ERROR" || typeof id !== "string") {
+      continue;
+    }
+    const group = copies.get(id);
+    if (group === undefined) {
+      copies.set(id, [row]);
+    } else {
+      group.push(row);
+    }
+  }
+  return [...copies.values()].every(channelCopiesAgree);
+};
+
+/** The three invariants, for ONE channel's writable rows. */
+const channelCopiesAgree = (group: ReadonlyArray<Record<string, unknown>>): boolean => {
+  const [first] = group;
+  if (
+    !group.every(
+      (row) =>
+        row.channel_name === first.channel_name &&
+        row.revenue_required === first.revenue_required,
+    )
+  ) {
+    return false;
+  }
+  const deciding = group.filter((row) => row.outcome !== OUTCOME_UNCHANGED);
+  if (deciding.length > 1) {
+    return false;
+  }
+  if (deciding.length === 0) {
+    return true;
+  }
+  const lowest = Math.min(...group.map((row) => row.row_number as number));
+  return deciding[0].row_number === lowest;
+};
+
+/**
  * A successful plan always has at least ONE row: parse_channel_import_csv
  * rejects a header-only or blank-only roster outright ("CSV contains no data
  * rows"), which is a format error carrying a string detail, never a plan. An
@@ -559,7 +652,8 @@ const isPlanRows = (value: unknown): boolean => {
   if (new Set(numbers).size !== numbers.length) {
     return false;
   }
-  return groupActionsAgree(value as ReadonlyArray<Record<string, unknown>>);
+  const rows = value as ReadonlyArray<Record<string, unknown>>;
+  return groupActionsAgree(rows) && channelRowsAgree(rows);
 };
 
 /**

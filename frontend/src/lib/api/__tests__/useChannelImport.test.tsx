@@ -491,7 +491,13 @@ describe("useChannelImport", () => {
         counts: { CREATE: 0, UPDATE: 2, UNCHANGED: 0, ERROR: 0 },
         rows: [
           { ...DRY_RUN_RESULT.rows[1], row_number: 1, group_id: "cms-tv", group_action: "CREATE" },
-          { ...DRY_RUN_RESULT.rows[1], row_number: 2, group_id: "cms-tv", group_action: "JOIN" },
+          {
+            ...DRY_RUN_RESULT.rows[1],
+            row_number: 2,
+            youtube_channel_id: "UCcccccccccccccccccccccc",
+            group_id: "cms-tv",
+            group_action: "JOIN",
+          },
         ],
       }),
     );
@@ -516,7 +522,13 @@ describe("useChannelImport", () => {
         counts: { CREATE: 0, UPDATE: 2, UNCHANGED: 0, ERROR: 0 },
         rows: [
           { ...DRY_RUN_RESULT.rows[1], row_number: 1, group_id: "cms-tv", group_action: "CREATE" },
-          { ...DRY_RUN_RESULT.rows[1], row_number: 2, group_id: "cms-tv", group_action: "CREATE" },
+          {
+            ...DRY_RUN_RESULT.rows[1],
+            row_number: 2,
+            youtube_channel_id: "UCcccccccccccccccccccccc",
+            group_id: "cms-tv",
+            group_action: "CREATE",
+          },
         ],
       }),
     );
@@ -530,6 +542,132 @@ describe("useChannelImport", () => {
         reason: "monthly roster import",
       }),
     ).resolves.toMatchObject({ counts: { UPDATE: 2 } });
+  });
+
+  it("rejects an ERROR row claiming an identity the planner never sets", async () => {
+    // All three ERROR constructions leave channel_name and revenue_required at
+    // their None defaults, and the id they DO keep already cleared
+    // CHANNEL_ID_PATTERN in the parser. Anything else prints a channel and a
+    // revenue flag beside the remediation text and sends the operator to fix
+    // the wrong CSV line (review #184, codex P2).
+    const errorRow = { ...BLOCKED_APPLY_DETAIL.rows[0] };
+    for (const claim of [
+      { youtube_channel_id: "bogus" },
+      { channel_name: "Alpha Channel" },
+      { revenue_required: true },
+    ]) {
+      fetchMock().mockResolvedValue(
+        jsonResponse({ ...BLOCKED_APPLY_DETAIL, dry_run: true, rows: [{ ...errorRow, ...claim }] }),
+      );
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+      ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+    }
+  });
+
+  it("still accepts the ERROR row shapes the planner DOES emit", async () => {
+    // Both of them: a parse failure with no channel to name, and a planning
+    // refusal that keeps the id of a row whose identity parsed cleanly.
+    for (const identity of [null, "UCaaaaaaaaaaaaaaaaaaaaaa"]) {
+      fetchMock().mockResolvedValue(
+        jsonResponse({
+          ...BLOCKED_APPLY_DETAIL,
+          dry_run: true,
+          rows: [{ ...BLOCKED_APPLY_DETAIL.rows[0], youtube_channel_id: identity }],
+        }),
+      );
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+      ).resolves.toMatchObject({ counts: { ERROR: 1 } });
+    }
+  });
+
+  it("rejects repeated copies of one channel that disagree", async () => {
+    // The parser rejects copies disagreeing on the inventory fields, so every
+    // surviving copy agrees; and only the FIRST copy owns the inventory
+    // decision, later ones planning as UNCHANGED so the apply attaches their
+    // group without a second outcome. Both halves, and the ordering rule.
+    const first = { ...DRY_RUN_RESULT.rows[1], row_number: 1, group_id: "g1" };
+    const membership = {
+      ...first,
+      row_number: 2,
+      outcome: "UNCHANGED",
+      changes: {},
+      group_id: "g2",
+      group_action: "CREATE",
+    };
+    for (const [label, second] of [
+      ["a second NAME", { ...membership, channel_name: "Beta Channel Renamed" }],
+      ["a second revenue FLAG", { ...membership, revenue_required: true }],
+      ["a second inventory decision", { ...first, row_number: 2, group_id: "g2" }],
+    ] as const) {
+      fetchMock().mockResolvedValue(
+        jsonResponse({
+          ...DRY_RUN_RESULT,
+          counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 1, ERROR: 0 },
+          rows: [first, second],
+        }),
+      );
+      const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+      await expect(
+        result.current({
+          file: rosterFile(),
+          contentOwnerId: "COabc",
+          dryRun: true,
+          reason: "monthly roster import",
+        }),
+        `expected ${label} to be refused`,
+      ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+    }
+  });
+
+  it("accepts one channel repeated across GROUPS, the way a roster does", async () => {
+    // The shape this must not break: many-to-many membership, one association
+    // per row, the first copy owning the inventory outcome and the rest
+    // UNCHANGED. Refusing this would refuse every grouped roster.
+    const first = { ...DRY_RUN_RESULT.rows[1], row_number: 1, group_id: "g1" };
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        ...DRY_RUN_RESULT,
+        counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 1, ERROR: 0 },
+        rows: [
+          first,
+          {
+            ...first,
+            row_number: 2,
+            outcome: "UNCHANGED",
+            changes: {},
+            group_id: "g2",
+            group_action: "CREATE",
+          },
+        ],
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).resolves.toMatchObject({ counts: { UNCHANGED: 1 } });
   });
 
   it("rejects a PRE-DISCLOSURE payload that omits the fields entirely", async () => {

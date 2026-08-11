@@ -471,6 +471,60 @@ def test_group_unstamped_between_plan_and_apply_fails_closed() -> None:
     assert sink.records == []
 
 
+def test_a_diverged_group_key_owned_by_another_owner_is_refused_before_writing() -> None:
+    """Existence, not ownership — the pre-flight must judge what the lock judges.
+
+    A stale CREATE label whose key has since been created by a DIFFERENT
+    content owner is absent from this owner's set, so an ownership-only
+    pre-flight passes it, the inventory pass writes every channel, and only
+    then does the locked check see the group and raise (review #184, codex P2).
+
+    The four bulk lookups are exhaustive over the ways a key can resolve, so
+    their union is the same existence question ``get_group_by_cms_id`` answers.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Old Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    groups = ChannelGroupRegistry()
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id="SomeOtherOwnerAAAAAAAA",
+    )
+    sink = InMemoryAuditSink()
+    plan = _plan(
+        ChannelImportPlanEntry(
+            row_number=1,
+            youtube_channel_id=CHANNEL_ID,
+            outcome=ChannelImportOutcome.UPDATE,
+            channel_name="Renamed By Import",
+            group_id="cms-tv",
+            group_action=ChannelImportGroupAction.CREATE,
+            revenue_required=True,
+            changes={"channel_name": ("Old Name", "Renamed By Import")},
+        )
+    )
+
+    with pytest.raises(ChannelImportGroupActionDivergedError):
+        _apply(plan, registry, groups, sink)
+
+    assert sink.records == []
+    stored = registry.get_channel(CHANNEL_ID)
+    assert stored is not None
+    assert stored.channel_name == "Old Name"
+
+
 def test_a_diverged_group_effect_is_refused_before_any_channel_is_written() -> None:
     """Refuse while there is still nothing to roll back.
 

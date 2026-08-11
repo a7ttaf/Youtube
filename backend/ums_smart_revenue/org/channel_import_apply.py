@@ -398,8 +398,11 @@ def apply_channel_import(
 # Purpose: Refuse a whole import whose reviewed group effects no longer match
 #   reality, BEFORE any channel row is written — a pre-flight for the locked
 #   per-key check the group pass performs.
-# Database/ORM: ChannelGroupORM, read-only: ONE bulk list_owned_cms_group_ids
-#   for every key in the plan, no locks and no writes.
+# Database/ORM: ChannelGroupORM, read-only: the four bulk key lookups over the
+#   plan's keys, no locks and no writes. All four, because their UNION is what
+#   "this key resolves to a group" means — owned, archived, another owner's,
+#   and owner-NULL are the only ways a row can exist, and the locked check
+#   judges existence, not ownership.
 # Standards: ADVISORY, not the guarantee. It cannot be the guarantee — a
 #   lock-free read can be raced, and locking here would invert the channels-
 #   before-groups order the two passes exist to establish. The authoritative
@@ -432,11 +435,24 @@ def _require_planned_group_actions(
     }
     if not planned:
         return
-    owned = set(groups.list_owned_cms_group_ids(set(planned), content_owner_id=content_owner_id))
+    keys = set(planned)
+    # EXISTENCE, not ownership. The locked check judges what
+    # get_group_by_cms_id returns, and that resolves a key regardless of who
+    # owns it — so asking only "is it mine" leaves a CREATE label passing here
+    # when the key has since been created owner-NULL or by another owner, and
+    # the divergence surfaces only in the second pass, after the inventory
+    # writes (review #184, codex P2). The four sets are exhaustive over the
+    # ways a key can resolve, which is exactly why the planner needs all four.
+    observed = (
+        set(groups.list_owned_cms_group_ids(keys, content_owner_id=content_owner_id))
+        | set(groups.list_archived_cms_group_ids(keys))
+        | set(groups.list_foreign_owner_cms_group_ids(keys, content_owner_id=content_owner_id))
+        | set(groups.list_adoptable_cms_group_ids(keys))
+    )
     for cms_group_id, action in planned.items():
         _require_planned_group_action(
             action,
-            observed_exists=cms_group_id in owned,
+            observed_exists=cms_group_id in observed,
             cms_group_id=cms_group_id,
         )
 

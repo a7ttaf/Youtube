@@ -40,10 +40,12 @@ guard that runs for **all** callers, and batched per-key group writes. See
 **Behaviour changes** and **Rollback / reset** below; the unbound "the file
 wins" rule of review #159 is what remains untouched.
 
-## Files changed (32)
+## Files changed (33)
 
 Counted from `git diff --name-only $(git merge-base origin/main HEAD)..HEAD`,
-not from memory. It was 30 until round 51 added the two registry files below.
+not from memory. It has moved twice under review — 30, then 32 when round 51
+added the two registry files below, then 33 when round 53 added a domain-side
+apply test.
 
 - **Backend (8)** — `api/channels.py` (fingerprint widened to include the
   server-resolved tenant; `expected_plan_fingerprint`; `group_action` and
@@ -59,10 +61,10 @@ not from memory. It was 30 until round 51 added the two registry files below.
   boundary (`lib/api/useChannelImport.ts`, `lib/api/types.ts`), two contexts
   (`UnsettledImportContext.tsx`, `WriteInFlightContext.tsx`),
   `ActionStepper.tsx`, and five test files.
-- **Backend tests (6)** — `tests/api/` (`test_channels_import_api.py`,
+- **Backend tests (7)** — `tests/api/` (`test_channels_import_api.py`,
   `test_channels_import_postgres.py`, `test_channel_group_sync_postgres.py`,
   `test_session_api.py`) and `tests/org/` (`test_channel_import_planner.py`,
-  `test_sql_channel_groups.py`).
+  `test_sql_channel_groups.py`, `test_channel_import_apply.py`).
 - **Docs (5)** — `01_IMPLEMENTATION_PLAN.md`, `12_BACKEND_API_SPEC.md`,
   `15_DELIVERY_BACKLOG.md`, the pre-implementation plan under
   `Docs/superpowers/plans/`, and this handoff.
@@ -106,19 +108,46 @@ not from memory. It was 30 until round 51 added the two registry files below.
 
 ## Tests run
 
+The four AGENTS.md baseline gates (L113-121), run from the repository root
+with the pinned toolchain:
+
+| Gate | Result |
+| --- | --- |
+| `uv sync --extra dev --extra test --extra lint` | 87 resolved, 85 checked |
+| `uv run ruff check backend tests scripts` | **All checks passed** |
+| `uv run pytest -q` | **2811 passed**, 15 warnings (7m54s) |
+| `git diff --check` | clean (exit 0) |
+
+Frontend, and the PR-scope analyzer:
+
 | Suite | Result |
 | --- | --- |
-| `bun run test` (frontend) | **456 passed**, 41 files |
+| `bun run test` (frontend) | **460 passed**, 41 files |
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
-| `uv run --project backend pytest -q` | **2810 passed**, 15 warnings (7m54s) |
 | DeepSource (PR scope) | `[]` |
 | CI checks | 6 pass, 1 skipping |
 
-The backend suite was re-run in full after the round-51 write-boundary change
-rather than assumed, and re-run again after the first pass surfaced a Postgres
-failure (a monkeypatched `update_inventory` wrapper that had not grown the new
-keyword). 2807 -> 2809 is this round's two new tests.
+**`uv run pytest -q` needs `UMS_TEST_DATABASE_URL`** and does not skip without
+it: the repository's no-skip policy makes the Postgres-tier tests raise, so a
+bare run reports 21 failures and 103 errors that are all the same missing
+prerequisite. The figure above is the documented command with that variable
+set against a disposable Postgres container. Recorded rather than smoothed
+over, because "2811 passed" and "21 failed" are the same command on the same
+commit, and the difference is entirely environmental.
+
+Running `ruff` the documented way also caught something a narrower invocation
+had not: `uv run --project backend ruff check backend/ tests/` reported clean
+while `uv run ruff check backend tests scripts` found an N802 violation in a
+test name added this round. Same ruff 0.16.1 either way — the scope and the
+config resolution differ, which is exactly why the gate is specified with
+those arguments.
+
+The backend suite has been re-run in full after every backend change rather
+than assumed — twice over, when the first pass after the round-51 write-boundary
+change surfaced a Postgres failure (a monkeypatched `update_inventory` wrapper
+that had not grown the new keyword). 2807 -> 2811 is the review rounds' added
+tests.
 
 **Failures encountered and fixed during review**, recorded because they are the
 useful part: twenty-two fixtures across five files carried shapes the backend
@@ -203,7 +232,7 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1426 insertions across eight files** (`git diff --stat
+backend diff is **1577 insertions across eight files** (`git diff --stat
 $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a frontend revert
 leaves all of it running.
 
