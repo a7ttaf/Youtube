@@ -892,12 +892,22 @@ ws_run() {
 }
 
 @test "node lane: a typecheck script satisfies the TypeScript requirement" {
+  # The fixture was `"typecheck": "true"`, chosen as a convenient stub — and
+  # that stub is precisely the no-op the lane now rejects, so this case was
+  # asserting that a typecheck which runs no compiler is acceptable. A real
+  # command instead.
+  #
+  # The assertion is what this case can honestly claim: the declared-TypeScript
+  # rules do not fire. It cannot assert an exit of 0, because the sandbox has no
+  # tsc to run and the lane would then fail on a missing binary — a real result,
+  # but a different question from the one in the title.
   ws_setup
   printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true", "typecheck": "true" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true", "typecheck": "tsc --noEmit" } }'
   ws_seed_fingerprint
   run ws_run
-  [ "$status" -eq 0 ]
+  [[ "$output" != *"defines no 'typecheck' script"* ]]
+  [[ "$output" != *"type checker"* ]]
   rm -rf "$NODE_SB"
 }
 
@@ -2361,4 +2371,87 @@ ws_run() {
   done
   [ -z "$bad" ] || { echo "comparator disagrees with npm:${bad}" >&2; return 1; }
   rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck script that runs no compiler is rejected" {
+  # The rule above it asked only whether a `typecheck` key exists. Changing its
+  # command to a successful no-op satisfies that, exits 0, and never invokes a
+  # compiler -- and `vite build` does not typecheck either, so a workspace
+  # containing a type error passed the lane with no checker installed at all.
+  # Editing the command reaches the same place as deleting the key.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "true", "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"does not"* ]]
+  [[ "$output" == *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a real typecheck command is accepted" {
+  # The control, and the shape this repository actually ships: `tsc --noEmit`.
+  # A rule that rejected it would fail the workspace it was written to protect.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit", "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck that delegates to another runner is accepted" {
+  # Delegation is not evasion: the script it hands to is either another package
+  # script this rule has already seen, or a shell script the gate does not read
+  # either way. Rejecting it would fail every workspace that wraps its build.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "npm run typecheck:all", "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a root manifest beside nested ones is refused, not half-covered" {
+  # A root package.json used to end discovery, so a repo with both a root and
+  # child packages ran only the root and exited 0 while the children's failing
+  # test and build were never invoked. Emitting the children instead is not the
+  # fix: in a workspaces monorepo only the root carries a lockfile, and this
+  # lane refuses to install a workspace that has none -- so that reading turns
+  # every real monorepo red. The ambiguity is reported instead.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/packages/app"
+  printf '{}' > "$sb/package.json"
+  printf '{}' > "$sb/packages/app/package.json"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces package.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"packages/app"* ]]
+  [[ "$output" == *"coexists"* ]]
+
+  # The control: a root manifest on its own is still the single workspace ".".
+  rm -rf "$sb/packages"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "." ]
+  rm -rf "$sb"
+}
+
+@test "node lane: a directory whose name resembles the manifest is not filtered out" {
+  # The root sentinel was dropped with `grep -v "^${manifest}$"`, and
+  # `package.json` as a regex makes every `.` a wildcard -- so a workspace
+  # directory named `package-json` matched the pattern and was skipped.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/package-json" "$sb/frontend"
+  printf '{}' > "$sb/package-json/package.json"
+  printf '{}' > "$sb/frontend/package.json"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"package-json"* ]]
+  [[ "$output" == *"frontend"* ]]
+  rm -rf "$sb"
 }

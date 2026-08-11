@@ -1304,7 +1304,49 @@ single P-tier above.
   both and picking either leaves the other unscanned; that is refused with a
   message naming the refs rather than silently gated on half the push. All
   three cases fail against the previous dispatcher.
-  Combined suite: `bats ci/tests/` = 292 cases, 0 failures.
+  A twenty-eighth round found five, two P1, and three of them are a rule that
+  asked whether a thing *exists* rather than whether it *works*. The `typecheck`
+  guard added in round seventeen tested for the presence of the script key, so
+  changing its command to `"typecheck": "true"` satisfied it, exited 0 and never
+  invoked a compiler — a workspace containing `const n: number = "not a number"`
+  passed the lane with no checker installed, since `vite build` does not
+  typecheck either. Editing the command reaches exactly where deleting the key
+  reached. It is an allow-list now, like the test-script filter: `tsc`, `tsgo`,
+  `vue-tsc`, `svelte-check`, `astro`, `tsd`, `attw`, or a runner that delegates
+  to one, and anything else stops the lane until someone says which it is.
+  `extract_test_block` returned on the **first** top-level `test:` key while
+  JavaScript keeps the later one, so a broad `include` followed by
+  `test: { include: ["tests/only.test.ts"] }` reported every file runnable while
+  vitest collected one; duplicates are refused rather than resolved, because a
+  config with two of them is a mistake whichever wins. And changeset detection
+  still consumed non-NUL `--name-status`, so git quoted `frontend/src/café.ts`
+  into `"frontend/src/caf\303\251.ts"` — a string ending in a quote character
+  rather than in `.ts`. Its language became `unknown`, the emitted checks were
+  the always-list alone, and the Node tests, typecheck and build were filtered
+  out of a commit that changes TypeScript: the same defect the git-safety scan
+  had, on the scheduler instead of the scanner. All four modes read `-z` now,
+  through one reader that keeps both sides of a rename.
+  The last two were in workspace discovery, and they pull in opposite
+  directions. A root `package.json` ended discovery, so a repository with both a
+  root and child packages ran only the root and exited 0 while the children's
+  failing scripts were never invoked — but emitting the children instead is not
+  the fix, because in a workspaces monorepo only the root carries a lockfile and
+  this lane refuses to install a workspace that has none, which would turn every
+  real monorepo red. Neither reading is safe to guess, so the ambiguity is
+  reported and the lane stops. Separately, the root sentinel was dropped with
+  `grep -v "^${manifest}$"`, and `package.json` as a regex makes every `.` a
+  wildcard — so a workspace directory named `package-json` matched the pattern
+  and was skipped. Path surgery is literal parameter expansion now, and the
+  index-side scan beside it, which had the same one-level-deep `NF == 2` limit
+  discovery had already outgrown, walks to any depth.
+  The typecheck fix broke an existing case, and the way it broke is the point:
+  `node lane: a typecheck script satisfies the TypeScript requirement` used
+  `"typecheck": "true"` as a convenient stub — so the suite had been asserting
+  that a typecheck running no compiler is acceptable, which is the defect
+  itself, written down as an expectation. The fixture is a real command now,
+  and the case asserts what it can honestly claim (neither declared-TypeScript
+  rule fires) rather than an exit of 0, since the sandbox has no tsc to run.
+  Combined suite: `bats ci/tests/` = 301 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

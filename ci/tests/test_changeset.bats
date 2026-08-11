@@ -126,3 +126,57 @@ teardown() {
   # treat it as "nothing changed".
   [ "$status" -ne 0 ]
 }
+
+@test "changeset: a non-ASCII path is classified, not quoted into nothing" {
+  # `--name-status` without -z emits git's quoted representation for any path
+  # outside plain ASCII, so frontend/src/café.ts arrived as
+  # "frontend/src/caf\303\251.ts" -- a string ending in a quote character, not
+  # in .ts. Its language became unknown and the emitted checks were the
+  # always-list alone: the Node tests, typecheck and build were filtered out of
+  # a commit that changes TypeScript.
+  mkdir -p frontend/src
+  printf '{}' > frontend/package.json
+  printf 'export const x = 1;\n' > "frontend/src/café.ts"
+  git add -A
+
+  # The premise: git really does quote it in the non-z form.
+  run bash -c "cd '$TEST_REPO' && git diff --cached --name-status"
+  [[ "$output" == *'\303\251'* ]]
+
+  run bash -c "cd '$TEST_REPO' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && . '$REPO_ROOT/ci/lib/changeset.sh' && ci::changeset::detect pre-commit \
+    && printf '%s' \"\$_CI_CHANGESET_CHECKS\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-js"* ]]
+  [[ "$output" == *"typecheck-js"* ]]
+  # And the raw entry carries the real bytes, not the escape sequence.
+  run bash -c "cd '$TEST_REPO' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && . '$REPO_ROOT/ci/lib/changeset.sh' && ci::changeset::detect pre-commit \
+    && printf '%s' \"\$_CI_CHANGESET_FILES_RAW\""
+  [[ "$output" != *'\303\251'* ]]
+  [[ "$output" == *"café.ts"* ]]
+}
+
+@test "changeset: a renamed path keeps both sides through the NUL reader" {
+  # A rename is three NUL fields, not two. Reading it as two would consume the
+  # destination as the next record's status and desynchronise everything after
+  # it -- and the scheduler needs both sides, since a changeset listing only
+  # the destination describes a different change from the one being gated.
+  mkdir -p frontend/src
+  printf '{}' > frontend/package.json
+  printf 'export const x = 1;\n' > frontend/src/old.ts
+  git add -A
+  git -c user.email=t@t -c user.name=t commit -qm init
+  git mv frontend/src/old.ts frontend/src/new.ts
+  printf 'export const y = 2;\n' > frontend/src/after.ts
+  git add -A
+
+  run bash -c "cd '$TEST_REPO' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && . '$REPO_ROOT/ci/lib/changeset.sh' && ci::changeset::detect pre-commit \
+    && printf '%s' \"\$_CI_CHANGESET_FILES_RAW\""
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"old.ts"* ]]
+  [[ "$output" == *"new.ts"* ]]
+  # The record after the rename is still read as its own entry.
+  [[ "$output" == *"after.ts"* ]]
+}

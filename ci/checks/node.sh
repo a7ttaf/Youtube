@@ -18,16 +18,31 @@ ci::common::section "Check: node lane"
 # marks that recursive call. A repo with a root package.json resolves to "."
 # and behaves exactly as before.
 if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
-  NODE_WORKSPACES="$(ci::common::node_workspaces package.json)"
+  # Discovery can now refuse: a root manifest coexisting with nested ones is a
+  # layout it cannot cover without guessing, and under `set -e` the bare
+  # assignment would abort the script with status 1 rather than say so.
+  _ws_rc=0
+  NODE_WORKSPACES="$(ci::common::node_workspaces package.json)" || _ws_rc=$?
+  if [ "$_ws_rc" -ne 0 ]; then
+    echo "Workspace discovery could not resolve this layout; see above."
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
 
   # Discovery stats the filesystem, so a workspace that exists only in the index
   # is invisible to it: stage a new added/package.json whose test script fails,
   # then remove added/ from disk, and the lane never looks at it. The index is a
   # second source of workspaces, and one that describes the commit rather than
   # the tree.
+  #
+  # To any depth, matching discovery. `NF == 2` covered one level only, so a
+  # staged packages/app/package.json was dropped here exactly as it was dropped
+  # by the filesystem walk before that was made recursive — the two sources have
+  # to agree about what a workspace is or the lane covers the intersection.
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
     INDEXED_WS="$(git ls-files -- 'package.json' '*/package.json' 2>/dev/null \
-      | awk -F/ 'NF == 1 { print "."; next } NF == 2 { print $1 }' | sort -u || true)"
+      | awk -F/ 'NF == 1 { print "."; next }
+                 { d = $1; for (i = 2; i < NF; i++) d = d "/" $i; print d }' \
+      | sort -u || true)"
     if [ -n "$INDEXED_WS" ]; then
       NODE_WORKSPACES="$(printf '%s\n%s\n' "$NODE_WORKSPACES" "$INDEXED_WS" \
         | sed '/^$/d' | sort -u)"
@@ -1230,6 +1245,45 @@ if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
     [ -f jsconfig.json ] && echo "    ${CI_GATE_NODE_WORKSPACE}/jsconfig.json"
     echo "  A bundler build is not a typecheck. Restore the script, or remove"
     echo "  the TypeScript configuration with it."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
+  # And it has to be a typecheck, not merely a key with that name. `"typecheck":
+  # "true"` satisfies a presence test, exits 0, and never invokes a compiler --
+  # a workspace containing `const n: number = "not a number"` passed the lane
+  # with no type checker installed at all. That is the same defect the presence
+  # rule above was written to close, reached by editing the command instead of
+  # deleting the key, so presence is not the property worth asserting.
+  #
+  # An allow-list, like the test-script filter: a command that cannot typecheck
+  # is not something to classify, and a checker this does not know about stops
+  # the lane until someone says which it is. Nested runners are accepted because
+  # the script they delegate to is itself a package script this rule has already
+  # seen, or a shell script the gate does not read either way.
+  _tc_cmd="$(script_command typecheck)"
+  _tc_ok=0
+  # Word-splitting is the point; globbing is not. `tsc -p tsconfig.*.json` would
+  # otherwise expand against the workspace and be matched as filenames — the
+  # same reason the range splitter in _semver_satisfies disables it.
+  set -f
+  # shellcheck disable=SC2086
+  for _tc_tok in $_tc_cmd; do
+    case "${_tc_tok##*/}" in
+      tsc|tsc.cmd|tsgo|vue-tsc|svelte-check|astro|tsd|attw)
+        _tc_ok=1 ; break ;;
+      # Delegation: the work happens in another script or binary runner.
+      npm|pnpm|yarn|bun|npx|pnpx|turbo|nx|lerna|make|bash|sh)
+        _tc_ok=1 ; break ;;
+    esac
+  done
+  set +f
+  if [ "$_tc_ok" -ne 1 ]; then
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} defines a 'typecheck' script that does not"
+    echo "  appear to run a type checker:"
+    echo "    typecheck: ${_tc_cmd}"
+    echo "  A script named typecheck that exits 0 without invoking a compiler is"
+    echo "  the enabled typecheck lane silently switched off by a manifest edit."
+    echo "  Recognised: tsc, tsgo, vue-tsc, svelte-check, astro, tsd, attw, or a"
+    echo "  runner that delegates to one. Add yours here if it belongs."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
   fi
 fi

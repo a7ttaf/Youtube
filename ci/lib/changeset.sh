@@ -356,6 +356,57 @@ $(ci::changeset::_workspace_checks "$p")"
   _CI_CHANGESET_CHECKS="$generated_checks"
 }
 
+# ci::changeset::_read_name_status – convert NUL-delimited `--name-status -z`
+# on stdin into the internal newline/tab form.
+#
+# `--name-status` without -z emits git's *quoted* representation for any path
+# outside plain ASCII: staging frontend/src/café.ts produced
+# "frontend/src/caf\303\251.ts", which classify_file read as ending in a quote
+# character rather than in .ts. Its language became unknown, the emitted checks
+# were the always-list alone, and the Node tests, typecheck and build were
+# filtered out of a commit that changes TypeScript. Same defect the git-safety
+# scan had, on the scheduler instead of the scanner.
+#
+# Renames and copies carry two paths; both are kept, because a changeset that
+# lists only the destination describes a different change from the one gated.
+ci::changeset::_read_name_status() {
+  local st p1 p2 out=""
+  while IFS= read -r -d '' st; do
+    [ -n "$st" ] || continue
+    IFS= read -r -d '' p1 || break
+    case "$st" in
+      R*|C*)
+        IFS= read -r -d '' p2 || break
+        out="${out}${st}	${p1}	${p2}
+"
+        ;;
+      *)
+        out="${out}${st}	${p1}
+"
+        ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# ci::changeset::_name_status <git diff args...> – the same query, NUL-safe,
+# with git's exit status preserved.
+#
+# A temp file rather than a pipe: `$(...)` cannot hold NUL bytes, and a pipe
+# would discard the status that tells detection apart from an empty result.
+ci::changeset::_name_status() {
+  local tmp rc=0 out
+  tmp="$(mktemp 2>/dev/null || printf '/tmp/ci-changeset.%s' "$$")"
+  git "$@" --name-status -z > "$tmp" 2>/dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    return "$rc"
+  fi
+  out="$(ci::changeset::_read_name_status < "$tmp")"
+  rm -f "$tmp"
+  printf '%s' "$out"
+}
+
 # ci::changeset::detect <mode> – populate internal state
 # mode: pre-commit | pre-push | pr | all
 ci::changeset::detect() {
@@ -373,10 +424,10 @@ ci::changeset::detect() {
       # broken" and "nothing is staged" the same observation, and the caller
       # reads an empty changeset as "nothing relevant changed" and skips the
       # whole gate. A detection failure has to be able to say so.
-      raw_entries="$(git diff --cached --name-status 2>/dev/null)" || _rc=$?
+      raw_entries="$(ci::changeset::_name_status diff --cached)" || _rc=$?
       [ "$_rc" -eq 0 ] || return 1
       if [ -z "$raw_entries" ]; then
-        raw_entries="$(git diff --name-status 2>/dev/null)" || _rc=$?
+        raw_entries="$(ci::changeset::_name_status diff)" || _rc=$?
         [ "$_rc" -eq 0 ] || return 1
       fi
       ;;
@@ -406,9 +457,9 @@ ci::changeset::detect() {
         # reported as a failure so the caller runs the full set.
         *) return 1 ;;
       esac
-      committed_entries="$(git diff --name-status "$push_range" 2>/dev/null)" || _rc=$?
+      committed_entries="$(ci::changeset::_name_status diff "$push_range")" || _rc=$?
       [ "$_rc" -eq 0 ] || return 1
-      staged_entries="$(git diff --cached --name-status 2>/dev/null)" || _rc=$?
+      staged_entries="$(ci::changeset::_name_status diff --cached)" || _rc=$?
       [ "$_rc" -eq 0 ] || return 1
       raw_entries="$committed_entries"
       if [ -n "$staged_entries" ]; then
@@ -435,20 +486,31 @@ ${staged_entries}"
         [ $rc -ne 0 ] && merge_base=""
       fi
       if [ -n "$merge_base" ]; then
-        raw_entries="$(git diff --name-status "${merge_base}..HEAD" 2>/dev/null)" || true
+        raw_entries="$(ci::changeset::_name_status diff "${merge_base}..HEAD")" || _rc=$?
+        [ "$_rc" -eq 0 ] || return 1
       fi
       ;;
     all)
       # Full tree scan – emit all tracked files as "M\tpath"
-      local f
-      while IFS= read -r f; do
+      # NUL-delimited for the same reason the diff modes are: `git ls-files`
+      # quotes a non-ASCII path, and a quoted path classifies as unknown.
+      local f _ls_tmp
+      _ls_tmp="$(mktemp 2>/dev/null || printf '/tmp/ci-lsfiles.%s' "$$")"
+      git ls-files -z > "$_ls_tmp" 2>/dev/null || _rc=$?
+      if [ "$_rc" -ne 0 ]; then
+        rm -f "$_ls_tmp"
+        return 1
+      fi
+      while IFS= read -r -d '' f; do
+        [ -n "$f" ] || continue
         if [ -n "$raw_entries" ]; then
           raw_entries="${raw_entries}
 M	${f}"
         else
           raw_entries="M	${f}"
         fi
-      done < <(git ls-files 2>/dev/null || true)
+      done < "$_ls_tmp"
+      rm -f "$_ls_tmp"
       ;;
     *)
       printf '[changeset] Unknown mode: %s\n' "$mode" >&2

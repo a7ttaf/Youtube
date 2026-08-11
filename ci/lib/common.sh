@@ -33,8 +33,46 @@ ci::common::command_exists() {
 # $1: manifest filename to look for (package.json, tsconfig.json, ...)
 ci::common::node_workspaces() {
   local manifest="${1:-package.json}"
+  local found dir
 
   if [ -f "$manifest" ]; then
+    # A root manifest used to end discovery here, so a repository with both a
+    # root package.json and child packages had every child skipped: the lane
+    # ran the root's scripts and exited 0 while packages/app's failing test and
+    # build were never invoked.
+    #
+    # Emitting the children instead is not the fix. In an npm/pnpm/yarn/bun
+    # workspaces monorepo only the root carries a lockfile, and this lane
+    # refuses to install a workspace that has none ("No lockfile detected") --
+    # so unconditional child discovery would turn every real monorepo red.
+    #
+    # Neither reading is safe to guess, so the ambiguity is reported. In a
+    # repository laid out the way this one is (no root manifest) nothing here
+    # changes; in a single-package repo with no children, nothing changes
+    # either.
+    local child_count=0
+    while IFS= read -r found; do
+      [ -n "$found" ] || continue
+      found="${found#./}"
+      [ "$found" = "$manifest" ] && continue
+      dir="${found%"/$manifest"}"
+      [ "$dir" != "$found" ] || continue
+      ci::common::is_vendored_path "$dir" && continue
+      child_count=$((child_count + 1))
+      printf '  %s\n' "$dir" >&2
+    done < <(
+      find . -name 'node_modules' -prune -o -name '.git' -prune -o \
+        -type f -name "$manifest" -print 2>/dev/null | sort
+    )
+    if [ "$child_count" -gt 0 ]; then
+      {
+        echo "A root ${manifest} coexists with ${child_count} nested one(s), listed above."
+        echo "  Running only the root silently skips their scripts; running them"
+        echo "  separately fails on the lockfile a workspaces monorepo keeps only"
+        echo "  at the root. Declare which this is before the lane can cover it."
+      } >&2
+      return 1
+    fi
     printf '%s\n' "."
     return 0
   fi
@@ -57,16 +95,26 @@ ci::common::node_workspaces() {
   # Pruned at dependency and build directories: a manifest under node_modules
   # belongs to a dependency, and one under dist/ or build/ is copied output.
   # Neither is a workspace this gate installs, typechecks or tests.
+  # Path surgery with shell parameter expansion, not sed and grep with the
+  # manifest name interpolated into a pattern. `package.json` as a regex makes
+  # every `.` a wildcard, so `grep -v "^package.json$"` also drops a directory
+  # genuinely named `package-json` or `packagexjson` — a workspace skipped
+  # because its name resembles the sentinel being filtered. `${found%"/$manifest"}`
+  # is a literal suffix strip and cannot do that.
   local candidate
-  while IFS= read -r candidate; do
-    [ -n "$candidate" ] || continue
+  while IFS= read -r found; do
+    [ -n "$found" ] || continue
+    found="${found#./}"
+    # The root manifest is handled above; anything without a directory prefix
+    # here is that same file and is not a nested workspace.
+    [ "$found" = "$manifest" ] && continue
+    candidate="${found%"/$manifest"}"
+    [ "$candidate" != "$found" ] || continue
     ci::common::is_vendored_path "$candidate" && continue
     printf '%s\n' "$candidate"
   done < <(
     find . -name 'node_modules' -prune -o -name '.git' -prune -o \
       -type f -name "$manifest" -print 2>/dev/null \
-      | sed 's|^\./||; s|/'"$manifest"'$||' \
-      | grep -v "^${manifest}$" \
       | sort -u
   )
   return 0

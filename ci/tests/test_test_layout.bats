@@ -1293,3 +1293,45 @@ EOF
   [ "$status" -eq 20 ]
   [[ "$output" == *"probe.test.ts"* ]]
 }
+
+@test "test-layout: two top-level test blocks are refused, not resolved" {
+  # The scan returned on the *first* `test:` at the exported object's own level,
+  # but JavaScript keeps the later property. A broad include followed by a
+  # narrow one therefore validated the broad one -- every filesystem test
+  # reported runnable, exit 0 -- while vitest collected the single file the
+  # second block names.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  test: {
+    include: ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"more than one top-level"* ]]
+}
+
+@test "test-layout: a nested test key is not mistaken for a second block" {
+  # The control. `depth == 1` is what makes the rule above safe: a `test`
+  # property inside another object is not a second exported config, and
+  # refusing it would fail an ordinary file.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  define: { test: { nested: true } },
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"more than one top-level"* ]]
+}

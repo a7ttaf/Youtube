@@ -426,12 +426,24 @@ extract_test_block() {
           rest = substr(all, p + 4)
           if (before !~ /[A-Za-z0-9_$]/ && rest ~ /^[[:space:]]*:[[:space:]]*\{/) {
             start = p + 4 + index(rest, "{")
-            print capture(all, start, n)
-            exit 0
+            # Every one of them, not the first. Returning on the first meant a
+            # broad `test.include` followed by a second `test: { include:
+            # ["tests/only.test.ts"] }` was validated on the broad one, which
+            # reported every file runnable and exited 0 -- while JavaScript
+            # keeps the *later* property and vitest collected the one file.
+            seen++
+            block = capture(all, start, n)
           }
         }
         p++
       }
+
+      # Duplicates are refused rather than resolved. Taking the last one would
+      # match the language, but a config with two `test` keys is a mistake
+      # whichever one wins, and guessing which was meant is how the first
+      # reading of this got it backwards.
+      if (seen > 1) exit 2
+      if (seen == 1) { print block; exit 0 }
 
       # No test property on the exported config. Signalled by status, because an
       # empty block is a different failure from a missing one and both print
@@ -665,7 +677,15 @@ check_one_config() {
   local block props have_block=1 active_include="" active_exclude="" active_spread=""
   local unknown_props=""
 
-  block="$(strip_ts_comments "$cfg" | extract_test_block)" || have_block=0
+  # The status carries three answers, not two: found, absent, and "found more
+  # than one", which is a different failure and needs a different message.
+  local _xt_rc=0
+  block="$(strip_ts_comments "$cfg" | extract_test_block)" || _xt_rc=$?
+  if [ "$_xt_rc" -eq 2 ]; then
+    printf 'duplicate-test-block'
+    return 0
+  fi
+  [ "$_xt_rc" -eq 0 ] || have_block=0
   if [ -n "$block" ]; then
     props="$(printf '%s\n' "$block" | test_block_props)"
     active_include="$(printf '%s\n' "$props" | awk -F'\t' '$1 == "include" { print $2 }')"
@@ -740,6 +760,14 @@ else
       no-test-block)
         fail "${_label} has no readable 'test: { ... }' block; cannot confirm the layout is declared."
         echo "  The layout must be declared under test.include, where vitest reads it."
+        ;;
+      duplicate-test-block)
+        fail "${_label} declares more than one top-level 'test: { ... }' block."
+        echo "  JavaScript keeps the later property, so the first one is not the"
+        echo "  config vitest uses: a broad include followed by"
+        echo "  test: { include: [\"tests/only.test.ts\"] } reads as fully covered"
+        echo "  while vitest collects one file. Which of the two was meant is not"
+        echo "  something this guard should decide — merge them into one block."
         ;;
       no-include)
         fail "${_label} no longer declares an active test.include '${DECLARED_GLOB}'."
