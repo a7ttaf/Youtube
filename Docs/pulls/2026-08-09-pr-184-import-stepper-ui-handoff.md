@@ -315,7 +315,7 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1921 insertions across eight files as of `59e96d68`**,
+backend diff is **1921 insertions across eight files as of `be5c955d`**,
 the commit that last changed `backend/`
 (`git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a
 frontend revert leaves all of it running.
@@ -336,7 +336,7 @@ and it produced two. The examples carry the lesson; the count only carried
 maintenance.
 
 "Can" rather than "does", because the converse also happens and this paragraph
-asserted otherwise until it was caught: `59e96d68` changed `backend/` and left
+asserted otherwise until it was caught: `be5c955d` changed `backend/` and left
 the figure at 1,894, swapping five comment lines for five others. A commit
 touching `backend/` is a reason to re-derive the number, not evidence that it
 moved.
@@ -345,7 +345,7 @@ The anchor is the commit that last changed `backend/`, **not** the branch tip,
 and that distinction is what stops this line going stale on its own: `Docs/` is
 outside the `-- backend/` pathspec, so any number of later documentation
 commits — including this one — leave both the figure and its anchor correct.
-If `backend/` has changed since `59e96d68`, this is a measurement of an earlier
+If `backend/` has changed since `be5c955d`, this is a measurement of an earlier
 tree rather than a wrong one, and the command above re-derives it.
 
 ### Reverting the frontend only

@@ -829,7 +829,7 @@ single P-tier above.
   no new endpoint and no migration.
   **Backend scope correction (2026-08-11).** The two "additive touch" notes
   above were written early and undercount what the PR ships: the final diff
-  is **1921 insertions across eight backend files as of `59e96d68`**, the
+  is **1921 insertions across eight backend files as of `be5c955d`**, the
   commit that last changed `backend/`, and
   calling it additive reads as frontend-with-a-flag. Beyond
   `can_import_channels` and `group_action`, the route gained
