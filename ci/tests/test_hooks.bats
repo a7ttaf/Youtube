@@ -54,6 +54,7 @@ echo "OLD=${CI_GATE_PUSH_OLD_SHA:-}"
 echo "DEST=${CI_GATE_PUSH_REMOTE_REFS-<unset>}"
 echo "TIPS=${CI_GATE_PUSH_BRANCH_TIPS-<unset>}"
 echo "TAGS=${CI_GATE_PUSH_TAG_TIPS-<unset>}"
+echo "OTHER=${CI_GATE_PUSH_OTHER_TIPS-<unset>}"
 echo "DELONLY=${CI_GATE_PUSH_DELETIONS_ONLY-<unset>}"
 exit 0
 SH
@@ -561,5 +562,88 @@ SH
     '$HD_TIP' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"DELONLY=<unset>"* ]]
+  rm -rf "$HD_SB"
+}
+
+@test "hook: only a branch destination has to fit the one range" {
+  # The single A..B range exists for the history checks over content being
+  # uploaded, and only a branch destination needs one. A tag or a pointer in
+  # another namespace publishes a name for a commit, and whether that commit may
+  # go out is decided per ref by worktree_covers_push. Letting them into the
+  # chain broke two ordinary pushes in opposite directions.
+  _hd_sandbox
+  local zero=0000000000000000000000000000000000000000
+
+  # `git push --follow-tags origin main`: the new tag has an all-zero remote
+  # sha, which blanked the base for the whole push. Every history check then
+  # re-walked the repository instead of the commits actually being sent.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s
+refs/tags/v1 %s refs/tags/v1 %s
+'     '$HD_TIP' '$HD_BASE' '$HD_TIP' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OLD=$HD_BASE"* ]]
+  [[ "$output" == *"NEW=$HD_TIP"* ]]
+  [[ "$output" == *"TAGS=$HD_TIP"* ]]
+
+  # `git push --tags origin` with tags on two lines of history: neither commit
+  # contains the other, so the chain check refused the run outright -- before
+  # the rule that would have cleared both tags had run at all.
+  run bash -c "cd '$HD_SB' && printf 'refs/tags/v1 %s refs/tags/v1 %s
+refs/tags/v3 %s refs/tags/v3 %s
+'     '$HD_TIP' '$zero' '$HD_FORK' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"do not form one chain"* ]]
+  [[ "$output" == *"TAGS=$HD_TIP $HD_FORK"* ]]
+
+  # Two divergent BRANCHES are still refused -- that is what the rule is for --
+  # and now inside the stated result contract rather than beside it.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s
+refs/heads/fork %s refs/heads/fork %s
+'     '$HD_TIP' '$zero' '$HD_FORK' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"do not form one chain"* ]]
+  rm -rf "$HD_SB"
+}
+
+@test "hook: a destination outside refs/heads and refs/tags is still a destination" {
+  # Both collectors recognised refs/heads/* and refs/tags/* and nothing else, so
+  # a record publishing to Gerrit's refs/for/*, a refs/publish/* pointer or
+  # refs/meta/config contributed to no list at all: worktree_covers_push walked
+  # an empty tag list and an all-matching branch list and returned 0, and the
+  # content lanes vouched for HEAD while an unexamined tree went out under the
+  # other ref.
+  _hd_sandbox
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s
+refs/heads/old %s refs/publish/prod %s
+'     '$HD_TIP' '$HD_ROOT' '$HD_BASE' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OTHER=$HD_BASE"* ]]
+
+  # And the rule it is judged by is the tag rule: carried by a branch in this
+  # push, or the checkout, or already on the destination.
+  run bash -c "cd '$HD_SB' && . '$REPO_ROOT/ci/lib/git.sh'     && CI_GATE_PUSH_NEW_SHA='$HD_TIP' CI_GATE_PUSH_BRANCH_TIPS='$HD_TIP'        CI_GATE_PUSH_OTHER_TIPS='$HD_FORK' CI_GATE_PUSH_REMOTE=origin        ci::git::worktree_covers_push"
+  [ "$status" -ne 0 ]
+  run bash -c "cd '$HD_SB' && . '$REPO_ROOT/ci/lib/git.sh'     && CI_GATE_PUSH_NEW_SHA='$HD_TIP' CI_GATE_PUSH_BRANCH_TIPS='$HD_TIP'        CI_GATE_PUSH_OTHER_TIPS='$HD_BASE' CI_GATE_PUSH_REMOTE=origin        ci::git::worktree_covers_push"
+  [ "$status" -eq 0 ]
+  rm -rf "$HD_SB"
+}
+
+@test "hook: a notes push is not a tree this gate stands behind" {
+  # `git push origin refs/notes/commits` publishes a commit whose tree is note
+  # blobs. It became CI_GATE_PUSH_NEW_SHA, worktree_covers_push found it was
+  # neither the checkout nor on the destination -- `git branch -r --contains`
+  # never lists a notes commit -- and the push was refused with "check out the
+  # commit being pushed", which cannot be done to a notes commit.
+  _hd_sandbox
+  local zero=0000000000000000000000000000000000000000
+  run bash -c "cd '$HD_SB' && printf 'refs/notes/commits %s refs/notes/commits %s
+'     '$HD_ROOT' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NEW="* ]]
+  [[ "$output" != *"NEW=$HD_ROOT"* ]]
+  [[ "$output" == *"OTHER="* ]]
+  [[ "$output" != *"OTHER=$HD_ROOT"* ]]
+  [[ "$output" == *"TAGS="* ]]
+  [[ "$output" != *"TAGS=$HD_ROOT"* ]]
   rm -rf "$HD_SB"
 }

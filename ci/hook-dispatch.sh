@@ -58,7 +58,7 @@ case "$HOOK_NAME" in
     # HEAD — and here that means leaving the base empty so it can.
     if [ ! -t 0 ]; then
       _push_old="" _push_new="" _push_nobase=0 _push_unrelated="" _push_dests="" _push_any_content=0
-      _push_btips="" _push_ttips="" _push_records=0
+      _push_btips="" _push_ttips="" _push_otips="" _push_records=0 _push_is_notes=0
       while read -r _lref _lsha _rref _rsha; do
         [ -n "${_lsha:-}" ] || continue
         # Counted separately from content, because "every record was a deletion"
@@ -140,7 +140,55 @@ case "$HOOK_NAME" in
               *) _push_ttips="${_push_ttips} ${_lsha}" ;;
             esac
             ;;
+          # Notes are annotations, not project source. `git push origin
+          # refs/notes/commits` publishes a commit whose tree is note blobs,
+          # which no content lane reads and none needs to -- and the covers rule
+          # refused it, with advice ("check out the commit being pushed") that
+          # cannot be followed for a notes commit.
+          refs/notes/*) _push_is_notes=1 ;;
+          # Everything else. Gerrit's refs/for/*, a refs/publish/* deployment
+          # pointer, refs/meta/config: destinations this gate has no model of,
+          # and they were invisible to both lists above, so the record
+          # contributed to nothing. `git push origin feature <older>:refs/publish/prod`
+          # had the lanes vouch for HEAD while an unexamined tree went out under
+          # the second ref. A namespace nobody taught this gate about gets the
+          # rule written for the other pointer-shaped push: it is the checkout,
+          # or this push carries it under a branch, or the destination already
+          # has it.
+          *)
+            case " ${_push_otips} " in
+              *" ${_lsha} "*) ;;
+              *) _push_otips="${_push_otips} ${_lsha}" ;;
+            esac
+            ;;
         esac
+
+        # Whether this record is one the single A..B range has to describe.
+        #
+        # Only a branch destination is. A tag or a pointer in another namespace
+        # publishes a name for a commit, and whether that commit may go out is
+        # decided per ref by ci::git::worktree_covers_push -- published to the
+        # destination, carried by a branch in this push, or refused. Letting
+        # them into the chain made an ordinary release push refuse itself:
+        # `git push --tags origin` with tags on two lines of history has neither
+        # containing the other, so the run was hard-refused before the rule that
+        # would have cleared both ever ran. `git push --follow-tags origin main`
+        # did it the other way -- the new tag has an all-zero remote sha, which
+        # blanked the base for the whole push, and every history check re-walked
+        # the repository instead of the handful of commits being sent.
+        _push_is_branch=0
+        case "${_rref:-}" in refs/heads/*) _push_is_branch=1 ;; esac
+
+        # A notes record names no tree this run stands behind, so it does not
+        # become the tip either. Left in, the notes commit became
+        # CI_GATE_PUSH_NEW_SHA, worktree_covers_push found it was neither the
+        # checkout nor on the destination -- `git branch -r --contains` never
+        # lists a notes commit -- and the push was refused with "check out the
+        # commit being pushed", which cannot be done to a notes commit.
+        if [ "${_push_is_notes:-0}" -eq 1 ]; then
+          _push_is_notes=0
+          continue
+        fi
 
         # The tip is chosen by ancestry, not by arrival. `_push_new="$_lsha"`
         # on every record meant "whichever ref git happened to list last",
@@ -153,12 +201,15 @@ case "$HOOK_NAME" in
           _push_new="$_lsha"
         elif git merge-base --is-ancestor "$_lsha" "$_push_new" 2>/dev/null; then
           : # already the descendant; keep it
-        else
+        elif [ "$_push_is_branch" -eq 1 ]; then
           # Neither contains the other. One `A..B` range cannot describe two
           # unrelated histories, and picking either one leaves the other
           # unscanned — which is the fail-open this gate exists to remove.
           _push_unrelated="${_push_unrelated} ${_lref:-<ref>}"
         fi
+
+        # The base, and whether one is missing, are the branch question only.
+        [ "$_push_is_branch" -eq 1 ] || continue
 
         case "${_rsha:-}" in
           *[!0]*)
@@ -210,7 +261,10 @@ case "$HOOK_NAME" in
         echo "  contains the other, so no single A..B range covers both, and" >&2
         echo "  collapsing them would either skip commits or re-scan commits the" >&2
         echo "  remote already has. Push the refs separately so each is gated." >&2
-        exit 1
+        # Inside the stated result contract, not beside it. `exit 1` produced no
+        # report and no result record at all, so a refusal here was reported
+        # differently from every other refusal this gate makes.
+        exit "${CI_RESULT_FAIL_NEW_ISSUE:-20}"
       fi
       # Any ref without a base means the push carries history the remote has
       # never seen, so there is no common base for the run as a whole.
@@ -225,6 +279,7 @@ case "$HOOK_NAME" in
       export CI_GATE_PUSH_REMOTE_REFS="${_push_dests# }"
       export CI_GATE_PUSH_BRANCH_TIPS="${_push_btips# }"
       export CI_GATE_PUSH_TAG_TIPS="${_push_ttips# }"
+      export CI_GATE_PUSH_OTHER_TIPS="${_push_otips# }"
       # A push whose every record is a deletion carries no content, and there is
       # nothing for a content or history check to report on. Stated explicitly
       # rather than left as "no new sha", because that is indistinguishable from

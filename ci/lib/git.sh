@@ -299,9 +299,18 @@ ci::git::worktree_covers_push() {
   # whole of the protection: a tag-only push carries no branch tips, so this arm
   # is empty for it and the tag must still meet the published test below. A tag
   # on a commit no pushed branch contains is carrying that commit out with it.
+  #
+  # And every destination in a namespace this gate has no model of, by the same
+  # test. Gerrit's refs/for/*, a refs/publish/* deployment pointer,
+  # refs/meta/config: the hook recognised refs/heads/* and refs/tags/* and
+  # nothing else, so such a record contributed to no list at all. `git push
+  # origin feature <older>:refs/publish/prod` had the content lanes vouch for
+  # HEAD while the second ref moved to a tree nothing in the run had read.
+  # refs/notes/* is the one namespace deliberately left out of this, upstream in
+  # the hook: a notes commit carries annotations rather than project source.
   local _wc_tag _wc_carried
   # shellcheck disable=SC2086
-  for _wc_tag in ${CI_GATE_PUSH_TAG_TIPS:-}; do
+  for _wc_tag in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-}; do
     _wc_res="$(git rev-parse --verify "${_wc_tag}^{commit}" 2>/dev/null || true)"
     [ -n "$_wc_res" ] || return 1
     [ "$_wc_res" = "$head" ] && continue
@@ -379,7 +388,7 @@ ci::git::explain_push_tip_drift() {
   local _d_head _d_tag _d_res _d_bad="" _d_carried _d_btip
   _d_head="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)"
   # shellcheck disable=SC2086
-  for _d_tag in ${CI_GATE_PUSH_TAG_TIPS:-}; do
+  for _d_tag in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-}; do
     _d_res="$(git rev-parse --verify "${_d_tag}^{commit}" 2>/dev/null || true)"
     if [ -z "$_d_res" ]; then _d_bad="${_d_bad} ${_d_tag}"; continue; fi
     [ "$_d_res" = "$_d_head" ] && continue
