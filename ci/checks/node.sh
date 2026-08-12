@@ -1206,10 +1206,19 @@ fi
 # lockfile alone, a package.json edited without a matching lockfile update looks
 # cached, the frozen install that would have caught the mismatch is skipped, and
 # tests pass as long as they do not touch the changed dependency.
+#
+# And the runtime, because the first two say what was asked for and not what was
+# built. Native addons, optional packages and install-script output are compiled
+# against the Node ABI and for a platform and architecture, so moving between
+# two releases that both satisfy a broad `engines.node` range left node_modules
+# looking current: the install was skipped and the lane validated a tree a clean
+# install would not produce. See ci::common::node_runtime_id, which is shared
+# with the test fixtures so both compute the same value.
 _deps_fingerprint() {
-  printf '%s %s\n' \
+  printf '%s %s %s\n' \
     "$(ci::common::hash_file "$LOCKFILE")" \
-    "$(ci::common::hash_file package.json)"
+    "$(ci::common::hash_file package.json)" \
+    "$(ci::common::node_runtime_id)"
 }
 
 SKIP_INSTALL=0
@@ -1997,8 +2006,41 @@ _timeout_advance() {
   esac
 }
 
+# _env_advance <token> – whether this token still belongs to an `env` prefix,
+# advancing `_ep_state` as it goes. Same contract as _timeout_advance, and here
+# for the same reason: the wrapper was skipped by name with nothing reading the
+# grammar that follows it.
+#
+# `env [OPTION]... [NAME=VALUE]... [COMMAND [ARG]...]`, from `env --help`, and
+# `-u NAME` / `-C DIR` / `-S STRING` take a value as a separate word. Skipping
+# the wrapper alone left `env -u NODE_ENV vitest run` selecting `NODE_ENV` as
+# the program -- it is neither a flag nor a `NAME=VALUE` assignment, so it fell
+# through as the command name -- and the lane refused a full-suite script for
+# running no test runner.
+#
+# Unlike timeout there is no duration: the first word that is neither an option
+# nor an assignment *is* the command, so it is handed back to the caller rather
+# than consumed.
+#
+# _ep_state: 1 = inside the prefix, 2 = this token is an option's value,
+#            0 = the prefix is behind us
+_env_advance() {
+  case "$_ep_state" in
+    2) _ep_state=1 ; return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    -u|--unset|-C|--chdir|-S|--split-string) _ep_state=2 ; return 0 ;;
+    -*) return 0 ;;
+    # An assignment, which is what env is usually there for.
+    [A-Za-z_]*=*) return 0 ;;
+    *) _ep_state=0 ; return 1 ;;
+  esac
+}
+
 _command_runner() {
-  local _tok _ng_out="" _tp_state=0 tok
+  local _tok _ng_out="" _tp_state=0 _ep_state=0 tok
   _cr=""
   _normalize_command "$1"
   set -f
@@ -2021,6 +2063,9 @@ _command_runner() {
     if [ "$_tp_state" -ne 0 ] && _timeout_advance "$_tok"; then
       continue
     fi
+    if [ "$_ep_state" -ne 0 ] && _env_advance "$_tok"; then
+      continue
+    fi
     case "${_tok##*/}" in
       # `env`, `cross-env` and `timeout` join the list for the reason `command`
       # and `nohup` are on it: they prefix a command without being one.
@@ -2030,7 +2075,10 @@ _command_runner() {
       # and it was refused with "does not appear to run a test runner" while
       # vitest sat in the string.
       timeout) _tp_state=1; continue ;;
-      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|env|cross-env \
+      # `env` and `cross-env` take options of their own before the command, and
+      # `-u NAME` puts a bare word after a flag; see _env_advance.
+      env|cross-env) _ep_state=1; continue ;;
+      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time \
         |--yes|-y|run) continue ;;
       -*) continue ;;
       [A-Za-z_]*=*) continue ;;
@@ -2203,7 +2251,7 @@ _script_names_a_checker() {
   # The last-token index goes with it: a runner invoked with no arguments at all
   # is a REPL that sees EOF and exits 0, which is the same empty pass in another
   # spelling, and `node` was the only one of the four that this list refused.
-  local _nt=0 _t _tp_state=0
+  local _nt=0 _t _tp_state=0 _ep_state=0
   local _cur_nt=0 _ti=0 _last=-1
   local _nt_seg=() _last_seg=()
   # shellcheck disable=SC2086
@@ -2320,6 +2368,7 @@ _script_names_a_checker() {
         _fwd=""
         neg=0
         _tp_state=0
+        _ep_state=0
         _seg_i=$((_seg_i + 1))
         _nt="${_nt_seg[$_seg_i]:-0}"
         continue
@@ -2382,11 +2431,15 @@ _script_names_a_checker() {
       if [ "$_tp_state" -ne 0 ] && _timeout_advance "$tok"; then
         continue
       fi
+      if [ "$_ep_state" -ne 0 ] && _env_advance "$tok"; then
+        continue
+      fi
       case "${tok##*/}" in
         # A duration is a bare word, so it has to be stepped over explicitly or
         # it becomes the command.
         timeout) _tp_state=1; continue ;;
-        exec|command|nohup|time|env|cross-env) continue ;;
+        env|cross-env) _ep_state=1; continue ;;
+        exec|command|nohup|time) continue ;;
       esac
       # A command that ends the shell ends the scan with it. `"test": "exit 0 ;
       # vitest run"` put the runner in command position after a separator, so
@@ -2641,7 +2694,7 @@ assert_no_persistent_filter() {
 # The non-narrowing flag allow-list, as its own function so a package script
 # reached through another one is read the same way as a direct command.
 _reject_narrowing_flags() {
-  local script_name="$1" cmd="$2" runner="${3:-}" tok _tp_state=0
+  local script_name="$1" cmd="$2" runner="${3:-}" tok _tp_state=0 _ep_state=0
   # shellcheck disable=SC2086
   for tok in $cmd; do
     # A `timeout` wrapper's own options are not the runner's. This scan reads
@@ -2653,8 +2706,15 @@ _reject_narrowing_flags() {
     if [ "$_tp_state" -ne 0 ] && _timeout_advance "$tok"; then
       continue
     fi
+    # And an `env` prefix's own options, for the same reason: `-u`, `-i` and
+    # `-C` are env's vocabulary and this scan judges every `-` word against the
+    # runner's.
+    if [ "$_ep_state" -ne 0 ] && _env_advance "$tok"; then
+      continue
+    fi
     case "${tok##*/}" in
       timeout) _tp_state=1 ; continue ;;
+      env|cross-env) _ep_state=1 ; continue ;;
     esac
     case "$tok" in
       -*) ;;
@@ -2847,7 +2907,7 @@ _reject_tool_args_one() {
 # The compiler's own argument rules: the modes that do not typecheck, and the
 # positionals that make it ignore tsconfig.json.
 _reject_tsc_args() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp _tp_state=0
+  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp _tp_state=0 _ep_state=0
   prev=""
   set -f
   # shellcheck disable=SC2086
@@ -2879,8 +2939,14 @@ _reject_tsc_args() {
     if [ "$_tp_state" -ne 0 ] && _timeout_advance "$tok"; then
       prev="" ; shift ; continue
     fi
+    if [ "$_ep_state" -ne 0 ] && _env_advance "$tok"; then
+      prev="" ; shift ; continue
+    fi
     case "${tok##*/}" in
       timeout) _tp_state=1 ; prev="" ; shift ; continue ;;
+      # `env` was on no list in this scan at all, so `env NODE_ENV=test tsc
+      # --noEmit` was refused for pointing the compiler at a file named `env`.
+      env|cross-env) _ep_state=1 ; prev="" ; shift ; continue ;;
     esac
     if [ "${tok##*/}" = "$runner" ]; then
       prev="" ; shift ; continue
@@ -3054,7 +3120,7 @@ _reject_tsc_args() {
 # rule held for the direct spelling and not for the one layer down, which is
 # the same right-rule-wrong-tree shape this lane has had to fix twice.
 _reject_positional_filters() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev _q _tp_state=0
+  local script_name="$1" cmd="$2" runner="$3" tok prev _q _tp_state=0 _ep_state=0
   prev=""
   # shellcheck disable=SC2086
   set -- $cmd
@@ -3075,6 +3141,14 @@ _reject_positional_filters() {
       # vitest run` left `300` for the scan to read as a test filter.
       _tp_state=1
       ;;
+    # And `env`, for the same reason and with the same fault available: this
+    # preamble drops the first token as "the runner or its wrapper", so the
+    # in-loop arm that would have recognised `env` never sees it, and
+    # `env -u NODE_ENV vitest run` left `NODE_ENV` to be read as a test filter.
+    env|*/env|cross-env|*/cross-env)
+      shift
+      _ep_state=1
+      ;;
     *) shift ;;
   esac
   while [ "$#" -gt 0 ]; do
@@ -3084,6 +3158,9 @@ _reject_positional_filters() {
     # below, because the wrapper's own words are never quoted values of the
     # runner's flags.
     if [ "$_tp_state" -ne 0 ] && _timeout_advance "$tok"; then
+      prev="" ; shift ; continue
+    fi
+    if [ "$_ep_state" -ne 0 ] && _env_advance "$tok"; then
       prev="" ; shift ; continue
     fi
     # A quoted value holding whitespace arrives here as several tokens, because
@@ -3137,7 +3214,9 @@ _reject_positional_filters() {
       # read by _timeout_advance above, which knows the wrapper's options.
       timeout|*/timeout)
         _tp_state=1 ; prev="" ; shift ; continue ;;
-      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|env|cross-env \
+      env|cross-env)
+        _ep_state=1 ; prev="" ; shift ; continue ;;
+      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time \
         |--yes|-y|run|related \
         |"$runner"|'&&'|'||'|';'|'|')
         prev="" ; shift ; continue ;;
@@ -3229,12 +3308,47 @@ run_script() {
 # script" and the lane exits 0 after tests and a build that never looked at a
 # type. The one check that would have caught it is the one that silently
 # stopped running.
-if [ -f tsconfig.json ] || [ -f jsconfig.json ]; then
+# Every TypeScript project in the workspace, not only one at its root.
+#
+# The root-file test read "does this workspace declare TypeScript" as "is there
+# a tsconfig.json beside package.json", and a package whose only project is a
+# nested one -- `e2e/tsconfig.json`, an ordinary shape -- answered no. The lane
+# then required no typecheck script, skipped the missing one, and reported PASS
+# with the nested project's type errors never looked for. Its counterpart in
+# ci/checks/typecheck.sh had the same blind spot from the same root-file test.
+#
+# Printed one per line and read through a file so the producer's status is
+# something this can act on, which is the rule the workspace enumeration in
+# ci/lib/common.sh already follows: could not look is not found nothing.
+_ts_project_files() {
+  local _tp_list _tp_rc=0
+  _tp_list="$(mktemp 2>/dev/null)" || return 2
+  find . -name 'node_modules' -prune -o -name '.git' -prune -o \
+    -type f \( -name 'tsconfig.json' -o -name 'jsconfig.json' \) -print 2>/dev/null \
+    > "$_tp_list" || _tp_rc=$?
+  if [ "$_tp_rc" -ne 0 ]; then
+    rm -f "$_tp_list"
+    return 2
+  fi
+  sed 's|^\./||' "$_tp_list" | sort
+  rm -f "$_tp_list"
+}
+
+_TS_PROJECTS="$(_ts_project_files)" || {
+  echo "Workspace ${CI_GATE_NODE_WORKSPACE}: cannot enumerate its TypeScript projects."
+  echo "  An empty list reads exactly like a workspace with none, which is why"
+  echo "  this is a failure and not an answer."
+  exit "$CI_RESULT_FAIL_INFRA"
+}
+
+if [ -n "$_TS_PROJECTS" ]; then
   if ! script_exists "typecheck"; then
     echo "Workspace ${CI_GATE_NODE_WORKSPACE} declares TypeScript configuration but"
     echo "  defines no 'typecheck' script, so nothing here ever runs tsc:"
-    [ -f tsconfig.json ] && echo "    ${CI_GATE_NODE_WORKSPACE}/tsconfig.json"
-    [ -f jsconfig.json ] && echo "    ${CI_GATE_NODE_WORKSPACE}/jsconfig.json"
+    while IFS= read -r _ts_proj; do
+      [ -n "$_ts_proj" ] || continue
+      echo "    ${CI_GATE_NODE_WORKSPACE}/${_ts_proj}"
+    done <<< "$_TS_PROJECTS"
     echo "  A bundler build is not a typecheck. Restore the script, or remove"
     echo "  the TypeScript configuration with it."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"

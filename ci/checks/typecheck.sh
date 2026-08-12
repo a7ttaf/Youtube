@@ -30,11 +30,33 @@ _tc_js_workspace() {
   local ws="$1"
   cd "$ws" || return 30
 
-  # A package root with no TypeScript project has nothing for this lane to
-  # check, and that is a fact about the workspace rather than a guess about it.
-  # Distinguished from "the compiler is missing" below, which is the opposite
-  # statement: a project exists and could not be compiled.
-  if [ ! -f tsconfig.json ]; then
+  # Every TypeScript project under this root, not only one at the root itself.
+  #
+  # `[ ! -f tsconfig.json ]` read "does this package have TypeScript" as "is
+  # there a config beside package.json", so a package whose only project is
+  # `e2e/tsconfig.json` -- an ordinary shape -- was reported as having none and
+  # its type errors were never looked for. That blind spot arrived with the
+  # switch to package-root discovery, which was right for the ambiguity rule it
+  # removed and wrong to keep the root-file test alongside it.
+  #
+  # Through a file so the producer's status is something this can act on: an
+  # unreadable subtree must not read as a package with no TypeScript in it.
+  local _tc_list _tc_rc=0
+  _tc_list="$(mktemp 2>/dev/null)" || return 30
+  find . -name 'node_modules' -prune -o -name '.git' -prune -o \
+    -type f -name 'tsconfig.json' -print 2>/dev/null > "$_tc_list" || _tc_rc=$?
+  if [ "$_tc_rc" -ne 0 ]; then
+    rm -f "$_tc_list"
+    echo "Cannot enumerate the TypeScript projects in ${ws} (exit ${_tc_rc})." >&2
+    echo "  An empty list reads exactly like a package with none." >&2
+    return 30
+  fi
+  if [ ! -s "$_tc_list" ]; then
+    rm -f "$_tc_list"
+    # A package root with no TypeScript project has nothing for this lane to
+    # check, and that is a fact about the workspace rather than a guess about
+    # it. Distinguished from "the compiler is missing" below, which is the
+    # opposite statement: a project exists and could not be compiled.
     return 3
   fi
 
@@ -46,6 +68,7 @@ _tc_js_workspace() {
     fi
   done
   if [ -z "$bin" ]; then
+    rm -f "$_tc_list"
     # Deliberately no PATH fallback, for the same reason the JS test runner has
     # none: a global tsc is not the version this workspace pins. An older one
     # rejects supported syntax and a newer one accepts what the locked
@@ -55,7 +78,29 @@ _tc_js_workspace() {
     return 127
   fi
 
-  "$bin" --noEmit
+  # The root project by its default resolution, and every other project by name.
+  #
+  # A nested config is compiled as its own project rather than assumed to be
+  # reachable from the root: `tsc --noEmit` at the root compiles what the root
+  # config includes, and a config the root neither includes nor references is
+  # exactly the one whose errors nobody would see. Compiling a referenced
+  # project twice costs time and reports the same errors twice; not compiling an
+  # unreferenced one reports none at all, and only one of those is a wrong
+  # answer.
+  local _tc_proj _tc_status=0 _tc_one
+  if [ -f tsconfig.json ]; then
+    "$bin" --noEmit || _tc_status=$?
+  fi
+  while IFS= read -r _tc_proj; do
+    [ -n "$_tc_proj" ] || continue
+    _tc_proj="${_tc_proj#./}"
+    [ "$_tc_proj" = "tsconfig.json" ] && continue
+    _tc_one=0
+    "$bin" -p "$_tc_proj" --noEmit || _tc_one=$?
+    [ "$_tc_one" -ne 0 ] && _tc_status="$_tc_one"
+  done < "$_tc_list"
+  rm -f "$_tc_list"
+  return "$_tc_status"
 }
 
 typecheck::run_js() {

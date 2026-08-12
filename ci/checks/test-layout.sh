@@ -1195,16 +1195,35 @@ WORKSPACE_NAMES=(
 )
 
 workspace_files_present() {
-  local _wf_name _wf_path _wf_found=""
+  local _wf_name _wf_path _wf_found="" _wf_git=0
+  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    _wf_git=1
+  fi
   for _wf_name in "${WORKSPACE_NAMES[@]}"; do
     _wf_path="${FRONTEND_DIR}/${_wf_name}"
     if [ -f "$_wf_path" ]; then
       _wf_found="${_wf_found}${_wf_path}"$'\n'
       continue
     fi
-    if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
+    if [ "$_wf_git" -eq 1 ] \
       && git ls-files --error-unmatch -- "$_wf_path" >/dev/null 2>&1; then
       _wf_found="${_wf_found}${_wf_path} (staged)"$'\n'
+      continue
+    fi
+    # And the pushed commit, for the reason config_sources reads it: in ship
+    # mode the commit already exists, so the worktree and the index can both
+    # hold a repair the pushed tree does not. A HEAD carrying a narrowing
+    # vitest.workspace.ts, with its deletion staged locally, was reported as
+    # having no workspace file at all -- and vitest resolves a workspace file
+    # before vitest.config.ts, so the tree going out collects whatever that file
+    # says while this guard validated a config it does not reach.
+    #
+    # One rule, two trees, again: the main config had this fixed and the file
+    # that overrides it did not.
+    if [ "$_wf_git" -eq 1 ] && [ "${CI_GATE_MODE:-}" = "ship" ] \
+      && git rev-parse --verify HEAD >/dev/null 2>&1 \
+      && git cat-file -e "HEAD:${_wf_path}" 2>/dev/null; then
+      _wf_found="${_wf_found}${_wf_path} (in the pushed commit)"$'\n'
     fi
   done
   printf '%s' "$_wf_found"

@@ -2164,3 +2164,38 @@ EOF
   # Nothing in what it printed can be read two ways.
   [[ "$output" != *'\'* ]]
 }
+
+@test "test-layout: a workspace file in the pushed commit is found in ship mode" {
+  # vitest resolves a workspace file before vitest.config.ts, so one in the tree
+  # being pushed decides what runs. Both presence tests read the worktree and
+  # the index only, and in ship mode the commit already exists -- so a HEAD
+  # carrying a narrowing vitest.workspace.ts, with its deletion staged as a
+  # local repair, was reported as having no workspace file at all. config_sources
+  # beside it already reads HEAD for exactly this reason: one rule, two trees.
+  (
+    cd "$SANDBOX"
+    git init -q -b main .
+    printf 'ci/\n' > .gitignore
+    printf 'export default ["tests/only.test.ts"];\n' > frontend/vitest.workspace.ts
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm "with workspace file"
+    git rm -q --cached frontend/vitest.workspace.ts
+    rm -f frontend/vitest.workspace.ts
+  ) >/dev/null 2>&1
+
+  # The premise: the worktree and the index are both clean of it.
+  [ ! -f "$SANDBOX/frontend/vitest.workspace.ts" ]
+
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"workspace file"* ]]
+
+  # The pre-commit gate stands behind the worktree, which really is clean.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=quick bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+
+  # And once the deletion is committed, the pushed tree is clean too.
+  run bash -c "cd '$SANDBOX' && git -c user.email=t@t -c user.name=t commit -qm drop"
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+}

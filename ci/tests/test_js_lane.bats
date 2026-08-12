@@ -231,9 +231,10 @@ ws_seed_fingerprint() {
   # the extension-coverage case above follows.
   ( cd "$NODE_SB/ws" \
     && . "$REPO_ROOT/ci/lib/common.sh" \
-    && printf '%s %s\n' \
+    && printf '%s %s %s\n' \
       "$(ci::common::hash_file bun.lock)" \
       "$(ci::common::hash_file package.json)" \
+      "$(ci::common::node_runtime_id)" \
       > "$NODE_SB/.ci-gate/node_modules-ws.hash" )
 }
 
@@ -2816,8 +2817,16 @@ ws_run() {
   printf '{ "extends": "../tsconfig.json" }\n' > "$NODE_SB/ws/e2e/tsconfig.json"
   ws_seed_fingerprint
   run bash -c "cd '$NODE_SB' && CI_GATE_MODE=full bash ci/checks/node.sh 2>&1"
-  [ "$status" -eq 0 ]
+  # Asserted by the absence of the orphan refusal and by what the run reaches
+  # instead, rather than by the lane's exit status. The status was a proxy for
+  # "nothing refused it", and a nested config is now a TypeScript project the
+  # workspace has to be able to check -- so this fixture is refused downstream,
+  # correctly and by a different rule. A proxy assertion that starts answering
+  # for a rule it was not written about is how a case passes for the wrong
+  # reason, which this suite has had to fix more than once.
   [[ "$output" != *"no package.json beside it"* ]]
+  [[ "$output" == *"declares TypeScript configuration but"* ]]
+  [[ "$output" == *"e2e/tsconfig.json"* ]]
 
   # The control, and the case the rule was written for: a config whose walk
   # reaches the root without finding any manifest is still an orphan. Without
@@ -4653,3 +4662,188 @@ lane_run_typecheck() {
   [[ "$output" == *"Typecheck result:"* ]]
   rm -rf "$LANE_SB"
 }
+
+@test "node lane: an env prefix's options belong to env" {
+  # `env [OPTION]... [NAME=VALUE]... [COMMAND [ARG]...]`, from `env --help`, and
+  # `-u NAME` / `-C DIR` / `-S STRING` take a value as a separate word. The
+  # wrapper was skipped by name with nothing reading the grammar after it, so
+  # `env -u NODE_ENV vitest run` selected `NODE_ENV` as the program -- it is
+  # neither a flag nor an assignment -- and the lane refused a full-suite script
+  # for running no test runner. The same six readers the `timeout` wrapper
+  # needed: two that discover the checker and three that judge its arguments,
+  # plus the preamble that drops the first token before the loop sees it.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  local b
+  for b in tsc env cross-env; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/$b"
+    chmod +x "$NODE_SB/ws/node_modules/.bin/$b"
+  done
+
+  local spelling
+  for spelling in \
+    "env vitest run" \
+    "env NODE_ENV=test vitest run" \
+    "env -u NODE_ENV vitest run" \
+    "env --unset=NODE_ENV vitest run" \
+    "env -i NODE_ENV=test vitest run" \
+    "env -C . vitest run" \
+    "cross-env -u NODE_ENV vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\", \"typecheck\": \"tsc --noEmit\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls: the prefix does not launder what follows it. A filter is still
+  # a filter, and a command that is not a runner is still not one.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "env -u NODE_ENV vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "env -u NODE_ENV echo hi", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the typecheck scan reads the same env prefix" {
+  # `env` was on no list in the compiler's argument scan at all, so
+  # `env NODE_ENV=test tsc --noEmit` was refused for pointing tsc at a file
+  # named `env`, and a non-checking mode behind the prefix was never reached
+  # because the wrong refusal came first.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  local b
+  for b in tsc env; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/$b"
+    chmod +x "$NODE_SB/ws/node_modules/.bin/$b"
+  done
+
+  local spelling
+  for spelling in \
+    "env NODE_ENV=test tsc --noEmit" \
+    "env -u NODE_ENV tsc --noEmit"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"individual files"* ]] \
+      || { echo "refused as naming files: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The control: the mode behind the prefix is now reached instead of hidden.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "env -u NODE_ENV tsc --noCheck" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the dependency fingerprint covers the runtime it installed under" {
+  # The lockfile and the manifest say what was asked for; they do not say what
+  # was built. Native addons, optional packages and install-script output are
+  # compiled against the Node ABI and for a platform and architecture, so moving
+  # between two releases that both satisfy a broad `engines.node` range left
+  # node_modules looking current -- the install was skipped and the lane
+  # validated a tree a clean install would not produce.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  ws_seed_fingerprint
+
+  # The premise: with the runtime it was seeded under, the install is skipped.
+  run ws_run
+  [[ "$output" == *"Skipping install"* ]]
+
+  # And under a different runtime it is not. Written directly rather than by
+  # running a second Node: what the rule asserts is that the recorded runtime is
+  # part of the key, and a fixture that cannot vary it asserts nothing.
+  ( cd "$NODE_SB/ws" \
+    && . "$REPO_ROOT/ci/lib/common.sh" \
+    && printf '%s %s %s\n' \
+      "$(ci::common::hash_file bun.lock)" \
+      "$(ci::common::hash_file package.json)" \
+      "v0.0.0-otherplatform-otherarch" \
+      > "$NODE_SB/.ci-gate/node_modules-ws.hash" )
+  run ws_run
+  [[ "$output" != *"Skipping install"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a nested TypeScript project still needs a typecheck script" {
+  # The root-file test read "does this workspace declare TypeScript" as "is
+  # there a tsconfig.json beside package.json", so a package whose only project
+  # is `e2e/tsconfig.json` -- an ordinary shape -- answered no, required no
+  # typecheck script, and reported PASS with that project's type errors never
+  # looked for.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/e2e"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/e2e/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"declares TypeScript configuration but"* ]]
+  [[ "$output" == *"e2e/tsconfig.json"* ]]
+
+  # The control: a config belonging to a dependency is not the workspace's.
+  rm -rf "$NODE_SB/ws/e2e"
+  mkdir -p "$NODE_SB/ws/node_modules/dep"
+  printf '{ }\n' > "$NODE_SB/ws/node_modules/dep/tsconfig.json"
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"declares TypeScript configuration but"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "typecheck lane: a nested project is compiled as its own project" {
+  # `tsc --noEmit` at the root compiles what the root config includes, and a
+  # config the root neither includes nor references is exactly the one whose
+  # errors nobody would see. Compiling a referenced project twice reports the
+  # same errors twice; not compiling an unreferenced one reports none at all,
+  # and only one of those is a wrong answer.
+  lane_setup
+  mkdir -p "$LANE_SB/ws/e2e"
+  lane_runner tsc TSC
+  # The stand-in echoes its arguments, which is how the case can see which
+  # projects were compiled rather than only that the compiler ran.
+  printf '#!/usr/bin/env bash\necho "INVOKED=TSC $*"\nexit 0\n' \
+    > "$LANE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$LANE_SB/ws/node_modules/.bin/tsc"
+  lane_manifest '{ "name": "w", "private": true }'
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/e2e/tsconfig.json"
+
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-p e2e/tsconfig.json --noEmit"* ]]
+
+  # With a root project too, both are compiled and the root is not compiled
+  # twice under its own name.
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tsconfig.json"
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INVOKED=TSC --noEmit"* ]]
+  [[ "$output" == *"-p e2e/tsconfig.json --noEmit"* ]]
+  [[ "$output" != *"-p tsconfig.json --noEmit"* ]]
+
+  # And a failing nested project fails the lane, so this is coverage and not
+  # decoration.
+  printf '#!/usr/bin/env bash\ncase "$*" in *e2e*) exit 2 ;; esac\nexit 0\n' \
+    > "$LANE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$LANE_SB/ws/node_modules/.bin/tsc"
+  run lane_run_typecheck
+  [ "$status" -eq 20 ]
+  rm -rf "$LANE_SB"
+}
+

@@ -224,6 +224,31 @@ ci::common::is_vendored_path() {
   return 1
 }
 
+# The runtime an install would be made under, as one word-safe string.
+#
+# A dependency fingerprint keyed on the lockfile and the manifest says what was
+# asked for and not what was built. Native addons, optional packages and
+# install-script output are compiled against the Node ABI and for a platform and
+# architecture, so switching between two releases that both satisfy a broad
+# `engines.node` range left an existing node_modules looking current: the lane
+# skipped the install and validated a tree that a clean install would not
+# produce. The version, the platform and the architecture are the three things
+# that change what gets built, so they are the three things in here.
+#
+# In one place because both the lane and its test fixtures have to agree about
+# it -- a fixture that derives the fingerprint differently seeds a value the
+# lane will never compute, and every case would then attempt a real install.
+ci::common::node_runtime_id() {
+  if ci::common::command_exists node; then
+    if node -e 'process.stdout.write(process.version+"-"+process.platform+"-"+process.arch)' 2>/dev/null; then
+      return 0
+    fi
+  fi
+  # No node is a statement too, and a stable one: nothing can have been built
+  # under a runtime that is not there.
+  printf 'node-unavailable'
+}
+
 ci::common::hash_file() {
   local file="$1"
   local hash crc
