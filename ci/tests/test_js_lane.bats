@@ -3825,5 +3825,49 @@ SH
   [ "$(_trap_verdict "trap - 'EXIT'")" = accepted ]
   [ "$(_trap_verdict "trap 'echo bye' INT TERM")" = accepted ]
   [ "$(_trap_verdict 'echo "trap fake EXIT"')" = accepted ]
+  # A separator ends the trap command, and the words after it belong to the next
+  # one. Applying that only to the piece in front of the separator, and leaving
+  # the state where it was, had `trap 'echo bye' INT; echo EXIT` refused for a
+  # signal two words past the end of the trap.
+  [ "$(_trap_verdict "trap 'echo bye' INT; echo EXIT")" = accepted ]
+  [ "$(_trap_verdict "trap 'echo bye' INT; trap 'exit 0' EXIT")" = refused ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the manifest check reads the pushed tree in ship mode" {
+  # The index is right for pre-commit, where the commit is being assembled in
+  # it, and it is not the tree a push carries: in ship mode the commit already
+  # exists and the index can hold anything staged for the next one. A staged
+  # deletion of the manifest, with the worktree copy kept and an unrelated HEAD
+  # pushed, failed the push over a tree it is not sending -- a mandatory gate
+  # blocking correct work.
+  ws_setup
+  cd "$NODE_SB"
+  printf 'ci/\n.ci-gate/\n' > .gitignore
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  git init -q -b main . >/dev/null 2>&1
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+  git rm -q --cached ws/package.json >/dev/null 2>&1
+
+  # The premises: HEAD carries the manifest, the index does not, and the
+  # worktree copy is still there for discovery to find.
+  run bash -c "cd '$NODE_SB' && git cat-file -e HEAD:ws/package.json"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$NODE_SB' && git cat-file -e :ws/package.json"
+  [ "$status" -ne 0 ]
+  [ -f "$NODE_SB/ws/package.json" ]
+
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *"exists on disk but not in"* ]]
+
+  # And the defect the check exists for is unchanged where the index *is* the
+  # commit: staging the deletion and committing nothing means the commit being
+  # made carries no manifest, while every check below reads the worktree copy.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"exists on disk but not in the git index"* ]]
+  cd "$REPO_ROOT"
   rm -rf "$NODE_SB"
 }

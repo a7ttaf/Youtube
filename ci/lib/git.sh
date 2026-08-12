@@ -132,6 +132,39 @@ ci::git::has_conflict_markers_in_changed() {
   git diff -U0 | grep -E '^\+[[:space:]]*(<{7}|={7}|>{7})([[:space:]]|$)' >/dev/null 2>&1
 }
 
+# Whether a commit is already on the remote this push names.
+#
+# Its own function because two rules ask it now: a tag pushed on its own, and a
+# tag pushed alongside a branch. The second was answered by not asking.
+#
+# Published *to the destination*, not published anywhere: `git branch -r
+# --contains` walks every remote-tracking branch, so a commit that exists only
+# on `upstream` counted as already gated when the push is going to `origin`.
+# Without a remote name there is nothing to scope to, and answering from every
+# remote is the bug -- so no name is a refusal.
+#
+# Compared as text, not as a pattern. `grep "^${remote}/"` interpolates the
+# remote name into an expression, so an ordinary name containing a `.` --
+# `release.prod` -- matched `releaseXprod/main`. A `-`, `+` or `[` does the same
+# thing in its own way.
+#
+# Remote-tracking refs can be stale, and stale makes this stricter rather than
+# looser: fewer refs contain the commit, so the answer is refuse.
+ci::git::published_to_destination() {
+  local sha="$1" remote="${CI_GATE_PUSH_REMOTE:-}" _pd_line _pd_pfx
+  [ -n "$remote" ] || return 1
+  [ -n "$sha" ] || return 1
+  _pd_pfx="${remote}/"
+  while IFS= read -r _pd_line; do
+    _pd_line="${_pd_line#"${_pd_line%%[![:space:]]*}"}"
+    [ -n "$_pd_line" ] || continue
+    if [ "${_pd_line:0:${#_pd_pfx}}" = "$_pd_pfx" ]; then
+      return 0
+    fi
+  done <<< "$(git branch -r --contains "$sha" 2>/dev/null || true)"
+  return 1
+}
+
 # ci::git::worktree_covers_push – 0 when the worktree can stand in for what is
 # being pushed.
 #
@@ -192,6 +225,25 @@ ci::git::worktree_covers_push() {
     [ "$_wc_res" = "$head" ] || return 1
   done
 
+  # And every tag tip is the checkout or is already on the destination.
+  #
+  # Tags were excluded from this on the grounds that a tag in a mixed push names
+  # a commit inside the history being pushed. True, and not the whole of it:
+  # `git push origin main v1`, where `v1` labels a failing commit and `main` is
+  # its repair, had the branch tip equal HEAD and returned before looking. The
+  # content lanes then validated the repaired tree while a release pointer went
+  # out at the broken one. It is the same question the tag-only rule below asks,
+  # and there was no reason for the mixed push to be exempt from it.
+  local _wc_tag
+  # shellcheck disable=SC2086
+  for _wc_tag in ${CI_GATE_PUSH_TAG_TIPS:-}; do
+    _wc_res="$(git rev-parse --verify "${_wc_tag}^{commit}" 2>/dev/null || true)"
+    [ -n "$_wc_res" ] || return 1
+    if [ "$_wc_res" != "$head" ]; then
+      ci::git::published_to_destination "$_wc_res" || return 1
+    fi
+  done
+
   [ "$pushed" = "$head" ] && return 0
 
   # A push that names no branch destination at all is a tag push. Two reviewers
@@ -219,37 +271,7 @@ ci::git::worktree_covers_push() {
   # Set-and-empty, not unset: unset means nobody told us and there is no second
   # tree to be wrong about, which the early return above already handles.
   if [ -n "${CI_GATE_PUSH_REMOTE_REFS+set}" ] && [ -z "${CI_GATE_PUSH_REMOTE_REFS}" ]; then
-    # Published *to the destination*, not published anywhere.
-    #
-    # `git branch -r --contains` walks every remote-tracking branch, so a
-    # commit that exists only on `upstream` counted as already gated when the
-    # push is going to `origin` -- and the tag then carries a tree origin has
-    # never seen, while the lanes report on the repaired HEAD. The remote is
-    # the destination this push named.
-    #
-    # Without a remote name there is nothing to scope to, and answering from
-    # every remote is the bug. Refuse instead: a tag push outside the pre-push
-    # hook has no destination this can verify.
-    # Compared as text, not as a pattern. `grep "^${remote}/"` interpolates the
-    # remote name into an expression, so a perfectly ordinary name containing a
-    # `.` -- `release.prod` -- matched `releaseXprod/main`, and a tag whose
-    # commit is published only on some unrelated remote read as published to
-    # this one. The gate then approved a tree that destination has never seen
-    # while the lanes validated the repaired HEAD. A `-`, `+` or `[` in a name
-    # does the same thing in its own way.
-    local contained remote="${CI_GATE_PUSH_REMOTE:-}" _wc_line _wc_pfx
-    [ -n "$remote" ] || return 1
-    contained=""
-    _wc_pfx="${remote}/"
-    while IFS= read -r _wc_line; do
-      _wc_line="${_wc_line#"${_wc_line%%[![:space:]]*}"}"
-      [ -n "$_wc_line" ] || continue
-      if [ "${_wc_line:0:${#_wc_pfx}}" = "$_wc_pfx" ]; then
-        contained="$_wc_line"
-        break
-      fi
-    done <<< "$(git branch -r --contains "$pushed" 2>/dev/null || true)"
-    [ -n "$contained" ] && return 0
+    ci::git::published_to_destination "$pushed" && return 0
   fi
   return 1
 }

@@ -58,7 +58,7 @@ case "$HOOK_NAME" in
     # HEAD — and here that means leaving the base empty so it can.
     if [ ! -t 0 ]; then
       _push_old="" _push_new="" _push_nobase=0 _push_unrelated="" _push_dests="" _push_any_content=0
-      _push_btips=""
+      _push_btips="" _push_ttips=""
       while read -r _lref _lsha _rref _rsha; do
         [ -n "${_lsha:-}" ] || continue
 
@@ -110,14 +110,30 @@ case "$HOOK_NAME" in
         # order-independent for the history checks, so the collector does not
         # refuse anything.
         #
-        # Only branch destinations, and only content-bearing ones. A tag in the
-        # same push names a commit inside the history being pushed, which the
-        # range checks already cover, and a deletion has no tip to validate.
+        # Only content-bearing refs: a deletion has no tip to validate.
         case "${_rref:-}" in
           refs/heads/*)
             case " ${_push_btips} " in
               *" ${_lsha} "*) ;;
               *) _push_btips="${_push_btips} ${_lsha}" ;;
+            esac
+            ;;
+          # Tags are collected too, and separately, because the question asked
+          # of them is a different one.
+          #
+          # They were left out on the grounds that a tag in a mixed push names a
+          # commit inside the history being pushed. That is true and it is not
+          # the whole of it: `git push origin main v1`, where `v1` labels a
+          # failing commit and `main` is its repair, has the content lanes
+          # validate the repaired tree and publishes a release pointer at the
+          # broken one. The branch tip equalling HEAD made the check return
+          # before it ever looked. What a tag needs is the rule this gate
+          # already applies to a tag pushed on its own -- it is the checkout, or
+          # its commit is already on the destination.
+          refs/tags/*)
+            case " ${_push_ttips} " in
+              *" ${_lsha} "*) ;;
+              *) _push_ttips="${_push_ttips} ${_lsha}" ;;
             esac
             ;;
         esac
@@ -204,6 +220,7 @@ case "$HOOK_NAME" in
       # said, which is every caller that is not this hook.
       export CI_GATE_PUSH_REMOTE_REFS="${_push_dests# }"
       export CI_GATE_PUSH_BRANCH_TIPS="${_push_btips# }"
+      export CI_GATE_PUSH_TAG_TIPS="${_push_ttips# }"
       # A push that carries no content at all is a deletion, and there is
       # nothing for a content or history check to report on. Stated explicitly
       # rather than left as "no new sha", because that is indistinguishable from

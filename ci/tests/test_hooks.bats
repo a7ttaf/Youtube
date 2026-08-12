@@ -53,6 +53,7 @@ echo "OLD=${CI_GATE_PUSH_OLD_SHA:-}"
 # the check downstream is required to tell them apart.
 echo "DEST=${CI_GATE_PUSH_REMOTE_REFS-<unset>}"
 echo "TIPS=${CI_GATE_PUSH_BRANCH_TIPS-<unset>}"
+echo "TAGS=${CI_GATE_PUSH_TAG_TIPS-<unset>}"
 exit 0
 SH
   chmod +x "$HD_SB/ci/preflight.sh"
@@ -414,5 +415,79 @@ SH
 
   unset CI_GATE_PUSH_NEW_SHA CI_GATE_PUSH_REMOTE_REFS
   cd "$REPO_ROOT"
+  rm -rf "$HD_SB"
+}
+
+@test "git: a tag beside a branch is the checkout or is already published" {
+  # Tags were excluded from the multi-tip rule on the grounds that a tag in a
+  # mixed push names a commit inside the history being pushed. True, and not the
+  # whole of it: `git push origin main v1`, where `v1` labels a failing commit
+  # and `main` is its repair, had the branch tip equal HEAD and returned before
+  # looking at the tag at all. The content lanes then validated the repaired
+  # tree while a release pointer went out at the broken one.
+  local sb
+  sb="$(mktemp -d)"
+  (
+    cd "$sb"
+    git init -q -b main .
+    printf 'a\n' > a.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c1
+    old="$(git rev-parse HEAD)"
+    printf 'b\n' > b.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c2
+    printf '%s %s\n' "$old" "$(git rev-parse HEAD)" > .shas
+  ) >/dev/null 2>&1
+  local old tip
+  read -r old tip < "$sb/.shas"
+
+  _covers() { # _covers <tag tips>
+    bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' \
+      && CI_GATE_PUSH_NEW_SHA='$tip' CI_GATE_PUSH_REMOTE_REFS=main \
+         CI_GATE_PUSH_BRANCH_TIPS='$tip' CI_GATE_PUSH_TAG_TIPS='$1' \
+         CI_GATE_PUSH_REMOTE=origin ci::git::worktree_covers_push"
+  }
+
+  # The premise: the branch tip is the checkout, which is what made the old
+  # rule return before it could look at anything else.
+  run bash -c "cd '$sb' && git rev-parse --verify HEAD"
+  [ "$output" = "$tip" ]
+
+  run _covers ""
+  [ "$status" -eq 0 ]
+  run _covers "$tip"
+  [ "$status" -eq 0 ]
+
+  # The reported case: an older commit, tagged, not yet on the destination.
+  run _covers "$old"
+  [ "$status" -ne 0 ]
+
+  # And the release workflow this must not block: the same tag once that commit
+  # is on the destination remote, which is the rule a tag-only push already met.
+  run bash -c "cd '$sb' && git update-ref refs/remotes/origin/main '$old'"
+  [ "$status" -eq 0 ]
+  run _covers "$old"
+  [ "$status" -eq 0 ]
+
+  # An unreadable tip is not evidence that it matches, as everywhere else here.
+  run _covers "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  [ "$status" -ne 0 ]
+  rm -rf "$sb"
+}
+
+@test "hooks: tag tips are collected separately from branch tips" {
+  _hd_sandbox
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\nrefs/tags/v1 %s refs/tags/v1 %s\n' \
+    '$HD_TIP' '$HD_ROOT' '$HD_BASE' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TIPS=$HD_TIP"* ]]
+  [[ "$output" == *"TAGS=$HD_BASE"* ]]
+
+  # A deletion of a tag carries no tree, so it contributes no tip.
+  local zero=0000000000000000000000000000000000000000
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\n(delete) %s refs/tags/old %s\n' \
+    '$HD_TIP' '$HD_ROOT' '$zero' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"TAGS="* ]]
+  [[ "$output" != *"TAGS=$HD_ROOT"* ]]
   rm -rf "$HD_SB"
 }

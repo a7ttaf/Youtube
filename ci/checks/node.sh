@@ -175,26 +175,45 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
   # manifest and script check then read that worktree copy, and both pre-commit
   # and pre-push passed for a commit that carries no manifest at all.
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
+    # Which tree is "the commit" depends on the gate.
+    #
+    # The index is right for pre-commit, where the commit is being assembled in
+    # it. It is not the tree a push carries: in ship mode the commit already
+    # exists, and the index can hold anything staged for the *next* one. Staging
+    # a deletion of frontend/package.json while the worktree copy stays, then
+    # pushing an unrelated HEAD that still contains the manifest, failed the
+    # push over a tree it is not sending. The drift scan below already reads
+    # HEAD in ship mode for exactly this reason; this check is one earlier and
+    # was still reading the index.
+    _mf_ref=":"
+    _mf_what="the git index"
+    _mf_says="The commit being made would carry no manifest for that workspace,"
+    _mf_fix="Stage it (git add <path>), or restore it if the deletion was staged by mistake."
+    if [ "${CI_GATE_MODE:-}" = "ship" ] && git rev-parse --verify HEAD >/dev/null 2>&1; then
+      _mf_ref="HEAD:"
+      _mf_what="the commit being pushed"
+      _mf_says="The commit being pushed carries no manifest for that workspace,"
+      _mf_fix="Commit it, or drop the workspace from the tree being pushed."
+    fi
     MISSING_FROM_INDEX=""
     while IFS= read -r _ws; do
       [ -n "$_ws" ] || continue
       if [ "$_ws" = "." ]; then _mf="package.json"; else _mf="$_ws/package.json"; fi
-      if ! git cat-file -e ":$_mf" 2>/dev/null; then
+      if ! git cat-file -e "${_mf_ref}${_mf}" 2>/dev/null; then
         MISSING_FROM_INDEX="${MISSING_FROM_INDEX}${_mf}"$'\n'
       fi
     done <<< "$NODE_WORKSPACES"
 
     if [ -n "$MISSING_FROM_INDEX" ]; then
-      echo "A workspace manifest exists on disk but not in the git index:"
+      echo "A workspace manifest exists on disk but not in ${_mf_what}:"
       while IFS= read -r _mf; do
         [ -n "$_mf" ] || continue
         echo "    $_mf"
       done <<< "$MISSING_FROM_INDEX"
-      echo "  The commit being made would carry no manifest for that workspace,"
+      echo "  ${_mf_says}"
       echo "  so nothing there could be installed or run -- while every check"
       echo "  below would read the worktree copy and pass."
-      echo "  Stage it (git add <path>), or restore it if the deletion was"
-      echo "  staged by mistake."
+      echo "  ${_mf_fix}"
       exit "$CI_RESULT_FAIL_NEW_ISSUE"
     fi
 
@@ -1752,11 +1771,10 @@ _reject_status_trap() {
     *trap*) ;;
     *) return 0 ;;
   esac
-  local _n=${#_cmd} _i=0 _arg="" _state=0 _sig
+  local _n=${#_cmd} _i=0 _arg="" _state=0 _sig _endcmd
   local _sq="'" _dq='"'
   while [ "$_i" -le "$_n" ]; do
-    if [ "$_i" -lt "$_n" ] \
-      && { [ "${_mask:$_i:1}" != " " ] || [ "${_cmd:$_i:1}" != " " ]; }; then
+    if [ "$_i" -lt "$_n" ]       && { [ "${_mask:$_i:1}" != " " ] || [ "${_cmd:$_i:1}" != " " ]; }; then
       _arg="${_arg}${_cmd:$_i:1}"
       _i=$((_i + 1))
       continue
@@ -1768,46 +1786,48 @@ _reject_status_trap() {
     _sig="${_arg//"$_sq"/}"
     _sig="${_sig//"$_dq"/}"
     _arg=""
-    # A separator ends the trap command wherever it appears, attached or not.
+    # A separator ends the trap command wherever it appears, attached to a word
+    # or standing alone. Recorded and applied *after* the piece in front of it
+    # has been judged: `trap 'x' INT; echo EXIT` ends the trap at the `;`, and
+    # leaving the state alone there had the `EXIT` two words later read as a
+    # signal of a command that finished -- refusing an echo.
+    _endcmd=0
     case "$_sig" in
       *';'*|*'&'*|*'|'*)
-        if [ "$_state" -ne 0 ]; then
-          _sig="${_sig%%[;&|]*}"
-          if [ -z "$_sig" ]; then _state=0; continue; fi
-        fi
+        _sig="${_sig%%[;&|]*}"
+        _endcmd=1
         ;;
     esac
-    case "$_state" in
-      0)
-        case "$_sig" in trap) _state=1 ;; esac
-        continue
-        ;;
-      1)
-        # The action, whatever it is. `-` restores the default handler and
-        # installs nothing, which is the one form that cannot carry a status.
-        case "$_sig" in
-          '-') _state=0 ;;
-          *) _state=2 ;;
-        esac
-        continue
-        ;;
-    esac
-    _sig="$(printf '%s' "$_sig" | tr '[:lower:]' '[:upper:]')"
-    _sig="${_sig#SIG}"
-    case "$_sig" in
-      EXIT|0)
-        echo "Workspace ${CI_GATE_NODE_WORKSPACE} installs an EXIT trap around a checker:"
-        echo "    ${_what}"
-        echo "  An EXIT handler runs after the runner and can leave with its own"
-        echo "  status -- 'trap \"exit 0\" EXIT' in front of a failing suite exits"
-        echo "  0, and the lane reports PASS on a suite that failed. The handler"
-        echo "  is quoted text, which this gate reads as data and cannot"
-        echo "  evaluate, so it cannot be shown to preserve the result."
-        echo "  Move the cleanup into whatever invokes this script, or name the"
-        echo "  runner in package.json where there is no handler to reason about."
-        exit "$CI_RESULT_FAIL_NEW_ISSUE"
-        ;;
-    esac
+    if [ -z "$_sig" ]; then
+      :
+    elif [ "$_state" -eq 0 ]; then
+      case "$_sig" in trap) _state=1 ;; esac
+    elif [ "$_state" -eq 1 ]; then
+      # The action, whatever it is. `-` restores the default handler and
+      # installs nothing, which is the one form that cannot carry a status.
+      case "$_sig" in
+        '-') _state=0 ;;
+        *) _state=2 ;;
+      esac
+    else
+      _sig="$(printf '%s' "$_sig" | tr '[:lower:]' '[:upper:]')"
+      _sig="${_sig#SIG}"
+      case "$_sig" in
+        EXIT|0)
+          echo "Workspace ${CI_GATE_NODE_WORKSPACE} installs an EXIT trap around a checker:"
+          echo "    ${_what}"
+          echo "  An EXIT handler runs after the runner and can leave with its own"
+          echo "  status -- 'trap \"exit 0\" EXIT' in front of a failing suite exits"
+          echo "  0, and the lane reports PASS on a suite that failed. The handler"
+          echo "  is quoted text, which this gate reads as data and cannot"
+          echo "  evaluate, so it cannot be shown to preserve the result."
+          echo "  Move the cleanup into whatever invokes this script, or name the"
+          echo "  runner in package.json where there is no handler to reason about."
+          exit "$CI_RESULT_FAIL_NEW_ISSUE"
+          ;;
+      esac
+    fi
+    if [ "$_endcmd" -eq 1 ]; then _state=0; fi
   done
 }
 

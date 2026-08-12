@@ -55,10 +55,28 @@ uv sync --extra test --extra dev --extra lint   # provision the venv
 make install-hooks                              # wire git hooks
 
 # Before each push:
-make verify                                     # full gate, < 2 min on this codebase
+make verify                                     # full gate — runtime depends on what you changed
 ```
 
 Pre-push hook runs `make ci-full` automatically. If anything fails, the push is refused before it leaves your machine.
+
+### How long `make verify` takes
+
+Under two minutes for an ordinary Python or frontend changeset, and that is what
+it was measured at.
+
+It is much longer when your changeset includes a shell script, because that
+schedules `tests-shell` — the bats suites under `ci/tests/`, which drive
+preflight, the node lane and the layout guard against synthetic trees and spawn
+a package manager or init a repository in many of them. That is roughly 380
+cases and around half an hour; `ci/config/checks.yml` gives the lane a
+3600-second timeout for exactly that reason, because at the 20-minute gate
+default it was being killed and reported as broken infrastructure. A run that
+has been sitting in `tests-shell` for twenty minutes is not hung.
+
+The gate's own scripts are all shell, so "I edited something under `ci/`" and
+"this run will take half an hour" are the same statement. `make ci-quick` is the
+fast pre-commit pass; the long lane belongs to the pre-push gate.
 
 ## When the gate fails
 
