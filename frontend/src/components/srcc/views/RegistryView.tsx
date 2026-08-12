@@ -15,6 +15,8 @@ import {
   RESTRICTED_FINANCE_VALUE,
   SummaryTile,
 } from "../shared";
+import { RegistryImportFlow } from "./RegistryImportFlow";
+import { useUnsettledImport } from "@/contexts/UnsettledImportContext";
 
 // ============================================================================
 // Purpose: The REAL-data Channel Registry screen (Phase 2). The table is wired
@@ -24,23 +26,31 @@ import {
 //   live: "Map" opens the mapping-change panel (PATCH /channels/{id}/mapping),
 //   "Assign" opens the account-link proposal panel (POST
 //   /revenue/channel-account-links, proposes an UNVERIFIED link), "Review"
-//   navigates to the Trace view preselected on the channel. Bulk import stays
-//   disabled (no route; format undefined — spec non-goal).
+//   navigates to the Trace view preselected on the channel. The header's
+//   Import CSV action (PR-B) opens RegistryImportFlow, which swaps the main
+//   panel's content (band + table) for the three-step import stepper; cancel
+//   restores the table untouched, done restores it and reloads the channels.
 // Database/ORM: None (frontend) — consumes GET /channels + GET /org-units
 //   (VIEW_ANALYTICS gates), PATCH /channels/{id}/mapping (dual
 //   MANAGE_ORG_MAPPING), POST /revenue/channel-account-links
-//   (MANAGE_ORG_MAPPING@global).
+//   (MANAGE_ORG_MAPPING@global); POST /channels/import stays inside
+//   RegistryImportFlow.
 // Standards: No client-side authorization is invented. canManageRegistry gates
 //   the write affordances and trace-key visibility (fail-closed); the backend
 //   permission checks remain the authority and scoped 403s surface inline.
-//   Mutations use the synchronous in-flight ref latch (one request per click
-//   burst -> one audit event) and reload the channel list on success.
-// Blast Radius: Registry reads + two audited registry write paths. No finance
+//   canImportChannels (a backend-derived both-permission render hint) gates
+//   the Import CSV control — hidden, not disabled, per the fail-closed house
+//   rule. Mutations use the synchronous in-flight ref latch (one request per
+//   click burst -> one audit event) and reload the channel list on success.
+// Blast Radius: Registry reads + two audited registry write paths, plus the
+//   audited bulk-import write path behind RegistryImportFlow. No finance
 //   number computation; no source-of-truth mutation outside the wired routes.
 // Connections:
 //   - File: frontend/src/lib/api/useOrgUnits.ts -> org-unit name directory.
 //   - File: frontend/src/lib/api/useChannelMapping.ts -> PATCH mapping action.
 //   - File: frontend/src/lib/api/useChannelAccountLinks.ts -> propose action.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> the
+//     import stepper the main panel swaps in behind canImportChannels.
 //   - File: backend/ums_smart_revenue/api/org_units.py -> GET /org-units.
 //   - File: Docs/superpowers/specs/2026-06-07-registry-phase2-design.md -> spec.
 // ============================================================================
@@ -199,20 +209,40 @@ type RowActions = {
   onReview: (ch: ChannelRegistryEntry) => void;
 };
 
-/** Registry panel header: title/subtitle and the bulk-import action. */
-const RegistryPanelHeader = () => {
+/**
+ * Registry panel header: title/subtitle and, for import-capable operators, the
+ * live Import CSV action (PR-B — POST /channels/import behind the flow). Per
+ * the fail-closed house rule the button renders only when canImportChannels is
+ * held (hidden, not disabled); it disables only while the stepper is already
+ * open, mirroring the Groups header's sync control.
+ */
+const RegistryPanelHeader = ({
+  canImportChannels,
+  importOpen,
+  onStartImport,
+}: {
+  canImportChannels: boolean;
+  importOpen: boolean;
+  onStartImport: () => void;
+}) => {
   return (
     <div className="panel-header">
       <div className="panel-title">
         <strong id="registryTitle">Channel Registry</strong>
         <span>Ownership, CMS status, revenue scope, and SQL lineage identity</span>
       </div>
-      <div className="view-actions">
-        {/* Spec non-goal: no bulk-import route exists (format undefined) — disabled. */}
-        <button className="ghost-button" type="button" disabled>
-          Bulk Import
-        </button>
-      </div>
+      {canImportChannels ? (
+        <div className="view-actions">
+          <button
+            className="primary-button"
+            type="button"
+            disabled={importOpen}
+            onClick={onStartImport}
+          >
+            Import CSV
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -449,27 +479,209 @@ const RegistryTable = ({
   );
 };
 
-/** The registry main panel: header + mapping band + registry table. */
+// ============================================================================
+// Purpose: Carry an UNSETTLED import out of the stepper and keep saying so.
+//   When an apply's response never arrives, the flow's exit still reloads the
+//   registry — but that GET races the original POST and can return PRE-write
+//   rows, so the table below it may be stale while looking authoritative.
+// Database/ORM: None (frontend) — the reload button re-issues the existing
+//   GET /channels via the shared channel state; nothing here writes.
+// Standards: The uncertainty leaves WITH the operator instead of trapping them
+//   in the stepper. Blocking both of the flow's exits until reconciliation
+//   settles is not an option: a roster whose rows carry group keys can never
+//   auto-settle, because `outcome` is computed from channel inventory and the
+//   planner never loads memberships — that operator would have no way out at
+//   all. So the exit is left open and the hazard is made loud and PERSISTENT:
+//   it survives reloads, other views, and the document, and only an explicit
+//   acknowledgement clears it.
+//   "Import CSV" deliberately stays LIVE. The duplicate it once guarded is
+//   already unreachable a layer down — Apply is disabled and the dispatch is
+//   refused while any apply is unaccounted for — so disabling the opener
+//   bought no safety and cost the operator the only reconciliation surface
+//   they have: re-opening the importer runs the READ-ONLY dry run against the
+//   same roster, which is what tells them whether the registry matches it.
+//   That matters most for the operators who cannot read the audit trail at
+//   all: MANAGE_CHANNELS + MANAGE_GROUPS does not imply VIEW_AUDIT_LOG, so
+//   the seeded revenue_operations_admin and data_steward roles can import but
+//   cannot open AuditView. Telling THEM to "check the audit trail" is advice
+//   they cannot follow, so the notice reads their capability and says
+//   something they can act on (review #184, codex P2).
+// Blast Radius: Whether an operator can start a duplicate audited bulk import
+//   after an import of unknown outcome. No requests beyond the registry GET,
+//   no authorization meaning.
+// Connections:
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       exits with ImportExitOutcome "unknown", which raises this notice.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> the dry run is the reconciliation
+//       tool for an apply whose response was lost.
+// ============================================================================
+// ============================================================================
+// Purpose: Decide WHICH pending applies an acknowledgement retires — the ids
+//   captured when the warning went up, or the live set when nothing was
+//   captured yet.
+// Database/ORM: None (frontend) — a pure selection over two id lists. It
+//   issues no request; what the caller does with the result is remove durable
+//   pending-write records, which is what re-enables dispatch.
+// Standards: The operator's claim is "I have checked the audit trail for the
+//   imports this warning told me about". Retiring MORE than that clears the
+//   duplicate-import guard over a request the warning never mentioned and
+//   which may still be committing; retiring LESS leaves a notice that cannot
+//   be dismissed and an Apply that stays refused.
+//   The captured list wins whenever it has anything, so an apply admitted
+//   while the warning stands survives the click it was never part of. The
+//   fallback exists because the capture runs in an effect: an acknowledgement
+//   dispatched in the same tick as the raising render would otherwise pass an
+//   empty list and retire nothing (review #184, qodo). An empty capture means
+//   nothing has been excluded yet, so the live set IS what is on screen.
+//   Kept as a named export rather than inlined because that fallback branch is
+//   NOT reachable from a rendered click — Testing Library flushes effects
+//   before dispatching — so a component test of it passes with the branch
+//   removed. Pinning the rule directly is the only honest way to cover it.
+// Blast Radius: Whether the duplicate-import guard comes down over a live
+//   audited write, or refuses to come down at all. No authorization meaning
+//   and no financial mutation; the CHANNEL_IMPORTED audit event remains the
+//   authority on what committed.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> acknowledge()
+//       and snapshotPendingIds(), the store operations this feeds.
+//   - File: frontend/src/components/srcc/views/RegistryView.tsx ->
+//       UnsettledImportNotice, whose button dispatches the acknowledgement.
+// ============================================================================
+/**
+ * Which applies an acknowledgement retires: the ids CAPTURED when the warning
+ * went up, or the live set when nothing was captured.
+ *
+ * The capture runs in an effect, so an acknowledgement dispatched before that
+ * effect — a programmatic or synthetic click in the same tick — would pass an
+ * empty list and retire nothing, leaving the notice and the Apply refusal up
+ * with no way to clear them (review #184, qodo). An empty capture means
+ * nothing has been excluded yet, so the live set IS what the operator is
+ * looking at.
+ *
+ * Extracted rather than inlined because the empty-capture branch is not
+ * reachable from a rendered click: Testing Library flushes effects before the
+ * event, so a component test of it passes with the branch removed. Pinning the
+ * rule directly is the only honest way to cover it.
+ */
+export const warnedIdsForAcknowledgement = (
+  captured: readonly string[],
+  livePendingIds: readonly string[],
+): readonly string[] => {
+  return captured.length > 0 ? captured : livePendingIds;
+};
+
+const UnsettledImportNotice = ({
+  canViewAudit,
+  onReload,
+  onAcknowledge,
+}: {
+  canViewAudit: boolean;
+  onReload: () => void;
+  onAcknowledge: () => void;
+}) => {
+  return (
+    <div className="callout warning" role="status">
+      <strong>An import may still be committing.</strong>{" "}
+      <span>
+        Its response never arrived, so the rows below may predate it. Reload
+        before judging the registry, and do not re-import until you know what
+        happened — a second import would record the same roster twice.
+      </span>{" "}
+      <span>
+        {canViewAudit
+          ? "The audit trail settles it: look for a CHANNEL_IMPORTED entry for " +
+            "this roster. You can also re-open Import CSV and preview the same " +
+            "file — Apply stays blocked until this is accounted for."
+          : "Your role cannot open the audit trail, which is the only place " +
+            "that says which import wrote what. Re-open Import CSV and preview " +
+            "the same file to see whether the registry already matches it — " +
+            "Apply stays blocked until this is accounted for — and ask someone " +
+            "with audit access to confirm the CHANNEL_IMPORTED entry before " +
+            "importing it again."}
+      </span>
+      <div className="view-actions">
+        <button className="ghost-button" type="button" onClick={onReload}>
+          Reload registry
+        </button>
+        <button className="ghost-button" type="button" onClick={onAcknowledge}>
+          {canViewAudit
+            ? "I have checked the audit trail"
+            : "This import is accounted for"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+/**
+ * The registry main panel: header + either the import stepper (importOpen) or
+ * the steady-state mapping band + registry table. importOpen can only ever
+ * become true for an import-capable operator — the header renders the opening
+ * control only behind canImportChannels.
+ */
 const RegistryMainPanel = ({
   canManageRegistry,
+  canImportChannels,
   channelState,
   unitsById,
+  importOpen,
+  importUnsettled,
+  canViewAudit,
+  importScope,
+  importScopeSettled,
+  onStartImport,
+  onCancelImport,
+  onImportDone,
+  onAcknowledgeUnsettled,
   ...rowActions
 }: {
   canManageRegistry: boolean;
+  canImportChannels: boolean;
   channelState: ChannelAsyncState;
   unitsById: Map<string, OrgUnit>;
+  importOpen: boolean;
+  importUnsettled: boolean;
+  canViewAudit: boolean;
+  importScope: string | undefined;
+  /** False while that namespace can still change under a write. */
+  importScopeSettled: boolean;
+  onStartImport: () => void;
+  onCancelImport: () => void;
+  onImportDone: () => void;
+  onAcknowledgeUnsettled: () => void;
 } & RowActions) => {
   return (
     <section className="panel">
-      <RegistryPanelHeader />
-      <RegistryMappingBand canManageRegistry={canManageRegistry} />
-      <RegistryTable
-        canManageRegistry={canManageRegistry}
-        channelState={channelState}
-        unitsById={unitsById}
-        {...rowActions}
+      <RegistryPanelHeader
+        canImportChannels={canImportChannels}
+        importOpen={importOpen}
+        onStartImport={onStartImport}
       />
+      {importOpen ? (
+        <RegistryImportFlow
+          importScope={importScope}
+          importScopeSettled={importScopeSettled}
+          onCancel={onCancelImport}
+          onDone={onImportDone}
+        />
+      ) : (
+        <>
+          {importUnsettled ? (
+            <UnsettledImportNotice
+              canViewAudit={canViewAudit}
+              onReload={channelState.reload}
+              onAcknowledge={onAcknowledgeUnsettled}
+            />
+          ) : null}
+          <RegistryMappingBand canManageRegistry={canManageRegistry} />
+          <RegistryTable
+            canManageRegistry={canManageRegistry}
+            channelState={channelState}
+            unitsById={unitsById}
+            {...rowActions}
+          />
+        </>
+      )}
     </section>
   );
 };
@@ -972,15 +1184,32 @@ const RegistrySidePanels = ({
  * The real-data channel registry view. useChannels() and useOrgUnits() are each
  * called ONCE here and threaded down — a second hook call in a child would
  * duplicate the GET. Row actions set the side-panel targets (Map/Assign) or
- * navigate to Trace (Review).
+ * navigate to Trace (Review). The importing flag swaps the main panel's
+ * content for RegistryImportFlow: cancel restores the table untouched, done
+ * restores it and reloads the channel list.
  */
 const RegistryView = ({
   canManageRegistry,
+  canImportChannels,
   canViewFinance,
+  canViewAudit = false,
+  importScope,
+  importScopeSettled = true,
   onOpenTrace,
 }: {
   canManageRegistry: boolean;
+  canImportChannels: boolean;
   canViewFinance: boolean;
+  /** Namespaces the unsettled-import records to one tenant + principal. Omitted
+   * only in standalone renders, which fall back to the unscoped bucket. */
+  importScope?: string;
+  /** False while that namespace can still change under a write. Defaults to
+   * true: a standalone render supplies no scope and has nothing to wait on. */
+  importScopeSettled?: boolean;
+  /** Whether AuditView is reachable at all. Defaults to the SAFE assumption:
+   * without it the notice must not send the operator somewhere they will be
+   * refused. */
+  canViewAudit?: boolean;
   onOpenTrace?: (channelId: string) => void;
 }) => {
   const channelState = useChannels();
@@ -991,6 +1220,25 @@ const RegistryView = ({
   const [mapPreset, setMapPreset] = useState<{ channelId: string } | null>(null);
   const [assignContext, setAssignContext] =
     useState<{ channel: ChannelRegistryEntry } | null>(null);
+  const [importing, setImporting] = useState(false);
+  // Raised when the stepper exits with an apply whose outcome it never learned.
+  // Held in the SHELL, not here: this view unmounts the moment the operator
+  // follows the notice's own advice and opens the Audit trail, and the flag
+  // has to survive that (review #184).
+  const unsettledImport = useUnsettledImport(importScope);
+  // The applies the CURRENT warning represents, captured when it goes up. The
+  // operator's acknowledgement is about those, and re-reading the scope at
+  // click time would also retire an apply another tab admitted after the
+  // warning rendered — a live request the warning never mentioned (review
+  // #184, codex P2). Re-captured only on a false -> true transition, so ids
+  // added while the warning stands are deliberately excluded and keep it up.
+  const warnedApplyIdsRef = useRef<readonly string[]>([]);
+  const { unsettled, snapshotPendingIds } = unsettledImport;
+  useEffect(() => {
+    if (unsettled) {
+      warnedApplyIdsRef.current = snapshotPendingIds();
+    }
+  }, [unsettled, snapshotPendingIds]);
 
   const unitsById = useMemo(
     () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
@@ -1033,8 +1281,41 @@ const RegistryView = ({
       <div className="view-grid wide-side">
         <RegistryMainPanel
           canManageRegistry={canManageRegistry}
+          canImportChannels={canImportChannels}
           channelState={channelState}
           unitsById={unitsById}
+          importOpen={importing}
+          importUnsettled={unsettledImport.unsettled}
+          canViewAudit={canViewAudit}
+          importScope={importScope}
+          importScopeSettled={importScopeSettled}
+          onStartImport={() => setImporting(true)}
+          onCancelImport={() => setImporting(false)}
+          onImportDone={() => {
+            setImporting(false);
+            channelState.reload();
+            // Nothing to raise here: the flow raises the unsettled flag BEFORE
+            // it dispatches the apply and clears it only once the response
+            // establishes an outcome. Raising on this callback instead left
+            // the case codex found — an operator who leaves by the sidebar
+            // never reaches it, and neither does a closed tab.
+          }}
+          onAcknowledgeUnsettled={() => {
+            const warned = warnedIdsForAcknowledgement(
+              warnedApplyIdsRef.current,
+              unsettledImport.snapshotPendingIds(),
+            );
+            unsettledImport.acknowledge(warned);
+            // RE-CAPTURE what remains. The effect only fires on a false -> true
+            // transition, so if one apply settles while another is still
+            // pending the flag never drops and the ref would stay pinned to
+            // the settled id — every further acknowledgement replaying a list
+            // that retires nothing, leaving the operator blocked until a
+            // reload. Refreshing here keeps the exclusion (the later apply
+            // survives THIS click) while letting the next click acknowledge
+            // the warning that is still on screen (review #184, codex P2).
+                      warnedApplyIdsRef.current = unsettledImport.snapshotPendingIds();
+          }}
           hasTraceNav={Boolean(onOpenTrace)}
           onMap={onMap}
           onAssign={onAssign}

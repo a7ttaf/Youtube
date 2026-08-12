@@ -1,11 +1,40 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import RegistryView from "@/components/srcc/views/RegistryView";
+import RegistryView, {
+  warnedIdsForAcknowledgement,
+} from "@/components/srcc/views/RegistryView";
 import type { ChannelRegistryEntry, OrgUnit } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
+
+
+describe("acknowledgement id selection", () => {
+  // The capture effect fills the ref AFTER the render that raises the notice.
+  // Testing Library flushes effects before dispatching an event, so the
+  // empty-capture branch is unreachable from a rendered click — a component
+  // test of it passes with the branch removed, which is why the rule is pinned
+  // here directly (review #184, qodo).
+
+  it("retires the CAPTURED ids when the warning was captured", () => {
+    // The exclusion that matters: an apply admitted after the warning went up
+    // was never represented by it and must survive the acknowledgement.
+    expect(warnedIdsForAcknowledgement(["apply-warned"], ["apply-warned", "apply-later"])).toEqual([
+      "apply-warned",
+    ]);
+  });
+
+  it("falls back to the LIVE set when nothing was captured", () => {
+    // Otherwise the click retires nothing and the notice — plus the Apply
+    // refusal behind it — cannot be cleared at all.
+    expect(warnedIdsForAcknowledgement([], ["apply-live"])).toEqual(["apply-live"]);
+  });
+
+  it("retires nothing when neither has anything", () => {
+    expect(warnedIdsForAcknowledgement([], [])).toEqual([]);
+  });
+});
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -121,15 +150,32 @@ const isMappingPatch = (url: string, init?: RequestInit) =>
 const isProposePost = (url: string, init?: RequestInit) =>
   url === "/revenue/channel-account-links" && init?.method === "POST";
 
-/** Route the registry's four endpoints; unrouted URLs fail loudly (404 + []). */
+/** Resolve the registry's GET reads (channels, org-units, owner picker), or null. */
+const readRouteResponse = (
+  url: string,
+  overrides: RouteOverrides,
+): Response | Promise<Response> | null => {
+  if (url === "/channels") {
+    return channelsResponse(overrides);
+  }
+  if (url === "/org-units") {
+    return orgUnitsResponse(overrides);
+  }
+  // The import stepper's owner picker (PR-B): no credentials seeded, so the
+  // picker renders its empty state with the Connectors pointer.
+  if (url === "/connectors/content-owners?connector_key=youtube-analytics") {
+    return jsonResponse({ items: [] });
+  }
+  return null;
+};
+
+/** Route the registry's endpoints; unrouted URLs fail loudly (404 + []). */
 const routeRegistry = (overrides: RouteOverrides = {}) => {
   return (input: unknown, init?: RequestInit) => {
     const url = urlOf(input);
-    if (url === "/channels") {
-      return Promise.resolve(channelsResponse(overrides));
-    }
-    if (url === "/org-units") {
-      return Promise.resolve(orgUnitsResponse(overrides));
+    const read = readRouteResponse(url, overrides);
+    if (read !== null) {
+      return Promise.resolve(read);
     }
     if (isMappingPatch(url, init)) {
       return Promise.resolve(mappingResponse(overrides, init));
@@ -150,11 +196,13 @@ const renderRegistry = (
   canManageRegistry = true,
   canViewFinance = true,
   onOpenTrace?: (channelId: string) => void,
+  canImportChannels = false,
 ) => {
   return render(
     <TenantProvider initialSlug="ums">
       <RegistryView
         canManageRegistry={canManageRegistry}
+        canImportChannels={canImportChannels}
         canViewFinance={canViewFinance}
         onOpenTrace={onOpenTrace}
       />
@@ -242,7 +290,11 @@ describe("RegistryView wired to GET /channels", () => {
 
     rerender(
       <TenantProvider initialSlug="ums">
-        <RegistryView canManageRegistry={false} canViewFinance />
+        <RegistryView
+          canManageRegistry={false}
+          canImportChannels={false}
+          canViewFinance
+        />
       </TenantProvider>,
     );
     expect(screen.queryByText("channel:UC-DRAMA-01")).not.toBeInTheDocument();
@@ -606,17 +658,42 @@ describe("RegistryView Phase 2: Review action + gating", () => {
     expect(screen.getByRole("button", { name: /^review$/i })).toBeEnabled();
     expect(screen.getByRole("button", { name: /^submit mapping change$/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /^propose link$/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /bulk import/i })).toBeDisabled();
+    // Import CSV is hidden (not disabled) without the capability — fail-closed.
+    expect(screen.queryByRole("button", { name: /import csv/i })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Channel")).toBeDisabled();
     expect(screen.getByLabelText("AdSense account ID")).toBeDisabled();
   });
 
-  it("keeps Bulk Import disabled even for registry managers (spec non-goal)", async () => {
+  it("hides Import CSV even for registry managers without canImportChannels (PR-B gate)", async () => {
     fetchMock().mockImplementation(routeRegistry());
     renderRegistry(true);
     await waitFor(() =>
       expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
     );
-    expect(screen.getByRole("button", { name: /bulk import/i })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /import csv/i })).not.toBeInTheDocument();
+  });
+
+  it("opens the import stepper via Import CSV and Cancel restores the table untouched", async () => {
+    fetchMock().mockImplementation(routeRegistry());
+    renderRegistry(true, true, undefined, true);
+    await waitFor(() =>
+      expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /import csv/i }));
+    // The stepper's Upload step replaces the main panel's table content.
+    expect(screen.getByRole("group", { name: "Import upload" })).toBeInTheDocument();
+    expect(screen.queryByText("UMS Drama")).not.toBeInTheDocument();
+    // No credentials are seeded, so the picker points the operator at Connectors.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/Register a youtube-analytics credential in Connectors first/i),
+      ).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+    // Cancel restores the table with NO refetch: still exactly one GET /channels.
+    expect(screen.getByText("UMS Drama")).toBeInTheDocument();
+    expect(channelCalls()).toHaveLength(1);
   });
 });

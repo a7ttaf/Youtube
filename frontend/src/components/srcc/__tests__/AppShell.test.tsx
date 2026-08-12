@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import AppShell from "@/components/srcc/AppShell";
+import AppShell, { isImportScopeSettled } from "@/components/srcc/AppShell";
 import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
 import type { SessionMe } from "@/lib/api/types";
@@ -32,6 +32,7 @@ const FULL_SESSION: SessionMe = {
     canExportAnalyticsReports: true,
     canManageRegistry: true,
     canManageGroups: true,
+    canImportChannels: true,
     canManageConnectors: true,
     canViewConnectorHealth: true,
     canRunConnectorJobs: true,
@@ -42,6 +43,10 @@ const FULL_SESSION: SessionMe = {
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
+  // The unsettled-import flag mirrors into localStorage ON PURPOSE, so it
+  // outlives a browser reload. That makes it leak between tests unless it is
+  // cleared here — the leak is the feature working, not a bug to design away.
+  globalThis.localStorage.clear();
 });
 
 afterEach(() => {
@@ -85,12 +90,21 @@ const urlOf = (input: unknown): string => {
   return String(input);
 };
 
+// The two shell reads every render performs. Named once because they are used
+// as BOTH route-map keys and substring probes: a literal that drifts in one
+// place and not the other silently routes a test to the fallback responder.
+const SESSION_ROUTE = "/session/me";
+const TENANT_ROUTE = "/tenants/me";
+
+// The one tenant every shell test resolves to; duplicated per route map before.
+const SHELL_TENANT = { id: "t1", slug: "ums", display_name: "UMS" };
+
 const isTenantCall = (input: unknown): boolean => {
-  return urlOf(input).includes("/tenants/me");
+  return urlOf(input).includes(TENANT_ROUTE);
 };
 
 const isSessionCall = (input: unknown): boolean => {
-  return urlOf(input).includes("/session/me");
+  return urlOf(input).includes(SESSION_ROUTE);
 };
 
 // Route fetch by URL: /session/me -> a ready full-capability session (so the
@@ -108,6 +122,34 @@ const tenantFetchCalls = () => {
   const mock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
   return mock.mock.calls.filter(([input]) => isTenantCall(input));
 };
+
+describe("import scope settling", () => {
+  // The rule that decides whether an import may be ADMITTED at all. Its effect
+  // on the button is covered in RegistryImportFlow.test.tsx.
+  //
+  // NOT covered here, stated so the gap is not mistaken for coverage: that a
+  // FAILED /tenants/me reaches this predicate as `tenantSettled: false`. That
+  // is one line in useTenantBootstrap (`tenant.id !== null`, with the former
+  // `|| tenantError !== null` removed), and this predicate cannot see the
+  // difference — a failure and an in-flight request both arrive as false. An
+  // end-to-end assertion needs the shell driven through registry -> upload ->
+  // preview, which this file has no fetch routing for.
+  const sessionWith = (tenant: { id: string } | null) =>
+    ({ ...FULL_SESSION, tenant }) as unknown as Parameters<typeof isImportScopeSettled>[0];
+
+  it("is settled when the SESSION carries the tenant, bootstrap or not", () => {
+    // Nothing has to resolve: the session's own tenant is authoritative.
+    expect(isImportScopeSettled(sessionWith({ id: "t1" }), false)).toBe(true);
+  });
+
+  it("is NOT settled while a tenantless session is still resolving", () => {
+    expect(isImportScopeSettled(sessionWith(null), false)).toBe(false);
+  });
+
+  it("is settled once a tenantless session resolves its tenant", () => {
+    expect(isImportScopeSettled(sessionWith(null), true)).toBe(true);
+  });
+});
 
 describe("AppShell tenant proof tag", () => {
   it("hydrates the tenant and shows UMS (ums) on the dev-only tag", async () => {
@@ -323,6 +365,7 @@ const sessionBody = (
       canExportAnalyticsReports: false,
       canManageRegistry: false,
       canManageGroups: false,
+      canImportChannels: false,
       canManageConnectors: false,
       canViewConnectorHealth: false,
       canRunConnectorJobs: false,
@@ -363,8 +406,8 @@ type FetchRouteMap = ReadonlyMap<string, () => Response>;
 const defaultSessionRouteResponse = () => jsonResponse(NET_REVENUE_BODY);
 
 const routeFetchWithSessionRoutes = (sessionResponder: () => Response): FetchRouteMap => new Map([
-  ["/session/me", sessionResponder],
-  ["/tenants/me", () => jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" })],
+  [SESSION_ROUTE, sessionResponder],
+  [TENANT_ROUTE, () => jsonResponse(SHELL_TENANT)],
   ["/connectors/credentials", () => jsonResponse(EMPTY_CONNECTOR_CREDENTIALS)],
   ["/connectors/content-owners", () => jsonResponse(EMPTY_CONTENT_OWNERS)],
   ["/adsense/payments", () => jsonResponse(EMPTY_ADSENSE_PAYMENTS)],
@@ -689,5 +732,444 @@ describe("AppShell groups navigation", () => {
     // Settle on the Groups view's loaded (empty) state before asserting absence.
     await screen.findByRole("heading", { name: "CMS Groups", level: 1 });
     expect(screen.queryByRole("button", { name: /sync/i })).not.toBeInTheDocument();
+  });
+});
+
+// ============================================================================
+// Shell navigation is the exit RegistryImportFlow cannot guard itself: the
+// sidebar lives outside that component's tree, so switching views unmounts the
+// flow no matter what its own Cancel and Back do. With an un-abortable apply
+// POST pending, that means the write still commits while its completion
+// handler is gone — no reload, no confirmation, and the operator left looking
+// at a stale registry (review #184, codex P1). AppShell latches nav off
+// WriteInFlightContext for exactly the duration of that write.
+// ============================================================================
+
+const IMPORT_CHANNELS = [
+  {
+    youtube_channel_id: "UC-DRAMA-01",
+    channel_name: "UMS Drama",
+    primary_company_id: "united-studios",
+    cms_status: "INSIDE_CMS",
+    content_owner_id: "OWNERaaa",
+    revenue_required: true,
+    revenue_source_status: "OFFICIAL_CMS_REVENUE",
+    active: true,
+  },
+];
+
+// A COMPLETE plan payload: useChannelImport structurally validates every 2xx
+// (a body missing plan_fingerprint would reach the next Apply as `undefined`
+// and silently unbind the write), so a shorthand fixture would be rejected
+// before these nav-latch tests ever reached Preview.
+const IMPORT_PLAN = {
+  dry_run: true,
+  content_owner_id: "OWNERaaa",
+  cms_status: "INSIDE_CMS",
+  counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+  plan_fingerprint: "plan-appshell-v1",
+  rows: [
+    {
+      row_number: 1,
+      youtube_channel_id: "UCaaaaaaaaaaaaaaaaaaaaaa",
+      outcome: "CREATE",
+      channel_name: "Alpha Channel",
+      group_id: null,
+      group_action: null,
+      revenue_required: true,
+      revenue_source_status: { from: null, to: "MISSING_REVENUE_SOURCE" },
+      changes: {},
+      reason: null,
+    },
+  ],
+};
+
+/** A pending Response plus its resolver, for holding the apply POST open. */
+const deferredImportResponse = () => {
+  let release!: (response: Response) => void;
+  // `reject` models the LOST response — a transport failure, where the POST was
+  // dispatched and never answered. That is a different outcome from any status
+  // code, so the helper must be able to produce it.
+  let fail!: (reason: unknown) => void;
+  const pending = new Promise<Response>((resolve, reject) => {
+    release = resolve;
+    fail = reject;
+  });
+  // An unobserved rejection would fail the run before the flow catches it; the
+  // flow's own catch is the observer, so keep the promise quiet until then.
+  pending.catch(() => undefined);
+  return { pending, release, reject: fail };
+};
+
+/** The SIDEBAR button carrying this label (the button also holds an icon +
+ * count, and labels like "Channel Registry" also appear in the view itself,
+ * so the lookup is scoped to the sidebar landmark). */
+const navButton = (label: string): HTMLElement => {
+  const sidebar = screen.getByRole("complementary", { name: "Primary navigation" });
+  const button = within(sidebar).getByText(label).closest("button");
+  if (button === null) throw new Error(`no nav button for ${label}`);
+  return button;
+};
+
+// The reads this flow needs, keyed by pathname like routeFetchWithSessionRoutes.
+// Only /channels/import is answered per test, so it is the sole branch in the
+// router below rather than another entry here.
+const IMPORT_SHELL_ROUTES: FetchRouteMap = new Map([
+  [SESSION_ROUTE, () => jsonResponse(FULL_SESSION)],
+  [TENANT_ROUTE, () => jsonResponse(SHELL_TENANT)],
+  ["/channels", () => jsonResponse(IMPORT_CHANNELS)],
+  ["/org-units", () => jsonResponse([])],
+  ["/connectors/content-owners", () => jsonResponse({ items: [{ account_id: "OWNERaaa" }] })],
+]);
+
+describe("AppShell navigation latch during an un-abortable write", () => {
+  const routeImportShell = (applyResponder: () => Promise<Response> | Response) => {
+    return (input: unknown) => {
+      const path = requestPathOf(input);
+      if (path === "/channels/import") {
+        return Promise.resolve(applyResponder());
+      }
+      return Promise.resolve((IMPORT_SHELL_ROUTES.get(path) ?? defaultSessionRouteResponse)());
+    };
+  };
+
+  /** Drive the shell to Preview with the apply POST answered by `applyResponder`. */
+  const openImportPreview = async (
+    applyResponder: () => Promise<Response> | Response,
+  ) => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeImportShell(applyResponder),
+    );
+    // Returned so a test can tear the DOCUMENT down (the reload case), not
+    // merely navigate within it.
+    const rendered = renderShell();
+
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /import csv/iu }));
+
+    const panel = screen.getByRole("group", { name: "Import upload" });
+    const picker = within(panel).getByLabelText("Content owner");
+    await waitFor(() =>
+      expect(within(picker).getByRole("option", { name: "OWNERaaa" })).toBeInTheDocument(),
+    );
+    fireEvent.change(picker, { target: { value: "OWNERaaa" } });
+    fireEvent.change(within(panel).getByLabelText("Roster CSV"), {
+      target: {
+        files: [new File(["youtube_channel_id,channel_name\nUCaaaaaaaaaaaaaaaaaaaaaa,Alpha\n"], "r.csv")],
+      },
+    });
+    fireEvent.change(within(panel).getByLabelText("Reason (required, audited)"), {
+      target: { value: "monthly roster load" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: /^preview$/iu }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument(),
+    );
+    return rendered;
+  };
+
+  it("NAV LATCH: blocks sidebar navigation while an import apply is in flight", async () => {
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    // Baseline: nav is live while only a preview has run.
+    expect(navButton("CMS Groups")).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    // This asserts the WIRING — the latch reaches the sidebar — not the
+    // timing. fireEvent wraps the click in act(), which flushes effects, so
+    // an effect-armed latch would look armed here too. The timing property
+    // (armed BEFORE the request is dispatched, so no window exists in which
+    // the write is running and nav is live) is proven in
+    // RegistryImportFlow.test.tsx, which observes the latch at dispatch.
+    expect(navButton("CMS Groups")).toBeDisabled();
+
+    // Every nav item is latched, and each says why.
+    expect(navButton("Command Center")).toBeDisabled();
+    expect(navButton("Channel Registry")).toBeDisabled();
+    expect(navButton("CMS Groups").getAttribute("title")).toMatch(/cannot be aborted/iu);
+
+    // Clicking anyway does nothing: the flow is still mounted on Preview, so
+    // the pending write's completion handler is still there to run.
+    fireEvent.click(navButton("CMS Groups"));
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+
+    // The latch releases with the request, so nav cannot stay stuck — and it
+    // releases in the same `finally` batch that advances the step, so the
+    // Applied panel and the freed nav land together.
+    applyGate.release(jsonResponse({ ...IMPORT_PLAN, dry_run: false }));
+    await waitFor(() =>
+      expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
+    );
+    expect(navButton("CMS Groups")).toBeEnabled();
+  });
+
+  it("NAV LATCH: leaves navigation free during the read-only dry run", async () => {
+    // Only the apply commits. A preview writes nothing, so latching the shell
+    // for it would strand the operator on a slow read for no safety gain.
+    await openImportPreview(() => jsonResponse(IMPORT_PLAN));
+
+    expect(navButton("CMS Groups")).toBeEnabled();
+    expect(navButton("CMS Groups").getAttribute("title")).toBeNull();
+  });
+
+  it("NAV LATCH: releases when a failed apply settles", async () => {
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+
+    // A 5xx does not establish that the write was rejected, so the flow
+    // reports the outcome as unknown — but the latch still releases, because
+    // it is tied to the request settling, not to the request succeeding.
+    applyGate.release(jsonResponse({ detail: "boom" }, 500));
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
+    expect(navButton("CMS Groups")).toBeEnabled();
+  });
+
+  it("UNSETTLED IMPORT: the warning survives navigating away and back", async () => {
+    // The nav latch releases when the request settles, which is correct — the
+    // warning's own advice is to open the Audit trail, so the shell must let
+    // the operator go. But that trip UNMOUNTS RegistryView. Holding the
+    // unsettled flag there meant returning to Registry produced a fresh view
+    // with Import CSV live again while the original request might still be
+    // committing — the duplicate CHANNEL_IMPORTED the flag exists to prevent
+    // (review #184, codex P1). The flag is owned by the shell for this reason.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
+
+    // Leaving the flow raises the shell-level warning.
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/iu }));
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu),
+    );
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
+
+    // Follow the notice's advice: nav is free, so the trip is possible at all.
+    expect(navButton("Audit Log")).toBeEnabled();
+    fireEvent.click(navButton("Audit Log"));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /import csv/iu })).not.toBeInTheDocument(),
+    );
+
+    // Coming back, the warning is still there and the duplicate is still shut.
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
+
+    // Only the explicit acknowledgement retires it.
+    fireEvent.click(
+      within(screen.getByRole("status")).getByRole("button", {
+        name: /checked the audit trail/iu,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("status")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("UNSETTLED IMPORT: the warning survives a browser reload and a second tab", async () => {
+    // Holding it in React state alone meant F5 — or opening the app in another
+    // tab — initialised the flag back to false and re-enabled Import CSV while
+    // the original POST might still be committing (review #184, codex P1). The
+    // flag mirrors into localStorage, so a fresh DOCUMENT still sees it.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    const { unmount } = await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/iu }));
+    await screen.findByRole("status");
+
+    // Tear the whole document down — the reload / second-tab case. Nothing of
+    // the previous React tree survives this; only the mirror does.
+    unmount();
+
+    renderShell();
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+
+    expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
+  });
+
+  it("UNSETTLED IMPORT: leaving by the SIDEBAR still raises the warning", async () => {
+    // The flow's exit handler is not the only way out. Once the latch releases
+    // on an indeterminate apply, the sidebar is live and unmounts the flow
+    // without ever calling onDone — so raising the flag on that callback left
+    // the operator returning to a clean-looking Registry with Import CSV live
+    // (review #184, codex P1). The flag is raised at DISPATCH instead, so the
+    // route out no longer matters.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    applyGate.reject(new TypeError("Failed to fetch"));
+    await waitFor(() =>
+      expect(screen.getByText("Apply outcome unknown")).toBeInTheDocument(),
+    );
+
+    // Out through the sidebar — never touching Cancel.
+    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+    fireEvent.click(navButton("CMS Groups"));
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+
+    expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
+  });
+
+  it("UNSETTLED IMPORT: a tab closed mid-apply still warns the next document", async () => {
+    // Nothing has failed yet here — the POST is simply still in flight. If the
+    // operator closes the tab now, this document's fetch handler dies while the
+    // backend goes on committing, so the uncertainty has to already be durable
+    // BEFORE the request is dispatched, not recorded when it fails.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    const { unmount } = await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeDisabled());
+    unmount();
+
+    renderShell();
+    await screen.findByRole("complementary", { name: "Primary navigation" });
+    fireEvent.click(navButton("Channel Registry"));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+
+    expect(screen.getByRole("status")).toHaveTextContent(/may still be committing/iu);
+    // Openable on purpose: re-previewing the roster is the reconciliation
+    // surface. The duplicate is refused at Apply, not at the opener.
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
+  });
+
+  it("UNSETTLED IMPORT: an established outcome clears the flag", async () => {
+    // The complement, and the reason raising at dispatch is safe: a 2xx and a
+    // definite rejection both SETTLE the question, so neither may leave the
+    // importer locked. A 422 is an established refusal — nothing committed.
+    const applyGate = deferredImportResponse();
+    let firstCall = true;
+    await openImportPreview(() => {
+      if (firstCall) {
+        firstCall = false;
+        return jsonResponse(IMPORT_PLAN);
+      }
+      return applyGate.pending;
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+    applyGate.release(jsonResponse({ detail: "roster rejected" }, 422));
+    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: /^cancel$/iu }));
+    await waitFor(() => expect(screen.getByText("UMS Drama")).toBeInTheDocument());
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /import csv/iu })).toBeEnabled();
+  });
+
+  it("UNSETTLED IMPORT: a browser that refuses storage REFUSES the apply", async () => {
+    // Supersedes an earlier fail-OPEN reading of this case, and codex was right
+    // to push back on it. A record that lives only in memory is not a claim:
+    // the Web Lock is released the moment admission returns, so no other tab
+    // can see it, and a reload erases it while the backend request may still
+    // be committing. Admitting on one hands out a claim nobody else can
+    // honour — for an audited write. So admission FAILS CLOSED.
+    //
+    // The cost is real and deliberate: the operator cannot import until
+    // storage works. That is why the refusal names the cause and the remedy
+    // rather than reading as a generic failure.
+    const denied = () => {
+      throw new DOMException("denied", "SecurityError");
+    };
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(denied);
+
+    let applyCalls = 0;
+    await openImportPreview(() => {
+      applyCalls += 1;
+      return jsonResponse(IMPORT_PLAN);
+    });
+    const beforeApply = applyCalls;
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/iu }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/not storing site data/iu)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/allow site data/iu)).toBeInTheDocument();
+    // Nothing was dispatched: the write never left, so there is no outcome to
+    // be unknown about and the nav latch is free again.
+    expect(applyCalls).toBe(beforeApply);
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+    await waitFor(() => expect(navButton("CMS Groups")).toBeEnabled());
+
+    vi.restoreAllMocks();
   });
 });

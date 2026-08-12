@@ -456,8 +456,30 @@ on real ingestion (Phase 2) and the inventory load workflow.
   (`feat/groups-view-ui`, PR-A of the import/sync UI arc): a CMS Groups nav
   view — group table with owner stamps, credential-fed owner picker, sync
   dry-run→apply stepper (CONFLICT blocks apply, remedy named), clear-stamp +
-  archive actions — gated by the new `can_manage_groups` capability; PR-B
-  (CSV-import stepper in Registry) is the arc's remaining half.
+  archive actions — gated by the new `can_manage_groups` capability.
+  **Import stepper UI shipped 2026-08-09** (`feat/import-stepper-ui`, PR-B,
+  the arc's other half): the Registry header's live Import CSV control opens
+  an Upload → Preview → Applied stepper over `POST /channels/import`
+  (read-only dry-run always first; ERROR rows block Apply per the
+  all-or-nothing 422), gated by the new `canImportChannels` capability —
+  derived from MANAGE_CHANNELS **and** MANAGE_GROUPS, since a group-bearing
+  roster needs both. Its review round added the preview's `group_action`
+  disclosure (does this `Group_ID` mint a new SECTOR group or join an
+  existing one — no migration), pinned both stepper exits closed while a
+  write is in flight, and relabelled the Applied counts as the approved PLAN
+  (the durable tally is the `CHANNEL_IMPORTED` audit event). The rounds also
+  added three backend REFUSALS, which is why "additive" undersells it: a
+  plan-bound apply (`expected_plan_fingerprint`) that 409s on drifted
+  pre-state, a write-boundary recheck of the previewed group effect that binds
+  unbound callers too, and a parser rejection of rosters restating one
+  `(youtube_channel_id, group_id)` pair — the only change here that refuses
+  input the previous code accepted, and therefore the only BREAKING one: such
+  a roster returned 200 before and returns 422 now, and must be deduped to
+  apply again. The registry lands the same rows and memberships either way;
+  the one persisted difference is the durable `CHANNEL_IMPORTED` tally, which
+  the restated row inflated. No new endpoint and
+  no migration; #159's unbound "the file wins" rule is untouched. The
+  import/sync UI arc is complete.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to

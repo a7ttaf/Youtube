@@ -369,6 +369,54 @@ class SqlAlchemyChannelGroupRegistry:
         ).all()
         return {key for key in rows if key is not None}
 
+    # ========================================================================
+    # Purpose: Bulk-classify a roster's CMS group keys by whether THIS content
+    #   owner already holds the group, so import planning can tell the operator
+    #   which rows JOIN an existing group and which MINT a new SECTOR group —
+    #   two effects with different finance-scope and audit consequences that a
+    #   bare Group_ID cell cannot distinguish (review #184).
+    # Database/ORM: ChannelGroupORM (read-only; cms_group_id + content_owner_id
+    #   under the per-tenant unique key). No membership loading, no writes.
+    # Standards: One bounded SELECT for the whole key set; tenant-scoped;
+    #   unknown keys absent — a key with no group is the CREATE case, which is
+    #   exactly what absence encodes here. Deliberately NOT filtered on active,
+    #   for the same reason as list_adoptable_cms_group_ids: the archived
+    #   lookup fails those rows closed on its own, and narrowing here would
+    #   make two reads of one row disagree. Read-only -> RLS-safe, no platform
+    #   lane. The equality is the exact complement of
+    #   list_foreign_owner_cms_group_ids' inequality over stamped rows, so the
+    #   four lookups partition the key set with no gap and no overlap.
+    # Blast Radius: The preview's per-row group disclosure only. No group
+    #   writes, no audit, and no bearing on which rows plan as ERROR — the
+    #   write boundary re-reads group state under a row lock regardless.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     plan_channel_import_with_stores feeds the result to the planner, and
+    #     _attach_group_membership performs the create/attach this predicts.
+    #   - File: backend/ums_smart_revenue/org/channel_import.py ->
+    #     plan_channel_import turns membership in this set into the row's
+    #     group_action.
+    # ========================================================================
+    def list_owned_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys already stamped to this content owner.
+
+        Absence is meaningful and is what the planner reads as CREATE: a key
+        with no group at all, like a key whose group another owner holds, is
+        simply not here. One bounded SELECT, mirroring its three siblings.
+        """
+        if not cms_group_ids:
+            return set()
+        rows = self._session.scalars(
+            select(ChannelGroupORM.cms_group_id).where(
+                ChannelGroupORM.tenant_id == self._tenant_id,
+                ChannelGroupORM.cms_group_id.in_(cms_group_ids),
+                ChannelGroupORM.content_owner_id == content_owner_id,
+            )
+        ).all()
+        return {key for key in rows if key is not None}
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.
 

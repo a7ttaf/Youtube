@@ -78,6 +78,52 @@ def test_keeps_agreeing_duplicates_for_multi_group_membership() -> None:
     assert [row.group_id for row in parsed.rows] == ["cms-tv", "cms-news"]
 
 
+def test_flags_every_copy_of_a_repeated_channel_group_pair() -> None:
+    """Repeating one association says nothing the first copy did not say.
+
+    The write side collapses it, so keeping both copies would let the preview
+    promise the group work twice for one membership.
+    """
+    csv_text = (
+        "youtube_channel_id,channel_name,group_id\n"
+        f"{CHANNEL_ID},Alpha News,cms-tv\n"
+        f"{CHANNEL_ID},Alpha News,cms-tv\n"
+    )
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.rows == ()
+    assert [error.row_number for error in parsed.errors] == [1, 2]
+    assert "already associated with group_id cms-tv" in parsed.errors[0].reason
+
+
+def test_flags_a_repeated_channel_carrying_no_group() -> None:
+    """With no group there is no many-to-many justification for the repeat."""
+    csv_text = (
+        "youtube_channel_id,channel_name\n"
+        f"{CHANNEL_ID},Alpha News\n"
+        f"{CHANNEL_ID},Alpha News\n"
+    )
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.rows == ()
+    assert [error.row_number for error in parsed.errors] == [1, 2]
+    assert "with no group_id" in parsed.errors[0].reason
+
+
+def test_reports_the_conflict_when_a_repeat_also_disagrees() -> None:
+    """A channel with no settled inventory has no group to attach yet.
+
+    Both rules match these rows; naming the repeat would send the operator to
+    fix the lesser defect.
+    """
+    csv_text = (
+        "youtube_channel_id,channel_name,group_id\n"
+        f"{CHANNEL_ID},First,cms-tv\n"
+        f"{CHANNEL_ID},Second,cms-tv\n"
+    )
+    parsed = parse_channel_import_csv(csv_text)
+    assert parsed.rows == ()
+    assert all("conflicting duplicate" in error.reason for error in parsed.errors)
+
+
 def test_flags_malformed_channel_id() -> None:
     csv_text = "youtube_channel_id,channel_name\nهاشتاج,CBC\n"
     parsed = parse_channel_import_csv(csv_text)

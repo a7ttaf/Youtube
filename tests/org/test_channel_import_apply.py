@@ -15,14 +15,19 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistry
 from ums_smart_revenue.org.channel_import import (
+    ChannelImportGroupAction,
     ChannelImportOutcome,
     ChannelImportPlan,
     ChannelImportPlanEntry,
+    parse_channel_import_csv,
+    plan_channel_import,
 )
 from ums_smart_revenue.org.channel_import_apply import (
     ChannelImportAdoptableGroupError,
     ChannelImportArchivedGroupError,
+    ChannelImportGroupActionDivergedError,
     ChannelImportGroupOwnerMismatchError,
+    _group_write_batches,
     apply_channel_import,
 )
 from ums_smart_revenue.org.channel_registry import ChannelRegistry, ChannelRegistryEntry
@@ -467,3 +472,297 @@ def test_group_unstamped_between_plan_and_apply_fails_closed() -> None:
     assert stored.channel_ids == ()
     assert stored.content_owner_id == CONTENT_OWNER
     assert sink.records == []
+
+
+def test_a_diverged_group_key_owned_by_another_owner_is_refused_before_writing() -> None:
+    """Existence, not ownership — the pre-flight must judge what the lock judges.
+
+    A stale CREATE label whose key has since been created by a DIFFERENT
+    content owner is absent from this owner's set, so an ownership-only
+    pre-flight passes it, the inventory pass writes every channel, and only
+    then does the locked check see the group and raise (review #184, codex P2).
+
+    The four bulk lookups are exhaustive over the ways a key can resolve, so
+    their union is the same existence question ``get_group_by_cms_id`` answers.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Old Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    groups = ChannelGroupRegistry()
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id="SomeOtherOwnerAAAAAAAA",
+    )
+    sink = InMemoryAuditSink()
+    plan = _plan(
+        ChannelImportPlanEntry(
+            row_number=1,
+            youtube_channel_id=CHANNEL_ID,
+            outcome=ChannelImportOutcome.UPDATE,
+            channel_name="Renamed By Import",
+            group_id="cms-tv",
+            group_action=ChannelImportGroupAction.CREATE,
+            revenue_required=True,
+            changes={"channel_name": ("Old Name", "Renamed By Import")},
+        )
+    )
+
+    with pytest.raises(ChannelImportGroupActionDivergedError):
+        _apply(plan, registry, groups, sink)
+
+    assert sink.records == []
+    stored = registry.get_channel(CHANNEL_ID)
+    assert stored is not None
+    assert stored.channel_name == "Old Name"
+
+
+def test_a_diverged_group_effect_is_refused_before_any_channel_is_written() -> None:
+    """Refuse while there is still nothing to roll back.
+
+    The authoritative group-effect check runs under each group's row lock, in
+    the SECOND pass — after every channel row has already been written. A store
+    with no transaction cannot take those back, so the caller saw a refusal
+    while the registry held the roster values that refusal said were not
+    applied (review #184, codex P2).
+
+    Called directly rather than through the route, because that is the shape
+    this protects: the route re-plans inside the apply request and puts
+    `group_action` in the fingerprint, so a bound apply catches most of this at
+    the fingerprint compare. A DIRECT caller — tests, bootstrap, any future
+    domain-side caller — hands over a plan built earlier, and this plan's
+    CREATE label is already wrong when apply_channel_import is entered.
+
+    Asserting the REGISTRY, not just the raise: the raise was already correct
+    before the pre-flight existed.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Old Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    groups = ChannelGroupRegistry()
+    # The group the plan says will be CREATED already exists, and belongs to
+    # this owner — so the reviewed effect is a JOIN and the label is stale.
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    sink = InMemoryAuditSink()
+    plan = _plan(
+        ChannelImportPlanEntry(
+            row_number=1,
+            youtube_channel_id=CHANNEL_ID,
+            outcome=ChannelImportOutcome.UPDATE,
+            channel_name="Renamed By Import",
+            group_id="cms-tv",
+            group_action=ChannelImportGroupAction.CREATE,
+            revenue_required=True,
+            changes={"channel_name": ("Old Name", "Renamed By Import")},
+        )
+    )
+
+    with pytest.raises(ChannelImportGroupActionDivergedError):
+        _apply(plan, registry, groups, sink)
+
+    assert sink.records == []
+    stored = registry.get_channel(CHANNEL_ID)
+    assert stored is not None
+    # The refusal cost no write: the roster's name never landed.
+    assert stored.channel_name == "Old Name"
+    assert groups.get_group_by_cms_id("cms-tv").channel_ids == ()
+
+
+def test_a_plan_disagreeing_with_itself_about_a_group_is_refused_before_writing() -> None:
+    """Two actions for one key must not slip past by being collapsed.
+
+    The pre-flight used a dict keyed by group_id, which is LAST-wins, while the
+    locked group pass takes its action from ``entries[0]`` of the batch — the
+    FIRST. So a plan carrying both CREATE and JOIN for one key had the two
+    halves judging different labels, and the pre-flight could approve the one
+    the write boundary was never going to use (review #184, qodo).
+
+    Checking every entry removes the need to detect the contradiction as such:
+    existence is one fact per key, so of two disagreeing labels exactly one must
+    contradict it. Here the group EXISTS, so the JOIN copy is consistent and the
+    CREATE copy is not — and it is the CREATE copy that the dict discarded.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Old Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    groups = ChannelGroupRegistry()
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    sink = InMemoryAuditSink()
+    # CREATE first, JOIN second: the dict comprehension kept JOIN (which the
+    # store agrees with) and dropped the CREATE that should have failed.
+    entries = (
+        ChannelImportPlanEntry(
+            row_number=1,
+            youtube_channel_id=CHANNEL_ID,
+            outcome=ChannelImportOutcome.UPDATE,
+            channel_name="Renamed By Import",
+            group_id="cms-tv",
+            group_action=ChannelImportGroupAction.CREATE,
+            revenue_required=True,
+            changes={"channel_name": ("Old Name", "Renamed By Import")},
+        ),
+        ChannelImportPlanEntry(
+            row_number=2,
+            youtube_channel_id=CHANNEL_ID,
+            outcome=ChannelImportOutcome.UNCHANGED,
+            channel_name="Renamed By Import",
+            group_id="cms-tv",
+            group_action=ChannelImportGroupAction.JOIN,
+            revenue_required=True,
+        ),
+    )
+    counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
+    counts[ChannelImportOutcome.UPDATE.value] = 1
+    counts[ChannelImportOutcome.UNCHANGED.value] = 1
+
+    with pytest.raises(ChannelImportGroupActionDivergedError):
+        _apply(ChannelImportPlan(entries=entries, counts=counts), registry, groups, sink)
+
+    assert sink.records == []
+    stored = registry.get_channel(CHANNEL_ID)
+    assert stored is not None
+    assert stored.channel_name == "Old Name"
+
+
+def test_a_stale_label_on_a_non_actionable_entry_is_not_refused() -> None:
+    """The pre-flight must judge exactly what the write pass will act on.
+
+    Checking every entry rather than a collapsed dict fixed a last-wins bug, but
+    it also widened the SET being judged: the group pass skips any entry without
+    a channel identity (``_group_write_batches``), so judging those refuses a
+    plan over work the write boundary was never going to do.
+
+    Here the only actionable group work is a valid JOIN. The second entry
+    carries a stale CREATE for the same key but no ``youtube_channel_id``, so
+    the write pass ignores it — and so must the pre-flight. Both filters now go
+    through ``_performs_group_write`` so they cannot drift apart again.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Alpha News",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+    groups = ChannelGroupRegistry()
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    sink = InMemoryAuditSink()
+    entries = (
+        ChannelImportPlanEntry(
+            row_number=1,
+            youtube_channel_id=CHANNEL_ID,
+            outcome=ChannelImportOutcome.UNCHANGED,
+            channel_name="Alpha News",
+            group_id="cms-tv",
+            group_action=ChannelImportGroupAction.JOIN,
+            revenue_required=True,
+        ),
+        # No channel identity: not group work, so its label is not a claim the
+        # write boundary will ever act on.
+        ChannelImportPlanEntry(
+            row_number=2,
+            youtube_channel_id=None,
+            outcome=ChannelImportOutcome.ERROR,
+            group_id="cms-tv",
+            group_action=ChannelImportGroupAction.CREATE,
+            reason="something else was wrong with this row",
+        ),
+    )
+    counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
+    counts[ChannelImportOutcome.UNCHANGED.value] = 1
+    counts[ChannelImportOutcome.ERROR.value] = 1
+
+    _apply(ChannelImportPlan(entries=entries, counts=counts), registry, groups, sink)
+
+    # The JOIN happened; nothing was refused.
+    assert groups.get_group_by_cms_id("cms-tv").channel_ids == (CHANNEL_ID,)
+
+
+def test_no_plan_promises_a_group_effect_the_write_pass_will_not_perform() -> None:
+    """Every row disclosing a group effect must map to a membership write.
+
+    The batcher collapses a repeated ``(channel, group)`` pair so one channel
+    is never handed to ``add_members`` twice. Planning has to refuse that
+    repeat rather than emit a second row carrying the same ``group_action``,
+    or the preview counts group work the apply does once (review #184).
+    """
+    csv_text = (
+        "youtube_channel_id,channel_name,group_id\n"
+        f"{CHANNEL_ID},Alpha News,cms-tv\n"
+        f"{CHANNEL_ID},Alpha News,cms-tv\n"
+        f"{CHANNEL_ID},Alpha News,cms-radio\n"
+    )
+    parsed = parse_channel_import_csv(csv_text)
+    plan = plan_channel_import(
+        rows=parsed.rows,
+        errors=parsed.errors,
+        existing={},
+        content_owner_id="OWNER1",
+        cms_status="INSIDE_CMS",
+        owned_group_ids=frozenset(),
+    )
+
+    claimed = [entry for entry in plan.entries if entry.group_action is not None]
+    written = [entry for _, entries in _group_write_batches(plan.entries) for entry in entries]
+
+    assert len(claimed) == len(written)
+    # Only the repeated pair is refused: making the counts agree by dropping
+    # the legal cms-radio association would satisfy the assertion above while
+    # losing the roster's actual intent.
+    assert plan.counts[ChannelImportOutcome.ERROR.value] == 2
+    surviving = [
+        entry for entry in plan.entries if entry.outcome is not ChannelImportOutcome.ERROR
+    ]
+    assert [entry.group_id for entry in surviving] == ["cms-radio"]

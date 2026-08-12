@@ -780,6 +780,88 @@ single P-tier above.
   viewers narrowed to their granted connector ids (no foreign-credential leak);
   offset-paginated (`limit` ≤ `100`). Token-health frontend wired into
   ConnectorsView. Read-only: no audit write, no migration.
+- ✅ Import stepper UI — PR-B of the import/sync UI arc (2026-08-09, branch
+  `feat/import-stepper-ui`) — closes the arc PR-A opened: the Registry
+  header's disabled Bulk Import placeholder becomes a live **Import CSV**
+  action that swaps the main panel for a three-step **Upload → Preview →
+  Applied** stepper over `POST /channels/import`, reusing PR-A's
+  `ActionStepper`/`OutcomeTable` primitives and the credential-fed
+  content-owner picker (empty state points at Connectors). Upload collects
+  the roster CSV + content owner + required audited reason and always fires
+  the read-only dry-run first; Preview renders per-row outcome chips
+  (CREATE/UPDATE/UNCHANGED/ERROR), the field-level `changes` diff, group
+  effect, the revenue flag (spec-mandated — on CREATE rows the diff is
+  empty by design, so the column is the only preview surface for the
+  default-true `revenue_required` before the all-or-nothing apply), and
+  non-zero counts, with **ERROR rows blocking Apply** (the API
+  422s the whole file — all-or-nothing; remedy named inline) and the 422
+  apply race (concurrent editor between preview and apply) replacing the
+  stale plan with the refreshed payload the backend ships as `detail`;
+  Applied echoes counts + reason, and leaving the flow reloads the table
+  (Cancel restores it untouched — no refetch unless an apply committed).
+  Backend touch (1, additive): a `can_import_channels` session capability
+  derived from MANAGE_CHANNELS **and** MANAGE_GROUPS (both-permission
+  render hint — a group-bearing roster needs both, so a channels-only
+  principal never sees a control that 403s mid-flow) gating the header
+  action — hidden, not disabled, without it. No new endpoint; no migration.
+  `can_import_channels` is the **Python field name**; `SessionCapabilities`
+  sets `alias_generator=to_camel`, so the key a client actually reads from
+  `/session/me` is **`canImportChannels`**. Both names are given because this
+  is the repo's frontend/backend casing seam, and a consumer that checks the
+  snake_case key finds `undefined` and silently hides Import CSV for everyone
+  (review #184, qodo).
+  Review round (2026-08-09, PR #184) added four corrections, all about the
+  preview telling the truth: (1) **both exits fail closed mid-request** —
+  Cancel and Preview's Back were live while an apply POST was in flight, and
+  since the hook has no abort and the backend commits independently, either
+  exit unmounted the flow while the write went on to land, showing a
+  cancelled import that actually committed (`ActionStepper` gained an
+  optional `cancelDisabledReason`); (2) the Channel cell shows the durable
+  `youtube_channel_id` **alongside** the mutable, non-unique `channel_name`
+  instead of falling back to it; (3) the Applied step labels its counts
+  **"Approved plan"** and names `CHANNEL_IMPORTED` as the authority, because
+  the route answers an apply with its PRE-write plan payload while the apply
+  tallies what it actually wrote under the write-boundary lock; (4) a second
+  additive backend touch — `group_action` (`CREATE`/`JOIN`) on each import
+  row, from a fourth bulk group lookup (`list_owned_cms_group_ids`), so the
+  Group cell can say whether a `Group_ID` **mints a new SECTOR group** (a
+  finance-scope object) or attaches to one this owner already holds. Still
+  no new endpoint and no migration.
+  **Backend scope correction (2026-08-11).** The two "additive touch" notes
+  above were written early and undercount what the PR ships: the final diff
+  is **2029 insertions across eight backend files as of `742dcc66`**, the
+  commit that last changed `backend/`, and
+  calling it additive reads as frontend-with-a-flag. Beyond
+  `can_import_channels` and `group_action`, the route gained
+  `expected_plan_fingerprint` — a **plan-bound apply** that 409s with the
+  refreshed plan when the reviewed pre-state has drifted — a
+  `plan_fingerprint` widened to cover the target *and* the server-resolved
+  tenant, `revenue_source_status` disclosure on every row, and a
+  write-boundary recheck of the previewed group effect under the group row
+  lock that applies to **unbound callers too**. A later round added a third
+  refusal: the parser now rejects a roster that **restates the same
+  `(youtube_channel_id, group_id)` pair**, for a reason that differs by shape:
+  a pair naming a group is collapsed into one membership by the write pass
+  while planning promises it twice, and a pair carrying **no** group never
+  reaches that pass at all — it is refused because the second copy is a
+  phantom `UNCHANGED` row reporting two outcomes for a channel named once. It
+  is the only change on this branch that refuses input the previous code
+  accepted, and it is therefore **BREAKING**: such a roster returned 200
+  before and returns 422 now, so an existing file carrying a restated line
+  must be deduped before it applies again. What is preserved is the REGISTRY
+  result — the restated row is not a no-op (`UNCHANGED` rows write through the
+  boundary) but only re-wrote what its first copy installed, so the same
+  channel rows and memberships land. The one persisted change is the durable
+  `CHANNEL_IMPORTED` `counts`, one lower without the restated row, which is
+  the double count the rule exists to remove. All three new behaviours are
+  refusals, so the no-endpoint and
+  no-migration claims still hold, and the unbound "the file wins" rule of
+  #159 is untouched. Scope, rollback ordering and the per-file evidence live
+  in `Docs/pulls/2026-08-09-pr-184-import-stepper-ui-handoff.md`.
+  The insertion figure names the commit it measured because it moves whenever
+  backend code does — including comment-only rounds; re-derive it with
+  `git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`
+  rather than trusting this line if the branch has advanced.
 - ✅ Groups view UI — PR-A of the import/sync UI arc (2026-08-07, branch
   `feat/groups-view-ui`) — the grouping loop gets its first operator surface:
   a new **CMS Groups** nav view (table-first: name · CMS id · owner stamp ·

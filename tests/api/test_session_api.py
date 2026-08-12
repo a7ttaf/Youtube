@@ -18,7 +18,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from ums_smart_revenue.api.session import _derive_capabilities
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
     RoleORM,
@@ -130,6 +134,8 @@ def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
     assert caps["canViewAnalytics"] is True
     # finance_admin holds VIEW_REVENUE but NOT MANAGE_CHANNELS (disjoint role sets).
     assert caps["canManageRegistry"] is False
+    # finance_admin holds neither MANAGE_CHANNELS nor MANAGE_GROUPS.
+    assert caps["canImportChannels"] is False
     assert caps["canViewAudit"] is True
     # finance_admin lacks connector permissions in ROLE_PERMISSIONS (seed.py).
     assert caps["canRunConnectorJobs"] is False
@@ -221,6 +227,8 @@ def test_session_me_header_mode_revenue_ops_admin_can_manage_groups(client_heade
     assert response.status_code == 200, response.text
     caps = response.json()["capabilities"]
     assert caps["canManageGroups"] is True
+    # ...and MANAGE_CHANNELS, so the both-permission import hint is true too.
+    assert caps["canImportChannels"] is True
 
 
 def test_session_me_header_mode_finance_admin_cannot_manage_groups(client_headers_mode):
@@ -316,6 +324,46 @@ def test_session_me_header_mode_audit_viewer_cannot_view_analytics(
     assert response.status_code == 200, response.text
     caps = response.json()["capabilities"]
     assert caps["canViewAnalytics"] is False
+
+
+# ---------------------------------------------------------------------------
+# Capability derivation — canImportChannels needs MANAGE_CHANNELS AND
+# MANAGE_GROUPS (POST /channels/import gates on both once a roster carries
+# Group_ID). No seeded role holds either permission alone, so the each-alone
+# cases build role-less principals from direct global-scope grants.
+# ---------------------------------------------------------------------------
+
+
+def _direct_grant_principal(*permissions: Permission) -> UserPrincipal:
+    """Build a role-less principal holding *permissions* as direct global grants."""
+    return UserPrincipal(
+        user_id=str(FINANCE_ADMIN_ID),
+        email="direct-grants@example.invalid",
+        direct_permissions=tuple(
+            PermissionGrant(permission=permission, scope=AccessScope.global_scope())
+            for permission in permissions
+        ),
+    )
+
+
+def test_derive_capabilities_import_channels_requires_both_permissions():
+    """MANAGE_CHANNELS + MANAGE_GROUPS together turn the import hint on."""
+    capabilities = _derive_capabilities(
+        _direct_grant_principal(Permission.MANAGE_CHANNELS, Permission.MANAGE_GROUPS)
+    )
+    assert capabilities.can_import_channels is True
+
+
+def test_derive_capabilities_import_channels_channels_alone_insufficient():
+    """MANAGE_CHANNELS alone stays false: group-bearing rosters would 403 mid-flow."""
+    capabilities = _derive_capabilities(_direct_grant_principal(Permission.MANAGE_CHANNELS))
+    assert capabilities.can_import_channels is False
+
+
+def test_derive_capabilities_import_channels_groups_alone_insufficient():
+    """MANAGE_GROUPS alone stays false: the route always requires MANAGE_CHANNELS."""
+    capabilities = _derive_capabilities(_direct_grant_principal(Permission.MANAGE_GROUPS))
+    assert capabilities.can_import_channels is False
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +568,8 @@ def test_session_me_db_mode_finance_admin_capabilities(client_db_mode):
     assert caps["canExportRevenue"] is True
     assert caps["canExportAnalyticsReports"] is True
     assert caps["canManageRegistry"] is False
+    # finance_admin holds neither MANAGE_CHANNELS nor MANAGE_GROUPS.
+    assert caps["canImportChannels"] is False
     assert caps["canViewAudit"] is True
     assert caps["canRunConnectorJobs"] is False
     assert caps["canManageConnectors"] is False
@@ -546,6 +596,8 @@ def test_session_me_db_mode_revenue_ops_admin_can_run_connector_jobs(client_db_m
     # revenue_operations_admin holds EXPORT_ANALYTICS_REPORT but not EXPORT_REVENUE_REPORT.
     assert caps["canExportAnalyticsReports"] is True
     assert caps["canExportRevenue"] is False
+    # revenue_operations_admin holds both MANAGE_CHANNELS and MANAGE_GROUPS.
+    assert caps["canImportChannels"] is True
 
 
 # ---------------------------------------------------------------------------

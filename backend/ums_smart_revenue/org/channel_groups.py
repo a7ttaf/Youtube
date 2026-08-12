@@ -204,6 +204,39 @@ class ChannelGroupRegistryStore(Protocol):
         an ownership claim the request already carries.
         """
 
+    # ========================================================================
+    # Purpose: Bulk-classify a roster's CMS group keys by "this owner already
+    #   holds it", so planning can label each row CREATE or JOIN without a
+    #   lookup-per-group query storm.
+    # Database/ORM: ChannelGroupORM (read-only; cms_group_id + content_owner_id
+    #   under the per-tenant unique key). No membership loading, no writes.
+    # Standards: One bounded SELECT for the whole key set, tenant-scoped, and
+    #   the only one of the four bulk key lookups that REPORTS rather than
+    #   refuses — its three siblings (archived, cross-owner, adoptable) all
+    #   exist to fail rows closed. That difference is the point: without a
+    #   non-refusing lookup, "exists and is mine" was unrepresentable, and the
+    #   preview could not tell CREATE from JOIN (review #184).
+    # Blast Radius: The preview's group-effect claim and the write-boundary
+    #   recheck built on it. Read-only.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import.py ->
+    #     _planned_group_action consumes this set.
+    # ========================================================================
+    def list_owned_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys already stamped to THIS content owner.
+
+        The fourth and last of the matched bulk lookups, and the only one that
+        is not a refusal: the other three name keys whose rows the planner
+        FAILS, while this one names the keys the import will JOIN rather than
+        CREATE. Without it the four are not exhaustive — a key absent from all
+        of archived/foreign/adoptable is either an existing group of this
+        owner's or no group at all, and those are the two outcomes the
+        operator most needs told apart before approving. One bulk lookup, no
+        membership loading, unknown keys absent — matching its siblings.
+        """
+
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         pass
 
@@ -331,6 +364,40 @@ class ChannelGroupRegistry:
             group.cms_group_id
             for group in self._groups.values()
             if group.cms_group_id in cms_group_ids and group.content_owner_id is None
+        }
+
+    # ========================================================================
+    # Purpose: In-memory implementation of the "this owner already holds it"
+    #   lookup — the read that lets the preview label a roster's Group_ID rows
+    #   CREATE or JOIN.
+    # Database/ORM: None — a scan of the in-memory group map. The SQL adapter
+    #   is the one that issues the bounded, tenant-scoped SELECT; this exists
+    #   so the planner and its guards can be exercised without a database.
+    # Standards: Must answer IDENTICALLY to sql_channel_groups.py, because the
+    #   planner's CREATE label is decided by ABSENCE from this set. Two
+    #   conditions carry that: membership in the requested key set, and an
+    #   EXACT content_owner_id match — an owner-NULL group is deliberately not
+    #   "mine", so it stays absent here and is refused by the adoptable lookup
+    #   rather than silently planned as a CREATE that then collides on the
+    #   per-tenant unique cms_group_id. Read-only, no membership loading, and
+    #   unknown keys are simply absent (review #184).
+    # Blast Radius: Whether the preview promises "new group" or "adds to
+    #   existing", and — because the write boundary re-checks that promise —
+    #   whether a diverged effect 409s the whole import. No writes.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the SQL
+    #     adapter this must agree with.
+    #   - File: backend/ums_smart_revenue/org/channel_import.py ->
+    #     _planned_group_action, the sole consumer of the returned set.
+    # ========================================================================
+    def list_owned_cms_group_ids(
+        self, cms_group_ids: set[str], *, content_owner_id: str
+    ) -> set[str]:
+        """Return the subset of CMS keys already stamped to this content owner."""
+        return {
+            group.cms_group_id
+            for group in self._groups.values()
+            if group.cms_group_id in cms_group_ids and group.content_owner_id == content_owner_id
         }
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:

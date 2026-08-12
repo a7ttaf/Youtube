@@ -17,6 +17,8 @@
 # ============================================================================
 """Channel registry, bulk-import, and CMS group sync HTTP routes."""
 
+import hashlib
+import json
 from collections.abc import Callable
 from typing import Annotated
 from uuid import UUID
@@ -76,7 +78,9 @@ from ums_smart_revenue.org.channel_import import (
 from ums_smart_revenue.org.channel_import_apply import (
     ChannelImportAdoptableGroupError,
     ChannelImportArchivedGroupError,
+    ChannelImportGroupActionDivergedError,
     ChannelImportGroupOwnerMismatchError,
+    ChannelImportRowStateDivergedError,
     apply_channel_import,
     plan_channel_import_with_stores,
 )
@@ -167,14 +171,28 @@ class ChannelImportFieldChange(BaseModel):
     to_value: str | bool | None = Field(alias="to")
 
 
+class ChannelImportSourceStatusChange(BaseModel):
+    """The revenue_source_status transition a row's write will perform.
+
+    Separate from ChannelImportFieldChange because ``from`` is genuinely
+    absent for a CREATE — the channel has no prior classification — where the
+    inventory diff's pairs always have both sides.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_value: str | None = Field(alias="from")
+    to_value: str = Field(alias="to")
+
+
 class ChannelImportRowResult(BaseModel):
     """One CSV row's planned or applied outcome.
 
-    ``outcome``, ``changes``, and ``group_id`` describe every write the row
-    performs — there is no ownership write hiding behind them. An import never
-    claims an existing group for its content owner (a row targeting an unowned
-    group is an ERROR naming the sync remedy), so the only stamp it can write
-    belongs to a group the same row creates.
+    ``outcome``, ``changes``, ``group_id`` and ``group_action`` describe every
+    write the row performs — there is no ownership write hiding behind them.
+    An import never claims an existing group for its content owner (a row
+    targeting an unowned group is an ERROR naming the sync remedy), so the
+    only stamp it can write belongs to a group the same row creates.
     """
 
     row_number: int
@@ -182,8 +200,26 @@ class ChannelImportRowResult(BaseModel):
     outcome: str
     channel_name: str | None
     group_id: str | None
+    # "CREATE" (this row mints a new SECTOR group, stamped to the request's
+    # content owner at birth) or "JOIN" (the owner already holds the group;
+    # the row attaches the channel to it unless it is already a member).
+    # Null when the row carries no group_id, and on every ERROR row — those
+    # write nothing at all. The literal set is ChannelImportGroupAction
+    # (channel_import.py); the field itself is a plain str, matching how
+    # `outcome` renders its own enum.
+    group_action: str | None
     revenue_required: bool | None
     changes: dict[str, ChannelImportFieldChange]
+    # The revenue_source_status this row's write will leave on the channel,
+    # when it changes it. Kept OUT of `changes` deliberately: that map holds
+    # the operator's own field edits and is what the write-boundary pre-state
+    # guard compares against, whereas this value is DERIVED by the registry
+    # from the revenue_required flip. Disclosed because it drives
+    # `missing_official_revenue` and the registry's recommended action, so a
+    # preview omitting it asks the operator to approve a finance-source
+    # mutation the diff never mentions (review #184). `from` is null for a
+    # CREATE; the whole field is null when the write leaves the status alone.
+    revenue_source_status: ChannelImportSourceStatusChange | None
     reason: str | None
 
 
@@ -195,6 +231,24 @@ class ChannelImportResult(BaseModel):
     cms_status: str
     counts: dict[str, int]
     rows: list[ChannelImportRowResult]
+    # Digest of the plan content above (`counts` + `rows`) AND the TARGET the
+    # write lands in: `content_owner_id`, `cms_status`, and the server-resolved
+    # tenant. A client echoes a dry run's value back as
+    # `expected_plan_fingerprint` on the apply, and a mismatch is a 409: the
+    # apply re-plans from CURRENT state, so without this a row reviewed as
+    # CREATE could silently commit as an UPDATE over a concurrently created
+    # channel (review #184).
+    #
+    # The target inputs are LOAD-BEARING, not incidental. An all-CREATE roster's
+    # rows carry no owner (a CREATE's `changes` is empty by design), so a digest
+    # over content alone let a preview approved for owner A authorize the same
+    # plan against owner B; the tenant is in for the same reason across
+    # tenancies. It is server-resolved and never client-supplied, which is what
+    # makes it a boundary rather than an echo — and it is why this digest is
+    # NOT reproducible client-side. It is an opaque equality token to echo
+    # back, not a checksum to recompute. Only `dry_run` is outside it, because
+    # a preview and its apply differ in it by definition.
+    plan_fingerprint: str
 
 
 class GroupSyncGroupResult(BaseModel):
@@ -648,6 +702,7 @@ def import_channels(
     dry_run: Annotated[bool, Form()],
     reason: Annotated[str, Form()],
     cms_status: Annotated[str, Form()] = "INSIDE_CMS",
+    expected_plan_fingerprint: Annotated[str | None, Form()] = None,
 ) -> ChannelImportResult:
     """Import a CMS channel roster CSV, previewing or applying every row."""
     target_scope = AccessScope.global_scope()
@@ -682,13 +737,33 @@ def import_channels(
         cms_status=cms_status,
     )
     payload = _import_plan_to_api(
-        plan, dry_run=dry_run, content_owner_id=content_owner_id, cms_status=cms_status
+        plan,
+        dry_run=dry_run,
+        content_owner_id=content_owner_id,
+        cms_status=cms_status,
+        # The RESOLVED tenant, not a client-supplied echo: an approval obtained
+        # in one tenant must not be spendable in another.
+        tenant_id=str(_resolve_tenant_uuid(user)),
     )
 
     if plan.has_errors and not dry_run:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=payload)
     if dry_run:
         return ChannelImportResult.model_validate(payload)
+
+    # The apply re-plans from CURRENT state, so the plan about to execute is
+    # not necessarily the one the operator reviewed: a concurrent writer can
+    # turn a reviewed CREATE into an UPDATE that overwrites their new channel,
+    # or a group CREATE into a JOIN. Binding the apply to the reviewed plan's
+    # fingerprint makes that divergence a retryable 409 carrying the REFRESHED
+    # plan, so approval is re-sought against reality instead of a stale
+    # preview (review #184). Optional for API clients that never previewed —
+    # they are not re-approving anything — but the SPA always sends it.
+    if (
+        expected_plan_fingerprint is not None
+        and expected_plan_fingerprint != payload["plan_fingerprint"]
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=payload)
 
     try:
         apply_channel_import(
@@ -702,6 +777,13 @@ def import_channels(
             cms_status=cms_status,
             reason=reason,
             filename=file.filename,
+            # A client that bound its apply to a reviewed plan is saying
+            # "apply the diff I reviewed, or none of it", so a row whose
+            # pre-state moved in the re-plan-to-row-lock window fails closed
+            # rather than overwriting a value the operator never saw. Off for
+            # unbound callers, who are re-approving nothing and keep the
+            # documented default (the file wins).
+            enforce_reviewed_pre_state=expected_plan_fingerprint is not None,
         )
     # A group whose owner stamp was cleared between the plan and the write is
     # the one plan-to-apply race the operator's preview cannot have shown: the
@@ -727,7 +809,9 @@ def import_channels(
     except (
         ChannelGroupConflictError,
         ChannelImportArchivedGroupError,
+        ChannelImportGroupActionDivergedError,
         ChannelImportGroupOwnerMismatchError,
+        ChannelImportRowStateDivergedError,
         ChannelRegistryConflictError,
         ChannelRevenueRequirementLockedMonthError,
     ) as exc:
@@ -829,8 +913,56 @@ def _parse_import_upload(file: UploadFile) -> ParsedChannelImport:
         ) from exc
 
 
+# ============================================================================
+# Purpose: Render an import plan as the API response body — which is the same
+#   object twice over: the disclosure the operator approves, and the material
+#   ``_plan_fingerprint`` binds an apply to. The relationship runs ONE way and
+#   the asymmetry is deliberate. Everything the operator REVIEWS is inside the
+#   token, so nothing they approved can change under a bound apply; but the
+#   token is not limited to what is shown. It also covers the server-resolved
+#   ``tenant_id``, which is withheld from this body on purpose — a client that
+#   could see it is a client that could try to name it. So adding a field HERE
+#   means adding it to the digest, while adding one to the DIGEST obliges no
+#   disclosure, and for the tenant must not. Do not "restore symmetry" by
+#   exposing the tenant or by dropping it from the digest: the first hands the
+#   client a value it must not choose, the second lets a plan reviewed in one
+#   tenant authorize a write in another.
+# Database/ORM: None — a pure projection of an already-computed plan. It issues
+#   no query and re-reads nothing; ``tenant_id`` arrives resolved.
+# Standards: Every row echoes the planned inventory VALUES, not just the field
+#   diff — a CREATE's ``changes`` is empty by design, and the dry run exists so
+#   the operator can see the exact values a full-roster apply would write.
+#   ``revenue_source_status`` is disclosed OUTSIDE ``changes`` on purpose: it is
+#   derived by the write rather than asserted by the CSV, and ``changes`` is
+#   what the write-boundary pre-state guard compares, so folding it in would
+#   make that guard police a field the roster never claimed. ``rows`` is
+#   annotated rather than inferred because ``list`` is invariant and the
+#   inferred element type would not satisfy ``_plan_fingerprint``. Both modes
+#   render the PLAN — unlike the sync route, whose apply renders the write
+#   boundary's own record.
+# Blast Radius: FINANCE + TENANCY + write authorization. These counts are the
+#   APPROVED PLAN, never the committed result: the apply re-checks every row
+#   under its write-boundary lock and tallies what it actually wrote into the
+#   ``CHANNEL_IMPORTED`` event, so a concurrent writer can turn a planned
+#   UPDATE into a no-op. Consumers must label them as the plan — the SPA's
+#   Applied step does. The tenant reaching the digest here is what stops a plan
+#   reviewed in one tenant from authorizing a write in another.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> _plan_fingerprint,
+#     which digests exactly this payload plus the resolved tenant.
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     ChannelImportPlan / ChannelImportPlanEntry, the source of every field.
+#   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult,
+#     the client-side structural gate that mirrors this shape field for field.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the documented response contract.
+# ============================================================================
 def _import_plan_to_api(
-    plan: ChannelImportPlan, *, dry_run: bool, content_owner_id: str, cms_status: str
+    plan: ChannelImportPlan,
+    *,
+    dry_run: bool,
+    content_owner_id: str,
+    cms_status: str,
+    tenant_id: str,
 ) -> dict[str, object]:
     """Render an import plan as the API response body.
 
@@ -841,32 +973,143 @@ def _import_plan_to_api(
     CMS status are echoed at the top level for the same reason.
 
     Both modes render the PLAN — unlike the sync route, whose apply renders the
-    write boundary's own record. That is safe here because the plan states
-    every write a row performs: the import claims no existing group's
-    ownership, so there is no write the apply could make that this payload
-    does not already show.
+    write boundary's own record. No KIND of write hides behind it: the import
+    claims no existing group's ownership, and ``group_action`` now names the
+    one remaining effect ``group_id`` alone left ambiguous (mint a new SECTOR
+    group vs attach to this owner's existing one). The plan is still not a
+    re-read, though: the apply re-checks every row under its write-boundary
+    lock and tallies what it ACTUALLY wrote into the CHANNEL_IMPORTED audit
+    event, so a concurrent writer can make a planned UPDATE a no-op. Consumers
+    must present these counts as the approved plan, not as the committed
+    result — the SPA's Applied step labels them exactly that way.
     """
+    counts = dict(plan.counts)
+    # Annotated rather than inferred: list is INVARIANT, so the literal's
+    # inferred list[dict[str, <union of cell types>]] is not a
+    # list[dict[str, object]] and would not satisfy _plan_fingerprint.
+    rows: list[dict[str, object]] = [
+        {
+            "row_number": entry.row_number,
+            "youtube_channel_id": entry.youtube_channel_id,
+            "outcome": entry.outcome.value,
+            "channel_name": entry.channel_name,
+            "group_id": entry.group_id,
+            "group_action": (entry.group_action.value if entry.group_action is not None else None),
+            "revenue_required": entry.revenue_required,
+            "changes": {
+                name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
+            },
+            # Disclosed separately from `changes` on purpose: the source status
+            # is DERIVED by the write, not carried by the CSV, and `changes`
+            # holds the operator's own field edits (it is also what the
+            # write-boundary pre-state guard compares against). Folding a
+            # derived value in there would make the guard police a field the
+            # roster never asserted. Null when the write leaves it alone.
+            "revenue_source_status": (
+                {
+                    "from": entry.revenue_source_status[0],
+                    "to": entry.revenue_source_status[1],
+                }
+                if entry.revenue_source_status is not None
+                else None
+            ),
+            "reason": entry.reason,
+        }
+        for entry in plan.entries
+    ]
     return {
         "dry_run": dry_run,
         "content_owner_id": content_owner_id,
         "cms_status": cms_status,
-        "counts": dict(plan.counts),
-        "rows": [
-            {
-                "row_number": entry.row_number,
-                "youtube_channel_id": entry.youtube_channel_id,
-                "outcome": entry.outcome.value,
-                "channel_name": entry.channel_name,
-                "group_id": entry.group_id,
-                "revenue_required": entry.revenue_required,
-                "changes": {
-                    name: {"from": pair[0], "to": pair[1]} for name, pair in entry.changes.items()
-                },
-                "reason": entry.reason,
-            }
-            for entry in plan.entries
-        ],
+        "counts": counts,
+        "rows": rows,
+        "plan_fingerprint": _plan_fingerprint(
+            counts,
+            rows,
+            content_owner_id=content_owner_id,
+            cms_status=cms_status,
+            tenant_id=tenant_id,
+        ),
     }
+
+
+# ============================================================================
+# Purpose: Digest one import plan into the equality token an apply binds to,
+#   so a client can say "execute the plan I reviewed, or nothing".
+# Database/ORM: None — pure function over an already-rendered plan payload.
+# Standards: The digest is the CONTRACT, so its inputs are a change point:
+#   anything an operator reviews must be inside it (plan rows, counts, the
+#   content owner + CMS status the write targets, and the RESOLVED tenant it
+#   lands in) and anything that legitimately differs between a preview and its
+#   apply must be outside it (`dry_run`).
+#   Widening or narrowing this set silently changes what "same plan" means —
+#   omitting the target once let an apply commit under a content owner that was
+#   never reviewed (review #184). Canonical JSON (sort_keys + tight separators)
+#   keeps the token stable across dict ordering and Python versions. It is an
+#   equality token only: never a secret, never an authorization input, so a
+#   plain SHA-256 is the whole mechanism and no constant-time compare applies.
+# Blast Radius: Which applies are accepted vs rejected 409, and — because
+#   sending the token opts in to write-boundary pre-state enforcement — whether
+#   a diverged row rolls the import back. No writes of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> import_channels
+#     compares it against expected_plan_fingerprint before the apply.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     enforce_reviewed_pre_state, which that comparison switches on.
+#   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> sends
+#     the reviewed plan's token and re-binds to the refreshed plan on 409.
+# ============================================================================
+def _plan_fingerprint(
+    counts: dict[str, int],
+    rows: list[dict[str, object]],
+    *,
+    content_owner_id: str,
+    cms_status: str,
+    tenant_id: str,
+) -> str:
+    """Digest everything an operator reviews: the plan AND the target it targets.
+
+    ``content_owner_id`` and ``cms_status`` are IN the digest, not treated as
+    mere echoes of form fields the apply re-sends. They are reviewed values —
+    the preview step names the content owner on screen — and leaving them out
+    let an apply bind to a different target than the one reviewed: the SPA's
+    owner picker stayed live during the dry run, so an operator could preview
+    owner A, switch to B while the request was in flight, and apply against B.
+    On an all-CREATE roster the rows carry no owner (a CREATE's ``changes`` is
+    empty by design), so B's plan digested identically to A's and the guard
+    waved it through, committing channels and groups under the wrong content
+    owner (review #184).
+
+    ``tenant_id`` is in for the same reason and one step further out: it is the
+    resolved tenant, never a client echo. Without it, two EMPTY tenants and an
+    all-CREATE roster digest identically — a CREATE's ``changes`` is empty by
+    design and the rows carry no tenant — so a preview approved in tenant A
+    satisfied the guard on an apply directed at tenant B, and channels, groups
+    and audit records committed there on an approval that was never given for
+    them (review #184). Tenancy is the one boundary an equality token must
+    never straddle.
+
+    ``dry_run`` stays out, and that exclusion is load-bearing: a preview and
+    its apply differ in it by definition, so folding it in would make every
+    fingerprint mismatch — and a guard that always fires protects nothing.
+
+    ``sort_keys`` plus tight separators make this stable across dict ordering
+    and Python versions, so the same plan always digests the same way. It is an
+    equality token, never a secret and never an authorization input, so a plain
+    SHA-256 of the canonical JSON is the whole mechanism.
+    """
+    canonical = json.dumps(
+        {
+            "tenant_id": tenant_id,
+            "content_owner_id": content_owner_id,
+            "cms_status": cms_status,
+            "counts": counts,
+            "rows": rows,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class GroupSyncRequest(BaseModel):
