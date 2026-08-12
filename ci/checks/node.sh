@@ -1296,7 +1296,7 @@ script_exists() {
 # `${...}` and `{ts,tsx}` are arguments and are left alone.
 script_command() {
   local _ng_out=""
-  _normalize_groups "$(node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{})['$1']||''))}catch(e){}" 2>/dev/null || true)"
+  _normalize_command "$(node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{})['$1']||''))}catch(e){}" 2>/dev/null || true)"
   printf '%s' "$_ng_out"
 }
 
@@ -1883,10 +1883,23 @@ _reject_status_trap() {
 # spelling the shell reads as a group: `tests/**/*.{ts,tsx}` and `${VAR}` are an
 # argument and an expansion, and blanking those would corrupt the very arguments
 # these rules exist to read.
-_normalize_groups() {
+# And an unquoted newline is `;`.
+#
+# A package.json script is a JSON string, and a JSON string may contain a real
+# newline. The shell reads it as a command separator exactly like `;`, so
+# a `"test"` script whose text is `vitest run`, a newline, then `exit 0` runs
+# the suite and then replaces its status --
+# byte-for-byte the case the status rule refuses when it is spelled with a
+# semicolon. Nothing saw it: `;` is matched as a *token* by the reader below,
+# and a newline arrives there as ordinary whitespace between two tokens. Turned
+# into the separator it is, once, so every rule downstream reads one spelling.
+_normalize_command() {
   local _s="$1"
+  local _nl=$'\n' _cr=$'\r'
   case "$_s" in
     *['(){}']*) ;;
+    *"$_nl"*) ;;
+    *"$_cr"*) ;;
     *) _ng_out="$_s"; return 0 ;;
   esac
   local _bq_state="" _bq_out="" _bq_cont=0 _bq_esc=0
@@ -1911,6 +1924,9 @@ _normalize_groups() {
           *)  _out="$_out${_s:$_i:1}" ;;
         esac
         ;;
+      "$_nl"|"$_cr")
+        _out="$_out;"
+        ;;
       '{'|'}')
         _nx="${_m:$((_i + 1)):1}"
         _post=0
@@ -1930,14 +1946,34 @@ _normalize_groups() {
 }
 
 _command_runner() {
-  local _tok _ng_out=""
+  local _tok _ng_out="" _cr_dur=0
   _cr=""
-  _normalize_groups "$1"
+  _normalize_command "$1"
   set -f
   # shellcheck disable=SC2086
   for _tok in $_ng_out; do
+    # `timeout` takes a duration before the command it wraps, and a duration is
+    # a bare word. Without this the number became the program name, so
+    # `timeout 300 vitest run` resolved to `300`, matched no tool, and every
+    # argument rule was skipped -- while the predicate beside it also stopped at
+    # the wrapper and reported that the script runs no test runner at all.
+    if [ "$_cr_dur" -eq 1 ]; then
+      _cr_dur=0
+      case "$_tok" in
+        [0-9]*) continue ;;
+      esac
+    fi
     case "${_tok##*/}" in
-      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run) continue ;;
+      # `env`, `cross-env` and `timeout` join the list for the reason `command`
+      # and `nohup` are on it: they prefix a command without being one.
+      # `cross-env` is the portable way to set a variable in a package script,
+      # and this gate states a Windows host, where it is the only way -- so
+      # `cross-env NODE_ENV=test vitest run` is an ordinary full-suite script,
+      # and it was refused with "does not appear to run a test runner" while
+      # vitest sat in the string.
+      timeout) _cr_dur=1; continue ;;
+      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|env|cross-env \
+        |--yes|-y|run) continue ;;
       -*) continue ;;
       [A-Za-z_]*=*) continue ;;
       *) _cr="${_tok##*/}"; break ;;
@@ -2095,13 +2131,46 @@ _script_names_a_checker() {
   # Pruning is inherited and cannot be undone: `"test": "bash scripts/nt.sh"`
   # has no `--test` of its own, so the list handed to the script would arrive
   # without `node` and the `node --test` inside it -- the correct form -- would
-  # be refused one layer down. `cmd` here is a single command, which is the
-  # scope `--test` belongs to.
-  local _nt=0 _t
+  # be refused one layer down.
+  #
+  # Per command, and `cmd` here is a *string* -- which is where this went wrong.
+  # The scan looked for `--test` anywhere in it, so `"test": "echo --test &&
+  # node"` had the flag belonging to `echo` license the bare `node` after the
+  # separator: echo exits 0, node reads an empty program from stdin at EOF and
+  # exits 0, and the lane reported PASS with no suite behind it. The comment two
+  # lines up asserted the scope and the code did not implement it.
+  #
+  # Computed per segment, in one pass, because the flag can sit either side of
+  # the runner in its own command and the main loop below reads left to right.
+  # The last-token index goes with it: a runner invoked with no arguments at all
+  # is a REPL that sees EOF and exits 0, which is the same empty pass in another
+  # spelling, and `node` was the only one of the four that this list refused.
+  local _nt=0 _t _skip_dur=0
+  local _cur_nt=0 _ti=0 _last=-1
+  local _nt_seg=() _last_seg=()
   # shellcheck disable=SC2086
   for _t in $cmd; do
-    if [ "$_t" = "--test" ]; then _nt=1; break; fi
+    tok="$_t" ; _unquote_tok ; _t="$tok"
+    case "$_t" in
+      ";"|"&&"|"|"|"("|")"|"{"|"}")
+        _nt_seg[${#_nt_seg[@]}]="$_cur_nt"
+        _last_seg[${#_last_seg[@]}]="$_last"
+        _cur_nt=0
+        _last=-1
+        _ti=$((_ti + 1))
+        continue
+        ;;
+    esac
+    [ "$_t" = "--test" ] && _cur_nt=1
+    _last=$_ti
+    _ti=$((_ti + 1))
   done
+  _nt_seg[${#_nt_seg[@]}]="$_cur_nt"
+  _last_seg[${#_last_seg[@]}]="$_last"
+  # The first segment's value is what the delegation path asks about when the
+  # string is one command, which is overwhelmingly the common case; the loop
+  # below re-reads it per segment.
+  _nt="${_nt_seg[0]}"
 
   # An inline shell command is judged as the command it is. `bash -c tsc` runs
   # a checker and is accepted; `bash -c true` names nothing and is not. Only
@@ -2163,9 +2232,13 @@ _script_names_a_checker() {
   # the shell gives it: in `! command -v foo && vitest run` the negation belongs
   # to the lookup and not to the suite.
   local neg=0
+  # Where in the string the loop is, so the per-command answers computed above
+  # can be read back for the command it is actually reading.
+  local _mi=-1 _seg_i=0
   # shellcheck disable=SC2086
   for tok in $cmd; do
     _unquote_tok
+    _mi=$((_mi + 1))
     case "$tok" in
       ";"|"&&"|"|"|"("|")"|"{"|"}")
         # A separator ends the current command, so any delegation it was
@@ -2188,6 +2261,9 @@ _script_names_a_checker() {
         target=""
         _fwd=""
         neg=0
+        _skip_dur=0
+        _seg_i=$((_seg_i + 1))
+        _nt="${_nt_seg[$_seg_i]:-0}"
         continue
         ;;
     esac
@@ -2235,8 +2311,25 @@ _script_names_a_checker() {
       # hands over. These replace the current process or merely prefix it; the
       # token after them is still where the command starts, so `continue`
       # without clearing expect_cmd.
+      #
+      # `env`, `cross-env` and `timeout` are the same shape and were missing, so
+      # the scan classified the wrapper as "some other command", cleared
+      # expect_cmd, and dropped every token after it -- `vitest` included. An
+      # ordinary `cross-env NODE_ENV=test vitest run` was refused with "does not
+      # appear to run a test runner" while the runner sat in the string, and
+      # cross-env is the portable way to set a variable in a package script on
+      # the Windows host this gate supports.
+      if [ "$_skip_dur" -eq 1 ]; then
+        _skip_dur=0
+        case "$tok" in
+          [0-9]*) continue ;;
+        esac
+      fi
       case "${tok##*/}" in
-        exec|command|nohup|time) continue ;;
+        # A duration is a bare word, so it has to be stepped over explicitly or
+        # it becomes the command.
+        timeout) _skip_dur=1; continue ;;
+        exec|command|nohup|time|env|cross-env) continue ;;
       esac
       # A command that ends the shell ends the scan with it. `"test": "exit 0 ;
       # vitest run"` put the runner in command position after a separator, so
@@ -2263,6 +2356,18 @@ _script_names_a_checker() {
         if [ "${tok##*/}" = "$t" ]; then
           # `node` without `--test` runs an empty program from stdin.
           if [ "$t" = "node" ] && [ "$_nt" -eq 0 ]; then continue; fi
+          # And the three beside it do the same thing invoked bare. `tsx`,
+          # `ts-node` and `deno` with no arguments drop into a REPL, which under
+          # this gate reads EOF immediately and exits 0 -- `"test": "tsx"` was
+          # accepted and ran nothing. The rule existed for `node` and was absent
+          # on the three names next to it in the same list. What makes them
+          # runners is what they are pointed at, so the test is whether anything
+          # follows in this command at all.
+          case "$t" in
+            tsx|ts-node|deno)
+              if [ "$_mi" -ge "${_last_seg[$_seg_i]:--1}" ]; then continue; fi
+              ;;
+          esac
           hit=1
           break
         fi
@@ -2479,7 +2584,7 @@ assert_no_persistent_filter() {
 # The non-narrowing flag allow-list, as its own function so a package script
 # reached through another one is read the same way as a direct command.
 _reject_narrowing_flags() {
-  local script_name="$1" cmd="$2" tok
+  local script_name="$1" cmd="$2" runner="${3:-}" tok
   # shellcheck disable=SC2086
   for tok in $cmd; do
     case "$tok" in
@@ -2513,7 +2618,39 @@ _reject_narrowing_flags() {
         |--test-concurrency|--experimental-test-coverage)
         ;;
       *)
-        _filter_reject "$script_name" "$cmd" "$tok"
+        # The list above is vitest's and `node --test`'s vocabulary, and it was
+        # applied to every runner this file recognises. `jest --ci` and `mocha
+        # --recursive` were both refused for "selecting a subset" -- and
+        # `--recursive` makes mocha collect *more* -- so every runner past those
+        # two was unusable under a gate that names it as recognised.
+        #
+        # Keyed by runner, because one list cannot describe two vocabularies:
+        # `--bail` reads as ordinary and stops a suite early, `--config`
+        # redirects which config declares the suite, and both stay refused for
+        # every tool. What is admitted here is only what cannot reduce a run.
+        #
+        # An empty runner is the forwarded-argument path, where the caller did
+        # not say what the flags belong to; the strictest list is the safe one
+        # there, so it falls through to the refusal.
+        case "${runner}|${tok%%=*}" in
+          'jest|--ci'|'jest|--runInBand'|'jest|--verbose'|'jest|--detectOpenHandles' \
+            |'jest|--forceExit'|'jest|--colors'|'jest|--no-colors'|'jest|--useStderr' \
+            |'jest|--errorOnDeprecated'|'jest|--injectGlobals'|'jest|--cache' \
+            |'jest|--no-cache'|'jest|--maxConcurrency'|'jest|--logHeapUsage' \
+            |'mocha|--recursive'|'mocha|--exit'|'mocha|--parallel'|'mocha|--jobs' \
+            |'mocha|--require'|'mocha|--timeout'|'mocha|--slow'|'mocha|--full-trace' \
+            |'mocha|--check-leaks'|'mocha|--color'|'mocha|--no-color' \
+            |'ava|--serial'|'ava|--concurrency'|'ava|--verbose'|'ava|--tap' \
+            |'tap|--jobs'|'tap|--no-coverage'|'tap|--disable-coverage' \
+            |'playwright|--workers'|'playwright|--retries'|'playwright|--forbid-only' \
+            |'playwright|--fully-parallel'|'playwright|--headed'|'playwright|--trace' \
+            |'deno|--allow-all'|'deno|--allow-read'|'deno|--allow-net' \
+            |'deno|--allow-env'|'deno|--no-check'|'deno|--parallel'|'deno|--quiet')
+            ;;
+          *)
+            _filter_reject "$script_name" "$cmd" "$tok"
+            ;;
+        esac
         ;;
     esac
   done
@@ -2577,7 +2714,7 @@ _reject_tool_args() {
     # on in place of the original: `)` at the end of `( vitest run a.test.ts )`
     # would otherwise be one more bare word, and a bare word is what
     # _reject_positional_filters refuses.
-    _normalize_groups "$_seg"
+    _normalize_command "$_seg"
     _seg="$_ng_out"
     _command_runner "$_seg"
     _sr="$_cr"
@@ -2622,7 +2759,7 @@ _reject_tool_args_one() {
       :
       ;;
     vitest|jest|mocha|ava|jasmine|tap|node|playwright|cypress|wdio|karma       |tsx|ts-node|deno)
-      _reject_narrowing_flags "$script_name" "$cmd"
+      _reject_narrowing_flags "$script_name" "$cmd" "$runner"
       # A positional argument to a test runner *is* a filter — `vitest run
       # [...filters]` is the documented syntax, and `vitest run
       # tests/lib/confidence.test.ts` ran 4 tests instead of 314 while every
@@ -2760,7 +2897,22 @@ _reject_positional_filters() {
   prev=""
   # shellcheck disable=SC2086
   set -- $cmd
-  shift                                  # the runner or its wrapper
+  # The wrapper's own argument goes with it. This drops one token as "the runner
+  # or its wrapper", and `timeout` is a wrapper that carries a duration -- a
+  # bare word, which the scan below then read as a file the runner had been
+  # pointed at, so `timeout 300 vitest run` was refused for narrowing a suite it
+  # does not narrow. Answered here because the arm inside the loop cannot: the
+  # wrapper in front position has already been shifted away by the time the loop
+  # starts.
+  case "${1:-}" in
+    timeout|*/timeout)
+      shift
+      case "${1:-}" in
+        [0-9]*) shift ;;
+      esac
+      ;;
+    *) shift ;;
+  esac
   while [ "$#" -gt 0 ]; do
     tok="$1"
     # A quoted value holding whitespace arrives here as several tokens, because
@@ -2808,9 +2960,34 @@ _reject_positional_filters() {
         echo "  result. Use the one-shot form -- 'vitest run'."
         exit "$CI_RESULT_FAIL_NEW_ISSUE"
         ;;
-      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run|related \
+      # `timeout` carries a duration, which is a bare word and was read as a
+      # file the runner had been pointed at: `timeout 300 vitest run` was
+      # refused for narrowing a suite it does not narrow.
+      timeout)
+        prev="" ; shift
+        case "${1:-}" in
+          [0-9]*) shift ;;
+        esac
+        continue ;;
+      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|env|cross-env \
+        |--yes|-y|run|related \
         |"$runner"|'&&'|'||'|';'|'|')
         prev="" ; shift ; continue ;;
+    esac
+    # The one invocation each of these tools has.
+    #
+    # `playwright test` and `deno test` are not filters -- they are how you run
+    # the entire suite, and there is no other spelling. The exempt list above
+    # carried `run`, which is vitest's and cypress's word, and nothing else, so
+    # every runner on the recognised list past vitest and `node --test` was
+    # refused for the subcommand that makes it run at all. Keyed by runner
+    # rather than added to the flat list, because `test` is a filter to vitest
+    # and a subcommand to playwright, and one list cannot say both.
+    case "${runner}|${tok}" in
+      'playwright|test'|'deno|test'|'cypress|run'|'wdio|run'|'karma|start')
+        prev="" ; shift ; continue ;;
+    esac
+    case "$tok" in
       # Argument forwarding is not a filter. `vitest run "$@"` is how a wrapper
       # script passes on what it was given, and under `bun run test` it is
       # given nothing -- reading it as a positional refused every ordinary

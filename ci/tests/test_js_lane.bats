@@ -203,6 +203,16 @@ ws_setup() {
   printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\n' > "$NODE_SB/ws/scripts/test.sh"
   printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\nexit 1\n' > "$NODE_SB/ws/scripts/fail.sh"
   printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\nexit 10\n' > "$NODE_SB/ws/scripts/fail10.sh"
+  # The other recognised runners, as stand-ins the workspace can actually
+  # execute. A case that expects the lane to *accept* a script has to be able to
+  # run it, or "the refusal message is absent" is satisfied by the script not
+  # existing -- which asserts nothing about the rule under test.
+  mkdir -p "$NODE_SB/ws/node_modules/.bin"
+  local _wsb
+  for _wsb in vitest jest mocha playwright deno tsx ts-node node cross-env env; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/$_wsb"
+    chmod +x "$NODE_SB/ws/node_modules/.bin/$_wsb"
+  done
 }
 
 ws_manifest() {
@@ -4044,5 +4054,156 @@ SH
   [ "$status" -eq 20 ]
   [[ "$output" == *"exists on disk but not in the git index"* ]]
   cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a newline in a package script is the separator the shell reads" {
+  # A package.json script is a JSON string and may hold a real newline, which
+  # the shell reads as `;`. `vitest run` then `exit 0` runs the suite and
+  # replaces its status -- byte for byte the case the status rule refuses when
+  # it is spelled with a semicolon. Nothing saw it: `;` is matched as a token by
+  # the reader, and a newline arrives there as ordinary whitespace.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  # Written through printf so the file carries the JSON escape, which is what a
+  # real manifest holds; node turns it into the newline.
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "vitest run\nexit 0", "typecheck": "tsc --noEmit" } }' \
+    > "$NODE_SB/ws/package.json"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"does not become the script"* ]]
+
+  # The control: an ordinary multi-line script, where the runner is the last
+  # command and nothing after it replaces its status, is still accepted -- so
+  # this is a newline read as the separator it is, not a newline refused.
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "cd .\nvitest run", "typecheck": "tsc --noEmit" } }' \
+    > "$NODE_SB/ws/package.json"
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"does not become the script"* ]]
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: --test belongs to the command that runs node" {
+  # `_nt` was computed by scanning every word of the whole script string, so the
+  # `--test` belonging to `echo` licensed the bare `node` after the separator.
+  # At runtime `echo --test` exits 0 and bare `node` reads an empty program from
+  # stdin -- already at EOF under the gate -- and exits 0, so the lane reported
+  # PASS with no suite behind it. The comment above the loop asserted the scope
+  # and the code did not implement it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo --test && node" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The control: `node --test` in one command is still a runner, and so is a
+  # `--test` that follows the runner rather than preceding it.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "node --test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a runner invoked bare runs nothing" {
+  # `tsx`, `ts-node` and `deno` with no arguments drop into a REPL, which under
+  # this gate reads EOF immediately and exits 0. That is the identical failure
+  # the file documents for bare `node` -- "runs an empty program and exits 0" --
+  # fixed for one name on the recognised list and absent on the three beside it.
+  ws_setup
+  local runner
+  for runner in tsx ts-node deno; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${runner}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "bare ${runner} accepted" >&2; return 1; }
+    [[ "$output" == *"not appear to run a test runner"* ]] \
+      || { echo "bare ${runner} refused for the wrong reason" >&2; return 1; }
+  done
+
+  # The control: pointed at something, they are runners again.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "deno test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an environment wrapper is not the command it wraps" {
+  # `_command_runner` stepped over `command`, `nohup` and `time` and not over
+  # `env`, `cross-env` or `timeout`, so the scan classified the wrapper as some
+  # other command, cleared expect_cmd and dropped every token after it --
+  # `vitest` included. `cross-env NODE_ENV=test vitest run` runs the complete
+  # suite and was refused with "does not appear to run a test runner", and
+  # cross-env is the portable way to set a variable in a package script on the
+  # Windows host this gate supports.
+  ws_setup
+  local script
+  for script in "cross-env NODE_ENV=test vitest run" "env NODE_ENV=test vitest run" \
+                "timeout 300 vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${script}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as running no runner: ${script}" >&2; return 1; }
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: ${script}" >&2; return 1; }
+  done
+
+  # And the argument rules still reach through the wrapper, which is the other
+  # half: stepping over a prefix is not the same as skipping the check.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "cross-env NODE_ENV=test vitest run --exclude=tests/x" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "timeout 300 vitest run --exclude=tests/x" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a runner's own vocabulary is not vitest's" {
+  # The narrowing allow-list is vitest's and `node --test`'s, and it was applied
+  # to every runner on the recognised list: `jest --ci` and `mocha --recursive`
+  # were both refused for selecting a subset, and `--recursive` makes mocha
+  # collect more. The positional-filter exemptions had the same shape -- they
+  # carried `run`, vitest's and cypress's word, so `playwright test` and `deno
+  # test`, the only invocation either tool has, were read as filters. Every
+  # runner past vitest and `node --test` was unusable under a gate that names it
+  # as recognised.
+  ws_setup
+  local script
+  for script in "jest --ci" "mocha --recursive" "playwright test"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${script}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: ${script}" >&2; return 1; }
+  done
+
+  # The controls, and they are what keeps this an allow-list: a real filter, a
+  # flag that stops a suite early, and a flag that redirects which config
+  # declares the suite are all still refused -- and the vocabulary is per
+  # runner, so vitest does not inherit jest's.
+  for script in "jest -t somename" "mocha --bail" "jest --config other.json" \
+                "vitest run --ci"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${script}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "accepted: ${script}" >&2; return 1; }
+    [[ "$output" == *"narrows its own suite"* ]] \
+      || { echo "refused for the wrong reason: ${script}" >&2; return 1; }
+  done
   rm -rf "$NODE_SB"
 }
