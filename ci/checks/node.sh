@@ -1953,8 +1953,52 @@ _normalize_command() {
   _ng_out="$_out"
 }
 
+# _timeout_advance <token> – whether this token still belongs to a `timeout`
+# wrapper, advancing `_tp_state` as it goes. Returns 0 when the caller should
+# skip the token, 1 when the wrapper is behind us and the token is the caller's.
+#
+# `timeout [OPTION] DURATION COMMAND [ARG]...`, which is what `timeout --help`
+# documents, and only the two-word shape was ever read: the token after the
+# wrapper was taken as the duration if it looked numeric and the state was
+# cleared either way. So `timeout --foreground 300 vitest run` cleared the state
+# on `--foreground`, `300` arrived as the command name, and an ordinary
+# full-suite script was refused for running no test runner. `-s SIGKILL`,
+# `-k 10` and `--preserve-status` all do it, and `-s`/`-k` bring a value of
+# their own that is not the duration either.
+#
+# One function because there were four copies of the two-word rule -- in
+# _command_runner, in _script_names_a_checker, and twice in
+# _reject_positional_filters -- and four copies is how a rule ends up fixed in
+# one place and left in the other three. The state is a variable rather than a
+# return value because two of those callers iterate words and two shift
+# positional parameters, and a shared *predicate* is the only shape that fits
+# both.
+#
+# _tp_state: 1 = inside the wrapper, still looking for the duration
+#            2 = this token is the value of the option before it
+#            0 = the wrapper is fully consumed
+_timeout_advance() {
+  case "$_tp_state" in
+    2) _tp_state=1 ; return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    # The options that take a separate value. The `=` spellings carry theirs in
+    # the same token and need nothing here.
+    -k|--kill-after|-s|--signal) _tp_state=2 ; return 0 ;;
+    # Any other option belongs to timeout and carries no value.
+    -*) return 0 ;;
+    # The first non-option word is the duration, and the wrapper ends with it.
+    # Matched by position rather than by looking numeric, because `5m`, `1.5h`
+    # and `0.5s` are durations too and the numeric test was already wrong for
+    # a wrapper written with an option in front.
+    *) _tp_state=0 ; return 0 ;;
+  esac
+}
+
 _command_runner() {
-  local _tok _ng_out="" _cr_dur=0 tok
+  local _tok _ng_out="" _tp_state=0 tok
   _cr=""
   _normalize_command "$1"
   set -f
@@ -1972,11 +2016,10 @@ _command_runner() {
     # `timeout 300 vitest run` resolved to `300`, matched no tool, and every
     # argument rule was skipped -- while the predicate beside it also stopped at
     # the wrapper and reported that the script runs no test runner at all.
-    if [ "$_cr_dur" -eq 1 ]; then
-      _cr_dur=0
-      case "$_tok" in
-        [0-9]*) continue ;;
-      esac
+    # The wrapper's options come before the duration, which is why this is a
+    # state machine and not a one-token lookahead; see _timeout_advance.
+    if [ "$_tp_state" -ne 0 ] && _timeout_advance "$_tok"; then
+      continue
     fi
     case "${_tok##*/}" in
       # `env`, `cross-env` and `timeout` join the list for the reason `command`
@@ -1986,7 +2029,7 @@ _command_runner() {
       # `cross-env NODE_ENV=test vitest run` is an ordinary full-suite script,
       # and it was refused with "does not appear to run a test runner" while
       # vitest sat in the string.
-      timeout) _cr_dur=1; continue ;;
+      timeout) _tp_state=1; continue ;;
       npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|env|cross-env \
         |--yes|-y|run) continue ;;
       -*) continue ;;
@@ -2160,7 +2203,7 @@ _script_names_a_checker() {
   # The last-token index goes with it: a runner invoked with no arguments at all
   # is a REPL that sees EOF and exits 0, which is the same empty pass in another
   # spelling, and `node` was the only one of the four that this list refused.
-  local _nt=0 _t _skip_dur=0
+  local _nt=0 _t _tp_state=0
   local _cur_nt=0 _ti=0 _last=-1
   local _nt_seg=() _last_seg=()
   # shellcheck disable=SC2086
@@ -2276,7 +2319,7 @@ _script_names_a_checker() {
         target=""
         _fwd=""
         neg=0
-        _skip_dur=0
+        _tp_state=0
         _seg_i=$((_seg_i + 1))
         _nt="${_nt_seg[$_seg_i]:-0}"
         continue
@@ -2334,16 +2377,15 @@ _script_names_a_checker() {
       # appear to run a test runner" while the runner sat in the string, and
       # cross-env is the portable way to set a variable in a package script on
       # the Windows host this gate supports.
-      if [ "$_skip_dur" -eq 1 ]; then
-        _skip_dur=0
-        case "$tok" in
-          [0-9]*) continue ;;
-        esac
+      # The wrapper's own options come before the duration; see
+      # _timeout_advance, which is the one reader of that grammar now.
+      if [ "$_tp_state" -ne 0 ] && _timeout_advance "$tok"; then
+        continue
       fi
       case "${tok##*/}" in
         # A duration is a bare word, so it has to be stepped over explicitly or
         # it becomes the command.
-        timeout) _skip_dur=1; continue ;;
+        timeout) _tp_state=1; continue ;;
         exec|command|nohup|time|env|cross-env) continue ;;
       esac
       # A command that ends the shell ends the scan with it. `"test": "exit 0 ;
@@ -2599,9 +2641,21 @@ assert_no_persistent_filter() {
 # The non-narrowing flag allow-list, as its own function so a package script
 # reached through another one is read the same way as a direct command.
 _reject_narrowing_flags() {
-  local script_name="$1" cmd="$2" runner="${3:-}" tok
+  local script_name="$1" cmd="$2" runner="${3:-}" tok _tp_state=0
   # shellcheck disable=SC2086
   for tok in $cmd; do
+    # A `timeout` wrapper's own options are not the runner's. This scan reads
+    # every `-` word in the script and judges it against the runner's
+    # vocabulary, so `timeout --foreground 300 vitest run` was refused for
+    # "selecting a subset" on a flag that belongs to timeout and selects
+    # nothing. Before the `-*` filter below, because that is what the wrapper's
+    # options look like.
+    if [ "$_tp_state" -ne 0 ] && _timeout_advance "$tok"; then
+      continue
+    fi
+    case "${tok##*/}" in
+      timeout) _tp_state=1 ; continue ;;
+    esac
     case "$tok" in
       -*) ;;
       *) continue ;;
@@ -2793,7 +2847,7 @@ _reject_tool_args_one() {
 # The compiler's own argument rules: the modes that do not typecheck, and the
 # positionals that make it ignore tsconfig.json.
 _reject_tsc_args() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp
+  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp _tp_state=0
   prev=""
   set -f
   # shellcheck disable=SC2086
@@ -2815,6 +2869,19 @@ _reject_tsc_args() {
     # fell through to the trailing arm and was refused as a source file it had
     # been pointed at.
     tok="$(printf '%s' "$tok" | tr -d '\042\047')"
+    # The `timeout` wrapper, which this scan had no notion of at all: the
+    # duration is a bare word, so `timeout 300 tsc --noEmit` -- an ordinary way
+    # to bound a compile, and the same wrapper the test lane already knew about
+    # -- was refused for pointing tsc at a file named `300`. A `--noCheck`
+    # behind the wrapper was never reached either, because the wrong refusal
+    # came first. The test lane carried this rule in four places; the typecheck
+    # lane beside it carried it in none.
+    if [ "$_tp_state" -ne 0 ] && _timeout_advance "$tok"; then
+      prev="" ; shift ; continue
+    fi
+    case "${tok##*/}" in
+      timeout) _tp_state=1 ; prev="" ; shift ; continue ;;
+    esac
     if [ "${tok##*/}" = "$runner" ]; then
       prev="" ; shift ; continue
     fi
@@ -2987,7 +3054,7 @@ _reject_tsc_args() {
 # rule held for the direct spelling and not for the one layer down, which is
 # the same right-rule-wrong-tree shape this lane has had to fix twice.
 _reject_positional_filters() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev _q
+  local script_name="$1" cmd="$2" runner="$3" tok prev _q _tp_state=0
   prev=""
   # shellcheck disable=SC2086
   set -- $cmd
@@ -3001,14 +3068,24 @@ _reject_positional_filters() {
   case "${1:-}" in
     timeout|*/timeout)
       shift
-      case "${1:-}" in
-        [0-9]*) shift ;;
-      esac
+      # Everything else the wrapper owns -- its options, an option's value, and
+      # the duration -- is consumed by the loop below through _timeout_advance,
+      # rather than by a second copy of that grammar here. The copy is what
+      # broke: it stepped over one numeric token, so `timeout --foreground 300
+      # vitest run` left `300` for the scan to read as a test filter.
+      _tp_state=1
       ;;
     *) shift ;;
   esac
   while [ "$#" -gt 0 ]; do
     tok="$1"
+    # Anything still owned by a `timeout` wrapper, whether it was in front of
+    # the command or reached through a separator. Before the quote rejoining
+    # below, because the wrapper's own words are never quoted values of the
+    # runner's flags.
+    if [ "$_tp_state" -ne 0 ] && _timeout_advance "$tok"; then
+      prev="" ; shift ; continue
+    fi
     # A quoted value holding whitespace arrives here as several tokens, because
     # this scan word-splits and the shell does not reinterpret the quotes.
     # `--reporter "my reporter"` becomes `--reporter`, `"my`, `reporter"`, and
@@ -3056,13 +3133,10 @@ _reject_positional_filters() {
         ;;
       # `timeout` carries a duration, which is a bare word and was read as a
       # file the runner had been pointed at: `timeout 300 vitest run` was
-      # refused for narrowing a suite it does not narrow.
-      timeout)
-        prev="" ; shift
-        case "${1:-}" in
-          [0-9]*) shift ;;
-        esac
-        continue ;;
+      # refused for narrowing a suite it does not narrow. What follows it is
+      # read by _timeout_advance above, which knows the wrapper's options.
+      timeout|*/timeout)
+        _tp_state=1 ; prev="" ; shift ; continue ;;
       npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|env|cross-env \
         |--yes|-y|run|related \
         |"$runner"|'&&'|'||'|';'|'|')

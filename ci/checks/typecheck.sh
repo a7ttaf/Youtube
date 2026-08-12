@@ -30,6 +30,14 @@ _tc_js_workspace() {
   local ws="$1"
   cd "$ws" || return 30
 
+  # A package root with no TypeScript project has nothing for this lane to
+  # check, and that is a fact about the workspace rather than a guess about it.
+  # Distinguished from "the compiler is missing" below, which is the opposite
+  # statement: a project exists and could not be compiled.
+  if [ ! -f tsconfig.json ]; then
+    return 3
+  fi
+
   local bin="" candidate
   for candidate in node_modules/.bin/tsc node_modules/.bin/tsc.exe node_modules/.bin/tsc.cmd; do
     if [ -x "$candidate" ]; then
@@ -51,11 +59,36 @@ _tc_js_workspace() {
 }
 
 typecheck::run_js() {
-  local workspaces
-  workspaces="$(ci::common::node_workspaces tsconfig.json)"
+  local workspaces _ws_rc=0
+  # Package roots, not every tsconfig.json in the tree.
+  #
+  # A nested `frontend/e2e/tsconfig.json` extending its parent is ordinary
+  # TypeScript -- project references and per-area configs are how the language
+  # is used -- and asking node_workspaces about tsconfig.json applied the
+  # package-manager ambiguity rule to it: two configs became "a workspace with a
+  # nested workspace", which is a statement about lockfiles and means nothing
+  # here. ci/checks/node.sh already treats the same layout as ordinary.
+  #
+  # A package root is the unit that owns a compiler and a tsconfig, which is
+  # exactly what this lane runs, so it is the unit to discover. A root with no
+  # tsconfig.json is reported as having no TypeScript project rather than
+  # skipped silently.
+  #
+  # And the status is captured rather than left to `set -e`. The substitution
+  # below aborts this script outright on a non-zero producer -- raw exit 1,
+  # outside the 0/10/20/30 contract, before the Python, Go and Rust typechecks
+  # have run -- so an unreadable tree or an ambiguous layout took the whole lane
+  # down with a message that named neither.
+  workspaces="$(ci::common::node_workspaces package.json)" || _ws_rc=$?
+  if [ "$_ws_rc" -ne 0 ]; then
+    OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+    ci::log::error "Could not enumerate JavaScript workspaces (exit ${_ws_rc}); see above."
+    ci::log::error "  This lane cannot report on a set of workspaces it could not determine."
+    return 0
+  fi
 
   if [ -z "$workspaces" ]; then
-    ci::log::info "skipped: no tsconfig.json found"
+    ci::log::info "skipped: no package.json found"
     return 0
   fi
 
@@ -66,6 +99,11 @@ typecheck::run_js() {
     rc=0
     # Subshell so the cd cannot leak into later languages.
     ( _tc_js_workspace "$ws" ) || rc=$?
+
+    if [ "$rc" -eq 3 ]; then
+      ci::log::info "skipped: no tsconfig.json in ${ws}"
+      continue
+    fi
 
     if [ "$rc" -eq 127 ]; then
       # A detected TypeScript workspace with no compiler is broken

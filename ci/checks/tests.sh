@@ -83,31 +83,97 @@ _tests_record_failure() {
 # version of vitest than the lockfile pins, against a different vite. That
 # produces mass phantom failures that look like real test breakage.
 #
-# Returns 127 when no runner is reachable.
+# Returns 127 when no runner is reachable, and 30 when the workspace does not
+# say which of several installed runners owns its suite.
+#
+# _tests_js_declared_runner – the runner the workspace's own `test` script
+# names, or the empty string when it names none this lane can run.
+#
+# The manifest is the workspace's statement about what its suite is; an
+# installed binary is only evidence that something depends on one. A workspace
+# migrating from Jest to Vitest has both, and picking by a fixed order ran
+# Vitest against a Jest suite: Vitest collects nothing it recognises, exits 0,
+# and `tests-js` reports PASS while every Jest test stays uncollected. A
+# transitive dependency pulling Vitest in does the same thing with nobody having
+# chosen anything at all.
+#
+# Read with node, the same way ci/checks/node.sh reads this file, because a
+# manifest is JSON and a grep for a runner's name finds it in a dependency entry
+# or a comment-shaped string just as readily as in the script that runs it.
+_tests_js_declared_runner() {
+  local _cmd _w
+  ci::common::command_exists node || return 1
+  _cmd="$(node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{}).test||''))}catch(e){process.exit(3)}" 2>/dev/null)" || return 1
+  # The first recognised runner word wins, which is the one the shell reaches
+  # first. `cross-env NODE_ENV=test vitest run` names vitest; `npm run jest:ci`
+  # names neither, and saying so is the honest answer.
+  for _w in $_cmd; do
+    case "${_w##*/}" in
+      vitest|vitest.cmd|vitest.exe) printf 'vitest' ; return 0 ;;
+      jest|jest.cmd|jest.exe) printf 'jest' ; return 0 ;;
+    esac
+  done
+  return 0
+}
+
+_tests_js_have_runner() {
+  local _c
+  for _c in "node_modules/.bin/$1" "node_modules/.bin/$1.exe" "node_modules/.bin/$1.cmd"; do
+    [ -x "$_c" ] && return 0
+  done
+  return 1
+}
+
 _tests_js_workspace() {
   local ws="$1" junit_out="$2" jest_pattern="$3"
   cd "$ws" || return 30
 
-  local candidate
+  local candidate declared="" have_vitest=0 have_jest=0
+  _tests_js_have_runner vitest && have_vitest=1
+  _tests_js_have_runner jest && have_jest=1
+  declared="$(_tests_js_declared_runner || true)"
 
-  for candidate in node_modules/.bin/vitest node_modules/.bin/vitest.exe node_modules/.bin/vitest.cmd; do
-    if [ -x "$candidate" ]; then
-      "$candidate" run --reporter=junit --outputFile="$junit_out"
-      return $?
-    fi
-  done
+  # Two runners installed and nothing saying which owns the suite is a question
+  # this lane cannot answer, and answering it by order is how the wrong suite
+  # runs green. Refused rather than guessed -- the same rule the missing-runner
+  # branch below already follows.
+  if [ -z "$declared" ] && [ "$have_vitest" -eq 1 ] && [ "$have_jest" -eq 1 ]; then
+    echo "Workspace ${ws} installs both vitest and jest and its 'test' script names neither." >&2
+    echo "  This lane runs the suite directly, so it has to know which runner owns it:" >&2
+    echo "  running the wrong one collects nothing and exits 0, which reports PASS over" >&2
+    echo "  a suite that never ran. Name the runner in the workspace's 'test' script." >&2
+    return 30
+  fi
 
-  for candidate in node_modules/.bin/jest node_modules/.bin/jest.exe node_modules/.bin/jest.cmd; do
-    if [ -x "$candidate" ]; then
-      if ci::common::command_exists node && node -e "require.resolve('jest-junit')" >/dev/null 2>&1; then
-        JEST_JUNIT_OUTPUT_FILE="$junit_out" \
-          "$candidate" --ci --reporters=default --reporters=jest-junit ${jest_pattern:+$jest_pattern}
+  # A declared runner that is not installed is not a reason to run the other
+  # one. It is the same broken install the no-runner branch reports, and
+  # silently substituting a different runner is the defect this block exists to
+  # prevent.
+  if [ "$declared" = "vitest" ] && [ "$have_vitest" -eq 0 ]; then return 127; fi
+  if [ "$declared" = "jest" ] && [ "$have_jest" -eq 0 ]; then return 127; fi
+
+  if [ "$declared" != "jest" ]; then
+    for candidate in node_modules/.bin/vitest node_modules/.bin/vitest.exe node_modules/.bin/vitest.cmd; do
+      if [ -x "$candidate" ]; then
+        "$candidate" run --reporter=junit --outputFile="$junit_out"
         return $?
       fi
-      "$candidate" --ci ${jest_pattern:+$jest_pattern}
-      return $?
-    fi
-  done
+    done
+  fi
+
+  if [ "$declared" != "vitest" ]; then
+    for candidate in node_modules/.bin/jest node_modules/.bin/jest.exe node_modules/.bin/jest.cmd; do
+      if [ -x "$candidate" ]; then
+        if ci::common::command_exists node && node -e "require.resolve('jest-junit')" >/dev/null 2>&1; then
+          JEST_JUNIT_OUTPUT_FILE="$junit_out" \
+            "$candidate" --ci --reporters=default --reporters=jest-junit ${jest_pattern:+$jest_pattern}
+          return $?
+        fi
+        "$candidate" --ci ${jest_pattern:+$jest_pattern}
+        return $?
+      fi
+    done
+  fi
 
   # Deliberately no PATH fallback. A global runner is not the version this
   # workspace pins, and the comment above this function is the evidence: an
@@ -119,8 +185,20 @@ _tests_js_workspace() {
 }
 
 tests::run_js() {
-  local workspaces
-  workspaces="$(ci::common::node_workspaces package.json)"
+  local workspaces _ws_rc=0
+  # The status is captured rather than left to `set -e`. A non-zero producer in
+  # this substitution aborts the whole script -- raw exit 1, outside the
+  # 0/10/20/30 contract, with the Python, Go, Rust and shell suites after it
+  # never reached -- so an unreadable tree or an ambiguous layout took every
+  # language's tests down and reported neither. The same shape, and the same
+  # cure, as ci/checks/typecheck.sh beside it.
+  workspaces="$(ci::common::node_workspaces package.json)" || _ws_rc=$?
+  if [ "$_ws_rc" -ne 0 ]; then
+    OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+    ci::log::error "Could not enumerate JavaScript workspaces (exit ${_ws_rc}); see above."
+    ci::log::error "  This lane cannot report on a set of workspaces it could not determine."
+    return 0
+  fi
 
   if [ -z "$workspaces" ]; then
     ci::log::info "skipped: no package.json found"
@@ -182,6 +260,16 @@ tests::run_js() {
       ci::log::error "  (a global jest/vitest is deliberately not used). This workspace was"
       ci::log::error "  detected and scheduled, so reporting PASS here would mean its suite"
       ci::log::error "  never ran. Install its dependencies, or remove the workspace."
+      continue
+    fi
+
+    if [ "$rc" -eq "$CI_RESULT_FAIL_INFRA" ]; then
+      # The workspace could not be entered, or it installs two runners and does
+      # not say which owns its suite. Neither is a failing test, and reporting
+      # it as one sends someone looking for a broken assertion; it is the same
+      # "the suite could not be run" statement the branch above makes.
+      OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+      ci::log::error "JavaScript tests in ${ws} could not be run (see above)."
       continue
     fi
 

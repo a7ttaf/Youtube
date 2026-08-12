@@ -4398,3 +4398,258 @@ SH
   [[ "$output" == *"frontend"* ]]
   rm -rf "$sb"
 }
+
+# --- the `timeout` wrapper's own grammar --------------------------------------
+
+@test "node lane: a timeout wrapper's options belong to timeout" {
+  # `timeout [OPTION] DURATION COMMAND [ARG]...` is the documented grammar, and
+  # every reader here knew only the two-word shape: the token after the wrapper
+  # was taken as the duration if it looked numeric, and the state was cleared
+  # either way. So `timeout --foreground 300 vitest run` left `300` in command
+  # position, the lane reported that the script runs no test runner, and an
+  # ordinary bounded full suite was refused. `-s SIGKILL` and `-k 10` bring a
+  # value of their own, which is not the duration either.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/timeout"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/timeout"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/tsc"
+
+  local spelling
+  for spelling in \
+    "timeout 300 vitest run" \
+    "timeout --foreground 300 vitest run" \
+    "timeout -s SIGKILL 300 vitest run" \
+    "timeout --signal=SIGKILL 300 vitest run" \
+    "timeout -k 10 300 vitest run" \
+    "timeout --kill-after=10 300 vitest run" \
+    "timeout --preserve-status 5m vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\", \"typecheck\": \"tsc --noEmit\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls: the wrapper does not launder what it wraps. A filter behind it
+  # is still a filter, and a positional behind it is still a positional.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "timeout --foreground 300 vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "timeout 300 vitest run tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the typecheck scan reads the same timeout wrapper" {
+  # The test lane carried the wrapper rule in four places and the typecheck scan
+  # beside it in none, so `timeout 300 tsc --noEmit` was refused for pointing
+  # the compiler at a file named `300` -- and a `--noCheck` behind the wrapper
+  # was never reached, because the wrong refusal came first.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/timeout"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/timeout"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/tsc"
+
+  local spelling
+  for spelling in \
+    "timeout 300 tsc --noEmit" \
+    "timeout --foreground 300 tsc --noEmit" \
+    "timeout -s SIGKILL 300 tsc --noEmit"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"individual files"* ]] \
+      || { echo "refused as naming files: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls: a real source file behind the wrapper is still a source file,
+  # and a non-compiling mode behind it is now reached instead of being hidden
+  # behind the wrong refusal.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "timeout 300 tsc --noEmit src/x.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"individual files"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "timeout --foreground 300 tsc --noCheck" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
+# --- which runner owns the suite ----------------------------------------------
+#
+# These drive ci/checks/tests.sh and ci/checks/typecheck.sh against a synthetic
+# workspace, with CI_GATE_CHECK_ID scoping the run to the JS lane so the other
+# languages' tools are not required.
+
+lane_setup() {
+  LANE_SB="$(mktemp -d)"
+  mkdir -p "$LANE_SB/ci/checks" "$LANE_SB/ci/lib" "$LANE_SB/ci/config" \
+           "$LANE_SB/ws/node_modules/.bin" "$LANE_SB/ws/tests"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$REPO_ROOT/ci/checks/typecheck.sh" "$LANE_SB/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/junit.sh" "$LANE_SB/ci/lib/"
+  printf 'it("x", () => {});\n' > "$LANE_SB/ws/tests/a.test.ts"
+}
+
+lane_runner() {
+  # A stand-in that says which binary was invoked, which is the whole question.
+  printf '#!/usr/bin/env bash\necho "INVOKED=%s"\nexit 0\n' "$2" \
+    > "$LANE_SB/ws/node_modules/.bin/$1"
+  chmod +x "$LANE_SB/ws/node_modules/.bin/$1"
+}
+
+lane_manifest() {
+  printf '%s\n' "$1" > "$LANE_SB/ws/package.json"
+}
+
+lane_run_tests() {
+  ( cd "$LANE_SB" && CI_GATE_CHECK_ID=tests-js bash ci/checks/tests.sh 2>&1 )
+}
+
+lane_run_typecheck() {
+  ( cd "$LANE_SB" && CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1 )
+}
+
+@test "tests lane: the runner is the one the workspace declares" {
+  # Presence and a fixed order decided this, so a workspace that declares Jest
+  # and also has Vitest installed -- a migration, or a transitive dependency --
+  # ran Vitest. Vitest collects nothing it recognises in a Jest suite, exits 0,
+  # and tests-js reports PASS while every Jest test stays uncollected.
+  lane_setup
+  lane_runner vitest VITEST
+  lane_runner jest JEST
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "jest --ci" } }'
+  run lane_run_tests
+  [[ "$output" == *"INVOKED=JEST"* ]]
+  [[ "$output" != *"INVOKED=VITEST"* ]]
+
+  # The other direction, so this is about the declaration and not about a new
+  # fixed order.
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  run lane_run_tests
+  [[ "$output" == *"INVOKED=VITEST"* ]]
+  [[ "$output" != *"INVOKED=JEST"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "tests lane: two runners and no declaration is refused, not ordered" {
+  # The question this lane cannot answer. Running either one and reporting PASS
+  # is the failure the case above describes, so it says so instead -- as
+  # infrastructure, because no test failed.
+  lane_setup
+  lane_runner vitest VITEST
+  lane_runner jest JEST
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "npm run inner" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"names neither"* ]]
+  [[ "$output" != *"INVOKED="* ]]
+
+  # The control: one runner installed needs no declaration to be unambiguous.
+  rm -f "$LANE_SB/ws/node_modules/.bin/jest"
+  run lane_run_tests
+  [[ "$output" == *"INVOKED=VITEST"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "tests lane: a declared runner that is absent is not a licence for the other" {
+  # Substituting the installed runner for the declared one is the same wrong
+  # suite by another route, so a missing declared runner is the broken install
+  # the no-runner branch already reports.
+  lane_setup
+  lane_runner vitest VITEST
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "jest --ci" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ]
+  [[ "$output" != *"INVOKED=VITEST"* ]]
+  [[ "$output" == *"No workspace-local JS test runner"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "typecheck lane: a nested tsconfig is ordinary TypeScript" {
+  # Discovery asked node_workspaces about tsconfig.json, which applies the
+  # package-manager ambiguity rule -- a statement about lockfiles. A normal
+  # `ws/e2e/tsconfig.json` extending its parent became "a workspace nested under
+  # a workspace", the helper returned 1, and under this script's `set -e` the
+  # substitution took the whole lane down: raw exit 1, outside the 0/10/20/30
+  # contract, with the Python, Go and Rust typechecks never reached.
+  lane_setup
+  mkdir -p "$LANE_SB/ws/e2e" "$LANE_SB/ws/src"
+  printf '{ "compilerOptions": { "strict": true }, "include": ["src"] }\n' > "$LANE_SB/ws/tsconfig.json"
+  printf '{ "extends": "../tsconfig.json", "include": ["."] }\n' > "$LANE_SB/ws/e2e/tsconfig.json"
+  printf 'export const ok = true;\n' > "$LANE_SB/ws/src/app.ts"
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INVOKED=TSC"* ]]
+  [[ "$output" != *"nested under"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "typecheck lane: a package root with no TypeScript project says so" {
+  # The counterpart of discovering package roots: a JavaScript-only package has
+  # no project to compile, which is a fact about the workspace rather than a
+  # compiler that could not be found -- and the two must not be reported as
+  # each other.
+  lane_setup
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no tsconfig.json in ws"* ]]
+  [[ "$output" != *"INVOKED=TSC"* ]]
+
+  # And with a project present, the same workspace is compiled.
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tsconfig.json"
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INVOKED=TSC"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "lanes: a workspace enumeration that could not run is infrastructure" {
+  # The producer's failure reached these two lanes through a command
+  # substitution under `set -e`, which aborts the script where it stands -- raw
+  # exit 1, no result line, and every language after JavaScript unrun. The
+  # status is read and reported now, which is the same rule the enumeration
+  # itself follows: could not look is not found nothing.
+  lane_setup
+  mkdir -p "$LANE_SB/bin"
+  printf '#!/usr/bin/env bash\nexit 71\n' > "$LANE_SB/bin/find"
+  chmod +x "$LANE_SB/bin/find"
+  lane_runner vitest VITEST
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tsconfig.json"
+
+  run bash -c "cd '$LANE_SB' && PATH='$LANE_SB/bin:'\"\$PATH\" CI_GATE_CHECK_ID=tests-js bash ci/checks/tests.sh 2>&1"
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Could not enumerate JavaScript workspaces"* ]]
+  [[ "$output" == *"Tests result:"* ]]
+
+  run bash -c "cd '$LANE_SB' && PATH='$LANE_SB/bin:'\"\$PATH\" CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Could not enumerate JavaScript workspaces"* ]]
+  [[ "$output" == *"Typecheck result:"* ]]
+  rm -rf "$LANE_SB"
+}
