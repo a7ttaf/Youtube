@@ -2077,8 +2077,17 @@ ws_run() {
   # because delegation was accepted without the target ever being read. What is
   # under test here is the *argument* handling, so the wrapper only has to be
   # one the lane accepts.
+  #
+  # The positional this case used to carry -- `tests/no-t-here.test.ts` beside
+  # the flags -- is gone from it, and that is a correction rather than a
+  # weakening. ws_setup's wrapper is `vitest run "$@"`, so that path was
+  # forwarded straight to the runner and collected one file: a filter, wearing a
+  # wrapper. It is refused now, by `node lane: arguments handed to a delegated
+  # wrapper are not ignored`. What this case still asserts is the property it
+  # was written for -- that a flag *value* which happens to look like a path or
+  # a test name is not matched by substring.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --reporter=dot tests/no-t-here.test.ts --outputFile=t.json" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --reporter=dot --outputFile=no-t-here.test.json" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -2233,8 +2242,16 @@ ws_run() {
   # describing — the second one surviving only because delegation was accepted
   # without the target being read. ws_setup's wrapper is a real one, and what
   # this case is about is the positional argument beside it.
+  #
+  # `--ci` became `--coverage` for the same reason the case above lost its
+  # positional: ws_setup's wrapper forwards `"$@"`, so `--ci` reached vitest,
+  # which has no such flag, and an unknown flag arriving at a runner stops the
+  # guard by design. `--coverage` is on the allow-list and cannot reduce the
+  # run, so there is still an argument beside the target and the property under
+  # test -- that `scripts/test.sh` is the script being run and not a filter --
+  # is unchanged.
   ws_setup
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --ci" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --coverage" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
@@ -3721,5 +3738,92 @@ SH
   [[ "$output" == *"ws/doomed.js"* ]]
   [[ "$output" != *".env.local"* ]]
   cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: arguments handed to a delegated wrapper are not ignored" {
+  # The wrapper reader accepts `vitest run "$@"`, and says why: what a caller
+  # forwards is not visible from inside the script. It is visible at the call,
+  # and the tokens after a delegated target were being dropped -- so
+  # `bash scripts/test.sh tests/a.test.ts` over that wrapper collected one file
+  # and the lane exited 0. Two halves of one question, one of them unasked.
+  ws_setup
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\n' > "$NODE_SB/ws/scripts/fwd.sh"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fwd.sh tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"passes an argument into the"* ]]
+  [[ "$output" == *"tests/a.test.ts"* ]]
+
+  # A narrowing flag forwarded is the same statement in flag form, and meets
+  # the allow-list the runner's own flags meet.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fwd.sh --exclude=tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The controls: forwarding nothing is the ordinary wrapper, and a flag that
+  # cannot reduce the run is not a filter.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fwd.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"passes an argument into the"* ]]
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fwd.sh --coverage" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"passes an argument into the"* ]]
+  [[ "$output" != *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an EXIT trap whose signal is quoted is still an EXIT trap" {
+  # The first version of this rule split the blanked mask on whitespace, and a
+  # quoted signal is blanked with everything else -- so `trap 'exit 0' 'EXIT'`,
+  # a valid spelling, showed the loop a `trap` and no signal at all and was
+  # accepted. The mask is length-preserving, so the arguments can be recovered
+  # whole: a position holding a space in the mask *and* in the original is a
+  # boundary, and a space inside a quoted span is marked so it is not mistaken
+  # for one.
+  ws_setup
+  _trap_verdict() {
+    printf '#!/usr/bin/env bash\n%s\n./scripts/vitest run\nexit 77\n' "$1" \
+      > "$NODE_SB/ws/scripts/t.sh"
+    ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/t.sh" } }'
+    ws_seed_fingerprint
+    case "$(ws_run)" in
+      *"installs an EXIT trap"*) printf 'refused' ;;
+      *) printf 'accepted' ;;
+    esac
+  }
+
+  # The premise: the shell really does install that handler, and it really does
+  # replace the 77 with a zero.
+  printf '#!/usr/bin/env bash\ntrap %s EXIT\nexit 77\n' "'exit 0'" > "$NODE_SB/ws/scripts/p.sh"
+  run bash -c "cd '$NODE_SB/ws' && bash scripts/p.sh"
+  [ "$status" -eq 0 ]
+
+  [ "$(_trap_verdict "trap 'exit 0' EXIT")" = refused ]
+  [ "$(_trap_verdict "trap 'exit 0' 'EXIT'")" = refused ]
+  [ "$(_trap_verdict 'trap "exit 0" "EXIT"')" = refused ]
+  [ "$(_trap_verdict "trap 'exit 0' 0")" = refused ]
+  [ "$(_trap_verdict "trap 'exit 0' EX'IT'")" = refused ]
+  # A quoted command name is still that command.
+  [ "$(_trap_verdict "'trap' 'exit 0' EXIT")" = refused ]
+
+  # The controls. `trap - EXIT` removes a handler rather than installing one,
+  # quoted or not; a handler on other signals cannot replace an exit status;
+  # and a trap named inside a string is text being printed. That last one is
+  # what the quoted-whitespace marking is for -- without it the words inside
+  # the string read as separate arguments and `EXIT` was found in the middle
+  # of one.
+  [ "$(_trap_verdict 'trap - EXIT')" = accepted ]
+  [ "$(_trap_verdict "trap - 'EXIT'")" = accepted ]
+  [ "$(_trap_verdict "trap 'echo bye' INT TERM")" = accepted ]
+  [ "$(_trap_verdict 'echo "trap fake EXIT"')" = accepted ]
   rm -rf "$NODE_SB"
 }

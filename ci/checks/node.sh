@@ -1360,7 +1360,15 @@ _unquote_tok() {
 # that never runs.
 #
 # Every quoted span becomes spaces, one character for one, so an offset into the
-# blanked line still addresses the same character of the original. `_bq_state`
+# blanked line still addresses the same character of the original.
+#
+# With one exception, and it is the one that makes argument boundaries readable:
+# whitespace *inside* a quoted span becomes `_` rather than a space. A blanked
+# space and a real space are otherwise the same character, so nothing could tell
+# `echo "trap fake EXIT"` -- one argument -- from `echo trap fake EXIT`, and the
+# trap rule read a word out of the middle of a string. `_` is not structure, not
+# a separator and not a comment, so no other reader here notices; what it buys
+# is that a position holding a space in both copies is a genuine boundary. `_bq_state`
 # carries an unterminated quote into the next line, because a string spanning
 # lines makes those lines data as well; `_bq_cont` reports a trailing backslash,
 # which makes the next line a continuation of this command rather than a new
@@ -1396,7 +1404,10 @@ _blank_quoted() {
             [A-Za-z0-9_]) _bq_esc=1 ;;
           esac
         fi
-        _out="$_out  "
+        case "${_s:$((_i + 1)):1}" in
+          [[:space:]]) _out="${_out} _" ;;
+          *) _out="$_out  " ;;
+        esac
       else
         _out="$_out "
         _bq_cont=1
@@ -1406,7 +1417,10 @@ _blank_quoted() {
     fi
     if [ -n "$_bq_state" ]; then
       if [ "$_c" = "$_bq_state" ]; then _bq_state=""; fi
-      _out="$_out "
+      case "$_c" in
+        [[:space:]]) _out="${_out}_" ;;
+        *) _out="$_out " ;;
+      esac
     else
       case "$_c" in
         \'|\") _bq_state="$_c"; _out="$_out " ;;
@@ -1419,6 +1433,10 @@ _blank_quoted() {
 }
 
 _resolve_delegated_target() {
+  # Out-parameter: whether the resolved target passes the caller's arguments on
+  # to the runner. Cleared here, so a caller reads the answer for the
+  # resolution it just asked for and not for an earlier one.
+  _rdt_fwd=0
   local target="$1"
   local tools="$2"
   local depth="${3:-0}"
@@ -1437,6 +1455,10 @@ _resolve_delegated_target() {
   for t in $tools; do
     if [ "${target##*/}" = "$t" ]; then
       if [ "$t" = "node" ] && [ "$node_ok" -eq 0 ]; then continue; fi
+      # The target *is* the executable, so whatever the caller wrote after it is
+      # an argument to that executable. There is nothing here to forward
+      # through, and `npx vitest tests/a.test.ts` is a filter like any other.
+      _rdt_fwd=1
       return 0
     fi
   done
@@ -1453,6 +1475,15 @@ _resolve_delegated_target() {
   sub="$(script_command "$target" 2>/dev/null || true)"
   if [ -n "$sub" ]; then
     if _script_names_a_checker "$sub" "$tools" "$((depth + 1))"; then
+      # Whether the caller's own arguments can reach the runner through this
+      # target at all. A script that names no positional parameter consumes
+      # what it is given; one that forwards passes it straight to the runner,
+      # where a bare word is a filter. Asked so that `bash scripts/build.sh
+      # --ci` -- a wrapper handling its own flag -- is not refused for a filter
+      # that never arrives anywhere.
+      case "$sub" in
+        *'$@'*|*'$*'*) _rdt_fwd=1 ;;
+      esac
       # A package script reached through another one gets the same reading as a
       # direct command. Resolving it and stopping at the runner meant `"test":
       # "bun run verify"` over `"verify": "vitest run --exclude=..."` passed
@@ -1535,7 +1566,7 @@ _resolve_delegated_target() {
       # exit. Restricting this to top-level lines would have left
       # `if [ -n "$CI" ]; then trap "exit 0" EXIT; fi` accepted.
       if [ "$_bq_esc" -eq 1 ]; then _reject_escaped_word "$real"; fi
-      _reject_status_trap "$real" "$code"
+      _reject_status_trap "$real" "$real" "$code"
 
       # Split on every separator so control keywords are matched as whole
       # tokens. Matching them as substrings is what let `well done` close a
@@ -1617,6 +1648,11 @@ _resolve_delegated_target() {
         esac
         if _script_names_a_checker "$real" "$tools" "$((depth + 1))"; then
           hit=1
+          # Same question as the package-script path: whether this script hands
+          # the caller's arguments on to the runner, or handles them itself.
+          case "$real" in
+            *'$@'*|*'$*'*) _rdt_fwd=1 ;;
+          esac
           # The filter rule holds one layer down as well. `"test": "bash
           # scripts/test.sh"` leaves is_test_runner at zero, so a script whose
           # body is `vitest run tests/only.test.ts` skipped positional
@@ -1687,58 +1723,79 @@ _resolve_delegated_target() {
 # failing runner leaves the script with a zero, and the suite's result never
 # reaches the gate at all.
 #
-# Judged on the blanked copy, so `echo "trap 'exit 0' EXIT"` -- text being
-# printed -- does not arm it. That is also why the action itself cannot be
-# read: quoted text is exactly what _blank_quoted removes, deliberately, and a
-# reader that cannot see what a handler does cannot vouch for it. So the
-# allow-list is the one spelling that installs nothing: `trap - EXIT`, which
-# restores the default and removes any handler already set.
+# Read as *arguments*, not as words. The first version split the blanked mask on
+# whitespace, which is wrong twice over: a quoted action disappears entirely, so
+# the first visible word is the signal rather than the action -- and a quoted
+# *signal*, `trap 'exit 0' 'EXIT'`, disappears too, so the loop saw `trap` and
+# no signal at all and accepted it. Both are valid spellings and the second one
+# defeated the rule outright.
 #
-# Everything else naming EXIT (or signal 0, its numeric spelling) is refused,
-# including an ordinary `trap 'rm -f "$tmp"' EXIT` cleanup: the shell preserves
-# the status across a handler that does not exit, but nothing here can tell
-# that handler apart from one that does, and "cannot tell" is refused in this
-# file rather than assumed benign.
+# The mask is length-preserving, which is what makes the split possible: a
+# position where the mask holds a space and the original does not is quoted
+# text, and a position where both do is a genuine argument boundary. So the
+# arguments come out whole, quotes and all, and the quotes come off afterwards
+# -- which also settles `'trap' 'exit 0' EXIT`, since a quoted command name is
+# still that command.
+#
+# The action is not read. Quoted text is exactly what _blank_quoted removes,
+# deliberately, and a reader that cannot see what a handler does cannot vouch
+# for it -- so the allow-list is the one spelling that installs nothing: `trap -
+# EXIT`, which restores the default. Everything else naming EXIT (or signal 0,
+# its numeric spelling) is refused, including an ordinary `trap 'rm -f "$tmp"'
+# EXIT` cleanup: the shell does preserve the status across a handler that does
+# not exit, and nothing here can tell that handler apart from one that does.
 _reject_status_trap() {
-  local _what="$1" _mask="$2" _tok _state=0 _sig _t
-  case "$_mask" in
+  local _what="$1" _cmd="$2" _mask="$3"
+  # On the real text, not the mask: a fully quoted `'trap'` is blanked out of
+  # the mask and is still the trap command. A false start here costs one walk.
+  case "$_cmd" in
     *trap*) ;;
     *) return 0 ;;
   esac
-  # Separators are split off the words they are attached to, so `trap 'x' EXIT;`
-  # ends the trap command at the `;` exactly as the shell does.
-  _t="$_mask"
-  _t="${_t//;/ ; }"
-  _t="${_t//&/ & }"
-  _t="${_t//|/ | }"
-  set -f
-  # shellcheck disable=SC2086
-  for _tok in $_t; do
-    if [ "$_state" -eq 0 ]; then
-      case "$_tok" in trap) _state=1 ;; esac
+  local _n=${#_cmd} _i=0 _arg="" _state=0 _sig
+  local _sq="'" _dq='"'
+  while [ "$_i" -le "$_n" ]; do
+    if [ "$_i" -lt "$_n" ] \
+      && { [ "${_mask:$_i:1}" != " " ] || [ "${_cmd:$_i:1}" != " " ]; }; then
+      _arg="${_arg}${_cmd:$_i:1}"
+      _i=$((_i + 1))
       continue
     fi
-    if [ "$_state" -eq 1 ]; then
-      # `-` reinstates the default handler, which is the one form that cannot
-      # introduce a status.
-      case "$_tok" in
-        '-') _state=0 ; continue ;;
-      esac
-      # Anything else is *not* consumed as the action, and getting that wrong is
-      # what made the first version of this rule inert: in `trap 'exit 0' EXIT`
-      # the action is quoted, so it has already been blanked away and the first
-      # word still visible here is the signal. Skipping one token skipped the
-      # only evidence there was.
-      _state=2
-    fi
-    case "$_tok" in
-      ';'|'&'|'|') _state=0 ; continue ;;
+    _i=$((_i + 1))
+    [ -n "$_arg" ] || continue
+    # Quotes off, all of them: bash lets a word be quoted in pieces, so `EX'IT'`
+    # is the signal EXIT and stripping only the outermost pair would miss it.
+    _sig="${_arg//"$_sq"/}"
+    _sig="${_sig//"$_dq"/}"
+    _arg=""
+    # A separator ends the trap command wherever it appears, attached or not.
+    case "$_sig" in
+      *';'*|*'&'*|*'|'*)
+        if [ "$_state" -ne 0 ]; then
+          _sig="${_sig%%[;&|]*}"
+          if [ -z "$_sig" ]; then _state=0; continue; fi
+        fi
+        ;;
     esac
-    _sig="$(printf '%s' "$_tok" | tr '[:lower:]' '[:upper:]')"
+    case "$_state" in
+      0)
+        case "$_sig" in trap) _state=1 ;; esac
+        continue
+        ;;
+      1)
+        # The action, whatever it is. `-` restores the default handler and
+        # installs nothing, which is the one form that cannot carry a status.
+        case "$_sig" in
+          '-') _state=0 ;;
+          *) _state=2 ;;
+        esac
+        continue
+        ;;
+    esac
+    _sig="$(printf '%s' "$_sig" | tr '[:lower:]' '[:upper:]')"
     _sig="${_sig#SIG}"
     case "$_sig" in
       EXIT|0)
-        set +f
         echo "Workspace ${CI_GATE_NODE_WORKSPACE} installs an EXIT trap around a checker:"
         echo "    ${_what}"
         echo "  An EXIT handler runs after the runner and can leave with its own"
@@ -1752,7 +1809,6 @@ _reject_status_trap() {
         ;;
     esac
   done
-  set +f
 }
 
 # The program a command actually runs: the first word that is not an
@@ -1800,6 +1856,46 @@ _reject_escaped_word() {
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 }
 
+# What a delegated wrapper is handed, judged by the rules its runner's own
+# arguments meet -- because that is what they become.
+#
+# The wrapper reader accepts `vitest run "$@"` and says why: what a caller
+# forwards is not visible from inside the script. It is visible here, and it was
+# being dropped, so `"test": "bash scripts/test.sh tests/a.test.ts"` over that
+# wrapper collected one file and the lane exited 0. Two halves of one question
+# with only one of them asked.
+_reject_forwarded_args() {
+  local script_name="$1" args="$2" tok
+  case "$args" in
+    *[![:space:]]*) ;;
+    *) return 0 ;;
+  esac
+  _reject_narrowing_flags "$script_name" "$args"
+  set -f
+  # shellcheck disable=SC2086
+  for tok in $args; do
+    case "$tok" in
+      -*) continue ;;
+      # Forwarding on again is not an argument this reader can resolve either
+      # way, and refusing it would refuse every wrapper of a wrapper.
+      '"$@"'|'$@'|'"$*"'|'$*') continue ;;
+    esac
+    set +f
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} passes an argument into the"
+    echo "  '${script_name}' wrapper:"
+    echo "    arguments: ${args# }"
+    echo "    offending argument: ${tok}"
+    echo "  A wrapper forwards what it is given, and this gate accepts the"
+    echo "  forwarding on the grounds that what arrives cannot be seen from"
+    echo "  inside the script. Here it can: a bare word reaching a test runner"
+    echo "  is a filter, so the suite is reduced to whatever is named and the"
+    echo "  lane still exits 0. Move the selection into a script this gate does"
+    echo "  not run."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  done
+  set +f
+}
+
 # A checker whose status is inverted is not a checker this gate can report on.
 #
 # Said out loud rather than answered with "does not appear to run a test
@@ -1842,7 +1938,7 @@ _script_names_a_checker() {
   _blank_quoted "$cmd"
   local _mask="$_bq_out" _norm="" _ci=0 _cn=${#cmd}
   if [ "$_bq_esc" -eq 1 ]; then _reject_escaped_word "$1"; fi
-  _reject_status_trap "$1" "$_mask"
+  _reject_status_trap "$1" "$1" "$_mask"
   while [ "$_ci" -lt "$_cn" ]; do
     if [ "${_mask:$_ci:1}" = ";" ]; then
       _norm="$_norm ; "
@@ -1950,6 +2046,9 @@ _script_names_a_checker() {
   # sees a checker -- it records the hit and keeps reading, and a command
   # sequenced after one with `;` refuses.
   local expect_cmd=1 runner="" target="" found=0 seq_after=0 hit=0 pending_exit=0
+  local _rdt_fwd=0
+  # What the current delegation is being handed, if anything.
+  local _fwd=""
   # Whether the command now being read is prefixed by `!`, which inverts its
   # status. Per command, cleared at every separator, because that is the scope
   # the shell gives it: in `! command -v foo && vitest run` the negation belongs
@@ -1968,6 +2067,9 @@ _script_names_a_checker() {
         if [ -n "$runner" ] && [ -n "$target" ]; then
           if _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"; then
             if [ "$neg" -eq 1 ]; then _reject_negated_checker "$1"; fi
+            if [ "$_rdt_fwd" -eq 1 ]; then
+              _reject_forwarded_args "$target" "$_fwd"
+            fi
             found=1
           fi
         fi
@@ -1975,6 +2077,7 @@ _script_names_a_checker() {
         expect_cmd=1
         runner=""
         target=""
+        _fwd=""
         neg=0
         continue
         ;;
@@ -2037,6 +2140,9 @@ _script_names_a_checker() {
           if [ -n "$runner" ] && [ -n "$target" ]; then
             if _resolve_delegated_target "$target" "$tools" "$depth" "$_nt"; then
               if [ "$neg" -eq 1 ]; then _reject_negated_checker "$1"; fi
+              if [ "$_rdt_fwd" -eq 1 ]; then
+                _reject_forwarded_args "$target" "$_fwd"
+              fi
               found=1
             fi
           fi
@@ -2073,7 +2179,20 @@ _script_names_a_checker() {
     # Arguments of whatever is currently running. Only a runner has a
     # delegation target worth resolving.
     [ -n "$runner" ] || continue
-    [ -n "$target" ] && continue
+    if [ -n "$target" ]; then
+      # Everything after the target is handed *to* the target, and the wrapper
+      # reader explicitly allows `vitest run "$@"` -- it has to, since what a
+      # caller forwards is not visible from inside the script. This is where it
+      # is visible, and the tokens were being dropped: `"test": "bash
+      # scripts/test.sh tests/a.test.ts"` over that wrapper ran one test file
+      # and the lane exited 0. The two halves of one question, and only one of
+      # them was being asked.
+      case "$tok" in
+        run|exec|dlx|--) continue ;;
+      esac
+      _fwd="${_fwd} ${tok}"
+      continue
+    fi
     case "$tok" in
       -*) continue ;;
       run|exec|dlx|--) continue ;;
@@ -2085,8 +2204,12 @@ _script_names_a_checker() {
   [ -n "$runner" ] && [ -n "$target" ] || return 1
   _resolve_delegated_target "$target" "$tools" "$depth" "$_nt" || return 1
   # `! bash scripts/test.sh` reaches the end of the string with the delegation
-  # still pending, so the negation has to be answered here too.
+  # still pending, so the negation has to be answered here too, and so does what
+  # the delegation was handed.
   if [ "$neg" -eq 1 ]; then _reject_negated_checker "$1"; fi
+  if [ "$_rdt_fwd" -eq 1 ]; then
+    _reject_forwarded_args "$target" "$_fwd"
+  fi
   return 0
 }
 
@@ -2181,7 +2304,7 @@ assert_no_persistent_filter() {
     echo "  so the suite can fail and the script still exit 0."
     echo "  '&&' is the composition that keeps it: either the runner passes and"
     echo "  the next command runs, or the script fails with it. A bare 'exit',"
-    echo '  `exit $?` and `exit 1` are fine for the same reason -- none of them'
+    echo "  'exit \$?' and 'exit 1' are fine for the same reason -- none of them"
     echo "  can turn a failure into a pass."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
   else

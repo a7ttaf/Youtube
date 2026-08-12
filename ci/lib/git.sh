@@ -57,6 +57,28 @@ ci::git::push_range() {
     return 0
   fi
 
+  # Past that point, a caller that supplied a tip gets the tip and nothing
+  # guessed around it.
+  #
+  # The fallbacks below exist for callers who said nothing at all -- CI, a
+  # direct invocation -- and they were being applied to the pre-push hook as
+  # well, which does say. The hook leaves the base unset precisely when the
+  # destination has none of this history: a new branch, or a remote sha this
+  # clone does not carry. Filling that in from `@{upstream}` or a local `main`
+  # then produced `main..tip` for a first push to an empty destination, and
+  # git-safety, the signature check and the changeset scan all skipped every
+  # commit up to `main`. A secret in the omitted history uploads past a gate
+  # reporting on the tail of the branch.
+  #
+  # Which is the same reasoning as the `HEAD~1` fallback that was removed from
+  # this list: a wrong base is worse than no base, because it produces a
+  # confident green over commits nobody looked at.
+  if [ -n "${CI_GATE_PUSH_NEW_SHA:-}" ]; then
+    git rev-parse --verify "${new_sha}^{commit}" >/dev/null 2>&1 || return 1
+    printf '%s' "$new_sha"
+    return 0
+  fi
+
   # Everything below measures against the tip being pushed, not the literal
   # HEAD. The hook can supply a new sha without an old one — a brand-new branch,
   # or `git push origin some-other-branch` — and measuring that against HEAD
@@ -208,11 +230,25 @@ ci::git::worktree_covers_push() {
     # Without a remote name there is nothing to scope to, and answering from
     # every remote is the bug. Refuse instead: a tag push outside the pre-push
     # hook has no destination this can verify.
-    local contained remote="${CI_GATE_PUSH_REMOTE:-}"
+    # Compared as text, not as a pattern. `grep "^${remote}/"` interpolates the
+    # remote name into an expression, so a perfectly ordinary name containing a
+    # `.` -- `release.prod` -- matched `releaseXprod/main`, and a tag whose
+    # commit is published only on some unrelated remote read as published to
+    # this one. The gate then approved a tree that destination has never seen
+    # while the lanes validated the repaired HEAD. A `-`, `+` or `[` in a name
+    # does the same thing in its own way.
+    local contained remote="${CI_GATE_PUSH_REMOTE:-}" _wc_line _wc_pfx
     [ -n "$remote" ] || return 1
-    contained="$(git branch -r --contains "$pushed" 2>/dev/null \
-      | sed 's/^[[:space:]]*//' \
-      | grep "^${remote}/" | head -1 || true)"
+    contained=""
+    _wc_pfx="${remote}/"
+    while IFS= read -r _wc_line; do
+      _wc_line="${_wc_line#"${_wc_line%%[![:space:]]*}"}"
+      [ -n "$_wc_line" ] || continue
+      if [ "${_wc_line:0:${#_wc_pfx}}" = "$_wc_pfx" ]; then
+        contained="$_wc_line"
+        break
+      fi
+    done <<< "$(git branch -r --contains "$pushed" 2>/dev/null || true)"
     [ -n "$contained" ] && return 0
   fi
   return 1

@@ -1143,3 +1143,138 @@ YML
   [[ "$output" == *"ordinary=1"* ]]
   rm -rf "$sb"
 }
+
+@test "git: a hook-supplied tip with no base walks the whole tip" {
+  # The fallbacks in push_range exist for callers who said nothing -- CI, a
+  # direct invocation. They were being applied to the pre-push hook too, which
+  # does say: it leaves the base unset precisely when the destination has none
+  # of this history. Filling that in from @{upstream} or a local `main` gave
+  # `main..tip` for a first push to an empty destination, and git-safety, the
+  # signature check and the changeset scan all skipped every commit up to
+  # `main`. A secret in the omitted history uploads past a green gate.
+  local sb
+  sb="$(mktemp -d)"
+  (
+    cd "$sb"
+    git init -q -b main .
+    printf 'a\n' > a.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c1
+    root="$(git rev-parse HEAD)"
+    printf 'b\n' > b.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c2
+    # A remote-tracking `main` exists and is exactly what the old fallback
+    # would have found and used as a base.
+    git update-ref refs/remotes/origin/main "$root"
+    git checkout -q -b feature
+    printf 'c\n' > c.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c3
+    printf '%s %s\n' "$root" "$(git rev-parse HEAD)" > .shas
+  ) >/dev/null 2>&1
+  local root tip
+  read -r root tip < "$sb/.shas"
+
+  # The premise: the guess is available, and it is wrong.
+  run bash -c "cd '$sb' && git rev-parse --verify refs/remotes/origin/main"
+  [ "$status" -eq 0 ]
+
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' && CI_GATE_PUSH_NEW_SHA='$tip' ci::git::push_range"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$tip" ]
+
+  # Which is not a cosmetic difference: it is the number of commits the scans
+  # then walk.
+  run bash -c "cd '$sb' && git rev-list '$output' | wc -l"
+  [ "$(printf '%s' "$output" | tr -d ' ')" = "3" ]
+
+  # And a base the hook *did* supply is still honoured.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' && CI_GATE_PUSH_NEW_SHA='$tip' CI_GATE_PUSH_OLD_SHA='$root' ci::git::push_range"
+  [ "$output" = "${root}..${tip}" ]
+  rm -rf "$sb"
+}
+
+@test "git: the destination remote is matched literally, not as a pattern" {
+  # `grep "^${remote}/"` interpolates the remote name into an expression, so
+  # `release.prod` matched `releaseXprod/main` and a tag whose commit is
+  # published only on some unrelated remote read as published to this one. The
+  # gate then approves a tree the destination has never seen while the lanes
+  # validate the repaired HEAD.
+  local sb
+  sb="$(mktemp -d)"
+  (
+    cd "$sb"
+    git init -q -b main .
+    printf 'a\n' > a.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c1
+    printf 'b\n' > b.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c2
+    tip="$(git rev-parse HEAD)"
+    git checkout -q HEAD~1
+    # The tagged commit is not the checkout, which is what sends the question
+    # to the publication rule at all.
+    git update-ref refs/remotes/releaseXprod/main "$tip"
+    printf '%s\n' "$tip" > .sha
+  ) >/dev/null 2>&1
+  local tip
+  read -r tip < "$sb/.sha"
+
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' \
+    && CI_GATE_PUSH_NEW_SHA='$tip' CI_GATE_PUSH_REMOTE_REFS= CI_GATE_PUSH_REMOTE=release.prod \
+       ci::git::worktree_covers_push"
+  [ "$status" -ne 0 ]
+
+  # The control: the remote it really names still matches.
+  run bash -c "cd '$sb' && git update-ref refs/remotes/release.prod/main '$tip' \
+    && . '$REPO_ROOT/ci/lib/git.sh' \
+    && CI_GATE_PUSH_NEW_SHA='$tip' CI_GATE_PUSH_REMOTE_REFS= CI_GATE_PUSH_REMOTE=release.prod \
+       ci::git::worktree_covers_push"
+  [ "$status" -eq 0 ]
+  rm -rf "$sb"
+}
+
+@test "tests-shell: an unreadable ignored listing is infrastructure, not a clean tree" {
+  # `| grep ... || true` puts the `|| true` on the pipeline, so it answers for
+  # grep -- which exits 1 whenever it filters everything out, the ordinary case
+  # -- and never for the enumeration in front of it. An unreadable index then
+  # produced an empty list that reads exactly like "nothing is ignored here",
+  # and this is the one of the three scans that can see a worktree replacement
+  # for a path the pushed commits delete.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/ci/tests" "$sb/.githooks" "$sb/bin"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf '#!/usr/bin/env bats\n@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  printf '#!/usr/bin/env bash\ntrue\n' > "$sb/.githooks/pre-push"
+  printf 'nothing\n' > "$sb/.gitignore"
+  (
+    cd "$sb"
+    git init -q -b main .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+  ) >/dev/null 2>&1
+
+  # A git that answers every question except the ignored-file enumeration.
+  # Nothing else about the run changes, so a refusal can only come from this
+  # producer.
+  local realgit
+  realgit="$(command -v git)"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'for a in "$@"; do\n'
+    printf '  if [ "$a" = "--ignored" ]; then exit 1; fi\n'
+    printf 'done\n'
+    printf 'exec "%s" "$@"\n' "$realgit"
+  } > "$sb/bin/git"
+  chmod +x "$sb/bin/git"
+
+  # The premises: the stub fails for that one question and for nothing else.
+  run bash -c "cd '$sb' && PATH=\"$sb/bin:\$PATH\" git rev-parse --verify HEAD"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$sb' && PATH=\"$sb/bin:\$PATH\" git ls-files --others --ignored --exclude-standard -- ci"
+  [ "$status" -ne 0 ]
+
+  run bash -c "cd '$sb' && PATH=\"$sb/bin:\$PATH\" CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot read the tree these suites are being compared against"* ]]
+  rm -rf "$sb"
+}

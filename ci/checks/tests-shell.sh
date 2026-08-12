@@ -65,8 +65,25 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
     # the remedy it printed -- "commit the rest" -- is one git-safety.sh
     # forbids. Anchored at `ci/`, so only these two directories are pruned and
     # not any directory that happens to share their name.
-    git ls-files --others --ignored --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null \
-      | grep -Ev '(^|/)(\.ci-gate|node_modules)/|^ci/(reports|artifacts)/' || true
+    #
+    # The listing status is taken before the output is shaped. `| grep ... ||
+    # true` puts the `|| true` on the *pipeline*, so it answers for grep -- which
+    # exits 1 whenever it filters everything out, the ordinary case -- and never
+    # for the enumeration in front of it. An unreadable index therefore produced
+    # an empty list that reads exactly like "nothing is ignored here", and this
+    # is the one of the three scans that can see a worktree replacement for a
+    # path the pushed commits delete: the suites would then validate code that
+    # is not in the tree being pushed. Third instance of this shape in the same
+    # sweep, and the two before it were also hidden behind a pipeline.
+    _ts_ig_rc=0
+    _ts_ig="$(git ls-files --others --ignored --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null)" \
+      || _ts_ig_rc=$?
+    if [ "$_ts_ig_rc" -ne 0 ]; then
+      printf '%s\n' "$SCAN_UNREADABLE"
+    else
+      printf '%s\n' "$_ts_ig" \
+        | grep -Ev '(^|/)(\.ci-gate|node_modules)/|^ci/(reports|artifacts)/' || true
+    fi
   } | sort -u | sed '/^$/d')"
   case "$SHELL_DRIFT" in
     *"$SCAN_UNREADABLE"*)
