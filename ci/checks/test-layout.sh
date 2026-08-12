@@ -481,8 +481,16 @@ extract_test_block() {
             rest = substr(all, e)
             if (rest ~ /^[[:space:]]*:[[:space:]]*\{/) {
               start = e + index(rest, "{")
-              print capture(all, start, n)
-              exit 0
+              # Recorded and scanning continues, exactly as the unquoted spelling
+              # below does. Printing here and leaving ended the scan at the first
+              # quoted key, so every rule that comes *after* it -- a duplicate, a
+              # computed key, a spread, a shorthand override -- was never applied
+              # to a config that spells the key `"test"`. `defineConfig({ "test":
+              # { include: [broad] }, ...narrow })` reported the broad include
+              # live and exited 0 while vitest collected the narrowed one. One
+              # rule, two spellings, and only one of them had it.
+              seen++
+              block = capture(all, start, n)
             }
           }
           p = e

@@ -1278,3 +1278,63 @@ YML
   [[ "$output" == *"Cannot read the tree these suites are being compared against"* ]]
   rm -rf "$sb"
 }
+
+@test "preflight: a deletion-only push runs destination protection and nothing else" {
+  # `git push --delete origin feature` sends no content, so every content lane
+  # was reporting on whatever happened to be checked out: a layout error or a
+  # failing suite in the worktree refused a deletion that carries neither, and
+  # it cost the half hour the shell suites take. git-safety already self-skipped
+  # on the flag; the ship *plan* did not, which is the same rule missing one
+  # tree over.
+  local sb
+  sb="$(mktemp -d)"
+  cp -r "$REPO_ROOT/ci" "$sb/ci"
+  rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
+  # Every check becomes a stub that names itself and passes, so what the run
+  # *scheduled* is readable from the output and no real lane executes.
+  local f
+  for f in "$sb"/ci/checks/*.sh; do
+    printf '#!/usr/bin/env bash\necho "RAN:%s"\nexit 0\n' "$(basename "$f" .sh)" > "$f"
+    chmod +x "$f"
+  done
+  (
+    cd "$sb"
+    printf 'x\n' > a.txt
+    git init -q -b main .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+  ) >/dev/null 2>&1
+
+  _pf_lanes() { # _pf_lanes <env assignments...>
+    ( cd "$sb" && env "$@" CI_GATE_USE_LANES=0 bash ci/preflight.sh --mode "$MODE_UNDER_TEST" 2>&1 ) \
+      | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
+  }
+
+  # The premise: an ordinary ship push does schedule the content lanes, so an
+  # empty list below is the flag acting and not the harness failing to run.
+  MODE_UNDER_TEST=ship
+  run _pf_lanes CI_GATE_PUSH_NEW_SHA=HEAD
+  [[ "$output" == *node* ]]
+  [[ "$output" == *test-layout* ]]
+  [[ "$output" == *tests-shell* ]]
+  [[ "$output" == *branch-protection* ]]
+
+  run _pf_lanes CI_GATE_PUSH_DELETIONS_ONLY=1 CI_GATE_PUSH_REMOTE_REFS=feature
+  [ "$status" -eq 0 ]
+  # Destination protection is the one thing that must survive: `git push origin
+  # :main` is a deletion too, and it is exactly the push to refuse.
+  [[ "$output" == *branch-protection* ]]
+  [[ "$output" != *node* ]]
+  [[ "$output" != *test-layout* ]]
+  [[ "$output" != *tests-shell* ]]
+  [[ "$output" != *build* ]]
+  [[ "$output" != *security* ]]
+
+  # And `full` is a deliberate whole-tree run. It is not a push at all, so an
+  # environment variable left over from one must not narrow it.
+  MODE_UNDER_TEST=full
+  run _pf_lanes CI_GATE_PUSH_DELETIONS_ONLY=1
+  [[ "$output" == *test-layout* ]]
+  [[ "$output" == *tests-shell* ]]
+  rm -rf "$sb"
+}

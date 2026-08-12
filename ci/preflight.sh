@@ -663,6 +663,27 @@ run_common_checks() {
   run_phase     "node:./ci/checks/node.sh"     "python:./ci/checks/python.sh"
 }
 
+# A push that carries no content has nothing for a content lane to report on.
+#
+# `git push --delete origin feature` is every record being a deletion, so
+# hook-dispatch sets CI_GATE_PUSH_DELETIONS_ONLY and git-safety self-skips on
+# it -- and the ship plan still ran test-layout, security, the node lane, the
+# build and the shell suites against whatever happens to be checked out. So
+# deleting an unprotected branch could be refused for a layout error or a
+# failing suite in a worktree the push is not sending anywhere, and it cost the
+# half hour the shell suites take. A gate that blocks correct work gets switched
+# off, and then it guards nothing.
+#
+# Destination protection is the one thing that must still run: `git push origin
+# :main` deletes a protected branch outright, and that is precisely the push
+# that has to be refused. branch-protection.sh reads the same flag and has its
+# own arms for it.
+run_ship_deletion_only_checks() {
+  echo "Push carries only ref deletions; content lanes have nothing to report on."
+  echo "  Destination protection still runs."
+  run_phase "branch-protection:./ci/checks/branch-protection.sh"
+}
+
 run_full_or_ship_checks() {
   run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "branch-protection:./ci/checks/branch-protection.sh"     "test-layout:./ci/checks/test-layout.sh"
   run_phase     "security:./ci/checks/security.sh"
@@ -694,7 +715,13 @@ run_mode() {
       run_common_checks
       ;;
     full|ship)
-      run_full_or_ship_checks
+      # Only ship, and only when the hook said so: `full` is a deliberate
+      # whole-tree run and must not be narrowed by an environment variable.
+      if [ "$MODE" = "ship" ] && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
+        run_ship_deletion_only_checks
+      else
+        run_full_or_ship_checks
+      fi
       ;;
     debt)
       run_phase "git-safety:./ci/checks/git-safety.sh"

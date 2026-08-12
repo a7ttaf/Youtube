@@ -3540,6 +3540,80 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "node lane: the build-mode operations that delete or plan are refused" {
+  # `tsc --build` takes operations of its own, and two of them never typecheck:
+  # `--clean` deletes the outputs of the referenced projects and `--dry` prints
+  # what a build would do. Either exits 0 over code that does not compile, so
+  # `tsc --build --clean` was a typecheck script that removed build output and
+  # reported success. The rule enumerated single-command modes and did not know
+  # the build operations existed.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --build --clean" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --build --dry" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The short spelling of the build flag reaches the same operations, and the
+  # compiler folds their case like every other option.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -b --clean" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --build --CLEAN" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The control: `tsc --build` on its own is an ordinary project build and does
+  # typecheck. Refusing it would be the other half of this rule going wrong.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --build" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: listing the files it compiled is not a non-compiling mode" {
+  # `--listFiles` and `--listFilesOnly` are one letter and a whole behaviour
+  # apart: the first prints the files as part of a normal compile and still
+  # reports every error, the second prints them *instead* of compiling. Naming
+  # both refused `tsc --listFiles --noEmit`, an ordinary diagnostic spelling of
+  # a real typecheck -- this rule's own false positive, and the shape that gets
+  # a gate switched off.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --listFiles --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+
+  # And the mode that really does replace the compile is still refused, which is
+  # what keeps this a correction rather than a relaxation.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --listFilesOnly --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: a word spelled with a backslash escape is refused, not read past" {
   # `\trap` is the trap command to the shell and `rap` to this gate: an escaped
   # character is blanked, and it has to be, since keeping it would let `echo

@@ -2580,8 +2580,20 @@ _reject_tsc_args() {
       # allow-list: watch mode does not exit, so the lane is killed by the
       # gate's timeout and a manifest edit is reported as broken infrastructure
       # rather than as a result.
-      --showconfig|--listfilesonly|--listfiles|--init|--help|-h|--version|-v \
-        |--all|--nocheck|--watch|-w)
+      # `--listFiles` was on this list and does not belong on it. It prints the
+      # files read *during* a compilation that still happens -- a project error
+      # still reports and still exits 2 -- while `--listFilesOnly` stops after
+      # listing them. Two options one letter apart, one of which checks, and
+      # taking them for the same thing blocked a legitimate diagnostic script
+      # before it could run. The pair is the reason this list is enumerated by
+      # behaviour rather than by name resemblance.
+      #
+      # `--clean` and `--dry` are the build-mode versions of the same
+      # distinction: `tsc --build` checks, `tsc --build --clean` deletes the
+      # outputs and `tsc --build --dry` reports what it would do. Both exit 0
+      # over a project that does not compile.
+      --showconfig|--listfilesonly|--init|--help|-h|--version|-v \
+        |--all|--nocheck|--watch|-w|--clean|--dry)
         echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a non-compiling tsc mode in its"
         echo "  '${script_name}' script:"
         echo "    ${script_name}: ${cmd}"

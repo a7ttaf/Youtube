@@ -1596,6 +1596,70 @@ EOF
   [ "$status" -eq 20 ]
 }
 
+@test "test-layout: a quoted test key is read under the same rules as a bare one" {
+  # `"test":` was recognised, then the scan printed the block and stopped -- so
+  # everything the scan exists to notice *after* that point stopped with it. The
+  # bare `test:` recorded and kept going, which is why the duplicate rule, the
+  # spread rule and the shorthand rule only ever held for one of the two
+  # spellings. JavaScript does not distinguish them; this is the same object.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  "test": {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  ...narrow,
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  "test": {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  test: {
+    include: ["tests/only.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"more than one top-level"* ]]
+
+  # The controls. A quoted key on its own is an ordinary config and must still
+  # pass, and a spread *before* the block is the case the spread rule already
+  # allows -- so this is the scan reaching further, not refusing more.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  "test": {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  ...shared,
+  "test": {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
 @test "test-layout: an unreadable staged config is infrastructure, not a pass" {
   # The index lists the blob and git cannot produce it. Dropping it silently
   # left the caller validating the worktree copy alone and reporting PASS --
