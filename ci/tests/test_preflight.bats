@@ -1123,10 +1123,17 @@ YML
   # assert nothing. The producer is the only thing replaced.
   local sb
   sb="$(mktemp -d)"
+  # The extraction now starts at the temp file the collector reads through
+  # rather than at the array, because the producer's status has to be checkable
+  # and a process substitution is a subshell that swallows it. Two names the
+  # extracted block needs are supplied here, for the same reason the producer
+  # is: what this case is about is the dedup, not the diagnostics around it.
   {
     printf '%s\n' 'set -Eeuo pipefail'
+    printf '%s\n' 'CI_RESULT_FAIL_INFRA=30'
+    printf '%s\n' 'GATE_WHAT=staged'
     printf '%s\n' '_gs_content_files() { printf "%s\0" "$NL1" "$NL1" "plain.py" "plain.py" "$NL2" "$NL1"; }'
-    sed -n '/^_GS_PATHS=()/,/^done < <(_gs_content_files)/p' "$REPO_ROOT/ci/checks/git-safety.sh"
+    sed -n '/^_GS_PATHLIST=/,/^rm -f "\$_GS_PATHLIST"/p' "$REPO_ROOT/ci/checks/git-safety.sh"
     printf '%s\n' 'printf "nl=%s ordinary=%s\n" "${#_GS_NL_PATHS[@]}" "${#_GS_PATHS[@]}"'
   } > "$sb/drive.sh"
 
@@ -1352,5 +1359,179 @@ YML
   run _pf_lanes CI_GATE_PUSH_DELETIONS_ONLY=1
   [[ "$output" == *test-layout* ]]
   [[ "$output" == *tests-shell* ]]
+  rm -rf "$sb"
+}
+
+@test "git-safety: a conflict resolved by committing the markers is caught" {
+  # `git show` of a merge produces a *combined* diff, which shows only hunks
+  # differing from every parent -- so git prints nothing for the ordinary case
+  # and `--check` reports nothing over it. Both conflict-marker scans read that
+  # output, so a merge whose resolution left the markers in the file went out
+  # through a gate that printed "Git safety checks passed".
+  gs_setup
+  (
+    cd "$GS_SB"
+    printf 'base\n' > f.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm base
+    git rev-parse HEAD > .base
+    git checkout -q -b side
+    printf 'side\n' > f.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm side
+    git checkout -q feature/x
+    printf 'mainline\n' > f.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm mainline
+    git merge side || true
+    printf 'resolved\n<<<<<<< HEAD\nkeep\n=======\n' > f.txt
+    git add f.txt
+    git -c user.email=t@t -c user.name=t commit -qm merge
+  ) >/dev/null 2>&1
+  local base tip
+  read -r base < "$GS_SB/.base"
+  tip="$(cd "$GS_SB" && git rev-parse HEAD)"
+
+  # The premise: git really is silent about this merge.
+  run bash -c "cd '$GS_SB' && git show --format= --check HEAD"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' CI_GATE_PUSH_NEW_SHA='$tip' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"conflict-marker"* || "$output" == *"conflict markers"* ]]
+  rm -rf "$GS_SB"
+}
+
+@test "git-safety: a diff that cannot be produced is not a clean tree" {
+  # Two independent holes, both live. In index mode `_gs_diff` never captured
+  # `git diff --cached`'s status at all, so a failing diff returned 0 with no
+  # output; and `_gs_diff | grep ... || rc=$?` records grep's status, where a
+  # producer failure (1) is indistinguishable from grep's "no match" and can
+  # also overwrite grep's "matched". A .gitattributes naming a textconv filter
+  # that is not installed reaches both.
+  gs_setup
+  (
+    cd "$GS_SB"
+    printf '*.dat diff=nope\n' > .gitattributes
+    printf 'AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrst\n' > s.dat
+    git config diff.nope.textconv /nonexistent-textconv-binary
+    git add .gitattributes s.dat
+  ) >/dev/null 2>&1
+
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=quick bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"never ran"* || "$output" == *"could not be produced"* ]]
+
+  # The control: the identical file without the broken filter is caught, so the
+  # scan does work and it was the producer that silenced it.
+  ( cd "$GS_SB" && git rm -q --cached .gitattributes && rm -f .gitattributes ) >/dev/null 2>&1
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=quick bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Potential secret-like value"* ]]
+  rm -rf "$GS_SB"
+}
+
+@test "git-safety: an unstaged worktree edit is not part of the push" {
+  # `git diff --check` over the worktree ran unconditionally, above the mode
+  # branch, so a trailing space in a work-in-progress line -- in no outgoing
+  # commit and no commit at all -- refused the push. There is no remedy in the
+  # push: you have to stash unrelated work to send commits that are clean. It
+  # contradicts the rule the same file states twelve lines lower, that the
+  # reference follows the gate's own mode.
+  gs_setup
+  (
+    cd "$GS_SB"
+    printf 'clean\n' > g.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm clean
+    git rev-parse HEAD~1 > .base
+    printf 'wip line with trailing space \n' >> g.txt
+  ) >/dev/null 2>&1
+  local base tip
+  read -r base < "$GS_SB/.base"
+  tip="$(cd "$GS_SB" && git rev-parse HEAD)"
+
+  # The premise: the worktree really is dirty in the way that used to refuse.
+  run bash -c "cd '$GS_SB' && git diff --check"
+  [ "$status" -ne 0 ]
+
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' CI_GATE_PUSH_NEW_SHA='$tip' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 0 ]
+
+  # And the pre-commit gate, which does stand behind the worktree, still says so.
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=quick bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"unstaged changes"* ]]
+  rm -rf "$GS_SB"
+}
+
+@test "tests-shell: the presence guard asks about the set the runner runs" {
+  # The guard walked ci/tests/ recursively while tests.sh runs `bats ci/tests/`,
+  # which is not recursive. A committed fixture at
+  # ci/tests/fixtures/shell/tests/hello.bats therefore satisfied the guard on
+  # behalf of suites that were not there: bats collected nothing, exited 0, and
+  # the lane reported PASS over zero tests -- found-nothing read as
+  # everything-passed, the exact state this wrapper says it exists to prevent.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/ci/tests/fixtures/shell/tests"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf '#!/usr/bin/env bats\n@test "x" { true; }\n' > "$sb/ci/tests/fixtures/shell/tests/hello.bats"
+  ( cd "$sb" && git init -q -b main . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+
+  # The premise: bats really does collect nothing from that tree.
+  run bash -c "cd '$sb' && bats --formatter junit ci/tests/ 2>/dev/null"
+  [ "$status" -eq 0 ]
+
+  run bash -c "cd '$sb' && bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"No .bats suites found"* ]]
+
+  # The control: a suite where the runner will actually see it. The runner is
+  # replaced by a stand-in that announces itself, because "the guard's message
+  # is absent" would also be satisfied by an exec that failed with 127 -- the
+  # control has to show the guard handed control on, not that something else
+  # went wrong first.
+  printf '#!/usr/bin/env bash\necho DELEGATED\nexit 0\n' > "$sb/ci/checks/tests.sh"
+  chmod +x "$sb/ci/checks/tests.sh"
+  printf '#!/usr/bin/env bats\n@test "y" { true; }\n' > "$sb/ci/tests/real.bats"
+  run bash -c "cd '$sb' && bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DELEGATED"* ]]
+  [[ "$output" != *"No .bats suites found"* ]]
+  rm -rf "$sb"
+}
+
+@test "preflight: a changeset of ignored paths is not an empty changeset" {
+  # "No relevant changes" meant "no path named a language", which is a statement
+  # about the lanes and not about the tree. Every path can be auto-ignored --
+  # dist/, build/, vendor/, node_modules/ -- or simply carry no language, a .md
+  # file or a LICENSE, and the changeset comes out with an empty language list
+  # and a perfectly non-empty file list. git-safety is the lane that blocks
+  # exactly those paths, and it never ran.
+  local sb
+  sb="$(mktemp -d)"
+  cp -r "$REPO_ROOT/ci" "$sb/ci"
+  rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
+  local f
+  for f in "$sb"/ci/checks/*.sh; do
+    case "$(basename "$f")" in common.sh) continue ;; esac
+    printf '#!/usr/bin/env bash\necho "RAN:%s"\nexit 0\n' "$(basename "$f" .sh)" > "$f"
+    chmod +x "$f"
+  done
+  ( cd "$sb" && git init -q -b main . && printf 'x\n' > a.txt && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  ( cd "$sb" && mkdir -p dist \
+    && printf 'AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrst\n' > dist/bundle.js \
+    && git add -f dist/bundle.js ) >/dev/null 2>&1
+
+  run bash -c "cd '$sb' && CI_GATE_USE_LANES=0 bash ci/preflight.sh --mode quick 2>&1"
+  [[ "$output" != *"No relevant changes detected"* ]]
+  [[ "$output" == *"RAN:git-safety"* ]]
+
+  # The control: nothing staged at all still takes the fast exit, which is what
+  # that exit is for.
+  ( cd "$sb" && git reset -q --hard && rm -rf dist ) >/dev/null 2>&1
+  run bash -c "cd '$sb' && CI_GATE_USE_LANES=0 bash ci/preflight.sh --mode quick 2>&1"
+  [[ "$output" == *"No relevant changes detected"* ]]
   rm -rf "$sb"
 }

@@ -828,10 +828,23 @@ if type ci::changeset::detect >/dev/null 2>&1; then
   # one leaves the endpoint diff clean while both commits are pushed. Either
   # exits here with PASS, before git-safety.sh has run at all — the pre-push
   # gate skipped on the strength of a diff that was never what it stands behind.
+  #
+  # And "no relevant changes" now means no changes. It used to mean "no path
+  # that named a language", which is a statement about the *lanes* and not about
+  # the tree: every path can be auto-ignored -- `dist/`, `build/`, `vendor/`,
+  # `node_modules/` -- or simply carry no language at all, a .md file or a
+  # LICENSE, and the changeset comes out with an empty language list and a
+  # perfectly non-empty file list. git-safety is the lane that blocks exactly
+  # those paths, and it never ran: staging `dist/bundle.js` containing an AWS
+  # key exits 20 from git-safety.sh directly and exited 0 through preflight,
+  # with no lane executed at all. The changeset filter downstream is where a
+  # lane decides it has nothing to do; this exit is only for a run with nothing
+  # in front of it.
+  _pf_has_paths=0
+  case "${_CI_CHANGESET_FILES_RAW:-}" in *[![:space:]]*) _pf_has_paths=1 ;; esac
   if [ "$RUN_ALL" -eq 0 ] && [ "$MODE" != "ship" ] \
-    && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ] \
-    && ! printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" \
-      | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|$))'; then
+    && [ "$_pf_has_paths" -eq 0 ] \
+    && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ]; then
     echo "No relevant changes detected. Skipping gate."
     exit 0
   fi

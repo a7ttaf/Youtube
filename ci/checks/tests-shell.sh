@@ -126,8 +126,17 @@ fi
 # found", reported PASS, and the gate approved the removal of the entire
 # regression net it was added to enforce. Asked here, before delegating, for the
 # same reason the bats-missing case is asked here.
+#
+# `-maxdepth 1`, because that is what the runner behind this actually executes.
+# tests.sh runs `bats ci/tests/`, which is *not* recursive, while this guard
+# walked the whole subtree -- so `ci/tests/fixtures/shell/tests/hello.bats`, a
+# committed fixture, satisfied the guard on behalf of suites that were not
+# there. Deleting every real suite then left bats collecting nothing, exiting 0,
+# and the lane printing "Tests result: PASS" over zero tests: found-nothing read
+# as everything-passed, which is the exact state this wrapper says it exists to
+# prevent. The guard has to ask about the same set the runner runs.
 if [ ! -d "$ROOT_DIR/ci/tests" ] \
-  || [ -z "$(find "$ROOT_DIR/ci/tests" -type f -name '*.bats' -print -quit 2>/dev/null)" ]; then
+  || [ -z "$(find "$ROOT_DIR/ci/tests" -maxdepth 1 -type f -name '*.bats' -print -quit 2>/dev/null)" ]; then
   echo "No .bats suites found under ci/tests/."
   echo "  This lane is scheduled as a blocker precisely so those suites execute;"
   echo "  reporting PASS with nothing to run would leave the layout, node and"

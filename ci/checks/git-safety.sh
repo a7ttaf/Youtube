@@ -33,10 +33,24 @@ fi
 
 echo "Branch: $BRANCH"
 
-if ! git diff --check >/dev/null 2>&1; then
-  echo "Whitespace/conflict-marker problems found in unstaged changes."
-  git diff --check || true
-  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+# Unstaged worktree edits, and only where they are part of what is being
+# gated.
+#
+# This ran unconditionally, above the mode branch below, so the pre-push gate
+# refused a push over a trailing space in a work-in-progress line that is in no
+# outgoing commit and no commit at all. There is no remedy in the push: the
+# developer has to stash or finish unrelated work to send commits that are
+# already clean. It contradicts the rule stated twelve lines down -- the
+# reference follows the gate's own mode -- and the one tests-shell.sh applies to
+# itself, that an unrelated dirty file is not something a lane's result claims
+# anything about. The staged and range-scoped equivalents are at _gs_check
+# below, and they are what each mode actually stands behind.
+if [ "${CI_GATE_MODE:-}" != "ship" ]; then
+  if ! git diff --check >/dev/null 2>&1; then
+    echo "Whitespace/conflict-marker problems found in unstaged changes."
+    git diff --check || true
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
 fi
 
 # Which content is this run vouching for?
@@ -94,8 +108,26 @@ fi
 #
 # --first-parent is deliberately absent: a merged side branch is part of what is
 # being pushed, and its commits carry their content into the remote too.
+# How many parents a commit has, so a merge is diffed against one of them.
+#
+# `git show` of a merge produces a *combined* diff, and a combined diff shows
+# only hunks that differ from every parent -- git prints nothing at all for the
+# ordinary case, and `--check` reports nothing over it either. So a conflict
+# resolved by committing the markers themselves went out through a gate that
+# reported "Git safety checks passed": measured, `git show --format= --check
+# <merge>` exits 0 in silence while the identical two lines in a non-merge
+# commit exit 2. Every content scan in this file reads _gs_diff, so the merge
+# commit was invisible to all of them at once.
+_gs_parents() {
+  local _gp_line
+  _gp_line="$(git rev-list --parents -n 1 "$1" 2>/dev/null)" || return 1
+  # shellcheck disable=SC2086
+  set -- $_gp_line
+  printf '%s' "$(( $# - 1 ))"
+}
+
 _gs_diff() {
-  local sha rc=0
+  local sha rc=0 _gd_np
   if [ -n "$GATE_RANGE" ]; then
     while IFS= read -r sha; do
       [ -n "$sha" ] || continue
@@ -104,10 +136,24 @@ _gs_diff() {
       # diff here, and an empty diff is indistinguishable from a clean one. The
       # failure is recorded and turned into FAIL_INFRA by the caller rather than
       # silently narrowing what was scanned.
-      git show --format= "$@" "$sha" || rc=1
+      _gd_np="$(_gs_parents "$sha")" || { rc=1; continue; }
+      if [ "${_gd_np:-1}" -gt 1 ]; then
+        # Against the first parent, which turns the combined diff into an
+        # ordinary one. It re-shows the side branch's content, and every commit
+        # of that side branch is separately in GATE_COMMITS -- so this scans
+        # more than the minimum and never less, which is the direction to err.
+        git diff "$@" "${sha}^1" "$sha" || rc=1
+      else
+        git show --format= "$@" "$sha" || rc=1
+      fi
     done <<< "$GATE_COMMITS"
   else
-    git diff --cached "$@"
+    # The index branch discarded git's status entirely: `rc` was only ever
+    # assigned in the range branch, so a `git diff --cached` that failed --
+    # a broken textconv filter named by .gitattributes is the realistic case --
+    # returned 0 with no output, and every scan reading this helper took that
+    # for a clean tree.
+    git diff --cached "$@" || rc=1
   fi
   return "$rc"
 }
@@ -172,8 +218,14 @@ fi
 # not content this commit introduces, and listing deletions blocked the one
 # change that fixes the problem: committing `git rm secrets.env` failed the gate
 # for the file it deletes. The index form had the same flaw and the same cure.
+#
+# The producer's status is not discarded here. `|| true` turned "the path list
+# could not be produced" into "this push adds no files", and the sensitive-file,
+# build-artifact and large-blob scans all read that list -- three rules
+# reporting clean over a list nobody could build. The caller decides; this
+# reports.
 _gs_content_files() {
-  _gs_diff --name-only -z --diff-filter=ACMR 2>/dev/null || true
+  _gs_diff --name-only -z --diff-filter=ACMR 2>/dev/null
 }
 
 # `--check` reports through its exit status, and _gs_diff swallows that: it runs
@@ -181,14 +233,22 @@ _gs_content_files() {
 # separately rather than reusing the helper — the alternative is an `if` that
 # can never be false, which is the failure mode this whole PR is about.
 _gs_check() {
-  local sha rc=0
+  local sha rc=0 _gc_np
   if [ -z "$GATE_RANGE" ]; then
     git diff --cached --check || rc=$?
     return "$rc"
   fi
   while IFS= read -r sha; do
     [ -n "$sha" ] || continue
-    git show --format= --check "$sha" || rc=1
+    # A merge is checked against its first parent, for the reason _gs_parents
+    # records: `--check` over a combined diff reports nothing, so the lines a
+    # conflict resolution introduces were checked by nothing at all.
+    _gc_np="$(_gs_parents "$sha")" || { rc=1; continue; }
+    if [ "${_gc_np:-1}" -gt 1 ]; then
+      git diff --check "${sha}^1" "$sha" || rc=1
+    else
+      git show --format= --check "$sha" || rc=1
+    fi
   done <<< "$GATE_COMMITS"
   return "$rc"
 }
@@ -201,8 +261,30 @@ fi
 
 # git diff --check already catches conflict markers. Keep this explicit helper
 # check so the failure message is specific and easier to understand.
-if ci::git::has_conflict_markers_in_changed \
-  || _gs_diff -U0 | grep -E '^\+[[:space:]]*(<{7}|={7}|>{7})([[:space:]]|$)' >/dev/null 2>&1; then
+#
+# The diff is produced first and the grep reads it from a file, because `_gs_diff
+# | grep` reports only grep's status: a producer that fails exits 1 there, which
+# is indistinguishable from grep's "no match", and it also *overrides* grep's
+# "matched" under pipefail. So the one scan that can see a conflict marker could
+# be silenced by the thing feeding it.
+_GS_MARKERS="$(mktemp 2>/dev/null)" || {
+  echo "Cannot create a temporary file for the conflict-marker scan."
+  exit "$CI_RESULT_FAIL_INFRA"
+}
+if ! _gs_diff -U0 > "$_GS_MARKERS"; then
+  rm -f "$_GS_MARKERS"
+  echo "Cannot read the content ${GATE_WHAT}; the conflict-marker scan never ran."
+  exit "$CI_RESULT_FAIL_INFRA"
+fi
+_gs_marker_rc=0
+grep -E '^\+[[:space:]]*(<{7}|={7}|>{7})([[:space:]]|$)' "$_GS_MARKERS" >/dev/null 2>&1 \
+  || _gs_marker_rc=$?
+rm -f "$_GS_MARKERS"
+if [ "$_gs_marker_rc" -ge 2 ]; then
+  echo "The conflict-marker scan failed to run (grep exited ${_gs_marker_rc})."
+  exit "$CI_RESULT_FAIL_INFRA"
+fi
+if ci::git::has_conflict_markers_in_changed || [ "$_gs_marker_rc" -eq 0 ]; then
   echo "Merge conflict markers found in changed content or ${GATE_WHAT}."
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi
@@ -229,6 +311,26 @@ fi
 # remote has never seen, makes GATE_COMMITS the entire history. Measured in
 # this tree at 419 commits and ~3800 emissions, with one path costing 19s, and
 # the pre-push budget is 120s.
+#
+# Through a file rather than `< <(_gs_content_files)`. A process substitution is
+# a subshell, so a producer that fails there fails invisibly: the loop reads
+# whatever reached the pipe and reports its own success, and the three scans
+# below then run over a path list nobody could build. The stream is
+# NUL-delimited, so it has to be a file -- a command substitution cannot carry a
+# NUL byte. Same shape, and same cure, as config_sources in test-layout.sh.
+_GS_PATHLIST="$(mktemp 2>/dev/null)" || {
+  echo "Cannot create a temporary file to enumerate the files ${GATE_WHAT}."
+  exit "$CI_RESULT_FAIL_INFRA"
+}
+if ! _gs_content_files > "$_GS_PATHLIST"; then
+  rm -f "$_GS_PATHLIST"
+  echo "Cannot enumerate the files ${GATE_WHAT}; the diff could not be produced."
+  echo "  Nothing was scanned, and an empty list here reads exactly like a push"
+  echo "  that adds no files -- which is why this is infrastructure failure and"
+  echo "  not a pass."
+  exit "$CI_RESULT_FAIL_INFRA"
+fi
+
 _GS_PATHS=()
 _GS_SIZES=()
 _GS_NL_PATHS=()
@@ -273,7 +375,8 @@ while IFS= read -r -d '' path; do
   case "$_gs_seen" in *"${_gs_lf}${path}${_gs_lf}"*) continue ;; esac
   _gs_seen="${_gs_seen}${path}${_gs_lf}"
   _GS_PATHS+=("$path")
-done < <(_gs_content_files)
+done < "$_GS_PATHLIST"
+rm -f "$_GS_PATHLIST"
 
 # One `git cat-file --batch-check` for every (commit, path) pair in the run,
 # rather than one `git cat-file -s` per pair. Identical question, identical
@@ -403,7 +506,26 @@ if [ "$rc" -ge 2 ]; then
   exit "$CI_RESULT_FAIL_INFRA"
 fi
 secret_rc=0
-_gs_diff -U0 | grep -E -f "$secret_pattern_file" >/dev/null 2>&1 || secret_rc=$?
+# Same reason as the conflict-marker scan above: the producer's status has to be
+# its own. `_gs_diff | grep ... || secret_rc=$?` recorded grep's status alone, so
+# a diff that could not be produced -- a .gitattributes naming a textconv filter
+# that is not installed does it, measured -- arrived here as rc 1 and read
+# exactly like "no secret found", and under pipefail it could also overwrite
+# grep's "matched" with the producer's failure. The one scan whose whole purpose
+# is to notice a secret was silenced by the thing feeding it.
+_GS_SECRET_DIFF="$(mktemp 2>/dev/null)" || {
+  echo "Cannot create a temporary file for the secret scan."
+  exit "$CI_RESULT_FAIL_INFRA"
+}
+if ! _gs_diff -U0 > "$_GS_SECRET_DIFF"; then
+  rm -f "$_GS_SECRET_DIFF"
+  echo "Cannot read the content ${GATE_WHAT}; the secret scan never ran."
+  echo "  An unreadable diff produces no output, and no output is what a clean"
+  echo "  push looks like -- so this is infrastructure failure, not a pass."
+  exit "$CI_RESULT_FAIL_INFRA"
+fi
+grep -E -f "$secret_pattern_file" "$_GS_SECRET_DIFF" >/dev/null 2>&1 || secret_rc=$?
+rm -f "$_GS_SECRET_DIFF"
 if [ "$secret_rc" -eq 0 ]; then
   echo "Potential secret-like value detected in additions ${GATE_WHAT}."
   SECRET_PATTERN_MATCH=1

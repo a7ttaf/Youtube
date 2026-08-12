@@ -1888,9 +1888,20 @@ ws_run() {
   # _CI_CHANGESET_FILES_RAW holds STATUS<TAB>PATH records and a rename is
   # R100<TAB>old<TAB>new, so an end-of-line anchor matched only the destination.
   # Renaming .gitignore away therefore filtered out the suite that guards it.
+  #
+  # One occurrence now, not two. The second was the gate's fast exit, which used
+  # this pattern to rescue a changeset whose paths named no language -- and that
+  # exit no longer asks which paths it holds, only whether it holds any. A
+  # renamed .gitignore is a path, so the fast exit cannot fire on it at all,
+  # which is a stronger statement than the rescue was. The occurrence that
+  # remains is the changeset filter, which is what decides whether this lane
+  # runs once the gate has started.
   run grep -nE "gitignore\(\[\[:space:\]\]\|\\$\)" ci/preflight.sh
   [ "$status" -eq 0 ]
-  [ "$(printf '%s\n' "$output" | wc -l)" -eq 2 ]
+  [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+  # And the exit that used to carry the other one now asks a different question.
+  run grep -n '_pf_has_paths' ci/preflight.sh
+  [ "$status" -eq 0 ]
   # And the pattern itself matches a rename record, not just the source text.
   run bash -c "printf 'R100\t.gitignore\t.gitignore.old\n' \
     | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|\$))'"
