@@ -5441,3 +5441,204 @@ node_lane_runner_for() {
   run declared_runner_for "npm run jest:ci"
   [ "$output" = "<none>" ]
 }
+
+@test "node lane: a package manager's value-taking options are its own, not one list" {
+  # The grammar that steps over a manager's options carried one list for all
+  # five of them, so `npx --package typescript tsc --noEmit` -- the documented
+  # way to run a tool without installing it -- selected `typescript` as the
+  # command and the lane refused the script before tsc could run. The joined
+  # `--package=typescript` spelling worked, which is the tell: the value was
+  # being read as a word rather than as the option's.
+  #
+  # Keyed by manager rather than widened, for the reason the flag allow-list is
+  # keyed by runner: one list cannot describe five vocabularies. `-p` is
+  # `--package` to npx and `--parseable` to pnpm, so a shared list either misses
+  # npx's value or eats pnpm's command.
+  ws_setup
+  ws_tools npx pnpm yarn npm bun tsc
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+
+  local spelling
+  for spelling in \
+    "npx --package typescript tsc --noEmit" \
+    "npx -p typescript tsc --noEmit" \
+    "npx --package=typescript tsc --noEmit" \
+    "npx tsc --noEmit"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" == *"Running script: typecheck"* ]] \
+      || { echo "never reached the compiler: $spelling" >&2; return 1; }
+  done
+
+  # And the other direction, which is why this is keyed and not widened: pnpm's
+  # `-p` is a boolean, so consuming a word after it would swallow the runner.
+  #
+  # The tsconfig goes first: with one present the lane requires a typecheck
+  # script and then runs it, and `tsc` in this sandbox resolves to a real shim
+  # that wants the typescript package -- so the case would fail at the compiler
+  # over a question it is not asking.
+  rm -f "$NODE_SB/ws/tsconfig.json"
+  for spelling in "pnpm -p vitest run" "pnpm --filter web vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script: test"* ]] \
+      || { echo "never reached the runner: $spelling" >&2; return 1; }
+  done
+
+  # The control that keeps the rule: a filter behind the option's value is
+  # still a filter, so the option is stepped over and not everything after it.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npx -p vitest vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # And `--call`, which is a value-taking option of a different shape: it takes
+  # a whole command line as one string, so `npx --call tsc --noEmit` hands `tsc`
+  # to the option and leaves `--noEmit` as the command. Refused, and correctly:
+  # the gate word-splits, so even the quoted `npx -c 'tsc --noEmit'` arrives as
+  # separate tokens and there is no command it can follow. My first draft of
+  # this case expected `--call tsc` to reach the compiler, which was a
+  # misreading of npx's grammar rather than a defect in the reader.
+  printf '{ "compilerOptions": { "strict": true } }
+' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "npx --call tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"does not"* ]]
+  [[ "$output" == *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+# --- which tree this lane's discovery stands behind ---------------------------
+#
+# Three readers here answered "is there a workspace" from the worktree and the
+# index in every mode, while the manifest check a screen below them already
+# switched to `HEAD:` in ship mode. These are the three.
+
+# A sandbox laid out as a real repository, with a frontend workspace committed.
+ship_ws_setup() {
+  SHIP_SB="$(mktemp -d)"
+  mkdir -p "$SHIP_SB/ci/checks" "$SHIP_SB/ci/lib" "$SHIP_SB/frontend/tests" "$SHIP_SB/.ci-gate"
+  cp "$REPO_ROOT/ci/checks/node.sh" "$SHIP_SB/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/git.sh" \
+     "$SHIP_SB/ci/lib/"
+  printf 'it("x", () => {});\n' > "$SHIP_SB/frontend/tests/a.test.ts"
+  printf '{}\n' > "$SHIP_SB/frontend/bun.lock"
+  printf '{ "compilerOptions": {} }\n' > "$SHIP_SB/frontend/tsconfig.json"
+  printf '{ "name": "f", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" } }\n' \
+    > "$SHIP_SB/frontend/package.json"
+  ( cd "$SHIP_SB" && git init -q -b main . \
+    && printf '.ci-gate/\nci/\n' > .gitignore \
+    && git add -A && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+}
+
+ship_ws_run() {
+  ( cd "$SHIP_SB" \
+    && CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA="$(git rev-parse HEAD)" \
+       bash ci/checks/node.sh 2>&1 )
+}
+
+@test "node lane: in ship mode the orphan scan reads the pushed tree" {
+  # This scan is what turns "no manifest" into "a workspace lost its manifest",
+  # and it walked the worktree alone -- so the repair that hides the fault hid
+  # it here too. Delete frontend/package.json in a commit, then delete the
+  # lockfile and the tsconfig on disk only, and push: discovery finds nothing,
+  # the scan finds nothing to be orphaned, and the lane prints "No package.json
+  # found" and exits 0. Install, typecheck, tests and build all skipped for a
+  # pushed tree that is broken, by the check written to notice exactly that.
+  ship_ws_setup
+  ( cd "$SHIP_SB" && git rm -q frontend/package.json \
+    && git -c user.email=t@t -c user.name=t commit -qm drop ) >/dev/null 2>&1
+  rm -f "$SHIP_SB/frontend/bun.lock" "$SHIP_SB/frontend/tsconfig.json"
+
+  # The premise: HEAD still carries the configuration, the disk does not.
+  run bash -c "cd '$SHIP_SB' && git ls-tree -r --name-only HEAD -- frontend"
+  [[ "$output" == *"bun.lock"* ]]
+  [[ "$output" == *"tsconfig.json"* ]]
+  [ ! -f "$SHIP_SB/frontend/bun.lock" ]
+
+  run ship_ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no package.json beside it"* ]]
+  [[ "$output" != *"No package.json found"* ]]
+
+  # The control: with the configuration genuinely gone from the pushed tree too,
+  # there is no orphan and nothing to report -- this rule is about a workspace
+  # that lost its manifest, not about any repository without one.
+  ( cd "$SHIP_SB" && git rm -q -r --ignore-unmatch frontend/bun.lock frontend/tsconfig.json \
+    && git -c user.email=t@t -c user.name=t commit -qm "drop the rest" ) >/dev/null 2>&1
+  run ship_ws_run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No package.json found"* ]]
+  rm -rf "$SHIP_SB"
+}
+
+@test "node lane: in ship mode a workspace staged for a later commit is not this push's" {
+  # The index is the commit being made; HEAD is the commit being pushed. Folding
+  # the index in for every mode meant a workspace staged for next time joined
+  # the list, and the HEAD manifest check then reported the pushed commit as
+  # missing a manifest for a directory this push has nothing to do with -- a
+  # clean HEAD refused because of work staged for later.
+  ship_ws_setup
+  mkdir -p "$SHIP_SB/added"
+  printf '{ "name": "added", "private": true }\n' > "$SHIP_SB/added/package.json"
+  ( cd "$SHIP_SB" && git add added/package.json ) >/dev/null 2>&1
+  rm -rf "$SHIP_SB/added"
+
+  # The premise: staged, absent from HEAD and from disk.
+  run bash -c "cd '$SHIP_SB' && git ls-files -- added/package.json"
+  [[ "$output" == *"added/package.json"* ]]
+  run bash -c "cd '$SHIP_SB' && git ls-tree -r --name-only HEAD -- added"
+  [ -z "$output" ]
+
+  # Asserted as "this push is not about `added`" rather than as an exit status.
+  # A ship run that gets past discovery goes on to install and to run the
+  # scripts, and this sandbox has neither a real lockfile nor real binaries --
+  # so the status would answer a question about the fixture rather than about
+  # the rule, and the case would pass or fail for the wrong reason.
+  run ship_ws_run
+  [[ "$output" != *"added"* ]] \
+    || { echo "ship enumerated a workspace that only the index carries" >&2; echo "$output" >&2; return 1; }
+  # And positively: it did reach the workspace the push is actually about.
+  [[ "$output" == *"frontend"* ]]
+
+  # The control that keeps the rule: the pre-commit gate does stand behind the
+  # index, and it still objects to a staged workspace with no manifest on disk.
+  run bash -c "cd '$SHIP_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [[ "$output" == *"added"* ]]
+  rm -rf "$SHIP_SB"
+}
+
+@test "node lane: in ship mode a workspace only the pushed tree carries is still found" {
+  # The other direction of the same line. Filesystem discovery cannot see a
+  # workspace that exists only in HEAD, the index no longer lists it once its
+  # removal is staged, and the ship drift scan iterates the workspaces this list
+  # already contains -- so it was contributed by nobody, and its test, typecheck
+  # and build scripts were never run and never reported on.
+  ship_ws_setup
+  mkdir -p "$SHIP_SB/pkg"
+  printf '{ "name": "pkg", "private": true, "scripts": { "test": "exit 1" } }\n' \
+    > "$SHIP_SB/pkg/package.json"
+  ( cd "$SHIP_SB" && git add pkg/package.json \
+    && git -c user.email=t@t -c user.name=t commit -qm "add pkg" ) >/dev/null 2>&1
+  ( cd "$SHIP_SB" && git rm -q -r --cached pkg ) >/dev/null 2>&1
+  rm -rf "$SHIP_SB/pkg"
+
+  # The premise: HEAD carries it, the index and the disk do not.
+  run bash -c "cd '$SHIP_SB' && git ls-tree -r --name-only HEAD -- pkg"
+  [[ "$output" == *"pkg/package.json"* ]]
+  run bash -c "cd '$SHIP_SB' && git ls-files -- pkg"
+  [ -z "$output" ]
+  [ ! -d "$SHIP_SB/pkg" ]
+
+  run ship_ws_run
+  [ "$status" -ne 0 ] || { echo "ship passed over a workspace only HEAD carries" >&2; return 1; }
+  [[ "$output" == *"pkg"* ]]
+  rm -rf "$SHIP_SB"
+}

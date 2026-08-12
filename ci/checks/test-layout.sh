@@ -675,14 +675,38 @@ extract_test_block() {
         p++
       }
       # `)` closes the defineConfig wrapper the scan stepped into; `;` ends the
-      # statement. `as const` and `satisfies <type>` are erased before anything
-      # evaluates this file, so a bare identifier tail is admitted only in that
-      # form.
+      # statement. A type assertion and a `satisfies` clause are erased before
+      # anything evaluates this file, so a bare identifier tail is admitted only
+      # in those forms.
+      #
+      # The closing `)` is stripped from the end as well as the front, and this
+      # is what the rule was missing. `defineConfig({ ... } as UserConfig)` --
+      # the ordinary way to write a typed Vitest config -- left `asUserConfig)`
+      # after the old strips and was refused as composition, and so was
+      # `defineConfig({ ... } as const)`, which the comment above claimed to
+      # allow: the allow-list only ever matched a config written *without* the
+      # wrapper, because with it the tail always ends in that paren. A rule
+      # that never matched the example its own comment gives.
+      #
+      # Stripping the paren does not admit a composition. `defineConfig({...})
+      # && defineConfig({...})` leaves `&&defineConfig({` behind, which matches
+      # nothing here and is still refused -- the strips remove only the
+      # punctuation of the statement itself, from its two ends.
+      #
+      # No apostrophes in this comment on purpose: it sits inside a
+      # single-quoted awk program, and one closes the program. My first draft
+      # of this paragraph did, and the whole file stopped parsing as shell.
+      #
+      # `as <Type>` in general rather than `as const` alone, for the reason
+      # `satisfies` is already general: the assertion is compile-time, and which
+      # type it names cannot change what vitest loads.
       if (tail != "") {
         tailrest = tail
         sub(/^\)*/, "", tailrest)
-        sub(/;*$/, "", tailrest)
-        if (tailrest != "" && tailrest !~ /^(asconst|satisfies[A-Za-z0-9_$.<>,\[\]|]*)$/) exit 4
+        sub(/[);]*$/, "", tailrest)
+        if (tailrest != "" \
+            && tailrest !~ /^as[A-Za-z0-9_$.<>,\[\]|]+$/ \
+            && tailrest !~ /^satisfies[A-Za-z0-9_$.<>,\[\]|]*$/) exit 4
       }
 
       # Duplicates are refused rather than resolved. Taking the last one would

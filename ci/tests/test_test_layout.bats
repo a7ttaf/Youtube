@@ -2306,3 +2306,75 @@ EOF
   [[ "$output" == *"carries no"* ]]
   [[ "$output" != *"git index"* ]]
 }
+
+@test "test-layout: a type assertion on the exported config is erased, not composition" {
+  # The tail after the exported object is refused unless it is punctuation the
+  # reader knows, and the allow-list named `as const` and `satisfies <type>` --
+  # but stripped only a *leading* `)`. A `defineConfig(` wrapper always closes
+  # after the object, so the tail always ended in that paren and the allow-list
+  # never matched with the wrapper present. The comment above it claimed to
+  # allow `as const`; with the wrapper, it never did.
+  #
+  # `defineConfig({ ... } as UserConfig)` is the ordinary way to write a typed
+  # Vitest config, and it was failing the layout guard -- which is on the
+  # always-run list, so nothing filters it out of the way.
+  local tail
+  for tail in "as UserConfig" "as const" "satisfies UserConfig" "as UserConfig<string>" "as Partial<UserConfig>"; do
+    cat > "$SANDBOX/frontend/vitest.config.ts" <<CFG
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+} ${tail});
+CFG
+    run_guard
+    [ "$status" -eq 0 ] || { echo "refused a config ending '${tail}'" >&2; echo "$output" >&2; return 1; }
+  done
+
+  # The controls: an assertion is erased, a composition is not, and stripping
+  # the paren must not have admitted one.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'CFG'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+}) && defineConfig({ test: { include: ["tests/only.test.ts"] } });
+CFG
+  run_guard
+  [ "$status" -eq 20 ]
+
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'CFG'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+}) || defineConfig({ test: { include: ["tests/only.test.ts"] } });
+CFG
+  run_guard
+  [ "$status" -eq 20 ]
+
+  # And the boundary, asserted rather than left to be discovered: an assertion
+  # whose *type* is call-shaped is still refused. `as import("vitest/config")
+  # .UserConfig` is legitimate TypeScript, but at this level of parsing it is
+  # not distinguishable from a call, and admitting parentheses into the tail is
+  # admitting the composition this rule exists to catch. Refusing it is the
+  # conservative side of a line that has to be drawn somewhere, and a developer
+  # who hits it can name the type directly.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'CFG'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+} as import("vitest/config").UserConfig);
+CFG
+  run_guard
+  [ "$status" -eq 20 ]
+}

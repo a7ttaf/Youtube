@@ -63,10 +63,37 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     # workspace present only in the index -- the case this scan exists for --
     # disappeared and the lane printed "No package.json found" and exited 0,
     # never reaching its failing test script.
+    # And *which* second source depends on the gate.
+    #
+    # The index is the commit being made; HEAD is the commit being pushed. This
+    # read the index in every mode, which is wrong twice over in ship mode. A
+    # workspace staged for a later commit joined the list, and the HEAD manifest
+    # check below then reported the pushed commit as missing a manifest for a
+    # directory that push has nothing to do with -- a clean HEAD refused because
+    # of work staged for next time. And a workspace that exists only in HEAD was
+    # contributed by nobody: filesystem discovery cannot see it, the index no
+    # longer lists it, and the ship drift scan iterates the workspaces this list
+    # already contains -- so its test, typecheck and build scripts were never
+    # run and never reported on, which is the fail-open half of the same line.
+    #
+    # ci/checks/test-layout.sh answers this for its own inputs by switching the
+    # source rather than widening it, and node.sh already switches to `HEAD:`
+    # for the manifest check one screen below.
     _idx_rc=0
-    _idx_raw="$(git ls-files -- 'package.json' '*/package.json' 2>/dev/null)" || _idx_rc=$?
+    if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+      # ls-tree takes no glob pathspec, so the tree is listed and filtered. The
+      # listing's status is taken before the filter runs: grep exits 1 when it
+      # matches nothing, which is an answer, and the enumeration failing is not.
+      _idx_head=""
+      _idx_head="$(git ls-tree -r --name-only HEAD 2>/dev/null)" || _idx_rc=$?
+      if [ "$_idx_rc" -eq 0 ]; then
+        _idx_raw="$(printf '%s\n' "$_idx_head" | grep -E '(^|/)package\.json$' || true)"
+      fi
+    else
+      _idx_raw="$(git ls-files -- 'package.json' '*/package.json' 2>/dev/null)" || _idx_rc=$?
+    fi
     if [ "$_idx_rc" -ne 0 ]; then
-      echo "Cannot read the index to find staged workspaces."
+      echo "Cannot read the tree this run stands behind to find its workspaces."
       echo "  Refusing to conclude there are none from a listing that failed to"
       echo "  produce one."
       exit "$CI_RESULT_FAIL_INFRA"
@@ -112,12 +139,48 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
         -o -name 'tsconfig.json' -o -name 'jsconfig.json' \
         -o -name 'vitest.config.*' -o -name 'vite.config.*' \) -print 2>/dev/null || true)"
 
+  # And the pushed tree, in ship mode.
+  #
+  # This scan is what turns "no manifest" into "a workspace lost its manifest",
+  # and it walked the worktree alone -- so the repair that hides the fault hides
+  # it here too. Delete frontend/package.json in a commit, then delete the
+  # lockfile and the tsconfig on disk only, and push: discovery finds nothing,
+  # this scan finds nothing to be orphaned, and the lane prints "No package.json
+  # found" and exits 0. Install, typecheck, tests and build are all skipped for
+  # a pushed tree that is broken, by the check written to notice exactly that.
+  #
+  # The listing's status is taken before the filter, for the reason given above.
+  if [ "${CI_GATE_MODE:-}" = "ship" ] \
+    && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    _oc_rc=0
+    _oc_head="$(git ls-tree -r --name-only HEAD 2>/dev/null)" || _oc_rc=$?
+    if [ "$_oc_rc" -ne 0 ]; then
+      echo "Cannot read the pushed tree to look for workspaces that lost a manifest."
+      echo "  A tree that could not be listed is not a tree with nothing in it."
+      exit "$CI_RESULT_FAIL_INFRA"
+    fi
+    _oc_cfg="$(printf '%s\n' "$_oc_head" \
+      | grep -Ev '(^|/)(node_modules|dist|build)/' \
+      | grep -E '(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock|bun\.lockb|tsconfig\.json|jsconfig\.json|vitest\.config\.[^/]+|vite\.config\.[^/]+)$' \
+      | sed 's|^|./|' || true)"
+    if [ -n "$_oc_cfg" ]; then
+      ORPHAN_CFG="$(printf '%s\n%s\n' "$ORPHAN_CFG" "$_oc_cfg" | sed '/^$/d' | sort -u)"
+    fi
+  fi
+
   ORPHANS=""
   while IFS= read -r _cfg; do
     [ -n "$_cfg" ] || continue
     _cfg_dir="$(dirname "$_cfg")"
-    # A manifest settles the question — on disk, or in the index, because a
-    # workspace being added is not an orphan either.
+    # A manifest settles the question — on disk, or in the tree this run stands
+    # behind, because a workspace being added is not an orphan either.
+    #
+    # Which tree that is depends on the gate, the same as everywhere else here.
+    # Asking the index in ship mode gets it wrong in both directions: a manifest
+    # staged for a later commit settles the question for a pushed tree that does
+    # not carry it, and a manifest that HEAD carries but the index no longer
+    # does fails to settle it at all.
     #
     # Looked for up the tree, not only beside it. A nested TypeScript project
     # config is ordinary: `frontend/e2e/tsconfig.json` extending
@@ -137,10 +200,14 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       if [ -f "$_mf_dir/package.json" ]; then _mf_found=1; break; fi
       if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
         _mf_rel="${_mf_dir#./}"
+        _mf_ref=":"
+        if [ "${CI_GATE_MODE:-}" = "ship" ]           && git rev-parse --verify HEAD >/dev/null 2>&1; then
+          _mf_ref="HEAD:"
+        fi
         if [ "$_mf_rel" = "." ] || [ -z "$_mf_rel" ]; then
-          git cat-file -e ":package.json" 2>/dev/null && { _mf_found=1; break; }
+          git cat-file -e "${_mf_ref}package.json" 2>/dev/null && { _mf_found=1; break; }
         else
-          git cat-file -e ":${_mf_rel}/package.json" 2>/dev/null && { _mf_found=1; break; }
+          git cat-file -e "${_mf_ref}${_mf_rel}/package.json" 2>/dev/null && { _mf_found=1; break; }
         fi
       fi
       case "$_mf_dir" in
@@ -2068,8 +2135,20 @@ _pm_advance() {
     1) ;;
     *) return 1 ;;
   esac
+  # Keyed by which manager is in front, for the reason the flag allow-list in
+  # _reject_narrowing_flags is keyed by runner: one list cannot describe five
+  # vocabularies. `-p` is `--package` to `npx` and `--parseable` to `pnpm`, so a
+  # shared list either misses npx's value or eats pnpm's command.
+  case "${_pm_name}|$1" in
+    'npx|-p'|'npx|--package'|'npx|-c'|'npx|--call' \
+      |'npm|-p'|'npm|--package'|'npm|-c'|'npm|--call' \
+      |'npm|--prefix'|'npm|-w'|'npm|--workspace'|'npm|-C' \
+      |'pnpm|--filter'|'pnpm|-F'|'pnpm|--dir'|'pnpm|-C'|'pnpm|--workspace-dir' \
+      |'yarn|--cwd' \
+      |'bun|--cwd')
+      _pp_state=2 ; return 0 ;;
+  esac
   case "$1" in
-    --filter|-F|--dir|-C|--cwd|--prefix|--workspace|-w) _pp_state=2 ; return 0 ;;
     -*) return 0 ;;
     *) _pp_state=0 ; return 1 ;;
   esac
@@ -2109,7 +2188,7 @@ _env_advance() {
 }
 
 _command_runner() {
-  local _tok _ng_out="" _tp_state=0 _ep_state=0 _pp_state=0 tok
+  local _tok _ng_out="" _tp_state=0 _ep_state=0 _pp_state=0 _pm_name="" tok
   _cr=""
   _normalize_command "$1"
   set -f
@@ -2152,7 +2231,7 @@ _command_runner() {
       env|cross-env) _ep_state=1; continue ;;
       # The package managers take options of their own before the command, and
       # `--filter web` puts a bare word after a flag; see _pm_advance.
-      npx|pnpm|bun|yarn|npm) _pp_state=1; continue ;;
+      npx|pnpm|bun|yarn|npm) _pp_state=1; _pm_name="${_tok##*/}"; continue ;;
       exec|dlx|command|nohup|time \
         |--yes|-y|run) continue ;;
       -*) continue ;;
@@ -2373,7 +2452,7 @@ _script_names_a_checker() {
   # The last-token index goes with it: a runner invoked with no arguments at all
   # is a REPL that sees EOF and exits 0, which is the same empty pass in another
   # spelling, and `node` was the only one of the four that this list refused.
-  local _nt=0 _t _tp_state=0 _ep_state=0 _pp_state=0
+  local _nt=0 _t _tp_state=0 _ep_state=0 _pp_state=0 _pm_name=""
   local _cur_nt=0 _ti=0 _last=-1
   local _nt_seg=() _last_seg=()
   # shellcheck disable=SC2086
@@ -2626,7 +2705,7 @@ _script_names_a_checker() {
           runner="$tok"
           # And now that the manager is the runner, its own options are read.
           case "${tok##*/}" in
-            pnpm|npm|yarn|bun|npx) _pp_state=1 ;;
+            pnpm|npm|yarn|bun|npx) _pp_state=1 ; _pm_name="${tok##*/}" ;;
           esac
           expect_cmd=0
           continue 2
@@ -2840,7 +2919,7 @@ assert_no_persistent_filter() {
 # The non-narrowing flag allow-list, as its own function so a package script
 # reached through another one is read the same way as a direct command.
 _reject_narrowing_flags() {
-  local script_name="$1" cmd="$2" runner="${3:-}" tok _tp_state=0 _ep_state=0 _pp_state=0 _rnf_word
+  local script_name="$1" cmd="$2" runner="${3:-}" tok _tp_state=0 _ep_state=0 _pp_state=0 _pm_name="" _rnf_word
   # shellcheck disable=SC2086
   for tok in $cmd; do
     # A `timeout` wrapper's own options are not the runner's. This scan reads
@@ -2883,7 +2962,7 @@ _reject_narrowing_flags() {
     case "$_rnf_word" in
       timeout) _tp_state=1 ; continue ;;
       env|cross-env) _ep_state=1 ; continue ;;
-      pnpm|npm|yarn|bun|npx) _pp_state=1 ; continue ;;
+      pnpm|npm|yarn|bun|npx) _pp_state=1 ; _pm_name="$_rnf_word" ; continue ;;
     esac
     case "$tok" in
       -*) ;;
@@ -3077,7 +3156,7 @@ _reject_tool_args_one() {
 # The compiler's own argument rules: the modes that do not typecheck, and the
 # positionals that make it ignore tsconfig.json.
 _reject_tsc_args() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp _tp_state=0 _ep_state=0 _pp_state=0
+  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp _tp_state=0 _ep_state=0 _pp_state=0 _pm_name=""
   prev=""
   set -f
   # shellcheck disable=SC2086
@@ -3121,7 +3200,7 @@ _reject_tsc_args() {
       # --noEmit` was refused for pointing the compiler at a file named `env`.
       env|cross-env) _ep_state=1 ; prev="" ; shift ; continue ;;
       # And the package managers, whose own options take a separate word.
-      pnpm|npm|yarn|bun|npx) _pp_state=1 ; prev="" ; shift ; continue ;;
+      pnpm|npm|yarn|bun|npx) _pp_state=1 ; _pm_name="${tok##*/}" ; prev="" ; shift ; continue ;;
     esac
     if [ "${tok##*/}" = "$runner" ]; then
       prev="" ; shift ; continue
@@ -3312,7 +3391,7 @@ _reject_tsc_args() {
 # rule held for the direct spelling and not for the one layer down, which is
 # the same right-rule-wrong-tree shape this lane has had to fix twice.
 _reject_positional_filters() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev _q _tp_state=0 _ep_state=0 _pp_state=0 _rpf_head
+  local script_name="$1" cmd="$2" runner="$3" tok prev _q _tp_state=0 _ep_state=0 _pp_state=0 _pm_name="" _rpf_head
   prev=""
   # shellcheck disable=SC2086
   set -- $cmd
@@ -3350,6 +3429,7 @@ _reject_positional_filters() {
       _ep_state=1
       ;;
     npx|*/npx|pnpm|*/pnpm|bun|*/bun|yarn|*/yarn|npm|*/npm)
+      _pm_name="${_rpf_head##*/}"
       shift
       _pp_state=1
       ;;
@@ -3427,7 +3507,7 @@ _reject_positional_filters() {
       env|*/env|cross-env|*/cross-env)
         _ep_state=1 ; prev="" ; shift ; continue ;;
       npx|*/npx|pnpm|*/pnpm|bun|*/bun|yarn|*/yarn|npm|*/npm)
-        _pp_state=1 ; prev="" ; shift ; continue ;;
+        _pp_state=1 ; _pm_name="${tok##*/}" ; prev="" ; shift ; continue ;;
       exec|dlx|command|nohup|time \
         |--yes|-y|run|related \
         |"$runner"|'&&'|'||'|';'|'|')
