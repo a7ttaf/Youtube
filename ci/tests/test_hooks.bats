@@ -815,3 +815,134 @@ refs/tags/new %s refs/tags/new %s
   [ "$status" -eq 0 ]
   rm -rf "$sb"
 }
+
+# --- the result contract, at three places that stepped outside it -------------
+#
+# 0 PASS / 10 PASS_WITH_KNOWN_DEBT / 20 FAIL_NEW_ISSUE / 30 FAIL_INFRA. A lane
+# that leaves with anything else is recorded through preflight's unrecognised
+# arm as FAIL_INFRA, so a code defect arrives labelled as a broken gate and the
+# output names no cause.
+
+@test "hook: commit-msg translates the result contract instead of handing it to git" {
+  # The arm exec'd the check, so its status became the hook's and git blocks a
+  # commit on any non-zero. PASS_WITH_KNOWN_DEBT is 10, so a pass-class result
+  # refused the commit: a staged diff over CI_GATE_WARN_DIFF_LINES with a
+  # perfectly valid subject calls _hygiene_warn, the check exits 10, and the
+  # commit is rejected with "Consider splitting" -- advice offered as a rule,
+  # with no way to proceed.
+  #
+  # Three hook entry points read the same four values. The other two exec
+  # ci/preflight.sh, which ends non-zero only for 20 and 30. This one skipped
+  # the translation by skipping the translator.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/hook-dispatch.sh" "$sb/ci/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  ( cd "$sb" && git init -q -b main . ) >/dev/null 2>&1
+  printf 'feat: a subject\n' > "$sb/msg.txt"
+
+  local rc want
+  # rc -> what the hook must do with it
+  for rc in "0:0" "10:0" "20:1" "30:1"; do
+    want="${rc##*:}"
+    rc="${rc%%:*}"
+    printf '#!/usr/bin/env bash\nexit %s\n' "$rc" > "$sb/ci/checks/commit-hygiene.sh"
+    chmod +x "$sb/ci/checks/commit-hygiene.sh"
+    run bash -c "cd '$sb' && bash ci/hook-dispatch.sh commit-msg msg.txt"
+    [ "$status" -eq "$want" ] \
+      || { echo "check exited $rc, hook exited $status, expected $want" >&2; return 1; }
+  done
+
+  # And a status outside the contract is not a pass. preflight records an
+  # unrecognised value as FAIL_INFRA rather than assuming, and so does this.
+  printf '#!/usr/bin/env bash\nexit 7\n' > "$sb/ci/checks/commit-hygiene.sh"
+  chmod +x "$sb/ci/checks/commit-hygiene.sh"
+  run bash -c "cd '$sb' && bash ci/hook-dispatch.sh commit-msg msg.txt 2>&1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not one of"* ]]
+  rm -rf "$sb"
+}
+
+@test "debt: fixing a registered debt is a pass, not a dead lane" {
+  # `count="$(... | grep -F -o -- "$signature" | wc -l ...)"` was bare under
+  # this file's own `set -Eeuo pipefail`. A signature that matches nothing makes
+  # grep exit 1, the pipeline exit 1, the assignment fail, and errexit end the
+  # lane -- so the lane died at the moment a registered debt entry stopped
+  # matching, which is what fixing the debt looks like. The branch below it that
+  # prints "debt may be reduced or changed" was unreachable.
+  #
+  # The debt command's own status is taken with `set +e` a few lines up and both
+  # ruff greps carry `|| true`, so this file knows the rule; one line did not.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/ci/debt" "$sb/ci/reports"
+  cp "$REPO_ROOT/ci/checks/debt.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  ( cd "$sb" && git init -q -b main . ) >/dev/null 2>&1
+
+  _debt_entry() {
+    cat > "$sb/ci/debt/known-failures.yml" <<YML
+version: 1
+known_failures:
+  - id: sample
+    type: ruff
+    command: "$1"
+    status: known_debt
+    first_seen: "2026-01-01"
+    blocking: false
+    owner: "project"
+    reason: "fixture"
+    allowed_until: "2099-01-01"
+    must_not_increase: false
+    signatures:
+      - "ASYNC240"
+YML
+  }
+
+  # The debt is gone: a pass, and a line saying so.
+  _debt_entry "echo clean"
+  run bash -c "cd '$sb' && bash ci/checks/debt.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Debt result: PASS"* ]]
+  [[ "$output" == *"debt may be reduced or changed"* ]]
+
+  # The control: the debt is still there, which is the branch that already
+  # worked and must keep working.
+  _debt_entry "echo ASYNC240-still-here"
+  run bash -c "cd '$sb' && bash ci/checks/debt.sh 2>&1"
+  [ "$status" -eq 10 ]
+  [[ "$output" == *"PASS_WITH_KNOWN_DEBT"* ]]
+  rm -rf "$sb"
+}
+
+@test "python: a module the compiler rejects is a code defect, not broken infrastructure" {
+  # compileall was the one tool in that lane whose status was not captured.
+  # Under `set -Eeuo pipefail` its failure ended the script before the result
+  # line and before any exit from the contract, so the lane left with raw 1 and
+  # preflight recorded FAIL_INFRA -- while the same tree failing ruff or pytest
+  # two screens up is reported as FAIL_NEW_ISSUE. Both are the same kind of
+  # defect and only one was described.
+  #
+  # Reachable without contriving anything: ruff respects .gitignore by default,
+  # so an ignored generated module with a syntax error passes `ruff check` and
+  # stops here.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/pkg"
+  cp "$REPO_ROOT/ci/checks/python.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+
+  printf 'def broken(:\n    pass\n' > "$sb/pkg/mod.py"
+  run bash -c "cd '$sb' && PYTHON_PACKAGE_DIR=pkg bash ci/checks/python.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"compileall rejected"* ]]
+
+  # The control: a module that compiles still passes, so this captures a status
+  # rather than inventing a failure.
+  printf 'def fine():\n    pass\n' > "$sb/pkg/mod.py"
+  run bash -c "cd '$sb' && PYTHON_PACKAGE_DIR=pkg bash ci/checks/python.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Python lane passed"* ]]
+  rm -rf "$sb"
+}

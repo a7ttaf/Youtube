@@ -25,7 +25,36 @@ case "$HOOK_NAME" in
       exit 0
     fi
     export CI_GATE_HOOK=commit-msg
-    exec "$ROOT_DIR/ci/checks/commit-hygiene.sh" "$COMMIT_MSG_FILE"
+    # The result contract translated, not handed to git raw.
+    #
+    # `exec` made the check's status the hook's, and git blocks a commit on any
+    # non-zero. PASS_WITH_KNOWN_DEBT is 10, so a pass-class result refused the
+    # commit: a staged diff over CI_GATE_WARN_DIFF_LINES with a perfectly valid
+    # subject line calls _hygiene_warn, the check exits 10, and the commit is
+    # rejected with "Consider splitting" -- advice, offered as if it were a
+    # rule, with no way to proceed.
+    #
+    # This gate has three hook entry points reading the same four values. The
+    # other two exec ci/preflight.sh, which ends non-zero only for
+    # FAIL_NEW_ISSUE and FAIL_INFRA and exits 0 for 0 and 10. This one skipped
+    # the translation by skipping the translator.
+    # Spelled as numbers rather than through CI_RESULT_*: common.sh is sourced
+    # above with `|| true`, so on a partial checkout those names are unset, and
+    # under `set -u` referring to them here would abort the hook with a message
+    # about an unbound variable instead of a verdict about the commit.
+    _cm_rc=0
+    "$ROOT_DIR/ci/checks/commit-hygiene.sh" "$COMMIT_MSG_FILE" || _cm_rc=$?
+    case "$_cm_rc" in
+      0|10) exit 0 ;;   # PASS, PASS_WITH_KNOWN_DEBT
+      20|30) exit 1 ;;  # FAIL_NEW_ISSUE, FAIL_INFRA
+      # A status outside the contract is not a pass. preflight records an
+      # unrecognised value as FAIL_INFRA rather than assuming, and so does this.
+      *)
+        echo "commit-msg: commit-hygiene.sh returned ${_cm_rc}, which is not one of" >&2
+        echo "  0, 10, 20 or 30. Refusing the commit rather than guessing." >&2
+        exit 1
+        ;;
+    esac
     ;;
   pre-push)
     export CI_GATE_HOOK=pre-push
