@@ -2204,3 +2204,105 @@ EOF
   run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
   [ "$status" -eq 0 ]
 }
+
+@test "test-layout: ship mode reads the pushed tree instead of the worktree" {
+  # HEAD arrived as a *third* source beside the worktree and the index, and the
+  # case above is the half of that which was right. This is the other half: ship
+  # mode then covered the pushed tree and every scratch file on disk with it, so
+  # an untracked test in the wrong place failed a push whose tree does not
+  # contain it, with no remedy but deleting the file. Which tree a run vouches
+  # for chooses the sources; it does not add to them.
+  ( cd "$SANDBOX" && git init -q -b f . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+
+  # The premise: HEAD is clean and stays clean throughout.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh"
+  [ "$status" -eq 0 ]
+
+  local stray
+  for stray in frontend/src/probe.test.ts frontend/tests/thing.spec.ts; do
+    printf 'it("stray", () => {});\n' > "$SANDBOX/$stray"
+    # Untracked: in neither the index nor HEAD.
+    run bash -c "cd '$SANDBOX' && git ls-files -- '$stray'"
+    [ -z "$output" ]
+    run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh"
+    [ "$status" -eq 0 ] || { echo "ship refused an untracked $stray" >&2; return 1; }
+    # And the control that keeps the rule: the pre-commit gate still objects,
+    # because that gate stands behind the tree the developer is building.
+    run bash -c "cd '$SANDBOX' && CI_GATE_MODE=quick bash ci/checks/test-layout.sh"
+    [ "$status" -eq 20 ] || { echo "quick accepted $stray" >&2; return 1; }
+    rm -f "$SANDBOX/$stray"
+  done
+
+  # A stray staged but not committed is the same question one tree over: the
+  # index is the commit being made, not the commit being pushed.
+  printf 'it("staged", () => {});\n' > "$SANDBOX/frontend/src/staged.test.ts"
+  ( cd "$SANDBOX" && git add frontend/src/staged.test.ts ) >/dev/null 2>&1
+  rm -f "$SANDBOX/frontend/src/staged.test.ts"
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=quick bash ci/checks/test-layout.sh"
+  [ "$status" -eq 20 ]
+}
+
+@test "test-layout: ship mode cannot fall back to the worktree when it cannot read HEAD" {
+  # Failing to look is not looking and finding nothing. With no git, no repo or
+  # no HEAD there is no pushed tree to read, and the answer that costs nothing
+  # to get wrong -- scan the worktree instead -- is the one that reports on a
+  # tree this run is not vouching for.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh"
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 20 ]
+
+  # An initialised repository with nothing committed has no HEAD either.
+  ( cd "$SANDBOX" && git init -q -b f . ) >/dev/null 2>&1
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh"
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 20 ]
+
+  # And once there is a commit to read, it reports on it.
+  ( cd "$SANDBOX" && git add -A && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: the config is looked for in the tree the run stands behind" {
+  # config_sources and workspace_files_present both switch to HEAD in ship mode.
+  # The two arms gating the whole config section asked the worktree and the
+  # index in every mode, so `git rm --cached frontend/vitest.config.ts` -- a
+  # deletion staged for a later commit, worktree copy untouched -- refused a
+  # push whose tree carries the config, and prescribed `git add` for a commit
+  # that is not being made. This check is on preflight's always-run list, so no
+  # changeset filter takes it out of the way.
+  ( cd "$SANDBOX" && git init -q -b f . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  ( cd "$SANDBOX" && git rm -q --cached frontend/vitest.config.ts ) >/dev/null 2>&1
+
+  # The premise: HEAD carries it, the index does not, the worktree does.
+  run bash -c "cd '$SANDBOX' && git cat-file -e HEAD:frontend/vitest.config.ts"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$SANDBOX' && git cat-file -e :frontend/vitest.config.ts"
+  [ "$status" -ne 0 ]
+  [ -f "$SANDBOX/frontend/vitest.config.ts" ]
+
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh"
+  [ "$status" -eq 0 ]
+
+  # The control: staging the deletion is exactly what the pre-commit gate is
+  # for, and it still says so.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=quick bash ci/checks/test-layout.sh"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not in the git index"* ]]
+
+  # And a commit that genuinely carries no config is refused in ship mode, in
+  # its own words rather than the index's. The removal is already staged, so
+  # this commits it rather than removing it again -- `git rm` on a path the
+  # index no longer holds exits 128, and inside a silenced subshell under
+  # `set -e` that aborts the case at the previous assertion's line.
+  ( cd "$SANDBOX" && git -c user.email=t@t -c user.name=t commit -qm drop \
+    && rm -f frontend/vitest.config.ts ) >/dev/null 2>&1
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"carries no"* ]]
+  [[ "$output" != *"git index"* ]]
+}

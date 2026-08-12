@@ -102,26 +102,37 @@ CANDIDATE_PRUNE=(
 # that will never run. git already emits its own quoted spelling for these
 # unless told otherwise, so the two sources did not even agree about the path.
 candidate_files() {
+  # Which tree this run vouches for chooses the sources, rather than HEAD being
+  # added to the other two.
+  #
+  # HEAD arrived here as a third source because the pre-push gate stands behind
+  # it and this file had no notion of that: remove a stray test from the index
+  # and the worktree without committing the removal, and the guard reported
+  # "Test layout OK" for a push whose tree still carries it. That half was
+  # right. Leaving the worktree in was not — ship mode then covered the pushed
+  # tree *and* every scratch file on disk, so an untracked
+  # frontend/src/probe.test.ts, in neither the index nor HEAD, failed a push
+  # whose tree does not contain it, with no remedy but deleting the file.
+  # Measured: exit 20 under CI_GATE_MODE=ship over a clean HEAD.
+  #
+  # ci/checks/node.sh:190-207 answers the same question about the same
+  # directory's manifest by switching its reference, not by widening it, and
+  # says why: "Which tree is 'the commit' depends on the gate."
+  if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+    # Fail closed rather than falling back to the worktree. Without git, or
+    # without a HEAD, this run cannot read the tree it is vouching for, and
+    # "could not look" is not "found nothing" -- the reason the `|| true` that
+    # used to be on the ls-tree below was removed.
+    command -v git >/dev/null 2>&1 || return 1
+    git rev-parse --git-dir >/dev/null 2>&1 || return 1
+    git rev-parse --verify HEAD >/dev/null 2>&1 || return 1
+    git ls-tree -r -z --name-only HEAD -- "$FRONTEND_DIR" 2>/dev/null || return 1
+    return 0
+  fi
   {
     find "$FRONTEND_DIR" "${CANDIDATE_PRUNE[@]}" -type f "${TEST_SUFFIXES[@]}" -print0 2>/dev/null || return 1
     if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
       git ls-files -z -- "$FRONTEND_DIR" 2>/dev/null || return 1
-      # And HEAD, in ship mode. The union above is worktree plus index, which
-      # describes the pre-commit gate; the pre-push gate stands behind HEAD, and
-      # this file had no notion of that at all. Remove a stray test from the
-      # index and the worktree without committing the removal, and the guard
-      # reported "Test layout OK" for a push whose tree still carries it —
-      # while node.sh, on the identical state, reported drift. Two checks, one
-      # file, opposite answers, and this is the one on the always-run list.
-      if [ "${CI_GATE_MODE:-}" = "ship" ] && git rev-parse --verify HEAD >/dev/null 2>&1; then
-        # `|| true` turned "cannot enumerate the pushed tree" into "the pushed
-        # tree carries no test files", and those are not the same answer. With
-        # an unavailable subtree -- a partial clone -- HEAD's stray test simply
-        # vanished from the candidate list and the guard reported "Test layout
-        # OK" for a tree it never read. Failing to look is infrastructure.
-        git ls-tree -r -z --name-only HEAD -- "$FRONTEND_DIR" 2>/dev/null \
-          || return 1
-      fi
     fi
   }
 }
@@ -817,6 +828,30 @@ config_missing_from_index() {
   return 0
 }
 
+# Whether the tree this run stands behind carries the config at all.
+#
+# The third reader of "which tree" in this file, and the one that was never
+# asked. config_sources and workspace_files_present both switch to `HEAD:` in
+# ship mode; the two arms that gate the whole config section read the worktree
+# and the index in every mode. So in ship mode `git rm --cached
+# frontend/vitest.config.ts` -- the worktree copy untouched, the deletion staged
+# for a later commit -- refused a docs-only push with "exists on disk but is not
+# in the git index", prescribing `git add` for a commit that is not being made.
+# The changeset filter cannot take this check out of the way either: it is on
+# preflight's always-run list, so it is the one check a docs-only push cannot
+# avoid. ci/checks/node.sh removed the identical false red for the same
+# directory's package.json, and gave the reason there.
+config_in_vouched_tree() {
+  if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+    command -v git >/dev/null 2>&1 || return 1
+    git rev-parse --git-dir >/dev/null 2>&1 || return 1
+    git rev-parse --verify HEAD >/dev/null 2>&1 || return 1
+    git cat-file -e "HEAD:$VITEST_CONFIG" 2>/dev/null
+    return
+  fi
+  [ -f "$VITEST_CONFIG" ]
+}
+
 # Splits a test block into its own top-level properties, one per line, as
 # NAME<TAB>VALUE. A spread is reported as the name "...".
 #
@@ -1245,9 +1280,19 @@ if [ -n "$WORKSPACE_FOUND" ]; then
   echo "  ${VITEST_CONFIG}, or teach this guard to read it in the same commit."
 fi
 
-if [ ! -f "$VITEST_CONFIG" ]; then
-  fail "Missing ${VITEST_CONFIG}; cannot confirm the test layout is declared."
-elif config_missing_from_index; then
+if ! config_in_vouched_tree; then
+  if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+    fail "The commit being pushed carries no ${VITEST_CONFIG}."
+    echo "  Nothing in the pushed tree declares the layout, so vitest would fall"
+    echo "  back to its default glob and collect whatever it finds. Commit the"
+    echo "  config, or restore it if its deletion was committed by mistake."
+  else
+    fail "Missing ${VITEST_CONFIG}; cannot confirm the test layout is declared."
+  fi
+# The index is the pre-commit gate's question and only its question. In ship
+# mode the commit already exists and the arm above has read it; asking the index
+# as well is how a staged local repair failed a push that does not carry it.
+elif [ "${CI_GATE_MODE:-}" != "ship" ] && config_missing_from_index; then
   fail "${VITEST_CONFIG} exists on disk but is not in the git index."
   echo "  The commit being made would carry no vitest config, so nothing would"
   echo "  declare the layout and vitest would fall back to its default glob."
