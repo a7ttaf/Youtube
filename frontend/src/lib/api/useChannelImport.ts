@@ -453,15 +453,40 @@ const PLAN_ROW_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => boole
   ["revenue_source_status", isSourceStatusChange],
 ];
 
-/**
- * `group_action` is non-null EXACTLY when `group_id` is. Field-by-field checks
- * cannot see that: `{outcome: "UPDATE", group_id: "g1", group_action: null}`
- * passes each of them individually, GroupCell then renders the bare key, and
- * Apply stays enabled over a row whose finance-scope effect — mint a new
- * SECTOR group, or join an existing one — was never disclosed. The backend
- * reserves null for rows with no group and for ERROR rows, which carry no
- * group key either, so the relation is a biconditional (review #184).
- */
+// ============================================================================
+// Purpose: The ROW-LOCAL half of the group-effect contract: `group_action` is
+//   disclosed EXACTLY when `group_id` is. `groupActionsAgree` below is the
+//   plan-wide half — one effect per key across all rows — and neither can see
+//   what the other does. This one asks whether a single row's effect was
+//   disclosed at all.
+// Database/ORM: None (frontend) — a predicate over one decoded row, run as
+//   part of ROW_CHECKS before the payload becomes trusted UI state.
+// Standards: A BICONDITIONAL for a writable row, not a one-way implication:
+//   null is reserved for rows with no group at all, so `group_id` without
+//   `group_action` and `group_action` without `group_id` are both refused.
+//   ERROR rows are the separate case and must have BOTH null — the planner
+//   never computes `group_action` past the block check for them, and the
+//   biconditional alone is satisfied by both being NON-null, which is how a
+//   rejected row came to claim it would create or join a group. Field-by-field
+//   checks cannot express either half: `{outcome: "UPDATE", group_id: "g1",
+//   group_action: null}` passes `isNullableString` and `isGroupAction`
+//   individually.
+// Blast Radius: FINANCE SCOPE + authorization. `group_action` is the
+//   difference between MINTING a new SECTOR group and joining an existing one
+//   — the effect a Group_ID-bearing roster needs MANAGE_GROUPS for. When it is
+//   missing, GroupCell renders a bare key, Apply stays enabled, and the
+//   operator approves a finance-scope effect that was never shown; when an
+//   ERROR row carries one, the preview contradicts its own statement that
+//   error rows write nothing (review #184, codex P2).
+// Connections:
+//   - File: frontend/src/lib/api/useChannelImport.ts -> groupActionsAgree, the
+//       plan-wide half of this contract, and ROW_CHECKS, which runs this.
+//   - File: backend/ums_smart_revenue/org/channel_import.py ->
+//       _planned_group_action, which leaves both fields null for a row with no
+//       group and for a blocked row.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       GroupCell, which renders the disclosure this guarantees exists.
+// ============================================================================
 const hasConsistentGroupEffect = (row: Record<string, unknown>): boolean => {
   // An ERROR row performs NO writes, so the planner leaves BOTH fields null —
   // it never even computes group_action past the block check. The biconditional
@@ -620,18 +645,35 @@ const explainsErrorRows = (row: Record<string, unknown>): boolean => {
   return row.outcome === OUTCOME_ERROR ? isNonBlankString(row.reason) : row.reason === null;
 };
 
-/**
- * The destination is DETERMINED by the row's revenue flag, not merely one of
- * two literals. Both derivations agree on the rule — `_created_revenue_source_status`
- * and `derive_revenue_source_status` each return MISSING_REVENUE_SOURCE when
- * revenue is required and PERFORMANCE_ONLY when it is not — so a row pairing
- * `revenue_required: true` with `to: "PERFORMANCE_ONLY"` (or the reverse) is
- * one the planner cannot produce.
- *
- * Checking only membership let that pair through, and RevenueCell renders the
- * two together: the operator would approve a finance classification that is
- * the opposite of what the backend goes on to persist (review #184, codex P2).
- */
+// ============================================================================
+// Purpose: The destination of a source-status change is DETERMINED by the
+//   row's revenue flag, not merely one of two permitted literals. This is the
+//   row-local half of the finance-classification contract;
+//   `sourceTransitionIsValid` below is the plan-shaped half that judges the
+//   transition itself.
+// Database/ORM: None (frontend) — a predicate over one decoded row, run as
+//   part of ROW_CHECKS before the payload becomes trusted UI state.
+// Standards: Both backend derivations agree on the rule this mirrors —
+//   `_created_revenue_source_status` and `derive_revenue_source_status` each
+//   return MISSING_REVENUE_SOURCE when revenue is required and PERFORMANCE_ONLY
+//   when it is not — so the pairing is a function, not a choice, and a row
+//   pairing `revenue_required: true` with `to: "PERFORMANCE_ONLY"` is one the
+//   planner cannot produce. Membership alone (`isSourceStatusChange`) admits
+//   both literals for either flag, which is exactly the gap this closes. A row
+//   with no source change passes trivially: absence is not a disagreement.
+// Blast Radius: FINANCE. `revenue_source_status` is the classification the
+//   operator signs off on, and RevenueCell renders it beside the flag it must
+//   agree with. Letting the pair diverge means approving a classification that
+//   is the OPPOSITE of what the backend derives and persists, under a
+//   fingerprint that authorises the real one (review #184, codex P2).
+// Connections:
+//   - File: backend/ums_smart_revenue/org/channel_registry.py ->
+//       derive_revenue_source_status, the rule this mirrors.
+//   - File: backend/ums_smart_revenue/org/channel_import.py ->
+//       _created_revenue_source_status, the CREATE-side stamp of the same rule.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> sourceTransitionIsValid,
+//       the transition-shaped half, and ROW_CHECKS, which runs both.
+// ============================================================================
 const sourceStatusMatchesRevenueFlag = (row: Record<string, unknown>): boolean => {
   const change = row.revenue_source_status;
   if (!isPlainObject(change)) {
@@ -1115,34 +1157,42 @@ export const isChannelImportResult = (payload: unknown): payload is ChannelImpor
 
 
 
-/**
- * The echoed target must be the target that was ASKED for. `plan_fingerprint`
- * covers the plan but cannot police this on its own: the digest is computed
- * server-side over the request's actual owner and CMS status, so a malformed or
- * misrouted body that keeps a valid fingerprint while changing
- * `content_owner_id`/`cms_status` is internally consistent from the client's
- * side — and the client cannot recompute the digest, which also takes the
- * server-resolved tenant. Preview would then render the ALTERED target while
- * Apply still sends the captured owner, so the write lands somewhere other
- * than what the operator reviewed (review #184, codex P2).
- *
- * The owner is compared STRIPPED because that is exactly what the route
- * echoes: `_validated_content_owner_id` calls `raw.strip()` once at the
- * boundary (channels.py:830) and returns the normalized value, so a padded
- * " owner-1 " legitimately comes back as "owner-1" and must not be read as a
- * mismatch.
- *
- * `pythonStrip`, never `trim()`. They disagree on U+FEFF, which `strip()`
- * keeps and `trim()` cuts, so an owner id carrying a BOM is echoed verbatim by
- * the backend and compared against a shortened string here — a mismatch on a
- * value the route accepted, which fails the WHOLE preview rather than
- * warning, and takes the import UI down for a roster the API handles fine
- * (review #184, codex P2). Same divergence, same consequence, as the
- * `isParserText` case in this file.
- *
- * `toWireText` first, because the route strips what ARRIVES, not what this
- * module holds — see its block for the newline the encoder rewrites in transit.
- */
+// ============================================================================
+// Purpose: The echoed target must be the target that was ASKED for. One of
+//   only three exported symbols in this module, and the check every entry
+//   into trusted plan state runs — the 2xx preview, the apply result, and
+//   the refreshed plan a 409/422 carries.
+// Database/ORM: None (frontend) — an equality check over a decoded body.
+//   It issues no request; it decides whether one's answer may be believed.
+// Standards: `plan_fingerprint` cannot police this on its own, which is the
+//   whole reason the check exists. The digest is computed SERVER-side over
+//   the request's own owner and CMS status and also folds in the
+//   server-resolved tenant, so a malformed or misrouted body that keeps a
+//   valid fingerprint while changing `content_owner_id` is internally
+//   consistent from the client's side, and the client cannot recompute the
+//   digest to notice. `cms_status` is compared against the constant this
+//   module SENDS, never against array order. The owner is compared through
+//   `toWireText` then `pythonStrip`, in that order: the route strips what
+//   ARRIVES, and both normalizations exist because getting either wrong is
+//   not a warning but a refusal — see their blocks for U+FEFF and for the
+//   newline the multipart encoder rewrites in transit.
+// Blast Radius: WHICH content owner an audited bulk write lands on. Preview
+//   would render the ALTERED target while Apply still sends the captured
+//   one, so the operator reviews one owner's roster and authorises a write
+//   against another (review #184, codex P2). The opposite failure is
+//   equally reachable and was the U+FEFF bug: normalize more aggressively
+//   than the route and a roster the API ACCEPTS is refused, with no
+//   reachable Preview and a banner that cannot say why.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/channels.py ->
+//       _validated_content_owner_id, whose `raw.strip()` the comparison
+//       mirrors, and _import_plan_to_api, which echoes the normalized value.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> pythonStrip and
+//       toWireText, the two normalizations this composes, and
+//       assertUsableResult, which turns a false here into a refusal.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       applyRaceDetail, which applies this same rule to a REJECTION body.
+// ============================================================================
 export const echoesRequestedTarget = (
   result: ChannelImportResult,
   contentOwnerId: string,
