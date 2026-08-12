@@ -243,15 +243,33 @@ const storedApplyKeys = (scope: string): string[] => {
   return keys;
 };
 
-/**
- * The UNION of both sources, never one in preference to the other.
- *
- * Preferring a non-empty mirror was a fail-open: with apply A already stored
- * and a quota error swallowing B's write, B lives only in memory. Reading the
- * mirror alone reports {A}; A then settles, its removeItem succeeds, and the
- * guard drops while B may still be committing (review #184, codex P1). The
- * two sources are partial views of one set, so the set is what to read.
- */
+// ============================================================================
+// Purpose: Every pending apply id in one scope, as the UNION of the durable
+//   mirror and the in-memory fallback — never one in preference to the
+//   other. It is the read behind both the warning flag and the admission
+//   decision, so what it omits is what the guard cannot protect.
+// Database/ORM: None (frontend) — reads localStorage keys under one prefix,
+//   plus the module-level memory list. No request, no server state.
+// Standards: The two sources are PARTIAL VIEWS of one set, so the set is
+//   what to read. Preferring a non-empty mirror was a fail-open: with apply
+//   A already stored and a quota error swallowing B's write, B lives only in
+//   memory; reading the mirror alone reports {A}, A then settles, its
+//   removeItem succeeds, and the guard drops while B may still be committing
+//   (review #184, codex P1). An unreadable mirror is caught, not raised —
+//   memory alone is still THIS document's guard, and throwing here would
+//   take down the warning it is meant to raise. Scoped by prefix on both
+//   sides, so one operator's namespace can never be read into another's.
+// Blast Radius: Whether a pending import is visible at all. An id missing
+//   from this union is an id admission will not see, which permits a second
+//   dispatch of the same roster and a second unconditional CHANNEL_IMPORTED.
+//   No finance math; it decides what the duplicate guard knows about.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> readFlag and
+//       admitApply, the warning and the permit that both rest on this read,
+//       and adoptPendingApplies, which enumerates a scope through it.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> the
+//       Apply gate that refuses while this reports anything outstanding.
+// ============================================================================
 const readIds = (scope: string): readonly string[] => {
   let stored: readonly string[] = [];
   try {

@@ -1321,6 +1321,35 @@ export const RegistryImportFlow = ({
   // always end up where the current binding points: a tenant resolution adopts
   // it forward, and any other scope change leaves it behind.
   const admittedScopeRef = useRef<string | null>(null);
+  // ==========================================================================
+  // Purpose: Retire THIS apply's pending record — the one whose id is in
+  //   flight — in every scope it could be sitting in. It is the only way the
+  //   cross-document duplicate guard comes down for a write that has been
+  //   answered.
+  // Database/ORM: None (frontend) — removes localStorage keys and notifies.
+  //   No request; what it clears is the client-side guard, never server state.
+  // Standards: Settles in BOTH the current scope (where a tenant resolution
+  //   would have adopted the record forward) and the scope the apply was
+  //   RECORDED under (where any other scope change would have left it behind).
+  //   Whichever does not hold the record is a no-op, because removal touches
+  //   exactly one key — so doing both is safe and doing one is not. Reads the
+  //   store through a ref rather than the render-time binding: settlement has
+  //   to follow the ID, and the binding can have moved to a different scope
+  //   since dispatch. Returns early on a null id, so a failure path that never
+  //   dispatched cannot retire another tab's record.
+  // Blast Radius: Whether the operator is blocked from their next import, and
+  //   whether the duplicate guard still stands over a write that may still be
+  //   committing. Both directions are bad: strand a completed apply and they
+  //   are warned about a write that demonstrably landed and blocked until they
+  //   acknowledge it; retire too early and the guard comes down over a request
+  //   that has not been answered (review #184).
+  // Connections:
+  //   - File: frontend/src/contexts/UnsettledImportContext.tsx -> settleApply
+  //       and settleApplyIn, the named-scope removals this pairs.
+  //   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+  //       handleApplyFailure, which calls this only on an ESTABLISHED
+  //       rejection, never on an indeterminate one.
+  // ==========================================================================
   const settleThisApply = () => {
     const applyId = applyIdRef.current;
     if (applyId === null) {
@@ -1548,14 +1577,33 @@ export const RegistryImportFlow = ({
     setError(describeImportError(caught));
   };
 
-  /**
-   * Refuse a second apply dispatch. A FUNCTION, not a render-time value: the
-   * `inFlightRef` read has to happen at call time, since beating a same-tick
-   * double click is exactly what the ref is for and a value captured during
-   * render would already be stale. `indeterminate` joins it because a blind
-   * retry after a lost response could double-submit a roster that already
-   * committed.
-   */
+  // ==========================================================================
+  // Purpose: Every reason a second apply dispatch must not start, in one
+  //   place. Four independent conditions, each covering a window the others
+  //   cannot see.
+  // Database/ORM: None (frontend) — a predicate. It dispatches nothing; it
+  //   decides whether POST /channels/import is reached, and therefore whether
+  //   a second CHANNEL_IMPORTED can be appended.
+  // Standards: A FUNCTION, not a render-time value. The `inFlightRef` read has
+  //   to happen at CALL time — beating a same-tick double click is exactly
+  //   what the ref is for, and a value captured during render is already
+  //   stale. `busy` is the rendered state, `inFlightRef` the same-tick guard,
+  //   `indeterminate` this document's lost-response lockout, and
+  //   `unsettledImport.unsettled` the only one that can see ANOTHER TAB's
+  //   pending apply. Dropping any one of the four leaves a live double-submit
+  //   path.
+  // Blast Radius: Whether one roster can be applied TWICE. A second dispatch
+  //   is a second unconditional CHANNEL_IMPORTED over the same registry, and
+  //   after a lost response it lands on a roster that may already have
+  //   committed. No finance math here; it gates whether the audited write
+  //   happens at all.
+  // Connections:
+  //   - File: frontend/src/contexts/UnsettledImportContext.tsx -> the
+  //       cross-document flag behind `unsettled`, the cross-TAB half.
+  //   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+  //       handleApplyFailure, which raises `indeterminate`, and the apply
+  //       handler that sets `busy` and `inFlightRef` in one batch.
+  // ==========================================================================
   const applyDispatchBlocked = (): boolean => {
     // `unsettledImport.unsettled` covers what this component cannot see: a
     // SECOND TAB holding a preview of its own, whose apply is still pending.
@@ -1732,12 +1780,36 @@ export const RegistryImportFlow = ({
     setStep("upload");
   };
 
-  // Cancel restores the registry WITHOUT a refetch — unless an apply already
-  // committed, in which case the inventory changed and the parent must reload.
-  // It is unreachable while `applying` (ActionStepper disables the control),
-  // which is what keeps that `applied`-null test honest: without the guard, a
-  // Cancel fired mid-apply would take the no-reload path even though the
-  // request goes on to commit, and the parent would restore a stale registry.
+  // ==========================================================================
+  // Purpose: Route Cancel to the exit that matches what the registry now
+  //   holds — `onDone` when it may have changed under this flow, `onCancel`
+  //   when it provably has not.
+  // Database/ORM: None (frontend) — chooses between two parent callbacks. The
+  //   difference between them is whether the parent REFETCHES.
+  // Standards: `indeterminate` joins `applied` on the reloading path: an apply
+  //   whose response was lost may have committed, so leaving without a refetch
+  //   would restore a registry that no longer matches the database.
+  //   Unreachable while `applying`, because ActionStepper disables the control
+  //   — which is what keeps the `applied`-null case honest: without that guard
+  //   a Cancel fired mid-apply would take the no-reload path while the request
+  //   went on to commit. The reload it triggers can race the original POST and
+  //   return pre-write rows; that is deliberately NOT signalled through this
+  //   callback, because the shell-level unsettled flag was raised before
+  //   dispatch and is still up, so the warning is already correct however the
+  //   operator leaves — including by the sidebar, which never reaches this
+  //   handler at all.
+  // Blast Radius: Whether the operator is returned to a STALE registry after a
+  //   write that may have landed. No request and no write of its own; it
+  //   decides what the parent believes about state it did not observe (review
+  //   #184, codex P1).
+  // Connections:
+  //   - File: frontend/src/components/srcc/views/RegistryView.tsx -> the
+  //       onDone / onCancel pair whose difference is the refetch.
+  //   - File: frontend/src/components/srcc/ActionStepper.tsx -> the control
+  //       this handler backs, disabled while `applying`.
+  //   - File: frontend/src/contexts/UnsettledImportContext.tsx -> the
+  //       shell-level warning that stays correct on every exit path.
+  // ==========================================================================
   const handleCancel = () => {
     // `indeterminate` joins `applied` on the reloading path: an apply whose
     // response was lost may have committed, and leaving without a refetch

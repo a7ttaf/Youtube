@@ -649,6 +649,41 @@ def _write_inventory_row(
         "revenue_required": bool(entry.revenue_required),
     }
 
+    # ========================================================================
+    # Purpose: Judge the LOCKED pre-state before a single field is assigned,
+    #   and refuse the write if the row is not what the plan was made
+    #   against. Two independent rules live here: one that runs for every
+    #   apply, and one only a plan-bound apply opts into.
+    # Database/ORM: youtube_channels, read under the row lock
+    #   update_inventory holds. It performs no write itself; raising is how
+    #   it prevents one.
+    # Standards: Runs INSIDE update_inventory rather than on its return
+    #   value, and that placement is the whole point — a raise here must
+    #   leave the row untouched, and a store without a transaction cannot
+    #   undo a mutation the caller then rejects (review #184).
+    #   _require_reviewed_active fires for EVERY apply, bound or not: "the
+    #   file wins" (review #159) is a decision about inventory FIELDS the
+    #   roster asserts, and it never licensed resurrecting a channel an
+    #   operator retired — the roster does not carry `active` to assert in
+    #   the first place. _require_reviewed_pre_state fires only when the
+    #   caller bound its apply to a reviewed plan, comparing against the four
+    #   values this write will install, with the store's own normalization
+    #   already applied to the owner so the comparison stays like-for-like.
+    # Blast Radius: FINANCE + AUDIT. Letting a drifted row through writes and
+    #   audits a diff the operator never saw — including over a retired
+    #   channel, whose Group_ID row would then carry on into the membership
+    #   pass. Failing closed costs a 409 and a re-preview; failing open costs
+    #   a silent overwrite with a CHANNEL_UPDATED event that describes it as
+    #   reviewed.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+    #     ChannelRegistryStore protocol that specifies calling this before
+    #     assignment, and the in-memory adapter that honours it.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+    #     same contract inside the row lock.
+    #   - File: backend/ums_smart_revenue/api/channels.py -> the route whose
+    #     expected_plan_fingerprint sets enforce_reviewed_pre_state.
+    # ========================================================================
     def require_pre_state(previous: ChannelRegistryEntry) -> None:
         """Judge the locked pre-state before a single field is assigned.
 
