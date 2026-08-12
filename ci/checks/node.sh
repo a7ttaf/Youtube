@@ -2006,6 +2006,40 @@ _timeout_advance() {
   esac
 }
 
+# _pm_advance <token> – whether this token still belongs to a package-manager
+# prefix, advancing `_pp_state` as it goes. Third of its kind, and for the third
+# time the same cause: the wrapper was skipped by name and the grammar after it
+# was not read.
+#
+# `pnpm --filter web vitest run`, `yarn --cwd packages/web vitest run`,
+# `npm --prefix packages/web run test` -- every one of these puts a bare word
+# after a flag, and every reader here took that word as the program. The
+# standard monorepo invocation was refused with "does not appear to run a test
+# runner" while the runner sat in the string.
+#
+# The options that take a separate value, from each manager's own help:
+#   pnpm  --filter/-F, --dir/-C, --workspace-root is a boolean
+#   yarn  --cwd
+#   npm   --prefix, --workspace/-w, -C
+#   bun   --cwd
+# `--filter=web` and the rest carry their value in the same token and need
+# nothing here.
+#
+# Like env and unlike timeout, the first word that is neither an option nor an
+# option's value is the command, and is handed back to the caller.
+_pm_advance() {
+  case "$_pp_state" in
+    2) _pp_state=1 ; return 0 ;;
+    1) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    --filter|-F|--dir|-C|--cwd|--prefix|--workspace|-w) _pp_state=2 ; return 0 ;;
+    -*) return 0 ;;
+    *) _pp_state=0 ; return 1 ;;
+  esac
+}
+
 # _env_advance <token> – whether this token still belongs to an `env` prefix,
 # advancing `_ep_state` as it goes. Same contract as _timeout_advance, and here
 # for the same reason: the wrapper was skipped by name with nothing reading the
@@ -2040,7 +2074,7 @@ _env_advance() {
 }
 
 _command_runner() {
-  local _tok _ng_out="" _tp_state=0 _ep_state=0 tok
+  local _tok _ng_out="" _tp_state=0 _ep_state=0 _pp_state=0 tok
   _cr=""
   _normalize_command "$1"
   set -f
@@ -2066,6 +2100,9 @@ _command_runner() {
     if [ "$_ep_state" -ne 0 ] && _env_advance "$_tok"; then
       continue
     fi
+    if [ "$_pp_state" -ne 0 ] && _pm_advance "$_tok"; then
+      continue
+    fi
     case "${_tok##*/}" in
       # `env`, `cross-env` and `timeout` join the list for the reason `command`
       # and `nohup` are on it: they prefix a command without being one.
@@ -2078,7 +2115,10 @@ _command_runner() {
       # `env` and `cross-env` take options of their own before the command, and
       # `-u NAME` puts a bare word after a flag; see _env_advance.
       env|cross-env) _ep_state=1; continue ;;
-      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time \
+      # The package managers take options of their own before the command, and
+      # `--filter web` puts a bare word after a flag; see _pm_advance.
+      npx|pnpm|bun|yarn|npm) _pp_state=1; continue ;;
+      exec|dlx|command|nohup|time \
         |--yes|-y|run) continue ;;
       -*) continue ;;
       [A-Za-z_]*=*) continue ;;
@@ -2116,11 +2156,47 @@ _reject_escaped_word() {
 # wrapper collected one file and the lane exited 0. Two halves of one question
 # with only one of them asked.
 _reject_forwarded_args() {
-  local script_name="$1" args="$2" tok
+  local script_name="$1" args="$2" tok _rfa_tool="${1##*/}"
   case "$args" in
     *[![:space:]]*) ;;
     *) return 0 ;;
   esac
+
+  # A tool this file has rules for is judged by *its* rules, through the same
+  # dispatcher the direct spelling goes through.
+  #
+  # This path is reached when the target IS the executable -- `npx tsc
+  # --noEmit`, `pnpm dlx vitest run` -- and it called _reject_narrowing_flags
+  # bare, with no runner. That is vitest's and `node --test`'s vocabulary
+  # applied to every tool: `npx tsc --noEmit` was refused for "narrowing a
+  # suite" that does not exist, `npx jest --ci` and `npx mocha --recursive` for
+  # flags the runner-keyed list beside it names as harmless, and
+  # `npx playwright test` for the only invocation playwright has. The bare-word
+  # loop below then refused `npx vitest run --reporter json` for the reporter's
+  # value, which _reject_positional_filters knows is a value and not a filter.
+  #
+  # _reject_tool_args_one exists for exactly this and says so in its own
+  # comment: falling through hands a type checker the test-runner allow-list and
+  # refuses every ordinary invocation. It was reached from the direct path and
+  # not from this one -- one rule, two spellings, on the spelling that is most
+  # of the ecosystem's documentation.
+  #
+  # The runner is prepended to the arguments because that is the shape the
+  # dispatcher's readers expect: _reject_positional_filters drops the first
+  # token as "the runner or its wrapper", and handing it arguments alone would
+  # eat the first one.
+  case "$_rfa_tool" in
+    tsc|tsc.cmd|tsgo|vue-tsc|svelte-check|astro|tsd|attw \
+      |vitest|jest|mocha|ava|jasmine|tap|node|playwright|cypress|wdio|karma \
+      |tsx|ts-node|deno)
+      _reject_tool_args_one "$script_name" "${_rfa_tool} ${args}" "$_rfa_tool"
+      return 0
+      ;;
+  esac
+
+  # And for a target this file has no rules for, the conservative reading it
+  # always had: a bare word forwarded into something that reaches a runner is a
+  # filter, and nothing here can say otherwise.
   _reject_narrowing_flags "$script_name" "$args"
   set -f
   # shellcheck disable=SC2086
@@ -2251,7 +2327,7 @@ _script_names_a_checker() {
   # The last-token index goes with it: a runner invoked with no arguments at all
   # is a REPL that sees EOF and exits 0, which is the same empty pass in another
   # spelling, and `node` was the only one of the four that this list refused.
-  local _nt=0 _t _tp_state=0 _ep_state=0
+  local _nt=0 _t _tp_state=0 _ep_state=0 _pp_state=0
   local _cur_nt=0 _ti=0 _last=-1
   local _nt_seg=() _last_seg=()
   # shellcheck disable=SC2086
@@ -2369,6 +2445,7 @@ _script_names_a_checker() {
         neg=0
         _tp_state=0
         _ep_state=0
+        _pp_state=0
         _seg_i=$((_seg_i + 1))
         _nt="${_nt_seg[$_seg_i]:-0}"
         continue
@@ -2434,6 +2511,9 @@ _script_names_a_checker() {
       if [ "$_ep_state" -ne 0 ] && _env_advance "$tok"; then
         continue
       fi
+      if [ "$_pp_state" -ne 0 ] && _pm_advance "$tok"; then
+        continue
+      fi
       case "${tok##*/}" in
         # A duration is a bare word, so it has to be stepped over explicitly or
         # it becomes the command.
@@ -2441,6 +2521,13 @@ _script_names_a_checker() {
         env|cross-env) _ep_state=1; continue ;;
         exec|command|nohup|time) continue ;;
       esac
+      # The package managers are deliberately absent from that list, unlike in
+      # every other reader here. To those readers a manager is a prefix to step
+      # over; to this one it is the delegating runner itself, and stepping over
+      # it leaves `npm run typecheck:all` with no runner, no target and no
+      # delegation to follow. Its option grammar is read below, where the
+      # delegation target is chosen -- which is the token the grammar was
+      # getting wrong.
       # A command that ends the shell ends the scan with it. `"test": "exit 0 ;
       # vitest run"` put the runner in command position after a separator, so
       # every rule above was satisfied by a token the shell never reaches. The
@@ -2491,6 +2578,10 @@ _script_names_a_checker() {
       for t in $runners; do
         if [ "${tok##*/}" = "$t" ]; then
           runner="$tok"
+          # And now that the manager is the runner, its own options are read.
+          case "${tok##*/}" in
+            pnpm|npm|yarn|bun|npx) _pp_state=1 ;;
+          esac
           expect_cmd=0
           continue 2
         fi
@@ -2515,6 +2606,15 @@ _script_names_a_checker() {
         run|exec|dlx|--) continue ;;
       esac
       _fwd="${_fwd} ${tok}"
+      continue
+    fi
+    # A package manager's own option can take its value as a separate word, and
+    # that word was becoming the delegation target: `pnpm --filter web vitest
+    # run` resolved `web`, which names no script and no tool, so the standard
+    # monorepo invocation was refused for running no test runner while the
+    # runner sat two tokens to the right. `--filter=web` carries its value in
+    # the same token and needs nothing here. See _pm_advance.
+    if [ "$_pp_state" -ne 0 ] && _pm_advance "$tok"; then
       continue
     fi
     case "$tok" in
@@ -2694,7 +2794,7 @@ assert_no_persistent_filter() {
 # The non-narrowing flag allow-list, as its own function so a package script
 # reached through another one is read the same way as a direct command.
 _reject_narrowing_flags() {
-  local script_name="$1" cmd="$2" runner="${3:-}" tok _tp_state=0 _ep_state=0
+  local script_name="$1" cmd="$2" runner="${3:-}" tok _tp_state=0 _ep_state=0 _pp_state=0 _rnf_word
   # shellcheck disable=SC2086
   for tok in $cmd; do
     # A `timeout` wrapper's own options are not the runner's. This scan reads
@@ -2712,9 +2812,26 @@ _reject_narrowing_flags() {
     if [ "$_ep_state" -ne 0 ] && _env_advance "$tok"; then
       continue
     fi
-    case "${tok##*/}" in
+    if [ "$_pp_state" -ne 0 ] && _pm_advance "$tok"; then
+      continue
+    fi
+    # By basename and unquoted, because both spellings are the same wrapper to
+    # the shell. `/usr/bin/env VAR=v cmd` is an ordinary prefix and `'timeout'
+    # 300 vitest run` an ordinary quoting, and each was read here as a flag or a
+    # filter belonging to the runner. The path spelling was already handled for
+    # `timeout` in the preamble of _reject_positional_filters and nowhere else,
+    # which is the same rule-in-one-reader shape twice over.
+    # The basename is computed for the wrapper comparison and is NOT written
+    # back over the token: `${tok##*/}` on `--exclude=tests/a.test.ts` is
+    # `a.test.ts`, which stops looking like a flag at all, and the narrowing
+    # rule this function exists for stops firing. The unquoting is written back,
+    # because a quoted flag is the same flag.
+    _unquote_tok
+    _rnf_word="${tok##*/}"
+    case "$_rnf_word" in
       timeout) _tp_state=1 ; continue ;;
       env|cross-env) _ep_state=1 ; continue ;;
+      pnpm|npm|yarn|bun|npx) _pp_state=1 ; continue ;;
     esac
     case "$tok" in
       -*) ;;
@@ -2887,7 +3004,8 @@ _reject_tool_args_one() {
       # test-runner allow-list and refuses every ordinary invocation.
       :
       ;;
-    vitest|jest|mocha|ava|jasmine|tap|node|playwright|cypress|wdio|karma       |tsx|ts-node|deno)
+    vitest|jest|mocha|ava|jasmine|tap|node|playwright|cypress|wdio|karma \
+      |tsx|ts-node|deno)
       _reject_narrowing_flags "$script_name" "$cmd" "$runner"
       # A positional argument to a test runner *is* a filter — `vitest run
       # [...filters]` is the documented syntax, and `vitest run
@@ -2907,7 +3025,7 @@ _reject_tool_args_one() {
 # The compiler's own argument rules: the modes that do not typecheck, and the
 # positionals that make it ignore tsconfig.json.
 _reject_tsc_args() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp _tp_state=0 _ep_state=0
+  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp _tp_state=0 _ep_state=0 _pp_state=0
   prev=""
   set -f
   # shellcheck disable=SC2086
@@ -2942,11 +3060,16 @@ _reject_tsc_args() {
     if [ "$_ep_state" -ne 0 ] && _env_advance "$tok"; then
       prev="" ; shift ; continue
     fi
+    if [ "$_pp_state" -ne 0 ] && _pm_advance "$tok"; then
+      prev="" ; shift ; continue
+    fi
     case "${tok##*/}" in
       timeout) _tp_state=1 ; prev="" ; shift ; continue ;;
       # `env` was on no list in this scan at all, so `env NODE_ENV=test tsc
       # --noEmit` was refused for pointing the compiler at a file named `env`.
       env|cross-env) _ep_state=1 ; prev="" ; shift ; continue ;;
+      # And the package managers, whose own options take a separate word.
+      pnpm|npm|yarn|bun|npx) _pp_state=1 ; prev="" ; shift ; continue ;;
     esac
     if [ "${tok##*/}" = "$runner" ]; then
       prev="" ; shift ; continue
@@ -2959,6 +3082,23 @@ _reject_tsc_args() {
     case "$tok" in
       -*) low="$(printf '%s' "$tok" | tr '[:upper:]' '[:lower:]')" ;;
       *) low="$tok" ;;
+    esac
+    # And one dash is the same option to tsc as two.
+    #
+    # TypeScript's command line strips the leading dashes before it looks the
+    # option up, so `-noCheck` is `--noCheck` to the compiler and was a token
+    # this scan had never heard of: it matched no arm of the non-compiling list
+    # and fell through the generic `-*` case that accepts ordinary flags. The
+    # typecheck lane reported PASS with the compiler told not to type check,
+    # which is precisely what that list exists to prevent, reachable by deleting
+    # one character.
+    #
+    # Only a long option is rewritten. `-p`, `-w`, `-v`, `-h` and `-?` are
+    # single-character flags the list already names in their one-dash spelling,
+    # and turning those into `--p` would take them out of it.
+    case "$low" in
+      --*) ;;
+      -[!-][!-]*) low="-${low}" ;;
     esac
     case "$low" in
       # Modes that print instead of compiling. `tsc --showConfig` resolves the
@@ -3120,7 +3260,7 @@ _reject_tsc_args() {
 # rule held for the direct spelling and not for the one layer down, which is
 # the same right-rule-wrong-tree shape this lane has had to fix twice.
 _reject_positional_filters() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev _q _tp_state=0 _ep_state=0
+  local script_name="$1" cmd="$2" runner="$3" tok prev _q _tp_state=0 _ep_state=0 _pp_state=0 _rpf_head
   prev=""
   # shellcheck disable=SC2086
   set -- $cmd
@@ -3131,7 +3271,15 @@ _reject_positional_filters() {
   # does not narrow. Answered here because the arm inside the loop cannot: the
   # wrapper in front position has already been shifted away by the time the loop
   # starts.
-  case "${1:-}" in
+  # Unquoted first: a quoted wrapper name is the same wrapper to the shell, and
+  # this preamble compares before anything strips the quotes -- so `'timeout'
+  # 300 vitest run` fell to the `*)` arm, the wrapper was dropped as "the runner
+  # or its wrapper", and the duration behind it was read as a test filter. Three
+  # readers unquote before their wrapper arms and two did not; this is one of
+  # the two.
+  _rpf_head="${1:-}"
+  tok="$_rpf_head" ; _unquote_tok ; _rpf_head="$tok"
+  case "$_rpf_head" in
     timeout|*/timeout)
       shift
       # Everything else the wrapper owns -- its options, an option's value, and
@@ -3149,6 +3297,10 @@ _reject_positional_filters() {
       shift
       _ep_state=1
       ;;
+    npx|*/npx|pnpm|*/pnpm|bun|*/bun|yarn|*/yarn|npm|*/npm)
+      shift
+      _pp_state=1
+      ;;
     *) shift ;;
   esac
   while [ "$#" -gt 0 ]; do
@@ -3161,6 +3313,9 @@ _reject_positional_filters() {
       prev="" ; shift ; continue
     fi
     if [ "$_ep_state" -ne 0 ] && _env_advance "$tok"; then
+      prev="" ; shift ; continue
+    fi
+    if [ "$_pp_state" -ne 0 ] && _pm_advance "$tok"; then
       prev="" ; shift ; continue
     fi
     # A quoted value holding whitespace arrives here as several tokens, because
@@ -3214,9 +3369,14 @@ _reject_positional_filters() {
       # read by _timeout_advance above, which knows the wrapper's options.
       timeout|*/timeout)
         _tp_state=1 ; prev="" ; shift ; continue ;;
-      env|cross-env)
+      # By path too, the way `timeout` above already is: `/usr/bin/env` is the
+      # same prefix as `env`, and the two arms sat next to each other with only
+      # one of them saying so.
+      env|*/env|cross-env|*/cross-env)
         _ep_state=1 ; prev="" ; shift ; continue ;;
-      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time \
+      npx|*/npx|pnpm|*/pnpm|bun|*/bun|yarn|*/yarn|npm|*/npm)
+        _pp_state=1 ; prev="" ; shift ; continue ;;
+      exec|dlx|command|nohup|time \
         |--yes|-y|run|related \
         |"$runner"|'&&'|'||'|';'|'|')
         prev="" ; shift ; continue ;;
@@ -3263,6 +3423,27 @@ _reject_positional_filters() {
     # `--reporter=json` does not appear here on purpose: its value is already
     # attached, so a bare word after it is a filter, and the exact-match arms
     # below let it fall through to the rejection.
+    # The runner-keyed ones first, for the reason the allow-list above this
+    # function is runner-keyed: this list is vitest's and `node --test`'s
+    # vocabulary, and it was the only list consulted for every runner. So the
+    # flag allow-list said `mocha --timeout` cannot reduce a run -- by name --
+    # and the reader beside it then refused `5000` as a test filter. Same for
+    # `mocha --require ts-node/register`, which is the standard mocha
+    # TypeScript setup, and for `playwright --workers 2` and
+    # `ava --concurrency 4`. One rule in two readers that had to agree about
+    # the same flag and did not.
+    #
+    # Only flags that list already accepts for that runner appear here. A flag
+    # it refuses is refused on its own line, and exempting its value would
+    # describe a state that cannot be reached.
+    case "${runner}|${prev}" in
+      'jest|--maxConcurrency' \
+        |'mocha|--jobs'|'mocha|--require'|'mocha|--timeout'|'mocha|--slow' \
+        |'ava|--concurrency' \
+        |'tap|--jobs' \
+        |'playwright|--workers'|'playwright|--retries'|'playwright|--trace')
+        prev="" ; shift ; continue ;;
+    esac
     case "$prev" in
       --reporter|--reporters|--outputFile|--outputTruncateLength|--mode \
         |--pool|--poolOptions|--maxWorkers|--minWorkers|--maxConcurrency \

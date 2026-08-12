@@ -4847,3 +4847,268 @@ lane_run_typecheck() {
   rm -rf "$LANE_SB"
 }
 
+
+# --- self-found: rules that existed in one reader and not in its sibling ------
+#
+# These came out of a sweep for the shape the reported findings kept having,
+# rather than from a review thread. Each names the reader that had the rule and
+# the one that did not.
+
+ws_tools() {
+  local _t
+  for _t in "$@"; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/$_t"
+    chmod +x "$NODE_SB/ws/node_modules/.bin/$_t"
+  done
+}
+
+@test "node lane: a tool reached through npx is judged by its own rules" {
+  # _reject_tool_args_one picks the argument rules by the tool actually
+  # resolved, and its own comment says why: falling through hands a type checker
+  # the test-runner allow-list and refuses every ordinary invocation. The
+  # forwarded path -- `npx tsc --noEmit`, `pnpm dlx vitest run`, where the
+  # target IS the executable -- never reached it. _reject_forwarded_args called
+  # _reject_narrowing_flags bare, with no runner, so vitest's vocabulary was
+  # applied to everything: `npx tsc --noEmit` was refused for narrowing a suite
+  # that does not exist, `npx jest --ci` and `npx mocha --recursive` for flags
+  # the runner-keyed list names as harmless, and `npx playwright test` for the
+  # only invocation playwright has.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_tools tsc vue-tsc svelte-check npx jest mocha ava tap playwright deno
+
+  # Every one of these passes when written directly, so it must pass through
+  # npx: the spelling is not the question the rules are about.
+  local spelling
+  for spelling in \
+    "npx tsc --noEmit" \
+    "npx vue-tsc --noEmit" \
+    "npx svelte-check --threshold error"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  for spelling in \
+    "npx jest --ci" \
+    "npx mocha --recursive" \
+    "npx playwright test" \
+    "npx deno test" \
+    "npx vitest run --reporter json"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\", \"typecheck\": \"tsc --noEmit\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" != *"passes an argument into the"* ]] \
+      || { echo "refused as forwarded: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls, and the point of the whole rule: npx does not launder a
+  # filter. Both spellings of a genuine narrowing are still refused.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npx vitest run tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npx vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: tsc reads one dash the same way it reads two" {
+  # TypeScript's command line strips the leading dashes before it looks an
+  # option up, so `-noCheck` is `--noCheck` to the compiler. The non-compiling
+  # list enumerated the two-dash spelling only, so the one-dash spelling matched
+  # no arm and fell through the generic `-*` case that accepts ordinary flags:
+  # the typecheck lane reported PASS with the compiler told not to type check,
+  # reachable by deleting one character. A deny-list that loses to a spelling is
+  # the shape this file keeps having to invert.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_tools tsc
+
+  local spelling
+  for spelling in "tsc --noEmit -noCheck" "tsc --noEmit -showConfig" "tsc --noEmit -watch"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "accepted: $spelling" >&2; return 1; }
+    [[ "$output" == *"non-compiling tsc mode"* ]] \
+      || { echo "refused for the wrong reason: $spelling" >&2; return 1; }
+  done
+
+  # The controls: a one-dash option that is not on the list is still an ordinary
+  # flag, and the single-character flags keep their one-dash spelling -- turning
+  # those into `--p` would take them out of the list they are already in.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" == *"Running script:"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"a project other than"* ]]
+  [[ "$output" == *"Running script:"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -w" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a runner flag's value is not a filter" {
+  # The flag allow-list is keyed by runner and says `mocha --timeout` cannot
+  # reduce a run -- by name. The positional reader beside it carried vitest's
+  # value-taking list and only that, so `5000` was refused as a test filter.
+  # `mocha --require ts-node/register` is the standard mocha TypeScript setup
+  # and went the same way. Two readers that had to agree about the same flag,
+  # and did not.
+  ws_setup
+  ws_tools mocha ava tap playwright
+
+  local spelling
+  for spelling in \
+    "mocha --timeout 5000" \
+    "mocha --require ts-node/register" \
+    "mocha --jobs 4" \
+    "ava --concurrency 4" \
+    "tap --jobs 4" \
+    "playwright --workers 2"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    # And positively: the script was reached and run. Asserting only the absence
+    # of a message is satisfied by the lane dying earlier for some unrelated
+    # reason, which asserts nothing about the rule under test.
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The control: a bare word that is NOT the value of a value-taking flag is
+  # still a filter, so this exempts values and not positionals.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "mocha --recursive tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a wrapper is the same wrapper quoted or spelled by path" {
+  # `'timeout' 300 vitest run` and `/usr/bin/env NODE_ENV=test vitest run` are
+  # ordinary scripts. Three readers unquoted before their wrapper arms and two
+  # did not, and `timeout` was matched by path in one arm while `env` beside it
+  # was not -- so the duration was read as a filter in the first case and the
+  # interpreter path as one in the second.
+  ws_setup
+  ws_tools timeout env cross-env
+
+  # The quoted spellings are written with plain single quotes: this is a bash
+  # string, so `'timeout'` reaches package.json as `'timeout'` and the shell
+  # that finally runs the script strips the quotes -- which is the whole point,
+  # since the readers under test see the quoted form and the runtime does not.
+  local spelling
+  for spelling in \
+    "'timeout' 300 vitest run" \
+    "'env' NODE_ENV=test vitest run" \
+    "/usr/bin/env NODE_ENV=test vitest run" \
+    "timeout 300 /usr/bin/env NODE_ENV=test vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The control: the wrapper does not launder what it wraps, whichever way it
+  # is spelled.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "/usr/bin/env NODE_ENV=test vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a package manager's own options are not the command" {
+  # `pnpm --filter web vitest run` and `yarn --cwd packages/web vitest run` put
+  # a bare word after a flag, and every reader took that word as the program --
+  # the third wrapper grammar with the same fault, after timeout and env. The
+  # standard monorepo invocation was refused with "does not appear to run a test
+  # runner" while the runner sat in the string.
+  ws_setup
+  ws_tools pnpm yarn npm bun npx
+
+  local spelling
+  for spelling in \
+    "pnpm -F web vitest run" \
+    "pnpm --filter web vitest run" \
+    "yarn --cwd . vitest run" \
+    "npm --prefix . vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls. A filter behind the prefix is still a filter -- the manager's
+  # options are stepped over, not everything after them.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "pnpm -F web vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # And delegating to another package's script is still something this gate
+  # cannot follow, which is the honest answer rather than a guess.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "pnpm --filter web test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The control the first draft of this fix failed. To most readers here a
+  # manager is a prefix to step over, and putting the grammar in that same arm
+  # everywhere stepped over `npm` in the one reader that treats it as the
+  # delegating runner: `npm run inner` was left with no runner, no target and no
+  # delegation to follow. The grammar belongs where that reader picks its
+  # delegation target -- which is the token it was getting wrong anyway.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npm run inner", "inner": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  [[ "$output" == *"Running script:"* ]]
+
+  # And both halves at once: the manager's option takes a word, and the script
+  # named after it is still the delegation target.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npm --prefix . run inner", "inner": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  [[ "$output" == *"Running script:"* ]]
+  rm -rf "$NODE_SB"
+}
