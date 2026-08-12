@@ -243,6 +243,11 @@ EOF
 }
 
 @test "test-layout: catches an include commented out with a block comment" {
+  # The declared glob closes the comment it is written inside: `tests/**/*` has
+  # `*/` in it, so a JavaScript parser ends the comment there too and the rest
+  # of the line is left as text. The file is not readable after that, and the
+  # guard now says so instead of reporting "no active include" -- both are
+  # refusals, and the second was right about the outcome for the wrong reason.
   cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
 import { defineConfig } from "vitest/config";
 
@@ -251,6 +256,24 @@ export default defineConfig({
     /*
     include: ["tests/**/*.test.{ts,tsx}"],
     */
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot read to the end"* ]]
+
+  # And a block comment the glob does not truncate, which is the same intent
+  # with a readable file behind it: the commented include is not active.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    /*
+    include: ["tests/app.test.ts"],
+    */
+    globals: true,
   },
 });
 EOF
@@ -1725,6 +1748,211 @@ export default defineConfig({
 EOF
   run_guard
   [ "$status" -eq 20 ]
+}
+
+@test "test-layout: the declared glob must be an element of include, not a substring of it" {
+  # include was checked with `grep -F` over the joined text of the value, and a
+  # substring is not an element. The first entry below is dead -- nothing lives
+  # under frontend/src/tests -- and exists only to carry the string this check
+  # searches for; vitest unions the entries and collects the second alone. The
+  # guard reported every file covered while one ran.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["src/tests/**/*.test.{ts,tsx}", "tests/app.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+
+  # A suffix does it just as well.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}.bak"] },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+
+  # The controls: the declared element on its own, and beside a narrower one --
+  # entries are unioned, so an extra one cannot subtract.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}", "tests/extra.test.ts"] },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: a property scan that lost its place says so" {
+  # test_block_props has no notion of a regular expression, and `alias` is on
+  # the allow-list. A quote inside the pattern opens a string that swallows
+  # every property after it; an unbalanced bracket leaves the depth counter
+  # stuck so no further comma is ever at segment level. Either one hides a live
+  # test.exclude from the rule that exists to catch it -- and from the unknown-
+  # property backstop behind that -- so the guard reported the layout covered
+  # over a config that drops a whole subtree.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    alias: [{ find: /'/, replacement: "q" }],
+    exclude: ["tests/lib/**"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot read to the end"* ]]
+
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    alias: [{ find: /^\(/ }],
+    exclude: ["tests/lib/**"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot read to the end"* ]]
+
+  # The control: a regular expression that balances is read like anything else,
+  # so this is a rule about losing the place and not about regexes.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    alias: [{ find: /x/, replacement: "q" }],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: a key spelled with an escape is refused, not read past" {
+  # JavaScript processes the escape in the string literal, so "test" IS
+  # `test`: one object, one key, and the narrow block under it replaces the
+  # broad one this scan validated. Both key arms compare source text, so the
+  # escaped spelling was not seen as a second key at all.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+  "\u0074est": { include: ["tests/app.test.ts"] },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+
+  # An identifier carries the same escape.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+  \u0074est: { include: ["tests/app.test.ts"] },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+
+  # The control, and the reason the rule is scoped to key position: a backslash
+  # in a value at this level is ordinary data and says nothing about which
+  # properties the object has.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+  name: "a\\b",
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: a type assertion after the include array is not an expression" {
+  # `as const` and `satisfies string[]` are erased before vite evaluates the
+  # config, so the value vitest receives is the literal array that was just
+  # checked. value_is_literal_array demanded the closing bracket be the last
+  # character of the value, and refused a correct config in a .ts file with
+  # "computes test.include instead of declaring it".
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] as const },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] satisfies string[] },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+
+  # The controls: what comes after the bracket is admitted by name, so an
+  # expression is still an expression.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"].slice(0) },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+}
+
+@test "test-layout: a vitest workspace file beside the config is refused" {
+  # vitest resolves vitest.workspace.* and vitest.projects.* before the root
+  # config, and from then on the projects listed there decide what is
+  # collected. A workspace naming one file left this guard reporting every test
+  # covered with frontend/vitest.config.ts entirely correct and entirely
+  # unused. The same narrowing written as `projects: [...]` inside the config
+  # is already refused by the allow-list -- one rule, and it was absent on the
+  # equivalent spelling one file over.
+  printf 'export default [{ test: { include: ["tests/app.test.ts"] } }];\n' \
+    > "$SANDBOX/frontend/vitest.workspace.ts"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"workspace file sits beside"* ]]
+  rm -f "$SANDBOX/frontend/vitest.workspace.ts"
+
+  # Every filename vitest resolves, not just the one that was reported.
+  printf 'export default [];\n' > "$SANDBOX/frontend/vitest.projects.js"
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"workspace file sits beside"* ]]
+  rm -f "$SANDBOX/frontend/vitest.projects.js"
+
+  # The control: without one, the config is what decides, and it passes.
+  run_guard
+  [ "$status" -eq 0 ]
 }
 
 @test "test-layout: an unreadable staged config is infrastructure, not a pass" {

@@ -476,6 +476,22 @@ extract_test_block() {
 
         if (is_quote(ch)) {
           e = string_end(all, p, n)
+          # A key spelled with an escape is a key this reader cannot see.
+          # JavaScript processes the escape in the string literal, so
+          # `"test"` IS `test` -- one object, one key, and the narrow block
+          # under it replaces the broad one this scan validated. Both key arms
+          # here compare source text, so the escaped spelling was not seen as a
+          # second `test` at all and the guard reported the layout covered while
+          # vitest collected one file. Refused rather than decoded, like every
+          # other form this reader cannot evaluate.
+          #
+          # Only in key position -- a string followed by a colon. A backslash in
+          # a *value* at this level is ordinary data and says nothing about
+          # which properties the object has.
+          if (depth == 1 && bdepth == 0 && index(substr(all, p, e - p), "\\") > 0 \
+              && substr(all, e) ~ /^[[:space:]]*:/) {
+            computed = 1
+          }
           # `"test": { }` is the same key as `test: { }`. Everything else in a
           # string is data, however much it looks like config.
           if (depth == 1 && bdepth == 0 && substr(all, p + 1, e - p - 2) == "test") {
@@ -526,6 +542,12 @@ extract_test_block() {
           continue
         }
         if (ch == "]") { if (bdepth > 0) bdepth--; p++; continue }
+
+        # An identifier may carry the same escape a quoted key can, and it is
+        # the same problem: a property whose name this reader cannot spell out.
+        # Strings and regular expressions are consumed above, so a backslash
+        # reaching here at the exported object own level is one of those.
+        if (depth == 1 && bdepth == 0 && ch == "\\") { computed = 1; p++; continue }
 
         # A computed key at the exported object own level. `["test"]: {...}` is
         # applied by JavaScript exactly like `test:`, and applied *later* if it
@@ -804,6 +826,21 @@ test_block_props() {
         seg = seg c
       }
       emit(seg)
+      # Whether this scan came out balanced, which is not the same question as
+      # what it found. This program has no notion of a regular expression, and
+      # extract_test_block hands it whole blocks: `alias: [{ find: /'"'"'/ }]` opens
+      # a string at the apostrophe inside the regex and swallows every property
+      # after it, and `find: /^\(/` leaves depth stuck above zero so no further
+      # comma is ever at segment level. Either one hides a live `exclude` or a
+      # live `testNamePattern` from the rule that exists to catch it, and hides
+      # it from the unknown-property backstop behind that -- so the guard
+      # reported "Test layout OK" over a config that collects almost nothing.
+      #
+      # Reported rather than parsed. Teaching a second reader about regular
+      # expressions is how the two readers drift apart; what the caller needs to
+      # know is that this one could not finish, and "I could not read it" is a
+      # different answer from "I read it and there was nothing there".
+      if (instr != "" || depth != 0) print "!unbalanced" "\t"
     }
   '
 }
@@ -880,8 +917,23 @@ value_is_literal_array() {
           depth--
           if (depth == 0) {
             if (!element_is_literal(seg)) ok = 0
-            # Anything after the outer bracket makes this an expression.
-            exit (i == n && ok) ? 0 : 1
+            # Anything after the outer bracket makes this an expression -- with
+            # the exception of a type assertion, which is not one. `as const` and
+            # `satisfies string[]` are erased before vite or esbuild evaluates
+            # this file, so the value vitest receives is the literal array that
+            # was just checked. Refusing them failed a correct config in a .ts
+            # file with "computes test.include instead of declaring it", which is
+            # the mode that gets a hook switched off.
+            #
+            # Named, not permitted by shape: the tail must begin with one of the
+            # two keywords and may then carry only what a type expression is made
+            # of. A call, a quote, a template or a ternary in there is an
+            # expression again, and this returns to refusing it.
+            rest = trim(substr(v, i + 1))
+            if (rest != "" \
+                && (rest !~ /^(as|satisfies)[[:space:]]/ \
+                    || rest ~ /[("'"'"'`?+!&:;]/)) ok = 0
+            exit ok ? 0 : 1
           }
           seg = seg c
           continue
@@ -894,6 +946,62 @@ value_is_literal_array() {
         seg = seg c
       }
       exit 1
+    }
+  '
+}
+
+# literal_array_elements – one unquoted element per line, for a value
+# value_is_literal_array has already accepted.
+#
+# The declared glob was looked for with `grep -F` over the joined text of the
+# value, and a substring is not an element. `["src/tests/**/*.test.{ts,tsx}",
+# "tests/lib/api/one.test.ts"]` contains the declared glob as text while
+# collecting one file: the first element is dead -- nothing lives under
+# frontend/src/tests -- and it exists only to carry the string this check greps
+# for. The guard reported "38 file(s), all under frontend/tests/" while vitest
+# listed one, and 37 suites were skipped behind a green lane. `noop/tests/...`,
+# `tests/**/*.test.{ts,tsx}.bak` and any other element with the glob inside it
+# do the same thing.
+#
+# The elements are already parsed one value up; this prints them so the caller
+# can ask for equality instead of for containment.
+literal_array_elements() {
+  awk '
+    { v = v $0 " " }
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function unq(s,   q) {
+      s = trim(s)
+      if (length(s) < 2) return s
+      q = substr(s, 1, 1)
+      if ((q == "\"" || q == "'"'"'" || q == "`") && substr(s, length(s), 1) == q) {
+        return substr(s, 2, length(s) - 2)
+      }
+      return s
+    }
+    END {
+      v = trim(v)
+      n = length(v)
+      if (n < 2 || substr(v, 1, 1) != "[") exit 0
+      depth = 0; instr = ""; seg = ""
+      for (i = 1; i <= n; i++) {
+        c = substr(v, i, 1)
+        if (instr != "") {
+          seg = seg c
+          if (c == "\\") { seg = seg substr(v, i + 1, 1); i++; continue }
+          if (c == instr) instr = ""
+          continue
+        }
+        if (c == "\"" || c == "'"'"'" || c == "`") { instr = c; seg = seg c; continue }
+        if (c == "[" || c == "{" || c == "(") { depth++; if (depth > 1) seg = seg c; continue }
+        if (c == "]" || c == "}" || c == ")") {
+          depth--
+          if (depth == 0) { if (trim(seg) != "") print unq(seg); exit 0 }
+          seg = seg c
+          continue
+        }
+        if (c == "," && depth == 1) { if (trim(seg) != "") print unq(seg); seg = ""; continue }
+        seg = seg c
+      }
     }
   '
 }
@@ -953,6 +1061,13 @@ check_one_config() {
 
   if [ "$have_block" = "0" ]; then
     printf 'no-test-block'
+  elif printf '%s\n' "$props" | grep -q '^!unbalanced'; then
+    # The property scan did not come out balanced, so the properties it did
+    # report are the ones before the point it lost track -- and everything after
+    # that point was never offered to the exclude rule, the spread rule or the
+    # allow-list. Answered before any of them, because each of those is a
+    # statement about a complete reading.
+    printf 'props-unreadable'
   elif [ -n "$active_include" ] && ! printf '%s\n' "$active_include" | value_is_literal_array; then
     # A non-literal include cannot be read by searching its text: in
     # `cond ? [glob] : ["tests/only.test.ts"]` the glob is present and inactive,
@@ -971,7 +1086,13 @@ check_one_config() {
     # cover that let this through, and an additive test glob has no other use
     # for the character.
     printf 'include-negated\t%s' "$active_include"
-  elif [ -z "$active_include" ] || ! printf '%s\n' "$active_include" | grep -qF "$DECLARED_GLOB"; then
+  elif [ -z "$active_include" ] \
+    || ! printf '%s\n' "$active_include" | literal_array_elements | grep -qxF "$DECLARED_GLOB"; then
+    # An *element* equal to the declared glob, not the glob somewhere in the
+    # text. include entries are unioned, so one element carrying the declared
+    # glob is what makes every declared file collected; an element that merely
+    # contains it as a substring collects something else entirely, and the dead
+    # element carrying the text was invisible to a containment test.
     printf 'no-include'
   elif [ -n "$active_exclude" ]; then
     printf 'has-exclude\t%s' "$active_exclude"
@@ -981,6 +1102,66 @@ check_one_config() {
     printf 'unknown-prop\t%s' "$(printf '%s' "$unknown_props" | tr '\n' ' ')"
   fi
 }
+
+# A workspace file beside the config takes collection away from it entirely.
+#
+# vitest resolves vitest.workspace.{ts,mts,cts,js,mjs,cjs,json} and
+# vitest.projects.* before it reads the root config's test.include, and from
+# then on the projects decide what is collected. So a
+# frontend/vitest.workspace.ts naming one file made this guard report "38
+# file(s), all under frontend/tests/" while vitest listed one -- with
+# frontend/vitest.config.ts entirely correct and entirely unused.
+#
+# The same narrowing spelled *inside* the config, as `projects: [...]`, is
+# already refused by the allow-list. The rule existed and was absent on the
+# equivalent spelling one file over, which is the shape this branch keeps
+# finding. Nothing in ci/ mentioned these filenames at all, and they are not
+# test files, so no other section of this check would ever look at them.
+#
+# Refused rather than read: this guard validates one declared include, and a
+# workspace is a list of configs each with its own. The index is consulted as
+# well as the worktree, for the same reason the config check is -- a file that
+# is only staged is still in the commit being made.
+WORKSPACE_NAMES=(
+  vitest.workspace.ts vitest.workspace.mts vitest.workspace.cts
+  vitest.workspace.js vitest.workspace.mjs vitest.workspace.cjs
+  vitest.workspace.json
+  vitest.projects.ts vitest.projects.mts vitest.projects.cts
+  vitest.projects.js vitest.projects.mjs vitest.projects.cjs
+  vitest.projects.json
+)
+
+workspace_files_present() {
+  local _wf_name _wf_path _wf_found=""
+  for _wf_name in "${WORKSPACE_NAMES[@]}"; do
+    _wf_path="${FRONTEND_DIR}/${_wf_name}"
+    if [ -f "$_wf_path" ]; then
+      _wf_found="${_wf_found}${_wf_path}"$'\n'
+      continue
+    fi
+    if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
+      && git ls-files --error-unmatch -- "$_wf_path" >/dev/null 2>&1; then
+      _wf_found="${_wf_found}${_wf_path} (staged)"$'\n'
+    fi
+  done
+  printf '%s' "$_wf_found"
+}
+
+WORKSPACE_FOUND="$(workspace_files_present)"
+if [ -n "$WORKSPACE_FOUND" ]; then
+  fail "A vitest workspace file sits beside ${VITEST_CONFIG}:"
+  printf '%s' "$WORKSPACE_FOUND" | while IFS= read -r _wf_line; do
+    [ -n "$_wf_line" ] || continue
+    echo "    ${_wf_line}"
+  done
+  echo "  vitest resolves a workspace before the root config, and from then on"
+  echo "  the projects it lists decide what is collected — so the include this"
+  echo "  guard validates in ${VITEST_CONFIG} is not the one in force."
+  echo "  The same narrowing written as 'projects: [...]' inside the config is"
+  echo "  already refused here; this is that spelling one file over."
+  echo "  Remove the workspace file and declare the layout in"
+  echo "  ${VITEST_CONFIG}, or teach this guard to read it in the same commit."
+fi
 
 if [ ! -f "$VITEST_CONFIG" ]; then
   fail "Missing ${VITEST_CONFIG}; cannot confirm the test layout is declared."
@@ -1028,6 +1209,21 @@ else
       no-test-block)
         fail "${_label} has no readable 'test: { ... }' block; cannot confirm the layout is declared."
         echo "  The layout must be declared under test.include, where vitest reads it."
+        ;;
+      props-unreadable)
+        fail "${_label} has a test block this guard cannot read to the end."
+        echo "  The property scan ran out of the block with a string still open or"
+        echo "  a bracket still unclosed, which is what a regular expression does"
+        echo "  to it: 'alias: [{ find: /'\''/ }]' opens a string at the quote"
+        echo "  inside the pattern, and 'find: /^\\(/' leaves a bracket counted"
+        echo "  and never closed."
+        echo "  Everything after that point was never offered to the exclude"
+        echo "  rule, the spread rule or the allow-list, so a live test.exclude"
+        echo "  or testNamePattern sitting there would have been reported as"
+        echo "  absent. This is 'could not read', not 'nothing there'."
+        echo "  Move the regular expression out of the test block — into a"
+        echo "  named const above the config — or teach this reader about"
+        echo "  regular expressions in the same commit."
         ;;
       composed-config)
         fail "${_label} composes its exported config, so the block read here may not be the one vitest uses."
