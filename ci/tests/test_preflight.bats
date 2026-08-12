@@ -913,6 +913,86 @@ YML
   rm -rf "$sb"
 }
 
+@test "branch-protection: linear history is judged on the push range, not the checkout" {
+  # The same distinction the case above draws, in the check below it: where the
+  # push is going is not where the working tree is standing. This one returned
+  # early whenever `git rev-parse --abbrev-ref HEAD` said `HEAD`, and the merge
+  # count needs no branch name at all -- _bp_commit_range is ci::git::push_range,
+  # which the pre-push hook fills from the SHAs git handed it. So
+  # `git push origin <sha>:refs/heads/main` from a detached checkout -- a release
+  # script, or a manual push of a tested commit -- skipped the count entirely and
+  # reported PASS over a range containing a merge.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks"
+  cp "$REPO_ROOT/ci/checks/branch-protection.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  (
+    cd "$sb"
+    git init -q -b main .
+    printf 'a\n' > a.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm base
+    git checkout -q -b side
+    printf 'b\n' > b.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm side
+    git checkout -q main
+    printf 'c\n' > c.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm main2
+    git -c user.email=t@t -c user.name=t merge -q --no-ff side -m "merge side"
+  ) >/dev/null 2>&1
+
+  local base tip
+  base="$(cd "$sb" && git rev-parse HEAD~2)"
+  tip="$(cd "$sb" && git rev-parse HEAD)"
+
+  # The premise: the range really does carry one merge commit.
+  run bash -c "cd '$sb' && git rev-list --count --merges '$base..$tip'"
+  [ "$output" = "1" ]
+
+  local bp_env="CI_GATE_REQUIRE_LINEAR_HISTORY=1 CI_GATE_MODE=ship"
+  bp_env="$bp_env CI_GATE_PUSH_OLD_SHA=$base CI_GATE_PUSH_NEW_SHA=$tip CI_GATE_PUSH_REMOTE=origin"
+
+  # On a branch, which is the spelling that always worked.
+  run bash -c "cd '$sb' && $bp_env bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Linear history required"* ]]
+
+  # Detached, with the identical range. The checkout has no branch name and the
+  # range is unchanged, so anything that answers differently here is answering
+  # a question nobody asked.
+  ( cd "$sb" && git checkout -q --detach HEAD ) >/dev/null 2>&1
+  run bash -c "cd '$sb' && git rev-parse --abbrev-ref HEAD"
+  [ "$output" = "HEAD" ]
+  run bash -c "cd '$sb' && $bp_env bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -eq 20 ] \
+    || { echo "a detached push skipped the merge count" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"Linear history required"* ]]
+
+  # The control that keeps the rule from becoming "refuse everything": a range
+  # with no merge in it passes, detached or not.
+  local lin
+  lin="$(cd "$sb" && git rev-parse HEAD~2)"
+  run bash -c "cd '$sb' && git rev-list --count --merges '$lin..$(cd "$sb" && git rev-parse HEAD~1)'"
+  [ "$output" = "0" ]
+  run bash -c "cd '$sb' && CI_GATE_REQUIRE_LINEAR_HISTORY=1 CI_GATE_MODE=ship \
+    CI_GATE_PUSH_OLD_SHA='$lin' CI_GATE_PUSH_NEW_SHA=\"\$(git rev-parse HEAD~1)\" \
+    CI_GATE_PUSH_REMOTE=origin bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Linear history required"* ]]
+
+  # And the control that keeps the rest of the check intact: with the rule off,
+  # a merge in the range is not this check's business in either checkout.
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' \
+    CI_GATE_PUSH_NEW_SHA='$tip' CI_GATE_PUSH_REMOTE=origin \
+    bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -eq 0 ]
+  rm -rf "$sb"
+}
+
 @test "git-safety: a path touched by many commits is sized once, by its largest version" {
   # Sizing ran per emitted path, and _gs_content_files emits one record per
   # commit per modification -- so a file touched by N of the pushed commits was

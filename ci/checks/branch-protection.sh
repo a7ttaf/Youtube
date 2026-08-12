@@ -218,12 +218,18 @@ _bp_check_linear_history() {
     return 0
   fi
 
-  local branch
-  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-  if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
-    return 0
-  fi
-
+  # Not gated on the checkout having a branch name.
+  #
+  # This returned early whenever HEAD was detached, and the check below needs no
+  # branch: _bp_commit_range is ci::git::push_range, which the hook fills from
+  # the SHAs git handed it. So `git push origin <sha>:refs/heads/main` from a
+  # detached checkout -- a release script, or a manual push of a tested commit
+  # -- skipped the merge count entirely. Reproduced: a range whose
+  # `git rev-list --count --merges` is 1, reported PASS.
+  #
+  # Where the push is going is not where the working tree is standing, which is
+  # the same distinction _bp_check_protected_branch above already draws for the
+  # same reason.
   local range
   if ! range="$(_bp_commit_range)"; then
     ci::log::info "No push range available; skipping linear-history check."

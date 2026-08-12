@@ -230,9 +230,21 @@ fi
 # 2. No lingering __tests__ directories outside tests/ (the retired convention).
 # ---------------------------------------------------------------------------
 LEGACY_DIRS="$( {
-  find "$FRONTEND_DIR" "${PRUNE[@]}" -type d -name '__tests__' -print 2>/dev/null || true
+  # The filesystem walk is the pre-commit gate's half. In ship mode the run
+  # stands behind HEAD, and ALL_CANDIDATES below is already derived from it --
+  # so walking the worktree here reintroduced the very thing candidate_files
+  # stopped doing: an untracked local `frontend/src/__tests__/` failed a push
+  # whose tree does not contain it, and git will not send that directory.
+  #
+  # Third reader of "which tree" in this file. The other two were fixed one
+  # commit ago and this one was not looked at, which is the shape this whole
+  # series is about, committed by the person fixing it.
+  if [ "${CI_GATE_MODE:-}" != "ship" ]; then
+    find "$FRONTEND_DIR" "${PRUNE[@]}" -type d -name '__tests__' -print 2>/dev/null || true
+  fi
   # Index side: a staged file under a __tests__/ path names the directory even
-  # when the directory no longer exists on disk.
+  # when the directory no longer exists on disk. In ship mode these candidates
+  # come from HEAD, so the same loop answers for the pushed tree.
   for f in ${ALL_CANDIDATES[@]+"${ALL_CANDIDATES[@]}"}; do
     [ -z "$f" ] && continue
     path_is_pruned "$f" && continue
@@ -1258,13 +1270,23 @@ workspace_files_present() {
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
     _wf_git=1
   fi
+  # In ship mode the pushed tree is the only source, for the reason
+  # candidate_files reads it alone: the worktree and the index are the commit
+  # being built, and an untracked local vitest.workspace.ts is not in the tree
+  # being sent. HEAD was added here as a *third* source and the other two were
+  # left in, which is the same half-fix candidate_files had.
+  local _wf_ship=0
+  if [ "${CI_GATE_MODE:-}" = "ship" ] && [ "$_wf_git" -eq 1 ] \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    _wf_ship=1
+  fi
   for _wf_name in "${WORKSPACE_NAMES[@]}"; do
     _wf_path="${FRONTEND_DIR}/${_wf_name}"
-    if [ -f "$_wf_path" ]; then
+    if [ "$_wf_ship" -eq 0 ] && [ -f "$_wf_path" ]; then
       _wf_found="${_wf_found}${_wf_path}"$'\n'
       continue
     fi
-    if [ "$_wf_git" -eq 1 ] \
+    if [ "$_wf_ship" -eq 0 ] && [ "$_wf_git" -eq 1 ] \
       && git ls-files --error-unmatch -- "$_wf_path" >/dev/null 2>&1; then
       _wf_found="${_wf_found}${_wf_path} (staged)"$'\n'
       continue
@@ -1464,10 +1486,24 @@ fi
 # Report
 # ---------------------------------------------------------------------------
 if [ "$RESULT" = "$CI_RESULT_PASS" ]; then
+  # Counted from the candidate list, which is the tree this run stands behind.
+  #
+  # Fourth reader of "which tree" in this file, found by sweeping for the other
+  # three rather than waiting for the next review to report it. This one decides
+  # nothing -- RESULT is already PASS here -- but the number it prints is read as
+  # "this is what the push contains", and walking the worktree in ship mode
+  # counts a developer's untracked scratch tests into a figure describing the
+  # pushed commit, and omits the ones only that commit carries.
   TEST_COUNT=0
-  if [ -d "$TESTS_DIR" ]; then
-    TEST_COUNT="$(find "$TESTS_DIR" -type f \( -name '*.test.ts' -o -name '*.test.tsx' \) 2>/dev/null | wc -l | tr -d '[:space:]')"
-  fi
+  for _rc_f in ${ALL_CANDIDATES[@]+"${ALL_CANDIDATES[@]}"}; do
+    [ -n "$_rc_f" ] || continue
+    case "$_rc_f" in
+      "$TESTS_DIR"/*.test.ts|"$TESTS_DIR"/*.test.tsx) ;;
+      *) continue ;;
+    esac
+    path_is_pruned "$_rc_f" && continue
+    TEST_COUNT=$((TEST_COUNT + 1))
+  done
   ci::log::info "Test layout OK: ${TEST_COUNT} file(s), all under ${TESTS_DIR}/ matching '${DECLARED_GLOB}'."
   exit "$CI_RESULT_PASS"
 fi

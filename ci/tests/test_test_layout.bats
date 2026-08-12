@@ -2245,6 +2245,136 @@ EOF
   [ "$status" -eq 20 ]
 }
 
+@test "test-layout: the retired-convention scan reads the tree the run stands behind" {
+  # The third reader of "which tree" in this file. candidate_files and
+  # config_sources were switched to HEAD in ship mode one commit ago; the
+  # __tests__ scan beside them was not looked at, and it walks the filesystem --
+  # so it reintroduced exactly what the other two stopped doing. An untracked
+  # local frontend/src/__tests__/ failed a push whose tree does not contain it,
+  # and git will not send that directory, so there was no remedy but deleting
+  # work off the developer's disk.
+  ( cd "$SANDBOX" && git init -q -b f . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+
+  # The premise: HEAD is clean, and the directory is in neither git tree.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+  mkdir -p "$SANDBOX/frontend/src/__tests__"
+  printf 'it("legacy", () => {});\n' > "$SANDBOX/frontend/src/__tests__/old.test.ts"
+  run bash -c "cd '$SANDBOX' && git ls-files -- frontend/src/__tests__"
+  [ -z "$output" ]
+
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ] \
+    || { echo "ship refused an untracked __tests__ directory" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" != *"__tests__"* ]]
+
+  # The control that keeps the rule: the pre-commit gate stands behind the tree
+  # the developer is building, and it still objects.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=quick bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"__tests__"* ]]
+
+  # And the other direction, which is why the index loop below the walk stays:
+  # once the directory is in the pushed tree, ship is the gate that must catch
+  # it -- the worktree copy is beside the point either way.
+  ( cd "$SANDBOX" && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm legacy ) >/dev/null 2>&1
+  rm -rf "$SANDBOX/frontend/src/__tests__"
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 20 ] \
+    || { echo "ship passed over a __tests__ directory HEAD carries" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"__tests__"* ]]
+}
+
+@test "test-layout: a workspace file only the worktree has does not fail a push" {
+  # The other half of the case above it. HEAD was added to workspace_files_present
+  # as a *third* source and the worktree and index sources were left in, so ship
+  # mode covered the pushed tree and every scratch file on disk with it: an
+  # untracked frontend/vitest.workspace.ts -- a local experiment, exactly the
+  # thing you would not commit -- failed a push that does not carry it.
+  #
+  # vitest resolves a workspace file before vitest.config.ts, which is why this
+  # check refuses one at all; a file git will not send cannot do that resolving
+  # on any machine but this one.
+  ( cd "$SANDBOX" && git init -q -b f . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+
+  printf 'export default ["tests/only.test.ts"];\n' > "$SANDBOX/frontend/vitest.workspace.ts"
+  run bash -c "cd '$SANDBOX' && git ls-files -- frontend/vitest.workspace.ts"
+  [ -z "$output" ]
+
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ] \
+    || { echo "ship refused an untracked workspace file" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" != *"workspace file"* ]]
+
+  # Staged and not committed is the same question one tree over: the index is
+  # the commit being made, not the commit being pushed.
+  ( cd "$SANDBOX" && git add frontend/vitest.workspace.ts ) >/dev/null 2>&1
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+
+  # The control that keeps the rule: the pre-commit gate objects to both, since
+  # the commit being built is the one that would carry the file.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=quick bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"workspace file"* ]]
+
+  # And the direction the HEAD source was added for, unchanged: committed, it is
+  # in the tree being pushed, and ship refuses it.
+  ( cd "$SANDBOX" && git -c user.email=t@t -c user.name=t commit -qm ws ) >/dev/null 2>&1
+  rm -f "$SANDBOX/frontend/vitest.workspace.ts"
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 20 ] \
+    || { echo "ship passed over a workspace file HEAD carries" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"workspace file"* ]]
+}
+
+@test "test-layout: the file count it reports is counted from the tree it stands behind" {
+  # The fourth reader of "which tree" in this file, found by sweeping for the
+  # other three rather than waiting for the next review to report it.
+  #
+  # This one decides nothing -- RESULT is already PASS where it runs -- but the
+  # number is read as "this is what the push contains", and the walk was of the
+  # worktree in every mode. So a developer with untracked scratch tests under
+  # frontend/tests/ was told the pushed commit carries more files than it does,
+  # by the line whose whole job is to say what was covered.
+  mkdir -p "$SANDBOX/frontend/tests/lib"
+  printf 'it("b", () => {});\n' > "$SANDBOX/frontend/tests/lib/b.test.tsx"
+  ( cd "$SANDBOX" && git init -q -b f . && printf 'ci/\n' > .gitignore && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+
+  # Two committed files, and the count agrees before anything is added.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Test layout OK: 2 file(s)"* ]]
+
+  # An untracked third one, in the right place so the layout still passes and
+  # the count is the only thing that can move.
+  printf 'it("scratch", () => {});\n' > "$SANDBOX/frontend/tests/scratch.test.ts"
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Test layout OK: 2 file(s)"* ]] \
+    || { echo "ship counted a file the push does not carry" >&2; echo "$output" >&2; return 1; }
+
+  # The control: the pre-commit gate stands behind the worktree, and there the
+  # third file is real. A count that never moved would satisfy the assertion
+  # above by reporting nothing at all.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=quick bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Test layout OK: 3 file(s)"* ]]
+
+  # And a nested file is still counted, which the recursive find did and a
+  # non-recursive replacement would silently stop doing.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [[ "$output" == *"2 file(s)"* ]]
+  ( cd "$SANDBOX" && git rm -q frontend/tests/lib/b.test.tsx \
+    && git -c user.email=t@t -c user.name=t commit -qm drop ) >/dev/null 2>&1
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [[ "$output" == *"Test layout OK: 1 file(s)"* ]]
+}
+
 @test "test-layout: ship mode cannot fall back to the worktree when it cannot read HEAD" {
   # Failing to look is not looking and finding nothing. With no git, no repo or
   # no HEAD there is no pushed tree to read, and the answer that costs nothing

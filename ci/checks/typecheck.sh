@@ -47,8 +47,10 @@ _tc_js_workspace() {
   # whether this workspace is *required* to have a typecheck script. When the
   # two disagree the gate demands a check of a project this lane then declines
   # to compile, or -- as it did -- neither of them sees `tsconfig.app.json` and
-  # a Vite scaffold's only project is checked by nobody. ci/lib/changeset.sh is
-  # the third list; all three have to agree.
+  # a Vite scaffold's only project is checked by nobody. ci/lib/changeset.sh's
+  # classifier arm is the third, and node.sh's orphan scan -- which decides
+  # whether a directory that lost its manifest is noticed at all -- is the
+  # fourth; all four have to agree.
   find . -name 'node_modules' -prune -o -name '.git' -prune -o \
     -type f \( -name 'tsconfig.json' -o -name 'tsconfig.*.json' \
                -o -name 'jsconfig.json' -o -name 'jsconfig.*.json' \) \

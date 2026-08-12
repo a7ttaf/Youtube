@@ -132,11 +132,20 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
   # *repository*: with two sibling workspaces, deleting b/package.json still
   # left a, discovery succeeded, and b -- lockfile and all -- was never looked
   # at. An orphan is a property of the directory it sits in.
+  # The TypeScript names here are the ones _ts_project_files enumerates, and
+  # they have to stay that way: this scan is what turns "no manifest" into "a
+  # workspace lost its manifest", so a name it does not know is a directory
+  # whose loss it cannot notice. `tsconfig.json|jsconfig.json` alone was the
+  # list before discovery widened, which left the `npm create vite` shape --
+  # tsconfig.app.json and tsconfig.node.json, no plain tsconfig.json -- as a
+  # workspace that could lose its package.json silently. Found by sweeping the
+  # other readers of this list rather than reported.
   ORPHAN_CFG="$(find . \
       \( -name 'node_modules' -o -name '.git' -o -name 'dist' -o -name 'build' \) -prune -o \
       -type f \( -name 'package-lock.json' -o -name 'npm-shrinkwrap.json' \
         -o -name 'pnpm-lock.yaml' -o -name 'yarn.lock' -o -name 'bun.lock' -o -name 'bun.lockb' \
-        -o -name 'tsconfig.json' -o -name 'jsconfig.json' \
+        -o -name 'tsconfig.json' -o -name 'tsconfig.*.json' \
+        -o -name 'jsconfig.json' -o -name 'jsconfig.*.json' \
         -o -name 'vitest.config.*' -o -name 'vite.config.*' \) -print 2>/dev/null || true)"
 
   # And the pushed tree, in ship mode.
@@ -162,7 +171,7 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     fi
     _oc_cfg="$(printf '%s\n' "$_oc_head" \
       | grep -Ev '(^|/)(node_modules|dist|build)/' \
-      | grep -E '(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock|bun\.lockb|tsconfig\.json|jsconfig\.json|vitest\.config\.[^/]+|vite\.config\.[^/]+)$' \
+      | grep -E '(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock|bun\.lockb|tsconfig\.json|tsconfig\.[^/]+\.json|jsconfig\.json|jsconfig\.[^/]+\.json|vitest\.config\.[^/]+|vite\.config\.[^/]+)$' \
       | sed 's|^|./|' || true)"
     if [ -n "$_oc_cfg" ]; then
       ORPHAN_CFG="$(printf '%s\n%s\n' "$ORPHAN_CFG" "$_oc_cfg" | sed '/^$/d' | sort -u)"
@@ -3153,6 +3162,47 @@ _reject_tool_args_one() {
   esac
 }
 
+# Is this path one of the workspace's own TypeScript projects?
+#
+# One function because there are two spellings of the option that names it,
+# `-p <file>` and `--project=<file>`, and the comment above the joined arm has
+# said since it was written that the two are "judged by the same test ... rather
+# than by a second rule that could drift away from it". They were two rules, and
+# they drifted the moment one of them was corrected: the split spelling learned
+# about tsconfig.app.json and the joined one went on refusing it. A comment that
+# outlives its rule is the shape this file keeps producing, so the claim is made
+# true here rather than restated.
+#
+# `_TS_PROJECTS` is the enumeration in _ts_project_files, rooted at the
+# workspace and printed one path per line with any leading `./` removed.
+_ts_project_declared() {
+  local _tpd_want="${1#./}" _tpd_one
+  [ -n "$_tpd_want" ] || return 1
+  while IFS= read -r _tpd_one; do
+    [ -n "$_tpd_one" ] || continue
+    [ "$_tpd_want" = "$_tpd_one" ] && return 0
+  done <<< "${_TS_PROJECTS:-}"
+  return 1
+}
+
+# The refusal both spellings share, so the advice cannot drift either.
+_reject_undeclared_project() {
+  local script_name="$1" cmd="$2" tok="$3" opt="$4" _rup_one
+  echo "Workspace ${CI_GATE_NODE_WORKSPACE} points its '${script_name}' script at"
+  echo "  a project this workspace does not have:"
+  echo "    ${script_name}: ${cmd}"
+  echo "    offending argument: ${tok}"
+  echo "  '${opt}' compiles the project that file describes, and a file"
+  echo "  discovery never found is one nothing here can read to see what"
+  echo "  it names. Use 'tsc --noEmit', or point it at one of this"
+  echo "  workspace's own configurations:"
+  while IFS= read -r _rup_one; do
+    [ -n "$_rup_one" ] || continue
+    echo "    ${_rup_one}"
+  done <<< "${_TS_PROJECTS:-}"
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+}
+
 # The compiler's own argument rules: the modes that do not typecheck, and the
 # positionals that make it ignore tsconfig.json.
 _reject_tsc_args() {
@@ -3290,20 +3340,10 @@ _reject_tsc_args() {
       # swallow nothing here, and above `-*` because that one accepts.
       --project=*|-p=*)
         _tp="${tok#*=}"
-        case "$_tp" in
-          tsconfig.json|./tsconfig.json)
-            prev="" ; shift ; continue ;;
-        esac
-        echo "Workspace ${CI_GATE_NODE_WORKSPACE} points its '${script_name}' script at"
-        echo "  a project other than the workspace configuration:"
-        echo "    ${script_name}: ${cmd}"
-        echo "    offending argument: ${tok}"
-        echo "  '--project=<file>' compiles the project that file describes, so"
-        echo "  an alternate configuration can name a narrower set of files"
-        echo "  while the lane reports PASS, and nothing here can read that"
-        echo "  file to see whether it does. Use 'tsc --noEmit', or"
-        echo "  'tsc -p tsconfig.json --noEmit'."
-        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        if _ts_project_declared "$_tp"; then
+          prev="" ; shift ; continue
+        fi
+        _reject_undeclared_project "$script_name" "$cmd" "$tok" '--project=<file>'
         ;;
       [A-Za-z_]*=*)
         prev="" ; shift ; continue ;;
@@ -3341,22 +3381,32 @@ _reject_tsc_args() {
     # and this reader cannot open that file to see which it is.
     case "$prev" in
       -p|--project)
-        case "$tok" in
-          tsconfig.json|./tsconfig.json)
-            prev="" ; shift ; continue ;;
-          *)
-            echo "Workspace ${CI_GATE_NODE_WORKSPACE} points its '${script_name}' script at"
-            echo "  a project other than the workspace configuration:"
-            echo "    ${script_name}: ${cmd}"
-            echo "    offending argument: ${tok}"
-            echo "  '-p <file>' compiles the project that file describes, so an"
-            echo "  alternate configuration can name a narrower set of files"
-            echo "  while the lane reports PASS, and nothing here can read that"
-            echo "  file to see whether it does. Use 'tsc --noEmit', or"
-            echo "  'tsc -p tsconfig.json --noEmit'."
-            exit "$CI_RESULT_FAIL_NEW_ISSUE"
-            ;;
-        esac
+        # A project this workspace actually has, not the default name alone.
+        #
+        # The rule was `tsconfig.json` or nothing, which was right while that
+        # was the only name discovery knew. It is not any more: a workspace
+        # whose only project is `tsconfig.app.json` is now required to have a
+        # typecheck script, and `tsc --noEmit` there finds no configuration to
+        # read while `tsc -p tsconfig.app.json --noEmit` was refused -- a
+        # requirement with no way to satisfy it, created by widening discovery
+        # two commits ago and reported before anyone hit it.
+        #
+        # What keeps the original protection is not this list. `-p <file>`
+        # compiles what that file describes, so a narrower configuration named
+        # here does reduce what the *script* checks -- but ci/checks/
+        # typecheck.sh compiles the root project and then every other discovered
+        # one by name, and the classifier emits `typecheck-js` beside the node
+        # lane for the same file (ci/lib/changeset.sh, ci/preflight.sh), so
+        # naming one project here cannot take another out of the run. The old
+        # rule did not have that property either: `-p tsconfig.json` was
+        # accepted in a workspace whose code lives under tsconfig.app.json.
+        #
+        # A path that is not a discovered project is still refused, because that
+        # is a file neither reader can see.
+        if _ts_project_declared "$tok"; then
+          prev="" ; shift ; continue
+        fi
+        _reject_undeclared_project "$script_name" "$cmd" "$tok" '-p <file>'
         ;;
     esac
     case "$prev" in
@@ -3647,7 +3697,10 @@ _ts_project_files() {
   # scheduler already knew about a file the two lanes it schedules could not
   # see -- the third reader of one question, and the only one that had it right.
   #
-  # These three lists have to agree. changeset.sh:331 is the third.
+  # Four lists ask this one question and all four have to agree:
+  # ci/checks/typecheck.sh, ci/lib/changeset.sh's classifier arm, the orphan
+  # scan near the top of this file, and here. The orphan scan was the one that
+  # did not, and it was found by sweeping for the others rather than reported.
   find . -name 'node_modules' -prune -o -name '.git' -prune -o \
     -type f \( -name 'tsconfig.json' -o -name 'tsconfig.*.json' \
                -o -name 'jsconfig.json' -o -name 'jsconfig.*.json' \) \

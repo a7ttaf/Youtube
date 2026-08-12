@@ -478,6 +478,107 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "js lane: every reader of 'is this a TypeScript project' knows the same names" {
+  # Four places ask this one question, in three syntaxes:
+  #
+  #   ci/checks/node.sh   _ts_project_files  -- does this workspace need a
+  #                                             typecheck script at all
+  #   ci/checks/node.sh   the orphan scan    -- is a lost package.json noticed
+  #   ci/checks/typecheck.sh                 -- which projects get compiled
+  #   ci/lib/changeset.sh the classifier arm -- which lanes get scheduled
+  #
+  # Each disagreement has already happened once. The first three drifted when
+  # tsconfig.app.json was added to two of them, and the orphan scan was still
+  # on the original list a commit later -- so this case is the thing that
+  # notices next time, rather than a fifth review round.
+  #
+  # Compared as sets of names with the syntax normalised away: `find -name`
+  # globs, an ERE with escaped dots and `[^/]+`, and a shell case pattern.
+  local expected
+  expected="$(printf '%s\n' jsconfig.'*'.json jsconfig.json tsconfig.'*'.json tsconfig.json | sort)"
+
+  # A guard on the extractor itself: a normaliser that matches nothing would
+  # make every comparison below a comparison of two empty strings.
+  [ -n "$expected" ]
+
+  _tsnames() {
+    # Backslashes (ERE escapes) removed, then `[^/]+` folded to `*`, so all
+    # three syntaxes spell the same four names the same way.
+    tr -d '\\' \
+      | grep -oE '(ts|js)config\.(json|\*\.json|\[\^/\]\+\.json)' \
+      | sed 's/\[\^\/\]+\.json/*.json/' \
+      | sort -u
+  }
+
+  local got
+  got="$(sed -n '/^_ts_project_files()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "node.sh _ts_project_files: $got" >&2; return 1; }
+
+  got="$(sed -n '/ORPHAN_CFG="\$(find/,/-print 2>\/dev\/null/p' "$REPO_ROOT/ci/checks/node.sh" | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "node.sh orphan find: $got" >&2; return 1; }
+
+  # The ship-mode half of the same scan, which reads HEAD through a grep rather
+  # than the filesystem through find -- two spellings of one list, and the place
+  # a fix applied to only one of them would show up.
+  got="$(grep -F 'npm-shrinkwrap' "$REPO_ROOT/ci/checks/node.sh" | grep -F 'grep -E' | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "node.sh orphan grep: $got" >&2; return 1; }
+
+  got="$(grep -n "name 'tsconfig" -A 2 "$REPO_ROOT/ci/checks/typecheck.sh" | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "typecheck.sh: $got" >&2; return 1; }
+
+  got="$(grep -F 'tsconfig.json|' "$REPO_ROOT/ci/lib/changeset.sh" | tr '|' '\n' | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "changeset.sh: $got" >&2; return 1; }
+}
+
+@test "node lane: the orphan scan knows every configuration name discovery does" {
+  # The scan's list of what counts as workspace configuration was
+  # `tsconfig.json|jsconfig.json`, which was the whole list until discovery
+  # widened to tsconfig.*.json. So the `npm create vite` shape -- tsconfig.app.
+  # json and tsconfig.node.json, no plain tsconfig.json -- was a workspace whose
+  # manifest could go missing with nothing left behind that this scan recognised:
+  # "No package.json found. Skipping Node lane.", exit 0, over a directory of
+  # unchecked TypeScript.
+  #
+  # A name this scan does not know is a directory whose loss it cannot notice,
+  # which is why the two lists have to agree. Found by sweeping the other readers
+  # after the same disagreement was reported one commit over.
+  ws_setup
+  rm -rf "$NODE_SB/ws"
+  mkdir -p "$NODE_SB/app/src"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/app/tsconfig.app.json"
+  printf '{ "compilerOptions": {} }\n' > "$NODE_SB/app/tsconfig.node.json"
+  printf 'export const n: number = "no";\n' > "$NODE_SB/app/src/a.ts"
+
+  # The premise: nothing else in the directory is on the old list -- no
+  # lockfile, no vite config, no plain tsconfig.json -- so the scaffold configs
+  # are the only thing that can report this directory.
+  [ ! -f "$NODE_SB/app/tsconfig.json" ]
+  run bash -c "ls '$NODE_SB/app'"
+  [[ "$output" != *"lock"* ]]
+  [[ "$output" != *"vite"* ]]
+
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ] \
+    || { echo "a lost manifest went unnoticed beside its scaffold configs" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"no package.json beside it"* ]]
+  [[ "$output" == *"tsconfig.app.json"* ]]
+  [[ "$output" == *"tsconfig.node.json"* ]]
+  # And not by the route this case is not about.
+  [[ "$output" != *"No package.json found"* ]]
+
+  # The control that keeps the rule: a manifest beside them settles it, in
+  # exactly the shape the scan exists to distinguish.
+  printf '{ "name": "app", "private": true }\n' > "$NODE_SB/app/package.json"
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *"no package.json beside it"* ]]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: an orphaned workspace beside a healthy one still fails" {
   # The scan was nested under "the repository has no workspace at all", which
   # made an orphan a property of the repository rather than of the directory it
@@ -4308,47 +4409,132 @@ SH
   rm -rf "$NODE_SB"
 }
 
-@test "node lane: tsc is not pointed at a project other than the workspace one" {
+@test "node lane: tsc is not pointed at a project this workspace does not have" {
   # The typecheck twin of `vitest --config`, and it sat on the value-taking
   # list -- so the argument was consumed and nothing asked which project it
-  # selects. `-p <file>` compiles the project that file describes: an alternate
-  # config naming one known-good file exits 0 while the default tsconfig.json
-  # reports errors, and the lane calls that PASS over a workspace nothing
-  # checked. This reader cannot open the file to see which it is, so it says so
-  # rather than assuming.
+  # selects. `-p <file>` compiles the project that file describes, and this
+  # reader cannot open the file to see what that is, so a path discovery never
+  # found is refused rather than assumed harmless.
+  #
+  # "Discovered" and not "named tsconfig.json", which is what it used to say:
+  # widening discovery to tsconfig.*.json made the old spelling a requirement
+  # with no way to satisfy it, and that half is asserted in the case below.
   ws_setup
   printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
-  printf '{ "compilerOptions": { "strict": true }, "files": ["src/ok.ts"] }\n' \
-    > "$NODE_SB/ws/tsconfig.narrow.json"
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.narrow.json --noEmit" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p ../shared/tsconfig.narrow.json --noEmit" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 20 ]
-  [[ "$output" == *"a project other than the workspace configuration"* ]]
+  [[ "$output" == *"a project this workspace does not have"* ]]
   [[ "$output" == *"tsconfig.narrow.json"* ]]
+  # And it says which projects there are, so the refusal is actionable.
+  [[ "$output" == *"tsconfig.json"* ]]
 
   # The joined spelling selects a project the same way and arrives as one
   # token, so it needs the rule written on it too -- otherwise the fix holds for
   # `-p x` and the option beside it walks straight through the generic flag arm.
-  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --project=tsconfig.narrow.json --noEmit" } }'
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --project=../shared/tsconfig.narrow.json --noEmit" } }'
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 20 ]
-  [[ "$output" == *"a project other than the workspace configuration"* ]]
+  [[ "$output" == *"a project this workspace does not have"* ]]
+
+  # A config that exists but sits outside the workspace is still outside it: the
+  # enumeration is rooted at the workspace, so `../` cannot be reached by it and
+  # the file being real does not make it discovered.
+  mkdir -p "$NODE_SB/shared"
+  printf '{ "compilerOptions": { "strict": true }, "files": ["src/ok.ts"] }\n' \
+    > "$NODE_SB/shared/tsconfig.narrow.json"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"a project this workspace does not have"* ]]
+  rm -rf "$NODE_SB/shared"
 
   # The controls: naming the workspace configuration explicitly is the same
   # compilation as omitting it, in either spelling, and stays accepted.
   ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit" } }'
   ws_seed_fingerprint
   run ws_run
-  [[ "$output" != *"a project other than the workspace configuration"* ]]
+  [[ "$output" != *"a project this workspace does not have"* ]]
   [[ "$output" == *"Running script: typecheck"* ]]
 
   ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --project=tsconfig.json --noEmit" } }'
   ws_seed_fingerprint
   run ws_run
-  [[ "$output" != *"a project other than the workspace configuration"* ]]
+  [[ "$output" != *"a project this workspace does not have"* ]]
   [[ "$output" == *"Running script: typecheck"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the only project a workspace has can be named as its project" {
+  # A requirement with no way to satisfy it, created by the commit that widened
+  # discovery to tsconfig.*.json and reported before anyone hit it.
+  #
+  # `npm create vite` leaves a workspace whose only configuration is
+  # tsconfig.app.json. Discovery now sees it, so a `typecheck` script is
+  # *required* -- and the only script that could typecheck that project was
+  # refused by the rule above, because the rule read "the project" as the
+  # literal name tsconfig.json. `tsc --noEmit` was accepted there, but with no
+  # root configuration to read it checks nothing.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.app.json"
+
+  # The premise: this workspace has a project, and it is not named tsconfig.json.
+  [ -f "$NODE_SB/ws/tsconfig.app.json" ]
+  [ ! -f "$NODE_SB/ws/tsconfig.json" ]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project this workspace does not have"* ]] \
+    || { echo "the workspace's own project was refused" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # The `./` spelling names the same file and is what a hand-written script
+  # tends to carry; matching it as a different string would refuse the project
+  # for its punctuation.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p ./tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project this workspace does not have"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # The joined spelling has its own arm, and the comment above it has claimed
+  # since it was written that both are "judged by the same test ... rather than
+  # by a second rule that could drift away from it". They were two rules, and
+  # they drifted the moment one was corrected: this case is what stops the split
+  # spelling being fixed on its own again.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --project=tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project"* ]] \
+    || { echo "the joined spelling refused the workspace's own project" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p=tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # A nested project is discovered too, and is likewise nameable.
+  mkdir -p "$NODE_SB/ws/e2e"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/e2e/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p e2e/tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project this workspace does not have"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # The control that keeps the rule from becoming "anything goes": a path that
+  # looks like a project but is not one of this workspace's is still refused,
+  # in a workspace that now has two real ones.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.node.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"a project this workspace does not have"* ]]
   rm -rf "$NODE_SB"
 }
 
@@ -4964,7 +5150,7 @@ ws_tools() {
   ws_seed_fingerprint
   run ws_run
   [[ "$output" != *"non-compiling tsc mode"* ]]
-  [[ "$output" != *"a project other than"* ]]
+  [[ "$output" != *"a project this workspace does not have"* ]]
   [[ "$output" == *"Running script:"* ]]
 
   ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -w" } }'
