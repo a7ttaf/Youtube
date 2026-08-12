@@ -715,21 +715,38 @@ const isPlanRow = (row: unknown): boolean => {
   return ROW_CHECKS.every((holds) => holds(row));
 };
 
-/**
- * ONE effect per group key, across the whole plan.
- *
- * Every per-row predicate is row-local, so two writable rows carrying the same
- * `group_id` with different `group_action`s pass all of them, tally correctly,
- * and render side by side — one cell promising a NEW SECTOR group and the
- * other promising a join of an existing one, for the same key.
- *
- * The backend cannot emit that: `_planned_group_action` derives the label from
- * that key's existence for the request's content owner, which is one fact per
- * key, and the apply then batches the key into a SINGLE group operation. So a
- * plan showing two effects is showing at least one effect the import will not
- * perform, while the retained fingerprint authorises the one real effect
- * (review #184, codex P2).
- */
+// ============================================================================
+// Purpose: ONE effect per group key, across the WHOLE plan — the invariant no
+//   per-row check can see. Every other row predicate is row-local, so two
+//   writable rows carrying the same `group_id` with different `group_action`s
+//   pass all of them, tally correctly, and render side by side: one cell
+//   promising a NEW SECTOR group, the other a join of an existing one, for the
+//   same key.
+// Database/ORM: None (frontend) — a structural predicate over decoded rows,
+//   run before the payload becomes trusted UI state.
+// Standards: Keyed on `group_id` and only where it is a string; a null group
+//   is not a key and rows carrying one are skipped rather than collapsed
+//   together. First writer per key wins the comparison, so the check reports
+//   DISAGREEMENT rather than trying to pick a winner — there is no basis for
+//   preferring either row. Fails CLOSED: a disagreeing plan is refused, never
+//   reconciled.
+// Blast Radius: FINANCE SCOPE. `group_action` is the difference between
+//   minting a new SECTOR group and attaching to an existing one — the single
+//   most consequential thing a Group_ID row does. The backend cannot emit a
+//   disagreement: `_planned_group_action` derives the label from that key's
+//   existence for the request's content owner, which is one fact per key, and
+//   the apply batches the key into a SINGLE group operation. A plan showing
+//   two effects is therefore showing at least one the import will not perform,
+//   while the retained fingerprint authorises the one real effect (review
+//   #184, codex P2).
+// Connections:
+//   - File: backend/ums_smart_revenue/org/channel_import.py ->
+//       _planned_group_action, the one-fact-per-key derivation this mirrors.
+//   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+//       _group_write_batches, which collapses the key into one operation.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> the
+//       Group cell whose CREATE/JOIN label this keeps single-valued.
+// ============================================================================
 const groupActionsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolean => {
   const actionByKey = new Map<string, unknown>();
   for (const row of rows) {
@@ -778,43 +795,42 @@ const channelCopiesAgree = (group: ReadonlyArray<Record<string, unknown>>): bool
   return deciding[0].row_number === lowest;
 };
 
-/**
- * The planner's REPEATED-CHANNEL contract, which no row-local rule can see.
- *
- * A roster legitimately lists one channel several times — CMS membership is
- * many-to-many and `group_id` carries one association per row — but the parser
- * rejects copies that disagree on the inventory fields, so every surviving
- * copy agrees on `channel_name` and `revenue_required`. And only the FIRST
- * copy owns the inventory decision: later copies plan as UNCHANGED so the
- * apply attaches their group without a second inventory outcome.
- *
- * Each copy must also name a DISTINCT group, because repeating a channel is
- * only meaningful ACROSS groups. The parser rejects a repeated
- * `(youtube_channel_id, group_id)` pair outright, so a plan carrying one did
- * not come from a roster — which is the whole reason to refuse it here, on a
- * boundary whose job is malformed RESPONSES rather than malformed files.
- *
- * The backend's reason differs by shape and only one half is about groups: a
- * repeated pair that NAMES a group is collapsed by the write pass to a single
- * membership, so Preview would promise the group work twice while the retained
- * fingerprint authorises the one real association; a repeated pair carrying NO
- * group produces no membership at all and is refused because the second copy
- * is a phantom UNCHANGED row (review #184, codex P2). This check covers both
- * because it keys on the pair, with absence as an ordinary value.
- *
- * Checked here rather than per-row for the usual reason — no row-local
- * predicate can see another row.
- *
- * Without this, a malformed response can repeat one valid id with two names or
- * two revenue flags, or give several copies their own CREATE/UPDATE diffs.
- * Every per-row predicate and the count tally still pass, so the operator
- * approves a plan showing inventory work the import will not do — twice over —
- * while the retained fingerprint authorises the real one (review #184).
- *
- * Keyed on the LOWEST row_number rather than array position: the backend sorts
- * its entries, but nothing here requires the array to arrive sorted, and "the
- * first copy" is a statement about the operator's file.
- */
+// ============================================================================
+// Purpose: The planner's REPEATED-CHANNEL contract, which no row-local rule
+//   can see. A roster legitimately lists one channel several times — CMS
+//   membership is many-to-many and `group_id` carries one association per row
+//   — so this groups the copies and enforces the four things that must hold
+//   ACROSS them: shared inventory values, distinct groups, one deciding
+//   outcome, and that decision belonging to the first copy.
+// Database/ORM: None (frontend) — a structural predicate over decoded rows,
+//   run before the payload becomes trusted UI state.
+// Standards: Mirrors the parser rather than inventing a rule. The parser
+//   rejects copies that disagree on the inventory fields, so every surviving
+//   copy agrees on `channel_name` and `revenue_required`; it rejects a
+//   repeated `(youtube_channel_id, group_id)` pair outright, so the copies
+//   must name DISTINCT groups; and only the FIRST copy owns the inventory
+//   decision, later ones planning UNCHANGED so the apply attaches their group
+//   without a second inventory outcome. ERROR rows are skipped — they carry
+//   no values to agree about. Keyed on the LOWEST `row_number`, not array
+//   position: the backend sorts its entries, but nothing here requires the
+//   array to arrive sorted, and "the first copy" is a statement about the
+//   OPERATOR'S FILE. Fails CLOSED; nothing is reconciled.
+// Blast Radius: FINANCE + inventory, doubled. Without this a malformed
+//   response can repeat one valid id with two names or two revenue flags, or
+//   give several copies their own CREATE/UPDATE diffs. Every per-row
+//   predicate and the count tally still pass, so the operator approves a plan
+//   showing inventory work the import will not do — twice over — while the
+//   retained fingerprint authorises the real one (review #184).
+// Connections:
+//   - File: backend/ums_smart_revenue/org/channel_import.py -> _flag_duplicates
+//       and _duplicate_reason, the parser-side rules this mirrors; a change
+//       to what the parser admits is a change to what belongs here.
+//   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+//       _group_write_batches, which collapses a repeated pair to one
+//       membership — the divergence the distinct-group rule prevents.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> the documented duplicate rule and
+//       its 422.
+// ============================================================================
 const channelRowsAgree = (rows: ReadonlyArray<Record<string, unknown>>): boolean => {
   const copies = new Map<string, Array<Record<string, unknown>>>();
   for (const row of rows) {

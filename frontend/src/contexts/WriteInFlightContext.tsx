@@ -83,28 +83,41 @@ export type WriteInFlightControl = {
   release: () => void;
 };
 
-/**
- * Imperative latch control for a flow that is about to start a write.
- *
- * Deliberately NOT an effect-driven `useBlockNavigationWhile(active, reason)`.
- * A passive effect arms one commit LATE: the click handler that starts the
- * request returns, React commits with navigation still enabled, and only then
- * do effects run — a real window in which an operator who clicks Apply and
- * immediately picks a sidebar destination unmounts the flow while the write
- * proceeds, which is precisely what the latch exists to prevent (review #184,
- * reported independently by greptile, qodo and codex).
- *
- * Calling `arm()` inside the same event handler that sets the flow's own
- * in-flight state puts both updates in one batch, so the shell's nav and the
- * flow's buttons disable in the SAME commit. `release()` in the request's
- * `finally` frees them together too.
- *
- * Only `setReason` is pulled out of the context, never the whole value: the
- * value object is re-memoized on every reason change, so depending on it
- * would give these callbacks — and the unmount guard below — a new identity
- * each time the latch armed. The setter comes from useState and is
- * identity-stable, so everything derived from it is too.
- */
+// ============================================================================
+// Purpose: Imperative latch control for a flow that is about to start a write
+//   it cannot abort. `arm()` disables shell navigation, `release()` frees it,
+//   and both are called by the flow rather than derived from its state.
+// Database/ORM: None (frontend) — sets a context value that gates navigation.
+//   No request, no persistence.
+// Standards: Deliberately NOT an effect-driven
+//   `useBlockNavigationWhile(active, reason)`. A passive effect arms one
+//   commit LATE: the click handler that starts the request returns, React
+//   commits with navigation still enabled, and only then do effects run — a
+//   real window in which an operator who clicks Apply and immediately picks a
+//   sidebar destination unmounts the flow while the write proceeds. Calling
+//   `arm()` inside the same event handler that sets the flow's in-flight
+//   state puts both updates in ONE batch, so the shell's nav and the flow's
+//   buttons disable in the same commit; `release()` in the request's
+//   `finally` frees them together. Only `setReason` is pulled out of the
+//   context, never the whole value: that object is re-memoized on every
+//   reason change, so depending on it would give these callbacks — and the
+//   unmount guard — a new identity each time the latch armed. The setter
+//   comes from useState and is identity-stable, so everything derived from it
+//   is too.
+// Blast Radius: Whether a committing import can be navigated away from, and
+//   whether the shell can be left permanently unnavigable. The hook exposes
+//   no abort, so leaving mid-write neither stops nor invalidates a POST that
+//   still commits — the operator would land elsewhere while the registry
+//   changes under them. The opposite failure is the unmount guard's: a flow
+//   torn down with its request pending strands navigation dead forever,
+//   because the component that armed the latch is gone (review #184,
+//   reported independently by greptile, qodo and codex).
+// Connections:
+//   - File: frontend/src/components/srcc/AppShell.tsx -> the sidebar whose
+//       destinations this latch disables.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> the
+//       apply handler that arms in the click and releases in `finally`.
+// ============================================================================
 export const useWriteInFlightControl = (): WriteInFlightControl => {
   const setReason = useContext(WriteInFlightContext)?.setReason;
   const arm = useCallback(

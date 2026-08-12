@@ -24,9 +24,17 @@ cross-document guard so an import whose outcome was never established cannot be
 silently repeated.
 
 **Non-goals.** No new backend route, no new persisted field, no migration, and
-no widening of what the import may write — every backend behaviour this PR adds
-is a **refusal**. No revenue math, no allocation, no month-close. The permission
-model is untouched.
+no widening of what the import may write. Every backend behaviour this PR adds
+to the **write path** is a refusal — it can reject an apply the old code would
+have performed, never perform one the old code would have rejected. No revenue
+math, no allocation, no month-close. The permission model is untouched.
+
+That sentence used to read "every backend behaviour this PR adds is a refusal",
+without the write-path qualifier, which the next two paragraphs immediately
+contradict (review #184, codex P2). Two additions are **disclosures**, not
+refusals: the audit payload below, and the plan rows' `group_action` and
+`revenue_source_status`. Both widen what the operator and the trail can SEE;
+neither widens what the import may write.
 
 The **audit contract is not** — `_channel_audit_details()` now adds
 `revenue_source_status: {from, to}` to `CHANNEL_CREATED` / `CHANNEL_UPDATED`
@@ -171,7 +179,7 @@ Frontend, and the PR-scope analyzer:
 
 | Suite | Result |
 | --- | --- |
-| `bun run test` (frontend) | **476 passed**, 41 files |
+| `bun run test` (frontend) | **477 passed**, 41 files |
 | `bunx tsc --noEmit` | clean |
 | `bun run build` | clean |
 | DeepSource (PR scope) | `[]` |

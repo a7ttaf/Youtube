@@ -858,7 +858,31 @@ const rosterMatchesRegistry = (plan: ChannelImportResult): boolean => {
   );
 };
 
-/** True when a re-plan is inconclusive BECAUSE the roster carries group keys. */
+// ============================================================================
+// Purpose: True when a re-plan is inconclusive BECAUSE the roster carries
+//   group keys — the case rosterMatchesRegistry above must refuse rather than
+//   answer. It exists so the group-bearing shape gets its own verdict instead
+//   of falling into the same "nothing left to do" bucket as a clean match.
+// Database/ORM: None (frontend) — a predicate over a re-planned payload.
+// Standards: Deliberately NOT the negation of rosterMatchesRegistry. Both
+//   require every row UNCHANGED; they differ only on whether any row carries a
+//   group key, so a plan with outstanding work satisfies neither and reaches
+//   the divergence copy instead. That three-way split is the point: match,
+//   unverifiable, and diverged are distinct verdicts, and collapsing the
+//   middle one into either neighbour is how silence starts reading as success.
+// Blast Radius: AUDIT follow-up after a write of UNKNOWN outcome. `outcome` is
+//   computed from channel INVENTORY only — the planner never loads
+//   memberships — so an all-UNCHANGED re-plan proves nothing about the
+//   attachments the same import owed. Reporting this shape as a match would
+//   close out an import whose group work may never have landed; reporting it
+//   as divergence would invite re-applying a roster that already committed.
+//   Neither writes anything — both steer what the operator does next.
+// Connections:
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       rosterMatchesRegistry, the sibling verdict this one carves out of.
+//   - File: backend/ums_smart_revenue/org/channel_import.py -> the planner
+//       whose inventory-only outcome makes memberships unverifiable here.
+// ============================================================================
 const hasUnverifiableGroupEffects = (plan: ChannelImportResult): boolean => {
   return (
     plan.rows.every((row) => row.outcome === OUTCOME_UNCHANGED) &&
@@ -1457,12 +1481,40 @@ export const RegistryImportFlow = ({
     }
   };
 
-  /**
-   * Apply-failure translation: the 422 apply race (a concurrent editor changed
-   * the registry between preview and apply) replaces the stale plan with the
-   * refreshed payload the backend ships as `detail`, so the operator reviews
-   * reality; every other failure surfaces as banner copy only.
-   */
+  // ==========================================================================
+  // Purpose: Translate an apply failure into the THREE things it can mean, and
+  //   settle the durable pending-apply record accordingly. Every failure lands
+  //   in exactly one branch: a plan-bearing rejection, an indeterminate
+  //   outcome, or a definite rejection.
+  // Database/ORM: None (frontend). It writes no request; what it settles is
+  //   the client-side duplicate-import guard over a write already answered.
+  // Standards: BOTH plan-bearing statuses take the first branch, not just the
+  //   422 an earlier version of this comment named — applyRaceDetail admits
+  //   409 as well, and each means "the plan you saw is not the plan we would
+  //   execute": 422 for a re-planned roster now holding ERROR rows, 409 for
+  //   divergence from the approved fingerprint. Both are ESTABLISHED refusals
+  //   at the boundary, so nothing committed and this apply is retired; the
+  //   refreshed payload replaces the preview, which also re-binds the
+  //   fingerprint so the next Apply sends the digest of what the operator is
+  //   actually looking at. Ordering is load-bearing: the indeterminate test
+  //   runs BEFORE the definite fallback, because only a failure that
+  //   ESTABLISHES rejection may retire the record.
+  // Blast Radius: Whether a roster can be submitted TWICE, and whether the
+  //   operator is told the truth about a write they cannot see. Retiring the
+  //   record on an indeterminate failure re-arms Apply over a roster that may
+  //   have committed — a second unconditional CHANNEL_IMPORTED — and lets
+  //   Cancel take the no-reload path over a changed registry. Holding the
+  //   record on an established refusal strands the operator behind a guard for
+  //   a write that provably did not happen.
+  // Connections:
+  //   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+  //       applyRaceDetail, which decides what counts as plan-bearing, and
+  //       settleThisApply, which retires the record in both scopes.
+  //   - File: frontend/src/contexts/UnsettledImportContext.tsx -> the durable
+  //       record this settles.
+  //   - File: backend/ums_smart_revenue/api/channels.py -> the route emitting
+  //       the 409/422 whose `detail` carries the refreshed plan.
+  // ==========================================================================
   const handleApplyFailure = (caught: unknown) => {
     const race = applyRaceDetail(caught, ownerId);
     if (race) {

@@ -276,16 +276,34 @@ const rememberInMemory = (key: string, pending: boolean): void => {
     : memoryIds.filter((id) => id !== key);
 };
 
-/**
- * Record one apply as pending. Touches ONLY this apply's key, so a concurrent
- * tab doing the same thing cannot drop it and it cannot drop theirs.
- *
- * Returns whether the record became DURABLE. A memory-only record is not a
- * successful claim: the Web Lock is released the moment admission returns, so
- * another tab cannot see it, and a reload erases it while the backend request
- * may still be committing. Callers admitting a write must treat `false` as a
- * refusal (review #184).
- */
+// ============================================================================
+// Purpose: The DURABLE-WRITE boundary of the cross-document duplicate-import
+//   guard. It records one apply as pending and reports whether that record
+//   became durable, which is the fact admission turns into a permit or a
+//   refusal.
+// Database/ORM: None (frontend) — one localStorage key per apply. No request,
+//   no server state; what it persists is the client-side guard over a write.
+// Standards: Touches ONLY this apply's key, so a concurrent tab doing the
+//   same thing cannot drop it and it cannot drop theirs. The return value is
+//   the contract: a memory-only record is NOT a successful claim, because the
+//   Web Lock is released the moment admission returns, another tab cannot see
+//   memory, and a reload erases it while the backend request may still be
+//   committing. The in-memory fallback is kept anyway so THIS document's own
+//   guards — the disabled Apply button, the notice — still hold; it is a
+//   consolation prize, never a claim. Callers admitting a write must treat
+//   `false` as a refusal (review #184).
+// Blast Radius: Whether the same roster can be dispatched TWICE from two
+//   tabs. Returning true on a non-durable write is the failure that matters:
+//   it permits a dispatch no other document can see, and the second apply
+//   writes a second unconditional CHANNEL_IMPORTED over the same registry.
+//   No finance math of its own; it gates whether the audited write happens.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> admitApply,
+//       which turns this boolean into `admitted` / `not-durable`, and
+//       adoptPendingApplies, which uses it to decide a migration is complete.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       admitForApply, the dispatch-side gate that must refuse on false.
+// ============================================================================
 const addId = (scope: string, applyId: string): boolean => {
   try {
     globalThis.localStorage.setItem(keyFor(scope, applyId), "1");
@@ -599,33 +617,47 @@ const isTenantResolution = (from: string, to: string): boolean => {
 //   must not inherit anything. Fail-closed on a storage failure: the old
 //   record is removed only once the new one is DURABLE, so a refused write
 //   leaves the guard standing in the old scope rather than dropping it from
-//   both. Idempotent — a second call finds the old prefix empty — which
-//   matters because two components read this store under the same scope.
+//   both — and the RETURN VALUE reports that, because a caller who cannot tell
+//   a complete adoption from a partial one has no way to retry the remainder.
+//   True means the old scope is drained (or was never eligible); false means
+//   at least one record is still there and this must run again. Idempotent —
+//   a second call finds only what did not move — which matters because two
+//   components read this store under the same scope, and because the retry
+//   path calls it repeatedly by design.
 //   This is a MITIGATION, not a licence to let the scope move under a write:
 //   admission is still withheld until the scope settles. It covers the case
 //   that gate cannot, a tenant that resolves AFTER a failure (review #184).
 // Blast Radius: Whether a pending-import warning survives tenant resolution.
-//   No requests, no authorization meaning; a mistake shows as a warning that
-//   is missing or duplicated, never as a permitted write.
+//   No requests and no authorization meaning of its own — but a record that
+//   ends up in neither scope takes the CROSS-TAB half of the duplicate guard
+//   down with it, since a second tab can only see what is durable. That is why
+//   an incomplete adoption is reported rather than swallowed.
 // Connections:
 //   - File: frontend/src/components/srcc/AppShell.tsx -> resolves the tenant
 //       whose arrival is exactly this transition.
 //   - File: frontend/src/contexts/TenantContext.tsx -> the hydration that
 //       moves the tenant half from missing to known.
 // ============================================================================
-export const adoptPendingApplies = (from: string, to: string): void => {
+export const adoptPendingApplies = (from: string, to: string): boolean => {
   if (!isTenantResolution(from, to)) {
-    return;
+    // Nothing to carry: this transition deliberately does not adopt, so it is
+    // COMPLETE, not pending. Reporting otherwise would make the caller retry a
+    // move that must never happen.
+    return true;
   }
   const prefix = prefixFor(from);
+  let complete = true;
   for (const key of readIds(from)) {
     const applyId = key.slice(prefix.length);
     // Remove only once the new record is durable, so a storage refusal cannot
     // erase the old one and leave nothing anywhere.
     if (addId(to, applyId)) {
       removeId(from, applyId);
+    } else {
+      complete = false;
     }
   }
+  return complete;
 };
 
 // ============================================================================
@@ -700,14 +732,24 @@ export const useUnsettledImport = (
    * scope and be granted while the old one still holds an outstanding apply,
    * dropping the duplicate guard exactly during tenant resolution (review
    * #184, qodo). Doing it here makes admission see the adopted records.
+   *
+   * The ref advances only on a COMPLETE adoption. `adoptPendingApplies` keeps
+   * a record in the old scope when the durable write is refused, so advancing
+   * unconditionally retired the retry along with it: `previous === scope`
+   * short-circuits every later call, this tab falls back to memory alone, and
+   * a second tab on the resolved scope sees neither the memory entry nor the
+   * key still sitting under the old prefix — free to dispatch the duplicate
+   * this store exists to prevent. Leaving the ref behind costs one re-attempt
+   * per admission, which is exactly when it matters (review #184, codex P2).
    */
   const syncScope = useCallback(() => {
     const previous = previousScopeRef.current;
     if (previous === scope) {
       return false;
     }
-    previousScopeRef.current = scope;
-    adoptPendingApplies(previous, scope);
+    if (adoptPendingApplies(previous, scope)) {
+      previousScopeRef.current = scope;
+    }
     return true;
   }, [scope]);
 

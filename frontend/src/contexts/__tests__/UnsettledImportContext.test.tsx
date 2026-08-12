@@ -172,6 +172,43 @@ describe("unsettled import store", () => {
     expect(storedIds(after)).toEqual(["apply-outstanding"]);
   });
 
+  it("RETRIES an adoption the storage refused, instead of advancing past it", async () => {
+    // adoptPendingApplies keeps the old record when the durable write fails,
+    // so the guard is never dropped from both scopes. Advancing the scope ref
+    // unconditionally retired the retry along with it: every later call
+    // short-circuits, this tab holds only a memory entry, and a second tab on
+    // the resolved scope sees neither that nor the key still under the old
+    // prefix — free to dispatch the duplicate (review #184, codex P2).
+    const before = importScopeFor(null, "user-1");
+    const after = importScopeFor("tenant-1", "user-1");
+    const { result, rerender } = renderHook(({ scope }) => useUnsettledImport(scope), {
+      initialProps: { scope: before },
+    });
+    act(() => result.current.trackApply("apply-outstanding"));
+
+    const setItem = vi
+      .spyOn(globalThis.Storage.prototype, "setItem")
+      .mockImplementation(() => {
+        throw new Error("quota");
+      });
+    rerender({ scope: after });
+    setItem.mockRestore();
+
+    // The refused write left it where it was, and nothing moved.
+    expect(storedIds(after)).toEqual([]);
+    expect(storedIds(before)).toEqual(["apply-outstanding"]);
+
+    // Storage recovered. The next admission must re-attempt the move rather
+    // than decide against an empty bucket.
+    await act(async () => {
+      await expect(result.current.admit("apply-second")).resolves.toBe(
+        "other-apply-pending",
+      );
+    });
+    expect(storedIds(after)).toEqual(["apply-outstanding"]);
+    expect(storedIds(before)).toEqual([]);
+  });
+
   it("carries NOTHING across a change of principal", () => {
     // The isolation this scoping exists for. Every transition except a
     // same-user tenant resolution is a different operator, and inheriting
