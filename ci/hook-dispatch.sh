@@ -187,8 +187,8 @@ case "$HOOK_NAME" in
         #
         # Only a branch destination is. A tag or a pointer in another namespace
         # publishes a name for a commit, and whether that commit may go out is
-        # decided per ref by ci::git::worktree_covers_push -- published to the
-        # destination, carried by a branch in this push, or refused. Letting
+        # decided per ref by ci::git::worktree_covers_push -- the checkout,
+        # published to the destination, or refused. Letting
         # them into the chain made an ordinary release push refuse itself:
         # `git push --tags origin` with tags on two lines of history has neither
         # containing the other, so the run was hard-refused before the rule that

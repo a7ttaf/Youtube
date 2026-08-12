@@ -420,26 +420,25 @@ SH
   rm -rf "$HD_SB"
 }
 
-@test "git: a tag beside a branch is covered when this push carries its commit" {
-  # Tags were excluded from the multi-tip rule on the grounds that a tag in a
-  # mixed push names a commit inside the history being pushed, and that
-  # exclusion made the check return before it looked at anything. Including them
-  # was right; the test applied to them was not. It asked only "is this the
-  # checkout, or already on the destination", which refuses `git push origin
-  # main v1.0` whenever the tag names a commit main is itself sending -- the
-  # ordinary release push -- and the drift message then printed the pushed sha
-  # and HEAD as the same value with a remedy that was already true.
+@test "git: a tag is the checkout or is already on the destination" {
+  # This case asserted a third answer for a while -- that a tag on a commit a
+  # branch in the same push is sending adds a label and no content, because the
+  # objects go out with the branch either way. The premise is wrong, and it is
+  # wrong for a reason no amount of looking at this repository would show:
+  # `git push -h` documents `--atomic` as *requesting* "atomic transaction on
+  # remote side", so a push is not atomic unless asked, and the server may
+  # reject the branch while accepting the tag. Then nothing carried the commit
+  # out except the tag, and its tree was never run by a content lane.
   #
-  # The commit under such a tag reaches the remote as part of the branch's
-  # history whether the tag exists or not, so the tag adds a label and no
-  # content. That is the same statement the "already published" arm makes about
-  # a commit that went out earlier, and it is the third answer this rule was
-  # missing.
+  # Nothing tells a pre-push hook whether `--atomic` was passed, so the
+  # condition that arm depended on cannot be checked from here. A rule that
+  # cannot be checked is not kept.
   #
-  # It is not "an ancestor of HEAD", and the difference is the protection: a
-  # tag-only push carries no branch tips, so that arm is empty for it and the
-  # tag must still be published. A tag on a commit no pushed branch contains is
-  # what carries that commit out.
+  # The cost, stated rather than hidden: `git push origin main v1.0` with the
+  # tag on a commit main is sending now needs two commands. Push the branch,
+  # then the tag -- by then the commit is on the destination and the tag really
+  # does carry no content. That remedy is followable, which is the test this
+  # gate applies to its own refusals.
   local sb
   sb="$(mktemp -d)"
   (
@@ -480,17 +479,16 @@ SH
   [ "$status" -eq 0 ]
 
   # The release push: a tag on a commit this same push is sending under main.
+  # Refused now, because a non-atomic push can drop the branch and keep the tag.
   run _covers "$old"
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
 
-  # And what the rule is actually for: a tag on a commit no branch in this push
-  # carries and the destination does not have. That tag is what takes the commit
-  # out, and its tree has never been run.
+  # And what the rule is for: a tag on a commit the destination does not have.
+  # That tag is what takes the commit out, and its tree has never been run.
   run _covers "$side"
   [ "$status" -ne 0 ]
 
-  # A tag-only push has no branch tips, so the carried arm is empty for it and
-  # the published test is the whole of the rule -- before and after.
+  # A tag-only push is judged by the same test, which is now the only test.
   run _covers "$old" ""
   [ "$status" -ne 0 ]
   run bash -c "cd '$sb' && git update-ref refs/remotes/origin/main '$old'"
@@ -619,10 +617,25 @@ refs/heads/old %s refs/publish/prod %s
   [ "$status" -eq 0 ]
   [[ "$output" == *"OTHER=$HD_BASE"* ]]
 
-  # And the rule it is judged by is the tag rule: carried by a branch in this
-  # push, or the checkout, or already on the destination.
+  # And the rule it is judged by is the tag rule: the checkout, or already on
+  # the destination. "Carried by a branch in this same push" was a third answer
+  # here for a while and is gone, because a push is not atomic unless asked for
+  # -- the server can reject the branch and accept this ref, and then nothing
+  # carried the commit out except the ref itself. Both of these are ancestors of
+  # HEAD and neither is published, so both are refused; being an ancestor says
+  # the worktree contains that commit's history, not that its tree was run.
   run bash -c "cd '$HD_SB' && . '$REPO_ROOT/ci/lib/git.sh'     && CI_GATE_PUSH_NEW_SHA='$HD_TIP' CI_GATE_PUSH_BRANCH_TIPS='$HD_TIP'        CI_GATE_PUSH_OTHER_TIPS='$HD_FORK' CI_GATE_PUSH_REMOTE=origin        ci::git::worktree_covers_push"
   [ "$status" -ne 0 ]
+  run bash -c "cd '$HD_SB' && . '$REPO_ROOT/ci/lib/git.sh'     && CI_GATE_PUSH_NEW_SHA='$HD_TIP' CI_GATE_PUSH_BRANCH_TIPS='$HD_TIP'        CI_GATE_PUSH_OTHER_TIPS='$HD_BASE' CI_GATE_PUSH_REMOTE=origin        ci::git::worktree_covers_push"
+  [ "$status" -ne 0 ]
+
+  # The controls, so this stays a rule about publication and not a refusal of
+  # every other-namespace push: the checkout itself is covered, and so is a
+  # commit the destination already has.
+  run bash -c "cd '$HD_SB' && . '$REPO_ROOT/ci/lib/git.sh'     && CI_GATE_PUSH_NEW_SHA='$HD_TIP' CI_GATE_PUSH_BRANCH_TIPS='$HD_TIP'        CI_GATE_PUSH_OTHER_TIPS='$HD_TIP' CI_GATE_PUSH_REMOTE=origin        ci::git::worktree_covers_push"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$HD_SB' && git update-ref refs/remotes/origin/main '$HD_BASE'"
+  [ "$status" -eq 0 ]
   run bash -c "cd '$HD_SB' && . '$REPO_ROOT/ci/lib/git.sh'     && CI_GATE_PUSH_NEW_SHA='$HD_TIP' CI_GATE_PUSH_BRANCH_TIPS='$HD_TIP'        CI_GATE_PUSH_OTHER_TIPS='$HD_BASE' CI_GATE_PUSH_REMOTE=origin        ci::git::worktree_covers_push"
   [ "$status" -eq 0 ]
   rm -rf "$HD_SB"
@@ -729,4 +742,71 @@ refs/tags/new %s refs/tags/new %s
   [[ "$output" == *"NEW=$HD_TIP"* ]]
   [[ "$output" == *"TAGS=$HD_ORPHAN"* ]]
   rm -rf "$HD_SB"
+}
+
+@test "git: an empty branch tip is not the same statement as an empty push" {
+  # The scalar is the collapsed *branch* tip, and the dispatcher deliberately
+  # leaves it unset for a push that names no branch -- a tag-only push, or one
+  # into a namespace this gate has no model of -- exporting the tip lists
+  # instead. Returning on the scalar alone therefore skipped both per-ref loops
+  # for exactly the pushes they exist to judge: `git push origin v1`, with `v1`
+  # on an older unpublished commit and its repair checked out, was covered by a
+  # function that never looked at the tag.
+  #
+  # The hole opened when the tip collapse was restricted to branch records --
+  # which was the right fix, one range is the branch question -- so this is its
+  # other half, and the pair is the whole rule.
+  local sb
+  sb="$(mktemp -d)"
+  (
+    cd "$sb"
+    git init -q -b main .
+    printf 'a\n' > a.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c1
+    old="$(git rev-parse HEAD)"
+    printf 'b\n' > b.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c2
+    tip="$(git rev-parse HEAD)"
+    printf '%s %s\n' "$old" "$tip" > .shas
+  ) >/dev/null 2>&1
+  local old tip
+  read -r old tip < "$sb/.shas"
+
+  _tagonly() { # _tagonly <tag tips> <other tips>
+    bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' \
+      && CI_GATE_PUSH_NEW_SHA='' CI_GATE_PUSH_BRANCH_TIPS='' \
+         CI_GATE_PUSH_TAG_TIPS='$1' CI_GATE_PUSH_OTHER_TIPS='$2' \
+         CI_GATE_PUSH_REMOTE=origin ci::git::worktree_covers_push"
+  }
+
+  # The premise: the checkout is the newer commit, and the tag names the older
+  # one, which the destination does not have.
+  run bash -c "cd '$sb' && git rev-parse --verify HEAD"
+  [ "$output" = "$tip" ]
+
+  run _tagonly "$old" ""
+  [ "$status" -ne 0 ]
+
+  # The same for a namespace this gate has no model of.
+  run _tagonly "" "$old"
+  [ "$status" -ne 0 ]
+
+  # The controls. A tag on the checkout is the tree every content lane just
+  # read, and a tag on a commit the destination already has carries nothing.
+  run _tagonly "$tip" ""
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$sb' && git update-ref refs/remotes/origin/main '$old'"
+  [ "$status" -eq 0 ]
+  run _tagonly "$old" ""
+  [ "$status" -eq 0 ]
+
+  # And the statement that really is "nobody said": every list empty, which is
+  # CI and every direct invocation, and must stay covered or the gate refuses
+  # itself.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' \
+    && CI_GATE_PUSH_NEW_SHA='' CI_GATE_PUSH_BRANCH_TIPS='' \
+       CI_GATE_PUSH_TAG_TIPS='' CI_GATE_PUSH_OTHER_TIPS='' \
+       ci::git::worktree_covers_push"
+  [ "$status" -eq 0 ]
+  rm -rf "$sb"
 }

@@ -244,14 +244,33 @@ ci::git::published_to_destination() {
 # wrong about.
 ci::git::worktree_covers_push() {
   local tip="${CI_GATE_PUSH_NEW_SHA:-}"
-  [ -n "$tip" ] || return 0
+  # "Nobody said" is every list being empty, not the scalar being empty.
+  #
+  # The scalar is the collapsed *branch* tip, and the dispatcher deliberately
+  # leaves it unset for a push that names no branch -- a tag-only push, or one
+  # into a namespace this gate has no model of -- while exporting the tip lists
+  # instead. Returning on the scalar alone therefore skipped both per-ref loops
+  # below for exactly the pushes they exist to judge: `git push origin v1`, with
+  # `v1` on an older failing commit and its repair checked out, was covered by a
+  # function that never looked at the tag. That hole opened when the tip collapse
+  # was restricted to branch records, which was itself the right fix -- one range
+  # is the branch question -- so this is the other half of it.
+  if [ -z "$tip" ] \
+     && [ -z "${CI_GATE_PUSH_BRANCH_TIPS:-}" ] \
+     && [ -z "${CI_GATE_PUSH_TAG_TIPS:-}" ] \
+     && [ -z "${CI_GATE_PUSH_OTHER_TIPS:-}" ]; then
+    return 0
+  fi
   local pushed head
-  pushed="$(git rev-parse --verify "${tip}^{commit}" 2>/dev/null || true)"
   head="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)"
-  # A tip that cannot be resolved is not evidence that it matches. Refusing on
-  # an unreadable sha is the same fail-closed direction as everywhere else.
-  [ -n "$pushed" ] || return 1
   [ -n "$head" ] || return 1
+  pushed=""
+  if [ -n "$tip" ]; then
+    pushed="$(git rev-parse --verify "${tip}^{commit}" 2>/dev/null || true)"
+    # A tip that cannot be resolved is not evidence that it matches. Refusing on
+    # an unreadable sha is the same fail-closed direction as everywhere else.
+    [ -n "$pushed" ] || return 1
+  fi
 
   # *Every* branch destination, not just the widest of them.
   #
@@ -286,19 +305,9 @@ ci::git::worktree_covers_push() {
   # out at the broken one. It is the same question the tag-only rule below asks,
   # and there was no reason for the mixed push to be exempt from it.
   #
-  # Or carried by a branch in this same push, which is the third answer and the
-  # one the rule above was missing. `git push origin main v1.0` with the tag on
-  # a commit main is itself sending was refused: not the checkout, not yet on
-  # the destination, and the drift message then printed the pushed sha and HEAD
-  # as the same value with a remedy that was already true. The objects under
-  # that tag are going to the remote as part of main's history whether the tag
-  # exists or not, so the tag adds a label and no content -- which is the same
-  # thing the "already published" arm says about a commit that went out earlier.
-  #
-  # It is not the same as "an ancestor of HEAD", and that difference is the
-  # whole of the protection: a tag-only push carries no branch tips, so this arm
-  # is empty for it and the tag must still meet the published test below. A tag
-  # on a commit no pushed branch contains is carrying that commit out with it.
+  # For a while there was a third answer here -- carried by a branch in this
+  # same push -- and it is gone; the paragraph below the loop says why, and the
+  # short version is that it assumed the branch update lands.
   #
   # And every destination in a namespace this gate has no model of, by the same
   # test. Gerrit's refs/for/*, a refs/publish/* deployment pointer,
@@ -308,23 +317,38 @@ ci::git::worktree_covers_push() {
   # HEAD while the second ref moved to a tree nothing in the run had read.
   # refs/notes/* is the one namespace deliberately left out of this, upstream in
   # the hook: a notes commit carries annotations rather than project source.
-  local _wc_tag _wc_carried
+  #
+  # The "carried by a branch in this same push" arm is gone, and the argument
+  # for it is why. It said the objects under the tag go to the remote as part of
+  # the branch's history whether the tag exists or not -- true only if the
+  # branch update actually lands. `git push -h` documents `--atomic` as
+  # requesting "atomic transaction on remote side", which means a push is *not*
+  # atomic by default: the server can reject the branch and accept the tag, and
+  # then a release pointer sits on a tree nothing validated with no branch
+  # having carried it anywhere. Nothing tells a pre-push hook whether `--atomic`
+  # was passed, so the condition the arm depended on cannot be checked here, and
+  # a rule that cannot be checked is not a rule this gate keeps.
+  #
+  # The cost is real and worth stating: `git push origin main v1.0`, with the
+  # tag on a commit main is itself sending, now needs two commands -- push the
+  # branch, then push the tag, at which point the commit is published and the
+  # tag carries no content. That is a followable remedy, which is the test this
+  # gate applies to a refusal.
+  local _wc_tag
   # shellcheck disable=SC2086
   for _wc_tag in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-}; do
     _wc_res="$(git rev-parse --verify "${_wc_tag}^{commit}" 2>/dev/null || true)"
     [ -n "$_wc_res" ] || return 1
     [ "$_wc_res" = "$head" ] && continue
-    _wc_carried=0
-    # shellcheck disable=SC2086
-    for _wc_tip in ${CI_GATE_PUSH_BRANCH_TIPS:-}; do
-      if git merge-base --is-ancestor "$_wc_res" "$_wc_tip" 2>/dev/null; then
-        _wc_carried=1
-        break
-      fi
-    done
-    [ "$_wc_carried" -eq 1 ] && continue
     ci::git::published_to_destination "$_wc_res" || return 1
   done
+
+  # A push that names no branch at all has been answered entirely by the loops
+  # above: every tag and every other-namespace tip is the checkout or is already
+  # on the destination. There is no scalar tip to compare, and comparing an
+  # empty one against HEAD refused a push that had just passed every test that
+  # applies to it.
+  [ -n "$pushed" ] || return 0
 
   [ "$pushed" = "$head" ] && return 0
 
@@ -385,19 +409,19 @@ ci::git::explain_push_tip_drift() {
   # collapsed tip against HEAD, and in a mixed push those are the same commit --
   # so a refusal caused by a tag printed two identical shas and told the reader
   # to check out the commit they already had.
-  local _d_head _d_tag _d_res _d_bad="" _d_carried _d_btip
+  # The same test the rule applies, and only that test. It carried a
+  # "carried by a branch in this push" arm while the rule did, and both are gone
+  # for the same reason: a push is not atomic unless `--atomic` is asked for, a
+  # pre-push hook cannot see whether it was, and a branch the server rejects
+  # carries nothing. A message that keeps a condition the rule has dropped
+  # explains a refusal that did not happen.
+  local _d_head _d_tag _d_res _d_bad=""
   _d_head="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)"
   # shellcheck disable=SC2086
   for _d_tag in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-}; do
     _d_res="$(git rev-parse --verify "${_d_tag}^{commit}" 2>/dev/null || true)"
     if [ -z "$_d_res" ]; then _d_bad="${_d_bad} ${_d_tag}"; continue; fi
     [ "$_d_res" = "$_d_head" ] && continue
-    _d_carried=0
-    # shellcheck disable=SC2086
-    for _d_btip in ${CI_GATE_PUSH_BRANCH_TIPS:-}; do
-      git merge-base --is-ancestor "$_d_res" "$_d_btip" 2>/dev/null && { _d_carried=1; break; }
-    done
-    [ "$_d_carried" -eq 1 ] && continue
     ci::git::published_to_destination "$_d_res" && continue
     _d_bad="${_d_bad} ${_d_res}"
   done
@@ -407,11 +431,14 @@ ci::git::explain_push_tip_drift() {
     for _d_tag in ${_d_bad}; do
       echo "    ${_d_tag}"
     done
-    echo "  It is not the checkout, no branch in this push carries it, and the"
-    echo "  destination does not already have it — so the tag is what takes that"
-    echo "  commit out, and its tree has never been run by a content lane."
-    echo "  Push the branch that contains it first, or check that commit out and"
-    echo "  push the tag from there."
+    echo "  It is not the checkout and the destination does not already have it,"
+    echo "  so the tag is what takes that commit out, and its tree has never been"
+    echo "  run by a content lane. A branch in this same push does not settle it:"
+    echo "  a push is not atomic unless you ask for it, so the server can reject"
+    echo "  the branch and accept the tag."
+    echo "  Push the branch that contains it first — the commit is then already"
+    echo "  on the destination and the tag carries no content — or check that"
+    echo "  commit out and push the tag from there."
     return 0
   fi
   echo "The commit being pushed is not the commit checked out."
