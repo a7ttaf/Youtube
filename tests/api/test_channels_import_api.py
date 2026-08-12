@@ -1,10 +1,12 @@
 """API tests for the bulk channel inventory import (POST /channels/import)."""
 
 import dataclasses
+from collections.abc import Callable
 
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.api.channels import (
+    _plan_fingerprint,
     current_audit_sink,
     current_channel_registry,
 )
@@ -20,7 +22,11 @@ from ums_smart_revenue.org.bootstrap_registry import (
     BOOTSTRAP_COMPANY_TV_ID,
     BOOTSTRAP_ORG_INDEX,
 )
-from ums_smart_revenue.org.channel_groups import ChannelGroupConflictError, ChannelGroupRegistry
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupConflictError,
+    ChannelGroupEntry,
+    ChannelGroupRegistry,
+)
 from ums_smart_revenue.org.channel_registry import (
     ChannelRegistry,
     ChannelRegistryConflictError,
@@ -29,6 +35,8 @@ from ums_smart_revenue.org.channel_registry import (
 )
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
+# A second valid channel id, for rows that must differ from CHANNEL_ID.
+SECOND_CHANNEL_ID = "UC3Dci3BzZXDo4jw4dU8KqWg"
 CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 DEFAULT_HEADER = "youtube_channel_id,channel_name,view_revenue"
 
@@ -49,11 +57,12 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
 
 def create_import_app(
     registry: ChannelRegistry | None = None,
+    groups: ChannelGroupRegistry | None = None,
 ) -> tuple[TestClient, object, ChannelGroupRegistry, InMemoryAuditSink]:
     """Build an import-ready client plus the registries and sink it writes to."""
     app = create_app()
     registry = registry if registry is not None else bootstrap_channel_registry()
-    groups = ChannelGroupRegistry()
+    groups = groups if groups is not None else ChannelGroupRegistry()
     audit_sink = InMemoryAuditSink()
     app.dependency_overrides[current_channel_registry] = lambda: registry
     app.dependency_overrides[sql_group_registry_from_session] = lambda: groups
@@ -429,6 +438,734 @@ def test_dry_run_shows_planned_create_values():
     assert row["channel_name"] == "Alpha News"
     assert row["group_id"] == "cms-tv"
     assert row["revenue_required"] is False
+    # No group carries this key yet, so the row mints a NEW SECTOR group.
+    assert row["group_action"] == "CREATE"
+
+
+def test_dry_run_discloses_group_create_versus_join():
+    """The preview says WHICH group write a Group_ID implies (review #184).
+
+    ``group_id`` alone cannot: minting a new SECTOR group creates a fresh
+    finance-scope object stamped to this content owner, while an existing key
+    only attaches a member. Both are audited GROUP_UPDATED, and the operator
+    approves an all-or-nothing roster, so the two must be told apart BEFORE
+    the write rather than reconstructed from the audit trail after it.
+    """
+    client, _registry, groups, _sink = create_import_app()
+    groups.create_group(
+        name="Existing TV",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+
+    response = post_import(
+        client,
+        import_csv(
+            f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+            f"{CHANNEL_ID},Alpha News,cms-brand-new,Yes",
+            header=header,
+        ),
+        dry_run="true",
+    )
+
+    assert response.status_code == 200, response.text
+    rows = response.json()["rows"]
+    assert [row["group_id"] for row in rows] == ["cms-tv", "cms-brand-new"]
+    assert [row["group_action"] for row in rows] == ["JOIN", "CREATE"]
+
+
+def test_apply_rejects_a_plan_that_changed_since_the_preview():
+    """The apply is bound to the plan the operator actually reviewed (#184).
+
+    The route re-plans from CURRENT state, so without this the roster row an
+    operator approved as a CREATE could commit as an UPDATE that overwrites a
+    channel someone else created in the meantime — a different write, never
+    reviewed. The 409 carries the REFRESHED plan so approval is re-sought
+    against reality.
+    """
+    client, registry, _groups, audit_sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true")
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["rows"][0]["outcome"] == "CREATE"
+    stale_fingerprint = preview.json()["plan_fingerprint"]
+
+    # A concurrent writer creates the very channel the roster planned to add.
+    registry.create_channel(
+        youtube_channel_id=CHANNEL_ID,
+        channel_name="Someone Else's Name",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+        content_owner_id=CONTENT_OWNER,
+    )
+
+    conflict = post_import(client, body, expected_plan_fingerprint=stale_fingerprint)
+
+    assert conflict.status_code == 409, conflict.text
+    refreshed = conflict.json()["detail"]
+    # The plan really did change under the operator: CREATE became UPDATE.
+    assert refreshed["rows"][0]["outcome"] == "UPDATE"
+    assert refreshed["plan_fingerprint"] != stale_fingerprint
+    # Nothing was written, and no audit event claims otherwise.
+    assert registry.get_channel(CHANNEL_ID).channel_name == "Someone Else's Name"
+    assert audit_sink.records == []
+
+
+def test_apply_proceeds_when_the_plan_still_matches_the_preview():
+    """A matching fingerprint is not a gate, only a guard: the apply runs."""
+    client, registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true")
+    fingerprint = preview.json()["plan_fingerprint"]
+
+    applied = post_import(client, body, expected_plan_fingerprint=fingerprint)
+
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["counts"]["CREATE"] == 1
+    assert registry.get_channel(CHANNEL_ID) is not None
+
+
+def test_apply_without_a_fingerprint_still_applies():
+    """The field is OPTIONAL: a client that never previewed re-approves nothing.
+
+    Pinned so the guard cannot quietly become a required field and break every
+    non-SPA caller of this route.
+    """
+    client, registry, _groups, _sink = create_import_app()
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+    assert response.status_code == 200, response.text
+    assert registry.get_channel(CHANNEL_ID) is not None
+
+
+def test_plan_fingerprint_ignores_dry_run():
+    """`dry_run` is excluded, and that exclusion is load-bearing.
+
+    A preview and its apply differ in it by definition, so folding it in would
+    make every fingerprint mismatch and the guard would reject every apply — a
+    guard that always fires protects nothing.
+    """
+    client, _registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true")
+    applied = post_import(client, body, dry_run="false")
+
+    assert preview.json()["dry_run"] is True
+    assert applied.json()["dry_run"] is False
+    assert preview.json()["plan_fingerprint"] == applied.json()["plan_fingerprint"]
+
+
+def test_plan_fingerprint_covers_the_content_owner_and_cms_status():
+    """The digest binds the TARGET too, not just the row plan (review #184).
+
+    An all-CREATE roster's rows carry no owner — a CREATE's `changes` is empty
+    by design — so without these fields two different content owners produce
+    byte-identical row plans. An operator who previewed owner A and applied
+    against B would then sail through the guard and commit channels and groups
+    under the wrong owner.
+    """
+    client, _registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    for_owner_a = post_import(client, body, dry_run="true").json()
+    for_owner_b = post_import(
+        client, body, dry_run="true", content_owner_id="OtherOwnerBBBBBBBBBBB"
+    ).json()
+    for_outside_cms = post_import(client, body, dry_run="true", cms_status="OUTSIDE_CMS").json()
+
+    # The row plans really are identical — the fingerprint is the only thing
+    # standing between them.
+    assert for_owner_a["counts"] == for_owner_b["counts"]
+    assert [row["outcome"] for row in for_owner_a["rows"]] == [
+        row["outcome"] for row in for_owner_b["rows"]
+    ]
+    assert for_owner_a["plan_fingerprint"] != for_owner_b["plan_fingerprint"]
+    assert for_owner_a["plan_fingerprint"] != for_outside_cms["plan_fingerprint"]
+
+
+def test_apply_under_a_swapped_content_owner_is_rejected():
+    """End to end: preview owner A, apply owner B -> 409, nothing written."""
+    client, registry, _groups, audit_sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    reviewed = post_import(client, body, dry_run="true").json()["plan_fingerprint"]
+    swapped = post_import(
+        client,
+        body,
+        content_owner_id="OtherOwnerBBBBBBBBBBB",
+        expected_plan_fingerprint=reviewed,
+    )
+
+    assert swapped.status_code == 409, swapped.text
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert audit_sink.records == []
+
+
+def test_group_created_before_the_apply_replans_is_caught_by_the_fingerprint():
+    """The FIRST of the two windows: preview -> the apply's own re-plan.
+
+    The apply re-plans from current state, so a group created here is already
+    visible to it and the row re-plans as JOIN. Nothing in the write path
+    would notice, but the fingerprint does: JOIN digests differently from the
+    reviewed CREATE, so the operator re-approves instead of silently joining a
+    group they never saw.
+    """
+    client, registry, groups, audit_sink = create_import_app()
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true").json()
+    assert preview["rows"][0]["group_action"] == "CREATE"
+
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["rows"][0]["group_action"] == "JOIN"
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert audit_sink.records == []
+
+
+class _GroupAppearsAtWriteBoundary(ChannelGroupRegistry):
+    """Create the group between the apply's re-plan and its locked read.
+
+    Planning reads group state through the bulk ``list_*`` lookups; only the
+    write boundary takes ``for_update``. Creating the group inside that locked
+    read reproduces the SECOND window exactly — the one the fingerprint cannot
+    see, because the plan it digested was already computed.
+    """
+
+    def __init__(self, *, cms_group_id: str, content_owner_id: str) -> None:
+        super().__init__()
+        self._race_key = cms_group_id
+        self._race_owner = content_owner_id
+        self._raced = False
+
+    def get_group_by_cms_id(
+        self, cms_group_id: str, *, for_update: bool = False
+    ) -> ChannelGroupEntry | None:
+        """Race the group into existence once, just before the locked read."""
+        if for_update and not self._raced and cms_group_id == self._race_key:
+            self._raced = True
+            super().create_group(
+                name=self._race_key,
+                group_type="SECTOR",
+                channel_ids=[],
+                cms_group_id=self._race_key,
+                content_owner_id=self._race_owner,
+            )
+        return super().get_group_by_cms_id(cms_group_id, for_update=for_update)
+
+
+def test_group_created_after_the_apply_replans_is_rejected_at_the_write_boundary():
+    """The SECOND window: the apply's re-plan -> the group row lock.
+
+    The fingerprint compare happens before ``apply_channel_import`` takes any
+    group lock, so this owner's own CMS sync can still create the group in
+    between and turn a reviewed "creates a new SECTOR group" into a silent
+    join — a different finance-scope and audit effect, with no second 409 to
+    catch it. The reviewed action is therefore re-checked under the SAME lock
+    that performs the write.
+    """
+    client, _registry, _groups, audit_sink = create_import_app()
+    racing = _GroupAppearsAtWriteBoundary(cms_group_id="cms-tv", content_owner_id=CONTENT_OWNER)
+    client.app.dependency_overrides[sql_group_registry_from_session] = lambda: racing
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true").json()
+    assert preview["rows"][0]["group_action"] == "CREATE"
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    assert "was created during the import" in response.json()["detail"]
+    # No GROUP write and no group audit event: the divergence is caught under
+    # the row lock, before either branch of _attach_group_membership runs.
+    assert racing.get_group_by_cms_id("cms-tv").channel_ids == ()
+    assert not [r for r in audit_sink.records if r.entity_type == "channel_group"]
+    # Rollback of the CHANNEL rows this row already wrote is the transaction's
+    # job, and the in-memory registry has no transaction — the raised error is
+    # what triggers it. tests/api/test_channels_import_postgres.py owns that
+    # proof against a real database.
+
+
+class _ChannelDriftsAtWriteBoundary(ChannelRegistry):
+    """Move a channel's stored name between the apply's re-plan and its lock.
+
+    Planning reads through ``list_channels_by_ids``; the write boundary calls
+    ``update_inventory``. Drifting the row inside that second call reproduces
+    the window the fingerprint cannot see, because the plan it digested was
+    already computed.
+    """
+
+    def __init__(self, entries: list[ChannelRegistryEntry], *, drift_to: str) -> None:
+        super().__init__(entries)
+        self._drift_to = drift_to
+        self._drifted = False
+
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
+        """Land a concurrent rename once, just before the locked write."""
+        if not self._drifted:
+            self._drifted = True
+            current = super().get_channel(youtube_channel_id)
+            assert current is not None
+            super().update_inventory(
+                youtube_channel_id=current.youtube_channel_id,
+                channel_name=self._drift_to,
+                cms_status=current.cms_status,
+                content_owner_id=current.content_owner_id,
+                revenue_required=current.revenue_required,
+            )
+        return super().update_inventory(
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+            require_pre_state=require_pre_state,
+        )
+
+
+def _seeded_registry(channel_name: str) -> ChannelRegistry:
+    """One existing channel, so a roster rename plans as an UPDATE."""
+    return ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name=channel_name,
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ]
+    )
+
+
+class _ChannelArchivedAtWriteBoundary(ChannelRegistry):
+    """Archive a channel between the apply's re-plan and its row lock.
+
+    The planner ERRORs any archived channel and an ERROR row 422s the whole
+    file, so a plan that reaches the write boundary reviewed every row as
+    ACTIVE. Retiring the row inside ``update_inventory`` reproduces the one
+    window in which that stops being true.
+    """
+
+    def __init__(self, entries: list[ChannelRegistryEntry]) -> None:
+        super().__init__(entries)
+        self._archived = False
+
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
+        """Retire the row once, just before the locked write reads it."""
+        if not self._archived:
+            self._archived = True
+            current = self._channels[youtube_channel_id]
+            self._channels[youtube_channel_id] = dataclasses.replace(current, active=False)
+        return super().update_inventory(
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+            require_pre_state=require_pre_state,
+        )
+
+
+def test_unbound_apply_also_refuses_a_row_archived_after_planning():
+    """The archive guard is NOT plan-bound, and that is deliberate.
+
+    "The file wins" (review #159) settled that a roster may overwrite
+    concurrent drift in the fields it ASSERTS. The roster does not carry
+    ``active`` and never asserts it, so that decision does not reach here —
+    an unbound apply racing an archive would otherwise resurrect a channel an
+    operator deliberately retired and attach it to a group (review #184).
+    """
+    archiving = _ChannelArchivedAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID})),
+    )
+    client, _registry, groups, audit_sink = create_import_app(archiving)
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    # NO expected_plan_fingerprint: the unbound, file-wins path.
+    response = post_import(client, body)
+
+    assert response.status_code == 409, response.text
+    assert "since been archived" in response.json()["detail"]
+    assert groups.get_group_by_cms_id("cms-tv") is None
+    assert audit_sink.records == []
+
+
+def test_plan_fingerprint_is_bound_to_the_resolved_tenant():
+    """An approval obtained in one tenant must not be spendable in another.
+
+    Two EMPTY tenants and an all-CREATE roster produce identical plans: a
+    CREATE's ``changes`` is empty by design and no row carries a tenant, so
+    without the tenant in the digest the preview approved under tenant A
+    satisfied the guard on an apply directed at tenant B — committing channels,
+    groups and audit records there on an approval never given for them
+    (review #184, codex P1).
+    """
+    counts = {"CREATE": 1}
+    rows = [{"row_number": 1, "youtube_channel_id": CHANNEL_ID, "outcome": "CREATE"}]
+    common = {"content_owner_id": CONTENT_OWNER, "cms_status": "INSIDE_CMS"}
+
+    tenant_a = _plan_fingerprint(
+        counts, rows, **common, tenant_id="11111111-1111-1111-1111-111111111111"
+    )
+    tenant_b = _plan_fingerprint(
+        counts, rows, **common, tenant_id="22222222-2222-2222-2222-222222222222"
+    )
+    same_again = _plan_fingerprint(
+        counts, rows, **common, tenant_id="11111111-1111-1111-1111-111111111111"
+    )
+
+    assert tenant_a != tenant_b
+    # Still an equality token within one tenant: the guard must not fire on a
+    # plan that genuinely did not change.
+    assert tenant_a == same_again
+
+
+def test_plan_bound_apply_refuses_a_row_archived_after_planning():
+    """A concurrent archive is a divergence, not something to write through.
+
+    ``active`` is not one of _INVENTORY_FIELDS — the roster never carries it —
+    so without an explicit check the bound apply would overwrite and audit
+    inventory on a channel an operator deliberately retired, and carry a
+    group-bearing row on into the membership pass to attach that archived
+    channel to a group. Reactivation is an explicit registry action, never an
+    import side effect (review #184, codex P2).
+    """
+    archiving = _ChannelArchivedAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID})),
+    )
+    client, _registry, groups, audit_sink = create_import_app(archiving)
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true").json()
+    # The preview reviewed it as a live UPDATE that also mints a group.
+    assert preview["rows"][0]["outcome"] == "UPDATE"
+    assert preview["rows"][0]["group_action"] == "CREATE"
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    assert "since been archived" in response.json()["detail"]
+    # The membership pass never ran, so no group was minted around the
+    # retired channel, and nothing claims a mutation the operator approved.
+    assert groups.get_group_by_cms_id("cms-tv") is None
+    assert audit_sink.records == []
+
+
+def test_plan_bound_apply_refuses_a_row_whose_pre_state_drifted():
+    """A bound apply means "the diff I reviewed, or none of it" (review #184).
+
+    The fingerprint compare happens before each channel row lock, so a writer
+    committing in that gap turns a reviewed "Old Name -> Alpha News" into an
+    unreviewed "Someone Else -> Alpha News". The values written would be the
+    approved ones, but the operator approved neither the other value nor the
+    decision to overwrite it.
+    """
+    drifting = _ChannelDriftsAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID})),
+        drift_to="Someone Else",
+    )
+    client, registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true").json()
+    assert preview["rows"][0]["changes"]["channel_name"] == {
+        "from": "Old Name",
+        "to": "Alpha News",
+    }
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    assert "changed during the import" in response.json()["detail"]
+    assert "Someone Else" in response.json()["detail"]
+    # No audit event claims a mutation the operator never approved. The row
+    # write itself is undone by the surrounding transaction, which this tier
+    # does not have (the in-memory registry commits as it goes) — the durable
+    # rollback proof is
+    # tests/api/test_channels_import_postgres.py::
+    # test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres.
+    assert audit_sink.records == []
+    assert registry is drifting
+
+
+def test_unbound_apply_still_lets_the_file_win_over_drift():
+    """The #159 default is untouched for a caller that bound no plan.
+
+    This is the whole reason the guard is opt-in: an API client that never
+    previewed is re-approving nothing, so the roster stays authoritative and
+    the audit records the REAL diff.
+    """
+    drifting = _ChannelDriftsAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID})),
+        drift_to="Someone Else",
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"))
+
+    assert response.status_code == 200, response.text
+    assert drifting.get_channel(CHANNEL_ID).channel_name == "Alpha News"
+    updated = [r for r in audit_sink.records if r.event_type == "CHANNEL_UPDATED"]
+    assert len(updated) == 1
+    assert updated[0].details["changes"] == {
+        "channel_name": {"from": "Someone Else", "to": "Alpha News"}
+    }
+
+
+class _RevenueFlagDriftsAtWriteBoundary(ChannelRegistry):
+    """Flip a field the preview showed as UNCHANGED, at the write boundary.
+
+    The gap this pins: ``entry.changes`` omits a field when planning found it
+    already matching the roster, but ``update_inventory`` writes all four
+    fields regardless. Drifting an omitted field is the case a changes-only
+    guard cannot see.
+    """
+
+    def __init__(self, entries: list[ChannelRegistryEntry]) -> None:
+        super().__init__(entries)
+        self._drifted = False
+
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
+        """Turn revenue_required off once, just before the locked write."""
+        if not self._drifted:
+            self._drifted = True
+            current = super().get_channel(youtube_channel_id)
+            assert current is not None
+            super().update_inventory(
+                youtube_channel_id=current.youtube_channel_id,
+                channel_name=current.channel_name,
+                cms_status=current.cms_status,
+                content_owner_id=current.content_owner_id,
+                revenue_required=False,
+            )
+        return super().update_inventory(
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+            require_pre_state=require_pre_state,
+        )
+
+
+def test_plan_bound_apply_refuses_drift_in_a_field_the_preview_showed_unchanged():
+    """ "No change to revenue_required" is a reviewed claim too (review #184).
+
+    The preview here promises exactly one effect — the rename — and implicitly
+    promises the other three fields stay put. A writer who turns
+    revenue_required OFF in the plan-to-apply window would have that decision
+    silently reverted by the roster's Yes, under an apply the operator bound
+    to a diff that never mentioned the flag. Reverting a revenue requirement
+    nobody reviewed is a finance-visible effect, not a cosmetic one.
+    """
+    drifting = _RevenueFlagDriftsAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID}))
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true").json()
+    # The reviewed diff mentions ONLY the name: the flag matched at plan time,
+    # so a changes-only guard has nothing to compare it against.
+    assert set(preview["rows"][0]["changes"]) == {"channel_name"}
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "no change to revenue_required" in detail
+    assert audit_sink.records == []
+
+
+def test_bound_apply_does_not_409_a_channel_repeated_across_groups():
+    """The guard must not read the import's OWN first write as concurrent drift.
+
+    A roster may list one channel once per group, and the extra copies plan as
+    UNCHANGED with an empty diff. The apply writes the channel once per copy,
+    so by the second copy the locked pre-state is what copy 1 just wrote. A
+    guard that compared an empty diff against the ORIGINAL stored state would
+    fire on the plan doing exactly what the operator approved — the same shape
+    of self-inflicted 409 the group ledger had to fix (review #184).
+    """
+    client, registry, groups, _sink = create_import_app()
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    # Copy 1 renames (a real UPDATE); copy 2 is membership-only (UNCHANGED).
+    body = import_csv(
+        f"{CHANNEL_ID},Alpha News,cms-tv,Yes",
+        f"{CHANNEL_ID},Alpha News,cms-radio,Yes",
+        header=header,
+    )
+    seed = post_import(client, import_csv(f"{CHANNEL_ID},Old Name,Yes"))
+    assert seed.status_code == 200
+
+    preview = post_import(client, body, dry_run="true").json()
+    # Pin the SCENARIO, not just the outcome: this only exercises the guard if
+    # copy 2 really is the empty-diff UNCHANGED row whose expected pre-state
+    # has to resolve to what copy 1 wrote. Without these, a planning change
+    # (say, duplicates becoming ERROR rows) could quietly stop covering it
+    # while the final-state assertions below still passed.
+    first, second = preview["rows"]
+    assert (first["outcome"], first["group_id"]) == ("UPDATE", "cms-tv")
+    assert first["changes"] == {"channel_name": {"from": "Old Name", "to": "Alpha News"}}
+    assert (second["outcome"], second["group_id"]) == ("UNCHANGED", "cms-radio")
+    assert second["changes"] == {}
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 200, response.text
+    stored = registry.get_channel(CHANNEL_ID)
+    assert stored is not None and stored.channel_name == "Alpha News"
+    # Both memberships landed, so the second copy really was executed.
+    for key in ("cms-tv", "cms-radio"):
+        group = groups.get_group_by_cms_id(key)
+        assert group is not None and group.channel_ids == (CHANNEL_ID,)
+
+
+def test_plan_bound_apply_proceeds_when_nothing_drifted():
+    """Anti-vacuity: the opt-in guard must not reject the ordinary bound apply."""
+    client, registry, _groups, _sink = create_import_app(_seeded_registry("Old Name"))
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true").json()
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 200, response.text
+    assert registry.get_channel(CHANNEL_ID).channel_name == "Alpha News"
+
+
+def test_several_rows_can_populate_one_newly_created_group():
+    """The common shape: N channels imported into a group that does not exist.
+
+    Planning labels EVERY such row CREATE, because the group was absent for
+    all of them. The first row then creates it and the rest observe it inside
+    the same transaction — which the write-boundary action check must read as
+    the plan's own handiwork, not as a concurrent creation. Getting this wrong
+    409s a perfectly valid import.
+    """
+    client, registry, groups, _sink = create_import_app()
+    second_id = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(
+        f"{CHANNEL_ID},Alpha News,cms-new,Yes",
+        f"{second_id},Beta News,cms-new,Yes",
+        header=header,
+    )
+
+    preview = post_import(client, body, dry_run="true").json()
+    # Both rows really are planned as CREATE — that is what makes this a trap.
+    assert [row["group_action"] for row in preview["rows"]] == ["CREATE", "CREATE"]
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 200, response.text
+    assert registry.get_channel(CHANNEL_ID) is not None
+    assert registry.get_channel(second_id) is not None
+    # One group, both channels in it.
+    created = groups.get_group_by_cms_id("cms-new")
+    assert created is not None
+    assert sorted(created.channel_ids) == sorted([CHANNEL_ID, second_id])
+
+
+def test_group_join_still_applies_when_the_group_is_still_there():
+    """Anti-vacuity: the divergence guard must not reject the normal path."""
+    client, registry, groups, _sink = create_import_app()
+    groups.create_group(
+        name="Existing TV",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    assert post_import(client, body, dry_run="true").json()["rows"][0]["group_action"] == "JOIN"
+    response = post_import(client, body)
+
+    assert response.status_code == 200, response.text
+    assert registry.get_channel(CHANNEL_ID) is not None
+
+
+def test_plan_fingerprint_changes_when_a_row_outcome_changes():
+    """Anti-vacuity: the digest must actually track plan content."""
+    client, registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    before = post_import(client, body, dry_run="true").json()["plan_fingerprint"]
+    registry.create_channel(
+        youtube_channel_id=CHANNEL_ID,
+        channel_name="Alpha News",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+        content_owner_id=CONTENT_OWNER,
+    )
+    after = post_import(client, body, dry_run="true").json()
+
+    assert after["rows"][0]["outcome"] == "UNCHANGED"
+    assert after["plan_fingerprint"] != before
+
+
+def test_rows_without_a_group_key_disclose_no_group_action():
+    """No Group_ID, no group write — and therefore no claim about one."""
+    client, _registry, _groups, _sink = create_import_app()
+
+    response = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"), dry_run="true")
+
+    assert response.status_code == 200, response.text
+    row = response.json()["rows"][0]
+    assert row["group_id"] is None
+    assert row["group_action"] is None
 
 
 def test_multi_group_roster_attaches_every_membership():
@@ -603,6 +1340,320 @@ def test_group_mutations_performed_by_import_are_audited():
         assert record.details["cms_group_id"] == "cms-tv"
         assert record.details["source"] == "bulk_import"
         assert record.reason == "Quarterly CMS roster load"
+
+
+def test_preview_discloses_the_derived_revenue_source_status():
+    """The write re-classifies the revenue SOURCE; the plan must say so.
+
+    ``changes`` carries the operator's own field edits, and never this — the
+    registry derives it from the revenue_required flip. It feeds
+    ``missing_official_revenue`` and the registry's recommended action, so a
+    preview that omits it asks the operator to approve a finance-source
+    mutation nothing on screen mentions (review #184).
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Alpha News",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+                revenue_source_status="OFFICIAL_CMS_REVENUE",
+            )
+        ]
+    )
+    client, _registry, _groups, _sink = create_import_app(registry)
+
+    # Row 1 flips revenue OFF, replacing a proven official classification.
+    # Row 2 is a CREATE, which has no prior status at all.
+    payload = post_import(
+        client,
+        import_csv(f"{CHANNEL_ID},Alpha News,No", f"{SECOND_CHANNEL_ID},Beta News,Yes"),
+        dry_run="true",
+    ).json()
+
+    by_id = {row["youtube_channel_id"]: row for row in payload["rows"]}
+    assert by_id[CHANNEL_ID]["revenue_source_status"] == {
+        "from": "OFFICIAL_CMS_REVENUE",
+        "to": "PERFORMANCE_ONLY",
+    }
+    # The diff itself still says nothing about it — that is the whole gap.
+    assert "revenue_source_status" not in by_id[CHANNEL_ID]["changes"]
+    assert by_id[SECOND_CHANNEL_ID]["revenue_source_status"] == {
+        "from": None,
+        "to": "MISSING_REVENUE_SOURCE",
+    }
+
+
+class _SourceStatusDriftsAtWriteBoundary(ChannelRegistry):
+    """Move ONLY the source classification, leaving the four fields alone.
+
+    Models two concurrent imports flipping revenue_required off and back on
+    between the route's re-plan and the row lock: the inventory fields return
+    to their reviewed values while the classification underneath does not.
+    """
+
+    def __init__(self, entries: list[ChannelRegistryEntry], *, drift_to: str) -> None:
+        super().__init__(entries)
+        self._drift_to = drift_to
+        self._drifted = False
+
+    def update_inventory(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        cms_status: str,
+        content_owner_id: str | None,
+        revenue_required: bool,
+        require_pre_state: Callable[[ChannelRegistryEntry], None] | None = None,
+    ) -> tuple[ChannelRegistryEntry, ChannelRegistryEntry]:
+        """Rewrite the stored classification once, just before the locked write."""
+        if not self._drifted:
+            self._drifted = True
+            current = super().get_channel(youtube_channel_id)
+            assert current is not None
+            self._channels[youtube_channel_id] = dataclasses.replace(
+                current, revenue_source_status=self._drift_to
+            )
+        return super().update_inventory(
+            youtube_channel_id=youtube_channel_id,
+            channel_name=channel_name,
+            cms_status=cms_status,
+            content_owner_id=content_owner_id,
+            revenue_required=revenue_required,
+            require_pre_state=require_pre_state,
+        )
+
+
+def test_plan_bound_apply_refuses_a_drifted_revenue_source_pre_state():
+    """The DISCLOSED source transition is reviewed, so it is enforced too.
+
+    All four inventory fields can return to their reviewed values while the
+    classification beneath them moves. The apply would then perform
+    MISSING_REVENUE_SOURCE -> PERFORMANCE_ONLY where the operator approved
+    OFFICIAL_CMS_REVENUE -> PERFORMANCE_ONLY: the same end state, reached from
+    a different one, which is a different finance-source mutation.
+    """
+    drifting = _SourceStatusDriftsAtWriteBoundary(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Alpha News",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+                revenue_source_status="OFFICIAL_CMS_REVENUE",
+            )
+        ],
+        drift_to="MISSING_REVENUE_SOURCE",
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},Alpha News,No")
+
+    preview = post_import(client, body, dry_run="true").json()
+    assert preview["rows"][0]["revenue_source_status"] == {
+        "from": "OFFICIAL_CMS_REVENUE",
+        "to": "PERFORMANCE_ONLY",
+    }
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "revenue_source_status" in detail
+    assert "OFFICIAL_CMS_REVENUE" in detail
+    assert audit_sink.records == []
+
+
+def test_plan_bound_apply_refuses_an_undisclosed_source_drift():
+    """A None disclosure is not an exemption, it is a recoverable pre-state.
+
+    The stored pair here — PERFORMANCE_ONLY with revenue_required=True — is one
+    the column permits, so a roster turning the flag OFF derives
+    PERFORMANCE_ONLY, matches what is stored, and the planner discloses no
+    transition at all. Two concurrent imports flipping the flag away and back
+    then leave all four inventory fields at their reviewed values while the
+    classification underneath has moved to MISSING_REVENUE_SOURCE.
+
+    Without recovering the reviewed pre-state, the write re-derives
+    PERFORMANCE_ONLY and performs MISSING_REVENUE_SOURCE -> PERFORMANCE_ONLY
+    under a preview that promised no source change whatsoever.
+    """
+    drifting = _SourceStatusDriftsAtWriteBoundary(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Alpha News",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+                revenue_source_status="PERFORMANCE_ONLY",
+            )
+        ],
+        drift_to="MISSING_REVENUE_SOURCE",
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},Alpha News,No")
+
+    preview = post_import(client, body, dry_run="true").json()
+    # The premise: nothing disclosed, yet the write CAN re-derive, because the
+    # row's diff flips the flag.
+    assert preview["rows"][0]["revenue_source_status"] is None
+    assert preview["rows"][0]["changes"]["revenue_required"] == {"from": True, "to": False}
+
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "revenue_source_status" in detail
+    assert "PERFORMANCE_ONLY" in detail
+    assert "MISSING_REVENUE_SOURCE" in detail
+    assert audit_sink.records == []
+
+
+def test_a_refused_bound_apply_leaves_a_nontransactional_store_untouched():
+    """The 409 must not be paid for with a write that already happened.
+
+    apply_channel_import's all-or-nothing promise is a TRANSACTION statement,
+    and the in-memory registry has none: if the pre-state were judged on
+    update_inventory's return value, the roster values would already be
+    installed by the time the guard raised, and this store has nothing to roll
+    back. The request would answer 409 while the drifted row now held the
+    values the operator was told were NOT applied (review #184).
+
+    Asserting the STORE, not just the response, is the point — the response
+    was already 409 before the ordering was fixed.
+    """
+    drifting = _ChannelDriftsAtWriteBoundary(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Old Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+            )
+        ],
+        drift_to="Concurrent Rename",
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},New Name,Yes")
+
+    preview = post_import(client, body, dry_run="true").json()
+    response = post_import(client, body, expected_plan_fingerprint=preview["plan_fingerprint"])
+
+    assert response.status_code == 409, response.text
+    assert audit_sink.records == []
+    stored = drifting.get_channel(CHANNEL_ID)
+    assert stored is not None
+    # The concurrent writer's value survives; the roster's does NOT.
+    assert stored.channel_name == "Concurrent Rename"
+
+
+def test_preview_claims_no_source_change_when_the_flag_holds():
+    """Anti-noise: only a revenue_required FLIP re-derives the source status.
+
+    A roster refreshing names must not read as a finance reclassification —
+    and must not downgrade an OFFICIAL_* classification either, which is
+    exactly what derive_revenue_source_status protects.
+    """
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id=CHANNEL_ID,
+                channel_name="Old Name",
+                primary_company_id=None,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                content_owner_id=CONTENT_OWNER,
+                revenue_source_status="OFFICIAL_CMS_REVENUE",
+            )
+        ]
+    )
+    client, registry_ref, _groups, _sink = create_import_app(registry)
+
+    payload = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes"), dry_run="true").json()
+
+    assert payload["rows"][0]["outcome"] == "UPDATE"
+    assert payload["rows"][0]["revenue_source_status"] is None
+    # And the apply really does leave the classification alone.
+    assert post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,Yes")).status_code == 200
+    stored = registry_ref.get_channel(CHANNEL_ID)
+    assert stored is not None and stored.revenue_source_status == "OFFICIAL_CMS_REVENUE"
+
+
+class _CountingGroupStore(ChannelGroupRegistry):
+    """Count the two store calls whose COST scales with a group's membership.
+
+    Both `get_group_by_cms_id(for_update=True)` and `add_members` materialize
+    the group's full member set in the SQL store, so calling either once per
+    roster row is what made a shared-group import quadratic in payload.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.locked_lookups = 0
+        self.member_adds = 0
+        self.added_batch_sizes: list[int] = []
+
+    def get_group_by_cms_id(
+        self, cms_group_id: str, *, for_update: bool = False
+    ) -> ChannelGroupEntry | None:
+        """Count only the LOCKED reads — the write-boundary ones."""
+        if for_update:
+            self.locked_lookups += 1
+        return super().get_group_by_cms_id(cms_group_id, for_update=for_update)
+
+    def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
+        """Count each membership write and the size of the batch it carried."""
+        self.member_adds += 1
+        self.added_batch_sizes.append(len(channel_ids))
+        return super().add_members(group_id=group_id, channel_ids=channel_ids)
+
+
+def _roster_sharing_one_group(count: int, *, group_id: str = "cms-tv") -> str:
+    """A CSV whose `count` distinct channels all name the same group key."""
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+    rows = []
+    for index in range(count):
+        tail = "".join(alphabet[(index // len(alphabet) ** p) % len(alphabet)] for p in range(22))
+        rows.append(f"UC{tail},Channel {index},{group_id},Yes")
+    return import_csv(*rows, header="youtube_channel_id,channel_name,group_id,view_revenue")
+
+
+def test_shared_group_rows_resolve_the_group_once_regardless_of_roster_size():
+    """One lock and one membership write per GROUP, not per row (review #184).
+
+    Resolving per row made the payload quadratic: every locked lookup loaded
+    the group's whole membership and every single-channel add read it and
+    returned it again, so a 5000-row roster under one group moved tens of
+    millions of membership rows inside one transaction while holding every
+    channel lock. The fix is per-key batching, and the property that proves it
+    is that these counts do NOT grow with the roster.
+    """
+    counts = {}
+    for size in (3, 12):
+        store = _CountingGroupStore()
+        client, _registry, _groups, _sink = create_import_app(groups=store)
+
+        response = post_import(client, _roster_sharing_one_group(size))
+
+        assert response.status_code == 200, response.text
+        assert response.json()["counts"]["CREATE"] == size
+        group = store.get_group_by_cms_id("cms-tv")
+        assert group is not None and len(group.channel_ids) == size
+        counts[size] = (store.locked_lookups, store.member_adds, store.added_batch_sizes)
+
+    # Identical for both roster sizes: one locked read, one bulk add carrying
+    # every channel but the one the create already attached.
+    assert counts[3] == (1, 1, [2])
+    assert counts[12] == (1, 1, [11])
 
 
 def test_unchanged_rows_do_not_emit_duplicate_group_audit():

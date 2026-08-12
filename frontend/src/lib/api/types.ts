@@ -53,7 +53,7 @@ export type SessionPermissionGrant = {
 // Derived global-scope capability booleans the SPA uses to render UI. Every key
 // is camelCase (backend alias generator). These are AUTHORITATIVE — the UI gates
 // every surface on them and never fabricates one the backend did not grant.
-// Source: SessionCapabilities (session.py:45-64).
+// Source: SessionCapabilities (session.py:67-95).
 export type SessionCapabilities = {
   canViewRevenue: boolean;
   canViewConfidence: boolean;
@@ -66,6 +66,11 @@ export type SessionCapabilities = {
   canExportAnalyticsReports: boolean;
   canManageRegistry: boolean;
   canManageGroups: boolean;
+  // Both-permission render hint (MANAGE_CHANNELS AND MANAGE_GROUPS, never
+  // either-of): POST /channels/import always requires the former and
+  // additionally requires the latter when the roster carries Group_ID values.
+  // Source: SessionCapabilities.can_import_channels.
+  canImportChannels: boolean;
   canManageConnectors: boolean;
   canViewConnectorHealth: boolean;
   canRunConnectorJobs: boolean;
@@ -1209,6 +1214,130 @@ export type ClearOwnerStampResponse = {
 // typed exactly; audit_event stays a loose Record since no schema enforces it.
 export type GroupUpdateResponse = ChannelGroupApiEntry & {
   audit_event: Record<string, unknown>;
+};
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend channel-import JSON contract
+//   consumed by the Registry import stepper: POST /channels/import takes a
+//   multipart CSV roster form and returns ONE shape for both modes: the PLAN.
+//   dry_run true is the previewed plan; dry_run false is the APPROVED plan
+//   echoed back after a successful apply — NOT a report of what the write did.
+//   Both modes render the pre-write plan, and the committed result lives only
+//   in the CHANNEL_IMPORTED audit event, because a concurrent writer can turn
+//   a planned UPDATE into a no-op between planning and the row lock. A
+//   consumer that presents `counts` from the false-mode body as committed
+//   totals is making a claim this payload does not support. The view must
+//   still read the flag rather than assume either mode. Fields are matched 1:1 against the
+//   DECLARED backend Pydantic models (not guessed); nullable fields serialize
+//   as null. WIRE CASING NOTE: these models have NO alias generator, so
+//   payloads stay snake_case on the wire — except ChannelImportFieldChange,
+//   whose `from`/`to` keys are explicit backend Field aliases.
+// Database/ORM: None (frontend) — declarations only. What they mirror is the
+//   backend's Pydantic rendering of a plan over `youtube_channels` and
+//   `channel_groups`; nothing here reads or writes either.
+// Standards: Read-only typed boundary at the API surface; no logic here. An
+//   apply attempted while the plan holds any ERROR row is rejected as a 422
+//   whose `detail` is this same ChannelImportResult payload
+//   (channels.py:688-689) — the all-or-nothing contract the import stepper
+//   mirrors by blocking Apply client-side while an ERROR row exists.
+// Blast Radius: What the operator sees before approving an audited bulk write,
+//   and what the runtime validator can even be written to check — a field
+//   missing from this mirror is one no guard can require. `plan_fingerprint`
+//   is the field that carries authorization weight: it is what binds an apply
+//   to the reviewed plan, and a consumer that loses it downgrades the write to
+//   the backend's unbound, file-wins path. Declarations alone enforce nothing
+//   at runtime, which is precisely why useChannelImport validates every field
+//   named here against the decoded body.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/channels.py
+//       ChannelImportFieldChange -> ChannelImportFieldChange
+//       ChannelImportRowResult   -> ChannelImportRowResult
+//       ChannelImportResult      -> ChannelImportResult
+//       import_channels()        -> POST /channels/import (channels.py:639)
+//   - File: backend/ums_smart_revenue/org/channel_import.py
+//       ChannelImportOutcome -> ChannelImportRowResult.outcome literal set
+//         (channel_import.py:322; the Pydantic field itself is a plain str;
+//         the enum is the actual source of truth for the 4 values).
+//   - File: frontend/src/lib/api/useChannelImport.ts -> the mutation hook
+//       posting the multipart form this contract answers.
+// ============================================================================
+
+// One field's before/after pair in an import row's diff. The wire keys are
+// literally `from`/`to` (backend Field aliases, api/channels.py:161); values
+// are `str | bool | None` on the backend, mirrored exactly here.
+export type ChannelImportFieldChange = {
+  from: string | boolean | null;
+  to: string | boolean | null;
+};
+
+// One CSV row's planned or applied outcome (backend ChannelImportRowResult,
+// api/channels.py:170). Row fields echo the planned inventory values, not just
+// the diff — a CREATE row has an EMPTY `changes` mapping by design. `reason`
+// is the backend's row-level explanation (ERROR rows name the failure
+// verbatim) and null when the row needs none.
+export type ChannelImportRowResult = {
+  row_number: number;
+  youtube_channel_id: string | null;
+  outcome: "CREATE" | "UPDATE" | "UNCHANGED" | "ERROR";
+  channel_name: string | null;
+  group_id: string | null;
+  // Which group write the row's `group_id` implies: "CREATE" mints a NEW
+  // SECTOR group (a fresh finance-scope object stamped to the request's
+  // content owner at birth), "JOIN" attaches the channel to a group this
+  // owner already holds. Null when the row carries no group_id, and on every
+  // ERROR row — those write nothing at all. The backend enum is
+  // ChannelImportGroupAction (org/channel_import.py); the wire field is a
+  // plain str, exactly like `outcome`.
+  group_action: "CREATE" | "JOIN" | null;
+  revenue_required: boolean | null;
+  changes: Record<string, ChannelImportFieldChange>;
+  // The revenue_source_status the write will leave on the channel, when it
+  // changes it. DERIVED by the backend rather than carried by the CSV — the
+  // registry re-classifies the source whenever revenue_required flips — and
+  // it feeds `missing_official_revenue` and the registry's recommended
+  // action, so the preview must disclose it: `changes` never mentions it, and
+  // the operator would otherwise approve a finance-source mutation blind
+  // (review #184). `from` is null for a CREATE, which has no prior status.
+  // Null when the write leaves the classification alone, which is every row
+  // whose revenue_required is unchanged.
+  revenue_source_status: {
+    from: string | null;
+    to: string;
+  } | null;
+  reason: string | null;
+};
+
+// POST /channels/import response, identical in shape for dry run and apply
+// (backend ChannelImportResult, api/channels.py:190). `counts` is keyed by
+// outcome literal; `content_owner_id` and `cms_status` echo the request form.
+export type ChannelImportResult = {
+  dry_run: boolean;
+  content_owner_id: string;
+  cms_status: string;
+  counts: Record<string, number>;
+  rows: ChannelImportRowResult[];
+  // Digest of everything the operator reviews — `counts` and `rows` — plus the
+  // target the write lands in: `content_owner_id`, `cms_status`, and the
+  // server-resolved TENANT. The target fields are in deliberately: an
+  // all-CREATE roster's rows carry no owner (a CREATE's `changes` is empty by
+  // design), so leaving them out let a preview of owner A apply against owner
+  // B with an identical digest, and leaving the tenant out let a preview
+  // approved in one tenant authorize the same plan in another.
+  //
+  // The tenant input is NOT part of this payload and clients neither send nor
+  // control it — the backend resolves it from the request principal. So this
+  // digest is not reproducible client-side, and it is not meant to be: it is
+  // an opaque equality token to echo back, not a checksum to recompute. Of the
+  // fields listed in this type, only `dry_run` is outside the digest, because
+  // a preview and its apply differ in it by definition.
+  //
+  // Echo a dry run's value back as `expected_plan_fingerprint` on the apply:
+  // the backend 409s if the plan it would execute is no longer the one that
+  // was reviewed, AND treats the field's presence as opting in to strict
+  // write-boundary pre-state enforcement. Omitting it is not a smaller
+  // version of the same request — it is an UNBOUND apply under which the
+  // roster overwrites concurrent drift ("the file wins").
+  plan_fingerprint: string;
 };
 
 // ============================================================================

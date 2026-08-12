@@ -8,6 +8,10 @@ import {
 } from "@/contexts/SessionContext";
 import { useTenant } from "@/contexts/TenantContext";
 import {
+  WriteInFlightProvider,
+  useWriteInFlightLatch,
+} from "@/contexts/WriteInFlightContext";
+import {
   NAV_GROUPS,
   VIEW_COPY,
   WORKFLOW_STEPS,
@@ -21,6 +25,7 @@ import { ConnectorsView } from "./views/ConnectorsView";
 import ExportsView from "./views/ExportsView";
 import { GroupsView } from "./views/GroupsView";
 import RegistryView from "./views/RegistryView";
+import { importScopeFor } from "@/contexts/UnsettledImportContext";
 import TraceView from "./views/TraceView";
 import {
   Badge,
@@ -45,6 +50,7 @@ type AccessPermissions = {
   canViewBankReconciliation: boolean;
   canManageRegistry: boolean;
   canManageGroups: boolean;
+  canImportChannels: boolean;
   canManageConnectors: boolean;
   canCloseMonth: boolean;
   canUnlockMonth: boolean;
@@ -124,6 +130,11 @@ const capabilitiesToPermissions = (
     canViewBankReconciliation: capabilities.canViewBankReconciliation,
     canManageRegistry: capabilities.canManageRegistry,
     canManageGroups: capabilities.canManageGroups,
+    // Import CSV render hint: the backend derives this as MANAGE_CHANNELS AND
+    // MANAGE_GROUPS (never either-of) — the import route always needs the
+    // former and additionally the latter for Group_ID-bearing rosters, so a
+    // channels-only principal never sees a control that would 403 mid-flow.
+    canImportChannels: capabilities.canImportChannels,
     canManageConnectors: capabilities.canManageConnectors,
     canCloseMonth: capabilities.canCloseMonth,
     canUnlockMonth: capabilities.canUnlockMonth,
@@ -230,6 +241,8 @@ const SessionLoadingState = () => {
 type TenantBootstrap = {
   /** The label rendered in the dev-only tenant proof tag. */
   proofLabel: string;
+  /** Whether the tenant id has stopped moving — see the return statement. */
+  tenantSettled: boolean;
 };
 
 /** A parsed error body that carries an operator-facing `detail` message. */
@@ -283,7 +296,9 @@ const tenantProofLabel = (
 // ============================================================================
 // Purpose: Fire /tenants/me once on mount; hydrate TenantContext on success or
 //          surface the typed ApiError message in the dev-only proof tag on
-//          failure, returning the proof label for the shell to render.
+//          failure. Returns the proof label AND `tenantSettled` — whether the
+//          tenant id is KNOWN — which is no longer presentational: it decides
+//          whether an audited bulk import may be dispatched at all.
 // Database/ORM: None (frontend API call only).
 // Standards: useRef re-entry guard keeps fetch count at 1 under React StrictMode.
 //            Effect is gated on `enabled` (the session is ready) so a shell that
@@ -291,10 +306,23 @@ const tenantProofLabel = (
 //            a tenant bootstrap fetch. The guard is reset in the failure path so
 //            a subsequent dep change (provider rebuild) can retry — a transient
 //            5xx must not permanently pin tenantSlug to the bootstrap value.
-// Blast Radius: None detected (read-only; does not mutate financial state).
+//            `tenantSettled` is `tenant.id !== null` and NOTHING else. A failure
+//            does not settle it: two tabs disagreeing about the tenant build
+//            different key prefixes and different Web Lock names, so neither can
+//            see the other's pending import and both dispatch (review #184).
+//            Because the failure path RETRIES, "failed" is not terminal — which
+//            is exactly why it must not be read as settled.
+// Blast Radius: Beyond the dev proof tag: `tenantSettled` gates dispatch of an
+//            audited bulk import and decides whether cross-tab duplicate
+//            protection is namespaced by a stable tenant. A wrong value here
+//            shows as a refused import or a duplicated one plus a duplicated
+//            CHANNEL_IMPORTED audit event — never as an unpermitted write, since
+//            no authorization is derived from it. Still no financial mutation.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET helper.
 //   - File: frontend/src/contexts/TenantContext.tsx -> hydrate() stores id/displayName.
+//   - File: frontend/src/components/srcc/AppShell.tsx -> isImportScopeSettled,
+//       the admission gate that consumes tenantSettled (contract just below).
 // ============================================================================
 /**
  * Bootstrap the active tenant from /tenants/me, hydrating TenantContext and
@@ -337,20 +365,53 @@ const useTenantBootstrap = (
       });
   }, [client, tenant.id, tenant.hydrate, enabled, retryToken]);
 
-  return { proofLabel: tenantProofLabel(tenant, tenantError) };
+  return {
+    proofLabel: tenantProofLabel(tenant, tenantError),
+    // SETTLED means the tenant is KNOWN, so anything namespaced by it lands
+    // where every other document for this operator will look. Nothing else
+    // counts — not a failure, and not a failure that will never be retried.
+    //
+    // This deliberately REVERSES an earlier reading of mine, which treated a
+    // failed resolution as settled on the grounds that a tenant which cannot
+    // resolve would otherwise withhold imports forever. That reasoning missed
+    // the case that matters: with /tenants/me failing in one tab and
+    // succeeding in another for the SAME operator, the two tabs build
+    // different scopes — different key prefixes AND different Web Lock names —
+    // so neither can see the other's pending apply and both dispatch the same
+    // roster, duplicating an audited write and its CHANNEL_IMPORTED event.
+    // Scope adoption cannot undo that: the request is already gone (review
+    // #184, codex P2).
+    //
+    // The lockout it trades against is far milder than I first judged: a
+    // reload re-runs the bootstrap, so the recovery path is a page refresh,
+    // and IMPORT_SCOPE_UNSETTLED_NOTE says so. Blocking an import until the
+    // workspace is known is the fail-closed direction; admitting one into a
+    // namespace nobody else shares is not.
+    tenantSettled: tenant.id !== null,
+  };
 };
 
 /* ------------------------------------------------------------------ sidebar */
 
-/** Render a single labelled navigation group with its selectable items. */
+/**
+ * Render a single labelled navigation group with its selectable items.
+ *
+ * `blockedReason` is non-null while a flow below the shell holds an
+ * unabortable write in flight. Navigating then would unmount that flow
+ * without stopping its request: the write still commits, but its completion
+ * handler can no longer reload anything or tell the operator it landed. The
+ * reason doubles as each button's title, so a disabled nav always says why.
+ */
 const NavSection = ({
   group,
   view,
   onSelectView,
+  blockedReason,
 }: {
   group: (typeof NAV_GROUPS)[number];
   view: ViewKey;
   onSelectView: (key: ViewKey) => void;
+  blockedReason: string | null;
 }) => {
   return (
     <nav className="nav-section" aria-label={group.label}>
@@ -363,6 +424,8 @@ const NavSection = ({
             type="button"
             className={`nav-item${active ? " is-active" : ""}`}
             aria-current={active ? "page" : undefined}
+            disabled={blockedReason !== null}
+            title={blockedReason ?? undefined}
             onClick={() => onSelectView(item.key)}
           >
             {NAV_ICONS[item.icon]}
@@ -446,6 +509,7 @@ const Sidebar = ({
   onSelectPreviewRole,
   displayedRole,
   canViewFinance,
+  blockedReason,
 }: {
   view: ViewKey;
   onSelectView: (key: ViewKey) => void;
@@ -453,6 +517,7 @@ const Sidebar = ({
   onSelectPreviewRole: (role: Role) => void;
   displayedRole: Role;
   canViewFinance: boolean;
+  blockedReason: string | null;
 }) => {
   return (
     <aside className="sidebar" aria-label="Primary navigation">
@@ -472,6 +537,7 @@ const Sidebar = ({
           group={group}
           view={view}
           onSelectView={onSelectView}
+          blockedReason={blockedReason}
         />
       ))}
 
@@ -568,6 +634,10 @@ type ViewRouterProps = {
   canViewFinance: boolean;
   displayedRole: Role;
   traceChannelId: string | null;
+  /** Namespaces the unsettled-import records to one tenant + principal. */
+  importScope: string;
+  /** False while that namespace can still change under a write. */
+  importScopeSettled: boolean;
   onOpenTrace: (channelId: string) => void;
 };
 
@@ -584,6 +654,8 @@ const ViewRouter = ({
   canViewFinance,
   displayedRole,
   traceChannelId,
+  importScope,
+  importScopeSettled,
   onOpenTrace,
 }: ViewRouterProps) => {
   const renderView: Record<ViewKey, () => ReactNode> = {
@@ -598,7 +670,11 @@ const ViewRouter = ({
     registry: () => (
       <RegistryView
         canManageRegistry={permissions.canManageRegistry}
+        canImportChannels={permissions.canImportChannels}
         canViewFinance={permissions.canViewFinance}
+        canViewAudit={permissions.canViewAudit}
+        importScope={importScope}
+        importScopeSettled={importScopeSettled}
         onOpenTrace={onOpenTrace}
       />
     ),
@@ -780,6 +856,86 @@ const TenantProofTag = ({ label }: { label: string }) => {
 };
 
 // ============================================================================
+// Purpose: Choose the tenant identity that NAMES this operator's
+//   unsettled-import namespace — the session's own tenant when it carries one,
+//   otherwise the tenant resolved asynchronously from /tenants/me.
+// Database/ORM: None (frontend) — a pure choice between two identity sources.
+//   What it namespaces is localStorage, and through it which pending audited
+//   import the duplicate-write guard can see.
+// Standards: The tenant **ID**, never the slug. A slug is routing metadata and
+//   can be renamed, which would mint a fresh scope while an apply is still
+//   unsettled — hiding the warning and handing admission an empty bucket for a
+//   request whose outcome nobody knows. `SessionMe.tenant` is nullable, so the
+//   resolved tenant is the fallback rather than an equal alternative: without
+//   it every tenant for one operator collapses into a single bucket and one
+//   acknowledgement retires them all (review #184). Preferring the session
+//   value keeps the scope STABLE across the bootstrap, which is what
+//   isImportScopeSettled below depends on — the two are one decision split in
+//   half, and changing the preference here silently changes what that gate
+//   admits.
+// Blast Radius: Cross-tenant isolation of the duplicate-import guard. Picking
+//   the wrong source can hide a pending import from the operator who owns it,
+//   or let one operator acknowledge another namespace's record away — and an
+//   acknowledgement is what re-enables dispatch. No authorization meaning: the
+//   backend's permission and tenant scoping are unaffected either way.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> importScopeFor
+//     encodes this pair into the storage key prefix.
+//   - File: frontend/src/contexts/TenantContext.tsx -> supplies the resolved
+//     tenant used when the session body carries none.
+// ============================================================================
+// Extracted from AppShell so the shell stays under the analyzer's complexity
+// threshold (DeepSource JS-R1005) — conformed, not suppressed.
+const resolveImportScope = (
+  session: SessionMe,
+  resolvedTenant: { id: string | null },
+): string => {
+  return importScopeFor(session.tenant?.id ?? resolvedTenant.id, session.user_id);
+};
+
+// ============================================================================
+// Purpose: The ADMISSION PRECONDITION for an audited bulk import — whether the
+//   namespace that isolates pending-write records is FINAL. The session's own
+//   tenant is authoritative and needs no bootstrap, so a session carrying one
+//   is settled immediately; a session WITHOUT one waits for /tenants/me to
+//   SUCCEED.
+// Database/ORM: None (frontend) — a pure predicate over two identity sources.
+//   It issues no request and decides no permission; what it gates is whether
+//   RegistryImportFlow may reach POST /channels/import at all, and therefore
+//   whether a CHANNEL_IMPORTED audit event can be appended.
+// Standards: A FAILURE does not settle it, and that is the load-bearing part.
+//   Treating a failure as settled — which this did until review #184 — lets
+//   two tabs for the same operator disagree about the tenant: one builds the
+//   missing-tenant scope, the other the resolved one. Different key prefixes
+//   AND different Web Lock names, so neither can see the other's pending apply
+//   and both dispatch the same roster, duplicating an audited write. Scope
+//   adoption cannot undo that, because the request has already left.
+//   Fails CLOSED, and recoverably: a reload re-runs the bootstrap, so
+//   withholding is a retry rather than a wedge, and
+//   IMPORT_SCOPE_UNSETTLED_NOTE tells the operator exactly that.
+//   Kept beside resolveImportScope on purpose — the two read the same two
+//   sources and must agree about which one supplied the tenant, or the guard
+//   would be settled against one scope and the record written under another.
+//   Not an authorization input: the backend's permission checks, its own
+//   tenant scoping, and the plan fingerprint remain the authority regardless
+//   of what this returns.
+// Blast Radius: Whether a duplicate audited bulk import can be dispatched
+//   while tenant identity is unresolved. No revenue math; a mistake here shows
+//   as a refused import or a duplicated one, never as an unpermitted one.
+// Connections:
+//   - File: frontend/src/contexts/UnsettledImportContext.tsx -> importScopeFor
+//       builds the namespace this decides the finality of, and admit() is what
+//       it gates.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx ->
+//       receives this as importScopeSettled and refuses Apply while false.
+//   - File: frontend/src/contexts/TenantContext.tsx -> the hydration that
+//       flips it, via useTenantBootstrap's tenantSettled just above.
+// ============================================================================
+export const isImportScopeSettled = (session: SessionMe, tenantSettled: boolean): boolean => {
+  return session.tenant?.id != null || tenantSettled;
+};
+
+// ============================================================================
 // Purpose: Top-level SRCC shell. Hydrates the authenticated session from
 //          /session/me, then renders: a loading state while the bootstrap runs;
 //          the fail-closed <AccessDeniedState/> when hydration failed (401/403/
@@ -804,22 +960,38 @@ const AppShell = () => {
   const [traceChannelId, setTraceChannelId] = useState<string | null>(null);
 
   const sessionBootstrap = useSessionBootstrap();
+  // The RESOLVED tenant, for the import scope below. SessionMe.tenant is
+  // nullable, and /tenants/me may have resolved the tenant even when the
+  // session body carries none — falling back to it keeps two tenants for the
+  // same operator in separate buckets instead of collapsing them (review
+  // #184).
+  const resolvedTenant = useTenant();
   // The tenant bootstrap only runs once the authenticated session is ready, so
   // a loading or access-denied shell never issues a /tenants/me fetch.
   const sessionReady = sessionBootstrap.status === "ready";
   // previewRole is passed as the retry token: a dev role switch after a failed
   // tenant bootstrap re-fires it (dev-only; it does not affect capabilities).
-  const { proofLabel } = useTenantBootstrap(sessionReady, previewRole);
+  const { proofLabel, tenantSettled } = useTenantBootstrap(sessionReady, previewRole);
 
   // FIX: Clear the Registry→Trace navigation seed when leaving the trace view
   // so that a later manual click on the Trace nav item opens a blank view
   // instead of pre-selecting the last "Review" channel.
+  // Navigating away from a flow holding an unabortable write in flight would
+  // unmount it without stopping the request: the write still commits, but its
+  // completion handler can no longer reload the view or tell the operator it
+  // landed (review #184). NavSection disables its buttons off the same latch;
+  // this guard is the second half, so a keyboard or programmatic caller cannot
+  // route around the disabled control.
+  const writeInFlight = useWriteInFlightLatch();
+  const navBlockedReason = writeInFlight.reason;
+
   const handleViewChange = useCallback(
     (next: ViewKey) => {
+      if (navBlockedReason !== null) return;
       if (next !== "trace") setTraceChannelId(null);
       setView(next);
     },
-    [setView, setTraceChannelId],
+    [navBlockedReason, setView, setTraceChannelId],
   );
 
   if (sessionBootstrap.status === "loading") {
@@ -842,9 +1014,20 @@ const AppShell = () => {
     sessionBootstrap.session.capabilities,
   );
   const canViewFinance = permissions.canViewFinance;
+  // Namespaces the unsettled-import records. localStorage is origin-wide and
+  // outlives sign-out, so without this a pending import follows a shared
+  // browser into the next operator's or the next tenant's session.
+  const importScope = resolveImportScope(sessionBootstrap.session, resolvedTenant);
+  // Withhold import ADMISSION until that namespace is final. Without this the
+  // shell renders while /tenants/me is still in flight, and an apply admitted
+  // in that window files its pending record under the missing-tenant scope
+  // that the very next render replaces (review #184).
+  const importScopeSettled = isImportScopeSettled(sessionBootstrap.session, tenantSettled);
   const copy = VIEW_COPY[view];
 
+
   return (
+    <WriteInFlightProvider value={writeInFlight}>
     <div className="app">
       {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
       <Sidebar
@@ -854,6 +1037,7 @@ const AppShell = () => {
         onSelectPreviewRole={setPreviewRole}
         displayedRole={displayedRole}
         canViewFinance={canViewFinance}
+        blockedReason={navBlockedReason}
       />
       <main className="main">
         <Topbar
@@ -868,6 +1052,8 @@ const AppShell = () => {
           canViewFinance={canViewFinance}
           displayedRole={displayedRole}
           traceChannelId={traceChannelId}
+          importScope={importScope}
+          importScopeSettled={importScopeSettled}
           onOpenTrace={(channelId) => {
             setTraceChannelId(channelId);
             setView("trace");
@@ -876,6 +1062,7 @@ const AppShell = () => {
         {view === "command" && <WorkflowRail />}
       </main>
     </div>
+    </WriteInFlightProvider>
   );
 };
 

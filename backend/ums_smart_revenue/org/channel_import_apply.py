@@ -25,6 +25,8 @@
 # ============================================================================
 """Execute a bulk channel import plan with registry writes and audit trail."""
 
+from collections.abc import Mapping
+
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -33,19 +35,34 @@ from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistryStore
 from ums_smart_revenue.org.channel_import import (
     ChannelImportError,
+    ChannelImportGroupAction,
     ChannelImportOutcome,
     ChannelImportPlan,
     ChannelImportPlanEntry,
     ParsedChannelImport,
     plan_channel_import,
 )
-from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry, ChannelRegistryStore
+from ums_smart_revenue.org.channel_registry import (
+    ChannelRegistryEntry,
+    ChannelRegistryStore,
+    derive_revenue_source_status,
+    normalize_optional_content_owner,
+)
 
-_INVENTORY_FIELDS = ("channel_name", "cms_status", "content_owner_id", "revenue_required")
+# The one inventory field name this module also spells outside the tuple:
+# _reviewed_source_status asks whether a row's diff flips it, because that flip
+# is the only trigger that re-derives revenue_source_status.
+_REVENUE_REQUIRED_FIELD = "revenue_required"
+_INVENTORY_FIELDS = ("channel_name", "cms_status", "content_owner_id", _REVENUE_REQUIRED_FIELD)
 # Provenance marker on every audit record this module writes: it is how an
 # auditor separates bulk-import changes from single-channel API edits, so both
 # call sites must emit the identical value.
 AUDIT_SOURCE_BULK_IMPORT = "bulk_import"
+# The `action` value _attach_group_memberships reports for a group it minted,
+# as opposed to a membership it added to an existing one. Recorded on the
+# GROUP_UPDATED audit event, where an auditor uses it to tell a new
+# finance-scope group apart from a channel joining one that already existed.
+AUDIT_GROUP_ACTION_CREATED = "group_created"
 
 
 class ChannelImportArchivedGroupError(ChannelImportError):
@@ -66,6 +83,54 @@ class ChannelImportAdoptableGroupError(ChannelImportError):
     one in the plan-to-apply window; the write boundary re-checks (under a row
     lock) and raises this rather than letting the apply mint an ownership
     claim from a CSV cell after all. The route maps it to HTTP 409.
+    """
+
+
+class ChannelImportRowStateDivergedError(ChannelImportError):
+    """A row's pre-state moved between the plan the operator read and the lock.
+
+    The route's fingerprint check runs BEFORE ``apply_channel_import`` takes
+    each channel row lock, so a registry writer committing in that gap turns a
+    reviewed "channel_name: A -> B" into an unreviewed "C -> B". The values
+    written are the ones approved and the audit records the true C -> B diff,
+    but the operator approved neither C nor the decision to overwrite it
+    (review #184).
+
+    Raised ONLY for a caller that bound its apply to a reviewed plan by
+    sending ``expected_plan_fingerprint``. That opt-in is the whole point:
+    "the file wins" — an import overwriting concurrent drift, audited
+    truthfully — is a deliberate decision (review #159, r3713841231 /
+    r3713966806) and remains the behaviour for callers that never previewed
+    and are therefore re-approving nothing. Binding a plan is a client saying
+    "apply the diff I reviewed, or none of it", and this honours that without
+    reversing the default.
+
+    An UNCHANGED row is NOT exempt under a bound apply. "The preview showed no
+    change to this field" is a reviewed claim as strong as a listed diff, and
+    silent healing is precisely the outcome a caller who bound its plan
+    declined — so all four inventory fields are compared. Healing drift stays
+    the UNCHANGED row's documented job for UNBOUND callers only. The route
+    maps this to HTTP 409.
+    """
+
+
+class ChannelImportGroupActionDivergedError(ChannelImportError):
+    """A row's group would be JOINed where the plan said CREATE, or vice versa.
+
+    The route's fingerprint check runs BEFORE ``apply_channel_import`` takes
+    any group row lock, so the plan-to-apply window is still open for group
+    existence specifically: this owner's CMS sync can create a previously
+    absent group after the comparison and before ``_attach_group_memberships``
+    reaches it, turning a reviewed "creates a new SECTOR group" into a silent
+    join of a group the operator never saw — a different finance-scope and
+    audit effect, with no second 409 to catch it (review #184).
+
+    So the planned ``group_action`` is re-checked under the SAME row lock that
+    performs the write, and any divergence fails the whole import closed. That
+    is the identical rule its three sibling errors already follow for
+    archived, owner-NULL and cross-owner groups; this one closes the last gap
+    in the set. The route maps it to HTTP 409, and the operator's retry
+    previews the new reality.
     """
 
 
@@ -129,6 +194,13 @@ def plan_channel_import_with_stores(
     owner is a decision only that owner's CMS sync may make, so a row
     targeting one fails closed here instead of the apply stamping ownership
     on the authority of a spreadsheet cell.
+
+    The fourth group read is the only one that refuses nothing: the keys this
+    owner already holds are what let a surviving row disclose whether its
+    group is JOINed or newly CREATED. It is always performed here, so the
+    planner's ``None`` ("caller did not read") never reaches an API response —
+    a bare ``group_id`` cell would otherwise leave the operator approving a
+    new finance-scope group sight unseen.
     """
     wanted = {row.youtube_channel_id for row in parsed.rows}
     existing = {
@@ -147,6 +219,9 @@ def plan_channel_import_with_stores(
             groups.list_foreign_owner_cms_group_ids(group_ids, content_owner_id=content_owner_id)
         ),
         adoptable_group_ids=frozenset(groups.list_adoptable_cms_group_ids(group_ids)),
+        owned_group_ids=frozenset(
+            groups.list_owned_cms_group_ids(group_ids, content_owner_id=content_owner_id)
+        ),
     )
 
 
@@ -187,8 +262,20 @@ def apply_channel_import(
     cms_status: str,
     reason: str,
     filename: str | None,
+    enforce_reviewed_pre_state: bool = False,
 ) -> None:
     """Execute every CREATE/UPDATE row, reconcile groups, and audit everything.
+
+    ``enforce_reviewed_pre_state`` is the caller's opt-in to "apply the diff I
+    reviewed, or none of it": when set, a row whose locked pre-state no longer
+    matches the one the preview showed fails the whole import closed instead of
+    overwriting a value the operator never saw — across ALL FOUR inventory
+    fields, including the ones the preview showed as unchanged. The route sets
+    it exactly when the client bound its apply with
+    ``expected_plan_fingerprint``. Left off, the documented default stands —
+    the file wins, and the audit records the real diff — so a caller that never
+    previewed is unaffected (review #184 for the opt-in; review #159 for the
+    default).
 
     CREATE rows perform a registry create and an audit event. UPDATE and
     UNCHANGED rows BOTH write through the registry at the write boundary: the
@@ -215,6 +302,12 @@ def apply_channel_import(
     same channels in opposite file order would otherwise each hold what the
     other waits for and PostgreSQL would abort one as a deadlock. The response
     payload and per-row numbering still follow the operator's file.
+
+    The two passes live in ``_apply_inventory_writes`` and
+    ``_apply_group_memberships``. The split is load-bearing for the lock order
+    described above — ALL channel locks are taken before ANY group lock — so
+    the passes must stay separate and in this sequence, not be interleaved
+    back into one loop over the plan.
     """
     # Counted at the WRITE BOUNDARY, never from plan.counts. The plan's
     # outcome came from a possibly-stale snapshot: a row planned UPDATE whose
@@ -224,49 +317,239 @@ def apply_channel_import(
     # import that recorded no channel update at all — the summary and the
     # per-row CHANNEL_UPDATED events would disagree in the same trail (review
     # #159 r3715617737). Same rule the per-row audit already follows.
+    # BEFORE the first inventory write. The authoritative group-effect check
+    # runs under each group's row lock in the second pass, and it must — but by
+    # then every channel row has been written, and a store without a
+    # transaction has no way to take those back when the group pass raises
+    # (review #184, codex P2). One bulk, LOCK-FREE read here refuses the whole
+    # import while nothing has been written yet.
+    #
+    # Lock-free deliberately: taking group locks in this position would put
+    # them BEFORE the channel locks, inverting the order the two passes exist
+    # to establish and re-opening the deadlock against a concurrent
+    # POST /groups/{id}/members that review #159 r3714644431 closed.
+    _require_planned_group_actions(plan, groups=groups, content_owner_id=content_owner_id)
+    applied_counts = _apply_inventory_writes(
+        plan,
+        registry=registry,
+        audit_sink=audit_sink,
+        actor=actor,
+        scope=scope,
+        content_owner_id=content_owner_id,
+        cms_status=cms_status,
+        reason=reason,
+        enforce_reviewed_pre_state=enforce_reviewed_pre_state,
+    )
+    _apply_group_memberships(
+        plan,
+        groups=groups,
+        audit_sink=audit_sink,
+        actor=actor,
+        scope=scope,
+        content_owner_id=content_owner_id,
+        reason=reason,
+    )
+    record_audit_event(
+        sink=audit_sink,
+        actor=actor,
+        event_type=AuditEventType.CHANNEL_IMPORTED,
+        entity_type="youtube_channel_import",
+        entity_id=content_owner_id,
+        scope=scope,
+        reason=reason,
+        details={
+            # The multipart filename is attacker-controlled and lands in
+            # audit_logs.details (JSONB); PostgreSQL rejects U+0000 inside a
+            # JSON string, so an unsanitized name would roll an otherwise
+            # valid import back as an unhandled 500 on this final append.
+            "filename": _safe_audit_filename(filename),
+            "content_owner_id": content_owner_id,
+            "cms_status": cms_status,
+            "counts": applied_counts,
+        },
+    )
+
+
+# ============================================================================
+# Purpose: Decide whether one plan entry is group work at all, and hand back the
+#   pair that work is made of — its CMS group key and the channel joining it.
+# Database/ORM: None — pure over the entry. It performs no read and no write;
+#   the group pass and its pre-flight both act on what this returns.
+# Standards: ONE definition, used by both halves, and that is the whole point.
+#   The pre-flight judges the labels the write boundary will enforce, so a
+#   filter WIDER than the batcher's refuses a plan over an entry the write pass
+#   then skips — a stale label on an ERROR row taking down a valid JOIN. The two
+#   drifting apart is exactly how that reappears (review #184).
+#   Returns the narrowed PAIR rather than a bool: `str | None` narrowing does not
+#   survive a boolean helper, so both callers went back to re-proving what they
+#   had just asked, and mypy failed them for it (DeepSource TYP-050).
+#   A row is group work only with a key AND a channel identity, because
+#   _attach_group_memberships is handed `channel_ids` — an entry missing either
+#   contributes nothing for the group pass to do.
+# Blast Radius: Which rows reach the group write, and — through the pre-flight —
+#   whether a whole import is refused before any channel row is written. No
+#   writes and no audit rows of its own; over-inclusion costs a false refusal,
+#   under-inclusion costs an unchecked group effect.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _require_planned_group_actions, the pre-flight, and _group_write_batches,
+#     the batcher — the two callers this exists to keep in step.
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     ChannelImportPlanEntry, whose optional fields make the narrowing necessary.
+# ============================================================================
+def _group_write_target(entry: ChannelImportPlanEntry) -> tuple[str, str] | None:
+    """The ``(group key, channel id)`` this entry's group write acts on, or None.
+
+    Shared by the pre-flight and _group_write_batches deliberately. The
+    pre-flight judges the labels the write boundary is going to enforce, so
+    judging a WIDER set would refuse a plan over an entry the write pass then
+    skips — an over-refusal that the two filters drifting apart is exactly how
+    you get (review #184).
+
+    A row needs a group key, and it needs the channel identity the membership
+    write is made of: ``_attach_group_memberships`` is handed ``channel_ids``,
+    so an entry missing either is not group work at all.
+
+    Returns the pair rather than a bool so both callers get the values already
+    narrowed out of ``str | None``. A predicate would have left each of them
+    re-proving what it had just asked.
+    """
+    if not entry.group_id or entry.youtube_channel_id is None or entry.channel_name is None:
+        return None
+    return entry.group_id, entry.youtube_channel_id
+
+
+# ============================================================================
+# Purpose: Refuse a whole import whose reviewed group effects no longer match
+#   reality, BEFORE any channel row is written — a pre-flight for the locked
+#   per-key check the group pass performs.
+# Database/ORM: ChannelGroupORM, read-only: the four bulk key lookups over the
+#   plan's keys, no locks and no writes. All four, because their UNION is what
+#   "this key resolves to a group" means — owned, archived, another owner's,
+#   and owner-NULL are the only ways a row can exist, and the locked check
+#   judges existence, not ownership.
+# Standards: ADVISORY, not the guarantee. It cannot be the guarantee — a
+#   lock-free read can be raced, and locking here would invert the channels-
+#   before-groups order the two passes exist to establish. The authoritative
+#   check stays in _require_planned_group_action under the group row lock; this
+#   one exists so the common case fails closed while the registry is still
+#   untouched, which is the only protection a NON-TRANSACTIONAL store has
+#   (the SQL adapter's transaction covers the rest). Asserts nothing for rows
+#   that disclosed no action, matching the locked check exactly — the two must
+#   not be able to disagree about what a null label means.
+# Blast Radius: Turns a diverged import into a 409 earlier and with no writes
+#   to undo. It can only REFUSE: a pass here still leaves every later guard in
+#   place, so it cannot admit anything the locked check would reject.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _require_planned_group_action, the locked authority this mirrors.
+#   - File: backend/ums_smart_revenue/org/channel_groups.py ->
+#     list_owned_cms_group_ids, the same read planning used.
+# ============================================================================
+def _require_planned_group_actions(
+    plan: ChannelImportPlan,
+    *,
+    groups: ChannelGroupRegistryStore,
+    content_owner_id: str,
+) -> None:
+    """Re-check every planned group effect against a fresh bulk read."""
+    # Every ENTRY the write pass will act on, not a dict keyed by group id.
+    # Collapsing was last-wins, while the locked pass takes its action from
+    # ``entries[0]`` of the batch — the FIRST — so a plan carrying two actions
+    # for one key had the two halves judging different labels, and the
+    # pre-flight could approve the one the write boundary was not going to use.
+    #
+    # Checking each entry also removes the need to detect the contradiction
+    # separately: existence is one fact per key, so of two disagreeing labels
+    # exactly one must contradict it, and that one raises here (review #184).
+    planned: list[tuple[str, ChannelImportGroupAction]] = []
+    for entry in plan.entries:
+        target = _group_write_target(entry)
+        if target is None or entry.group_action is None:
+            continue
+        planned.append((target[0], entry.group_action))
+    if not planned:
+        return
+    keys = {group_id for group_id, _ in planned}
+    # EXISTENCE, not ownership. The locked check judges what
+    # get_group_by_cms_id returns, and that resolves a key regardless of who
+    # owns it — so asking only "is it mine" leaves a CREATE label passing here
+    # when the key has since been created owner-NULL or by another owner, and
+    # the divergence surfaces only in the second pass, after the inventory
+    # writes (review #184, codex P2). The four sets are exhaustive over the
+    # ways a key can resolve, which is exactly why the planner needs all four.
+    observed = (
+        set(groups.list_owned_cms_group_ids(keys, content_owner_id=content_owner_id))
+        | set(groups.list_archived_cms_group_ids(keys))
+        | set(groups.list_foreign_owner_cms_group_ids(keys, content_owner_id=content_owner_id))
+        | set(groups.list_adoptable_cms_group_ids(keys))
+    )
+    for cms_group_id, action in planned:
+        _require_planned_group_action(
+            action,
+            observed_exists=cms_group_id in observed,
+            cms_group_id=cms_group_id,
+        )
+
+
+# ============================================================================
+# Purpose: Execute the import's FIRST write pass — one registry write per
+#   CREATE/UPDATE/UNCHANGED row plus its audit event — and return the tally
+#   the CHANNEL_IMPORTED summary must carry.
+# Database/ORM: YouTubeChannelORM via ChannelRegistryStore (create_channel /
+#   update_inventory); AuditLogORM rows via the supplied sink. No group or
+#   finance tables.
+# Standards: Runs inside the caller's single transaction, so any raise here
+#   rolls back every row already written in this pass. Rows are visited in
+#   _channel_write_order so overlapping imports take channel locks in one
+#   consistent order. The tally is accumulated from what the write boundary
+#   actually did, never from plan.counts. ERROR rows and rows missing an id or
+#   name are skipped without a write.
+# Blast Radius: Channel registry inventory (name, cms_status,
+#   content_owner_id, revenue_required) and the per-channel audit trail;
+#   through cms_status/content_owner_id it steers connector ingest targeting.
+#   No revenue math, no allocation, no month-close.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     apply_channel_import owns the pass ORDER this half depends on.
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+#     row-locked update_inventory whose (previous, updated) pair is audited.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the write-boundary audit contract.
+# ============================================================================
+def _apply_inventory_writes(
+    plan: ChannelImportPlan,
+    *,
+    registry: ChannelRegistryStore,
+    audit_sink: AuditSink,
+    actor: UserPrincipal,
+    scope: AccessScope,
+    content_owner_id: str,
+    cms_status: str,
+    reason: str,
+    enforce_reviewed_pre_state: bool,
+) -> dict[str, int]:
+    """Run the FIRST pass — every channel row write and its audit event.
+
+    Returns the write-boundary tally the CHANNEL_IMPORTED summary must carry.
+    Split out of ``apply_channel_import`` with the group pass so neither the
+    caller nor either pass carries all three phases' branching at once; see
+    those functions for the ordering and audit rules this implements.
+    """
     applied_counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
     for entry in _channel_write_order(plan.entries):
         channel_id = entry.youtube_channel_id
         if channel_id is None or entry.channel_name is None:
             continue
-        event_type: AuditEventType | None = None
-        applied_changes: dict[str, tuple[object, object]] = {}
-        if entry.outcome is ChannelImportOutcome.CREATE:
-            registry.create_channel(
-                youtube_channel_id=channel_id,
-                channel_name=entry.channel_name,
-                primary_company_id=None,
-                cms_status=cms_status,
-                revenue_required=bool(entry.revenue_required),
-                content_owner_id=content_owner_id,
-            )
-            event_type = AuditEventType.CHANNEL_CREATED
-            applied_counts[ChannelImportOutcome.CREATE.value] += 1
-        elif entry.outcome in (ChannelImportOutcome.UPDATE, ChannelImportOutcome.UNCHANGED):
-            # The registry re-reads the row under a lock at the write boundary
-            # and returns what it actually replaced; the durable diff below is
-            # built from THAT, not the plan's possibly-stale snapshot, so a
-            # concurrent committed change cannot be hidden from the trail —
-            # and an UNCHANGED classification cannot preserve a concurrent
-            # writer's value over the roster's (review #159 r3713841231).
-            previous, updated = registry.update_inventory(
-                youtube_channel_id=channel_id,
-                channel_name=entry.channel_name,
-                cms_status=cms_status,
-                content_owner_id=content_owner_id,
-                revenue_required=bool(entry.revenue_required),
-            )
-            applied_changes = _entry_changes(previous, updated)
-            # The audit rule is the same for planned UPDATE and UNCHANGED:
-            # record CHANNEL_UPDATED only when the write-boundary diff is
-            # non-empty. A planned UPDATE whose target values a concurrent
-            # writer already committed replaces nothing — auditing it would
-            # claim a mutation that did not occur (review #159 r3713966806).
-            if applied_changes:
-                event_type = AuditEventType.CHANNEL_UPDATED
-                applied_counts[ChannelImportOutcome.UPDATE.value] += 1
-            else:
-                applied_counts[ChannelImportOutcome.UNCHANGED.value] += 1
+        event_type, applied_changes, source_status_change = _write_inventory_row(
+            entry,
+            registry=registry,
+            channel_id=channel_id,
+            channel_name=entry.channel_name,
+            content_owner_id=content_owner_id,
+            cms_status=cms_status,
+            enforce_reviewed_pre_state=enforce_reviewed_pre_state,
+            applied_counts=applied_counts,
+        )
         if event_type is not None:
             record_audit_event(
                 sink=audit_sink,
@@ -288,28 +571,235 @@ def apply_channel_import(
                     content_owner_id=content_owner_id,
                     cms_status=cms_status,
                     applied_changes=applied_changes,
+                    source_status_change=source_status_change,
                 ),
             )
-    # Group membership runs as a SECOND pass, ordered by (group key, channel
-    # id): every channel row lock is taken before any group row lock, and both
-    # resource classes are visited in a stable order, so overlapping imports
-    # can never hold one class while waiting on the other's.
-    for entry in _group_write_order(plan.entries):
-        channel_id = entry.youtube_channel_id
-        if channel_id is None or entry.channel_name is None or not entry.group_id:
-            continue
-        group_change = _attach_group_membership(
-            groups,
-            cms_group_id=entry.group_id,
-            channel_id=channel_id,
+    return applied_counts
+
+
+# ============================================================================
+# Purpose: Perform ONE roster row's registry write and report what the audit
+#   trail should record for it — the CREATE/UPDATE/UNCHANGED decision made at
+#   the write boundary rather than at plan time.
+# Database/ORM: YouTubeChannelORM via ChannelRegistryStore.create_channel or
+#   .update_inventory (the latter re-reads the row under a lock and returns
+#   what it replaced). No audit write of its own — it returns the verdict.
+# Standards: Typed domain errors propagate for the route to translate
+#   (ChannelRevenueRequirementLockedMonthError, ChannelRegistryConflictError,
+#   ChannelImportRowStateDivergedError -> 409), each aborting the caller's
+#   single transaction. The audit verdict is derived from the write-boundary
+#   diff, never from entry.changes, so a write that replaced nothing is
+#   reported as UNCHANGED even when the plan called it an UPDATE.
+# Blast Radius: One channel's inventory row and whether a CHANNEL_CREATED or
+#   CHANNEL_UPDATED event exists for it. Mutates the caller's running tally.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _require_reviewed_pre_state, the plan-bound divergence guard it gates.
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+#     update_inventory's lock order (tenant guard before channel row).
+# ============================================================================
+def _write_inventory_row(
+    entry: ChannelImportPlanEntry,
+    *,
+    registry: ChannelRegistryStore,
+    channel_id: str,
+    channel_name: str,
+    content_owner_id: str,
+    cms_status: str,
+    enforce_reviewed_pre_state: bool,
+    applied_counts: dict[str, int],
+) -> tuple[AuditEventType | None, dict[str, tuple[object, object]], tuple[str | None, str] | None]:
+    """Write ONE row and report what to audit, tallying ``applied_counts``.
+
+    Returns ``(event_type, applied_changes)`` where a ``None`` event means the
+    write recorded nothing worth auditing. The tally is mutated here rather
+    than returned because it accumulates across rows and must count what the
+    write boundary did, not what the plan predicted.
+
+    ``channel_id`` and ``channel_name`` come in already narrowed to non-None by
+    the caller's skip check, so this never has to invent a fallback name.
+    """
+    if entry.outcome is ChannelImportOutcome.CREATE:
+        created = registry.create_channel(
+            youtube_channel_id=channel_id,
+            channel_name=channel_name,
+            primary_company_id=None,
+            cms_status=cms_status,
+            revenue_required=bool(entry.revenue_required),
             content_owner_id=content_owner_id,
         )
-        # A group creation or membership addition is a finance-scope
-        # mutation; without its own GROUP_UPDATED record an inventory-
-        # UNCHANGED row's group change would be invisible in the audit
-        # trail (the summary event carries only counts).
-        if group_change is not None:
-            group_action, group = group_change
+        applied_counts[ChannelImportOutcome.CREATE.value] += 1
+        return AuditEventType.CHANNEL_CREATED, {}, (None, created.revenue_source_status)
+    if entry.outcome not in (ChannelImportOutcome.UPDATE, ChannelImportOutcome.UNCHANGED):
+        return None, {}, None
+    # The registry re-reads the row under a lock at the write boundary and
+    # returns what it actually replaced; the durable diff below is built from
+    # THAT, not the plan's possibly-stale snapshot, so a concurrent committed
+    # change cannot be hidden from the trail — and an UNCHANGED classification
+    # cannot preserve a concurrent writer's value over the roster's (review
+    # #159 r3713841231).
+    # The four values this write will install, needed by the pre-state guard
+    # BEFORE the write happens. They are exactly what `updated` will carry —
+    # update_inventory assigns each from these arguments — with the store's own
+    # normalization applied to the owner so the comparison stays like-for-like.
+    written: dict[str, object] = {
+        "channel_name": channel_name,
+        "cms_status": cms_status,
+        "content_owner_id": normalize_optional_content_owner(content_owner_id),
+        "revenue_required": bool(entry.revenue_required),
+    }
+
+    # ========================================================================
+    # Purpose: Judge the LOCKED pre-state before a single field is assigned,
+    #   and refuse the write if the row is not what the plan was made
+    #   against. Two independent rules live here: one that runs for every
+    #   apply, and one only a plan-bound apply opts into.
+    # Database/ORM: youtube_channels, read under the row lock
+    #   update_inventory holds. It performs no write itself; raising is how
+    #   it prevents one.
+    # Standards: Runs INSIDE update_inventory rather than on its return
+    #   value, and that placement is the whole point — a raise here must
+    #   leave the row untouched, and a store without a transaction cannot
+    #   undo a mutation the caller then rejects (review #184).
+    #   _require_reviewed_active fires for EVERY apply, bound or not: "the
+    #   file wins" (review #159) is a decision about inventory FIELDS the
+    #   roster asserts, and it never licensed resurrecting a channel an
+    #   operator retired — the roster does not carry `active` to assert in
+    #   the first place. _require_reviewed_pre_state fires only when the
+    #   caller bound its apply to a reviewed plan, comparing against the four
+    #   values this write will install, with the store's own normalization
+    #   already applied to the owner so the comparison stays like-for-like.
+    # Blast Radius: FINANCE + AUDIT. Letting a drifted row through writes and
+    #   audits a diff the operator never saw — including over a retired
+    #   channel, whose Group_ID row would then carry on into the membership
+    #   pass. Failing closed costs a 409 and a re-preview; failing open costs
+    #   a silent overwrite with a CHANNEL_UPDATED event that describes it as
+    #   reviewed.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+    #     ChannelRegistryStore protocol that specifies calling this before
+    #     assignment, and the in-memory adapter that honours it.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+    #     same contract inside the row lock.
+    #   - File: backend/ums_smart_revenue/api/channels.py -> the route whose
+    #     expected_plan_fingerprint sets enforce_reviewed_pre_state.
+    # ========================================================================
+    def require_pre_state(previous: ChannelRegistryEntry) -> None:
+        """Judge the locked pre-state before a single field is assigned.
+
+        Runs INSIDE update_inventory rather than on its return value: a raise
+        here must leave the row untouched, and a store without a transaction
+        cannot undo a mutation the caller then rejects (review #184).
+        """
+        # EVERY apply, bound or not. "The file wins" (review #159) is a
+        # decision about inventory FIELDS the roster asserts — it never
+        # licensed resurrecting a channel an operator retired, and the roster
+        # does not carry `active` to assert in the first place. The planner
+        # ERRORs archived channels for all callers, so an unbound apply that
+        # races an archive would write and audit a retired row and carry a
+        # Group_ID row on into the membership pass (review #184).
+        _require_reviewed_active(entry, previous)
+        # Only for a plan-bound apply: the pre-state the operator reviewed must
+        # still be the stored one, or the diff on their screen is not the diff
+        # this write performs.
+        if enforce_reviewed_pre_state:
+            _require_reviewed_pre_state(entry, previous, written)
+
+    previous, updated = registry.update_inventory(
+        youtube_channel_id=channel_id,
+        channel_name=channel_name,
+        cms_status=cms_status,
+        content_owner_id=content_owner_id,
+        revenue_required=bool(entry.revenue_required),
+        require_pre_state=require_pre_state,
+    )
+    applied_changes = _entry_changes(previous, updated)
+    # The audit rule is the same for planned UPDATE and UNCHANGED: record
+    # CHANNEL_UPDATED only when the write-boundary diff is non-empty. A planned
+    # UPDATE whose target values a concurrent writer already committed replaces
+    # nothing — auditing it would claim a mutation that did not occur (review
+    # #159 r3713966806).
+    # The write ALSO re-derives revenue_source_status when revenue_required
+    # flips, and _INVENTORY_FIELDS deliberately excludes it (it drives the
+    # outcome tally and the pre-state guard, which are about the operator's
+    # asserted fields). Reporting it separately keeps the audit trail able to
+    # reconstruct the finance-source transition that was actually persisted —
+    # the same one the preview now discloses (review #184).
+    source_status_change = (
+        None
+        if previous.revenue_source_status == updated.revenue_source_status
+        else (previous.revenue_source_status, updated.revenue_source_status)
+    )
+    if not applied_changes:
+        applied_counts[ChannelImportOutcome.UNCHANGED.value] += 1
+        return None, applied_changes, source_status_change
+    applied_counts[ChannelImportOutcome.UPDATE.value] += 1
+    return AuditEventType.CHANNEL_UPDATED, applied_changes, source_status_change
+
+
+# ============================================================================
+# Purpose: Execute the import's SECOND write pass — resolve each row's CMS
+#   group, create it when absent, attach the channel, and audit every
+#   membership mutation.
+# Database/ORM: ChannelGroupORM (row-locked read via get_group_by_cms_id
+#   for_update=True; INSERT via create_group) and ChannelGroupMemberORM
+#   (INSERT via add_members); AuditLogORM rows via the supplied sink.
+# Standards: Runs AFTER the inventory pass, never interleaved with it — every
+#   channel row lock is taken before any group row lock, and groups are
+#   visited in _group_write_order, so overlapping imports cannot hold one
+#   resource class while waiting on the other's. Write-boundary rechecks over
+#   plan trust: archived, owner-NULL, cross-owner and diverged-action groups
+#   all raise typed errors (route: 409) that roll the whole import back. A
+#   membership that already existed is not audited.
+# Blast Radius: Channel-group membership, and therefore finance group-scope
+#   selection and rollups; the GROUP_UPDATED audit trail. No channel
+#   inventory writes, no revenue totals.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the locked
+#     lookup, typed uniqueness conflict, and membership writers.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps the archived,
+#     unstamped, cross-owner and diverged-action errors to 409.
+# ============================================================================
+def _apply_group_memberships(
+    plan: ChannelImportPlan,
+    *,
+    groups: ChannelGroupRegistryStore,
+    audit_sink: AuditSink,
+    actor: UserPrincipal,
+    scope: AccessScope,
+    content_owner_id: str,
+    reason: str,
+) -> None:
+    """Run the SECOND pass — group resolution, membership, and its audit.
+
+    Ordered by (group key, channel id): every channel row lock is taken in the
+    first pass before any group row lock here, and both resource classes are
+    visited in a stable order, so overlapping imports can never hold one class
+    while waiting on the other's.
+
+    Work is grouped BY KEY, so each CMS group is locked and resolved exactly
+    once no matter how many rows name it. Resolving per row made the cost
+    quadratic in the payload: every lookup materialized the group's whole
+    membership, and every single-channel add read it again and returned it
+    again, so a 5000-row roster under one group moved tens of millions of
+    membership rows inside one transaction while holding every channel lock
+    (review #184, measured). Per-key resolution also makes it structurally
+    impossible for the run to observe its own group creation, which is what
+    the removed ``groups_created_here`` ledger used to compensate for.
+    """
+    for cms_group_id, entries in _group_write_batches(plan.entries):
+        # A group creation or membership addition is a finance-scope mutation;
+        # without its own GROUP_UPDATED record an inventory-UNCHANGED row's
+        # group change would be invisible in the audit trail (the summary
+        # event carries only counts). One event per channel actually attached,
+        # exactly as the per-row pass emitted.
+        for group_action, group, channel_id in _attach_group_memberships(
+            groups,
+            cms_group_id=cms_group_id,
+            channel_ids=[entry.youtube_channel_id or "" for entry in entries],
+            content_owner_id=content_owner_id,
+            planned_action=entries[0].group_action,
+        ):
             record_audit_event(
                 sink=audit_sink,
                 actor=actor,
@@ -320,31 +810,12 @@ def apply_channel_import(
                 reason=reason,
                 details={
                     "action": group_action,
-                    "cms_group_id": entry.group_id,
+                    "cms_group_id": cms_group_id,
                     "group_type": group.group_type,
                     "channel_id": channel_id,
                     "source": AUDIT_SOURCE_BULK_IMPORT,
                 },
             )
-    record_audit_event(
-        sink=audit_sink,
-        actor=actor,
-        event_type=AuditEventType.CHANNEL_IMPORTED,
-        entity_type="youtube_channel_import",
-        entity_id=content_owner_id,
-        scope=scope,
-        reason=reason,
-        details={
-            # The multipart filename is attacker-controlled and lands in
-            # audit_logs.details (JSONB); PostgreSQL rejects U+0000 inside a
-            # JSON string, so an unsanitized name would roll an otherwise
-            # valid import back as an unhandled 500 on this final append.
-            "filename": _safe_audit_filename(filename),
-            "content_owner_id": content_owner_id,
-            "cms_status": cms_status,
-            "counts": applied_counts,
-        },
-    )
 
 
 def _safe_audit_filename(filename: str | None) -> str | None:
@@ -371,6 +842,57 @@ def _channel_write_order(
     )
 
 
+# ============================================================================
+# Purpose: Group the membership work by CMS key so each group is locked and
+#   resolved exactly once, and decide the order those batches are written in.
+# Database/ORM: None — pure partition of an in-memory plan. The batches it
+#   returns determine which ChannelGroupORM rows get locked and in what order.
+# Standards: Built ON _group_write_order, not beside it, so the lock order it
+#   establishes is inherited rather than re-derived: keys ascending, and
+#   channels within a key in (group key, channel id) order — which is also the
+#   order their GROUP_UPDATED events are emitted in. A channel repeated under
+#   the SAME key collapses to one entry: the per-row pass got that for free
+#   because the second copy found itself already a member and audited nothing,
+#   whereas a batch handing the same channel to add_members twice would claim
+#   two attachments for one membership. Rows with no id, no name, or no group
+#   key are skipped here rather than downstream.
+# Blast Radius: Which groups are locked, in what order, and therefore the
+#   deadlock behaviour of overlapping imports; and the shape of the
+#   GROUP_UPDATED trail. No writes of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _apply_group_memberships consumes these batches; _group_write_order
+#     supplies the ordering this preserves.
+# ============================================================================
+def _group_write_batches(
+    entries: tuple[ChannelImportPlanEntry, ...],
+) -> list[tuple[str, list[ChannelImportPlanEntry]]]:
+    """Group the membership work by CMS key, keys and rows in write order.
+
+    Built on ``_group_write_order`` so the lock order it establishes is
+    unchanged: keys are still visited ascending, and within a key the channels
+    keep their (group key, channel id) order, which is the order their audit
+    events are emitted in.
+
+    A channel repeated under the SAME key collapses to one entry. The per-row
+    pass got that for free — the second copy found itself already a member and
+    audited nothing — but a batch must not hand the same channel to
+    ``add_members`` twice and claim two attachments for one membership.
+    """
+    batches: dict[str, list[ChannelImportPlanEntry]] = {}
+    seen: set[tuple[str, str]] = set()
+    for entry in _group_write_order(entries):
+        target = _group_write_target(entry)
+        if target is None:
+            continue
+        group_id, channel_id = target
+        if (group_id, channel_id) in seen:
+            continue
+        seen.add((group_id, channel_id))
+        batches.setdefault(group_id, []).append(entry)
+    return list(batches.items())
+
+
 def _group_write_order(
     entries: tuple[ChannelImportPlanEntry, ...],
 ) -> list[ChannelImportPlanEntry]:
@@ -386,12 +908,48 @@ def _group_write_order(
     )
 
 
+# ============================================================================
+# Purpose: Build ONE channel write's audit details — the durable, field-level
+#   record of what that write actually replaced, including the finance-source
+#   transition it performed.
+# Database/ORM: None directly; the mapping returned becomes AuditLogORM.details
+#   (JSONB) for a CHANNEL_CREATED or CHANNEL_UPDATED event.
+# Standards: Provenance over convenience. `changes` is built from the write
+#   BOUNDARY re-read, never from the plan's snapshot, so the trail records what
+#   was replaced rather than what was predicted; `view_revenue_raw` preserves
+#   the operator's original CSV token, because the derived boolean alone cannot
+#   tell an explicit permission from the required-by-default rule. Every record
+#   carries AUDIT_SOURCE_BULK_IMPORT, which is how an auditor separates import
+#   changes from single-channel API edits, so the value must stay identical at
+#   both call sites. `revenue_source_status` is recorded SEPARATELY from
+#   `changes` and only when the write re-classified: it is derived by the
+#   registry rather than asserted by the roster, so it is not one of
+#   _INVENTORY_FIELDS — but omitting it let a CHANNEL_UPDATED event record the
+#   revenue_required flip while hiding the classification that flip replaced
+#   (review #184). Its ABSENCE is meaningful and must stay so: it means the
+#   write left the classification alone, which is also what it means on every
+#   event written before this key existed.
+# Blast Radius: AUDIT + FINANCE. This payload is the authoritative record of a
+#   bulk import's effect on a channel — the one the operator is told to consult
+#   when an apply's outcome is unknown — and revenue_source_status is what lets
+#   it reconstruct a missing-official-revenue transition after the fact. It
+#   writes nothing itself; a mistake here is a trail that misdescribes a write
+#   that did happen, which is worse than a missing one.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _write_inventory_row, which supplies the boundary diff and the transition.
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> record_audit_event,
+#     which persists this mapping.
+#   - File: Docs/pulls/2026-08-09-pr-184-import-stepper-ui-handoff.md -> records
+#     revenue_source_status as an additive audit-contract change.
+# ============================================================================
 def _channel_audit_details(
     entry: ChannelImportPlanEntry,
     *,
     content_owner_id: str,
     cms_status: str,
     applied_changes: dict[str, tuple[object, object]],
+    source_status_change: tuple[str | None, str] | None = None,
 ) -> dict[str, object]:
     """Build one channel write's audit details with full field-level provenance.
 
@@ -402,8 +960,15 @@ def _channel_audit_details(
     means the column was absent and the required-by-default rule applied —
     because the derived boolean alone cannot distinguish an explicit
     permission from the default.
+
+    ``revenue_source_status`` is recorded SEPARATELY from ``changes`` when the
+    write re-classified it. It is derived by the registry rather than asserted
+    by the roster, so it is not one of _INVENTORY_FIELDS — but leaving it out
+    of the trail entirely meant a CHANNEL_UPDATED event could record the
+    revenue_required flip while omitting the finance-source classification
+    that flip actually replaced (review #184).
     """
-    return {
+    details: dict[str, object] = {
         "channel_name": entry.channel_name,
         "content_owner_id": content_owner_id,
         "cms_status": cms_status,
@@ -414,6 +979,288 @@ def _channel_audit_details(
         },
         "source": AUDIT_SOURCE_BULK_IMPORT,
     }
+    if source_status_change is not None:
+        details["revenue_source_status"] = {
+            "from": source_status_change[0],
+            "to": source_status_change[1],
+        }
+    return details
+
+
+# ============================================================================
+# Purpose: Enforce, for a plan-bound apply only, that the row this write just
+#   touched still held the pre-state the operator reviewed — the second half
+#   of the optimistic-concurrency story `plan_fingerprint` starts.
+# Database/ORM: None directly. Reads the ``previous``/``updated`` pair the
+#   registry's row-locked write already returned (YouTubeChannelORM), so it
+#   adds no query and cannot itself be raced.
+# Standards: Fail closed and fail WHOLE — raising aborts the single import
+#   transaction, so a divergence on one row rolls back every row, every group
+#   mutation and every audit event. Compares all of _INVENTORY_FIELDS, not
+#   just the reviewed diff, because the write sets all four: "no change to X"
+#   is a reviewed claim as strong as "X: A -> B". Runs ONLY when the caller
+#   passed enforce_reviewed_pre_state (the route sets it exactly for a request
+#   carrying expected_plan_fingerprint); the unbound default remains "the file
+#   wins" per review #159. An unlisted field's expected value is taken from
+#   ``updated`` rather than the plan, which is what keeps a channel repeated
+#   across groups from tripping on its own first write.
+# Blast Radius: Turns an accepted import into a 409 for the whole file. No
+#   writes, no audit rows, no finance effect of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     _inventory_changes, which decides which fields land in entry.changes.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps
+#     ChannelImportRowStateDivergedError to 409 and sets the opt-in.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the bound/unbound contract.
+# ============================================================================
+def _require_reviewed_pre_state(
+    entry: ChannelImportPlanEntry,
+    previous: ChannelRegistryEntry,
+    written: Mapping[str, object],
+) -> None:
+    """Fail closed when the locked pre-state is not the one the operator read.
+
+    Checks ALL FOUR inventory fields, not just the ones in ``entry.changes``,
+    because the write touches all four every time. A field the preview showed
+    as unchanged carries a pre-state claim just as strong as a changed one —
+    "this stays as it is" — and a concurrent writer who moved it would have
+    that change silently reverted to the roster value under an apply the
+    operator bound to a diff that never mentioned the field (review #184,
+    raised independently by qodo and codex).
+
+    The reviewed pre-state of each field is recoverable from the plan plus the
+    values this write is ABOUT to install. ``entry.changes`` omits a field
+    precisely when planning found stored == roster (see ``_inventory_changes``),
+    so for an omitted field the reviewed pre-state IS the value being written:
+
+        expected(f) = entry.changes[f].from   if planning saw a difference
+                      written[f]              otherwise
+
+    ``written`` rather than the post-write entry, because this now runs BEFORE
+    the write — there is no post-write entry yet, and asking for one is what
+    forced the mutate-then-validate ordering this guard used to depend on. The
+    two are the same values: update_inventory assigns each inventory field from
+    the argument ``written`` mirrors. Taking an unlisted field's expected value
+    from the write (not the plan) is also what keeps a channel repeated across
+    several group rows from tripping on its OWN first write.
+
+    ``previous`` is what the row-locked read actually found. Any mismatch means
+    a registry writer committed in the plan-to-apply window, so the diff on the
+    operator's screen is not the diff this write would perform.
+
+    An UNCHANGED row is therefore NOT exempt here. That is deliberate and does
+    not touch review #159: this runs only for a caller that bound its apply, so
+    "heal the drift silently" is exactly the outcome that caller declined. The
+    unbound path still heals and audits it.
+    """
+    _require_reviewed_source_status(entry, previous)
+    for field in _INVENTORY_FIELDS:
+        reviewed = entry.changes.get(field)
+        expected = reviewed[0] if reviewed is not None else written[field]
+        actual = getattr(previous, field)
+        if actual == expected:
+            continue
+        shown = (
+            f"{field} {reviewed[0]!r} -> {reviewed[1]!r}"
+            if reviewed is not None
+            else f"no change to {field} (already {expected!r})"
+        )
+        raise ChannelImportRowStateDivergedError(
+            f"channel {entry.youtube_channel_id} changed during the import: "
+            f"the preview showed {shown}, but the stored value is now "
+            f"{actual!r}; re-run the preview and review the change"
+        )
+
+
+# ============================================================================
+# Purpose: Enforce, for EVERY apply, that a row the plan saw as ACTIVE has not
+#   been archived in the plan-to-write window.
+# Database/ORM: None directly — reads the row-locked ``previous`` the
+#   registry's write already returned (YouTubeChannelORM).
+# Standards: Runs for BOUND AND UNBOUND callers alike, unlike the reviewed
+#   pre-state guard beside it, and the distinction is the point. "The file
+#   wins" (review #159) settled that a roster may overwrite concurrent drift
+#   in the fields it ASSERTS; the roster does not carry ``active`` and never
+#   asserts it, so that decision says nothing here. Reactivation is an
+#   explicit registry action, never an import side effect
+#   (channel_import._plan_entries), and skipping this for unbound callers
+#   would have made it one.
+#   ``active`` cannot live in _INVENTORY_FIELDS for the same reason: it is
+#   neither a planned change nor a value ``updated`` holds an opinion about.
+#   The check is safe to assert because the planner ERRORs every archived
+#   channel and one ERROR row 422s the whole file — so any plan reaching this
+#   point saw this row as active, whoever sent it. Without it a concurrent
+#   archive between planning and the row lock lets an apply overwrite and
+#   audit inventory on a channel an operator deliberately retired, and carry a
+#   group-bearing row on into the membership pass to attach that archived
+#   channel to a group. Fails the WHOLE import closed, as every divergence
+#   here does — the apply is one all-or-nothing transaction.
+# Blast Radius: Registry write + audit. This is the difference between a 409
+#   the operator can re-review and a silent resurrection of a retired channel,
+#   membership included.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py -> the planner's
+#       archived-channel ERROR row, which is what makes "reviewed as active"
+#       a safe assumption here.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps
+#       ChannelImportRowStateDivergedError to 409.
+# ============================================================================
+def _require_reviewed_active(
+    entry: ChannelImportPlanEntry,
+    previous: ChannelRegistryEntry,
+) -> None:
+    """Fail closed when a reviewed row was archived before the write."""
+    if previous.active:
+        return
+    raise ChannelImportRowStateDivergedError(
+        f"channel {entry.youtube_channel_id} changed during the import: "
+        "the preview reviewed it as active, but it has since been archived "
+        "(active=false); reactivate it before importing, then re-run the "
+        "preview and review the change"
+    )
+
+
+# ============================================================================
+# Purpose: Enforce, for a plan-bound apply only, that the revenue SOURCE
+#   classification the preview disclosed is still the stored one.
+# Database/ORM: None directly — reads the row-locked ``previous`` the
+#   registry's write already returned (YouTubeChannelORM).
+# Standards: Exists because _INVENTORY_FIELDS is not sufficient once the plan
+#   DISCLOSES the transition. Two concurrent imports can flip
+#   revenue_required off and back on between the route's re-plan and the row
+#   lock, returning all four inventory fields to their reviewed values while
+#   the classification underneath moves — so the apply would perform a
+#   different finance-source mutation than the one on screen. Fails closed and
+#   fails WHOLE (raising aborts the single import transaction). Scoped to what
+#   was promised: a None disclosure means the write leaves the status alone,
+#   and a CREATE's ``from`` is None because no prior status could have moved.
+# Blast Radius: Turns an accepted import into a 409 for the whole file. No
+#   writes, no audit rows.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     _planned_revenue_source_status, which produces the disclosure enforced.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps
+#     ChannelImportRowStateDivergedError to 409.
+# ============================================================================
+def _require_reviewed_source_status(
+    entry: ChannelImportPlanEntry, previous: ChannelRegistryEntry
+) -> None:
+    """Fail closed when the reviewed source classification is not the stored one.
+
+    ``_INVENTORY_FIELDS`` is not enough once the plan DISCLOSES the
+    revenue_source_status transition. Two concurrent imports can flip
+    ``revenue_required`` off and back on between the route's re-plan and this
+    row lock, returning all four inventory fields to their reviewed values
+    while the classification underneath moves from OFFICIAL_CMS_REVENUE to
+    MISSING_REVENUE_SOURCE. The bound apply would then perform
+    ``MISSING_REVENUE_SOURCE -> PERFORMANCE_ONLY`` while the operator approved
+    ``OFFICIAL_CMS_REVENUE -> PERFORMANCE_ONLY`` — a different finance-source
+    mutation than the one on screen (review #184).
+
+    A None disclosure is NOT an exemption. The planner returns None when the
+    derived destination already equals the stored status, and that happens on
+    flag-FLIPPING rows too: a channel stored PERFORMANCE_ONLY with
+    revenue_required=true is a combination the column permits, so a roster
+    turning the flag off derives PERFORMANCE_ONLY, matches, and discloses
+    nothing. Concurrent imports flipping the flag away and back then leave the
+    four inventory fields at their reviewed values while the classification
+    underneath has moved to MISSING_REVENUE_SOURCE, and this write re-derives
+    it back to PERFORMANCE_ONLY — a finance-source transition the bound preview
+    never showed. Exempting those rows made the guard cover only the cases that
+    happened to be visible (review #184).
+
+    So the reviewed pre-state is RECOVERED rather than required to be present;
+    see ``_reviewed_source_status``. Rows whose write cannot re-derive at all
+    still assert nothing, which is what keeps an ordinary re-import quiet.
+    """
+    reviewed_from = _reviewed_source_status(entry)
+    if reviewed_from is None or reviewed_from == previous.revenue_source_status:
+        return
+    disclosed = entry.revenue_source_status
+    shown = (
+        f"{reviewed_from!r} -> {disclosed[1]!r}"
+        if disclosed is not None
+        else f"no change to revenue_source_status (already {reviewed_from!r})"
+    )
+    raise ChannelImportRowStateDivergedError(
+        f"channel {entry.youtube_channel_id} changed during the import: the "
+        f"preview showed revenue_source_status {shown}, but the stored value "
+        f"is now {previous.revenue_source_status!r}; re-run the preview and "
+        "review the change"
+    )
+
+
+# ============================================================================
+# Purpose: Recover the revenue_source_status the operator actually reviewed for
+#   one row — from the plan's disclosure when there is one, and by re-deriving
+#   it when there is not — so the bound apply can enforce a classification the
+#   preview never had to name.
+# Database/ORM: None — pure over the plan entry. It reads no row and writes
+#   none; its caller compares the answer against the locked pre-state.
+# Standards: Three cases, and the middle one is why this exists. A disclosed
+#   transition carries its own `from` (None for a CREATE, which has no prior
+#   status). No disclosure on a row whose diff FLIPS revenue_required means the
+#   planner found the derived destination already stored, so that destination
+#   IS the reviewed pre-state — re-derived through derive_revenue_source_status
+#   rather than hardcoded, since with the flag flipping that function ignores
+#   `current_status` entirely and no literal need be duplicated. No disclosure
+#   and no flip asserts NOTHING: such a write cannot re-derive the status at
+#   all, and asserting anyway would 409 ordinary re-imports of a channel whose
+#   classification another writer legitimately changed. Returning None is
+#   therefore "make no claim", never "the status is unknown, refuse" — the
+#   fail-closed decision belongs to the caller, which only raises on a
+#   recovered value that DISAGREES with the stored one.
+# Blast Radius: FINANCE-SCOPE, in both directions. Recovering too little lets a
+#   bound apply perform an undisclosed source transition the operator never
+#   approved; recovering too much 409s imports that diverged in nothing the
+#   preview spoke about. No writes and no audit rows of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     _planned_revenue_source_status, whose None result this reconstructs.
+#   - File: backend/ums_smart_revenue/org/channel_registry.py ->
+#     derive_revenue_source_status, the single derivation both sides share.
+# ============================================================================
+def _reviewed_source_status(entry: ChannelImportPlanEntry) -> str | None:
+    """The revenue_source_status the operator reviewed, or None to assert none.
+
+    Three cases, and only the middle one is new:
+
+    - A DISCLOSED transition carries its own ``from`` — None for a CREATE,
+      which has no prior status to have moved.
+    - No disclosure on a row whose diff FLIPS revenue_required. The planner
+      returned None because the derived destination equalled the stored status,
+      so that destination IS the reviewed pre-state. It is re-derived here
+      rather than hardcoded: with the flag flipping,
+      ``derive_revenue_source_status`` ignores ``current_status`` entirely and
+      returns the constant for the new flag, so the value passed for it does
+      not matter and no literal is duplicated.
+    - No disclosure and no flag flip. The write cannot re-derive the status at
+      all, so there is nothing to assert — asserting anyway would 409 ordinary
+      re-imports of a channel whose classification another writer legitimately
+      changed without touching the roster's fields.
+    """
+    disclosed = entry.revenue_source_status
+    if disclosed is not None:
+        return disclosed[0]
+    reviewed = entry.changes.get(_REVENUE_REQUIRED_FIELD)
+    if reviewed is None:
+        return None
+    reviewed_flag = bool(reviewed[0])
+    roster_flag = bool(entry.revenue_required)
+    if reviewed_flag == roster_flag:
+        # Unreachable from this planner: _inventory_changes emits a pair only
+        # when the values DIFFER. Assert nothing rather than trust the sentinel
+        # below, so a future planner that widened the diff would lose the guard
+        # rather than 409 every row with a fabricated pre-state.
+        return None
+    return derive_revenue_source_status(
+        # Ignored: with the flag flipping, the derivation returns the constant
+        # for the new flag and never consults this. Passing the empty string
+        # rather than a plausible status keeps that from reading as a claim.
+        current_status="",
+        current_revenue_required=reviewed_flag,
+        revenue_required=roster_flag,
+    )
 
 
 def _entry_changes(
@@ -428,9 +1275,73 @@ def _entry_changes(
 
 
 # ============================================================================
-# Purpose: Reconcile one import row's CMS group membership — resolve the group
-#   by its CMS key, create it when absent, and attach the channel — returning
-#   the mutation performed so the caller can audit it.
+# Purpose: Enforce that the group EFFECT the operator reviewed — mint a new
+#   CMS group, or join one that already exists — is still the effect this
+#   write would have, checked under the group row lock it runs inside.
+# Database/ORM: None directly. Judges the ChannelGroupORM existence its caller
+#   already observed under `FOR NO KEY UPDATE`, so the check cannot be raced
+#   between observation and decision.
+# Standards: Fail closed and fail WHOLE — raising aborts the single import
+#   transaction. Unlike the channel pre-state guard this applies to EVERY
+#   caller, bound or not, because a CREATE becoming a JOIN is a different KIND
+#   of write (a different finance scope and a different audit event), not a
+#   different value, so no "the file wins" decision covers it. `planned` is
+#   None for a caller that disclosed no action, and then nothing is asserted.
+#   An observed existence is always a CONCURRENT one: the caller batches by
+#   key and resolves each group once, so this never runs after the import's
+#   own create and needs no ledger to tell the two apart (review #184).
+# Blast Radius: Turns an accepted import into a 409 for the whole file. No
+#   writes, no audit rows, no finance effect of its own.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_import.py ->
+#     _planned_group_action, which assigns the CREATE/JOIN label at plan time.
+#   - File: backend/ums_smart_revenue/api/channels.py -> maps
+#     ChannelImportGroupActionDivergedError to 409.
+#   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> the
+#     "new group" / "adds to existing" cell this label drives.
+# ============================================================================
+def _require_planned_group_action(
+    planned: ChannelImportGroupAction | None,
+    *,
+    observed_exists: bool,
+    cms_group_id: str,
+) -> None:
+    """Fail closed when the locked read contradicts the reviewed group effect.
+
+    ``planned`` is ``None`` for a caller that never disclosed one, and then
+    nothing is asserted — the pre-existing behaviour. Otherwise CREATE demands
+    the group still be absent and JOIN demands it still be present, both read
+    under the row lock this runs inside, so the check cannot itself be raced.
+
+    An observed existence is therefore always someone ELSE's. This used to need
+    a ``created_in_this_run`` ledger, because a roster legitimately lists
+    several channels under one new group key, planning labels every such row
+    CREATE, and the per-row pass had rows 2..N observe the group row 1 had just
+    created — the plan's own handiwork reading as a concurrent creation.
+    Batching by key retired that: the group is resolved once per key, so this
+    check never runs after the run's own create (review #184).
+    """
+    if planned is None:
+        return
+    if planned is ChannelImportGroupAction.CREATE and observed_exists:
+        raise ChannelImportGroupActionDivergedError(
+            f"channel group {cms_group_id} was created during the import; the "
+            "preview approved creating it, not joining it — re-run the preview "
+            "and review the change"
+        )
+    if planned is ChannelImportGroupAction.JOIN and not observed_exists:
+        raise ChannelImportGroupActionDivergedError(
+            f"channel group {cms_group_id} disappeared during the import; the "
+            "preview approved joining it, not creating it — re-run the preview "
+            "and review the change"
+        )
+
+
+# ============================================================================
+# Purpose: Reconcile a whole BATCH of import rows sharing one CMS group key —
+#   resolve the group by that key once, create it when absent, and attach every
+#   channel in the batch — returning one entry per mutation actually performed
+#   so the caller can audit each, or an EMPTY list when nothing was written.
 # Database/ORM: ChannelGroupORM (row-locked read via get_group_by_cms_id
 #   for_update=True; INSERT via create_group) and ChannelGroupMemberORM
 #   (INSERT via add_members). No channel or finance writes.
@@ -444,8 +1355,16 @@ def _entry_changes(
 #   stamps groups it creates here, whose ownership the request already
 #   asserts. The parent group row is the membership serialization point every
 #   writer shares (FOR NO KEY UPDATE, compatible with membership FK key-share
-#   locks). Returns None when membership already existed so a no-op is never
-#   audited.
+#   locks), and the batch takes it ONCE. That is the point of the batch
+#   boundary: resolving per channel made the payload quadratic, because each
+#   lookup materialized the full membership and each single-channel add read
+#   it and returned it again (review #184, measured 4.0x per doubling of the
+#   roster). Batching must not be traded away for "simpler" per-row calls.
+#   The AUDIT shape is deliberately unchanged by the batching: a newly created
+#   group still records exactly ONE group_created — for the first channel —
+#   and a member_added for each of the rest, which is why the create is passed
+#   only channel_ids[0] rather than the whole list. A channel already in the
+#   group yields no entry at all, so a no-op is never audited.
 # Blast Radius: Channel-group membership and therefore finance group-scope
 #   selection and rollups; the GROUP_UPDATED audit trail. No revenue totals,
 #   no allocation, no month-close.
@@ -455,21 +1374,31 @@ def _entry_changes(
 #   - File: backend/ums_smart_revenue/api/channels.py -> maps the archived,
 #     unstamped, and cross-owner errors to 409.
 # ============================================================================
-def _attach_group_membership(
+def _attach_group_memberships(
     groups: ChannelGroupRegistryStore,
     *,
     cms_group_id: str,
-    channel_id: str,
+    channel_ids: list[str],
     content_owner_id: str,
-) -> tuple[str, ChannelGroupEntry] | None:
-    """Ensure the channel belongs to the group carrying this CMS key.
+    planned_action: ChannelImportGroupAction | None = None,
+) -> list[tuple[str, ChannelGroupEntry, str]]:
+    """Ensure every listed channel belongs to the group carrying this CMS key.
 
-    Returns ``(action, group)`` for the mutation performed — group creation or
-    membership addition — so the caller can audit it, or None when nothing at
-    all was written. Planning fails rows targeting archived, cross-owner, and
-    owner-NULL groups closed, and the write boundary RE-CHECKS all three under
-    a row lock so a state change in the plan-to-apply window fails the
-    transaction closed rather than springing a write the preview never showed.
+    Returns one ``(action, group, channel_id)`` per mutation performed — the
+    group creation and each membership addition — so the caller can audit each
+    one, and an EMPTY list when nothing at all was written. Planning fails rows
+    targeting archived, cross-owner, and owner-NULL groups closed, and the
+    write boundary RE-CHECKS all three under a row lock so a state change in
+    the plan-to-apply window fails the transaction closed rather than springing
+    a write the preview never showed.
+
+    Takes the whole batch for one key so the group is resolved and locked ONCE.
+    Resolving per channel made the payload quadratic: each lookup materialized
+    the full membership and each single-channel add read it and returned it
+    again (review #184). The audit trail is unchanged by that — a newly created
+    group still records ONE ``group_created`` for the first channel and a
+    ``member_added`` for each of the rest, which is why the create takes only
+    ``channel_ids[0]`` instead of the whole batch.
 
     The import's ``content_owner_id`` is stamped on any group CREATED here so
     CMS group sync — which scopes ``list_synced_groups`` to one owner — can
@@ -479,15 +1408,23 @@ def _attach_group_membership(
     claim belongs to the owner's own sync, on YouTube's evidence.
     """
     group = groups.get_group_by_cms_id(cms_group_id, for_update=True)
+    # Under the row lock, before either branch writes: the reviewed effect and
+    # the observed state must still agree, or the whole import rolls back.
+    _require_planned_group_action(
+        planned_action,
+        observed_exists=group is not None,
+        cms_group_id=cms_group_id,
+    )
     if group is None:
         created = groups.create_group(
             name=cms_group_id,
             group_type="SECTOR",
-            channel_ids=[channel_id],
+            channel_ids=channel_ids[:1],
             cms_group_id=cms_group_id,
             content_owner_id=content_owner_id,
         )
-        return ("group_created", created)
+        events = [(AUDIT_GROUP_ACTION_CREATED, created, channel_ids[0])]
+        return events + _add_members(groups, created, channel_ids[1:])
     if not group.active:
         raise ChannelImportArchivedGroupError(
             f"channel group was archived during the import: {cms_group_id}; "
@@ -514,7 +1451,52 @@ def _attach_group_membership(
             f"{group.content_owner_id!r}, not {content_owner_id!r}; "
             "import that group's channels under its own content owner"
         )
-    if channel_id not in group.channel_ids:
-        updated = groups.add_members(group_id=group.id, channel_ids=[channel_id])
-        return ("member_added", updated)
-    return None
+    # Hashed ONCE for the batch. `group.channel_ids` is a tuple carrying the
+    # group's full membership, so a per-candidate `in` is a linear scan: the
+    # supported 5000-row roster joining a 5000-member group would pay ~25M
+    # string comparisons here and give back exactly the quadratic cost the
+    # batching change removed (review #184, codex P2). add_members filters
+    # again on its own side; this keeps the batch it receives honest without
+    # racing that.
+    existing_members = set(group.channel_ids)
+    return _add_members(groups, group, [cid for cid in channel_ids if cid not in existing_members])
+
+
+# ============================================================================
+# Purpose: Attach a batch of channels to ONE already-resolved group in a
+#   single write, and report one auditable attachment per channel.
+# Database/ORM: ChannelGroupMemberORM INSERTs via
+#   ChannelGroupRegistryStore.add_members, which re-locks the parent
+#   ChannelGroupORM row (FOR NO KEY UPDATE) as the membership serialization
+#   point. No channel or finance writes.
+# Standards: One call per group instead of one per channel — the per-channel
+#   shape made a shared-group roster quadratic in payload (review #184). The
+#   caller filters to channels not already members, so an EMPTY batch returns
+#   without touching the store at all: that is what keeps a re-imported
+#   roster audit-quiet rather than claiming attachments it did not make. Runs
+#   inside the import's single transaction, so a later failure rolls these
+#   memberships back with everything else.
+# Blast Radius: Channel-group membership, and therefore finance group-scope
+#   selection and rollups; one GROUP_UPDATED audit event per channel actually
+#   attached. No revenue totals, no allocation, no month-close.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> add_members
+#     (the locked parent row and the existing-membership filter).
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+#     _attach_group_memberships, which resolves the group this writes into.
+# ============================================================================
+def _add_members(
+    groups: ChannelGroupRegistryStore,
+    group: ChannelGroupEntry,
+    channel_ids: list[str],
+) -> list[tuple[str, ChannelGroupEntry, str]]:
+    """Attach a batch of channels in ONE write, one audit event per channel.
+
+    Returns an empty list for an empty batch WITHOUT touching the store, which
+    is what keeps a re-imported roster audit-quiet: every channel was already a
+    member, so nothing was written and nothing is claimed.
+    """
+    if not channel_ids:
+        return []
+    updated = groups.add_members(group_id=group.id, channel_ids=channel_ids)
+    return [("member_added", updated, channel_id) for channel_id in channel_ids]

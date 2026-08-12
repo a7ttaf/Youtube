@@ -966,6 +966,91 @@ def test_list_adoptable_cms_group_ids_returns_only_owner_null_keys() -> None:
     assert registry.list_adoptable_cms_group_ids(set()) == set()
 
 
+def test_list_owned_cms_group_ids_returns_only_this_owners_keys() -> None:
+    """The fourth bulk lookup: which keys this owner ALREADY holds (review #184).
+
+    It is the only one of the four that refuses nothing — it is what lets the
+    import preview say JOIN rather than CREATE. Absence is load-bearing, so
+    every way a key can be absent is pinned here: another owner's key, an
+    owner-NULL key, another TENANT's key, and a key with no group at all must
+    all stay out, because the planner reads absence as "this row mints a new
+    finance-scope group". A leak in either direction is a preview that lies
+    about a group write.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    other_registry = SqlAlchemyChannelGroupRegistry(session, tenant_id=OTHER_TENANT_ID)
+
+    registry.create_group(
+        name="Mine",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-mine",
+        content_owner_id="owner-a",
+    )
+    registry.create_group(
+        name="Theirs",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-theirs",
+        content_owner_id="owner-b",
+    )
+    registry.create_group(
+        name="Legacy", group_type="SECTOR", channel_ids=[], cms_group_id="cms-legacy"
+    )
+    other_registry.create_group(
+        name="Other Tenant Mine",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-other-tenant",
+        content_owner_id="owner-a",
+    )
+
+    result = registry.list_owned_cms_group_ids(
+        {"cms-mine", "cms-theirs", "cms-legacy", "cms-other-tenant", "cms-missing"},
+        content_owner_id="owner-a",
+    )
+
+    assert result == {"cms-mine"}
+    assert registry.list_owned_cms_group_ids(set(), content_owner_id="owner-a") == set()
+
+
+def test_owned_and_foreign_cms_group_id_sets_partition_the_stamped_rows() -> None:
+    """The two owner lookups are exact complements over stamped rows.
+
+    The planner's CREATE signal is "absent from owned", which is only sound
+    while nothing stamped can fall through BOTH sets. Pinning the partition
+    here is what stops a future edit to either predicate from silently
+    turning some owner's JOIN into a promised new group.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+
+    registry.create_group(
+        name="Mine",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-mine",
+        content_owner_id="owner-a",
+    )
+    registry.create_group(
+        name="Theirs",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-theirs",
+        content_owner_id="owner-b",
+    )
+    keys = {"cms-mine", "cms-theirs"}
+
+    owned = registry.list_owned_cms_group_ids(keys, content_owner_id="owner-a")
+    foreign = registry.list_foreign_owner_cms_group_ids(keys, content_owner_id="owner-a")
+
+    assert owned | foreign == keys
+    assert owned & foreign == set()
+
+
 def test_create_group_duplicate_cms_key_raises_typed_conflict() -> None:
     """Losing the per-tenant cms_group_id uniqueness race is a typed conflict.
 

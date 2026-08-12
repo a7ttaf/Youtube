@@ -61,11 +61,74 @@ limited to `INSIDE_CMS`/`OUTSIDE_CMS`/`UNKNOWN`). Authorization is
 `registry.manage_channels` at GLOBAL scope (a roster is not scoped to one
 company); a roster carrying any `group_id` additionally requires
 `registry.manage_groups` at global scope because imports must not bypass the
-group API's checks. The response (`dry_run` and apply alike) is the declared
+group API's checks. `GET /session/me` mirrors this pairing as the additive
+`canImportChannels` capability — true only when the principal holds BOTH
+permissions at global scope, so the SPA renders its Import CSV control only
+for principals whose group-bearing rosters cannot 403 mid-flow; the route's
+own checks stay the authority. The response (`dry_run` and apply alike) is
+the declared
 `ChannelImportResult` model: `counts` by outcome plus per-row entries carrying
 `row_number`, `youtube_channel_id`, `outcome` (`CREATE`/`UPDATE`/`UNCHANGED`/
 `ERROR`), the planned `channel_name`/`group_id`/`revenue_required`, the
-field-level `changes` diff, and a `reason` for ERROR rows. A row whose
+field-level `changes` diff, and a `reason` for ERROR rows. `group_action`
+(added 2026-08-09, review #184) says which group write the row's `group_id`
+implies: `CREATE` mints a NEW `SECTOR` group, stamped to the request's content
+owner at birth, while `JOIN` attaches the channel to a group this owner
+already holds — two effects with different finance-scope and audit
+consequences that the key alone cannot distinguish, on a roster the operator
+approves all-or-nothing. It is null when the row carries no `group_id` and on
+every ERROR row (those write nothing). `JOIN` describes the GROUP's fate, not
+the membership row's: a channel already in the group writes nothing, and
+planning deliberately does not load memberships for a 5000-row roster.
+`counts` is the PLAN's tally in both modes — the apply re-checks each row
+under its write-boundary lock and records what it actually wrote in the
+`CHANNEL_IMPORTED` audit event, so a concurrent writer can turn a planned
+UPDATE into a no-op. Present these counts as the approved plan, not as the
+committed result; the SPA's Applied step labels them that way.
+Each row also discloses `revenue_source_status` — `{from, to}` when the write
+will re-classify the channel's revenue source, `null` when it leaves it alone.
+This is DERIVED, not carried by the CSV: the registry re-derives the status
+only when `revenue_required` flips (to `MISSING_REVENUE_SOURCE` when enabled,
+`PERFORMANCE_ONLY` when disabled), so an established `OFFICIAL_CMS_REVENUE` /
+`OFFICIAL_MANUAL_IMPORT` survives an ordinary inventory refresh. It is
+disclosed because it drives `missing_official_revenue` and the registry's
+recommended action, and `changes` never mentions it — that map holds the
+operator's own field edits and is what the write-boundary pre-state guard
+compares against, so a derived value does not belong in it. `from` is null for
+a CREATE, which has no prior classification (review #184).
+
+`plan_fingerprint` (added 2026-08-09, review #184) is a SHA-256 over
+everything the operator reviews AND the target it lands in: the resolved
+`tenant_id`, `content_owner_id`, `cms_status`, `counts` and `rows`. Only
+`dry_run` is excluded, and that exclusion is load-bearing — a preview and its
+apply differ in it by definition, so folding it in would make every
+fingerprint mismatch. The owner and CMS status are IN the digest because an
+all-`CREATE` roster's rows carry neither (a CREATE's `changes` is empty by
+design), so two different content owners would otherwise produce identical
+digests and an apply could bind to a target that was never reviewed. The
+tenant is in for the same reason one step further out, and it is
+SERVER-DERIVED — resolved from the request principal, never read from the
+request body — so a client cannot influence it. Without it, two empty tenants
+and an all-`CREATE` roster digest identically, and a preview approved in one
+tenant satisfies the guard on an apply directed at another.
+An apply may send the approved dry run's value back as the optional
+`expected_plan_fingerprint` form field; if the plan the route would execute no
+longer matches, it returns **409** with that refreshed plan as `detail` (the
+same payload shape the 422 error-rows rejection carries) and writes nothing.
+This exists because the apply RE-PLANS from current state: a row an operator
+reviewed as `CREATE` could otherwise commit as an `UPDATE` overwriting a
+channel created since the preview, or a group `CREATE` could become a `JOIN`,
+with the changed outcome never reviewed. The field is optional — a client that
+never previewed is not re-approving anything — but the SPA always sends it and
+re-binds to the refreshed plan on a 409. Sending it also OPTS IN to strict
+pre-state enforcement at the write boundary (see "the file wins" below): it is
+the request's declaration that only the reviewed diff may be applied.
+The fingerprint closes the preview→re-plan window; a second, narrower window
+runs from the re-plan to the group row lock, and `group_action` is re-checked
+under that lock. If this owner's CMS sync creates (or removes) the row's group
+in between, the apply returns **409** rather than silently turning a reviewed
+group `CREATE` into a `JOIN` — the same fail-closed rule already applied to
+archived, owner-NULL and cross-owner groups at that boundary. A row whose
 `group_id` targets an existing group with a NULL `content_owner_id` is an
 `ERROR` row (Path A, 2026-08-06): the import never adopts an existing group —
 only the owner's own CMS sync (`POST /channels/groups/sync`) may claim one,
@@ -73,18 +136,103 @@ and `DELETE /groups/{id}/content-owner` is the admin remedy for a wrong stamp.
 The former `will_adopt_content_owner` disclosure field is gone from the import
 response (it survives on the group-sync response, where adoption is
 legitimate). A dry run writes
-nothing (no audit event). The apply is all-or-nothing: any ERROR row —
+nothing (no audit event), which also makes it the RECONCILIATION tool for a
+client whose apply response was lost — with a claim boundary that clients MUST
+respect. Re-planning the same roster reports the END STATE, not authorship: an
+all-`UNCHANGED` result says the registry now matches the roster, and nothing
+more. It does NOT establish that the lost request is what made it match. The
+roster may have been entirely `UNCHANGED` before the request was ever sent;
+another writer may have landed the same inventory values; and rows carrying a
+`group_id` are outside the claim altogether, because `outcome` is computed from
+channel inventory and the planner never reads memberships. A refreshed plan that still shows
+`CREATE`/`UPDATE`/`ERROR` work is the mirror image and carries no more
+authority: it says the registry currently DIVERGES from the roster, not that
+this request failed. A completed import followed by another writer's edit or
+archive produces exactly that plan. The check is operator-triggered and
+repeatable because the original request may also still be executing, and a
+single automatic shot would race it into a false "did not commit".
+A client MUST NOT report success or advance an "applied" state on this
+evidence, MUST NOT report failure or "not committed" on the inverse, and MUST
+NOT treat either as licence to retry: the durable record of what committed is
+the `CHANNEL_IMPORTED` audit event, which is where an operator settles
+authorship. Neither direction of the comparison establishes it. The SPA does exactly this (review #184) — it
+reports "the registry now matches this roster", stays on Preview, keeps Apply
+disabled, and points at the audit trail. The apply is all-or-nothing: any ERROR row —
 malformed id/name/token, a value containing a NUL character, a group_id over
-255 characters, a CONFLICTING duplicate id (copies that disagree on
-channel_name/view_revenue; repeating a channel once per group is legal and
-attaches every membership, the extra copies planning as UNCHANGED), row wider
+255 characters, either kind of duplicate id, row wider
 than the header, archived channel, or archived CMS group — rejects the file
-as 422 before any write. UPDATE and UNCHANGED rows both write through the
+as 422 before any write.
+Repeating a channel id is legal exactly once per DISTINCT `group_id`, which
+attaches every membership, the extra copies planning as UNCHANGED. **Two**
+duplicate shapes are ERRORs, and both fail every copy: copies that DISAGREE on
+`channel_name`/`view_revenue` (ambiguous about what to persist — no copy is
+privileged, so there is no non-arbitrary winner), and copies that RESTATE the
+same `(youtube_channel_id, group_id)` pair, including two rows carrying no
+group at all. The second exists for a reason that **differs by shape**. When
+the restated pair names a group, the write pass collapses it into one
+membership while planning does not, so the dry run promised the group work
+twice for a single association. When both copies carry **no** group there is no
+membership and nothing to collapse — that shape is refused because the second
+copy is a phantom `UNCHANGED` row, reporting two outcomes for a channel the
+roster named once (review #184).
+**This second shape is a BREAKING change for clients** and is the only one on
+this branch: a roster restating a pair previously returned **200** and now
+returns **422**, so an existing roster carrying such a line must be deduped
+before it will apply again. What is preserved is the **registry** result, not
+the request outcome: the restated row is not a no-op — `UNCHANGED` rows write
+through the boundary — but it only re-wrote values its first copy had already
+installed, so the deduped file lands the same channel rows and the same
+memberships. Exactly one persisted thing does change, and it is the point of
+the rule: the restated row also incremented the durable `CHANNEL_IMPORTED`
+`counts`, so the deduped file's summary is one lower. The double count this
+removes was in the audit tally, not only in the preview.
+A client holding a roster it applied successfully before should expect a 422
+naming **every** row of the restated pair — the first occurrence included,
+since no copy is privileged — and should delete copies until exactly one
+remains, or give them distinct `group_id` values. UPDATE and UNCHANGED rows both write through the
 registry at the apply boundary so a concurrent change committed after
 planning cannot survive the roster (the file wins); CHANNEL_UPDATED is
 recorded exactly when the write-boundary diff is non-empty, so healed drift
 is audited and a no-op write (truly unchanged, or a concurrent writer that
-already landed the roster values) stays audit-quiet. Malformed CSV structure
+already landed the roster values) stays audit-quiet.
+"The file wins" is a DELIBERATE decision (review #159, r3713841231 /
+r3713966806), not an oversight, and it has a known consequence worth stating
+because reviewers keep re-deriving it: a row the operator reviewed as
+`A -> B` can be applied as `C -> B` when another writer commits between the
+apply's re-plan and the channel row lock. The values written are the ones
+approved, on the channel approved, and the audit records the TRUE `C -> B`
+diff, so nothing is hidden from the trail — but the operator's screen showed
+`A -> B`. Drift landing BEFORE the apply re-plans is already refused by
+`plan_fingerprint` (409), so only that narrow window remains.
+**A plan-bound apply now closes that window too** (review #184): when the
+request carries `expected_plan_fingerprint`, the caller has declared "the
+diff I reviewed, or none of it", so a row whose row-locked pre-state no
+longer matches its reviewed `changes` returns **409**
+(`channel … changed during the import`) and rolls the whole import back.
+The two behaviours are not in conflict, because they answer to different
+callers: an apply that bound no plan is re-approving nothing, so the roster
+stays authoritative and drift is healed and audited exactly as #159 decided.
+That default is what
+`test_audit_diff_reflects_write_boundary_not_the_stale_plan` and
+`test_planned_update_that_became_a_noop_is_not_audited` pin, and both pass
+unchanged; the opt-in half is pinned by
+`test_plan_bound_apply_refuses_a_row_whose_pre_state_drifted`,
+`test_unbound_apply_still_lets_the_file_win_over_drift`, and — for the
+durable rollback — `tests/api/test_channels_import_postgres.py::
+test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres`. The guard
+compares ALL FOUR inventory fields, not only the ones the preview listed as
+changing: the write touches all four every time, and "no change to
+`revenue_required`" is a reviewed claim exactly as strong as a listed diff, so
+a writer who flips it in the plan-to-apply window must not have that decision
+reverted under an apply bound to a diff that never mentioned the field
+(`test_plan_bound_apply_refuses_drift_in_a_field_the_preview_showed_unchanged`).
+An UNCHANGED row is therefore not exempt under a bound apply — silent healing
+is precisely what that caller declined — while the unbound path heals and
+audits it as before. Note the contrast
+with the GROUP half of the same window, which is refused for EVERY caller
+(`ChannelImportGroupActionDivergedError`): a reviewed group `CREATE` becoming
+a `JOIN` is a different KIND of write, not a different value, and no prior
+decision covered it. Malformed CSV structure
 (unterminated quotes, duplicate or unknown header columns, a header wider than
 16 columns, more blank records than the row cap, or a valid header carrying no
 data rows at all) rejects the whole file as 422; oversize payloads return 413. Flipping
