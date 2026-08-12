@@ -1279,6 +1279,193 @@ single P-tier above.
   `bank`, and `gap` data sources via `DeductionIngestionService`. Ships
   alongside the Track F reconciliation service (PR #87).
 
+## Known issues on `main` — candidates for a follow-up PR
+
+Recorded 2026-08-13 against `main` at `9435af29` (the squash merge of PR #184),
+measured rather than recalled: every figure below comes from a command run at
+that commit, and the command is given so it can be re-derived. Nothing here
+blocks anything shipped; all of it is the residue a green pipeline does not
+show.
+
+### What "green" currently means on `main`
+
+| Gate | Result at `9435af29` | Notes |
+| --- | --- | --- |
+| `uv run pytest -q` | **2817 passed, 15 warnings, exit 0** | 9m38s and 8m56s on two runs — expect ~9-10 min, not a fixed number |
+| `uv run ruff check backend tests scripts` | All checks passed | `line-length = 100` (`pyproject.toml:47`) — matches DeepSource FLK-E501 |
+| `uv run mypy backend` | **1 error** | NOT one of the four AGENTS.md gates — see B below |
+| `bun run test` (frontend) | 477 passed, 41 files | `bun`, never `npx` |
+| `bunx tsc --noEmit` / `bun run build` | clean | |
+| `git diff --check` | clean | |
+| DeepSource (6 analyzers) | all SUCCESS | |
+
+**The pytest figure is only trustworthy against a FRESH Postgres container.**
+It needs `UMS_TEST_DATABASE_URL`; a reused container carrying a stray schema
+from an earlier round reports **23 failures**, every one an RLS/migration test
+and none of them touching the code under change. Both runs above used a
+disposable `postgres:16` container created for the run and removed after.
+
+```bash
+docker run -d --name ums-verify -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=test_ums -p 55505:5432 postgres:16
+UMS_TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@127.0.0.1:55505/test_ums" uv run pytest -q -rw
+docker rm -f ums-verify
+```
+
+### A. The 15 pytest warnings — two causes, both dependency-config
+
+Captured with `pytest -q -rw` so the summary is verbatim rather than
+reconstructed. The 15 are **14 + 1**, and they account for the total exactly.
+
+#### A1 — Alembic `path_separator` (14 of the 15)
+
+```
+.venv/Lib/site-packages/alembic/config.py:612: DeprecationWarning:
+  No path_separator found in configuration; falling back to legacy splitting
+  on spaces, commas, and colons for prepend_sys_path.
+  Consider adding path_separator=os to Alembic config.
+```
+
+Distribution — one per Alembic `Config` load, which is why the tenancy suites
+dominate:
+
+| Test file | Warnings |
+| --- | --- |
+| `tests/tenancy/test_rls_grant_surface.py` | 7 |
+| `tests/tenancy/test_isolation.py` | 4 |
+| `tests/db/test_alembic_env_url_precedence_postgres.py` | 1 |
+| `tests/db/test_session_tenant_hook.py` | 1 |
+| `tests/tenancy/test_rls_restricted_login.py` | 1 |
+| **Total** | **14** |
+
+**Cause.** `alembic.ini:3` sets `prepend_sys_path = backend` and the file
+declares no `path_separator`, so Alembic 1.18.5 falls back to legacy splitting
+and warns once per config load.
+
+**Fix.** Add `path_separator = os` to the `[alembic]` block of `alembic.ini`.
+
+**Risk to check before merging that one line, not after.** `os` resolves to
+`os.pathsep`, which is `;` on Windows and `:` on Linux — dev here is Windows,
+CI is Linux. The current value is a **single** path (`backend`) with no
+separator in it, so no split can change meaning today; the change is safe now
+and the note exists so nobody adds a second path later without revisiting it.
+Re-run the Alembic-touching suites specifically (`tests/db/`,
+`tests/tenancy/`) rather than trusting a full-suite pass, since those are the
+only ones that load the config.
+
+#### A2 — Starlette TestClient / httpx (1 of the 15)
+
+```
+.venv/Lib/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning:
+  Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+```
+
+Emitted once at import, from **inside FastAPI's own `testclient` shim** — not
+from our code, and there is no call site of ours to change.
+
+Installed versions at `9435af29`: `starlette 1.3.1`, `httpx 0.28.1`,
+`httpx2` **not installed**, `fastapi 0.141.1`.
+
+**Fix.** A dependency migration to `httpx2`, not a code edit. It is the larger
+of the two by a distance: `httpx` is a direct dependency of the app as well as
+the test client, so the move needs its own PR with the connector/HTTP paths
+re-exercised (Google/AdSense clients especially), and it should NOT be bundled
+with A1.
+
+**Deliberately not silenced.** A `filterwarnings` entry in the pytest config
+would zero the count without changing anything real, and the warning is the
+only current signal that this migration is pending.
+
+### B. The mypy error on `main`
+
+```
+backend/ums_smart_revenue/devtools/pytest_policy_gate.py:597: error:
+  Need type annotation for "candidates"
+  (hint: "candidates: list[<type>] = ...")  [var-annotated]
+```
+
+The function, in full:
+
+```python
+def _resolve_pytest_plugin_path(project_root: Path, module: str) -> Path | None:
+    if not module or module.startswith("."):
+        return None
+    module_parts = module.split(".")
+    candidates = []                      # <- line 597
+    for root in (project_root, project_root / "backend"):
+        module_path = root.joinpath(*module_parts)
+        candidates.extend((module_path.with_suffix(".py"), module_path / "__init__.py"))
+    return next((candidate for candidate in candidates if candidate.exists()), None)
+```
+
+**Fix.** One line: `candidates: list[Path] = []`. `Path` is already imported in
+the module.
+
+**Provenance — it is NOT from PR #184.** `git log -1 -- <that file>` returns
+`16b6bb58`, PR #105 (`feat(connectors): credential token-health surface`),
+merged 2026-06-15. It has been on `main` for about two months.
+
+**Why it survived that long, which is the part worth fixing.** `mypy` is not
+one of the four AGENTS.md baseline gates (L113-121: `uv sync`, `ruff`,
+`pytest`, `git diff --check`), so nothing in the normal flow runs it — but
+**DeepSource's Python analyzer does**. That makes it an ungated gate: reachable
+by review, invisible to the local loop. Run `uv run mypy backend` before any
+push regardless of the four gates.
+
+### C. Deferred design questions from PR #184
+
+Both were escalated during review rather than guessed at, and both remain open
+on the merged PR. Each is a real change with a real failure mode, not a nit.
+
+1. **Bind the displayed plan contents to the fingerprint**
+   (`PRRT_kwDOSZIgN86YC1sW`). `plan_fingerprint` is a server-computed digest the
+   client cannot recompute — it folds in the server-resolved tenant. So a
+   malformed 2xx that keeps a valid fingerprint while substituting a different
+   but structurally valid plan passes every client-side check; Apply then echoes
+   the original token with the original CSV and the backend writes the real
+   plan, though the operator reviewed different contents. Fixing it means
+   returning something the client CAN verify — a display digest over the
+   disclosed payload, or the resolved tenant — which is a **backend contract
+   change** and therefore its own PR.
+
+2. **Roll back inventory when group-action validation fails**
+   (`PRRT_kwDOSZIgN86YGxak`). `_require_planned_group_actions` is a lock-free
+   pre-flight that already runs BEFORE the first inventory write
+   (`channel_import_apply.py:331`), which closed the direct-caller case. The
+   residual window is a group appearing or disappearing between that pre-flight
+   and the locked second pass: `_apply_inventory_writes` has already replaced
+   every channel, and a store without a transaction cannot take those back when
+   the group pass raises. Production SQL is transactional; the exposure is the
+   in-memory adapters used by direct/test/bootstrap callers. Fixing it means
+   either making both passes transactional for those adapters or adding a
+   compensating restore — a **store-layer refactor**, also its own PR.
+
+### D. Analyzer dispositions carried forward — NOT defects
+
+Recorded so nobody re-opens them, and so the reasoning is auditable rather than
+asserted.
+
+- **Qodo, 6 × "Empty `Connections:`"** — the matcher requires content on the
+  same line as the label; AGENTS.md L209-225 puts the label on its own line with
+  entries beneath it, which is what every flagged block does. Qodo reviewed the
+  evidence and agreed in writing: *"matcher/configuration findings, not missing
+  contract coverage or code defects."* They were left **active, not dismissed** —
+  no ignore rule, no suppression — and they double as a coverage detector,
+  firing whenever a new contract block lands.
+- **DeepSource `SCT-A000`** on `Docs/` files — the accepted syntax-matcher
+  ruling from the baseline program. Do not re-litigate.
+
+### Suggested PR split
+
+Three PRs, in this order. A1 and B are trivial and independent; keep them apart
+from the two that need design.
+
+| PR | Contents | Size |
+| --- | --- | --- |
+| 1 | A1 (`path_separator = os`) + B (`candidates: list[Path]`) | two lines, plus a re-run of `tests/db/` and `tests/tenancy/` |
+| 2 | A2 — `httpx2` migration | dependency-wide; re-exercise the connector HTTP paths |
+| 3 | C1 and/or C2 — the two #184 design questions | one each; both need a decision before code |
+
 ## Hard problems to solve early
 
 1. ⏳ Revenue source for 70 outside-CMS channels — partially solved: Track F
