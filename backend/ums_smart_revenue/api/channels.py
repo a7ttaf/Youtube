@@ -915,11 +915,18 @@ def _parse_import_upload(file: UploadFile) -> ParsedChannelImport:
 
 # ============================================================================
 # Purpose: Render an import plan as the API response body — which is the same
-#   object twice over: the disclosure the operator approves, and (for four of
-#   the five digest inputs) the material ``_plan_fingerprint`` binds an apply
-#   to. Disclosure and binding are deliberately the SAME payload, so a field
-#   hidden from the operator is also outside the token, and a field added to
-#   the token must be shown.
+#   object twice over: the disclosure the operator approves, and the material
+#   ``_plan_fingerprint`` binds an apply to. The relationship runs ONE way and
+#   the asymmetry is deliberate. Everything the operator REVIEWS is inside the
+#   token, so nothing they approved can change under a bound apply; but the
+#   token is not limited to what is shown. It also covers the server-resolved
+#   ``tenant_id``, which is withheld from this body on purpose — a client that
+#   could see it is a client that could try to name it. So adding a field HERE
+#   means adding it to the digest, while adding one to the DIGEST obliges no
+#   disclosure, and for the tenant must not. Do not "restore symmetry" by
+#   exposing the tenant or by dropping it from the digest: the first hands the
+#   client a value it must not choose, the second lets a plan reviewed in one
+#   tenant authorize a write in another.
 # Database/ORM: None — a pure projection of an already-computed plan. It issues
 #   no query and re-reads nothing; ``tenant_id`` arrives resolved.
 # Standards: Every row echoes the planned inventory VALUES, not just the field
