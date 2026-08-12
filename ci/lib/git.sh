@@ -44,6 +44,38 @@ ci::git::has_conflict_markers_in_staged() {
 # base with the remote default branch, then the local default branch, and only
 # then the whole of HEAD — which is what a genuine first push contains anyway.
 # `ci::changeset::detect pre-push` resolves the same question the same way.
+# The newest commit on the way to <tip> that the destination remote is already
+# known to hold, or nothing when there is no such record.
+#
+# "Already on the destination" is not "already gated somewhere": the answer is
+# read only from refs/remotes/<destination>/, never from every remote at once.
+#
+# The newest of the per-ref merge bases, because that is the one that excludes
+# the most while excluding only commits the remote has. Two refs whose bases are
+# incomparable -- neither an ancestor of the other -- leave the first in place,
+# which scans more than strictly necessary and never less.
+#
+# Remote-tracking refs can be stale, and stale here means the record is behind
+# reality: the base is older than the truth, so the range is wider. That is the
+# safe direction, and it is the same direction the rest of this file accepts
+# from the same source.
+ci::git::destination_base() {
+  local tip="$1" remote="${CI_GATE_PUSH_REMOTE:-}" _db_ref _db_mb _db_best=""
+  [ -n "$remote" ] || return 0
+  [ -n "$tip" ] || return 0
+  while IFS= read -r _db_ref; do
+    [ -n "$_db_ref" ] || continue
+    _db_mb="$(git merge-base "$tip" "$_db_ref" 2>/dev/null || true)"
+    [ -n "$_db_mb" ] || continue
+    if [ -z "$_db_best" ]; then
+      _db_best="$_db_mb"
+    elif git merge-base --is-ancestor "$_db_best" "$_db_mb" 2>/dev/null; then
+      _db_best="$_db_mb"
+    fi
+  done <<< "$(git for-each-ref --format='%(refname)' "refs/remotes/${remote}/" 2>/dev/null || true)"
+  printf '%s' "$_db_best"
+}
+
 ci::git::push_range() {
   local old_sha="${CI_GATE_PUSH_OLD_SHA:-${GITHUB_EVENT_BEFORE:-}}"
   local new_sha="${CI_GATE_PUSH_NEW_SHA:-HEAD}"
@@ -73,9 +105,28 @@ ci::git::push_range() {
   # Which is the same reasoning as the `HEAD~1` fallback that was removed from
   # this list: a wrong base is worse than no base, because it produces a
   # confident green over commits nobody looked at.
+  #
+  # With one exception, and it is the difference between a guess and a record.
+  # `@{upstream}` and a bare local `main` are guesses about where this branch
+  # belongs. A remote-tracking ref of the *destination* is a record of what that
+  # destination was last seen holding, which is the same source
+  # ci::git::published_to_destination is trusted with one function down. Without
+  # it the first push of any branch walked its whole history: in this repository
+  # that is 439 commits instead of the handful being uploaded, and twelve
+  # long-published commits fail the whitespace scan -- so `git push -u origin
+  # <new-branch>` was refused, with no remedy available to the person pushing.
+  #
+  # Scoped to the named destination for the reason published_to_destination is:
+  # a commit that exists only on `upstream` says nothing about a push to
+  # `origin`. No name means no record, and no record means the whole tip.
   if [ -n "${CI_GATE_PUSH_NEW_SHA:-}" ]; then
     git rev-parse --verify "${new_sha}^{commit}" >/dev/null 2>&1 || return 1
-    printf '%s' "$new_sha"
+    base="$(ci::git::destination_base "$new_sha")"
+    if [ -n "$base" ]; then
+      printf '%s..%s' "$base" "$new_sha"
+    else
+      printf '%s' "$new_sha"
+    fi
     return 0
   fi
 
@@ -234,14 +285,36 @@ ci::git::worktree_covers_push() {
   # content lanes then validated the repaired tree while a release pointer went
   # out at the broken one. It is the same question the tag-only rule below asks,
   # and there was no reason for the mixed push to be exempt from it.
-  local _wc_tag
+  #
+  # Or carried by a branch in this same push, which is the third answer and the
+  # one the rule above was missing. `git push origin main v1.0` with the tag on
+  # a commit main is itself sending was refused: not the checkout, not yet on
+  # the destination, and the drift message then printed the pushed sha and HEAD
+  # as the same value with a remedy that was already true. The objects under
+  # that tag are going to the remote as part of main's history whether the tag
+  # exists or not, so the tag adds a label and no content -- which is the same
+  # thing the "already published" arm says about a commit that went out earlier.
+  #
+  # It is not the same as "an ancestor of HEAD", and that difference is the
+  # whole of the protection: a tag-only push carries no branch tips, so this arm
+  # is empty for it and the tag must still meet the published test below. A tag
+  # on a commit no pushed branch contains is carrying that commit out with it.
+  local _wc_tag _wc_carried
   # shellcheck disable=SC2086
   for _wc_tag in ${CI_GATE_PUSH_TAG_TIPS:-}; do
     _wc_res="$(git rev-parse --verify "${_wc_tag}^{commit}" 2>/dev/null || true)"
     [ -n "$_wc_res" ] || return 1
-    if [ "$_wc_res" != "$head" ]; then
-      ci::git::published_to_destination "$_wc_res" || return 1
-    fi
+    [ "$_wc_res" = "$head" ] && continue
+    _wc_carried=0
+    # shellcheck disable=SC2086
+    for _wc_tip in ${CI_GATE_PUSH_BRANCH_TIPS:-}; do
+      if git merge-base --is-ancestor "$_wc_res" "$_wc_tip" 2>/dev/null; then
+        _wc_carried=1
+        break
+      fi
+    done
+    [ "$_wc_carried" -eq 1 ] && continue
+    ci::git::published_to_destination "$_wc_res" || return 1
   done
 
   [ "$pushed" = "$head" ] && return 0
@@ -299,6 +372,39 @@ ci::git::explain_push_tip_drift() {
       return 0
       ;;
   esac
+  # A tag is its own sentence too. The generic message below compares the
+  # collapsed tip against HEAD, and in a mixed push those are the same commit --
+  # so a refusal caused by a tag printed two identical shas and told the reader
+  # to check out the commit they already had.
+  local _d_head _d_tag _d_res _d_bad="" _d_carried _d_btip
+  _d_head="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)"
+  # shellcheck disable=SC2086
+  for _d_tag in ${CI_GATE_PUSH_TAG_TIPS:-}; do
+    _d_res="$(git rev-parse --verify "${_d_tag}^{commit}" 2>/dev/null || true)"
+    if [ -z "$_d_res" ]; then _d_bad="${_d_bad} ${_d_tag}"; continue; fi
+    [ "$_d_res" = "$_d_head" ] && continue
+    _d_carried=0
+    # shellcheck disable=SC2086
+    for _d_btip in ${CI_GATE_PUSH_BRANCH_TIPS:-}; do
+      git merge-base --is-ancestor "$_d_res" "$_d_btip" 2>/dev/null && { _d_carried=1; break; }
+    done
+    [ "$_d_carried" -eq 1 ] && continue
+    ci::git::published_to_destination "$_d_res" && continue
+    _d_bad="${_d_bad} ${_d_res}"
+  done
+  if [ -n "$_d_bad" ]; then
+    echo "This push publishes a tag on a commit nothing here has vouched for:"
+    # shellcheck disable=SC2086
+    for _d_tag in ${_d_bad}; do
+      echo "    ${_d_tag}"
+    done
+    echo "  It is not the checkout, no branch in this push carries it, and the"
+    echo "  destination does not already have it — so the tag is what takes that"
+    echo "  commit out, and its tree has never been run by a content lane."
+    echo "  Push the branch that contains it first, or check that commit out and"
+    echo "  push the tag from there."
+    return 0
+  fi
   echo "The commit being pushed is not the commit checked out."
   echo "  pushed: ${tip}"
   echo "  HEAD:   $(git rev-parse --verify HEAD 2>/dev/null || echo '<none>')"

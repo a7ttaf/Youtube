@@ -3614,6 +3614,96 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "node lane: the compiler's third spelling of help is refused, and no short flag with it" {
+  # typescript registers the option as `{ name: "help", shortName: "?" }`, so
+  # `tsc -?` prints the banner and exits 0. The list refused `--help` and `-h`
+  # and missed the one spelling that is punctuation -- a one-character manifest
+  # edit switched the typecheck lane off while it reported PASS.
+  #
+  # And the reason the pattern is quoted: an unquoted `?` in a case pattern
+  # matches any single character, so `-?` written bare would have refused `-p`,
+  # `-b`, `-w` and the rest of the short vocabulary at a stroke. The controls
+  # below are that half of the rule.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -?" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  local flag
+  for flag in "-p tsconfig.json --noEmit" "-b" "--noEmit -i" "--noEmit -f"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"tsc ${flag}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"non-compiling tsc mode"* ]] || {
+      echo "short flag swallowed by the -? pattern: ${flag}" >&2
+      return 1
+    }
+  done
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a subshell or brace group does not switch off the argument rules" {
+  # `_script_names_a_checker` steps over `(`, `)`, `{` and `}` when it looks for
+  # a runner in command position, so it said the script runs vitest. Beside it
+  # `_command_runner` had no arm for them at all: `(` became the program name,
+  # `(` is in no tool list, and `_reject_tool_args_one` -- the only route to the
+  # tsc rules, the narrowing rules and the positional-filter rule -- was never
+  # called. One character in front of a command switched off every argument rule
+  # at once, on both the test and the typecheck path.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "( vitest run --exclude=tests/x )", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # No spaces are needed for a subshell, so the word is `(vitest`.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "(vitest run --exclude=tests/x)", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # A brace group reaches the same place by the other spelling.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "{ vitest run tests/a.test.ts; }", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # And the typecheck path, whose own rule this equally bypassed.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "( tsc --noEmit src/app.ts )" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"individual files"* ]]
+
+  # The controls, and they are the reason the blanking is scoped to command
+  # position: a wrapped full-suite run is an ordinary script and must pass, and
+  # `{ts,tsx}` and `${VAR}` are arguments rather than groups.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "( vitest run )", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"does not appear to run"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "(cd . && vitest run)", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"does not appear to run"* ]]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: a word spelled with a backslash escape is refused, not read past" {
   # `\trap` is the trap command to the shell and `rap` to this gate: an escaped
   # character is blanked, and it has to be, since keeping it would let `echo

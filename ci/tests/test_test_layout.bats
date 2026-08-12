@@ -1660,6 +1660,73 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "test-layout: an array is not the exported object own level" {
+  # Nothing counted brackets, so everything inside an array was still read as a
+  # property of the object around it. An element after a comma inside
+  # `plugins: [react(), ["p", {...}]]` is `depth == 1` preceded by `,` -- which
+  # is exactly the shape the computed-key rule was narrowed to -- so a config
+  # with one `test` block was refused as declaring two. The two cases already
+  # here only ever used flat arrays, which is why they did not catch it.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+  plugins: [react(), ["vite-plugin-x", { a: 1 }]],
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+
+  # The same miscount reached the three rules after it.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+  plugins: [...basePlugins, react()],
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+  plugins: [test, other],
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+
+  # And the controls: the same three shapes at the level they are actually
+  # about are still refused, so this is a depth counter and not an exemption.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+  ["test"]: { include: ["tests/only.test.ts"] },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  plugins: [react(), ["vite-plugin-x", { a: 1 }]],
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+  ...narrow,
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+}
+
 @test "test-layout: an unreadable staged config is infrastructure, not a pass" {
   # The index lists the blob and git cannot produce it. Dropping it silently
   # left the caller validating the worktree copy alone and reporting PASS --

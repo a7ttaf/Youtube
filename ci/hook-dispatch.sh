@@ -58,9 +58,13 @@ case "$HOOK_NAME" in
     # HEAD — and here that means leaving the base empty so it can.
     if [ ! -t 0 ]; then
       _push_old="" _push_new="" _push_nobase=0 _push_unrelated="" _push_dests="" _push_any_content=0
-      _push_btips="" _push_ttips=""
+      _push_btips="" _push_ttips="" _push_records=0
       while read -r _lref _lsha _rref _rsha; do
         [ -n "${_lsha:-}" ] || continue
+        # Counted separately from content, because "every record was a deletion"
+        # and "there were no records" are different statements and only one of
+        # them describes a push. See where the flag is exported below.
+        _push_records=$((_push_records + 1))
 
         # The *destination* is collected before anything else, because a push
         # names where it is going and the gate was reading where we happen to
@@ -221,15 +225,33 @@ case "$HOOK_NAME" in
       export CI_GATE_PUSH_REMOTE_REFS="${_push_dests# }"
       export CI_GATE_PUSH_BRANCH_TIPS="${_push_btips# }"
       export CI_GATE_PUSH_TAG_TIPS="${_push_ttips# }"
-      # A push that carries no content at all is a deletion, and there is
+      # A push whose every record is a deletion carries no content, and there is
       # nothing for a content or history check to report on. Stated explicitly
       # rather than left as "no new sha", because that is indistinguishable from
       # "nobody told us" and resolves to HEAD -- the checked-out branch, which
       # is not being pushed anywhere. Destination protection still runs off
       # CI_GATE_PUSH_REMOTE_REFS above: deleting `main` is exactly the push that
       # must still be refused.
-      if [ "$_push_any_content" -eq 0 ]; then
+      #
+      # `_push_records -gt 0` is the whole of the difference between a statement
+      # and a shrug. `_push_any_content` starts at 0 and only rises inside the
+      # loop, so reading no records at all produced the identical flag -- and
+      # since that flag now selects the entire ship plan, a hook invoked with
+      # nothing on stdin reported PASS having run one lane, which then announced
+      # that it did not apply. git really does run this hook with zero records
+      # (`git push` with nothing to send: "Everything up-to-date"), so failing
+      # here would refuse an ordinary no-op push; but a hook harness that does
+      # not forward the ref list gives the same silence while git still sends
+      # the refs. The two cannot be told apart from here, so the empty case does
+      # not narrow anything: it is "I could not look", and the full ship set is
+      # what this gate does when it does not know.
+      if [ "$_push_records" -gt 0 ] && [ "$_push_any_content" -eq 0 ]; then
         export CI_GATE_PUSH_DELETIONS_ONLY=1
+      elif [ "$_push_records" -eq 0 ]; then
+        echo "pre-push: no ref records on stdin." >&2
+        echo "  git sends none when there is nothing to push, and a hook runner" >&2
+        echo "  that does not forward them sends none either. Gating the tree" >&2
+        echo "  rather than assuming the first." >&2
       fi
       if [ -n "$_push_new" ]; then
         export CI_GATE_PUSH_NEW_SHA="$_push_new"

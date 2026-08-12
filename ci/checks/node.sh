@@ -1279,8 +1279,25 @@ script_exists() {
   printf '%s\n' "$PACKAGE_SCRIPTS" | grep -Fx -- "$script_name" >/dev/null 2>&1
 }
 
+# The command a package script runs, with grouping punctuation blanked.
+#
+# Every caller of this function is a reader -- the delegation resolver, the test
+# path and the typecheck path -- and what each of them wants to know is which
+# words the shell will hand to which command. `( vitest run --exclude=x )` and
+# `{ tsc --noEmit src/a.ts; }` hand over exactly what the unwrapped forms do, so
+# the wrapper is normalised away once, here, rather than taught to each rule
+# separately. Doing it per rule is what left `_script_names_a_checker` stepping
+# over `(` while `_command_runner` returned it as the program name: the
+# predicate said a runner was named and the argument rules were never reached.
+#
+# The substitution preserves length, so a message quoting this text differs from
+# package.json only by the two characters that were structure. See
+# _normalize_groups for which parentheses and braces qualify -- `$(...)`,
+# `${...}` and `{ts,tsx}` are arguments and are left alone.
 script_command() {
-  node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{})['$1']||''))}catch(e){}" 2>/dev/null || true
+  local _ng_out=""
+  _normalize_groups "$(node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{})['$1']||''))}catch(e){}" 2>/dev/null || true)"
+  printf '%s' "$_ng_out"
 }
 
 # A test script that narrows the suite is a suite that does not run.
@@ -1841,12 +1858,84 @@ _reject_status_trap() {
 # argument rules skipped entirely while the resolver accepted vitest one
 # function over. `NODE_ENV=test vitest run --exclude=...` was the same bypass
 # with an assignment instead of a prefix, and is closed by the same list.
+# Grouping is structure, and every reader here was taking it for a command name.
+#
+# `( vitest run tests/a.test.ts )` and `{ vitest run --exclude=x; }` run exactly
+# what the unwrapped forms run. `_script_names_a_checker` already knew that --
+# it steps over `(`, `)`, `{` and `}` when looking for a runner in command
+# position -- so the predicate said "this script runs vitest" while
+# `_command_runner` derived `(` as the program, `(` is in no tool list, and
+# `_reject_tool_args_one` was never called at all. That function is the only
+# route to the tsc rules, the narrowing rules and the positional-filter rule, so
+# one character in front of a command switched off every argument rule at once,
+# for the test path and the typecheck path alike.
+#
+# Blanked rather than tokenised away, because `(vitest run)` needs no spaces to
+# be a subshell and `(vitest` is one word.
+#
+# Only in *command position*, which is what separates a subshell from the two
+# constructs that look like one: `$(...)` and `<(...)` are substitutions whose
+# parenthesis follows a character, and their contents are an argument to the
+# command in front of them, not a command of their own. A `)` closes whichever
+# kind was opened, so the two are tracked on a stack rather than counted.
+#
+# `{` and `}` only when they stand alone as words, because that is the only
+# spelling the shell reads as a group: `tests/**/*.{ts,tsx}` and `${VAR}` are an
+# argument and an expansion, and blanking those would corrupt the very arguments
+# these rules exist to read.
+_normalize_groups() {
+  local _s="$1"
+  case "$_s" in
+    *['(){}']*) ;;
+    *) _ng_out="$_s"; return 0 ;;
+  esac
+  local _bq_state="" _bq_out="" _bq_cont=0 _bq_esc=0
+  _blank_quoted "$_s"
+  local _m="$_bq_out" _i=0 _n=${#_s} _out="" _mc _nx _stack="" _prev=" " _pre=0 _post=0
+  while [ "$_i" -lt "$_n" ]; do
+    _mc="${_m:$_i:1}"
+    _pre=0
+    case "$_prev" in [[:space:]]) _pre=1 ;; esac
+    case "$_mc" in
+      '(')
+        if [ "$_pre" -eq 1 ]; then
+          _stack="${_stack}s" ; _out="$_out "
+        else
+          _stack="${_stack}u" ; _out="$_out${_s:$_i:1}"
+        fi
+        ;;
+      ')')
+        case "$_stack" in
+          *s) _stack="${_stack%?}" ; _out="$_out " ;;
+          *u) _stack="${_stack%?}" ; _out="$_out${_s:$_i:1}" ;;
+          *)  _out="$_out${_s:$_i:1}" ;;
+        esac
+        ;;
+      '{'|'}')
+        _nx="${_m:$((_i + 1)):1}"
+        _post=0
+        case "$_nx" in ''|[[:space:]]) _post=1 ;; esac
+        if [ "$_pre" -eq 1 ] && [ "$_post" -eq 1 ]; then
+          _out="$_out "
+        else
+          _out="$_out${_s:$_i:1}"
+        fi
+        ;;
+      *) _out="$_out${_s:$_i:1}" ;;
+    esac
+    _prev="$_mc"
+    _i=$((_i + 1))
+  done
+  _ng_out="$_out"
+}
+
 _command_runner() {
-  local _tok
+  local _tok _ng_out=""
   _cr=""
+  _normalize_groups "$1"
   set -f
   # shellcheck disable=SC2086
-  for _tok in $1; do
+  for _tok in $_ng_out; do
     case "${_tok##*/}" in
       npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run) continue ;;
       -*) continue ;;
@@ -2477,11 +2566,19 @@ _reject_tool_args() {
   done
   _segs="${_segs}${_seg}"
 
+  local _ng_out=""
   while IFS= read -r _seg; do
     case "$_seg" in
       *[![:space:]]*) ;;
       *) continue ;;
     esac
+    # Grouping blanked before anything reads the words, so the rules below see
+    # the command the shell will run and not the punctuation around it. Passed
+    # on in place of the original: `)` at the end of `( vitest run a.test.ts )`
+    # would otherwise be one more bare word, and a bare word is what
+    # _reject_positional_filters refuses.
+    _normalize_groups "$_seg"
+    _seg="$_ng_out"
     _command_runner "$_seg"
     _sr="$_cr"
     [ -n "$_sr" ] || continue
@@ -2592,7 +2689,15 @@ _reject_tsc_args() {
       # distinction: `tsc --build` checks, `tsc --build --clean` deletes the
       # outputs and `tsc --build --dry` reports what it would do. Both exit 0
       # over a project that does not compile.
-      --showconfig|--listfilesonly|--init|--help|-h|--version|-v \
+      #
+      # `-?` is the compiler's own third spelling of --help -- typescript
+      # registers the option as `{ name: "help", shortName: "?" }` -- and it was
+      # the one this list missed while refusing the other two. It is quoted
+      # because an unquoted `?` in a case pattern matches any single character,
+      # so `-?` written bare would swallow `-p`, `-b`, `-w` and every other short
+      # flag: a rule against one help spelling would have refused the whole
+      # short-option vocabulary.
+      --showconfig|--listfilesonly|--init|--help|-h|'-?'|--version|-v \
         |--all|--nocheck|--watch|-w|--clean|--dry)
         echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a non-compiling tsc mode in its"
         echo "  '${script_name}' script:"

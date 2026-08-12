@@ -470,6 +470,7 @@ extract_test_block() {
       p++
 
       depth = 1
+      bdepth = 0
       while (p <= n && depth > 0) {
         ch = substr(all, p, 1)
 
@@ -477,7 +478,7 @@ extract_test_block() {
           e = string_end(all, p, n)
           # `"test": { }` is the same key as `test: { }`. Everything else in a
           # string is data, however much it looks like config.
-          if (depth == 1 && substr(all, p + 1, e - p - 2) == "test") {
+          if (depth == 1 && bdepth == 0 && substr(all, p + 1, e - p - 2) == "test") {
             rest = substr(all, e)
             if (rest ~ /^[[:space:]]*:[[:space:]]*\{/) {
               start = e + index(rest, "{")
@@ -502,6 +503,30 @@ extract_test_block() {
         if (ch == "{") { depth++; p++; continue }
         if (ch == "}") { depth--; p++; continue }
 
+        # Brackets move a depth of their own, so what is inside an array is not
+        # read as a property of the object around it. Nothing counted them: an
+        # element after a comma inside `plugins: [react(), ["vite-plugin-x", {
+        # a: 1 }]]` was still `depth == 1` preceded by `,`, which is exactly the
+        # shape the computed-key rule below was narrowed to, and a config with
+        # one `test` block was refused as declaring two. The same miscount
+        # reached the three rules after it: `plugins: [...base, react()]` is a
+        # spread at `depth == 1`, and `plugins: [test, other]` is a bare `test`
+        # followed by a comma.
+        #
+        # A computed key is judged here rather than below, because `[` is the
+        # character that opens both and only the one at the exported object own
+        # level is a key.
+        if (ch == "[") {
+          if (depth == 1 && bdepth == 0) {
+            pc = prev_signif(all, p)
+            if (pc == "{" || pc == "," || pc == "") computed = 1
+          }
+          bdepth++
+          p++
+          continue
+        }
+        if (ch == "]") { if (bdepth > 0) bdepth--; p++; continue }
+
         # A computed key at the exported object own level. `["test"]: {...}` is
         # applied by JavaScript exactly like `test:`, and applied *later* if it
         # comes later -- but the quoted token is skipped by the string handling
@@ -520,11 +545,6 @@ extract_test_block() {
         #
         # The narrowing keeps the case it was written for: `["test"]: {...}`
         # follows `{` or `,` because that is where a property starts.
-        if (depth == 1 && ch == "[") {
-          pc = prev_signif(all, p)
-          if (pc == "{" || pc == "," || pc == "") computed = 1
-        }
-
         # A spread at this level is the same problem as a computed key, and was
         # the next one along: `{ test: {broad}, ...narrow }` applies the spread
         # `test` last, so the block this scan captured is not the one vitest
@@ -537,7 +557,7 @@ extract_test_block() {
         # ...narrow }` can be. Flagging both failed a config that is entirely
         # correct and is the ordinary way to reuse a base config, which is the
         # same false failure this round has already fixed twice.
-        if (depth == 1 && seen > 0 && substr(all, p, 3) == "...") {
+        if (depth == 1 && bdepth == 0 && seen > 0 && substr(all, p, 3) == "...") {
           computed = 1
         }
 
@@ -549,7 +569,7 @@ extract_test_block() {
         # reach the same place by two more spellings, so the test is what
         # *follows* the identifier: anything other than a colon is a form this
         # reader cannot evaluate, and it stops rather than guessing.
-        if (depth == 1 && substr(all, p, 4) == "test") {
+        if (depth == 1 && bdepth == 0 && substr(all, p, 4) == "test") {
           before = (p > 1) ? substr(all, p - 1, 1) : " "
           rest = substr(all, p + 4)
           if (before !~ /[A-Za-z0-9_$]/ && rest !~ /^[[:space:]]*:/ \
@@ -559,7 +579,7 @@ extract_test_block() {
         }
 
         # Only a key at the exported object own level counts.
-        if (depth == 1 && substr(all, p, 4) == "test") {
+        if (depth == 1 && bdepth == 0 && substr(all, p, 4) == "test") {
           before = (p > 1) ? substr(all, p - 1, 1) : " "
           rest = substr(all, p + 4)
           if (before !~ /[A-Za-z0-9_$]/ && rest ~ /^[[:space:]]*:[[:space:]]*\{/) {

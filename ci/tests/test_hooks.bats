@@ -54,6 +54,7 @@ echo "OLD=${CI_GATE_PUSH_OLD_SHA:-}"
 echo "DEST=${CI_GATE_PUSH_REMOTE_REFS-<unset>}"
 echo "TIPS=${CI_GATE_PUSH_BRANCH_TIPS-<unset>}"
 echo "TAGS=${CI_GATE_PUSH_TAG_TIPS-<unset>}"
+echo "DELONLY=${CI_GATE_PUSH_DELETIONS_ONLY-<unset>}"
 exit 0
 SH
   chmod +x "$HD_SB/ci/preflight.sh"
@@ -418,13 +419,26 @@ SH
   rm -rf "$HD_SB"
 }
 
-@test "git: a tag beside a branch is the checkout or is already published" {
+@test "git: a tag beside a branch is covered when this push carries its commit" {
   # Tags were excluded from the multi-tip rule on the grounds that a tag in a
-  # mixed push names a commit inside the history being pushed. True, and not the
-  # whole of it: `git push origin main v1`, where `v1` labels a failing commit
-  # and `main` is its repair, had the branch tip equal HEAD and returned before
-  # looking at the tag at all. The content lanes then validated the repaired
-  # tree while a release pointer went out at the broken one.
+  # mixed push names a commit inside the history being pushed, and that
+  # exclusion made the check return before it looked at anything. Including them
+  # was right; the test applied to them was not. It asked only "is this the
+  # checkout, or already on the destination", which refuses `git push origin
+  # main v1.0` whenever the tag names a commit main is itself sending -- the
+  # ordinary release push -- and the drift message then printed the pushed sha
+  # and HEAD as the same value with a remedy that was already true.
+  #
+  # The commit under such a tag reaches the remote as part of the branch's
+  # history whether the tag exists or not, so the tag adds a label and no
+  # content. That is the same statement the "already published" arm makes about
+  # a commit that went out earlier, and it is the third answer this rule was
+  # missing.
+  #
+  # It is not "an ancestor of HEAD", and the difference is the protection: a
+  # tag-only push carries no branch tips, so that arm is empty for it and the
+  # tag must still be published. A tag on a commit no pushed branch contains is
+  # what carries that commit out.
   local sb
   sb="$(mktemp -d)"
   (
@@ -435,15 +449,22 @@ SH
     old="$(git rev-parse HEAD)"
     printf 'b\n' > b.txt && git add -A
     git -c user.email=t@t -c user.name=t commit -qm c2
-    printf '%s %s\n' "$old" "$(git rev-parse HEAD)" > .shas
+    tip="$(git rev-parse HEAD)"
+    # A commit on a branch this push does not name.
+    git checkout -q -b side "$old"
+    printf 's\n' > s.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm side1
+    side="$(git rev-parse HEAD)"
+    git checkout -q main
+    printf '%s %s %s\n' "$old" "$tip" "$side" > .shas
   ) >/dev/null 2>&1
-  local old tip
-  read -r old tip < "$sb/.shas"
+  local old tip side
+  read -r old tip side < "$sb/.shas"
 
-  _covers() { # _covers <tag tips>
+  _covers() { # _covers <tag tips> [branch tips]
     bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' \
       && CI_GATE_PUSH_NEW_SHA='$tip' CI_GATE_PUSH_REMOTE_REFS=main \
-         CI_GATE_PUSH_BRANCH_TIPS='$tip' CI_GATE_PUSH_TAG_TIPS='$1' \
+         CI_GATE_PUSH_BRANCH_TIPS='${2-$tip}' CI_GATE_PUSH_TAG_TIPS='$1' \
          CI_GATE_PUSH_REMOTE=origin ci::git::worktree_covers_push"
   }
 
@@ -457,20 +478,37 @@ SH
   run _covers "$tip"
   [ "$status" -eq 0 ]
 
-  # The reported case: an older commit, tagged, not yet on the destination.
+  # The release push: a tag on a commit this same push is sending under main.
   run _covers "$old"
+  [ "$status" -eq 0 ]
+
+  # And what the rule is actually for: a tag on a commit no branch in this push
+  # carries and the destination does not have. That tag is what takes the commit
+  # out, and its tree has never been run.
+  run _covers "$side"
   [ "$status" -ne 0 ]
 
-  # And the release workflow this must not block: the same tag once that commit
-  # is on the destination remote, which is the rule a tag-only push already met.
+  # A tag-only push has no branch tips, so the carried arm is empty for it and
+  # the published test is the whole of the rule -- before and after.
+  run _covers "$old" ""
+  [ "$status" -ne 0 ]
   run bash -c "cd '$sb' && git update-ref refs/remotes/origin/main '$old'"
   [ "$status" -eq 0 ]
-  run _covers "$old"
+  run _covers "$old" ""
   [ "$status" -eq 0 ]
 
   # An unreadable tip is not evidence that it matches, as everywhere else here.
   run _covers "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
   [ "$status" -ne 0 ]
+
+  # And the diagnostic names the condition it found, rather than comparing a
+  # collapsed tip against a HEAD that equals it.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' \
+    && CI_GATE_PUSH_NEW_SHA='$tip' CI_GATE_PUSH_BRANCH_TIPS='$tip' \
+       CI_GATE_PUSH_TAG_TIPS='$side' CI_GATE_PUSH_REMOTE=origin \
+       ci::git::explain_push_tip_drift"
+  [[ "$output" == *"publishes a tag on a commit nothing here has vouched for"* ]]
+  [[ "$output" != *"is not the commit checked out"* ]]
   rm -rf "$sb"
 }
 
@@ -489,5 +527,39 @@ SH
   [ "$status" -eq 0 ]
   [[ "$output" == *"TAGS="* ]]
   [[ "$output" != *"TAGS=$HD_ROOT"* ]]
+  rm -rf "$HD_SB"
+}
+
+@test "hook: reading no records is not the same statement as reading deletions" {
+  # `_push_any_content` starts at 0 and only rises inside the read loop, so
+  # "every record was a deletion" and "there were no records at all" set the
+  # identical flag -- and that flag now selects the whole ship plan. A hook run
+  # with nothing on stdin therefore reported PASS having scheduled one lane,
+  # which then announced that it did not apply.
+  #
+  # git really does run this hook with zero records, on a push with nothing to
+  # send, so failing here would refuse an ordinary no-op push. A hook runner
+  # that does not forward the ref list is silent in exactly the same way while
+  # git still sends the refs, and the two cannot be told apart from inside the
+  # hook. So the empty case narrows nothing.
+  _hd_sandbox
+  local zero=0000000000000000000000000000000000000000
+
+  run bash -c "cd '$HD_SB' && bash ci/hook-dispatch.sh pre-push origin file:///x </dev/null 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DELONLY=<unset>"* ]]
+  [[ "$output" == *"no ref records on stdin"* ]]
+
+  # The statement it must not be confused with: records that are all deletions.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/x %s refs/heads/feature %s\n' \
+    '$zero' '$HD_TIP' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DELONLY=1"* ]]
+
+  # And a push that carries content is neither.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s\n' \
+    '$HD_TIP' '$HD_ROOT' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DELONLY=<unset>"* ]]
   rm -rf "$HD_SB"
 }

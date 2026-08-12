@@ -1189,6 +1189,22 @@ YML
   # And a base the hook *did* supply is still honoured.
   run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' && CI_GATE_PUSH_NEW_SHA='$tip' CI_GATE_PUSH_OLD_SHA='$root' ci::git::push_range"
   [ "$output" = "${root}..${tip}" ]
+
+  # The other half of the same rule, and the reason the guess above is refused
+  # while this is not. `origin/main` becomes an answer once the push says which
+  # remote it is going to: a remote-tracking ref of the *named destination* is
+  # a record of what that destination was last seen holding, which is what
+  # published_to_destination is trusted with one function down. Without it the
+  # first push of any branch walked its entire history -- 439 commits in this
+  # repository, twelve of which fail the whitespace scan, so `git push -u origin
+  # <new-branch>` was refused with no remedy available to the person pushing.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' && CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_NEW_SHA='$tip' ci::git::push_range"
+  [ "$output" = "${root}..${tip}" ]
+
+  # Scoped to that destination, for the reason the publication test is: a commit
+  # that exists only on `upstream` says nothing about a push to `origin`.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' && CI_GATE_PUSH_REMOTE=upstream CI_GATE_PUSH_NEW_SHA='$tip' ci::git::push_range"
+  [ "$output" = "$tip" ]
   rm -rf "$sb"
 }
 
