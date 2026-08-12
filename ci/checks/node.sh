@@ -28,14 +28,39 @@ fi
 # marks that recursive call. A repo with a root package.json resolves to "."
 # and behaves exactly as before.
 if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
+  # Which tree the workspaces come from is the gate's question, the same as
+  # everywhere else in this file.
+  #
+  # ci::common::node_workspaces stats the filesystem, and in ship mode its
+  # result was unioned with HEAD's rather than replaced by it -- so an untracked
+  # zz_review_pkg/package.json entered the list, and the HEAD manifest check
+  # below then failed the push for a workspace the pushed commit does not
+  # contain and git will not send. Sixth reader of this one question, after the
+  # orphan scan, the manifest walk, and three in ci/checks/test-layout.sh.
+  #
+  # The lib is left alone: it is shared with tests.sh and typecheck.sh, and its
+  # root-manifest ambiguity refusal is a statement about the filesystem. The
+  # source is switched here, and the same ambiguity is asked of HEAD's list
+  # below, so ship mode neither inherits the worktree's layout nor loses the
+  # rule.
+  _ws_ship=0
+  if [ "${CI_GATE_MODE:-}" = "ship" ] \
+    && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    _ws_ship=1
+  fi
+
   # Discovery can now refuse: a root manifest coexisting with nested ones is a
   # layout it cannot cover without guessing, and under `set -e` the bare
   # assignment would abort the script with status 1 rather than say so.
-  _ws_rc=0
-  NODE_WORKSPACES="$(ci::common::node_workspaces package.json)" || _ws_rc=$?
-  if [ "$_ws_rc" -ne 0 ]; then
-    echo "Workspace discovery could not resolve this layout; see above."
-    exit "$CI_RESULT_FAIL_INFRA"
+  NODE_WORKSPACES=""
+  if [ "$_ws_ship" -eq 0 ]; then
+    _ws_rc=0
+    NODE_WORKSPACES="$(ci::common::node_workspaces package.json)" || _ws_rc=$?
+    if [ "$_ws_rc" -ne 0 ]; then
+      echo "Workspace discovery could not resolve this layout; see above."
+      exit "$CI_RESULT_FAIL_INFRA"
+    fi
   fi
 
   # Discovery stats the filesystem, so a workspace that exists only in the index
@@ -80,7 +105,7 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     # source rather than widening it, and node.sh already switches to `HEAD:`
     # for the manifest check one screen below.
     _idx_rc=0
-    if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+    if [ "$_ws_ship" -eq 1 ]; then
       # ls-tree takes no glob pathspec, so the tree is listed and filtered. The
       # listing's status is taken before the filter runs: grep exits 1 when it
       # matches nothing, which is an answer, and the enumeration failing is not.
@@ -112,10 +137,41 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       done <<< "$INDEXED_WS"
       INDEXED_WS="$(printf '%s' "$_kept_ws")"
     fi
-    if [ -n "$INDEXED_WS" ]; then
+    if [ "$_ws_ship" -eq 1 ]; then
+      # Replaced, not unioned. See the comment at the discovery call above.
+      NODE_WORKSPACES="$INDEXED_WS"
+      # The ambiguity the lib refuses on the filesystem, asked of the pushed
+      # tree: a root manifest beside nested ones is a layout this lane cannot
+      # cover without guessing which one owns the lockfile, and guessing is what
+      # made it skip every child package. Dropping the worktree source must not
+      # drop the rule with it.
+      _amb_root=0 _amb_child=0
+      while IFS= read -r _aw; do
+        [ -n "$_aw" ] || continue
+        if [ "$_aw" = "." ]; then _amb_root=1; else _amb_child=1; fi
+      done <<< "$NODE_WORKSPACES"
+      if [ "$_amb_root" -eq 1 ] && [ "$_amb_child" -eq 1 ]; then
+        echo "The pushed commit carries a root package.json and nested ones:"
+        while IFS= read -r _aw; do
+          [ -n "$_aw" ] || continue
+          [ "$_aw" = "." ] && continue
+          echo "    ${_aw}"
+        done <<< "$NODE_WORKSPACES"
+        echo "  Only the root carries a lockfile in a workspaces monorepo, and"
+        echo "  this lane refuses to install a workspace without one -- so which"
+        echo "  of the two readings applies cannot be settled from here."
+        echo "  Workspace discovery could not resolve this layout."
+        exit "$CI_RESULT_FAIL_INFRA"
+      fi
+    elif [ -n "$INDEXED_WS" ]; then
       NODE_WORKSPACES="$(printf '%s\n%s\n' "$NODE_WORKSPACES" "$INDEXED_WS" \
         | sed '/^$/d' | sort -u)"
     fi
+  elif [ "$_ws_ship" -eq 1 ]; then
+    # Ship mode with no readable git: there is no pushed tree to discover from,
+    # and the worktree is not a stand-in for it.
+    echo "Cannot read the tree this run stands behind to find its workspaces."
+    exit "$CI_RESULT_FAIL_INFRA"
   fi
 
   # "No manifest" and "no JavaScript here" are not the same statement. Deleting
@@ -2046,8 +2102,18 @@ _reject_status_trap() {
 _normalize_command() {
   local _s="$1"
   local _nl=$'\n' _cr=$'\r'
+  # `&&` and `;` bind to the token before them, and this is the normaliser every
+  # word-splitting reader in this file goes through -- so `true&&vitest run`
+  # arrived at _command_runner as the single token `true&&vitest`, which is not
+  # a runner, and the script was judged as running none.
+  #
+  # _script_names_a_checker has its own copy of this spacing and was corrected
+  # first; this one was not, and the two disagreed about the same string. Found
+  # by the case that drives both readers over one table rather than by the next
+  # review round -- which is what that case is for.
   case "$_s" in
-    *['(){}']*) ;;
+    *['(){};']*) ;;
+    *'&&'*) ;;
     *"$_nl"*) ;;
     *"$_cr"*) ;;
     *) _ng_out="$_s"; return 0 ;;
@@ -2057,6 +2123,20 @@ _normalize_command() {
   local _m="$_bq_out" _i=0 _n=${#_s} _out="" _mc _nx _stack="" _prev=" " _pre=0 _post=0
   while [ "$_i" -lt "$_n" ]; do
     _mc="${_m:$_i:1}"
+    # Separators first, and against the mask, so a `&&` or `;` inside a quoted
+    # argument stays where it is: quoted text is data.
+    if [ "${_m:$_i:2}" = "&&" ]; then
+      _out="$_out && "
+      _prev=" "
+      _i=$((_i + 2))
+      continue
+    fi
+    if [ "$_mc" = ";" ]; then
+      _out="$_out ; "
+      _prev=" "
+      _i=$((_i + 1))
+      continue
+    fi
     _pre=0
     case "$_prev" in [[:space:]]) _pre=1 ;; esac
     case "$_mc" in

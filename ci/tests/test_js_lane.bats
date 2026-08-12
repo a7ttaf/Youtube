@@ -478,6 +478,133 @@ ws_run() {
   rm -rf "$NODE_SB"
 }
 
+@test "tests-js: a package manager's value-taking option is not the command" {
+  # The sharpest fail-open this file has. `npx --package vitest jest --ci` is
+  # the documented way to run a tool without installing it, and the reader
+  # treated `--package` as valueless -- so it declared `vitest`, the name that
+  # is the option's *value*. In a workspace that installs both runners this lane
+  # then ran Vitest over a Jest suite: Vitest collects nothing it recognises,
+  # exits 0, and tests-js reports PASS with every Jest test uncollected.
+  #
+  # ci/checks/node.sh's _pm_advance was keyed by manager in 0105adc8 for exactly
+  # this reason; this copy kept the un-keyed list. Keyed here now, so `-p` can
+  # mean `--package` to npx and `--parseable` to pnpm without one eating the
+  # other's command.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  _tj_declared() {
+    printf '{ "name": "w", "scripts": { "test": %s } }\n' "$1" > "$sb/package.json"
+    ( cd "$sb" && bash -c '. ci/lib/log.sh 2>/dev/null
+                           . ci/lib/common.sh
+                           eval "$(sed -n "/^_tests_js_declared_runner()/,/^}/p" ci/checks/tests.sh)"
+                           _tests_js_declared_runner || printf ""' )
+  }
+
+  [ "$(_tj_declared '"npx --package vitest jest --ci"')" = "jest" ]
+  [ "$(_tj_declared '"npx -p vitest jest --ci"')" = "jest" ]
+  [ "$(_tj_declared '"npm --package vitest jest --ci"')" = "jest" ]
+
+  # The joined spelling always worked, and is the tell that the value was being
+  # read as a word rather than as the option's.
+  [ "$(_tj_declared '"npx --package=vitest jest --ci"')" = "jest" ]
+
+  # The control that keyed lists exist for: pnpm's `-p` is `--parseable`, a
+  # boolean, so the word after it *is* the command. A shared list would have to
+  # eat one of these two to satisfy the other.
+  [ "$(_tj_declared '"pnpm -p vitest run"')" = "vitest" ]
+  [ "$(_tj_declared '"pnpm --filter web vitest run"')" = "vitest" ]
+
+  # And the plain forms are untouched.
+  [ "$(_tj_declared '"vitest run"')" = "vitest" ]
+  [ "$(_tj_declared '"jest --ci"')" = "jest" ]
+  rm -rf "$sb"
+}
+
+@test "js lane: the two runner readers agree about the same test script" {
+  # ci/checks/node.sh and ci/checks/tests.sh both answer "which runner does this
+  # test script name", for different purposes: node.sh refuses a script that
+  # runs no runner, tests.sh picks which runner to invoke when a workspace
+  # installs both. The comment above the tests.sh reader has claimed since it
+  # was written that "ci/tests/test_js_lane.bats pins the two readers against
+  # the same spellings so they cannot drift apart about a wrapper".
+  #
+  # Nothing did. They drifted on two spellings at once, both of them fixed in
+  # node.sh first and left standing in tests.sh:
+  #
+  #   true&&vitest run              node.sh: fixed here    tests.sh: read as one token
+  #   npx --package vitest jest     node.sh: fixed in 0105adc8  tests.sh: declared vitest
+  #
+  # The second is the sharper one -- tests.sh would run Vitest over a Jest suite,
+  # collect nothing, and report PASS. This case is that claim made true.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+
+  # The tests.sh reader, extracted and driven directly: it reads ./package.json
+  # through node, so the fixture is a manifest.
+  _declared() {
+    printf '{ "name": "w", "scripts": { "test": %s } }\n' "$1" > "$sb/package.json"
+    ( cd "$sb" && bash -c '. ci/lib/log.sh 2>/dev/null
+                           . ci/lib/common.sh
+                           eval "$(sed -n "/^_tests_js_declared_runner()/,/^}/p" ci/checks/tests.sh)"
+                           _tests_js_declared_runner || printf ""' )
+  }
+  # The node.sh side is asked through the lane itself rather than through one of
+  # its helpers. The two files do not share a function, so the property worth
+  # pinning is the one a developer feels: for the same script, tests.sh names
+  # the runner the shell would run, and node.sh does not refuse it for naming
+  # none. Reaching into _command_runner asks a narrower question -- it answers
+  # with the *first* command, so `true && vitest run` is `true` there and that
+  # is correct -- and a case built on it fails for a reason no user has.
+  ws_setup
+  rm -f "$NODE_SB/ws/tsconfig.json"
+
+  # The spellings, and what the shell would actually run for each.
+  local spec truth got_t
+  for spec in \
+    'true&&vitest run|vitest' \
+    'true && vitest run|vitest' \
+    'true;vitest run|vitest' \
+    'npx --package vitest jest --ci|jest' \
+    'npx --package=vitest jest --ci|jest' \
+    'pnpm -p vitest run|vitest' \
+    'timeout 300 vitest run|vitest' \
+    'env FOO=1 jest --ci|jest' \
+    'jest --ci|jest'
+  do
+    truth="${spec##*|}"
+    spec="${spec%|*}"
+    got_t="$(_declared "\"$spec\"")"
+    [ "$got_t" = "$truth" ] \
+      || { echo "tests.sh read '$spec' as '${got_t:-<none>}', shell runs '$truth'" >&2; rm -rf "$sb"; return 1; }
+
+    # node.sh's half. `;` throws the runner's status away and is refused on
+    # those grounds, which is a different objection from "names no runner" --
+    # the point here is that neither reader may fail to *find* the runner.
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"$spec\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "node.sh could not find the runner in '$spec'" >&2; echo "$output" >&2; rm -rf "$sb"; return 1; }
+  done
+
+  # And the control that keeps this from being "both readers say vitest to
+  # everything": a script that names no runner is named by neither.
+  got_t="$(_declared '"echo nothing"')"
+  [ -z "$got_t" ]
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo nothing" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"not appear to run a test runner"* ]]
+  rm -rf "$sb"
+  rm -rf "$NODE_SB"
+}
+
 @test "js lane: every reader of 'is this a TypeScript project' knows the same names" {
   # Four places ask this one question, in three syntaxes:
   #
@@ -5814,6 +5941,45 @@ ship_ws_run() {
   ( cd "$SHIP_SB" \
     && CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA="$(git rev-parse HEAD)" \
        bash ci/checks/node.sh 2>&1 )
+}
+
+@test "node lane: ship-mode workspace discovery is the pushed tree, not a union" {
+  # The first discovery in this file stats the filesystem, and in ship mode its
+  # result was unioned with HEAD's rather than replaced by it. So an untracked
+  # zz_review_pkg/package.json joined the list and the HEAD manifest check below
+  # then failed the push for a workspace the pushed commit does not contain --
+  # and git will not send that directory, so there was no remedy but deleting
+  # it.
+  #
+  # Sixth reader of "which tree" corrected across this file and
+  # ci/checks/test-layout.sh.
+  ship_ws_setup
+  mkdir -p "$SHIP_SB/zz_review_pkg"
+  printf '{ "name": "zz", "private": true }\n' > "$SHIP_SB/zz_review_pkg/package.json"
+
+  # The premise: untracked, in neither git tree.
+  run bash -c "cd '$SHIP_SB' && git ls-files -- zz_review_pkg"
+  [ -z "$output" ]
+
+  run ship_ws_run
+  [[ "$output" != *"zz_review_pkg"* ]] \
+    || { echo "ship discovered a workspace the push does not carry" >&2; echo "$output" >&2; return 1; }
+  # And positively: the workspace this push is about was still discovered.
+  [[ "$output" == *"frontend"* ]]
+
+  # The control that keeps the rule: the pre-commit gate stands behind the
+  # worktree, where the package really is, and still sees it.
+  run bash -c "cd '$SHIP_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [[ "$output" == *"zz_review_pkg"* ]]
+
+  # And a workspace the pushed tree does carry is still discovered in ship mode,
+  # which is the direction the HEAD source was added for.
+  ( cd "$SHIP_SB" && git add zz_review_pkg/package.json \
+    && git -c user.email=t@t -c user.name=t commit -qm zz ) >/dev/null 2>&1
+  rm -rf "$SHIP_SB/zz_review_pkg"
+  run ship_ws_run
+  [[ "$output" == *"zz_review_pkg"* ]]
+  rm -rf "$SHIP_SB"
 }
 
 @test "node lane: the orphan scan reads one tree, not the union of two" {

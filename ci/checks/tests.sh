@@ -125,7 +125,39 @@ _tests_js_declared_runner() {
   # runners and declares neither, so silence fails closed rather than guessing.
   # `ci/tests/test_js_lane.bats` pins the two readers against the same spellings
   # so they cannot drift apart about a wrapper.
-  local _expect=1 _tp=0 _ep=0 _pp=0
+  # `&&` spaced out before the split, for the reason ci/checks/node.sh spaces
+  # it: the loop below splits on whitespace, so `true&&vitest run` arrives as
+  # the single token `true&&vitest`, never matches the separator arm, and the
+  # scan ends with nothing declared. The caller reads "nothing declared" as
+  # ambiguous and returns FAIL_INFRA for a workspace whose test script the shell
+  # would run perfectly well.
+  #
+  # No quote mask here, unlike node.sh, and the boundary is worth stating: a
+  # `&&` inside a quoted argument is spaced too. It cannot promote an argument
+  # to a runner, because the quote characters stay attached to the token --
+  # `"a&&vitest"` becomes `"a` and `vitest"`, and `vitest"` matches no arm. The
+  # case below asserts that rather than leaving it to be re-derived.
+  # `;` gets the same treatment, and it was not enough to do `&&` alone: the
+  # cross-reader case caught `true;vitest run` one spelling after it caught
+  # `true&&vitest run`, in the same function, on the same run.
+  local _norm="" _ci=0 _cn=${#_cmd}
+  while [ "$_ci" -lt "$_cn" ]; do
+    if [ "${_cmd:$_ci:2}" = "&&" ]; then
+      _norm="$_norm && "
+      _ci=$((_ci + 2))
+      continue
+    fi
+    if [ "${_cmd:$_ci:1}" = ";" ]; then
+      _norm="$_norm ; "
+      _ci=$((_ci + 1))
+      continue
+    fi
+    _norm="$_norm${_cmd:$_ci:1}"
+    _ci=$((_ci + 1))
+  done
+  _cmd="$_norm"
+
+  local _expect=1 _tp=0 _ep=0 _pp=0 _pm_name=""
   for _w in $_cmd; do
     case "$_w" in
       ';'|'&&'|'||'|'|'|'&'|'('|')'|'{'|'}')
@@ -153,8 +185,27 @@ _tests_js_declared_runner() {
     elif [ "$_ep" -eq 2 ]; then _ep=1 ; continue
     fi
     if [ "$_pp" -eq 1 ]; then
+      # Keyed by which manager is in front, which is how ci/checks/node.sh's
+      # _pm_advance reads the same grammar. One list cannot describe five
+      # vocabularies: `-p` is `--package` to npx and `--parseable` to pnpm, so a
+      # shared list either misses npx's value or eats pnpm's command.
+      #
+      # npx's own value-takers were missing entirely, and that is a fail-open in
+      # the sharpest place this file has. `npx --package vitest jest --ci` --
+      # the documented way to run a tool without installing it -- read
+      # `--package` as valueless and declared `vitest` as the command, so in a
+      # workspace carrying both runners this lane ran Vitest while the
+      # manifest's Jest suite never ran and the lane reported PASS.
+      case "${_pm_name}|$_w" in
+        'npx|-p'|'npx|--package'|'npx|-c'|'npx|--call' \
+          |'npm|-p'|'npm|--package'|'npm|-c'|'npm|--call' \
+          |'npm|--prefix'|'npm|-w'|'npm|--workspace'|'npm|-C' \
+          |'pnpm|--filter'|'pnpm|-F'|'pnpm|--dir'|'pnpm|-C'|'pnpm|--workspace-dir' \
+          |'yarn|--cwd' \
+          |'bun|--cwd')
+          _pp=2 ; continue ;;
+      esac
       case "$_w" in
-        --filter|-F|--dir|-C|--cwd|--prefix|--workspace|-w) _pp=2 ; continue ;;
         -*) continue ;;
         *) _pp=0 ;;
       esac
@@ -165,7 +216,7 @@ _tests_js_declared_runner() {
       jest|jest.cmd|jest.exe) printf 'jest' ; return 0 ;;
       timeout) _tp=1 ; continue ;;
       env|cross-env) _ep=1 ; continue ;;
-      npx|pnpm|yarn|npm|bun) _pp=1 ; continue ;;
+      npx|pnpm|yarn|npm|bun) _pm_name="${_w##*/}" ; _pp=1 ; continue ;;
       nohup|command|exec|time|dlx|run|--) continue ;;
     esac
     case "$_w" in
