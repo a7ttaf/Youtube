@@ -227,9 +227,14 @@ them.
 **The gate-table figure names the commit the run was EXECUTED at, not the last
 commit that changed `backend/`.** It previously named `4c70c599` while three
 later commits had touched `backend/` (`921a252a`, `59e96d68`, `be5c955d`),
-which left the mandatory pytest gate evidenced against an earlier tree even
-though all three deltas were docstring-only — 16 changed non-comment lines, all
-of them inside a `"""` block (review #184, codex P1). Re-run at `c92d260c`
+which left the mandatory pytest gate evidenced against an earlier tree. None of
+the three changed executable code, but "docstring-only" would be the wrong
+summary and was worth measuring per commit rather than in aggregate: `921a252a`
+(10 lines) and `59e96d68` (6) changed docstring text, all of it inside a `"""`
+block, while `be5c955d` changed 23 lines and every one is a `#` comment — the
+`_conflicting_channel_ids` contract block. An aggregate grep hides that, because
+the `#` lines are filtered out before the count is taken (review #184, codex
+P1). Re-run at `c92d260c`
 rather than argued about: same 2817, same 15 warnings, fresh container.
 
 The two anchoring conventions in this document differ on purpose, because the

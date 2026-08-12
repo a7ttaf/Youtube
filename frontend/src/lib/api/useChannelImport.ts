@@ -205,9 +205,12 @@ const PYTHON_UNSTRIPPED = new RegExp(`^[${PYTHON_SPACE}]|[${PYTHON_SPACE}]$`, "u
 //   safe, which is why the detector above is a separate, non-global RegExp.
 // Blast Radius: Whether a preview the backend ACCEPTED is refused. The owner
 //   echo is an equality check, so normalizing differently from the route does
-//   not warn — assertUsableResult raises ChannelImportShapeError and the whole
-//   import UI stops for a roster the API handles fine. No finance math, no
-//   write; the damage is availability of the operator's only preview.
+//   not warn: assertUsableResult raises ChannelImportShapeError, the operator
+//   never reaches Preview for a roster the API handles fine, and the flow
+//   stays on Upload behind a generic failure banner that cannot name the cause
+//   — so retrying is the obvious move and fails identically every time. No
+//   finance math, no write; the damage is availability of the operator's only
+//   preview.
 // Connections:
 //   - File: backend/ums_smart_revenue/api/channels.py ->
 //       _validated_content_owner_id, whose `raw.strip()` this mirrors and
@@ -233,9 +236,11 @@ const pythonStrip = (value: string): string => value.replace(PYTHON_STRIPPABLE, 
 //   multipart normalization, not an approximation of it. Measured, not read —
 //   `new Request(url, {method: "POST", body: formData})` serialized
 //   `"CO\nabc"` as `CO\r\nabc` on the wire.
-// Blast Radius: Only ends-of-string whitespace survives `pythonStrip`, so this
-//   changes nothing for any value without an INTERIOR lone newline. For one
-//   that has it, the owner echo is an equality check against a value the route
+// Blast Radius: `pythonStrip` only ever cuts at the ENDS, so it can never mask
+//   a difference in the middle — which makes this step decide the comparison
+//   for exactly one shape of value, one carrying an INTERIOR lone newline, and
+//   change nothing for every other. For a value that has it, the owner echo
+//   is an equality check against a value the route
 //   ACCEPTED — `_validated_content_owner_id` rejects only blank, NUL and
 //   over-length — so a mismatch is not a warning: it raises
 //   ChannelImportShapeError and refuses the whole preview.
@@ -874,9 +879,13 @@ const rowNumbersAscend = (rows: ReadonlyArray<Record<string, unknown>>): boolean
 //   short-circuits, so a non-ascending plan is refused before this is reached.
 //   That ordering is load-bearing: reversing PLAN_CHECKS would leave this
 //   check comparing row numbers against arbitrary array positions. Both limits
-//   mirror the parser's own constants; if MAX_IMPORT_ROWS or the blank-record
-//   budget moves in channel_import.py, this moves with it. Fails CLOSED — an
-//   over-budget plan is refused, never truncated to fit.
+//   trace to ONE number: the route passes MAX_IMPORT_ROWS (channels.py:111)
+//   as the parser's `max_rows`, and that single argument caps the data rows
+//   AND the blank records separately — which is precisely why the ceiling is
+//   `i + MAX_IMPORT_ROWS + 1` and not `i + 1`. The parser itself declares no
+//   cap (`max_rows: int | None = None`), so this mirrors the ROUTE's constant,
+//   not a parser default. Fails CLOSED — an over-budget plan is refused, never
+//   truncated to fit.
 // Blast Radius: Which CSV LINE the operator is sent to. A malformed response
 //   can keep the real fingerprint and either pad the plan to 10000 plausible
 //   rows or hand back a single row numbered 10000 — a line no one-row file has
@@ -884,8 +893,12 @@ const rowNumbersAscend = (rows: ReadonlyArray<Record<string, unknown>>): boolean
 //   the bound apply executes the real roster (review #184, codex P2). No
 //   finance math; the damage is that the reviewed plan is not the applied one.
 // Connections:
-//   - File: backend/ums_smart_revenue/org/channel_import.py -> the parser
-//       whose 5000-data-row and 5000-blank-record caps produce this bound.
+//   - File: backend/ums_smart_revenue/api/channels.py -> MAX_IMPORT_ROWS
+//       (:111), the only place the 5000 is declared, passed to the parser as
+//       `max_rows`. If that number moves, THIS number moves.
+//   - File: backend/ums_smart_revenue/org/channel_import.py ->
+//       parse_channel_import_csv, which spends that one argument on both the
+//       data-row cap and the blank-record cap — the reason for the +5001.
 //   - File: frontend/src/lib/api/useChannelImport.ts -> rowNumbersAscend,
 //       which must stay ahead of this in PLAN_CHECKS, and isRowNumber, whose
 //       per-row ceiling this completes.
