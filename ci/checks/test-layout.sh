@@ -815,17 +815,32 @@ _emit_config_copy() {
 }
 
 config_sources() {
-  printf '%s\n' "$VITEST_CONFIG"
   # In ship mode the commit already exists, so the index and the worktree can
   # both hold a repair the pushed tree does not. `git show :path` reads the
   # index, so a HEAD whose include is narrowed -- or absent -- was never looked
   # at, and with the configurable Node lanes disabled nothing else looks at it
-  # either. The pushed tree is what the gate is vouching for, so it is a source.
+  # either. The pushed tree is what the gate is vouching for, so it is *the*
+  # source.
+  #
+  # The source, and not a third one beside the other two. Adding HEAD while
+  # leaving the worktree and index in made ship validate every copy, so a local
+  # edit to frontend/vitest.config.ts -- narrowing the include while debugging,
+  # or deleting the file on disk -- failed a push whose commit carries a
+  # perfectly good config, and git will not send that edit. Which tree a run
+  # vouches for chooses the sources; it does not add to them. Same correction as
+  # candidate_files, workspace_files_present and the __tests__ scan, which is
+  # four readers of one question in this file.
+  local _cs_ship=0
   if [ "${CI_GATE_MODE:-}" = "ship" ] \
     && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
     && git rev-parse --verify HEAD >/dev/null 2>&1; then
-    _emit_config_copy "HEAD:" "pushed commit"
+    _cs_ship=1
   fi
+  if [ "$_cs_ship" -eq 1 ]; then
+    _emit_config_copy "HEAD:" "pushed commit"
+    return 0
+  fi
+  printf '%s\n' "$VITEST_CONFIG"
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
     if git cat-file -e ":$VITEST_CONFIG" 2>/dev/null; then
       local staged
@@ -866,8 +881,8 @@ config_missing_from_index() {
 
 # Whether the tree this run stands behind carries the config at all.
 #
-# The third reader of "which tree" in this file, and the one that was never
-# asked. config_sources and workspace_files_present both switch to `HEAD:` in
+# One of several readers of "which tree" in this file, and the one that was
+# never asked. config_sources and workspace_files_present both read `HEAD:` in
 # ship mode; the two arms that gate the whole config section read the worktree
 # and the index in every mode. So in ship mode `git rm --cached
 # frontend/vitest.config.ts` -- the worktree copy untouched, the deletion staged

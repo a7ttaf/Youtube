@@ -535,6 +535,92 @@ ws_run() {
     || { echo "changeset.sh: $got" >&2; return 1; }
 }
 
+@test "node lane: a compact && is the same composition as a spaced one" {
+  # `&&` is the one composition this reader calls safe -- either the checker
+  # runs or the thing before it failed and the script fails with it -- and the
+  # separator normalisation above spaced out `;` and left it joined. So
+  # `true&&vitest run` tokenized as `true&&vitest`, which sits in command
+  # position and is not a runner, and a legitimate script was refused as "does
+  # not appear to run a test runner".
+  #
+  # The mirror image of the `;` fix beside it: that one spaced its separator to
+  # close a bypass, this one spaces its separator to stop inventing a failure.
+  # Both are the tokenizer disagreeing with the shell.
+  #
+  # The runner is named bare here rather than as `./scripts/vitest`, which is
+  # what the other cases in this file use. A path form was never affected: the
+  # token `true&&./scripts/vitest` still ends in `/vitest`, and the basename is
+  # what gets matched, so the joined separator was invisible. Only the bare name
+  # reproduces -- my first draft of this case used the path and passed against
+  # the unfixed tree.
+  #
+  # Asserted on what the lane says rather than on its exit status, because a
+  # bare `vitest` is not installed in this sandbox: the script is reached and
+  # then fails for a reason that has nothing to do with the rule. "Running
+  # script: test" is printed before the script runs, which is exactly the
+  # boundary this case is about.
+  ws_setup
+  rm -f "$NODE_SB/ws/tsconfig.json"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true&&vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]] \
+    || { echo "a compact && was read as part of the command name" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"Running script: test"* ]]
+
+  # The spaced spelling is the same shell program and already worked; asserting
+  # it here is what makes the case about the spacing rather than about the
+  # fixture.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true && vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  [[ "$output" == *"Running script: test"* ]]
+
+  # The controls, each checking that spacing the separator did not space past a
+  # rule. A narrowing positional after a compact `&&` is still a narrowing
+  # positional -- and refused in the same words as the spaced spelling, not by
+  # the runner rule firing for the wrong reason, which is how the unfixed tree
+  # happened to reach the right verdict here.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true&&vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # A config redirect likewise.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true&&vitest --config other.ts run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # `||` is still refused, joined or not: it either never reaches the checker or
+  # throws the checker's result away.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run||true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" != *"Running script: test"* ]]
+
+  # A single `&` backgrounds the checker and is not `&&` with a character
+  # missing -- the two-character match must not fire on it.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true&vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"backgrounds"* ]]
+
+  # And a quoted `&&` is data, not a separator: the mask is what is scanned, so
+  # an argument containing it is left where it is.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --reporter=\"a&&b\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"Running script: test"* ]]
+  rm -rf "$NODE_SB"
+}
+
 @test "node lane: the orphan scan knows every configuration name discovery does" {
   # The scan's list of what counts as workspace configuration was
   # `tsconfig.json|jsconfig.json`, which was the whole list until discovery
@@ -5728,6 +5814,50 @@ ship_ws_run() {
   ( cd "$SHIP_SB" \
     && CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA="$(git rev-parse HEAD)" \
        bash ci/checks/node.sh 2>&1 )
+}
+
+@test "node lane: the orphan scan reads one tree, not the union of two" {
+  # The other direction of the case below, reported one round after it. Adding
+  # HEAD beside the filesystem walk fixed the miss and opened a false red: an
+  # untracked scratch/tsconfig.json -- a local experiment with no package.json
+  # beside it, which git will not send -- failed a ship run over a directory the
+  # push has nothing to do with.
+  #
+  # Which tree a run vouches for chooses the source; it does not add to it. The
+  # same correction as candidate_files in ci/checks/test-layout.sh, and the same
+  # one this scan's sibling readers took two commits ago.
+  ship_ws_setup
+  mkdir -p "$SHIP_SB/scratch"
+  printf '{ "compilerOptions": {} }\n' > "$SHIP_SB/scratch/tsconfig.json"
+
+  # The premise: untracked, and in no git tree.
+  run bash -c "cd '$SHIP_SB' && git ls-files -- scratch"
+  [ -z "$output" ]
+  run bash -c "cd '$SHIP_SB' && git ls-tree -r --name-only HEAD -- scratch"
+  [ -z "$output" ]
+
+  run ship_ws_run
+  [[ "$output" != *"no package.json beside it"* ]] \
+    || { echo "ship reported an orphan the push does not carry" >&2; echo "$output" >&2; return 1; }
+  # And positively: it reached the workspace this push is actually about.
+  [[ "$output" == *"frontend"* ]]
+
+  # The control that keeps the rule: the pre-commit gate stands behind the
+  # worktree, where the stray really is, and still reports it.
+  run bash -c "cd '$SHIP_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no package.json beside it"* ]]
+  [[ "$output" == *"scratch/tsconfig.json"* ]]
+
+  # And once it is in the pushed tree, ship is the gate that must catch it --
+  # which is what the case below covers from the other side.
+  ( cd "$SHIP_SB" && git add -f scratch/tsconfig.json \
+    && git -c user.email=t@t -c user.name=t commit -qm scratch ) >/dev/null 2>&1
+  rm -rf "$SHIP_SB/scratch"
+  run ship_ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"scratch/tsconfig.json"* ]]
+  rm -rf "$SHIP_SB"
 }
 
 @test "node lane: in ship mode the orphan scan reads the pushed tree" {

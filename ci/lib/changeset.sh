@@ -594,7 +594,7 @@ ci::changeset::detect() {
       ;;
     pre-push)
       local push_range=""
-      local committed_entries="" staged_entries=""
+      local committed_entries=""
       # ci::git::push_range, not a second hand-rolled resolution. git.sh's
       # comment claimed this function "resolves the same question the same
       # way"; it did not. push_range falls back to the whole of HEAD when it
@@ -618,19 +618,24 @@ ci::changeset::detect() {
         # reported as a failure so the caller runs the full set.
         *) return 1 ;;
       esac
+      # The pushed range and nothing else. The index is the commit being made,
+      # not the commit being pushed, and unioning it in scheduled lanes for work
+      # that is not going out: a README-only outgoing commit with a staged
+      # frontend/src/wip.ts emitted lint-js, typecheck-js, format-js and
+      # tests-js, so unrelated local work decided what a push had to survive.
+      #
+      # Nothing is lost by dropping it. The lanes the union existed to reach all
+      # stand behind HEAD in ship mode themselves -- ci/checks/node.sh and
+      # ci/checks/test-layout.sh read the pushed tree and were corrected to stop
+      # reading the worktree beside it -- and the checks that must run whatever
+      # changed are on _CI_CHANGESET_ALWAYS_CHECKS, which no filter touches.
+      # The union was added in d3f1a71f, when those lanes did read the worktree.
+      #
+      # Same rule as the checks it schedules, one level up: which tree a run
+      # vouches for chooses the sources, and it does not add to them.
       committed_entries="$(ci::changeset::_name_status diff "$push_range")" || _rc=$?
       [ "$_rc" -eq 0 ] || return 1
-      staged_entries="$(ci::changeset::_name_status diff --cached)" || _rc=$?
-      [ "$_rc" -eq 0 ] || return 1
       raw_entries="$committed_entries"
-      if [ -n "$staged_entries" ]; then
-        if [ -n "$raw_entries" ]; then
-          raw_entries="${raw_entries}
-${staged_entries}"
-        else
-          raw_entries="$staged_entries"
-        fi
-      fi
       ;;
     pr)
       local default_branch merge_base

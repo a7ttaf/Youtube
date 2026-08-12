@@ -289,3 +289,64 @@ PY
   done
   rm -rf "$sb"
 }
+
+@test "changeset: a pre-push changeset is the pushed range, not the index beside it" {
+  # The index is the commit being made, not the commit being pushed, and this
+  # mode unioned it in -- so a README-only outgoing commit with a staged
+  # frontend/src/wip.ts emitted lint-js, typecheck-js, format-js and tests-js,
+  # and unrelated local work decided what a push had to survive.
+  #
+  # Nothing is lost by dropping it: the lanes the union reached stand behind
+  # HEAD in ship mode themselves, and the checks that must run whatever changed
+  # are on the always-list, which no filter touches. Both are asserted below.
+  source "$REPO_ROOT/ci/lib/git.sh"
+  mkdir -p "$TEST_REPO/frontend/src"
+  printf '# readme\n' > "$TEST_REPO/README.md"
+  printf 'export const a = 1;\n' > "$TEST_REPO/frontend/src/app.ts"
+  printf '{ "name": "f" }\n' > "$TEST_REPO/frontend/package.json"
+  git add -A
+  git commit -qm init
+  local base tip
+  base="$(git rev-parse HEAD)"
+  printf '# readme v2\n' > "$TEST_REPO/README.md"
+  git add README.md
+  git commit -qm docs
+  tip="$(git rev-parse HEAD)"
+
+  printf 'export const wip = 1;\n' > "$TEST_REPO/frontend/src/wip.ts"
+  git add frontend/src/wip.ts
+
+  # The premise: the push carries README.md alone; the JS file is staged only.
+  run git diff --name-only "${base}..${tip}"
+  [ "$output" = "README.md" ]
+  run git diff --cached --name-only
+  [ "$output" = "frontend/src/wip.ts" ]
+
+  export CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA="$base" CI_GATE_PUSH_NEW_SHA="$tip" \
+         CI_GATE_PUSH_REMOTE=origin
+  ci::changeset::detect pre-push
+  local checks
+  checks="$(ci::changeset::get_checks_needed)"
+  [[ "$checks" != *"tests-js"* ]] \
+    || { echo "staged WIP scheduled a JS lane on a docs-only push: $checks" >&2; return 1; }
+  [[ "$checks" != *"typecheck-js"* ]]
+  [[ "$checks" != *"lint-js"* ]]
+
+  # And positively, so the case cannot be satisfied by a detector that emits
+  # nothing: what the push does carry is still classified, and the always-run
+  # checks are still there.
+  [[ "$checks" == *"lint-markdown"* ]]
+  [[ "$checks" == *"secrets"* ]]
+  [[ "$checks" == *"commit-hygiene"* ]]
+
+  # The control that keeps the rule: a JS file in the pushed range still
+  # schedules the JS lanes. Without this the fix would read as "never schedule
+  # JavaScript from a pre-push changeset".
+  git commit -qm wip
+  tip="$(git rev-parse HEAD)"
+  export CI_GATE_PUSH_NEW_SHA="$tip"
+  ci::changeset::detect pre-push
+  checks="$(ci::changeset::get_checks_needed)"
+  [[ "$checks" == *"tests-js"* ]]
+  [[ "$checks" == *"typecheck-js"* ]]
+}

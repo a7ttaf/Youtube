@@ -140,28 +140,33 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
   # tsconfig.app.json and tsconfig.node.json, no plain tsconfig.json -- as a
   # workspace that could lose its package.json silently. Found by sweeping the
   # other readers of this list rather than reported.
-  ORPHAN_CFG="$(find . \
-      \( -name 'node_modules' -o -name '.git' -o -name 'dist' -o -name 'build' \) -prune -o \
-      -type f \( -name 'package-lock.json' -o -name 'npm-shrinkwrap.json' \
-        -o -name 'pnpm-lock.yaml' -o -name 'yarn.lock' -o -name 'bun.lock' -o -name 'bun.lockb' \
-        -o -name 'tsconfig.json' -o -name 'tsconfig.*.json' \
-        -o -name 'jsconfig.json' -o -name 'jsconfig.*.json' \
-        -o -name 'vitest.config.*' -o -name 'vite.config.*' \) -print 2>/dev/null || true)"
-
-  # And the pushed tree, in ship mode.
   #
-  # This scan is what turns "no manifest" into "a workspace lost its manifest",
-  # and it walked the worktree alone -- so the repair that hides the fault hides
-  # it here too. Delete frontend/package.json in a commit, then delete the
-  # lockfile and the tsconfig on disk only, and push: discovery finds nothing,
+  # The pushed tree in ship mode, and *only* it -- not a union with the
+  # worktree.
+  #
+  # Walking the filesystem here was the whole scan, which missed the fault it
+  # exists to catch: delete frontend/package.json in a commit, then delete the
+  # lockfile and the tsconfig on disk only, and push. Discovery finds nothing,
   # this scan finds nothing to be orphaned, and the lane prints "No package.json
-  # found" and exits 0. Install, typecheck, tests and build are all skipped for
-  # a pushed tree that is broken, by the check written to notice exactly that.
+  # found" and exits 0 -- install, typecheck, tests and build all skipped for a
+  # broken pushed tree. Adding HEAD beside the walk fixed that and opened the
+  # other direction: an untracked scratch/tsconfig.json, a local experiment git
+  # will not send, failed a ship run over a directory the push has nothing to do
+  # with. Both were reported, one round apart, about the same scan.
   #
-  # The listing's status is taken before the filter, for the reason given above.
+  # Which tree a run vouches for chooses the source; it does not add to it. The
+  # pre-commit gate stands behind the worktree and keeps the walk.
+  _oc_ship=0
   if [ "${CI_GATE_MODE:-}" = "ship" ] \
     && command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
     && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    _oc_ship=1
+  fi
+
+  if [ "$_oc_ship" -eq 1 ]; then
+    # The listing's status is taken before the filter, for the reason given
+    # above: a tree that could not be listed is not a tree with nothing in it,
+    # and this is the scan whose empty answer reads as "nothing was lost".
     _oc_rc=0
     _oc_head="$(git ls-tree -r --name-only HEAD 2>/dev/null)" || _oc_rc=$?
     if [ "$_oc_rc" -ne 0 ]; then
@@ -169,13 +174,18 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       echo "  A tree that could not be listed is not a tree with nothing in it."
       exit "$CI_RESULT_FAIL_INFRA"
     fi
-    _oc_cfg="$(printf '%s\n' "$_oc_head" \
+    ORPHAN_CFG="$(printf '%s\n' "$_oc_head" \
       | grep -Ev '(^|/)(node_modules|dist|build)/' \
       | grep -E '(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock|bun\.lockb|tsconfig\.json|tsconfig\.[^/]+\.json|jsconfig\.json|jsconfig\.[^/]+\.json|vitest\.config\.[^/]+|vite\.config\.[^/]+)$' \
       | sed 's|^|./|' || true)"
-    if [ -n "$_oc_cfg" ]; then
-      ORPHAN_CFG="$(printf '%s\n%s\n' "$ORPHAN_CFG" "$_oc_cfg" | sed '/^$/d' | sort -u)"
-    fi
+  else
+    ORPHAN_CFG="$(find . \
+        \( -name 'node_modules' -o -name '.git' -o -name 'dist' -o -name 'build' \) -prune -o \
+        -type f \( -name 'package-lock.json' -o -name 'npm-shrinkwrap.json' \
+          -o -name 'pnpm-lock.yaml' -o -name 'yarn.lock' -o -name 'bun.lock' -o -name 'bun.lockb' \
+          -o -name 'tsconfig.json' -o -name 'tsconfig.*.json' \
+          -o -name 'jsconfig.json' -o -name 'jsconfig.*.json' \
+          -o -name 'vitest.config.*' -o -name 'vite.config.*' \) -print 2>/dev/null || true)"
   fi
 
   ORPHANS=""
@@ -190,6 +200,18 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     # staged for a later commit settles the question for a pushed tree that does
     # not carry it, and a manifest that HEAD carries but the index no longer
     # does fails to settle it at all.
+    #
+    # The disk test in front of it is skipped in ship mode for the same reason,
+    # and honestly: no input was found where that changes the verdict. Every
+    # state it could have hidden -- a manifest deleted in the commit and
+    # restored on disk, or one on disk that .gitignore keeps out of the tree --
+    # is caught first by the discovery drift check further down, which exits 20
+    # with "a workspace manifest exists on disk but not in the commit being
+    # pushed". Both trees exit 20 on all of them; only the message differs.
+    #
+    # Changed anyway, because a scan that consults two trees is the defect this
+    # file keeps producing, and the drift check is a different question that
+    # happens to overlap -- not a guarantee this one is entitled to lean on.
     #
     # Looked for up the tree, not only beside it. A nested TypeScript project
     # config is ordinary: `frontend/e2e/tsconfig.json` extending
@@ -206,11 +228,11 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     _mf_found=0
     _mf_dir="$_cfg_dir"
     while :; do
-      if [ -f "$_mf_dir/package.json" ]; then _mf_found=1; break; fi
+      if [ "$_oc_ship" -eq 0 ] && [ -f "$_mf_dir/package.json" ]; then _mf_found=1; break; fi
       if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
         _mf_rel="${_mf_dir#./}"
         _mf_ref=":"
-        if [ "${CI_GATE_MODE:-}" = "ship" ]           && git rev-parse --verify HEAD >/dev/null 2>&1; then
+        if [ "$_oc_ship" -eq 1 ]; then
           _mf_ref="HEAD:"
         fi
         if [ "$_mf_rel" = "." ] || [ -z "$_mf_rel" ]; then
@@ -2384,12 +2406,28 @@ _script_names_a_checker() {
   # the same bypass the `||` rule had before it stopped requiring spaces.
   # Spaced out here, and only where it is really a separator: the blanked copy
   # marks quoted spans, so a `;` inside an argument is left where it is.
+  #
+  # `&&` gets the same treatment, and for the opposite consequence. It is the
+  # one composition this function calls safe -- either the checker runs or the
+  # thing before it failed and the script fails with it -- and leaving it joined
+  # made `true&&vitest run` tokenize as `true&&vitest`, which is in command
+  # position and is not a runner, so a legitimate script was refused as "does
+  # not appear to run a test runner". Reproduced: the spaced spelling reached
+  # `Running script: test`, the compact one exited 20. The `;` rule spaced its
+  # separator to close a bypass; this one spaces its separator to stop
+  # inventing a failure. Same normalisation, opposite direction, and both are
+  # the tokenizer disagreeing with the shell.
   local _bq_state="" _bq_out="" _bq_cont=0 _bq_esc=0
   _blank_quoted "$cmd"
   local _mask="$_bq_out" _norm="" _ci=0 _cn=${#cmd}
   if [ "$_bq_esc" -eq 1 ]; then _reject_escaped_word "$1"; fi
   _reject_status_trap "$1" "$1" "$_mask"
   while [ "$_ci" -lt "$_cn" ]; do
+    if [ "${_mask:$_ci:2}" = "&&" ]; then
+      _norm="$_norm && "
+      _ci=$((_ci + 2))
+      continue
+    fi
     if [ "${_mask:$_ci:1}" = ";" ]; then
       _norm="$_norm ; "
     else

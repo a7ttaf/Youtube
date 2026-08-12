@@ -2375,6 +2375,71 @@ EOF
   [[ "$output" == *"Test layout OK: 1 file(s)"* ]]
 }
 
+@test "test-layout: the config validated in ship mode is the pushed commit's alone" {
+  # config_sources emitted the worktree path unconditionally, then added HEAD in
+  # ship mode, then the index -- so ship validated all three copies and any one
+  # of them could fail the push. A local edit to frontend/vitest.config.ts, or
+  # deleting it on disk while debugging, failed a push whose commit carries a
+  # perfectly good config that git is about to send unchanged.
+  #
+  # Same correction as candidate_files, workspace_files_present and the
+  # __tests__ scan: which tree a run vouches for chooses the sources, it does
+  # not add to them.
+  ( cd "$SANDBOX" && git init -q -b f . && printf 'ci/\n' > .gitignore && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+
+  # The premise: HEAD's config is good and stays untouched throughout.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+
+  # A local edit narrowing the include -- the config this push does not carry.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/app.test.ts"],
+  },
+});
+EOF
+  run bash -c "cd '$SANDBOX' && git diff --name-only -- frontend/vitest.config.ts"
+  [[ "$output" == *"vitest.config.ts"* ]]
+
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ] \
+    || { echo "ship judged a worktree-only config edit" >&2; echo "$output" >&2; return 1; }
+
+  # The control that keeps the rule: the pre-commit gate stands behind the tree
+  # being built, and the same edit is its business.
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=quick bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 20 ]
+
+  # Deleting the config on disk is the same question in its sharper form: ship
+  # has a config to read and does not need the file.
+  rm -f "$SANDBOX/frontend/vitest.config.ts"
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+
+  # And the direction HEAD was made the source for, unchanged: a narrowing
+  # include in the pushed commit is still caught, with the worktree copy absent.
+  ( cd "$SANDBOX" && git checkout -q -- frontend/vitest.config.ts ) >/dev/null 2>&1
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/app.test.ts"],
+  },
+});
+EOF
+  ( cd "$SANDBOX" && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm narrow ) >/dev/null 2>&1
+  rm -f "$SANDBOX/frontend/vitest.config.ts"
+  run bash -c "cd '$SANDBOX' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 20 ] \
+    || { echo "ship passed over a narrowing include the push carries" >&2; echo "$output" >&2; return 1; }
+}
+
 @test "test-layout: ship mode cannot fall back to the worktree when it cannot read HEAD" {
   # Failing to look is not looking and finding nothing. With no git, no repo or
   # no HEAD there is no pushed tree to read, and the answer that costs nothing
