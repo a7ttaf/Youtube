@@ -7,6 +7,11 @@
 
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+  # The gate exports its own mode and push state, and these suites run
+  # under it -- so a case inherited a range belonging to another tree.
+  # shellcheck source=ci/tests/gate_env.bash
+  source "$REPO_ROOT/ci/tests/gate_env.bash"
+  ci::tests::clear_gate_env
   cd "$REPO_ROOT"
 
   # Sandbox with the real script and libs, but a synthetic frontend/ tree, so a

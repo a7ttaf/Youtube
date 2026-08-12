@@ -2,6 +2,11 @@
 
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+  # The gate exports its own mode and push state, and these suites run
+  # under it -- so a case inherited a range belonging to another tree.
+  # shellcheck source=ci/tests/gate_env.bash
+  source "$REPO_ROOT/ci/tests/gate_env.bash"
+  ci::tests::clear_gate_env
   cd "$REPO_ROOT"
 }
 
@@ -53,6 +58,34 @@ setup() {
 # secret-pattern scans all inspected nothing and the gate passed. Same class as
 # the node lane's partial-staging rule, on the security path.
 
+# A secret-shaped line, assembled at run time.
+#
+# ci/checks/common.sh defines the patterns as literal text, so a fixture that
+# spells one out is a line in *this* repository matching CI_CHECKS_SECRET_PATTERN
+# -- and git-safety.sh refuses a push whose additions match it. Spelling it out
+# therefore made the branch carrying these tests unpushable through the gate the
+# tests are for. Measured, not inferred:
+#
+#   CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA=f6bd39ea~1 \
+#   CI_GATE_PUSH_NEW_SHA=f6bd39ea CI_GATE_PUSH_REMOTE=origin \
+#   bash ci/checks/git-safety.sh
+#     -> exit 20, "Potential secret-like value detected in additions in the
+#        pushed commits." / "Blocking content checks: secret-pattern-match"
+#
+# f6bd39ea is a commit on this branch, and the only reason the push went through
+# is that no hook is installed in this clone. The comment in gs_setup already
+# notes that the patterns match their own definitions; the fixtures had the same
+# problem one level up and nothing was reading them for it.
+#
+# Split so no line here matches, while the bytes written to the file are
+# identical to what the scanner is being asked to catch. The value is not a
+# credential and never was -- twenty letters of the alphabet -- but "it is
+# obviously fake" is not something a regex can see, and a scanner that took my
+# word for it would be the wrong scanner.
+gs_secret_line() {
+  printf 'AWS_SECRET_ACCESS%s%s\n' '_KEY=' 'abcdefghijklmnopqrst'
+}
+
 gs_setup() {
   GS_SB="$(mktemp -d)"
   mkdir -p "$GS_SB/ci/lib" "$GS_SB/ci/checks"
@@ -63,8 +96,8 @@ gs_setup() {
     git init -q -b feature/x .
     # The copied gate scripts stay out of the history under test. ci/checks/
     # defines the secret patterns as literal text and several of them match
-    # themselves — `DATABASE_URL=[^[:space:]]+` is its own witness — so a range
-    # reaching the first commit would flag the fixture rather than the case.
+    # themselves — the `DATABASE_URL` alternative is its own witness — so a
+    # range reaching the first commit would flag the fixture, not the case.
     printf 'ci/\n' > .gitignore
     printf 'x\n' > a.txt
     git add -A
@@ -1411,7 +1444,7 @@ YML
   (
     cd "$GS_SB"
     printf '*.dat diff=nope\n' > .gitattributes
-    printf 'AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrst\n' > s.dat
+    gs_secret_line > s.dat
     git config diff.nope.textconv /nonexistent-textconv-binary
     git add .gitattributes s.dat
   ) >/dev/null 2>&1
@@ -1521,7 +1554,7 @@ YML
   ( cd "$sb" && git init -q -b main . && printf 'x\n' > a.txt && git add -A \
     && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
   ( cd "$sb" && mkdir -p dist \
-    && printf 'AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrst\n' > dist/bundle.js \
+    && gs_secret_line > dist/bundle.js \
     && git add -f dist/bundle.js ) >/dev/null 2>&1
 
   run bash -c "cd '$sb' && CI_GATE_USE_LANES=0 bash ci/preflight.sh --mode quick 2>&1"
@@ -1584,4 +1617,63 @@ YML
   [ "$status" -eq 20 ]
   [[ "$output" == *"conflict markers found"* ]]
   rm -rf "$GS_SB"
+}
+
+# --- the suites' own hygiene ---------------------------------------------------
+#
+# Both of these are about the harness rather than about a check, and both exist
+# because the gate could not pass its own repository: one because the suites
+# inherited the gate's state, the other because a fixture spelled out a string
+# the gate refuses.
+
+@test "tests: every gate variable the suites can inherit is cleared" {
+  # ci/tests/gate_env.bash clears the gate's exported state so a case is not
+  # answered by whoever invoked it. That list and the set of variables the gate
+  # exports are two lists that have to agree, and nothing was checking: a
+  # variable added to the gate is silently absent here, and the failure it
+  # causes shows up as a case failing for a reason unrelated to what it asserts,
+  # 148 of them at once, only when run under `ci/preflight.sh --mode ship`.
+  #
+  # Enumerated from the source rather than restated, for the same reason.
+  local _v _missing=""
+  while IFS= read -r _v; do
+    [ -n "$_v" ] || continue
+    grep -qw -- "$_v" "$REPO_ROOT/ci/tests/gate_env.bash" || _missing="${_missing} ${_v}"
+  done <<< "$(grep -rhoE 'export CI_GATE_[A-Z_]+' \
+                "$REPO_ROOT"/ci/*.sh "$REPO_ROOT"/ci/checks/*.sh \
+                "$REPO_ROOT"/ci/lib/*.sh 2>/dev/null \
+              | sed 's/^export //' | sort -u)"
+  [ -z "$_missing" ] || { echo "exported by the gate, not cleared:${_missing}" >&2; return 1; }
+
+  # And the function does what the list says. A list nothing applies is a list.
+  (
+    export CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA=deadbeef CI_GATE_PUSH_REMOTE=origin
+    # shellcheck source=ci/tests/gate_env.bash
+    source "$REPO_ROOT/ci/tests/gate_env.bash"
+    ci::tests::clear_gate_env
+    [ -z "${CI_GATE_MODE:-}" ] && [ -z "${CI_GATE_PUSH_NEW_SHA:-}" ] \
+      && [ -z "${CI_GATE_PUSH_REMOTE:-}" ]
+  )
+}
+
+@test "tests: no fixture spells out a string the gate refuses to push" {
+  # ci/checks/common.sh defines the secret patterns as literal text, and
+  # git-safety.sh refuses a push whose additions match them. A fixture that
+  # spells one out is therefore a line this repository cannot push through its
+  # own gate -- which happened: an `AWS_SECRET_ACCESS_KEY` assignment written
+  # out in two cases here made the commit that added them exit 20 under
+  # git-safety.sh, and only the absence of an installed hook let the branch go
+  # out. This comment cannot spell it either, and the first draft did, and this
+  # case failed on itself -- which is the shortest demonstration available that
+  # it works.
+  #
+  # The fixtures assemble the string at run time now (see gs_secret_line), so
+  # what the scanner is handed is unchanged and what git stores does not match.
+  # This case is what stops the literal spelling coming back, since it is the
+  # obvious way to write the next such fixture.
+  run bash -c ". '$REPO_ROOT/ci/checks/common.sh' \
+                 && grep -rnE \"\$CI_CHECKS_SECRET_PATTERN\" '$REPO_ROOT/ci/tests/'"
+  # 1 is grep's "no match", which is the pass. 0 means a fixture matches; 2 and
+  # above mean grep could not look, and "could not look" is not "found nothing".
+  [ "$status" -eq 1 ] || { echo "matches under ci/tests/:"; echo "$output"; return 1; }
 }
