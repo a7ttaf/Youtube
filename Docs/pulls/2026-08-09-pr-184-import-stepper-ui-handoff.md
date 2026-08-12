@@ -163,7 +163,7 @@ with the pinned toolchain:
 | --- | --- |
 | `uv sync --extra dev --extra test --extra lint` | 87 resolved, 85 checked |
 | `uv run ruff check backend tests scripts` | **All checks passed** |
-| `uv run pytest -q` | **2817 passed**, 15 warnings (9m55s) — re-run at `cdf61c6b` |
+| `uv run pytest -q` | **2817 passed**, 15 warnings (8m46s) — re-run at `f96bacf4` |
 | `git diff --check` | clean (exit 0) |
 | `uv run mypy backend` | clean for this PR's files (see note) |
 
@@ -246,12 +246,12 @@ re-measurement that never happened.
 
 Which makes the currency test explicit rather than a matter of reading dates:
 **the recorded run is current while no commit after it has touched `backend/`.**
-`cdf61c6b` is the last one that did, and the run was executed AT it, so the
+`f96bacf4` is the last one that did, and the run was executed AT it, so the
 figure describes the branch tip's backend tree even as later frontend and docs
 commits land on top. The single command that settles it:
 
 ```bash
-git log --oneline cdf61c6b..HEAD -- backend/
+git log --oneline f96bacf4..HEAD -- backend/
 ```
 
 Empty output means the gate row still holds. Any output is a re-run, not an
@@ -348,7 +348,7 @@ that the pre-PR code would not have written.
 ## Rollback / reset
 
 This PR is **not** frontend-only, and the rollback story has to say so: the
-backend diff is **1987 insertions across eight files as of `cdf61c6b`**,
+backend diff is **1994 insertions across eight files as of `f96bacf4`**,
 the commit that last changed `backend/`
 (`git diff --stat $(git merge-base origin/main HEAD)..HEAD -- backend/`), and a
 frontend revert leaves all of it running.
@@ -360,7 +360,8 @@ out: 1,808 became 1,860 when a round added nothing but contract blocks, 1,866
 when a later round corrected six lines of one of them, 1,877 when a further
 round corrected the wording of another, 1,894 then 1,898 as the by-shape
 rewrite landed and was itself corrected, 1,921 when `_conflicting_channel_ids`
-gained a block, and 1,987 for this round's two backend blocks. `--stat` counts
+gained a block, 1,987 for the round that added two backend blocks, and 1,994
+when one of those blocks was corrected. `--stat` counts
 lines, not behaviour, so "no executable change" is not a reason to skip
 re-running it.
 
@@ -380,7 +381,7 @@ The anchor is the commit that last changed `backend/`, **not** the branch tip,
 and that distinction is what stops this line going stale on its own: `Docs/` is
 outside the `-- backend/` pathspec, so any number of later documentation
 commits — including this one — leave both the figure and its anchor correct.
-If `backend/` has changed since `cdf61c6b`, this is a measurement of an earlier
+If `backend/` has changed since `f96bacf4`, this is a measurement of an earlier
 tree rather than a wrong one, and the command above re-derives it.
 
 ### Reverting the frontend only
