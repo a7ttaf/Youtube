@@ -43,8 +43,16 @@ _tc_js_workspace() {
   # unreadable subtree must not read as a package with no TypeScript in it.
   local _tc_list _tc_rc=0
   _tc_list="$(mktemp 2>/dev/null)" || return 30
+  # The same name list as _ts_project_files in ci/checks/node.sh, which decides
+  # whether this workspace is *required* to have a typecheck script. When the
+  # two disagree the gate demands a check of a project this lane then declines
+  # to compile, or -- as it did -- neither of them sees `tsconfig.app.json` and
+  # a Vite scaffold's only project is checked by nobody. ci/lib/changeset.sh is
+  # the third list; all three have to agree.
   find . -name 'node_modules' -prune -o -name '.git' -prune -o \
-    -type f -name 'tsconfig.json' -print 2>/dev/null > "$_tc_list" || _tc_rc=$?
+    -type f \( -name 'tsconfig.json' -o -name 'tsconfig.*.json' \
+               -o -name 'jsconfig.json' -o -name 'jsconfig.*.json' \) \
+    -print 2>/dev/null > "$_tc_list" || _tc_rc=$?
   if [ "$_tc_rc" -ne 0 ]; then
     rm -f "$_tc_list"
     echo "Cannot enumerate the TypeScript projects in ${ws} (exit ${_tc_rc})." >&2

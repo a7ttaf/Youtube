@@ -1340,11 +1340,46 @@ script_command() {
 # and matching only the spaced form was a bypass two keystrokes wide.
 _reject_untrustworthy_composition() {
   local _name="$1" _cmd="$2"
+  # Quoted text is data, and this read the raw string.
+  #
+  # `PATTERN='foo|bar' vitest run` was refused as a pipeline. The shell treats
+  # that `|` as part of an assignment's value and then runs the whole suite, so
+  # the rule fired on a script it has no objection to and the message sent the
+  # developer looking for a pipeline that is not there. _blank_quoted is in this
+  # file for exactly this and three other readers already go through it: one
+  # rule, four readers, and this was the one asking the raw text.
+  local _bq_state="" _bq_out="" _bq_cont=0 _bq_esc=0
+  _blank_quoted "$_cmd"
+  local _mask="$_bq_out"
+  # An escaped word is refused rather than masked, the same way the readers that
+  # already mask refuse it: blanking it hides a word from every rule reading the
+  # mask while the shell still runs it.
+  if [ "$_bq_esc" -eq 1 ]; then _reject_escaped_word "$_name"; fi
+  # And a quote that never closes is refused here rather than masked past.
+  # _blank_quoted blanks to the end of the string once it is inside an unclosed
+  # quote, so an operator after it is invisible to the two tests below -- the
+  # masking that fixes a false red would otherwise open a fail-through two
+  # keystrokes wide. This function's question is whether the result can be
+  # attributed to the checker, and a command whose quoting does not resolve
+  # cannot be read at all, let alone vouched for.
+  if [ -n "$_bq_state" ] || [ "$_bq_cont" -eq 1 ]; then
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} leaves a quote open in the '${_name}' script:"
+    echo "    ${_name}: ${_cmd}"
+    echo "  Where the quoting ends decides which characters are operators, so"
+    echo "  this gate cannot say what the script composes -- and reading past it"
+    echo "  would hide a pipeline or a '||' inside the unclosed span."
+    echo "  Close the quote, or move the command into a script this gate does"
+    echo "  not have to reason about."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
   # `&&` is removed before the `&` test rather than enumerated around it: it is
   # the one composition that is safe, since either the checker runs or the thing
   # before it failed and the script fails with it.
-  local _cmp="${_cmd//&&/}"
-  case "$_cmd" in
+  #
+  # Removed from the *mask*, so a literal `&&` inside quoted data is not taken
+  # for the operator either.
+  local _cmp="${_mask//&&/}"
+  case "$_mask" in
     *"|"*)
       echo "Workspace ${CI_GATE_NODE_WORKSPACE} pipes or branches the '${_name}' script, so its"
       echo "  result cannot be trusted:"
@@ -2295,8 +2330,19 @@ _script_names_a_checker() {
   # `&&` is removed before the `&` test rather than enumerated around it: it is
   # the one form that is safe, since either the checker runs or the thing before
   # it failed and the script fails with it.
-  local _comp="${cmd//&&/}"
-  case "$cmd" in
+  # Against the blanked copy, not the raw string, for the reason
+  # _reject_untrustworthy_composition now does the same: quoted text is data.
+  # This is the second reader of that one rule and it had the identical fault --
+  # `PATTERN='foo|bar' vitest run` returned "not a checker" here, and because a
+  # runner *is* named the caller then reported the runner's status as lost to a
+  # `;` the script does not contain. Fixing the composition check alone only
+  # changed which wrong message came out, which is how I found this one.
+  #
+  # `_mask` is the mask of the command as it arrived, computed above; the
+  # normalisation since then only spaced out separators, and these are substring
+  # tests, so the mask is the right thing to ask.
+  local _comp="${_mask//&&/}"
+  case "$_mask" in
     *"|"*) return 1 ;;
   esac
   case "$_comp" in
@@ -2822,10 +2868,16 @@ _reject_narrowing_flags() {
     # `timeout` in the preamble of _reject_positional_filters and nowhere else,
     # which is the same rule-in-one-reader shape twice over.
     # The basename is computed for the wrapper comparison and is NOT written
-    # back over the token: `${tok##*/}` on `--exclude=tests/a.test.ts` is
-    # `a.test.ts`, which stops looking like a flag at all, and the narrowing
-    # rule this function exists for stops firing. The unquoting is written back,
-    # because a quoted flag is the same flag.
+    # back over the token. Taking the basename of an exclude flag carrying a
+    # path leaves the bare file name, which stops looking like a flag at all,
+    # and the narrowing rule this function exists for stops firing. The
+    # unquoting is written back, because a quoted flag is the same flag.
+    #
+    # Spelled without the flag-and-value example it used to carry: DeepSource's
+    # secret matcher read that as an assignment and reported the token beside it
+    # as a hardcoded credential, failing the Secrets analyzer on 1e72261d over a
+    # comment. Rewriting the sentence is cheaper than arguing with a syntax
+    # matcher, and disposing of it as a false positive is not on the table.
     _unquote_tok
     _rnf_word="${tok##*/}"
     case "$_rnf_word" in
@@ -3504,8 +3556,22 @@ run_script() {
 _ts_project_files() {
   local _tp_list _tp_rc=0
   _tp_list="$(mktemp 2>/dev/null)" || return 2
+  # Every name TypeScript's own scaffolds use, not only the default one.
+  #
+  # `tsconfig.app.json` and `tsconfig.node.json` are what `npm create vite` ends
+  # up with, and a workspace whose only project is one of those answered "no
+  # TypeScript here": no `typecheck` script was required of it, ci/checks/
+  # typecheck.sh skipped it for the same reason, and a Vite build passed with
+  # nothing having type checked anything. ci/lib/changeset.sh has classified
+  # `tsconfig.*.json` as TypeScript configuration since it was written, so the
+  # scheduler already knew about a file the two lanes it schedules could not
+  # see -- the third reader of one question, and the only one that had it right.
+  #
+  # These three lists have to agree. changeset.sh:331 is the third.
   find . -name 'node_modules' -prune -o -name '.git' -prune -o \
-    -type f \( -name 'tsconfig.json' -o -name 'jsconfig.json' \) -print 2>/dev/null \
+    -type f \( -name 'tsconfig.json' -o -name 'tsconfig.*.json' \
+               -o -name 'jsconfig.json' -o -name 'jsconfig.*.json' \) \
+    -print 2>/dev/null \
     > "$_tp_list" || _tp_rc=$?
   if [ "$_tp_rc" -ne 0 ]; then
     rm -f "$_tp_list"

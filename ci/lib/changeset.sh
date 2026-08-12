@@ -328,7 +328,13 @@ ci::changeset::classify_file() {
     package.json|package-lock.json|npm-shrinkwrap.json|pnpm-lock.yaml|yarn.lock|bun.lock|bun.lockb)
       printf 'javascript'; return 0 ;;
     # tsconfig drives tsc directly; it is TypeScript configuration, not data.
-    tsconfig.json|tsconfig.*.json|jsconfig.json)
+    #
+    # `jsconfig.*.json` joins its tsconfig counterpart: this list is one of
+    # three that answer "is this a TypeScript project", beside _ts_project_files
+    # in ci/checks/node.sh and the discovery in ci/checks/typecheck.sh, and a
+    # spelling that is in one and not the others is how `tsconfig.app.json` came
+    # to be scheduled by this list and then found by neither lane.
+    tsconfig.json|tsconfig.*.json|jsconfig.json|jsconfig.*.json)
       printf 'javascript'; return 0 ;;
   esac
 

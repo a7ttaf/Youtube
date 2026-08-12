@@ -104,14 +104,77 @@ _tests_js_declared_runner() {
   local _cmd _w
   ci::common::command_exists node || return 1
   _cmd="$(node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{}).test||''))}catch(e){process.exit(3)}" 2>/dev/null)" || return 1
-  # The first recognised runner word wins, which is the one the shell reaches
-  # first. `cross-env NODE_ENV=test vitest run` names vitest; `npm run jest:ci`
-  # names neither, and saying so is the honest answer.
+  # In command position, not anywhere in the string.
+  #
+  # This scanned every word, so a runner named as an *argument* declared the
+  # suite: `echo vitest && jest` reported vitest, this lane ran Vitest over a
+  # Jest suite, Vitest collected nothing it recognised and exited 0, and
+  # tests-js reported PASS with every Jest test uncollected. That is the exact
+  # failure the declared-runner rule was written to prevent, reached by the
+  # spelling it does not read.
+  #
+  # ci/checks/node.sh answers the same question from command position, and the
+  # comment above its scanner says the rule has been fixed five times there --
+  # every previous attempt losing for asking whether a string *contains* a name
+  # rather than whether the shell would *run* it. Presence is not execution.
+  #
+  # A smaller reader than node.sh's _command_runner on purpose: that one has to
+  # identify any checker in any script, and this one only has to say which of
+  # two runners a `test` script names. Where it cannot tell it says nothing, and
+  # nothing is safe here -- the caller refuses a workspace that installs both
+  # runners and declares neither, so silence fails closed rather than guessing.
+  # `ci/tests/test_js_lane.bats` pins the two readers against the same spellings
+  # so they cannot drift apart about a wrapper.
+  local _expect=1 _tp=0 _ep=0 _pp=0
   for _w in $_cmd; do
+    case "$_w" in
+      ';'|'&&'|'||'|'|'|'&'|'('|')'|'{'|'}')
+        _expect=1 ; _tp=0 ; _ep=0 ; _pp=0 ; continue ;;
+    esac
+    [ "$_expect" -eq 1 ] || continue
+    # A wrapper's own option can take its value as a separate word, and that
+    # word is not the command. The three grammars node.sh models: timeout's
+    # duration, env's -u/-C/-S, and a package manager's --filter/--cwd/--prefix.
+    if [ "$_tp" -eq 1 ]; then
+      case "$_w" in
+        -k|--kill-after|-s|--signal) _tp=2 ; continue ;;
+        -*) continue ;;
+        *) _tp=0 ; continue ;;
+      esac
+    elif [ "$_tp" -eq 2 ]; then _tp=1 ; continue
+    fi
+    if [ "$_ep" -eq 1 ]; then
+      case "$_w" in
+        -u|--unset|-C|--chdir|-S|--split-string) _ep=2 ; continue ;;
+        -*) continue ;;
+        [A-Za-z_]*=*) continue ;;
+        *) _ep=0 ;;
+      esac
+    elif [ "$_ep" -eq 2 ]; then _ep=1 ; continue
+    fi
+    if [ "$_pp" -eq 1 ]; then
+      case "$_w" in
+        --filter|-F|--dir|-C|--cwd|--prefix|--workspace|-w) _pp=2 ; continue ;;
+        -*) continue ;;
+        *) _pp=0 ;;
+      esac
+    elif [ "$_pp" -eq 2 ]; then _pp=1 ; continue
+    fi
     case "${_w##*/}" in
       vitest|vitest.cmd|vitest.exe) printf 'vitest' ; return 0 ;;
       jest|jest.cmd|jest.exe) printf 'jest' ; return 0 ;;
+      timeout) _tp=1 ; continue ;;
+      env|cross-env) _ep=1 ; continue ;;
+      npx|pnpm|yarn|npm|bun) _pp=1 ; continue ;;
+      nohup|command|exec|time|dlx|run|--) continue ;;
     esac
+    case "$_w" in
+      -*) continue ;;
+      [A-Za-z_]*=*) continue ;;
+    esac
+    # Some other command. What follows are its arguments, and a runner named
+    # among them is not the one this script runs.
+    _expect=0
   done
   return 0
 }

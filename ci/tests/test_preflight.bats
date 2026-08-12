@@ -1677,3 +1677,76 @@ YML
   # above mean grep could not look, and "could not look" is not "found nothing".
   [ "$status" -eq 1 ] || { echo "matches under ci/tests/:"; echo "$output"; return 1; }
 }
+
+@test "runner: a timeout it cannot use is infrastructure, not a silent fallback" {
+  # The case above pins that a malformed timeout_sec is not stripped into a
+  # different number. This is the half it did not ask: the awk printed its
+  # diagnostic and exited 0 with no value, so submit could not tell "declares
+  # none" from "declares one this runner cannot use" and fell back to the global
+  # timeout, or -- with CI_GATE_TIMEOUT unset -- to no bound at all.
+  #
+  # The value exists precisely because the default is wrong for that check, so
+  # ignoring it is not a smaller version of honouring it. A typo on the long
+  # `tests-shell` blocker removes its bound and leaves full and ship validation
+  # to hang, announced as an infrastructure timeout nobody configured, or not
+  # announced at all.
+  local cfg
+  cfg="$(mktemp)"
+  printf 'checks:\n  alpha:\n    timeout_sec: banana\n  gamma:\n    timeout_sec: 900\n' > "$cfg"
+
+  # The status is the answer; the empty output is what it used to be mistaken for.
+  run bash -c ". '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    CI_CHECKS_CONFIG='$cfg' ci::runner::_declared_timeout alpha 2>/dev/null"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+
+  # A declared value is still read, and a check that declares nothing is not an
+  # error -- absence and unusable are the two answers this had collapsed.
+  run bash -c ". '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    CI_CHECKS_CONFIG='$cfg' ci::runner::_declared_timeout gamma 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [ "$output" = "900" ]
+
+  run bash -c ". '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    CI_CHECKS_CONFIG='$cfg' ci::runner::_declared_timeout delta 2>/dev/null"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  rm -f "$cfg"
+}
+
+@test "runner: a check whose declared timeout is unusable is not run at all" {
+  # And submit acts on it. Recorded as FAIL_INFRA (30) -- which is what the
+  # contract calls a gate that cannot do its job -- rather than launched without
+  # the bound its configuration asked for.
+  local sb
+  sb="$(mktemp -d)"
+  printf 'checks:\n  alpha:\n    timeout_sec: banana\n  gamma:\n    timeout_sec: 900\n' > "$sb/checks.yml"
+  printf '#!/usr/bin/env bash\ntouch "%s/ran"\nexit 0\n' "$sb" > "$sb/check.sh"
+  chmod +x "$sb/check.sh"
+
+  run bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1; \
+    . '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    export CI_CHECKS_CONFIG='$sb/checks.yml' CI_GATE_PARALLEL=1; \
+    ci::runner::init 1 >/dev/null 2>&1; \
+    ci::runner::submit alpha '$sb/check.sh' >/dev/null 2>&1; \
+    ci::runner::wait_all >/dev/null 2>&1; \
+    printf 'rc=%s\n' \"\$(ci::runner::get_result alpha)\"; \
+    ci::runner::get_output alpha"
+  [[ "$output" == *"rc=30"* ]]
+  [[ "$output" == *"cannot use"* ]]
+  # The check itself never ran, which is the point: an unbounded run of a
+  # blocking lane is the outcome being refused.
+  [ ! -f "$sb/ran" ]
+
+  # The control: a well-formed timeout still submits and runs the check.
+  run bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1; \
+    . '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    export CI_CHECKS_CONFIG='$sb/checks.yml' CI_GATE_PARALLEL=1; \
+    ci::runner::init 1 >/dev/null 2>&1; \
+    ci::runner::submit gamma '$sb/check.sh' >/dev/null 2>&1; \
+    ci::runner::wait_all >/dev/null 2>&1; \
+    printf 'rc=%s\n' \"\$(ci::runner::get_result gamma)\""
+  [[ "$output" == *"rc=0"* ]]
+  [ -f "$sb/ran" ]
+  rm -rf "$sb"
+}

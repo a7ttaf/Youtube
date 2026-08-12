@@ -5116,3 +5116,328 @@ ws_tools() {
   [[ "$output" == *"Running script:"* ]]
   rm -rf "$NODE_SB"
 }
+
+@test "workspaces: a root manifest with unreadable children is not a single-package repo" {
+  # The cure above was applied to one branch. The branch taken when a root
+  # manifest *does* exist still ran its producer inside process substitution, so
+  # a find that fails delivers nothing, child_count stays 0, the
+  # root-plus-nested ambiguity is never reported, and the function returns "."
+  # and success.
+  #
+  # That is the fail-open direction of the same defect: node.sh, tests.sh and
+  # typecheck.sh each treat a non-zero return as FAIL_INFRA on the stated
+  # grounds that a lane cannot report on workspaces it could not determine.
+  # Handed "." and a success they install, typecheck, test and build the root
+  # alone and exit 0 -- which is precisely the harm the ambiguity report exists
+  # to prevent.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/bin" "$sb/packages/app"
+  printf '{ "name": "root", "private": true }\n' > "$sb/package.json"
+  printf '{ "name": "app", "private": true }\n' > "$sb/packages/app/package.json"
+  printf '#!/usr/bin/env bash\nexit 71\n' > "$sb/bin/find"
+  chmod +x "$sb/bin/find"
+
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && export PATH='$sb/bin:'\"\$PATH\" \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Cannot enumerate"* ]]
+  # And specifically not the answer that reads as "a single-package repo".
+  [[ "$output" != "." ]]
+
+  # The control: with a working find the same tree reports the ambiguity, so
+  # this is about the producer's status and not about the layout.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"coexists with 1 nested one(s)"* ]]
+
+  # And a genuine single-package repo still answers ".", which is what the
+  # branch is for.
+  rm -rf "$sb/packages"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "." ]]
+  rm -rf "$sb"
+}
+
+@test "node lane: a project is a project whatever its config is called" {
+  # `tsconfig.app.json` and `tsconfig.node.json` are what `npm create vite`
+  # produces, and discovery matched `tsconfig.json` and `jsconfig.json` only. A
+  # workspace whose only project is one of those answered "no TypeScript here":
+  # no typecheck script was required of it and the standalone typecheck lane
+  # skipped it for the same reason, so a bundler build passed with nothing
+  # having type checked anything.
+  #
+  # ci/lib/changeset.sh has classified `tsconfig.*.json` as TypeScript
+  # configuration since it was written, so the scheduler already knew about a
+  # file neither of the lanes it schedules could see.
+  ws_setup
+  ws_tools tsc
+
+  local cfg
+  for cfg in tsconfig.app.json tsconfig.node.json jsconfig.app.json; do
+    rm -f "$NODE_SB/ws"/tsconfig*.json "$NODE_SB/ws"/jsconfig*.json
+    printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/$cfg"
+    ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "accepted a workspace whose only project is $cfg" >&2; return 1; }
+    [[ "$output" == *"defines no 'typecheck' script"* ]] \
+      || { echo "refused for the wrong reason: $cfg" >&2; return 1; }
+    [[ "$output" == *"$cfg"* ]] \
+      || { echo "did not name $cfg" >&2; return 1; }
+
+    # And it is satisfied the ordinary way, so this requires a check rather
+    # than making the workspace unusable. Asserted positively as well: the
+    # refusal's absence alone is satisfied by the lane stopping earlier for some
+    # unrelated reason, and the status here is not discriminating -- against the
+    # previous tree this fixture exits 20 from the test script itself.
+    ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" } }'
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"defines no 'typecheck' script"* ]] \
+      || { echo "still refused with a typecheck script: $cfg" >&2; return 1; }
+    [[ "$output" == *"Running script: typecheck"* ]] \
+      || { echo "typecheck never ran for: $cfg" >&2; return 1; }
+  done
+
+  # The control: a workspace with no TypeScript configuration at all is not
+  # asked for a typecheck script, which is the rule this widens and not one it
+  # replaces.
+  rm -f "$NODE_SB/ws"/tsconfig*.json "$NODE_SB/ws"/jsconfig*.json
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"defines no 'typecheck' script"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "js config names: the three readers of that question agree" {
+  # Discovery in node.sh, discovery in typecheck.sh and the changeset
+  # classifier all answer "is this a TypeScript project", and a spelling in one
+  # and not the others is how tsconfig.app.json came to be scheduled by the
+  # classifier and then found by neither lane. Compared by reading the three
+  # lists rather than by restating them here, so this fails when they drift.
+  local name
+  for name in 'tsconfig.json' 'tsconfig.*.json' 'jsconfig.json' 'jsconfig.*.json'; do
+    grep -qF -- "-name '${name}'" "$REPO_ROOT/ci/checks/node.sh" \
+      || { echo "node.sh discovery does not match ${name}" >&2; return 1; }
+    grep -qF -- "-name '${name}'" "$REPO_ROOT/ci/checks/typecheck.sh" \
+      || { echo "typecheck.sh discovery does not match ${name}" >&2; return 1; }
+    grep -qF -- "${name}" "$REPO_ROOT/ci/lib/changeset.sh" \
+      || { echo "changeset.sh does not classify ${name}" >&2; return 1; }
+  done
+
+  # And the classifier really returns javascript for them, rather than merely
+  # containing the text.
+  for name in tsconfig.app.json jsconfig.app.json; do
+    run bash -c ". '$REPO_ROOT/ci/lib/common.sh' && . '$REPO_ROOT/ci/lib/changeset.sh' \
+      && ci::changeset::classify_file 'frontend/${name}'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "javascript" ] || { echo "${name} classified as '${output}'" >&2; return 1; }
+  done
+}
+
+@test "node lane: a pipe inside quotes is data, not a pipeline" {
+  # The composition rule read the raw string, so `PATTERN='foo|bar' vitest run`
+  # was refused as a pipeline -- the shell treats that `|` as part of the
+  # assignment's value and then runs the whole suite. _blank_quoted is in this
+  # file for exactly this and three readers already went through it.
+  #
+  # Two readers had the fault, not one: _reject_untrustworthy_composition and
+  # the copy of the same test inside _script_names_a_checker. Fixing the first
+  # alone only changed the message -- the second returned "not a checker", and
+  # since a runner *is* named the lane then reported the runner's status lost to
+  # a `;` the script does not contain. That is how the second one was found.
+  ws_setup
+  ws_tools tee
+
+  local spelling
+  for spelling in \
+    "PATTERN='foo|bar' vitest run" \
+    "MSG='a&&b' vitest run" \
+    "MSG='a&b' vitest run" \
+    "vitest run --reporter='a|b'"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"pipes or branches"* ]] \
+      || { echo "refused as a pipeline: $spelling" >&2; return 1; }
+    [[ "$output" != *"does not become the script"* ]] \
+      || { echo "refused as status-lost: $spelling" >&2; return 1; }
+    [[ "$output" != *"backgrounds"* ]] \
+      || { echo "refused as backgrounded: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls, and the point: masking the quotes must not mask a real
+  # operator, including one that follows a quoted span.
+  for spelling in \
+    "vitest run | tee out.log" \
+    "vitest run || true" \
+    "PATTERN='x' vitest run | tee out.log"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "accepted: $spelling" >&2; return 1; }
+    [[ "$output" == *"pipes or branches"* ]] \
+      || { echo "refused for the wrong reason: $spelling" >&2; return 1; }
+  done
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run &" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"backgrounds"* ]]
+
+  # And a quote that never closes is refused rather than masked past: the mask
+  # blanks to end of string once inside an unclosed quote, so an operator after
+  # it would be invisible to both tests above.
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"PATTERN='foo vitest run | tee out.log\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"leaves a quote open"* ]]
+  rm -rf "$NODE_SB"
+}
+
+# --- which runner a workspace declares ----------------------------------------
+#
+# _tests_js_declared_runner decides which of two installed runners owns a suite,
+# and arrived with no case of its own. These are it.
+
+# Print _tests_js_declared_runner's answer for a `test` script, or "<none>".
+#
+# The function is extracted and sourced rather than reached through the lane,
+# because the lane installs and runs a real suite to get there and the question
+# here is one line of parsing. `bash -n` first, so a mis-extraction fails loudly
+# instead of quietly defining nothing.
+declared_runner_for() {
+  local sb fn
+  sb="$(mktemp -d)"
+  fn="$(mktemp)"
+  awk '/^_tests_js_declared_runner\(\) \{/,/^\}/' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
+  bash -n "$fn" || { rm -rf "$sb" "$fn"; echo "<extraction failed>"; return 1; }
+  printf '{ "name": "w", "private": true, "scripts": { "test": "%s" } }\n' "$1" > "$sb/package.json"
+  (
+    cd "$sb" || exit 1
+    # shellcheck disable=SC1090
+    . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1
+    # shellcheck disable=SC1090
+    . "$fn"
+    local _r
+    _r="$(_tests_js_declared_runner)"
+    printf '%s' "${_r:-<none>}"
+  )
+  rm -rf "$sb" "$fn"
+}
+
+@test "tests-js: the declared runner is the one in command position" {
+  # The scan read every word, so a runner named as an *argument* declared the
+  # suite: `echo vitest && jest` reported vitest, the lane ran Vitest over a
+  # Jest suite, Vitest collected nothing it recognised and exited 0, and
+  # tests-js reported PASS with every Jest test uncollected -- the exact failure
+  # the declared-runner rule exists to prevent, reached by a spelling it did not
+  # read.
+  run declared_runner_for "echo vitest && jest"
+  [ "$output" = "jest" ]
+
+  run declared_runner_for "echo 'runs vitest' && jest --ci"
+  [ "$output" = "jest" ]
+
+  # A runner named among another command's arguments is not what runs.
+  run declared_runner_for "bash scripts/test.sh vitest"
+  [ "$output" = "<none>" ]
+
+  # The controls: the ordinary spellings still resolve, or this would refuse
+  # every workspace that installs both runners.
+  local spelling
+  for spelling in "vitest run" "cross-env NODE_ENV=test vitest run" \
+                  "timeout 300 vitest run" "env -u NODE_ENV vitest run" \
+                  "pnpm --filter web vitest run" "npx vitest run"; do
+    run declared_runner_for "$spelling"
+    [ "$output" = "vitest" ] || { echo "'$spelling' declared '$output'" >&2; return 1; }
+  done
+  for spelling in "jest --ci" "timeout -k 10 300 jest --ci"; do
+    run declared_runner_for "$spelling"
+    [ "$output" = "jest" ] || { echo "'$spelling' declared '$output'" >&2; return 1; }
+  done
+
+  # And saying nothing is still the honest answer where it cannot tell. The
+  # caller refuses a workspace that installs both and declares neither, so
+  # silence fails closed.
+  run declared_runner_for "npm run jest:ci"
+  [ "$output" = "<none>" ]
+}
+
+# Print node.sh's _command_runner answer for a command string, or "<none>".
+#
+# The function and the five helpers it calls are extracted and sourced. That is
+# more machinery than the extraction above, and it is the point: this case is
+# the only thing that compares the two readers, so it has to ask the real one
+# rather than a restatement of what it is believed to do.
+node_lane_runner_for() {
+  local fn _f
+  fn="$(mktemp)"
+  for _f in _blank_quoted _unquote_tok _normalize_command _timeout_advance \
+            _env_advance _pm_advance _command_runner; do
+    awk -v n="^${_f}\\\\(\\\\) \\\\{" '$0 ~ n, /^\}/' "$REPO_ROOT/ci/checks/node.sh" >> "$fn"
+  done
+  bash -n "$fn" || { rm -f "$fn"; echo "<extraction failed>"; return 1; }
+  (
+    # shellcheck disable=SC1090
+    . "$fn"
+    local _cr="" _ng_out="" _bq_state="" _bq_out="" _bq_cont=0 _bq_esc=0
+    _command_runner "$1"
+    printf '%s' "${_cr:-<none>}"
+  )
+  rm -f "$fn"
+}
+
+@test "tests-js: this reader and the node lane's agree about wrappers" {
+  # Two readers of "what does this command run", in two files, and the only
+  # reason this one was wrong is that it was written without reference to the
+  # other. Compared by running both rather than by restating what either is
+  # believed to do.
+  #
+  # Scoped to single commands, because that is the question both answer.
+  # node.sh's _command_runner is applied by its caller to one segment at a time,
+  # so asked for a whole composed script it answers about the first segment --
+  # `echo vitest && vitest run` is `echo` to it and `vitest` to this reader, and
+  # neither is wrong. The wrappers are where they have to agree, and where this
+  # one had drifted.
+  local spelling ours theirs
+  for spelling in \
+    "vitest run" \
+    "jest --ci" \
+    "cross-env NODE_ENV=test vitest run" \
+    "timeout 300 vitest run" \
+    "timeout -k 10 300 vitest run" \
+    "env -u NODE_ENV vitest run" \
+    "pnpm --filter web vitest run" \
+    "npx vitest run" \
+    "pnpm --filter jest vitest run" \
+    "env -u vitest jest --ci"; do
+    run declared_runner_for "$spelling"
+    ours="$output"
+    run node_lane_runner_for "$spelling"
+    theirs="$output"
+    [ "$ours" = "$theirs" ] \
+      || { echo "'$spelling': tests.sh says '$ours', node.sh says '$theirs'" >&2; return 1; }
+  done
+
+  # And the difference above is asserted rather than assumed, so a change that
+  # makes node.sh scan across separators shows up here instead of quietly making
+  # the scoping comment false.
+  run node_lane_runner_for "echo vitest && vitest run"
+  [ "$output" = "echo" ]
+  run declared_runner_for "echo vitest && vitest run"
+  [ "$output" = "vitest" ]
+
+  run declared_runner_for "npm run jest:ci"
+  [ "$output" = "<none>" ]
+}

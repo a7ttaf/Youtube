@@ -50,7 +50,44 @@ ci::common::node_workspaces() {
     # repository laid out the way this one is (no root manifest) nothing here
     # changes; in a single-package repo with no children, nothing changes
     # either.
+    # Through a file, for the reason spelled out at the head of the other
+    # branch: `< <(find ... | sort)` is a subshell whose status is discarded, so
+    # a find that fails on an unreadable subtree delivered partial or empty
+    # output and this loop reported its own success.
+    #
+    # The cure was written for the no-root-manifest branch below and not applied
+    # here, and this branch is where it fails *open*: child_count stays 0, the
+    # ambiguity below is never reported, and the function returns "." and
+    # success. Its three callers -- node.sh, tests.sh, typecheck.sh -- each
+    # treat a non-zero return as FAIL_INFRA on the stated grounds that a lane
+    # cannot report on a set of workspaces it could not determine; handed "." and
+    # a success, they install, typecheck, test and build the root alone and exit
+    # 0, which is the exact harm the ambiguity report above exists to prevent.
     local child_count=0
+    local _rw_raw _rw_list _rw_rc=0
+    _rw_raw="$(mktemp 2>/dev/null)" || {
+      echo "Cannot create a temporary file to enumerate workspaces." >&2
+      return 1
+    }
+    _rw_list="$(mktemp 2>/dev/null)" || {
+      rm -f "$_rw_raw"
+      echo "Cannot create a temporary file to enumerate workspaces." >&2
+      return 1
+    }
+    find . -name 'node_modules' -prune -o -name '.git' -prune -o \
+      -type f -name "$manifest" -print 2>/dev/null > "$_rw_raw" || _rw_rc=$?
+    if [ "$_rw_rc" -eq 0 ]; then
+      sort < "$_rw_raw" > "$_rw_list" || _rw_rc=$?
+    fi
+    rm -f "$_rw_raw"
+    if [ "$_rw_rc" -ne 0 ]; then
+      rm -f "$_rw_list"
+      echo "Cannot enumerate ${manifest} files in this repository (exit ${_rw_rc})." >&2
+      echo "  A root ${manifest} with no readable children reads exactly like a" >&2
+      echo "  single-package repository, which is why this is a failure and not" >&2
+      echo "  an answer." >&2
+      return 1
+    fi
     while IFS= read -r found; do
       [ -n "$found" ] || continue
       found="${found#./}"
@@ -60,10 +97,8 @@ ci::common::node_workspaces() {
       ci::common::is_vendored_path "$dir" && continue
       child_count=$((child_count + 1))
       printf '  %s\n' "$dir" >&2
-    done < <(
-      find . -name 'node_modules' -prune -o -name '.git' -prune -o \
-        -type f -name "$manifest" -print 2>/dev/null | sort
-    )
+    done < "$_rw_list"
+    rm -f "$_rw_list"
     if [ "$child_count" -gt 0 ]; then
       {
         echo "A root ${manifest} coexists with ${child_count} nested one(s), listed above."

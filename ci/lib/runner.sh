@@ -156,10 +156,17 @@ ci::runner::_declared_timeout() {
       # it into a different number is the worst of the available answers.
       if ($0 ~ /^[0-9]+$/ && $0 + 0 > 0) {
         print
-      } else {
-        print "timeout_sec for " want " is not a positive whole number: " $0 > "/dev/stderr"
+        exit 0
       }
-      exit
+      # A diagnostic is not a result. This printed and exited 0 with no value,
+      # so submit could not tell "no timeout declared" from "the declared one is
+      # unusable" and silently fell back to the global timeout, or to none at
+      # all. A typo on the long `tests-shell` blocker therefore removed its
+      # bound and left full and ship validation to hang, which is the same
+      # "silently turning it into a different number" the comment above refuses
+      # -- reached by discarding the number instead of rewriting it.
+      print "timeout_sec for " want " is not a positive whole number: " $0 > "/dev/stderr"
+      exit 3
     }
     found && $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { exit }
   ' "$file"
@@ -190,8 +197,31 @@ ci::runner::submit() {
   # timeout applied only to the background path meant a supported mode ignored
   # both the declared value and the global one -- and could hang indefinitely.
   local check_timeout="${CI_GATE_TIMEOUT:-}"
-  local declared_timeout
-  declared_timeout="$(ci::runner::_declared_timeout "$job_id")"
+  local declared_timeout declared_rc=0
+  declared_timeout="$(ci::runner::_declared_timeout "$job_id")" || declared_rc=$?
+  if [ "$declared_rc" -ne 0 ]; then
+    # Configuration this runner cannot act on, recorded as infrastructure
+    # instead of run without the bound it asked for. Running the check anyway
+    # is the answer that looks harmless and is not: the value exists precisely
+    # because the global default is wrong for that check, so ignoring it is how
+    # a blocking lane runs unbounded and the gate reports a timeout nobody
+    # configured -- or never reports at all.
+    #
+    # Written the way the sequential branch below records a finished job, so the
+    # pool's bookkeeping sees an ordinary completed job rather than a launch
+    # that never happened.
+    {
+      echo "Check '${job_id}' declares a timeout_sec this runner cannot use."
+      echo "  ${CI_CHECKS_CONFIG:-ci/config/checks.yml} has to carry a positive"
+      echo "  whole number of seconds, or nothing at all. Refusing to run the"
+      echo "  check unbounded under a configuration that asked for a bound."
+    } > "$log_file" 2>&1
+    printf '%d' "$CI_RESULT_FAIL_INFRA" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.rc"
+    printf '%s' "$(ci::runner::_epoch)" > "$start_file"
+    printf '%s' "$(ci::runner::_epoch)" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.end"
+    printf '%d' "$$" > "$pid_file"
+    return 0
+  fi
   [ -n "$declared_timeout" ] && check_timeout="$declared_timeout"
 
   local timeout_cmd=""
