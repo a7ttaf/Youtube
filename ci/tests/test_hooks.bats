@@ -647,3 +647,86 @@ refs/heads/old %s refs/publish/prod %s
   [[ "$output" != *"TAGS=$HD_ROOT"* ]]
   rm -rf "$HD_SB"
 }
+
+@test "hook: the push state this hook exports is its own conclusion, not the caller's" {
+  # Every one of these variables is only ever *set*, never cleared, so a value
+  # inherited from the calling environment survived into a run that never
+  # reached the line which would have set it. CI_GATE_PUSH_DELETIONS_ONLY is the
+  # sharpest of them: ci/preflight.sh selects the entire ship plan from it, so a
+  # stray `CI_GATE_PUSH_DELETIONS_ONLY=1` in the caller's environment reduced an
+  # ordinary content-bearing push to destination protection alone -- git-safety,
+  # test-layout, the node lane, the build and the shell suites all skipped.
+  _hd_sandbox
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s
+' '$HD_TIP' '$HD_BASE' | CI_GATE_PUSH_DELETIONS_ONLY=1 CI_GATE_PUSH_TAG_TIPS=stale CI_GATE_PUSH_NEW_SHA=stale bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DELONLY=<unset>"* ]]
+  [[ "$output" == *"NEW=$HD_TIP"* ]]
+  [[ "$output" != *"=stale"* ]]
+
+  # The control: a push this hook itself finds to be deletions-only still says
+  # so, so the reset is a reset and not a removal.
+  local zero=0000000000000000000000000000000000000000
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/gone %s refs/heads/gone %s
+' '$zero' '$HD_BASE' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DELONLY=1"* ]]
+  rm -rf "$HD_SB"
+}
+
+@test "hook: a notes-only push carries nothing a content lane reads" {
+  # `_push_any_content=1` was raised before the record's namespace was known, so
+  # the arm that treats refs/notes/* as annotations -- which it is -- came too
+  # late: the push counted as content, exported no tip and no deletions-only
+  # flag, and ship preflight fell back to the checked-out HEAD. An ordinary
+  # `git notes` update then ran the node lane, the build and the shell suites
+  # over unrelated project content, where any pre-existing failure blocked it.
+  _hd_sandbox
+  local zero=0000000000000000000000000000000000000000
+  run bash -c "cd '$HD_SB' && printf 'refs/notes/commits %s refs/notes/commits %s
+' '$HD_ROOT' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DELONLY=1"* ]]
+
+  # The control: a branch record beside the notes one raises the flag for
+  # itself, and that push is gated in full.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s
+refs/notes/commits %s refs/notes/commits %s
+' '$HD_TIP' '$HD_BASE' '$HD_ROOT' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"DELONLY=<unset>"* ]]
+  [[ "$output" == *"NEW=$HD_TIP"* ]]
+  rm -rf "$HD_SB"
+}
+
+@test "hook: only a branch record moves the collapsed history tip" {
+  # The tip and the base are one range, and a range is the branch question. With
+  # tags still able to seed it, a tag-only push listing an already-published tag
+  # from an unrelated lineage before a new tag at HEAD took the published SHA
+  # first and kept it -- the later tag is not a branch, so it could not displace
+  # it. push_range then had git-safety and the history checks walk the published
+  # lineage instead of the outgoing one, and a secret added and removed before
+  # HEAD was never looked at. What may go out under a tag is decided per ref by
+  # worktree_covers_push, which is where that question already lives.
+  _hd_sandbox
+  local zero=0000000000000000000000000000000000000000
+  run bash -c "cd '$HD_SB' && printf 'refs/tags/old %s refs/tags/old %s
+refs/tags/new %s refs/tags/new %s
+' '$HD_ORPHAN' '$zero' '$HD_TIP' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NEW="* ]]
+  [[ "$output" != *"NEW=$HD_ORPHAN"* ]]
+  [[ "$output" != *"NEW=$HD_TIP"* ]]
+  # Collected, though -- the per-ref rule still gets both of them.
+  [[ "$output" == *"TAGS=$HD_ORPHAN $HD_TIP"* ]]
+
+  # The control: a branch record in the same push still sets the tip, and a tag
+  # listed after it does not take it away.
+  run bash -c "cd '$HD_SB' && printf 'refs/heads/main %s refs/heads/main %s
+refs/tags/new %s refs/tags/new %s
+' '$HD_TIP' '$HD_BASE' '$HD_ORPHAN' '$zero' | bash ci/hook-dispatch.sh pre-push origin file:///x 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"NEW=$HD_TIP"* ]]
+  [[ "$output" == *"TAGS=$HD_ORPHAN"* ]]
+  rm -rf "$HD_SB"
+}

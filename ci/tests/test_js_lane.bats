@@ -4207,3 +4207,194 @@ SH
   done
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: a quoted runner name is the same runner to every reader" {
+  # `'vitest' run --exclude=tests/a.test.ts` executes vitest -- the shell
+  # removes the quotes -- and _script_names_a_checker unquotes before it looks,
+  # so the predicate accepted the runner. _command_runner did not: it returned
+  # the token with its quotes still attached, matched no tool, and the whole
+  # argument family was skipped for that script. Two readers of one token, and
+  # only one of them was reading what the shell reads, so the persistent filter
+  # went through.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "'"'"'vitest'"'"' run --exclude=tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The control: the same quoting without a filter is still an accepted runner,
+  # so this is a rule about the arguments and not about the quotes.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "'"'"'vitest'"'"' run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a quoted spelling of a non-checking tsc mode is still that mode" {
+  # `tsc --no'Check'` is `tsc --noCheck` to the shell, which compiles without
+  # checking anything. This scan lowercased the raw token to `--no'check'`,
+  # matched none of the named modes, and fell through the generic `-*` arm that
+  # accepts ordinary flags: the mandatory typecheck reported PASS with the
+  # compiler told not to type-check. Quotes are removed wherever they sit in the
+  # token, because that is where a bypass would put them.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --no'"'"'Check'"'"'" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The control: the ordinary spelling of a mode that does check is admitted and
+  # handed to the package manager.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # And the control that says where the unquoting has to happen: the compiler's
+  # own name quoted. Stripping below the runner comparison rather than above it
+  # would leave `'tsc' --noEmit` falling through to the trailing arm and being
+  # refused as a source file -- the same defect one line over from its own fix.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "'"'"'tsc'"'"' --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an explicit boolean is the value of the switch before it" {
+  # `tsc --noEmit --pretty false` typechecks the whole project: tsc documents
+  # `--pretty` as a boolean whose default is true, and passing it `false` only
+  # changes how the diagnostics are formatted. The value-taking allow-list names
+  # no boolean switch, so `false` reached the trailing arm and was refused as a
+  # source file the compiler had been pointed at -- the gate blocking a valid
+  # full-project typecheck, which is how a gate gets switched off.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit --pretty false" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # The control that keeps it narrow: only `true` and `false`, and only directly
+  # after a flag. Any other bare word after a switch is still a source file, and
+  # naming files is still what makes tsc ignore tsconfig.json.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit src/x.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: tsc is not pointed at a project other than the workspace one" {
+  # The typecheck twin of `vitest --config`, and it sat on the value-taking
+  # list -- so the argument was consumed and nothing asked which project it
+  # selects. `-p <file>` compiles the project that file describes: an alternate
+  # config naming one known-good file exits 0 while the default tsconfig.json
+  # reports errors, and the lane calls that PASS over a workspace nothing
+  # checked. This reader cannot open the file to see which it is, so it says so
+  # rather than assuming.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '{ "compilerOptions": { "strict": true }, "files": ["src/ok.ts"] }\n' \
+    > "$NODE_SB/ws/tsconfig.narrow.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.narrow.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"a project other than the workspace configuration"* ]]
+  [[ "$output" == *"tsconfig.narrow.json"* ]]
+
+  # The joined spelling selects a project the same way and arrives as one
+  # token, so it needs the rule written on it too -- otherwise the fix holds for
+  # `-p x` and the option beside it walks straight through the generic flag arm.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --project=tsconfig.narrow.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"a project other than the workspace configuration"* ]]
+
+  # The controls: naming the workspace configuration explicitly is the same
+  # compilation as omitting it, in either spelling, and stays accepted.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project other than the workspace configuration"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --project=tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project other than the workspace configuration"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: trap -p inspects the handlers and installs none" {
+  # `trap -p EXIT && vitest run` prints the EXIT trap and returns; bash
+  # documents `-p` as displaying the trap commands associated with each signal.
+  # The state machine read `-p` as the handler and `EXIT` as the signal it was
+  # installed for, and refused an ordinary diagnostic script before the suite
+  # ran. It is the distinction `-` already makes in the same arm: inspection is
+  # not installation.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "trap -p EXIT && vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"installs an EXIT trap"* ]]
+  # The lane validates every script before it runs any of them, so reaching an
+  # execution line at all is the evidence this script was admitted -- the
+  # refusal below never prints one. Which script runs first is the lane's
+  # business and not this case's.
+  [[ "$output" == *"Running script:"* ]]
+
+  # The control: a handler that does replace the runner's status is still
+  # refused, which is the rule this one sits inside.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "trap true EXIT && vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"installs an EXIT trap"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "workspaces: an enumeration that could not run is not an empty repository" {
+  # The producer ran inside process substitution, so `find` failing on an
+  # unreadable subtree -- or `sort` failing to allocate -- delivered partial or
+  # empty output and the loop reported its own success. This repository has no
+  # root manifest, so an empty list reads as "no package.json found" and the
+  # node lane passes having run nothing: one unreadable directory silently
+  # removing every frontend check. "Could not look" is not "found nothing",
+  # which is the rule config_sources and the git-safety path collector already
+  # follow.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/bin" "$sb/frontend"
+  printf '{ "name": "f", "private": true }\n' > "$sb/frontend/package.json"
+  printf '#!/usr/bin/env bash\nexit 71\n' > "$sb/bin/find"
+  chmod +x "$sb/bin/find"
+
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && export PATH='$sb/bin:'\"\$PATH\" \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Cannot enumerate"* ]]
+  [[ "$output" != *"frontend"* ]]
+
+  # The control: with a working enumeration the same tree answers normally, so
+  # this is a rule about the producer's status and not about the layout.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend"* ]]
+  rm -rf "$sb"
+}

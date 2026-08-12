@@ -1822,8 +1822,16 @@ _reject_status_trap() {
     elif [ "$_state" -eq 1 ]; then
       # The action, whatever it is. `-` restores the default handler and
       # installs nothing, which is the one form that cannot carry a status.
+      #
+      # `-p` installs nothing either: bash documents it as displaying the trap
+      # commands associated with each signal, so `trap -p EXIT && vitest run`
+      # prints and returns, and the runner behind it keeps its own status. Read
+      # as an action, the `EXIT` after it was judged as that action's signal and
+      # an ordinary diagnostic script was refused before the suite ran. It is
+      # the same distinction `-` already makes here: inspection is not
+      # installation.
       case "$_sig" in
-        '-') _state=0 ;;
+        '-'|'-p'|'--print') _state=0 ;;
         *) _state=2 ;;
       esac
     else
@@ -1946,12 +1954,19 @@ _normalize_command() {
 }
 
 _command_runner() {
-  local _tok _ng_out="" _cr_dur=0
+  local _tok _ng_out="" _cr_dur=0 tok
   _cr=""
   _normalize_command "$1"
   set -f
   # shellcheck disable=SC2086
   for _tok in $_ng_out; do
+    # A quoted name is the same program to the shell. `quoted vitest run
+    # --exclude=tests/a.test.ts` executes vitest, and _script_names_a_checker
+    # unquotes before it looks -- so the predicate accepted the runner while
+    # this function returned a quoted `vitest` with the quotes still on, matched no
+    # tool, and every argument rule was skipped. Two readers of one token, and
+    # only one of them was reading what the shell reads.
+    tok="$_tok" ; _unquote_tok ; _tok="$tok"
     # `timeout` takes a duration before the command it wraps, and a duration is
     # a bare word. Without this the number became the program name, so
     # `timeout 300 vitest run` resolved to `300`, matched no tool, and every
@@ -2778,7 +2793,7 @@ _reject_tool_args_one() {
 # The compiler's own argument rules: the modes that do not typecheck, and the
 # positionals that make it ignore tsconfig.json.
 _reject_tsc_args() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev low
+  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp
   prev=""
   set -f
   # shellcheck disable=SC2086
@@ -2786,6 +2801,20 @@ _reject_tsc_args() {
   set +f
   while [ "$#" -gt 0 ]; do
     tok="$1"
+    # Quoting removed first, because the shell removes it first.
+    #
+    # `tsc --no'Check'` is `tsc --noCheck` to the shell and was `--no'check'` to
+    # the mode scan below, which matched no arm and fell through the generic
+    # `-*` case: the typecheck lane reported PASS with the compiler told not to
+    # check. Quotes are stripped wherever they sit in the token, not only at its
+    # ends, since that is where a bypass would put them.
+    #
+    # Above the runner comparison, not below it, or the fix would have been the
+    # defect it was fixing one line over: `'tsc' --noEmit` runs the compiler,
+    # and with the comparison reading the quoted spelling the runner's own name
+    # fell through to the trailing arm and was refused as a source file it had
+    # been pointed at.
+    tok="$(printf '%s' "$tok" | tr -d '\042\047')"
     if [ "${tok##*/}" = "$runner" ]; then
       prev="" ; shift ; continue
     fi
@@ -2842,11 +2871,36 @@ _reject_tsc_args() {
         echo "    offending argument: ${tok}"
         echo "  That mode does not type check the project, so the lane reports"
         echo "  PASS having checked nothing. Use 'tsc --noEmit' or"
-        echo "  'tsc -p <tsconfig> --noEmit'."
+        echo "  'tsc -p tsconfig.json --noEmit'."
         exit "$CI_RESULT_FAIL_NEW_ISSUE"
         ;;
       npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run|'&&'|';')
         prev="" ; shift ; continue ;;
+      # The joined spelling of the project option, which selects a project
+      # exactly as the spaced form does and arrives here as a single token: it
+      # matches `-p|--project` in no `prev` arm below and was accepted by the
+      # generic flag case at the bottom of this list. Judged by the same test as
+      # the spaced form -- the value after the `=` -- rather than by a second
+      # rule that could drift away from it. Ordered above `[A-Za-z_]*=*`
+      # because that arm is for environment assignments and would otherwise
+      # swallow nothing here, and above `-*` because that one accepts.
+      --project=*|-p=*)
+        _tp="${tok#*=}"
+        case "$_tp" in
+          tsconfig.json|./tsconfig.json)
+            prev="" ; shift ; continue ;;
+        esac
+        echo "Workspace ${CI_GATE_NODE_WORKSPACE} points its '${script_name}' script at"
+        echo "  a project other than the workspace configuration:"
+        echo "    ${script_name}: ${cmd}"
+        echo "    offending argument: ${tok}"
+        echo "  '--project=<file>' compiles the project that file describes, so"
+        echo "  an alternate configuration can name a narrower set of files"
+        echo "  while the lane reports PASS, and nothing here can read that"
+        echo "  file to see whether it does. Use 'tsc --noEmit', or"
+        echo "  'tsc -p tsconfig.json --noEmit'."
+        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        ;;
       [A-Za-z_]*=*)
         prev="" ; shift ; continue ;;
       -*)
@@ -2861,8 +2915,48 @@ _reject_tsc_args() {
     # either, so nothing else catches it. That is the test-filter defect on the
     # typecheck script, and it is refused the same way: the value-taking options
     # are named, and after anything else a bare word is a source file.
+    # An explicit boolean is the value of the switch before it, not a source
+    # file. `tsc --noEmit --pretty false` typechecks the whole project -- tsc
+    # documents `--pretty` as a boolean whose default is true -- and this scan
+    # recorded `--pretty` as `prev`, found it in no value-taking arm, and
+    # refused `false` as a file the compiler had been pointed at. Only `true`
+    # and `false`, and only immediately after a flag: any other bare word after
+    # a boolean switch is still a file.
+    case "$prev|$low" in
+      -*'|true'|-*'|false')
+        prev="" ; shift ; continue ;;
+    esac
+    # A project other than the workspace configuration is the typecheck twin
+    # of `vitest --config`, and it was accepted without anything asking which
+    # project it selects. `tsc -p tsconfig.narrow.json --noEmit` compiles the
+    # project that file describes: the default tsconfig.json can report
+    # TS2322 and exit 2 while an alternate naming one known-good file exits 0,
+    # so the lane reports PASS over a workspace nothing checked. Same
+    # reasoning that removed `--config` from the test-runner allow-list -- a
+    # flag that redirects the guard is not a flag that cannot reduce the run,
+    # and this reader cannot open that file to see which it is.
     case "$prev" in
-      -p|--project|--outdir|--outfile|--target|--module|--moduleresolution \
+      -p|--project)
+        case "$tok" in
+          tsconfig.json|./tsconfig.json)
+            prev="" ; shift ; continue ;;
+          *)
+            echo "Workspace ${CI_GATE_NODE_WORKSPACE} points its '${script_name}' script at"
+            echo "  a project other than the workspace configuration:"
+            echo "    ${script_name}: ${cmd}"
+            echo "    offending argument: ${tok}"
+            echo "  '-p <file>' compiles the project that file describes, so an"
+            echo "  alternate configuration can name a narrower set of files"
+            echo "  while the lane reports PASS, and nothing here can read that"
+            echo "  file to see whether it does. Use 'tsc --noEmit', or"
+            echo "  'tsc -p tsconfig.json --noEmit'."
+            exit "$CI_RESULT_FAIL_NEW_ISSUE"
+            ;;
+        esac
+        ;;
+    esac
+    case "$prev" in
+      --outdir|--outfile|--target|--module|--moduleresolution \
         |--lib|--jsx|--jsxfactory|--jsxfragmentfactory|--typeroots|--types \
         |--rootdir|--rootdirs|--baseurl|--tsbuildinfofile|--declarationdir \
         |--maxnodemodulejsdepth|--charset|--locale \
@@ -2876,7 +2970,7 @@ _reject_tsc_args() {
         echo "  Naming files on the command line makes tsc ignore tsconfig.json,"
         echo "  so only those files are compiled and every error elsewhere goes"
         echo "  unreported while the lane exits 0. Point it at the project"
-        echo "  instead -- 'tsc --noEmit', or 'tsc -p <tsconfig>'."
+        echo "  instead -- 'tsc --noEmit', or 'tsc -p tsconfig.json --noEmit'."
         exit "$CI_RESULT_FAIL_NEW_ISSUE"
         ;;
     esac

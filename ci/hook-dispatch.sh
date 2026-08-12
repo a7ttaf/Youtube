@@ -29,6 +29,18 @@ case "$HOOK_NAME" in
     ;;
   pre-push)
     export CI_GATE_HOOK=pre-push
+    # Derived state, cleared before it is derived.
+    #
+    # These are this hook's own conclusions about the push, and every one of
+    # them is only ever *set* -- so an inherited value survived into a run that
+    # never reached the line that would have set it. CI_GATE_PUSH_DELETIONS_ONLY
+    # is the sharpest: it selects the entire ship plan, so a stray
+    # `CI_GATE_PUSH_DELETIONS_ONLY=1` in the caller's environment reduced an
+    # ordinary content-bearing push to destination protection alone. The others
+    # would misdirect a range or a tip the same way.
+    unset CI_GATE_PUSH_DELETIONS_ONLY CI_GATE_PUSH_NEW_SHA CI_GATE_PUSH_OLD_SHA
+    unset CI_GATE_PUSH_REMOTE_REFS CI_GATE_PUSH_BRANCH_TIPS CI_GATE_PUSH_TAG_TIPS
+    unset CI_GATE_PUSH_OTHER_TIPS
     # The destination remote *name*, which is what scopes the tag-publication
     # check: without it that check asked whether any remote-tracking branch
     # contained the commit, so a commit published only to `upstream` counted as
@@ -95,7 +107,6 @@ case "$HOOK_NAME" in
         if [ "$_push_has_content" -eq 0 ]; then
           continue
         fi
-        _push_any_content=1
 
         # Every commit a branch destination is being moved to, distinctly.
         #
@@ -145,6 +156,15 @@ case "$HOOK_NAME" in
           # which no content lane reads and none needs to -- and the covers rule
           # refused it, with advice ("check out the commit being pushed") that
           # cannot be followed for a notes commit.
+          # Content-free, not merely skipped. `_push_any_content` used to be
+          # raised above this case, so this arm's own conclusion arrived too
+          # late: a notes-only push exported neither a tip nor the
+          # deletions-only flag, ship preflight fell back to the checked-out
+          # HEAD, and an ordinary `git notes` update ran -- and could be blocked
+          # by -- the node lane, the build and the shell suites over unrelated
+          # project content. It is raised below this decision now. A mixed
+          # notes-and-branch push is unaffected: the branch record raises the
+          # flag for itself.
           refs/notes/*) _push_is_notes=1 ;;
           # Everything else. Gerrit's refs/for/*, a refs/publish/* deployment
           # pointer, refs/meta/config: destinations this gate has no model of,
@@ -190,26 +210,45 @@ case "$HOOK_NAME" in
           continue
         fi
 
+        # Content this run stands behind, recorded here rather than above the
+        # destination case: `_push_any_content` was raised before the record's
+        # namespace was known, so a notes-only push -- which the case just
+        # below decided carries nothing a content lane reads -- still counted as
+        # content. It exported neither a tip nor the deletions-only flag, ship
+        # preflight fell back to the checked-out HEAD, and an ordinary
+        # `git notes` update ran the node lane, the build and the shell suites
+        # over unrelated project content, where any existing failure blocked it.
+        _push_any_content=1
+
         # The tip is chosen by ancestry, not by arrival. `_push_new="$_lsha"`
         # on every record meant "whichever ref git happened to list last",
         # while the base beside it was already being widened properly — so the
         # two halves of the same range disagreed about which push they
         # described, and the answer changed when git reordered its input.
+        # The tip, the base, and whether a base is missing are all the branch
+        # question. Leaving tags in the tip collapse was half a fix: a tag-only
+        # push listing an already-published tag from an unrelated history before
+        # a new tag at HEAD seeded the tip from the published one and kept it,
+        # because the later tag is not a branch and so could not displace it.
+        # push_range then had git-safety and the history checks walk the
+        # published lineage instead of the outgoing one, and a secret added and
+        # removed before HEAD was never looked at. What may go out under a tag
+        # is decided per ref by worktree_covers_push, which is where that
+        # question already lives.
+        [ "$_push_is_branch" -eq 1 ] || continue
+
         if [ -z "$_push_new" ]; then
           _push_new="$_lsha"
         elif git merge-base --is-ancestor "$_push_new" "$_lsha" 2>/dev/null; then
           _push_new="$_lsha"
         elif git merge-base --is-ancestor "$_lsha" "$_push_new" 2>/dev/null; then
           : # already the descendant; keep it
-        elif [ "$_push_is_branch" -eq 1 ]; then
+        else
           # Neither contains the other. One `A..B` range cannot describe two
           # unrelated histories, and picking either one leaves the other
           # unscanned — which is the fail-open this gate exists to remove.
           _push_unrelated="${_push_unrelated} ${_lref:-<ref>}"
         fi
-
-        # The base, and whether one is missing, are the branch question only.
-        [ "$_push_is_branch" -eq 1 ] || continue
 
         case "${_rsha:-}" in
           *[!0]*)

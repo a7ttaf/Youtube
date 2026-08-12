@@ -1535,3 +1535,53 @@ YML
   [[ "$output" == *"No relevant changes detected"* ]]
   rm -rf "$sb"
 }
+
+@test "git-safety: work that is not being pushed does not block the push" {
+  # The conflict-marker rule has two halves: a range scan, which answers for the
+  # outgoing commits, and has_conflict_markers_in_changed, which reads `git
+  # diff` -- the unstaged worktree. Only the range half was scoped to the mode,
+  # so in ship mode a marker in a file nobody is sending refused a clean push.
+  # The unstaged `git diff --check` beside it was scoped to pre-commit two
+  # rounds ago and this half was left behind: the same rule, fixed on one
+  # spelling and absent on the other.
+  #
+  # The marker is indented, which is what isolates the helper. `git diff
+  # --check` only reports one at column zero, so it stays quiet here and the
+  # grep-based scan is the only thing that can speak -- otherwise "refused in
+  # quick mode" would be satisfied by the whitespace check and would assert
+  # nothing about the helper this case is scoping.
+  gs_setup
+  printf 'clean
+' > "$GS_SB/f.txt"
+  gs_commit "clean"
+  local base tip
+  base="$( cd "$GS_SB" && git rev-parse HEAD~1 )"
+  tip="$( cd "$GS_SB" && git rev-parse HEAD )"
+  printf '  <<<<<<< LOCAL-WIP
+' >> "$GS_SB/f.txt"
+
+  # The premise: the whitespace check does not see this one, so whatever answers
+  # below is the helper and not that.
+  run bash -c "cd '$GS_SB' && git diff --check"
+  [ "$status" -eq 0 ]
+
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' CI_GATE_PUSH_NEW_SHA='$tip' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"conflict markers found"* ]]
+
+  # The control that keeps the rule: the pre-commit gate is the one that stands
+  # behind the worktree, and the helper still refuses the same file there.
+  run gs_run quick
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"Merge conflict markers found in changed content"* ]]
+
+  # And the second control: a marker inside the pushed range is still caught in
+  # ship mode, so this scopes the worktree helper rather than removing the rule.
+  gs_commit "wip"
+  local tip2
+  tip2="$( cd "$GS_SB" && git rev-parse HEAD )"
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' CI_GATE_PUSH_NEW_SHA='$tip2' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"conflict markers found"* ]]
+  rm -rf "$GS_SB"
+}

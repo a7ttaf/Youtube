@@ -284,7 +284,18 @@ if [ "$_gs_marker_rc" -ge 2 ]; then
   echo "The conflict-marker scan failed to run (grep exited ${_gs_marker_rc})."
   exit "$CI_RESULT_FAIL_INFRA"
 fi
-if ci::git::has_conflict_markers_in_changed || [ "$_gs_marker_rc" -eq 0 ]; then
+# The worktree helper is a pre-commit question, like the `git diff --check` at
+# the top of this file. It reads `git diff` -- unstaged, unrelated to the push
+# -- and in ship mode `_gs_marker_rc` above already answers for the outgoing
+# range, so calling it there refused a clean push over `<<<<<<< LOCAL-WIP` in a
+# file nobody is sending. Half of this rule was scoped to the mode two rounds
+# ago and this half was left behind, which is the same shape as the defect it
+# was fixing.
+_gs_worktree_markers=1
+if [ -z "$GATE_RANGE" ] && ci::git::has_conflict_markers_in_changed; then
+  _gs_worktree_markers=0
+fi
+if [ "$_gs_worktree_markers" -eq 0 ] || [ "$_gs_marker_rc" -eq 0 ]; then
   echo "Merge conflict markers found in changed content or ${GATE_WHAT}."
   exit "$CI_RESULT_FAIL_NEW_ISSUE"
 fi

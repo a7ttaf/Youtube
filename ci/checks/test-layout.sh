@@ -496,6 +496,16 @@ extract_test_block() {
           # string is data, however much it looks like config.
           if (depth == 1 && bdepth == 0 && substr(all, p + 1, e - p - 2) == "test") {
             rest = substr(all, e)
+            # A value that is not a literal object is refused here for the same
+            # reason it is refused for the unquoted spelling below: JavaScript
+            # keeps the later property whatever shape it has, and this reader
+            # can see into an object literal and nothing else. Written on both
+            # arms in the same commit, because a rule that exists for one
+            # spelling of a key and not the other is the defect this file keeps
+            # being handed.
+            if (rest ~ /^[[:space:]]*:/ && rest !~ /^[[:space:]]*:[[:space:]]*\{/) {
+              computed = 1
+            }
             if (rest ~ /^[[:space:]]*:[[:space:]]*\{/) {
               start = e + index(rest, "{")
               # Recorded and scanning continues, exactly as the unquoted spelling
@@ -600,6 +610,23 @@ extract_test_block() {
           }
         }
 
+        # A `test` key whose value is not a literal object is a value this
+        # reader cannot see into, and it is applied all the same. `test: narrow`
+        # or `test: makeTestConfig()` after the validated block is what
+        # JavaScript keeps, and it can hold `include: ["tests/only.test.ts"]`
+        # while the broad literal above it was reported as active. Only the
+        # `test: {` spelling was recognised at all, so every other value was
+        # simply not seen. Refused as a duplicate, because that is what it is:
+        # a second top-level `test`, and this one cannot even be read.
+        if (depth == 1 && bdepth == 0 && substr(all, p, 4) == "test") {
+          before = (p > 1) ? substr(all, p - 1, 1) : " "
+          rest = substr(all, p + 4)
+          if (before !~ /[A-Za-z0-9_$]/ && rest ~ /^[[:space:]]*:/ \
+              && rest !~ /^[[:space:]]*:[[:space:]]*\{/) {
+            computed = 1
+          }
+        }
+
         # Only a key at the exported object own level counts.
         if (depth == 1 && bdepth == 0 && substr(all, p, 4) == "test") {
           before = (p > 1) ? substr(all, p - 1, 1) : " "
@@ -616,6 +643,35 @@ extract_test_block() {
           }
         }
         p++
+      }
+
+      # What follows the exported object, if anything. The loop above ends when
+      # the object closes, and everything after that was simply not looked at:
+      # `export default defineConfig({ test: { include: [broad] } }) &&
+      # defineConfig({ test: { include: ["tests/only.test.ts"] } })` exports the
+      # right-hand config, because the left one is truthy, while this scan
+      # validated the left one and exited 0. A `defineConfig(` wrapper closes
+      # with its own `)`, and a statement may end with `;` -- everything else is
+      # an expression this reader cannot evaluate, so it stops rather than
+      # assuming it is transparent, exactly as the wrapper allow-list above the
+      # object does.
+      tail = ""
+      while (p <= n) {
+        ch = substr(all, p, 1)
+        if (is_quote(ch)) { p = string_end(all, p, n); tail = tail "\"" ; continue }
+        if (ch == "/" && is_regex_start(all, p)) { p = regex_end(all, p, n); tail = tail "/" ; continue }
+        if (ch !~ /[[:space:]]/) tail = tail ch
+        p++
+      }
+      # `)` closes the defineConfig wrapper the scan stepped into; `;` ends the
+      # statement. `as const` and `satisfies <type>` are erased before anything
+      # evaluates this file, so a bare identifier tail is admitted only in that
+      # form.
+      if (tail != "") {
+        tailrest = tail
+        sub(/^\)*/, "", tailrest)
+        sub(/;*$/, "", tailrest)
+        if (tailrest != "" && tailrest !~ /^(asconst|satisfies[A-Za-z0-9_$.<>,\[\]|]*)$/) exit 4
       }
 
       # Duplicates are refused rather than resolved. Taking the last one would
@@ -1030,6 +1086,13 @@ check_one_config() {
     printf 'composed-config'
     return 0
   fi
+  # An expression after the exported object composes it just as a wrapper in
+  # front of it does, and the same answer fits: the block this guard read may
+  # not be the one vitest receives.
+  if [ "$_xt_rc" -eq 4 ]; then
+    printf 'composed-config'
+    return 0
+  fi
   [ "$_xt_rc" -eq 0 ] || have_block=0
   if [ -n "$block" ]; then
     props="$(printf '%s\n' "$block" | test_block_props)"
@@ -1214,9 +1277,8 @@ else
         fail "${_label} has a test block this guard cannot read to the end."
         echo "  The property scan ran out of the block with a string still open or"
         echo "  a bracket still unclosed, which is what a regular expression does"
-        echo "  to it: 'alias: [{ find: /'\''/ }]' opens a string at the quote"
-        echo "  inside the pattern, and 'find: /^\\(/' leaves a bracket counted"
-        echo "  and never closed."
+        echo "  to it: a quote inside the pattern opens a string, and an"
+        echo "  unbalanced bracket leaves the depth counted and never closed."
         echo "  Everything after that point was never offered to the exclude"
         echo "  rule, the spread rule or the allow-list, so a live test.exclude"
         echo "  or testNamePattern sitting there would have been reported as"
@@ -1231,7 +1293,9 @@ else
         echo "  { test: { include: [\"tests/only.test.ts\"] } })) validates the first"
         echo "  object and runs the second: Object.assign replaces test wholesale."
         echo "  This guard reads one object literal, so a wrapper that merges"
-        echo "  several is something it cannot follow."
+        echo "  several is something it cannot follow -- and neither is an"
+        echo "  expression *after* it: 'defineConfig({...}) && defineConfig({...})'"
+        echo "  exports the right-hand config because the left one is truthy."
         echo "  Export a single literal config — 'export default defineConfig({ ... })'"
         echo "  or 'export default { ... }' — or teach this guard the wrapper in"
         echo "  the same commit."

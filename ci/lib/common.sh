@@ -103,6 +103,43 @@ ci::common::node_workspaces() {
   # is a literal suffix strip and cannot do that.
   local candidate
   local _cands=() _n=0 _i=0 _j=0 _nested=0
+  # Through a file, so the enumeration's own status is something this function
+  # can act on. `< <(find ... | sort)` is a subshell: a `find` that fails on an
+  # unreadable subtree, or a `sort` that cannot allocate, delivered partial or
+  # empty output and the loop reported its own success. This repository has no
+  # root manifest, so an empty list here is "no package.json found" and the node
+  # lane passes having run nothing -- an unreadable directory silently removing
+  # every frontend check. The same shape, and the same cure, as config_sources
+  # in test-layout.sh and the path collector in git-safety.sh.
+  #
+  # Two files and two statuses rather than one pipeline, because a pipeline's
+  # status is the last command's unless `pipefail` is set -- and `sort` succeeds
+  # perfectly well on nothing. Sourcing this file happens to turn `pipefail` on,
+  # which is not a thing the caller should have to know: the producer is asked
+  # directly instead, the way the tsc lane and the marker scan already do it.
+  local _nw_raw _nw_list _nw_rc=0
+  _nw_raw="$(mktemp 2>/dev/null)" || {
+    echo "Cannot create a temporary file to enumerate workspaces." >&2
+    return 1
+  }
+  _nw_list="$(mktemp 2>/dev/null)" || {
+    rm -f "$_nw_raw"
+    echo "Cannot create a temporary file to enumerate workspaces." >&2
+    return 1
+  }
+  find . -name 'node_modules' -prune -o -name '.git' -prune -o \
+    -type f -name "$manifest" -print 2>/dev/null > "$_nw_raw" || _nw_rc=$?
+  if [ "$_nw_rc" -eq 0 ]; then
+    sort -u < "$_nw_raw" > "$_nw_list" || _nw_rc=$?
+  fi
+  rm -f "$_nw_raw"
+  if [ "$_nw_rc" -ne 0 ]; then
+    rm -f "$_nw_list"
+    echo "Cannot enumerate ${manifest} files in this repository (exit ${_nw_rc})." >&2
+    echo "  An empty list reads exactly like a repository with no workspaces," >&2
+    echo "  which is why this is a failure and not an answer." >&2
+    return 1
+  fi
   while IFS= read -r found; do
     [ -n "$found" ] || continue
     found="${found#./}"
@@ -114,11 +151,8 @@ ci::common::node_workspaces() {
     ci::common::is_vendored_path "$candidate" && continue
     _cands[_n]="$candidate"
     _n=$((_n + 1))
-  done < <(
-    find . -name 'node_modules' -prune -o -name '.git' -prune -o \
-      -type f -name "$manifest" -print 2>/dev/null \
-      | sort -u
-  )
+  done < "$_nw_list"
+  rm -f "$_nw_list"
 
   # A manifest nested under another manifest is the same ambiguity the root
   # branch reports, and it was only ever asked about the repository root. A

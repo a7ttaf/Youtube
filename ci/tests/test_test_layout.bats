@@ -1968,3 +1968,199 @@ EOF
   run bash -c "sed -n '/^config_sources()/,/^}/p' '$REPO_ROOT/ci/checks/test-layout.sh' | grep -c 'exit \"\$CI_RESULT_FAIL_INFRA\"'"
   [ "$output" -eq 2 ]
 }
+
+@test "test-layout: an include entry carrying an escape is not the declared glob" {
+  # A regression pin on the element-equality rule, not a fix of its own. When
+  # include was matched with `grep -F` over the joined text of the value, the
+  # entry below satisfied it: JavaScript decodes the escape, so the first entry
+  # is a glob under `tests/**/*.test.{ts,tsx}/`, a directory that does not
+  # exist, and vitest collects the single named file beside it -- while the
+  # source spelling contains the declared glob as a substring.
+  #
+  # Asking for an *element equal to* the declared glob answers this too, because
+  # the declared glob carries no backslash and so no entry containing one can
+  # equal it. That is why this case passes against the commit before it as well:
+  # it is here to fail if the comparison is ever loosened back toward
+  # containment, which is the shape of the defect and not one input of it.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}\u002fnever", "tests/app.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no longer declares an active test.include"* ]]
+
+  # The control: the declared glob spelled plainly, beside an entry that also
+  # holds no escape, is still an element and still passes.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}", "tests/app.test.ts"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: a test property whose value is not an object is refused" {
+  # Only `test: {` was recognised as a top-level test key, so `test: narrow` and
+  # `test: makeTestConfig()` after the validated block were not seen at all.
+  # JavaScript keeps the later value: it can be `{ include: ["tests/only.test.ts"] }`
+  # while this guard reports the broad literal above it as active. frontend/
+  # tsconfig.json covers only src and tests, so the typecheck is no duplicate-key
+  # backstop here either. A second top-level `test` is refused as the duplicate
+  # it is -- and this one cannot even be read.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const narrow = { include: ["tests/only.test.ts"] };
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  test: narrow,
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"more than one top-level"* ]]
+
+  # A call is the same statement, and is refused for the same reason.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  test: makeTestConfig(),
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"more than one top-level"* ]]
+
+  # And the quoted spelling of the key, which has its own arm in the scan and
+  # so needs the rule written on it too -- one rule, two spellings, which is the
+  # defect this file has already been handed twice.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const narrow = { include: ["tests/only.test.ts"] };
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  "test": narrow,
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"more than one top-level"* ]]
+
+  # The control: a `test` key nested inside another property is not a second
+  # top-level one, and the single literal block is still read normally.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  define: { test: "unit" },
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: an expression after the exported object is not transparent" {
+  # The capture loop ended when the first object closed and never looked at what
+  # followed. `defineConfig({ broad }) && defineConfig({ narrow })` exports the
+  # right-hand config -- the left one is truthy -- yet the guard validated the
+  # left one and exited 0 with both test files reported covered. It is the same
+  # answer a wrapper *in front of* the object already gets: the block read here
+  # may not be the one vitest receives.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+}) && defineConfig({
+  test: { include: ["tests/only.test.ts"] },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"composes its exported config"* ]]
+
+  # The controls: the syntax that genuinely is transparent. A closing wrapper
+  # paren, a statement semicolon, and a type assertion are all erased before
+  # anything evaluates this file.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+export default {
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+} as const;
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+
+  # And a trailing comment, which is the shape a real config is most likely to
+  # carry after the closing paren. It survives because comments are dropped
+  # before this scan runs -- asserted here so a change to that order shows up as
+  # this case failing rather than as a repository-wide false refusal.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"] },
+}); // keep in sync with tsconfig
+EOF
+  run_guard
+  [ "$status" -eq 0 ]
+}
+
+@test "test-layout: the advice this guard prints holds no escape for echo to expand" {
+  # The unreadable-properties advice quoted two regex fixtures, and quoting a
+  # regex means writing a backslash into an `echo` argument. `echo` is not
+  # required to pass those through: a shell with xpg_echo, or /bin/sh being
+  # dash, expands them, so the advice a developer reads is not the advice this
+  # file contains. The text was rewritten to describe the two shapes instead of
+  # spelling them, which is what makes the printed message and the source agree.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    alias: [{ find: /'/, replacement: "q" }],
+    exclude: ["tests/lib/**"],
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot read to the end"* ]]
+  # Nothing in what it printed can be read two ways.
+  [[ "$output" != *'\'* ]]
+}
