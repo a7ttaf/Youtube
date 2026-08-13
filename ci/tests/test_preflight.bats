@@ -1745,10 +1745,19 @@ YML
   }
 
   # The configuration this case is about, read from the file rather than
-  # asserted: lanes.conf schedules content lanes and no destination protection.
-  run grep -c 'branch-protection' "$sb/ci/config/lanes.conf"
-  [ "$output" = "0" ] \
-    || { echo "lanes.conf now has destination protection; this case needs rewriting" >&2; rm -rf "$sb"; return 1; }
+  # asserted: lanes.conf schedules the content lanes, so their absence below is
+  # the rule acting.
+  #
+  # This premise used to read `grep -c 'branch-protection' lanes.conf` and
+  # require 0, with a message saying the case needed rewriting if that changed.
+  # It changed: a later review round had branch-protection and typecheck-js
+  # added to the file so the two full/ship schedulers agree. So
+  # branch-protection present no longer separates the short path from the wide
+  # one -- both run it now -- and test-layout absent is what does. The rule
+  # under test is unchanged; only the discriminator moved.
+  run grep -c '^test-layout|' "$sb/ci/config/lanes.conf"
+  [ "$output" = "1" ] \
+    || { echo "lanes.conf no longer schedules test-layout; this case needs rewriting" >&2; rm -rf "$sb"; return 1; }
 
   # The premise: under lanes.conf an ordinary ship push does schedule the lane
   # list, so an absence below is the rule acting and not the harness failing.
@@ -1855,6 +1864,47 @@ YML
     || { echo "the lane list stopped applying to full: $output" >&2; rm -rf "$sb"; return 1; }
   [[ "$output" == *debt* ]]
   rm -rf "$sb"
+}
+
+@test "preflight: the lane file and the built-in plan schedule the same lanes" {
+  # Two schedulers describe the full/ship plan -- run_full_or_ship_checks and
+  # ci/config/lanes.conf -- and nothing compared them. lanes.conf was missing
+  # branch-protection and typecheck-js, so `CI_GATE_USE_LANES=1` ran a strictly
+  # smaller plan than the same push without it: no destination protection, and
+  # no lane compiling the TypeScript projects a workspace script does not name.
+  # The second one matters more than a missing lane usually would, because the
+  # `-p <project>` rule in ci/checks/node.sh accepts a script naming one project
+  # *because* typecheck-js compiles the rest.
+  #
+  # Three separate findings came out of this one divergence -- the deletion-only
+  # path being unreachable under lanes, quick running the whole file, and
+  # typecheck-js missing from it -- which is what a pair of lists nobody
+  # compares produces. Enumerated from both sources rather than restated here,
+  # so a lane added to either has to reach the other.
+  local built_in lanes
+  built_in="$(awk '/^run_full_or_ship_checks\(\)/,/^}/' "$REPO_ROOT/ci/preflight.sh" \
+    | grep -oE '"[a-z-]+:\./ci/checks/' | sed 's/^"//; s|:\./ci/checks/$||' | sort -u)"
+  lanes="$(grep -vE '^[[:space:]]*(#|$)' "$REPO_ROOT/ci/config/lanes.conf" \
+    | cut -d'|' -f1 | tr -d ' ' | sort -u)"
+
+  # Both selectors have to still be selecting; either one matching nothing makes
+  # the comparison below pass while comparing nothing.
+  local n_built n_lanes
+  n_built="$(printf '%s\n' "$built_in" | grep -c .)"
+  n_lanes="$(printf '%s\n' "$lanes" | grep -c .)"
+  [ "$n_built" -ge 8 ] \
+    || { echo "read only $n_built lanes from run_full_or_ship_checks; the selector has drifted" >&2; return 1; }
+  [ "$n_lanes" -ge 8 ] \
+    || { echo "read only $n_lanes lanes from lanes.conf; the selector has drifted" >&2; return 1; }
+
+  if [ "$built_in" != "$lanes" ]; then
+    echo "the two full/ship schedulers disagree" >&2
+    echo "only in run_full_or_ship_checks:" >&2
+    comm -23 <(printf '%s\n' "$built_in") <(printf '%s\n' "$lanes") >&2
+    echo "only in ci/config/lanes.conf:" >&2
+    comm -13 <(printf '%s\n' "$built_in") <(printf '%s\n' "$lanes") >&2
+    return 1
+  fi
 }
 
 # --- the suites' own hygiene ---------------------------------------------------
