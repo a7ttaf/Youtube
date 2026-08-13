@@ -2573,3 +2573,68 @@ CFG
   run_guard
   [ "$status" -eq 20 ]
 }
+
+@test "test-layout: a regex literal in the config is not read as a comment" {
+  # `resolve: { alias: [{ find: /^@\//, ... }] }` is an ordinary Vite alias. The
+  # comment stripper had no notion of a regex literal, so the escaped slash next
+  # to the closing one read as `//` and the rest of that line was dropped --
+  # taking the closing braces with it. Measured on exactly this config:
+  #
+  #   old stripper -> net braces: 2      (unbalanced, extractor cannot match)
+  #   new stripper -> net braces: 0
+  #
+  # so the brace matcher could not find the `test` block in a config that
+  # declares one, and the guard failed a workspace for a glob it does have.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'CFG'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  resolve: { alias: [{ find: /^@\//, replacement: "/src/" }] },
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+CFG
+  run_guard
+  [ "$status" -eq 0 ] \
+    || { echo "a regex alias broke the config reader" >&2; echo "$output" >&2; return 1; }
+
+  # The controls. Comments must still be stripped -- the first draft of the fix
+  # tested for a regex opener before the two comment openers, so a line
+  # beginning `//` started at a position where a value is expected and the whole
+  # comment survived. A stripper that strips nothing passes the case above.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'CFG'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  resolve: { alias: [{ find: /^@\//, replacement: "/src/" }] },
+  // test: { include: ["tests/commented-out.test.ts"] },
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+  /* test: { include: ["tests/blocked-out.test.ts"] }, */
+});
+CFG
+  run_guard
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"commented-out"* ]] \
+    || { echo "a commented-out include was read as the real one" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" != *"blocked-out"* ]] \
+    || { echo "a block-commented include was read as the real one" >&2; echo "$output" >&2; return 1; }
+
+  # And the guard still refuses a config whose declared glob misses a test file,
+  # so the case above is the rule passing rather than the check going quiet.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'CFG'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  resolve: { alias: [{ find: /^@\//, replacement: "/src/" }] },
+  test: {
+    include: ["tests/only-this-one.test.ts"],
+  },
+});
+CFG
+  run_guard
+  [ "$status" -eq 20 ] \
+    || { echo "the guard stopped catching an uncovered test file" >&2; echo "$output" >&2; return 1; }
+}

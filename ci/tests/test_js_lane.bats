@@ -6124,3 +6124,136 @@ ship_ws_run() {
   [[ "$output" == *"pkg"* ]]
   rm -rf "$SHIP_SB"
 }
+
+@test "node lane: bunx is a package runner, in every reader" {
+  # Bun's docs call `bunx` an alias for `bun x` and Bun's equivalent of npx, and
+  # a workspace whose test script is `bunx vitest run` was refused for running
+  # no test runner: `bunx` matched no name in the runner list, so the scan never
+  # advanced to the word after it.
+  #
+  # Both readers, because the runner list is written out twice -- the command
+  # reader and the tsc reader in ci/checks/node.sh, plus a third in
+  # ci/checks/tests.sh -- and a name added to one of them is the exact shape of
+  # defect this branch keeps finding.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bunx tsc --noEmit", "test": "bunx vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  # Matched on the wording the lane actually prints. The first draft of this
+  # case looked for "no test runner", which the lane never emits -- it wraps as
+  # `does` / `not appear to run a test runner:` -- so the accept assertion here
+  # was vacuously true and the control below failed while the code was correct.
+  # A message assertion that cannot fail is the same defect as a rule that
+  # cannot fire.
+  [[ "$output" != *"appear to run a test runner"* ]] \
+    || { echo "bunx was not read as a package runner" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  [[ "$output" != *"type checker"* ]] \
+    || { echo "bunx hid the compiler from the typecheck reader" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # The control: the prefix is transparent, not an exemption. `bunx true` still
+  # reaches no runner, and a rule that accepted anything after `bunx` would be
+  # the no-op-wrapper hole this suite already closes for npx.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bunx tsc --noEmit", "test": "bunx true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: build mode names a project, not a source file" {
+  # `tsc -b tsconfig.app.json --noEmit` is how a workspace with project
+  # references typechecks. `-b` matched no arm, fell through to the generic
+  # flag accept, and the project after it arrived as a bare word -- which this
+  # scan calls a source file, on the correct grounds that naming files makes tsc
+  # ignore tsconfig.json. Correct rule, wrong token.
+  #
+  # Verified against tsc 6.0.3 before the rule was widened: `tsc -b <project>`
+  # reports TS2322 and exits non-zero over a project holding a type error, and
+  # reports it again after a source edit invalidates the build info -- so unlike
+  # `--clean` and `--dry` above it, build mode does check.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.app.json"
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.node.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc -b tsconfig.app.json --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]] \
+    || { echo "a build-mode project was read as a source file" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # Build mode takes one or more projects, so the option stays in force over the
+  # words after it. Spending it on the first would refuse the second -- the same
+  # defect one token later, which is how the first draft of the fix behaved.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc -b tsconfig.app.json tsconfig.node.json", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]] \
+    || { echo "the second project of a build was read as a source file" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # A folder is the option's other documented spelling -- tsc takes "the path to
+  # its configuration file, or to a folder with a tsconfig.json" -- and both
+  # readers of the option now answer that the same way.
+  mkdir -p "$NODE_SB/ws/packages/app"
+  printf '{}\n' > "$NODE_SB/ws/packages/app/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc -p packages/app --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]] \
+    || { echo "a project folder was read as a source file" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # The controls. A path that is no discovered project is still refused, under
+  # either option -- that is a file neither reader can open, which is the whole
+  # reason the rule exists.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc -b tsconfig.absent.json", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc src/one.ts --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "js lane: every reader of the runner vocabulary knows the same names" {
+  # Nine lists across ci/checks/node.sh and ci/checks/tests.sh answer "is this
+  # token a package runner", and they did not agree. `pnpx` was in exactly one
+  # of them before this case existed, and `bunx` was reported against one of the
+  # other eight -- so adding it where the report pointed left a fixture whose
+  # typecheck script was `bunx tsc --noEmit` still refused, by a list that spells
+  # its vocabulary as a space-separated string instead of a case pattern and so
+  # does not turn up in a sweep for the pattern.
+  #
+  # Enumerated from the source rather than restated here, the same way
+  # `tests: every gate variable the suites can inherit is cleared` is: a list
+  # this case names is a list that stops being checked the day a tenth appears.
+  #
+  # The selector takes `npx` only where it stands as a whole alternative or a
+  # whole word, which is what excludes _pm_advance's option table -- `npx|-p`
+  # keys a *flag* belonging to npx, and bunx and pnpx have no such flags to key.
+  local _line _n=0 _bad="" _name
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _n=$(( _n + 1 ))
+    for _name in npx bunx pnpx; do
+      case "$_line" in
+        *"$_name"*) ;;
+        *) _bad="${_bad}
+    ${_name} missing from ${_line}" ;;
+      esac
+    done
+  done <<< "$(grep -nE '(^|[|" ])npx([|)" ]|$)' \
+               "$REPO_ROOT/ci/checks/node.sh" "$REPO_ROOT/ci/checks/tests.sh" \
+             | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')"
+
+  # The selector has to still be selecting. A regex that matches nothing makes
+  # every assertion below vacuously true, which is the failure mode of every
+  # enumerate-from-source case ever written.
+  [ "$_n" -ge 9 ] \
+    || { echo "found only $_n runner lists; the selector has drifted" >&2; return 1; }
+  [ -z "$_bad" ] \
+    || { echo "the runner lists disagree:$_bad" >&2; return 1; }
+}

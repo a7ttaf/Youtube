@@ -2342,7 +2342,24 @@ _command_runner() {
       env|cross-env) _ep_state=1; continue ;;
       # The package managers take options of their own before the command, and
       # `--filter web` puts a bare word after a flag; see _pm_advance.
-      npx|pnpm|bun|yarn|npm) _pp_state=1; _pm_name="${_tok##*/}"; continue ;;
+      # `bunx` is Bun's package runner -- its own docs call it an alias for
+      # `bun x` and the equivalent of npx -- so a workspace with
+      # `"test": "bunx vitest run"` was refused for running no test runner.
+      # It takes no value-bearing options of its own, so _pm_advance's
+      # keyed list has no arm for it and every `-flag` is skipped as a
+      # boolean, which is the correct grammar for it. `pnpx` is pnpm's
+      # spelling of the same thing and was already in one of these lists and
+      # in none of the others.
+      #
+      # Eight lists in this file answer "is this token a package runner", and
+      # adding a name to the one in the report is not the fix: with this arm
+      # and the tsc reader both carrying `bunx`, a fixture whose typecheck
+      # script was `bunx tsc --noEmit` was still refused for running no type
+      # checker, by _script_names_a_checker's separate `runners=` string.
+      # `js lane: every reader of the runner vocabulary knows the same names`
+      # enumerates them from the source so the next name added has to reach
+      # all of them.
+      npx|bunx|pnpx|pnpm|bun|yarn|npm) _pp_state=1; _pm_name="${_tok##*/}"; continue ;;
       exec|dlx|command|nohup|time \
         |--yes|-y|run) continue ;;
       -*) continue ;;
@@ -2475,7 +2492,7 @@ _script_names_a_checker() {
   # manifest and accepted whatever that ran, which is not what make would do.
   # A Makefile is not something this gate reads, so `make test` is delegation it
   # cannot follow, and unresolvable delegation is refused like any other.
-  local runners="npm pnpm yarn bun npx pnpx turbo nx lerna bash sh zsh"
+  local runners="npm pnpm yarn bun npx bunx pnpx turbo nx lerna bash sh zsh"
   local tok t
 
   [ "$depth" -ge 8 ] && return 1
@@ -2832,7 +2849,7 @@ _script_names_a_checker() {
           runner="$tok"
           # And now that the manager is the runner, its own options are read.
           case "${tok##*/}" in
-            pnpm|npm|yarn|bun|npx) _pp_state=1 ; _pm_name="${tok##*/}" ;;
+            pnpm|npm|yarn|bun|npx|bunx|pnpx) _pp_state=1 ; _pm_name="${tok##*/}" ;;
           esac
           expect_cmd=0
           continue 2
@@ -3089,7 +3106,7 @@ _reject_narrowing_flags() {
     case "$_rnf_word" in
       timeout) _tp_state=1 ; continue ;;
       env|cross-env) _ep_state=1 ; continue ;;
-      pnpm|npm|yarn|bun|npx) _pp_state=1 ; _pm_name="$_rnf_word" ; continue ;;
+      pnpm|npm|yarn|bun|npx|bunx|pnpx) _pp_state=1 ; _pm_name="$_rnf_word" ; continue ;;
     esac
     case "$tok" in
       -*) ;;
@@ -3303,6 +3320,25 @@ _ts_project_declared() {
   return 1
 }
 
+# The argument of -p/--project/-b/--build, which tsc documents as "the path to
+# its configuration file, or to a folder with a tsconfig.json" -- so a directory
+# is the same argument spelled differently, and refusing it refuses a valid
+# script. Measured against tsc 6.0.3 over a project holding one type error:
+#
+#   tsc -p app --noEmit   -> app/src/bad.ts(1,14): error TS2322 ... exit 2
+#   tsc -b app            -> app/src/bad.ts(1,14): error TS2322 ... exit 1
+#
+# Both readers of this option call this, rather than each testing the token its
+# own way. Two spellings of one question answered in two places is the defect
+# this branch keeps finding.
+_ts_project_arg_ok() {
+  local _tpa="${1%/}"
+  [ -n "$_tpa" ] || return 1
+  _ts_project_declared "$_tpa" && return 0
+  # A folder is named by its configuration file, which is what discovery lists.
+  _ts_project_declared "${_tpa}/tsconfig.json"
+}
+
 # The refusal both spellings share, so the advice cannot drift either.
 _reject_undeclared_project() {
   local script_name="$1" cmd="$2" tok="$3" opt="$4" _rup_one
@@ -3368,7 +3404,7 @@ _reject_tsc_args() {
       # --noEmit` was refused for pointing the compiler at a file named `env`.
       env|cross-env) _ep_state=1 ; prev="" ; shift ; continue ;;
       # And the package managers, whose own options take a separate word.
-      pnpm|npm|yarn|bun|npx) _pp_state=1 ; _pm_name="${tok##*/}" ; prev="" ; shift ; continue ;;
+      pnpm|npm|yarn|bun|npx|bunx|pnpx) _pp_state=1 ; _pm_name="${tok##*/}" ; prev="" ; shift ; continue ;;
     esac
     if [ "${tok##*/}" = "$runner" ]; then
       prev="" ; shift ; continue
@@ -3446,7 +3482,7 @@ _reject_tsc_args() {
         echo "  'tsc -p tsconfig.json --noEmit'."
         exit "$CI_RESULT_FAIL_NEW_ISSUE"
         ;;
-      npx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run|'&&'|';')
+      npx|bunx|pnpx|pnpm|bun|yarn|npm|exec|dlx|command|nohup|time|--yes|-y|run|'&&'|';')
         prev="" ; shift ; continue ;;
       # The joined spelling of the project option, which selects a project
       # exactly as the spaced form does and arrives here as a single token: it
@@ -3458,7 +3494,7 @@ _reject_tsc_args() {
       # swallow nothing here, and above `-*` because that one accepts.
       --project=*|-p=*)
         _tp="${tok#*=}"
-        if _ts_project_declared "$_tp"; then
+        if _ts_project_arg_ok "$_tp"; then
           prev="" ; shift ; continue
         fi
         _reject_undeclared_project "$script_name" "$cmd" "$tok" '--project=<file>'
@@ -3498,7 +3534,7 @@ _reject_tsc_args() {
     # flag that redirects the guard is not a flag that cannot reduce the run,
     # and this reader cannot open that file to see which it is.
     case "$prev" in
-      -p|--project)
+      -p|--project|-b|--build)
         # A project this workspace actually has, not the default name alone.
         #
         # The rule was `tsconfig.json` or nothing, which was right while that
@@ -3509,22 +3545,62 @@ _reject_tsc_args() {
         # requirement with no way to satisfy it, created by widening discovery
         # two commits ago and reported before anyone hit it.
         #
-        # What keeps the original protection is not this list. `-p <file>`
-        # compiles what that file describes, so a narrower configuration named
-        # here does reduce what the *script* checks -- but ci/checks/
-        # typecheck.sh compiles the root project and then every other discovered
-        # one by name, and the classifier emits `typecheck-js` beside the node
-        # lane for the same file (ci/lib/changeset.sh, ci/preflight.sh), so
-        # naming one project here cannot take another out of the run. The old
-        # rule did not have that property either: `-p tsconfig.json` was
+        # What keeps the original protection is the sibling lane, and the first
+        # version of this comment was wrong about it. It said ci/checks/
+        # typecheck.sh compiles every discovered project "so naming one project
+        # here cannot take another out of the run" -- reasoning about a lane
+        # instead of checking that it runs. It did not run: typecheck-js is
+        # registered in ci/checks/manifest.yml, and `grep typecheck.sh
+        # ci/preflight.sh ci/config/lanes.conf` returned nothing, because
+        # preflight maps that id back to this combined node lane. So a script
+        # naming one project really did let the others ship uncompiled, and the
+        # justification was false rather than merely incomplete.
+        #
+        # The lane is scheduled now, which is what makes the sentence true. If
+        # it is ever taken back out of ci/preflight.sh, this rule has to become
+        # "cover every discovered project" in the same commit -- the two are one
+        # decision, and `preflight: the standalone typecheck lane runs` in
+        # ci/tests/test_preflight.bats is what notices if they come apart.
+        #
+        # The old rule did not have the property either: `-p tsconfig.json` was
         # accepted in a workspace whose code lives under tsconfig.app.json.
         #
         # A path that is not a discovered project is still refused, because that
         # is a file neither reader can see.
-        if _ts_project_declared "$tok"; then
+        #
+        # `-b`/`--build` names projects here for the same reason `-p` does, and
+        # was refused: `-b` matched no arm, fell to the generic `-*` accept, and
+        # the project after it arrived as a bare word that this scan calls a
+        # source file. So `tsc -b tsconfig.app.json --noEmit` -- a workspace
+        # using build mode, which is how a repository with project references
+        # typechecks at all -- could not be written in a way this lane accepts.
+        #
+        # It is a typechecking mode, verified rather than assumed, against
+        # tsc 6.0.3 over a composite project holding one type error:
+        #
+        #   tsc -b tsconfig.app.json           -> TS2322, exit 1
+        #   tsc -b tsconfig.app.json --noEmit  -> TS2322, exit 1
+        #   (fix the file, build, then break it again) -> TS2322, exit 1
+        #
+        # The third row is the one that mattered: build mode skips a project it
+        # considers up to date, so the question was whether a stale .tsbuildinfo
+        # could carry a green result over changed sources. It cannot -- a source
+        # edit invalidates the entry and the project is checked again -- which is
+        # why `-b` belongs with `-p` rather than beside `--clean` and `--dry`,
+        # the two build-mode spellings above that really do exit 0 having
+        # compiled nothing.
+        #
+        # Build mode takes one or more projects, so the option stays in force
+        # across the words that follow it: `tsc -b tsconfig.app.json
+        # tsconfig.node.json` names two, and spending `prev` on the first would
+        # refuse the second as a source file -- the same defect one token later.
+        if _ts_project_arg_ok "$tok"; then
+          case "$prev" in
+            -b|--build) shift ; continue ;;
+          esac
           prev="" ; shift ; continue
         fi
-        _reject_undeclared_project "$script_name" "$cmd" "$tok" '-p <file>'
+        _reject_undeclared_project "$script_name" "$cmd" "$tok" "${prev} <file>"
         ;;
     esac
     case "$prev" in
@@ -3596,7 +3672,7 @@ _reject_positional_filters() {
       shift
       _ep_state=1
       ;;
-    npx|*/npx|pnpm|*/pnpm|bun|*/bun|yarn|*/yarn|npm|*/npm)
+    npx|*/npx|bunx|*/bunx|pnpx|*/pnpx|pnpm|*/pnpm|bun|*/bun|yarn|*/yarn|npm|*/npm)
       _pm_name="${_rpf_head##*/}"
       shift
       _pp_state=1
@@ -3674,7 +3750,7 @@ _reject_positional_filters() {
       # one of them saying so.
       env|*/env|cross-env|*/cross-env)
         _ep_state=1 ; prev="" ; shift ; continue ;;
-      npx|*/npx|pnpm|*/pnpm|bun|*/bun|yarn|*/yarn|npm|*/npm)
+      npx|*/npx|bunx|*/bunx|pnpx|*/pnpx|pnpm|*/pnpm|bun|*/bun|yarn|*/yarn|npm|*/npm)
         _pp_state=1 ; _pm_name="${tok##*/}" ; prev="" ; shift ; continue ;;
       exec|dlx|command|nohup|time \
         |--yes|-y|run|related \

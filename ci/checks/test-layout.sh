@@ -301,8 +301,29 @@ fi
 # (tests/**/*.test...), which a naive scanner reads as a block-comment opener.
 strip_ts_comments() {
   awk '
+    # Where a `/` opens a regex literal rather than divides.
+    #
+    # A vitest config that aliases with a regex -- `find: /^@\//` is the shape
+    # the reviewer reproduced -- put an escaped slash next to the closing one,
+    # and the scanner read that `//` as a line comment and dropped the rest of
+    # the line before the brace matcher ran. `resolve: { alias: [{ find: /^@\//,
+    # replacement: ... }] }` lost its closing braces, so the extractor could not
+    # find the `test` block in a config that has one, and the check reported a
+    # missing include glob for a workspace that declares it.
+    #
+    # Told apart the way a JavaScript tokenizer tells them apart: by what comes
+    # before. After a value -- a name, a number, `)`, `]` -- a slash divides;
+    # everywhere a value is still expected it opens a regex. Line start counts as
+    # expecting a value. This is a heuristic in the language itself, not a
+    # shortcut taken here, and it is why prevc tracks the last non-blank
+    # character rather than the last character.
+    function re_allowed(pc) {
+      return (pc == "" || pc ~ /[(,=:\[!&|?{};+\-*%~^<>]/)
+    }
     {
       line = $0
+      in_re = 0
+      prevc = ""
       out = ""
       i = 1
       n = length(line)
@@ -320,10 +341,26 @@ strip_ts_comments() {
           i++
           continue
         }
+        if (in_re) {
+          out = out c
+          if (c == "\\") { out = out substr(line, i + 1, 1); i += 2; continue }
+          if (c == "/") { in_re = 0 }
+          i++
+          continue
+        }
         if (two == "//") { break }
         if (two == "/*") { in_block = 1; i += 2; continue }
+        # Below the two comment openers, not above them, and the first draft had
+        # it above: a line whose first non-blank characters are `//` starts at
+        # prevc == "" -- a position where a value is expected -- so the comment
+        # opener was read as a regex opener and no comment was stripped at all.
+        # Nothing is lost by testing the openers first. `//` is an empty regex,
+        # which JavaScript does not have precisely because it spells a comment,
+        # and a regex cannot begin with an unescaped `*` either.
+        if (c == "/" && re_allowed(prevc)) { in_re = 1; out = out c; prevc = c; i++; continue }
         if (c == "\"" || c == "'"'"'" || c == "`") { in_str = c }
         out = out c
+        if (c !~ /[ \t]/) { prevc = c }
         i++
       }
       print out

@@ -118,19 +118,40 @@ ci::changeset::_in_node_workspace() {
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
     _git=1
   fi
+  # And *which* tree, which is the gate's question here as everywhere else.
+  #
+  # In ship mode the commit already exists, so the disk and the index are the
+  # commit being built, not the one being pushed. With frontend/package.json
+  # deleted or staged-for-deletion locally while HEAD still carries it, this
+  # answered "not a workspace" for an outgoing frontend/public/*.svg change: the
+  # changeset emitted no JS check ids, preflight filtered the node lane out, and
+  # the pushed frontend asset got no install, typecheck, test or build.
+  #
+  # Seventh reader of this one question across ci/checks/node.sh,
+  # ci/checks/test-layout.sh and here -- and the first of them in the scheduler,
+  # where being wrong removes a lane rather than misreporting inside one.
+  local _ref=":"
+  if [ "${CI_GATE_MODE:-}" = "ship" ] && [ "$_git" -eq 1 ] \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    _ref="HEAD:"
+    # HEAD alone, not HEAD plus the worktree: a manifest present only on disk
+    # describes a commit this push is not sending.
+    _git=2
+  fi
   dir="$(dirname "$1")"
   while [ -n "$dir" ] && [ "$dir" != "." ] && [ "$dir" != "/" ]; do
-    if [ -f "$dir/package.json" ]; then
+    if [ "$_git" -ne 2 ] && [ -f "$dir/package.json" ]; then
       return 0
     fi
-    if [ "$_git" -eq 1 ] && git cat-file -e ":$dir/package.json" 2>/dev/null; then
+    if [ "$_git" -ne 0 ] && git cat-file -e "${_ref}${dir}/package.json" 2>/dev/null; then
       return 0
     fi
     dir="$(dirname "$dir")"
   done
-  if [ "$_git" -eq 1 ] && git cat-file -e ":package.json" 2>/dev/null; then
+  if [ "$_git" -ne 0 ] && git cat-file -e "${_ref}package.json" 2>/dev/null; then
     return 0
   fi
+  [ "$_git" -eq 2 ] && return 1
   # The walk stopped one directory short of the only one it never examined.
   # ci::common::node_workspaces treats a root package.json as the workspace ".",
   # so in a repository laid out that way every path is inside a Node workspace

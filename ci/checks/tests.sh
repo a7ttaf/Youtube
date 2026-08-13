@@ -216,7 +216,7 @@ _tests_js_declared_runner() {
       jest|jest.cmd|jest.exe) printf 'jest' ; return 0 ;;
       timeout) _tp=1 ; continue ;;
       env|cross-env) _ep=1 ; continue ;;
-      npx|pnpm|yarn|npm|bun) _pm_name="${_w##*/}" ; _pp=1 ; continue ;;
+      npx|bunx|pnpx|pnpm|yarn|npm|bun) _pm_name="${_w##*/}" ; _pp=1 ; continue ;;
       nohup|command|exec|time|dlx|run|--) continue ;;
     esac
     case "$_w" in

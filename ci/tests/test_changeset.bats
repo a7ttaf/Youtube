@@ -350,3 +350,52 @@ PY
   [[ "$checks" == *"tests-js"* ]]
   [[ "$checks" == *"typecheck-js"* ]]
 }
+
+@test "changeset: ship-mode workspace membership is read from the pushed tree" {
+  # _in_node_workspace decides whether a non-JS path sits under a Node workspace,
+  # and that answer picks the JS check ids -- which preflight turns into the node
+  # lane. It read the worktree and the index in every mode.
+  #
+  # In ship mode those are the commit being built, not the one being pushed. With
+  # frontend/package.json deleted locally while HEAD still carries it, an
+  # outgoing frontend/public asset classified as "not a workspace", the changeset
+  # emitted no JS ids, and the node lane was filtered out of a push that carries
+  # frontend files. Seventh reader of "which tree does this run stand behind",
+  # and the first inside the scheduler, where being wrong removes a lane instead
+  # of misreporting inside one.
+  mkdir -p frontend/public
+  printf '{ "name": "f", "private": true }\n' > frontend/package.json
+  printf '<svg/>\n' > frontend/public/logo.svg
+  git add -A
+  git commit -qm "workspace in HEAD"
+
+  # The premise: with the manifest present everywhere, this is a workspace.
+  CI_GATE_MODE=ship run ci::changeset::_in_node_workspace frontend/public/logo.svg
+  [ "$status" -eq 0 ]
+
+  # Now the manifest is gone from the worktree and the index, and still in HEAD,
+  # which is the tree a push sends.
+  git rm -q --cached frontend/package.json
+  rm -f frontend/package.json
+  CI_GATE_MODE=ship run ci::changeset::_in_node_workspace frontend/public/logo.svg
+  [ "$status" -eq 0 ] \
+    || { echo "ship mode lost a workspace HEAD still declares" >&2; return 1; }
+
+  # And the converse, which is the half a plain union would get wrong: a
+  # manifest that exists only on disk describes a commit this push is not
+  # sending, so it does not make the path a workspace member in ship mode.
+  git rm -q -r --cached frontend >/dev/null
+  git commit -qm "workspace removed from HEAD"
+  mkdir -p frontend/public
+  printf '{ "name": "f", "private": true }\n' > frontend/package.json
+  CI_GATE_MODE=ship run ci::changeset::_in_node_workspace frontend/public/logo.svg
+  [ "$status" -ne 0 ] \
+    || { echo "ship mode counted a manifest the push does not send" >&2; return 1; }
+
+  # The control: quick mode is the pre-commit gate and stands behind the index
+  # and worktree, so the same file there is a workspace member. The rule chooses
+  # which tree to read; it does not read both.
+  CI_GATE_MODE=quick run ci::changeset::_in_node_workspace frontend/public/logo.svg
+  [ "$status" -eq 0 ] \
+    || { echo "quick mode stopped seeing the tree it stands behind" >&2; return 1; }
+}
