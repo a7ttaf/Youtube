@@ -473,6 +473,27 @@ _check_is_cacheable() {
     # has an identical key, and the lane is restored without executing
     # anything. Same argument as tests-shell, one lane over.
     node) return 1 ;;
+    # typecheck-js compiles every project ci/checks/typecheck.sh discovers, not
+    # the ones this branch touched, so the changed-file key does not describe
+    # what it read -- the same argument as `node` above, and it arrived with the
+    # lane. A PASS cached for a branch touching frontend/src/a.ts is replayed
+    # after a rebase onto a base where tsconfig.node.json now has a type error,
+    # and the node lane does not cover that gap: the `-p <project>` rule in
+    # ci/checks/node.sh accepts a typecheck script naming one project *because*
+    # this lane compiles the rest. Cached, it compiles nothing.
+    #
+    # Reported by review, and separately met head-on: the case asserting this
+    # lane is scheduled began failing under ci/preflight.sh --mode ship, because
+    # a hit restored the lane and the stub never printed its marker.
+    #
+    #   RAN:node
+    #     [cache hit] typecheck-js
+    #   Result [typecheck-js]: PASS
+    #
+    # That was a test-isolation bug and is fixed in ci/tests/gate_env.bash; this
+    # is the product half of the same observation, and only this half stops a
+    # green result standing for a compile that did not happen.
+    typecheck-js) return 1 ;;
     # python is the same lane one language over, and it was left cacheable.
     # It runs `ruff check`, `ruff format --check`, a bare `pytest` and
     # `compileall` across the whole of PYTHON_PACKAGE_DIR, none of which is
@@ -764,7 +785,21 @@ run_mode() {
   fi
 
   # If lanes.conf exists and CI_GATE_USE_LANES=1, read it. Otherwise use hardcoded defaults.
-  if [ "${CI_GATE_USE_LANES:-0}" = "1" ] && [ -f "ci/config/lanes.conf" ]; then
+  #
+  # Not in quick. ci/config/lanes.conf carries no mode column, so this branch ran
+  # every lane in it whatever the mode -- and the file is a description of the
+  # full plan: security, build, debt and tests-shell are all in it and none of
+  # them belongs to a pre-commit run. `./ci/preflight.sh --mode quick` under
+  # CI_GATE_USE_LANES=1 therefore ran the whole bats suite, which takes about an
+  # hour here against a 30s pre-commit budget, and could fail a commit on gate
+  # self-tests that have nothing to do with the staged change.
+  #
+  # Gated by mode rather than by adding a column, because the alternative is a
+  # second list of which lanes are pre-commit lanes -- run_common_checks below
+  # is the first, and ci/checks/manifest.yml's `pre_commit:` field is arguably a
+  # third. Quick keeps the one that already decides it.
+  if [ "${CI_GATE_USE_LANES:-0}" = "1" ] && [ "$MODE" != "quick" ] \
+     && [ -f "ci/config/lanes.conf" ]; then
     # lanes.conf has 5 columns (id|name|command|blocking|description); only id and
     # command are consumed here. Unused columns are read into `_` so shellcheck does
     # not flag them (SC2034) while still consuming every delimited field.

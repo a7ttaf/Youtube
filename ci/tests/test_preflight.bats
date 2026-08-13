@@ -1789,6 +1789,74 @@ YML
   rm -rf "$sb"
 }
 
+@test "preflight: quick does not run the full lane list" {
+  # ci/config/lanes.conf carries no mode column, and this branch was reached
+  # before the dispatch on $MODE -- so `--mode quick` under CI_GATE_USE_LANES=1
+  # ran every lane in the file. That file is a description of the full plan:
+  # security, build, debt and tests-shell are all in it, and tests-shell is the
+  # bats suite, about an hour here against a 30s pre-commit budget. A commit
+  # could then fail on a gate self-test unrelated to anything staged.
+  local sb
+  sb="$(mktemp -d)"
+  cp -r "$REPO_ROOT/ci" "$sb/ci"
+  rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
+  local f
+  for f in "$sb"/ci/checks/*.sh; do
+    printf '#!/usr/bin/env bash\necho "RAN:%s"\nexit 0\n' "$(basename "$f" .sh)" > "$f"
+    chmod +x "$f"
+  done
+  (
+    cd "$sb"
+    printf 'x\n' > a.txt
+    git init -q -b main .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+    # A staged change, because quick with a clean tree reports "No relevant
+    # changes detected. Skipping gate." and runs nothing at all -- on which an
+    # assertion that the suite did not run passes without the rule existing.
+    # And a *shell* change specifically: the lane list is changeset-filtered
+    # like any other, so with only a text file staged the old code did not
+    # schedule tests-shell either and the case proved nothing about it.
+    printf '#!/usr/bin/env bash\ntrue\n' > tool.sh
+    git add -A
+  ) >/dev/null 2>&1
+
+  _ql_lanes() { # _ql_lanes <mode> <env...>
+    local _m="$1"; shift
+    ( cd "$sb" && env "$@" bash ci/preflight.sh --mode "$_m" 2>&1 ) \
+      | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
+  }
+
+  # The premise, read from the file: lanes.conf really does schedule the suite,
+  # so its absence below is this rule and not a missing entry.
+  run grep -c '^tests-shell|' "$sb/ci/config/lanes.conf"
+  [ "$output" = "1" ] \
+    || { echo "lanes.conf no longer lists tests-shell; this case needs rewriting" >&2; rm -rf "$sb"; return 1; }
+
+  # Measured against the tree before the fix, with this same fixture:
+  #   old  quick+lanes -> build changed-files debt git-safety security
+  #                       test-layout tests-shell
+  #   new  quick+lanes -> changed-files git-safety test-layout
+  run _ql_lanes quick CI_GATE_USE_LANES=1
+  [[ "$output" != *tests-shell* ]] \
+    || { echo "a pre-commit run scheduled the shell suite: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" != *debt* ]]
+  [[ "$output" != *security* ]]
+  [[ "$output" != *build* ]]
+  # And it still runs the pre-commit lanes, so this is quick using its own plan
+  # rather than quick running nothing.
+  [[ "$output" == *test-layout* ]] \
+    || { echo "quick stopped running its own lanes: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # The control: full and ship are what lanes.conf describes, and they still
+  # get it. Gating by mode must not disable the feature.
+  run _ql_lanes full CI_GATE_USE_LANES=1
+  [[ "$output" == *tests-shell* ]] \
+    || { echo "the lane list stopped applying to full: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" == *debt* ]]
+  rm -rf "$sb"
+}
+
 # --- the suites' own hygiene ---------------------------------------------------
 #
 # Both of these are about the harness rather than about a check, and both exist

@@ -3990,6 +3990,87 @@ if [ -n "$_TS_PROJECTS" ]; then
     "tsc tsc.cmd tsgo vue-tsc svelte-check astro tsd attw"
 fi
 
+# A workspace that declares a bundler must be able to build with it.
+#
+# `run_script build` logs "Skipping missing script" and returns 0, so deleting
+# the key removed production bundling from the gate silently; and `"build":
+# "true"` exits 0 without the bundler ever starting. Nothing else covers it --
+# ci/checks/build.sh validates shell syntax and shellcheck over the CI scripts
+# and builds no frontend at all -- so a production-only failure (an import that
+# resolves under the dev server and not in a bundle, a plugin that throws on
+# minify) reached main with every lane green.
+#
+# The same two rules the `typecheck` and `test` scripts already carry, applied
+# to the third script of the three, and keyed the same way: on the workspace
+# declaring the thing, so the rule travels with the workspace and one that
+# bundles nothing is unaffected.
+_bundler_config_files() {
+  local _bc_list _bc_rc=0
+  _bc_list="$(mktemp 2>/dev/null)" || return 2
+  # Depth-limited, unlike the tsconfig scan: a bundler configuration under
+  # src/ or in a fixture belongs to something else, while a tsconfig anywhere
+  # in the workspace really is a project this workspace must typecheck.
+  find . -maxdepth 2 -name 'node_modules' -prune -o -name '.git' -prune -o \
+    -type f \( -name 'vite.config.*' -o -name 'webpack.config.*' \
+               -o -name 'rollup.config.*' -o -name 'rspack.config.*' \
+               -o -name 'next.config.*' -o -name 'nuxt.config.*' \
+               -o -name 'astro.config.*' -o -name 'tsup.config.*' \) \
+    -print 2>/dev/null \
+    > "$_bc_list" || _bc_rc=$?
+  if [ "$_bc_rc" -ne 0 ]; then
+    rm -f "$_bc_list"
+    return 2
+  fi
+  sed 's|^\./||' "$_bc_list" | sort
+  rm -f "$_bc_list"
+}
+
+# Could-not-look is not found-nothing, the same as for the project scan above:
+# an empty list reads exactly like a workspace that bundles nothing.
+_BUNDLER_CONFIGS="$(_bundler_config_files)" || {
+  echo "Workspace ${CI_GATE_NODE_WORKSPACE}: cannot enumerate its bundler configuration."
+  echo "  An empty list reads exactly like a workspace with none, which is why"
+  echo "  this is a failure and not an answer."
+  exit "$CI_RESULT_FAIL_INFRA"
+}
+
+if [ -n "$_BUNDLER_CONFIGS" ]; then
+  if ! script_exists "build"; then
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} declares a bundler but defines no"
+    echo "  'build' script, so nothing here ever produces a production bundle:"
+    while IFS= read -r _bd_conf; do
+      [ -n "$_bd_conf" ] || continue
+      echo "    ${CI_GATE_NODE_WORKSPACE}/${_bd_conf}"
+    done <<< "$_BUNDLER_CONFIGS"
+    echo "  A dev server is not a build and a typecheck is not a bundle."
+    echo "  Restore the script, or remove the bundler configuration with it."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
+
+  _bd_cmd="$(script_command build)"
+  _reject_untrustworthy_composition build "$_bd_cmd"
+  _bd_ok=0
+  # set -f for the same reason the typecheck predicate uses it: word-splitting
+  # is wanted here and globbing against the workspace is not.
+  set -f
+  _script_names_a_checker "$_bd_cmd" \
+    "vite webpack rollup rspack next nuxt astro tsup esbuild parcel remix ng react-scripts" \
+    && _bd_ok=1
+  set +f
+  if [ "$_bd_ok" -ne 1 ]; then
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} defines a 'build' script that does not"
+    echo "  appear to run its bundler:"
+    echo "    build: ${_bd_cmd}"
+    echo "  A script named build that exits 0 without bundling is production"
+    echo "  packaging removed from the gate by a manifest edit, and no other"
+    echo "  lane builds this workspace."
+    echo "  Recognised: vite, webpack, rollup, rspack, next, nuxt, astro, tsup,"
+    echo "  esbuild, parcel, remix, ng, react-scripts, or a runner that"
+    echo "  delegates to one. Add yours here if it belongs."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
+fi
+
 # A workspace that ships tests must be able to run them. run_script only logs
 # "Skipping missing script", so deleting or renaming `test` would remove the
 # whole suite from the gate while the lane still exits 0 — the suite passing by

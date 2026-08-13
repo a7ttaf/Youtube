@@ -31,11 +31,40 @@ ci::common::command_exists() {
 # the JS lanes silently skipped and no frontend test ever ran in the gate.
 #
 # $1: manifest filename to look for (package.json, tsconfig.json, ...)
+# Is this manifest part of the tree the run stands behind?
+#
+# Discovery stats the worktree, which in ship mode is the commit being built and
+# not the one being pushed. An untracked scratch/package.json therefore became a
+# workspace of the push: the standalone typecheck lane entered it, found no
+# scratch/node_modules/.bin/tsc and returned FAIL_INFRA, so unrelated local WIP
+# blocked a valid push. Same question as ci::changeset::_in_node_workspace, one
+# layer down, and this is the reader the node, tests and typecheck lanes share --
+# fixing it in one of them would have been a fourth answer to it.
+#
+# An intersection with HEAD, never a substitute for the walk. The list stays
+# "manifests that are on disk", narrowed in ship mode to those the push carries:
+# a workspace present in HEAD and deleted locally is still absent, because the
+# walk never offered it. Narrowing only, which is the direction that cannot
+# invent a workspace nothing can install.
+#
+# Non-ship modes, a non-repository, and a repository with no commits all answer
+# "in scope" -- quick stands behind the index and the worktree, and could-not-ask
+# must not silently empty the list the way a failure to enumerate would.
+ci::common::_manifest_in_scope() {
+  [ "${CI_GATE_MODE:-}" = "ship" ] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  git rev-parse --git-dir >/dev/null 2>&1 || return 0
+  git rev-parse --verify HEAD >/dev/null 2>&1 || return 0
+  git cat-file -e "HEAD:${1#./}" 2>/dev/null
+}
+
 ci::common::node_workspaces() {
   local manifest="${1:-package.json}"
   local found dir
 
-  if [ -f "$manifest" ]; then
+  # A root manifest that the push does not carry is not this run's root: ship
+  # mode falls through to the walk below, which skips it for the same reason.
+  if [ -f "$manifest" ] && ci::common::_manifest_in_scope "$manifest"; then
     # A root manifest used to end discovery here, so a repository with both a
     # root package.json and child packages had every child skipped: the lane
     # ran the root's scripts and exited 0 while packages/app's failing test and
@@ -95,6 +124,11 @@ ci::common::node_workspaces() {
       dir="${found%"/$manifest"}"
       [ "$dir" != "$found" ] || continue
       ci::common::is_vendored_path "$dir" && continue
+      # Before the ambiguity is counted, not after: an untracked child manifest
+      # made this branch report a monorepo it is not and return FAIL_INFRA, so
+      # local WIP failed the push through the ambiguity report rather than
+      # through the lane.
+      ci::common::_manifest_in_scope "$found" || continue
       child_count=$((child_count + 1))
       printf '  %s\n' "$dir" >&2
     done < "$_rw_list"
@@ -184,6 +218,10 @@ ci::common::node_workspaces() {
     candidate="${found%"/$manifest"}"
     [ "$candidate" != "$found" ] || continue
     ci::common::is_vendored_path "$candidate" && continue
+    # Before the nesting check below, for the reason the root branch filters
+    # before its own: an untracked manifest under a real workspace reports a
+    # nested monorepo and fails the lane, without ever being pushed.
+    ci::common::_manifest_in_scope "$found" || continue
     _cands[_n]="$candidate"
     _n=$((_n + 1))
   done < "$_nw_list"

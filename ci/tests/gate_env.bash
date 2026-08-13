@@ -48,7 +48,7 @@ ci::tests::clear_gate_env() {
   unset CI_GATE_PARALLEL CI_GATE_TIMEOUT CI_GATE_FAIL_FAST
   unset CI_GATE_PRE_COMMIT_BUDGET CI_GATE_PRE_PUSH_BUDGET
   unset CI_GATE_COVERAGE_MIN CI_GATE_COMPLEXITY_MAX CI_GATE_BUNDLE_SIZE_MAX
-  unset CI_GATE_NODE_WORKSPACE CI_GATE_USE_LANES CI_GATE_CACHE_DIR
+  unset CI_GATE_NODE_WORKSPACE CI_GATE_USE_LANES
 
   unset CI_GATE_TRUST_TRACKING_REFS
   unset CI_GATE_PUSH_REMOTE_TIPS CI_GATE_PUSH_REMOTE_TIPS_FOR
@@ -73,6 +73,36 @@ ci::tests::clear_gate_env() {
   # command, which is why nothing has broken yet. That is the state the rest of
   # this list was also in until the day it wasn't.
   unset CI_GATE_CHECK_ID
+
+  # CI_GATE_CACHE_DIR is *set* here, not unset, and that is the whole point.
+  #
+  # ci/lib/cache.sh defaults it to "${HOME}/.cache/ci-gate", so unsetting it did
+  # not isolate a case from the gate's cache -- it pointed every case at the
+  # developer's shared one. A sandbox these files build is a fresh directory
+  # with a synthetic tree, but the cache key is the lane plus tool versions plus
+  # the changed files, and two runs of the same case build byte-identical
+  # sandboxes: the second run gets a hit from the first, run_phase prints
+  # "[cache hit] <lane>" and restores the result without executing anything.
+  #
+  # Every case here that asserts on which lanes ran reads execution markers, so
+  # a hit reads as "the lane was not scheduled". Found by the gate rather than
+  # by these suites: `preflight: the standalone typecheck lane runs` passed on
+  # every direct run and failed under ci/preflight.sh --mode ship, with 669
+  # entries in ~/.cache/ci-gate by then. The sandbox output says it plainly:
+  #
+  #   RAN:node
+  #     [cache hit] typecheck-js
+  #   Result [typecheck-js]: PASS
+  #
+  # The lane was scheduled correctly the whole time. Only the marker was gone.
+  #
+  # BATS_TEST_TMPDIR is per-test and bats removes it, so each case starts cold
+  # and the caching path itself still runs -- which is what ci/tests/
+  # test_cache.bats asserts, and it keeps setting its own directory after this
+  # call for exactly that reason. This is the same pattern, applied to the cases
+  # that never meant to involve the cache at all.
+  CI_GATE_CACHE_DIR="${BATS_TEST_TMPDIR:-${BATS_TMPDIR:-/tmp}}/ci-gate-cache"
+  export CI_GATE_CACHE_DIR
 }
 
 # Make a sandbox's destination genuinely carry a commit.

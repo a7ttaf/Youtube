@@ -6257,3 +6257,145 @@ ship_ws_run() {
   [ -z "$_bad" ] \
     || { echo "the runner lists disagree:$_bad" >&2; return 1; }
 }
+
+@test "node lane: a workspace declaring a bundler must be able to build with it" {
+  # `run_script build` logs "Skipping missing script" and returns 0, and
+  # `"build": "true"` exits 0 without the bundler starting -- so production
+  # bundling left the gate by a manifest edit, and nothing else covers it:
+  # ci/checks/build.sh validates shell syntax over the CI scripts and builds no
+  # frontend. The same two rules `typecheck` and `test` already carry, applied
+  # to the third script of the three.
+  ws_setup
+  printf 'export default {};\n' > "$NODE_SB/ws/vite.config.ts"
+
+  # Declared and missing.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"declares a bundler but defines no"* ]] \
+    || { echo "a missing build script was accepted" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # Declared, present, and a no-op -- the edit that reaches the same place.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"appear to run its bundler"* ]] \
+    || { echo "a no-op build script was accepted" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # The real thing, which is what this repository ships: `vite build`.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "vite build", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"appear to run its bundler"* ]] \
+    || { echo "the rule refused the workspace it was written to protect" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  [[ "$output" != *"declares a bundler but defines no"* ]]
+
+  # Delegation is followed, not taken on trust, exactly as it is for typecheck.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "npm run build:prod", "build:prod": "vite build", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"appear to run its bundler"* ]] \
+    || { echo "a delegated build was refused" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # And delegation to a no-op is still a no-op.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "npm run build:prod", "build:prod": "true", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"appear to run its bundler"* ]]
+
+  # The control, and the reason the rule is keyed on the configuration rather
+  # than applied to every workspace: one that bundles nothing is untouched by
+  # all of this. Without it the rule would demand a bundler of every package.
+  rm -f "$NODE_SB/ws/vite.config.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"declares a bundler but defines no"* ]] \
+    || { echo "a workspace with no bundler was required to have a build" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "cache key: a lane whose input the changeset does not describe is not cached" {
+  # typecheck-js arrived cacheable. ci/checks/typecheck.sh compiles every project
+  # it discovers, not the ones the branch touched, so the changed-file key does
+  # not describe what the lane read -- the same argument already written out for
+  # `node` and `python`. A PASS cached for a branch touching frontend/src/a.ts
+  # is replayed after a rebase onto a base where tsconfig.node.json now has a
+  # type error, and nothing else covers that: the `-p <project>` rule in
+  # ci/checks/node.sh accepts a typecheck script naming one project *because*
+  # this lane compiles the rest.
+  #
+  # Executed, not grepped. The two cases above match on the text of the function
+  # body, which a comment mentioning `node) return 1` satisfies just as well as
+  # the arm does. Extracting and calling it asks the question directly, and it
+  # covers the lanes those cases already claim.
+  local fn
+  fn="$(sed -n '/^_check_is_cacheable()/,/^}/p' "$REPO_ROOT/ci/preflight.sh")"
+  [ -n "$fn" ] || { echo "could not extract _check_is_cacheable" >&2; return 1; }
+  bash -n <<< "$fn" || { echo "the extraction is not valid shell" >&2; return 1; }
+  eval "$fn"
+
+  local lane
+  for lane in typecheck-js node python tests-shell test-layout git-safety branch-protection; do
+    ! _check_is_cacheable "$lane" \
+      || { echo "$lane is cacheable, and its result does not follow the changeset" >&2; return 1; }
+  done
+
+  # The premise. Without it an unconditional `return 1` passes every assertion
+  # above while turning the cache off for everything.
+  _check_is_cacheable format \
+    || { echo "nothing is cacheable any more; this case no longer tests the rule" >&2; return 1; }
+}
+
+@test "js lane: ship-mode workspace discovery is the tree being pushed" {
+  # ci::common::node_workspaces stats the worktree, which in ship mode is the
+  # commit being built and not the one going out. An untracked scratch package
+  # became a workspace of the push: the standalone typecheck lane entered it,
+  # found no scratch/node_modules/.bin/tsc, and returned FAIL_INFRA -- local WIP
+  # failing a valid push.
+  #
+  # Asserted on the shared reader rather than on one lane. node.sh, tests.sh and
+  # typecheck.sh all call this, so fixing it inside the lane that reported it
+  # would have made a fourth answer to a question this branch keeps finding
+  # answered three different ways.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/frontend"
+  printf '{"name":"f"}\n' > "$sb/frontend/package.json"
+  ( cd "$sb" && git init -q -b main . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  mkdir -p "$sb/scratch"
+  printf '{"name":"s"}\n' > "$sb/scratch/package.json"
+
+  # quick stands behind the index and the worktree, so the scratch package is
+  # part of what it vouches for. This is the control: the rule chooses a tree,
+  # it does not simply drop things.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=quick ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *frontend* ]]
+  [[ "$output" == *scratch* ]] \
+    || { echo "quick mode stopped seeing the tree it stands behind: $output" >&2; rm -rf "$sb"; return 1; }
+
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *frontend* ]] \
+    || { echo "ship mode lost a workspace the push carries: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" != *scratch* ]] \
+    || { echo "ship mode counted a workspace the push does not send: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # And the narrowing is an intersection with HEAD, never a substitute for the
+  # walk: a workspace in HEAD and gone from disk stays absent, because discovery
+  # never offered it. This is the half a "read HEAD instead" fix would invert,
+  # producing a workspace no lane can install.
+  ( cd "$sb" && rm -rf frontend )
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json"
+  [[ "$output" != *frontend* ]] \
+    || { echo "a workspace deleted from disk was invented from HEAD: $output" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
