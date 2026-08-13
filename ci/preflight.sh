@@ -786,19 +786,29 @@ run_mode() {
 
   # If lanes.conf exists and CI_GATE_USE_LANES=1, read it. Otherwise use hardcoded defaults.
   #
-  # Not in quick. ci/config/lanes.conf carries no mode column, so this branch ran
-  # every lane in it whatever the mode -- and the file is a description of the
-  # full plan: security, build, debt and tests-shell are all in it and none of
-  # them belongs to a pre-commit run. `./ci/preflight.sh --mode quick` under
-  # CI_GATE_USE_LANES=1 therefore ran the whole bats suite, which takes about an
-  # hour here against a 30s pre-commit budget, and could fail a commit on gate
-  # self-tests that have nothing to do with the staged change.
+  # Full and ship only. ci/config/lanes.conf carries no mode column, so this
+  # branch ran every lane in it whatever the mode -- and the file is a
+  # description of the full plan: security, build, debt and tests-shell are all
+  # in it and none of them belongs to a pre-commit run. `--mode quick` under
+  # CI_GATE_USE_LANES=1 therefore ran the whole bats suite, about an hour here
+  # against a 30s pre-commit budget, and could fail a commit on gate self-tests
+  # unrelated to anything staged.
+  #
+  # Named positively, and the first version of this was not. It read
+  # `[ "$MODE" != "quick" ]`, which fixed the mode in the report and let every
+  # other one through: `--mode debt` is not quick, so a debt-ratchet run took
+  # this branch and executed node, security, build and the shell suites before
+  # returning, instead of the two lanes the `debt)` arm below schedules. An
+  # exclusion list has to name every mode that must not reach here, including
+  # the ones added later; naming the two that must is the same rule with no
+  # tail. Reported one round after the exclusion landed.
   #
   # Gated by mode rather than by adding a column, because the alternative is a
   # second list of which lanes are pre-commit lanes -- run_common_checks below
   # is the first, and ci/checks/manifest.yml's `pre_commit:` field is arguably a
   # third. Quick keeps the one that already decides it.
-  if [ "${CI_GATE_USE_LANES:-0}" = "1" ] && [ "$MODE" != "quick" ] \
+  if [ "${CI_GATE_USE_LANES:-0}" = "1" ] \
+     && { [ "$MODE" = "full" ] || [ "$MODE" = "ship" ]; } \
      && [ -f "ci/config/lanes.conf" ]; then
     # lanes.conf has 5 columns (id|name|command|blocking|description); only id and
     # command are consumed here. Unused columns are read into `_` so shellcheck does

@@ -6399,3 +6399,49 @@ ship_ws_run() {
     || { echo "a workspace deleted from disk was invented from HEAD: $output" >&2; rm -rf "$sb"; return 1; }
   rm -rf "$sb"
 }
+
+@test "node lane: words after a shell -c command are its arguments, not commands" {
+  # Reported as a bypass: `bash -c 'true' tsc --noEmit` supposedly reached the
+  # trailing `tsc` and satisfied the checker rule while the script only runs
+  # `true`. It does not, and the reason is worth pinning rather than leaving to
+  # be re-derived -- the inline string is parsed as shell, and in shell a word
+  # after a command is an argument to it. Only a separator starts a new command.
+  #
+  # Which cuts both ways, so both directions are asserted here: the shape that
+  # must be refused, and the shape that must not be, since a rule that refused
+  # every `bash -c` would pass the first half by refusing everything.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  mkdir -p "$NODE_SB/ws/node_modules/.bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/tsc"
+
+  local bad
+  for bad in "bash -c 'true' tsc --noEmit" \
+             "sh -c true tsc --noEmit" \
+             "bash -c 'true' npx tsc --noEmit" \
+             "bash -c ':' tsc --noEmit" \
+             "bash -c 'true tsc --noEmit'"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"typecheck\": \"${bad}\", \"test\": \"bash scripts/test.sh\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] \
+      || { echo "accepted a script whose compiler is an argument: ${bad}" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+    [[ "$output" == *"type checker"* ]] \
+      || { echo "refused for the wrong reason: ${bad}" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  done
+
+  # And the two that genuinely do run a compiler. `&&` and a bare command
+  # string are how a shell reaches one, and refusing either would make the loop
+  # above pass by refusing every `bash -c`.
+  local good
+  for good in "bash -c 'tsc --noEmit'" \
+              "bash -c 'true && tsc --noEmit'"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"typecheck\": \"${good}\", \"test\": \"bash scripts/test.sh\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"type checker"* ]] \
+      || { echo "refused a script that does run a compiler: ${good}" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  done
+  rm -rf "$NODE_SB"
+}

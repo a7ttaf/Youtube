@@ -21,7 +21,37 @@ VITEST_CONFIG="$FRONTEND_DIR/vitest.config.ts"
 # frontend/vitest.config.ts; the drift check below fails if they diverge.
 DECLARED_GLOB='tests/**/*.test.{ts,tsx}'
 
-if [ ! -d "$FRONTEND_DIR" ]; then
+# Is there a frontend in the tree this run stands behind?
+#
+# `[ ! -d frontend ]` is a question about the worktree, and the answer here is
+# the entire check not running. Everything below it already reads `HEAD:` in
+# ship mode -- config_sources, workspace_files_present, the retired-convention
+# scan, the file count -- and this gate above them all did not, so a frontend/
+# missing from the worktree while HEAD still carries it switched the always-run
+# layout guard off for a push that contains it. A stash, a partial checkout or
+# an in-progress move is enough. Reproduced on a clean HEAD holding frontend/:
+#
+#   rm -rf frontend
+#   CI_GATE_MODE=ship bash ci/checks/test-layout.sh
+#   -> [INFO] skipped: no frontend/ directory        exit 0
+#
+# HEAD alone in ship mode, not HEAD plus the worktree: a frontend/ that exists
+# only on disk is not what the push sends, and the checks below would then be
+# reporting on files no destination receives. Same rule as every other reader of
+# this question on the branch -- which tree a run vouches for chooses the
+# sources, it does not add to them.
+frontend_present() {
+  if [ "${CI_GATE_MODE:-}" = "ship" ] \
+    && command -v git >/dev/null 2>&1 \
+    && git rev-parse --git-dir >/dev/null 2>&1 \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    [ -n "$(git ls-tree --name-only "HEAD:${FRONTEND_DIR}" 2>/dev/null | head -n 1)" ]
+    return
+  fi
+  [ -d "$FRONTEND_DIR" ]
+}
+
+if ! frontend_present; then
   ci::log::info "skipped: no frontend/ directory"
   exit "$CI_RESULT_PASS"
 fi

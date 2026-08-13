@@ -1857,6 +1857,33 @@ YML
   [[ "$output" == *test-layout* ]] \
     || { echo "quick stopped running its own lanes: $output" >&2; rm -rf "$sb"; return 1; }
 
+  # debt, which the first version of this rule let through. That version read
+  # `[ "$MODE" != "quick" ]` -- it fixed the mode in the report and nothing
+  # else, so `--mode debt` took the lane branch and ran the whole full plan
+  # before returning, instead of the two lanes its own arm schedules. Measured
+  # on this fixture, with --all so the changeset short-circuit does not answer
+  # first:
+  #   old  debt+lanes -> branch-protection build changed-files debt git-safety
+  #                      security test-layout tests-shell
+  #   new  debt+lanes -> debt git-safety
+  #
+  # Asserted per mode rather than only for the one that was reported, because an
+  # exclusion has to name every mode that must not reach the branch, including
+  # ones added later; this is the case that notices when the next one is added.
+  # Inline rather than through _ql_lanes: that helper hands its arguments to
+  # `env`, and --all is preflight's, not the environment's.
+  _ql_debt() {
+    ( cd "$sb" && env CI_GATE_USE_LANES=1 bash ci/preflight.sh --mode debt --all 2>&1 ) \
+      | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
+  }
+  run _ql_debt
+  [[ "$output" != *tests-shell* ]] \
+    || { echo "a debt run scheduled the shell suite: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" != *security* ]]
+  [[ "$output" != *test-layout* ]]
+  [[ "$output" == *debt* ]] \
+    || { echo "debt stopped running its own lanes: $output" >&2; rm -rf "$sb"; return 1; }
+
   # The control: full and ship are what lanes.conf describes, and they still
   # get it. Gating by mode must not disable the feature.
   run _ql_lanes full CI_GATE_USE_LANES=1

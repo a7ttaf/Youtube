@@ -2638,3 +2638,67 @@ CFG
   [ "$status" -eq 20 ] \
     || { echo "the guard stopped catching an uncovered test file" >&2; echo "$output" >&2; return 1; }
 }
+
+@test "test-layout: ship mode decides there is a frontend from the pushed tree" {
+  # `[ ! -d frontend ]` is a question about the worktree, and the answer is the
+  # entire check not running. Everything below it already reads HEAD: in ship
+  # mode; this gate above them all did not, so a frontend/ missing from the
+  # worktree while HEAD still carries it switched the always-run layout guard
+  # off for a push that contains it. A stash or a partial checkout is enough.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/checks/test-layout.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  mkdir -p "$sb/frontend/tests" "$sb/frontend/src"
+  printf 'it("x", () => {});\n' > "$sb/frontend/tests/a.test.ts"
+  printf 'export const a = 1;\n' > "$sb/frontend/src/a.ts"
+  cat > "$sb/frontend/vitest.config.ts" <<'CFG'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+  },
+});
+CFG
+  ( cd "$sb" && git init -q -b main . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+
+  # The premise: with frontend/ everywhere, the guard runs and reports on it.
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Test layout OK"* ]] \
+    || { echo "the guard did not run on a tree that has a frontend: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # Removed from the worktree only. HEAD still carries it, so the push does.
+  rm -rf "$sb/frontend"
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"skipped: no frontend"* ]] \
+    || { echo "ship mode skipped the guard for a push that carries frontend/: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" == *"Test layout OK"* ]] \
+    || { echo "ship mode did not report on the pushed frontend: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # The controls. quick stands behind the worktree and the index, so with
+  # frontend/ gone from disk there is nothing for it to report on; and a
+  # repository that genuinely has no frontend must still skip in ship mode,
+  # or this rule would turn every non-frontend repository red.
+  run bash -c "cd '$sb' && CI_GATE_MODE=quick bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped: no frontend"* ]] \
+    || { echo "quick stopped standing behind the worktree: $output" >&2; rm -rf "$sb"; return 1; }
+
+  local sb2
+  sb2="$(mktemp -d)"
+  mkdir -p "$sb2/ci/checks" "$sb2/ci/lib"
+  cp "$REPO_ROOT/ci/checks/test-layout.sh" "$sb2/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb2/ci/lib/"
+  ( cd "$sb2" && printf 'x\n' > a.txt && git init -q -b main . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  run bash -c "cd '$sb2' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skipped: no frontend"* ]] \
+    || { echo "a repository with no frontend was not skipped: $output" >&2; rm -rf "$sb" "$sb2"; return 1; }
+  rm -rf "$sb" "$sb2"
+}
