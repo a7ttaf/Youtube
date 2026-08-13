@@ -496,7 +496,10 @@ SH
   # A tag-only push is judged by the same test, which is now the only test.
   run _covers "$old" ""
   [ "$status" -ne 0 ]
-  run bash -c "cd '$sb' && git update-ref refs/remotes/origin/main '$old'"
+  # Published for real, not by writing this clone's memory of the destination:
+  # a tracking ref is no longer proof, because a force-push can leave one
+  # reaching a commit the remote has dropped.
+  run ci::tests::publish "$sb" origin main "$old"
   [ "$status" -eq 0 ]
   run _covers "$old" ""
   [ "$status" -eq 0 ]
@@ -639,7 +642,7 @@ refs/heads/old %s refs/publish/prod %s
   # commit the destination already has.
   run bash -c "cd '$HD_SB' && . '$REPO_ROOT/ci/lib/git.sh'     && CI_GATE_PUSH_NEW_SHA='$HD_TIP' CI_GATE_PUSH_BRANCH_TIPS='$HD_TIP'        CI_GATE_PUSH_OTHER_TIPS='$HD_TIP' CI_GATE_PUSH_REMOTE=origin        ci::git::worktree_covers_push"
   [ "$status" -eq 0 ]
-  run bash -c "cd '$HD_SB' && git update-ref refs/remotes/origin/main '$HD_BASE'"
+  run ci::tests::publish "$HD_SB" origin main "$HD_BASE"
   [ "$status" -eq 0 ]
   run bash -c "cd '$HD_SB' && . '$REPO_ROOT/ci/lib/git.sh'     && CI_GATE_PUSH_NEW_SHA='$HD_TIP' CI_GATE_PUSH_BRANCH_TIPS='$HD_TIP'        CI_GATE_PUSH_OTHER_TIPS='$HD_BASE' CI_GATE_PUSH_REMOTE=origin        ci::git::worktree_covers_push"
   [ "$status" -eq 0 ]
@@ -800,7 +803,7 @@ refs/tags/new %s refs/tags/new %s
   # read, and a tag on a commit the destination already has carries nothing.
   run _tagonly "$tip" ""
   [ "$status" -eq 0 ]
-  run bash -c "cd '$sb' && git update-ref refs/remotes/origin/main '$old'"
+  run ci::tests::publish "$sb" origin main "$old"
   [ "$status" -eq 0 ]
   run _tagonly "$old" ""
   [ "$status" -eq 0 ]

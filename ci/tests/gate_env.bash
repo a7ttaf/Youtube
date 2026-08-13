@@ -49,4 +49,55 @@ ci::tests::clear_gate_env() {
   unset CI_GATE_PRE_COMMIT_BUDGET CI_GATE_PRE_PUSH_BUDGET
   unset CI_GATE_COVERAGE_MIN CI_GATE_COMPLEXITY_MAX CI_GATE_BUNDLE_SIZE_MAX
   unset CI_GATE_NODE_WORKSPACE CI_GATE_USE_LANES CI_GATE_CACHE_DIR
+
+  unset CI_GATE_TRUST_TRACKING_REFS
+  unset CI_GATE_PUSH_REMOTE_TIPS CI_GATE_PUSH_REMOTE_TIPS_FOR
+
+  # CI_GATE_CHECK_ID selects which language a check runs, and four checks read
+  # it: ci/checks/format.sh, lint.sh, tests.sh and typecheck.sh, each defaulting
+  # to `all`. Its value is ambient in every case in these files during a real
+  # gate run -- ci/checks/tests-shell.sh sets it, and it reaches grandchildren:
+  #
+  #   env -u CI_GATE_CHECK_ID bash -c \
+  #     'exec env CI_GATE_CHECK_ID=tests-shell bash mid.sh'   # mid.sh runs inner.sh
+  #   -> grandchild sees: CI_GATE_CHECK_ID='tests-shell'
+  #
+  # and tests-shell.sh's grandchildren are `bats ci/tests/` and everything a
+  # case invokes. So a case running a check bare narrows it to the shell arm
+  # without saying so, which for typecheck.sh is the difference between
+  #
+  #   bash ci/checks/typecheck.sh                       -> runs mypy, fails here
+  #   CI_GATE_CHECK_ID=typecheck-js bash .../typecheck.sh -> tsc only, passes
+  #
+  # No case relies on the ambient value today; every one of them pins it on the
+  # command, which is why nothing has broken yet. That is the state the rest of
+  # this list was also in until the day it wasn't.
+  unset CI_GATE_CHECK_ID
+}
+
+# Make a sandbox's destination genuinely carry a commit.
+#
+# `git update-ref refs/remotes/origin/main <sha>` was how these fixtures said
+# "the destination already has this". It is not a statement about the
+# destination -- it writes this clone's *memory* of one -- and
+# ci::git::published_to_destination stopped accepting that memory as proof, for
+# the reason a force-push makes it wrong: the ref can still reach a commit the
+# remote has dropped.
+#
+# So a fixture that means "published" now has to publish. A bare repository
+# beside the sandbox is a real remote: `ls-remote` answers from it, the answer
+# is authoritative, and no network is involved.
+#
+# ci::tests::publish <sandbox> <remote> <branch> <sha>
+ci::tests::publish() {
+  local sb="$1" remote="$2" branch="$3" sha="$4"
+  local bare="${sb}/.remotes/${remote}.git"
+  if [ ! -d "$bare" ]; then
+    mkdir -p "${sb}/.remotes"
+    git init -q --bare "$bare" || return 1
+  fi
+  ( cd "$sb"     && { git remote add "$remote" "$bare" 2>/dev/null || git remote set-url "$remote" "$bare"; }     && git push -q "$bare" "+${sha}:refs/heads/${branch}" ) || return 1
+  # The tracking ref too, so a fixture that also reads it still sees what it
+  # expects. It is no longer what decides the answer.
+  ( cd "$sb" && git update-ref "refs/remotes/${remote}/${branch}" "$sha" ) || return 1
 }

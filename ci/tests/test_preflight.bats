@@ -1311,13 +1311,19 @@ YML
   [ "$output" = "${root}..${tip}" ]
 
   # The other half of the same rule, and the reason the guess above is refused
-  # while this is not. `origin/main` becomes an answer once the push says which
-  # remote it is going to: a remote-tracking ref of the *named destination* is
-  # a record of what that destination was last seen holding, which is what
-  # published_to_destination is trusted with one function down. Without it the
-  # first push of any branch walked its entire history -- 439 commits in this
-  # repository, twelve of which fail the whitespace scan, so `git push -u origin
-  # <new-branch>` was refused with no remedy available to the person pushing.
+  # while this is not. The *named destination* bounds what this push adds, so
+  # the first push of a branch does not walk its entire history -- 439 commits
+  # in this repository, twelve of which fail the whitespace scan, so `git push
+  # -u origin <new-branch>` was refused with no remedy available to the person
+  # pushing.
+  #
+  # Established by publishing rather than by writing a tracking ref. That ref is
+  # this clone's memory of the destination and is no longer what the answer
+  # comes from: a force-push elsewhere leaves it reaching commits the remote has
+  # dropped, and this would then narrow past exactly the commits the push makes
+  # reachable again.
+  run ci::tests::publish "$sb" origin main "$root"
+  [ "$status" -eq 0 ]
   run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' && CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_NEW_SHA='$tip' ci::git::push_range"
   [ "$output" = "${root}..${tip}" ]
 
@@ -1358,9 +1364,11 @@ YML
        ci::git::worktree_covers_push"
   [ "$status" -ne 0 ]
 
-  # The control: the remote it really names still matches.
-  run bash -c "cd '$sb' && git update-ref refs/remotes/release.prod/main '$tip' \
-    && . '$REPO_ROOT/ci/lib/git.sh' \
+  # The control: the remote it really names still matches. Published to a real
+  # remote of that name, because the tracking ref alone no longer answers.
+  run ci::tests::publish "$sb" release.prod main "$tip"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/git.sh' \
     && CI_GATE_PUSH_NEW_SHA='$tip' CI_GATE_PUSH_REMOTE_REFS= CI_GATE_PUSH_REMOTE=release.prod \
        ci::git::worktree_covers_push"
   [ "$status" -eq 0 ]
@@ -1699,12 +1707,131 @@ YML
   rm -rf "$GS_SB"
 }
 
+@test "preflight: a content-free push is decided before the scheduler is chosen" {
+  # Both content-free paths lived inside the `full|ship` arm, which sits after
+  # the lanes.conf branch and its `return 0`. With CI_GATE_USE_LANES=1 and
+  # ci/config/lanes.conf present -- a supported configuration -- neither was
+  # reachable: a deletion-only push ran the whole lane list over whatever
+  # happened to be checked out.
+  #
+  # And worse there than in the default plan, because lanes.conf carries no
+  # branch-protection entry. The wide path was missing the one check both narrow
+  # paths deliberately keep, and the narrow path was unreachable, so each was
+  # missing the other's protection.
+  local sb
+  sb="$(mktemp -d)"
+  cp -r "$REPO_ROOT/ci" "$sb/ci"
+  rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
+  local f
+  for f in "$sb"/ci/checks/*.sh; do
+    printf '#!/usr/bin/env bash\necho "RAN:%s"\nexit 0\n' "$(basename "$f" .sh)" > "$f"
+    chmod +x "$f"
+  done
+  (
+    cd "$sb"
+    printf 'x\n' > a.txt
+    git init -q -b main .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+  ) >/dev/null 2>&1
+  local published
+  published="$(cd "$sb" && git rev-parse HEAD)"
+  ci::tests::publish "$sb" origin main "$published"
+
+  _pf_lanes() { # _pf_lanes <mode> <env assignments...>
+    local _m="$1"; shift
+    ( cd "$sb" && env "$@" bash ci/preflight.sh --mode "$_m" 2>&1 ) \
+      | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
+  }
+
+  # The configuration this case is about, read from the file rather than
+  # asserted: lanes.conf schedules content lanes and no destination protection.
+  run grep -c 'branch-protection' "$sb/ci/config/lanes.conf"
+  [ "$output" = "0" ] \
+    || { echo "lanes.conf now has destination protection; this case needs rewriting" >&2; rm -rf "$sb"; return 1; }
+
+  # The premise: under lanes.conf an ordinary ship push does schedule the lane
+  # list, so an absence below is the rule acting and not the harness failing.
+  run _pf_lanes ship CI_GATE_USE_LANES=1 CI_GATE_PUSH_NEW_SHA="$published"
+  [[ "$output" == *test-layout* ]] \
+    || { echo "the lanes.conf plan did not run: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" == *node* ]]
+
+  # A deletion-only push, in the mode where it used to be unreachable.
+  run _pf_lanes ship CI_GATE_USE_LANES=1 CI_GATE_PUSH_DELETIONS_ONLY=1 \
+                CI_GATE_PUSH_REMOTE_REFS=feature
+  [ "$status" -eq 0 ]
+  [[ "$output" == *branch-protection* ]] \
+    || { echo "lanes.conf mode skipped destination protection: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" != *test-layout* ]] \
+    || { echo "a deletion ran the content lanes under lanes.conf: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" != *node* ]]
+  [[ "$output" != *tests-shell* ]]
+
+  # And the label-only path, which is the same hoist. Asserted separately
+  # because "the same rule missing one tree over" is how each of these was found
+  # in the first place: one of the two nested back under the scheduler would
+  # leave the other's case green.
+  run _pf_lanes ship CI_GATE_USE_LANES=1 CI_GATE_PUSH_REMOTE=origin \
+                CI_GATE_PUSH_REMOTE_REFS= CI_GATE_PUSH_TAG_TIPS="$published"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *branch-protection* ]] \
+    || { echo "lanes.conf mode skipped destination protection for a tag: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" != *test-layout* ]] \
+    || { echo "a label-only push ran the content lanes under lanes.conf: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # The control that the hoist did not widen the rule: `full` is a deliberate
+  # whole-tree run, not a push, so a leftover push variable must not narrow it
+  # in this mode either.
+  run _pf_lanes full CI_GATE_USE_LANES=1 CI_GATE_PUSH_DELETIONS_ONLY=1
+  [[ "$output" == *test-layout* ]] \
+    || { echo "a push variable narrowed a full run: $output" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
+
 # --- the suites' own hygiene ---------------------------------------------------
 #
 # Both of these are about the harness rather than about a check, and both exist
 # because the gate could not pass its own repository: one because the suites
 # inherited the gate's state, the other because a fixture spelled out a string
 # the gate refuses.
+
+@test "preflight: every check it schedules is executable in the index" {
+  # run_check executes the path -- `output=$("$script" 2>&1)` -- so a check
+  # committed 100644 is a lane that cannot start, and the mode git records is
+  # what a runner checks out.
+  #
+  # Nothing here would have caught it. Git does not enforce the bit on Windows,
+  # so the file is executable on the disk it was written on; the sandboxes these
+  # suites build chmod +x their own stubs; and `bats ci/tests/...` never runs
+  # the real script through run_check. ci/checks/typecheck-js.sh was committed
+  # 100644 while every other check in that directory is 100755, and the first
+  # sight of it would have been "Permission denied" on a Linux runner, from a
+  # lane this branch had just finished scheduling.
+  #
+  # Enumerated from ci/preflight.sh rather than from the directory listing: the
+  # property that matters is "scheduled and unrunnable", and a check that no
+  # mode runs is a different problem with its own case.
+  local _s _bad="" _n=0 _mode
+  while IFS= read -r _s; do
+    [ -n "$_s" ] || continue
+    _n=$(( _n + 1 ))
+    _mode="$(git -C "$REPO_ROOT" ls-files -s -- "$_s" | awk '{print $1}')"
+    case "$_mode" in
+      100755) ;;
+      "") _bad="${_bad} ${_s}(not tracked)" ;;
+      *)  _bad="${_bad} ${_s}(${_mode})" ;;
+    esac
+  done <<< "$(grep -ohE '\./ci/checks/[a-z-]+\.sh' "$REPO_ROOT/ci/preflight.sh" \
+              | sed 's|^\./||' | sort -u)"
+
+  # The selector has to still be selecting; a regex matching nothing makes the
+  # assertion below vacuously true.
+  [ "$_n" -ge 10 ] \
+    || { echo "found only $_n scheduled checks; the selector has drifted" >&2; return 1; }
+  [ -z "$_bad" ] \
+    || { echo "scheduled by preflight but not executable:${_bad}" >&2; return 1; }
+}
 
 @test "tests: every gate variable the suites can inherit is cleared" {
   # ci/tests/gate_env.bash clears the gate's exported state so a case is not
@@ -1715,25 +1842,48 @@ YML
   # 148 of them at once, only when run under `ci/preflight.sh --mode ship`.
   #
   # Enumerated from the source rather than restated, for the same reason.
+  #
+  # `env NAME=` counts as well as `export NAME`. A variable placed in a child's
+  # environment is inherited by that child's children too, so the spelling makes
+  # no difference to what a case can pick up -- but it made all the difference
+  # to this enumeration, which read only one of the two:
+  #
+  #   grep -rhoE 'export CI_GATE_[A-Z_]+'      ci/checks/tests-shell.sh -> []
+  #   grep -rhoE '(export|env) CI_GATE_[A-Z_]+' ci/checks/tests-shell.sh
+  #     -> CI_GATE_CHECK_ID
+  #
+  # tests-shell.sh has set CI_GATE_CHECK_ID for the whole shell suite since it
+  # was written, and this case reported the two lists as agreeing throughout.
   local _v _missing=""
   while IFS= read -r _v; do
     [ -n "$_v" ] || continue
     grep -qw -- "$_v" "$REPO_ROOT/ci/tests/gate_env.bash" || _missing="${_missing} ${_v}"
-  done <<< "$(grep -rhoE 'export CI_GATE_[A-Z_]+' \
+  done <<< "$(grep -rhoE '(export|env) CI_GATE_[A-Z_]+' \
                 "$REPO_ROOT"/ci/*.sh "$REPO_ROOT"/ci/checks/*.sh \
                 "$REPO_ROOT"/ci/lib/*.sh 2>/dev/null \
-              | sed 's/^export //' | sort -u)"
+              | sed -E 's/^(export|env) //' | sort -u)"
   [ -z "$_missing" ] || { echo "exported by the gate, not cleared:${_missing}" >&2; return 1; }
 
   # And the function does what the list says. A list nothing applies is a list.
-  (
-    export CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA=deadbeef CI_GATE_PUSH_REMOTE=origin
-    # shellcheck source=ci/tests/gate_env.bash
-    source "$REPO_ROOT/ci/tests/gate_env.bash"
-    ci::tests::clear_gate_env
-    [ -z "${CI_GATE_MODE:-}" ] && [ -z "${CI_GATE_PUSH_NEW_SHA:-}" ] \
-      && [ -z "${CI_GATE_PUSH_REMOTE:-}" ]
-  )
+  #
+  # Driven from the same enumeration rather than from three sampled names: the
+  # half above proves a variable is *mentioned* in gate_env.bash, which a
+  # comment satisfies as well as an unset does. Naming three of them here left
+  # the other twenty-two proven only to be spelled out somewhere in the file.
+  local _left=""
+  for _v in $(grep -rhoE '(export|env) CI_GATE_[A-Z_]+' \
+                "$REPO_ROOT"/ci/*.sh "$REPO_ROOT"/ci/checks/*.sh \
+                "$REPO_ROOT"/ci/lib/*.sh 2>/dev/null \
+              | sed -E 's/^(export|env) //' | sort -u); do
+    _left="${_left}$(
+      export "${_v}=sentinel"
+      # shellcheck source=ci/tests/gate_env.bash
+      source "$REPO_ROOT/ci/tests/gate_env.bash"
+      ci::tests::clear_gate_env
+      [ -z "$(eval "printf '%s' \"\${${_v}:-}\"")" ] || printf ' %s' "$_v"
+    )"
+  done
+  [ -z "$_left" ] || { echo "named in gate_env.bash but not cleared:${_left}" >&2; return 1; }
 }
 
 @test "tests: no fixture spells out a string the gate refuses to push" {
@@ -1828,5 +1978,271 @@ YML
     printf 'rc=%s\n' \"\$(ci::runner::get_result gamma)\""
   [[ "$output" == *"rc=0"* ]]
   [ -f "$sb/ran" ]
+  rm -rf "$sb"
+}
+
+@test "git: the destination is asked what it holds, not this clone's memory of it" {
+  # `refs/remotes/<remote>/*` records what this clone last *saw* the destination
+  # holding, and two rules read it as what the destination *has*. The two differ
+  # asymmetrically: stale-behind refuses, which is safe, but a force-push or a
+  # branch deletion by another actor leaves a tracking ref still containing a
+  # commit the destination has dropped -- and both rules then answer "already
+  # published" about it.
+  #
+  # The consequence is the one the gate exists to prevent: a tag on that commit
+  # republishes it while the content lanes validate the current checkout, and
+  # push_range narrows past it so git-safety, the signature walk and the
+  # changeset scan never look at it either.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/up"
+  (
+    cd "$sb/up"
+    git init -q -b main .
+    printf 'a\n' > a.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c1
+    printf 'secret-shaped\n' > s.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c2
+  ) >/dev/null 2>&1
+  local dropped
+  dropped="$(cd "$sb/up" && git rev-parse HEAD)"
+  ( cd "$sb" && git clone -q "$sb/up" clone ) >/dev/null 2>&1
+  # The destination drops it after this clone last looked.
+  ( cd "$sb/up" && git reset -q --hard HEAD~1 ) >/dev/null 2>&1
+
+  mkdir -p "$sb/clone/ci/lib"
+  cp "$REPO_ROOT/ci/lib/git.sh" "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$sb/clone/ci/lib/"
+
+  # The premise: the tracking ref still reaches the dropped commit, and the
+  # destination no longer does. Without this the case would pass on a clone
+  # that simply never had it.
+  run bash -c "cd '$sb/clone' && git merge-base --is-ancestor '$dropped' origin/main"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$sb/up' && git merge-base --is-ancestor '$dropped' HEAD"
+  [ "$status" -ne 0 ]
+
+  _pub() {
+    ( cd "$sb/clone" && env "$@" bash -c '
+        . ci/lib/log.sh 2>/dev/null
+        . ci/lib/common.sh 2>/dev/null
+        . ci/lib/git.sh
+        ci::git::published_to_destination "'"$dropped"'" && echo YES || echo NO' )
+  }
+
+  run _pub CI_GATE_PUSH_REMOTE=origin
+  [ "$output" = "NO" ] \
+    || { echo "a dropped commit was reported as published" >&2; rm -rf "$sb"; return 1; }
+
+  # The control that keeps the rule usable: a commit the destination really does
+  # carry is still published, and push_range still narrows to base..tip rather
+  # than walking the whole branch -- which is the refusal the tracking-ref
+  # shortcut was introduced to avoid.
+  local kept tip
+  kept="$(cd "$sb/up" && git rev-parse HEAD)"
+  ( cd "$sb/clone" && printf 'local\n' > l.txt && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm local ) >/dev/null 2>&1
+  tip="$(cd "$sb/clone" && git rev-parse HEAD)"
+  run bash -c "cd '$sb/clone' && CI_GATE_PUSH_REMOTE=origin bash -c '
+      . ci/lib/log.sh 2>/dev/null
+      . ci/lib/common.sh 2>/dev/null
+      . ci/lib/git.sh
+      ci::git::published_to_destination \"$kept\" && echo YES || echo NO
+      CI_GATE_PUSH_NEW_SHA=$tip ci::git::push_range'"
+  [[ "$output" == *"YES"* ]]
+  [[ "$output" == *".."* ]] \
+    || { echo "push_range stopped narrowing for a reachable destination" >&2; echo "$output" >&2; rm -rf "$sb"; return 1; }
+
+  # Unreachable is not an answer. A remote that cannot be queried fails closed --
+  # not published, and no base -- rather than falling back to the record whose
+  # staleness is the whole problem.
+  ( cd "$sb/clone" && git remote set-url origin "$sb/gone" ) >/dev/null 2>&1
+  run _pub CI_GATE_PUSH_REMOTE=origin
+  [ "$output" = "NO" ]
+  run bash -c "cd '$sb/clone' && CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_NEW_SHA=$tip bash -c '
+      . ci/lib/log.sh 2>/dev/null
+      . ci/lib/common.sh 2>/dev/null
+      . ci/lib/git.sh
+      ci::git::push_range'"
+  [ "$output" = "$tip" ] \
+    || { echo "an unreachable remote still produced a narrowed range: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # And the documented opt-out, so an air-gapped runner is not left with an
+  # unfixable refusal. Only an explicit 1 opts out.
+  run _pub CI_GATE_PUSH_REMOTE=origin CI_GATE_TRUST_TRACKING_REFS=1
+  [ "$output" = "YES" ]
+  rm -rf "$sb"
+}
+
+@test "preflight: a tag on an already-published commit runs destination protection only" {
+  # `git tag v1.2 <commit the destination already has>; git push origin v1.2`
+  # sends no tree. ci::git::worktree_covers_push accepts it on exactly that
+  # ground, and then the ship dispatch ran the complete plan anyway, because
+  # deletions were the only content-free case it knew -- so test-layout, node,
+  # python, the build and the shell suites all ran over whatever happened to be
+  # checked out, and a failure already sitting there blocked a release that
+  # sends none of it.
+  local sb
+  sb="$(mktemp -d)"
+  cp -r "$REPO_ROOT/ci" "$sb/ci"
+  rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
+  local f
+  for f in "$sb"/ci/checks/*.sh; do
+    printf '#!/usr/bin/env bash\necho "RAN:%s"\nexit 0\n' "$(basename "$f" .sh)" > "$f"
+    chmod +x "$f"
+  done
+  mkdir -p "$sb/up"
+  (
+    cd "$sb/up"
+    git init -q -b main .
+    printf 'a\n' > a.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c1
+  ) >/dev/null 2>&1
+  ( cd "$sb" && git init -q -b main . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  local published unpublished
+  published="$(cd "$sb" && git rev-parse HEAD)"
+  ci::tests::publish "$sb" origin main "$published"
+  ( cd "$sb" && printf 'later\n' > later.txt && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm later ) >/dev/null 2>&1
+  unpublished="$(cd "$sb" && git rev-parse HEAD)"
+
+  _pf_lanes() {
+    ( cd "$sb" && env "$@" CI_GATE_USE_LANES=0 bash ci/preflight.sh --mode ship 2>&1 ) \
+      | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
+  }
+
+  # The premise: an ordinary ship push does schedule the content lanes, so an
+  # empty list below is the rule acting rather than the harness failing to run.
+  # Asserted on the always-run lanes rather than on `node`: the changeset filter
+  # legitimately drops the language lanes for a change that touches no
+  # JavaScript, so `node` absent would not tell this case anything. test-layout
+  # and tests-shell are on preflight's always-run list, which is what makes
+  # their absence below attributable to the rule under test.
+  run _pf_lanes CI_GATE_PUSH_NEW_SHA="$unpublished" CI_GATE_PUSH_REMOTE=origin
+  [[ "$output" == *test-layout* ]]
+  [[ "$output" == *tests-shell* ]]
+  [[ "$output" == *security* ]]
+
+  # A tag on a commit the destination already carries, and no branch record.
+  run _pf_lanes CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_REMOTE_REFS= \
+                CI_GATE_PUSH_TAG_TIPS="$published"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *branch-protection* ]] \
+    || { echo "destination protection was skipped: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" != *test-layout* ]] \
+    || { echo "a label-only push still ran the content lanes: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" != *tests-shell* ]]
+  [[ "$output" != *build* ]]
+
+  # The controls, each one a reason this must NOT take the short path.
+  #
+  # Asserted on test-layout alone. tests-shell is changeset-filtered and
+  # these rows supply no push range, so its absence would say nothing about
+  # the rule; test-layout is on the always-run list, and the short path runs
+  # branch-protection and nothing else -- so test-layout present is exactly
+  # "the short path was not taken".
+  #
+  # A tag on a commit the destination does not have is carrying that commit out,
+  # and the lanes over the checkout are exactly the right thing to run.
+  run _pf_lanes CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_REMOTE_REFS= \
+                CI_GATE_PUSH_TAG_TIPS="$unpublished"
+  [[ "$output" == *test-layout* ]]
+
+  # A push that names a branch destination is sending a tree, whatever else is
+  # in it.
+  run _pf_lanes CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_REMOTE_REFS=main \
+                CI_GATE_PUSH_TAG_TIPS="$published"
+  [[ "$output" == *test-layout* ]]
+
+  # Unset is "nobody told us", which is every caller that is not the pre-push
+  # hook, and none of them may be narrowed on a guess.
+  run _pf_lanes CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_TAG_TIPS="$published"
+  [[ "$output" == *test-layout* ]]
+
+  # And an unreachable destination cannot prove publication, so the short path
+  # is not taken. Asserted on the banner rather than on the lane list, because
+  # what happens instead is stricter than "run everything": worktree_covers_push
+  # cannot verify the tag either, so preflight refuses the push outright and no
+  # lane runs at all. An assertion looking for test-layout would fail on that --
+  # for the opposite of the reason it was written -- which is what my first
+  # draft did.
+  ( cd "$sb" && git remote set-url origin "$sb/gone" ) >/dev/null 2>&1
+  run bash -c "cd '$sb' && CI_GATE_USE_LANES=0 CI_GATE_PUSH_REMOTE=origin \
+      CI_GATE_PUSH_REMOTE_REFS= CI_GATE_PUSH_TAG_TIPS='$published' \
+      bash ci/preflight.sh --mode ship 2>&1"
+  [[ "$output" != *"publishes only refs the destination already carries"* ]] \
+    || { echo "an unreachable destination took the short path" >&2; echo "$output" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
+
+@test "preflight: the standalone typecheck lane runs" {
+  # ci/checks/typecheck.sh was registered in ci/checks/manifest.yml with
+  # `severity: blocker` and scheduled by nothing: `typecheck-js` survived only
+  # as a changeset id that the reverse mapping folds back into the combined
+  # `node` lane, so the file never executed in quick, full or ship. Registered
+  # at one layer and run at none.
+  #
+  # This case exists for a second reason, and it is the load-bearing one. The
+  # `-p/--project` rule in ci/checks/node.sh accepts a typecheck script that
+  # names one of several discovered projects, and the justification for
+  # accepting it is that this lane compiles the rest. That justification was
+  # written while this lane did not run, which made it false. If the lane is
+  # ever taken back out of the plan, this case fails and that rule has to change
+  # with it -- the two are one decision.
+  local sb
+  sb="$(mktemp -d)"
+  cp -r "$REPO_ROOT/ci" "$sb/ci"
+  rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
+  local f
+  for f in "$sb"/ci/checks/*.sh; do
+    printf '#!/usr/bin/env bash\necho "RAN:%s"\nexit 0\n' "$(basename "$f" .sh)" > "$f"
+    chmod +x "$f"
+  done
+  mkdir -p "$sb/frontend/src"
+  printf '{ "name": "f" }\n' > "$sb/frontend/package.json"
+  printf '# r\n' > "$sb/README.md"
+  printf 'export const a = 1;\n' > "$sb/frontend/src/a.ts"
+  (
+    cd "$sb"
+    git init -q -b main .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+  ) >/dev/null 2>&1
+  local base
+  base="$(cd "$sb" && git rev-parse HEAD)"
+
+  _tc_lanes() {
+    ( cd "$sb" && env "$@" CI_GATE_USE_LANES=0 bash ci/preflight.sh --mode ship 2>&1 ) \
+      | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
+  }
+
+  # A JavaScript change schedules it.
+  ( cd "$sb" && printf 'export const b = 2;\n' > frontend/src/b.ts && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm js ) >/dev/null 2>&1
+  local js_tip
+  js_tip="$(cd "$sb" && git rev-parse HEAD)"
+  run _tc_lanes CI_GATE_PUSH_OLD_SHA="$base" CI_GATE_PUSH_NEW_SHA="$js_tip" \
+                CI_GATE_PUSH_REMOTE_REFS=main
+  [[ "$output" == *typecheck* ]] \
+    || { echo "the typecheck lane was not scheduled for a JS change: $output" >&2; rm -rf "$sb"; return 1; }
+  # And beside the node lane, not instead of it: they answer different
+  # questions -- node runs the workspace's own script, this compiles every
+  # discovered project by name.
+  [[ "$output" == *node* ]]
+
+  # The control: it is a language lane, so a change touching no JavaScript
+  # still filters it out. Without this the case would be satisfied by wiring it
+  # into the always-run list, which is a different and worse thing.
+  ( cd "$sb" && printf '# r2\n' > README.md && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm docs ) >/dev/null 2>&1
+  run _tc_lanes CI_GATE_PUSH_OLD_SHA="$js_tip" \
+                CI_GATE_PUSH_NEW_SHA="$(cd "$sb" && git rev-parse HEAD)" \
+                CI_GATE_PUSH_REMOTE_REFS=main
+  [[ "$output" != *typecheck* ]]
+  [[ "$output" != *node* ]]
   rm -rf "$sb"
 }

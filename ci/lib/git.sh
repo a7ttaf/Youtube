@@ -29,6 +29,155 @@ ci::git::has_conflict_markers_in_staged() {
   git diff --cached -U0 | grep -E '^\+[[:space:]]*(<{7}|={7}|>{7})([[:space:]]|$)' >/dev/null 2>&1
 }
 
+# What the destination holds *now*, asked of the destination.
+#
+# Two rules below read `refs/remotes/<remote>/*` as a record of what the
+# destination contains. It is not: it records what this clone last *saw* it
+# containing, and the two differ in the direction that matters. Stale-behind is
+# harmless -- fewer refs contain the commit, so the answer is refuse -- but a
+# force-push or a branch deletion by another actor leaves this clone holding a
+# ref that still contains a commit the destination has dropped. Both rules then
+# answer "already published" about a commit nothing on the remote carries, and
+# a push republishes it while the content lanes validate the current checkout.
+# The comment that used to sit on published_to_destination reasoned about the
+# first direction and asserted it as the general property.
+#
+# So the tips are read from the remote. `git ls-remote --heads` is a query, not
+# a fetch: it writes nothing and transfers no objects, and `git push` is about
+# to contact the same remote anyway, so the round-trip is one this path can
+# afford.
+#
+# Cached per remote for the length of the process, because published_to_destination
+# is called once per tag and once per other-namespace tip.
+#
+# Failure is not an empty answer. An unreachable remote, a permission error, or
+# no `git` at all leaves _CI_GIT_REMOTE_TIPS_RC non-zero, and both callers treat
+# that as "cannot prove it is published" rather than as "the destination has
+# nothing" -- which is the same rule the rest of this gate applies to a listing
+# it could not obtain.
+_CI_GIT_REMOTE_TIPS=""
+_CI_GIT_REMOTE_TIPS_FOR=""
+_CI_GIT_REMOTE_TIPS_RC=1
+ci::git::_remote_tips() {
+  local remote="$1" _rt_out="" _rt_rc=0
+  [ -n "$remote" ] || return 1
+  if [ "$_CI_GIT_REMOTE_TIPS_FOR" = "$remote" ]; then
+    printf '%s' "$_CI_GIT_REMOTE_TIPS"
+    return "$_CI_GIT_REMOTE_TIPS_RC"
+  fi
+  # Asked once per push, not once per check. Five processes in a ship run
+  # resolve a push range -- git-safety, branch-protection, node, the changeset
+  # scan and preflight itself -- and a per-process cache is no cache at all
+  # across them.
+  #
+  # The saving is modest and worth stating honestly: `ls-remote` against this
+  # repository's origin measures 0.8s, so this removes about 3s from a ship run,
+  # not the minute a first guess suggested. The 15.3s that a full push_range
+  # actually costs here is the merge-base loop in destination_base -- one
+  # subprocess per destination ref, 135 of them -- and that cost is unchanged by
+  # this commit: the previous code walked 136 local tracking refs the same way.
+  # Measured on both trees rather than assumed.
+  #
+  # ci/hook-dispatch.sh performs the query once and exports the answer, the same
+  # way it already exports the tips and the range. Set-and-empty is a real
+  # answer here -- a destination with no refs at all -- so the presence of the
+  # variable is what is tested, not its content.
+  if [ -n "${CI_GATE_PUSH_REMOTE_TIPS+set}" ] \
+    && [ "${CI_GATE_PUSH_REMOTE_TIPS_FOR:-}" = "$remote" ]; then
+    _CI_GIT_REMOTE_TIPS_FOR="$remote"
+    _CI_GIT_REMOTE_TIPS="$CI_GATE_PUSH_REMOTE_TIPS"
+    _CI_GIT_REMOTE_TIPS_RC=0
+    printf '%s' "$_CI_GIT_REMOTE_TIPS"
+    return 0
+  fi
+  _CI_GIT_REMOTE_TIPS_FOR="$remote"
+  _CI_GIT_REMOTE_TIPS=""
+  _CI_GIT_REMOTE_TIPS_RC=1
+  # An override for environments that have no network by design -- CI runners
+  # behind a proxy, an air-gapped mirror -- so this cannot become an unfixable
+  # refusal. Set-and-empty is not set: only an explicit `0` opts out.
+  if [ "${CI_GATE_TRUST_TRACKING_REFS:-0}" = "1" ]; then
+    _CI_GIT_REMOTE_TIPS="$(git for-each-ref --format='%(objectname)' "refs/remotes/${remote}/" 2>/dev/null || true)"
+    _CI_GIT_REMOTE_TIPS_RC=0
+    printf '%s' "$_CI_GIT_REMOTE_TIPS"
+    return 0
+  fi
+  command -v git >/dev/null 2>&1 || return 1
+  # --heads and --tags: a commit is published if any ref on the destination
+  # reaches it, and a release tag is as good a publication as a branch.
+  _rt_out="$(git ls-remote --heads --tags "$remote" 2>/dev/null)" || _rt_rc=$?
+  if [ "$_rt_rc" -ne 0 ]; then
+    return 1
+  fi
+  _CI_GIT_REMOTE_TIPS="$(printf '%s\n' "$_rt_out" | awk '{ print $1 }' | sed '/^$/d' | sort -u)"
+  _CI_GIT_REMOTE_TIPS_RC=0
+  printf '%s' "$_CI_GIT_REMOTE_TIPS"
+  return 0
+}
+
+# Whether the destination, as it is right now, reaches this commit.
+#
+# A tip this clone does not carry cannot be walked, and `merge-base
+# --is-ancestor` says so by failing -- which is the fail-closed answer and the
+# right one: a commit whose relationship to the destination cannot be computed
+# is not a commit that has been proven to be on it.
+ci::git::_reachable_from_destination() {
+  local sha="$1" remote="$2" _rf_tips _rf_tip
+  [ -n "$sha" ] || return 1
+  _rf_tips="$(ci::git::_remote_tips "$remote")" || return 1
+  [ -n "$_rf_tips" ] || return 1
+  while IFS= read -r _rf_tip; do
+    [ -n "$_rf_tip" ] || continue
+    [ "$_rf_tip" = "$sha" ] && return 0
+    git merge-base --is-ancestor "$sha" "$_rf_tip" 2>/dev/null && return 0
+  done <<< "$_rf_tips"
+  return 1
+}
+
+# The newest commit on the way to <tip> that the destination is known to hold,
+# or nothing when that cannot be established.
+#
+# "Already on the destination" is not "already gated somewhere": the answer is
+# read only from the named destination, never from every remote at once.
+#
+# The newest of the per-ref merge bases, because that is the one that excludes
+# the most while excluding only commits the destination has. Two refs whose
+# bases are incomparable -- neither an ancestor of the other -- leave the first
+# in place, which scans more than strictly necessary and never less.
+#
+# The paragraph that used to end this comment claimed staleness was safe here
+# because "the record is behind reality, so the range is wider". That holds for
+# one direction of staleness and was written as though it held for both: a
+# force-push or a deletion leaves the record *ahead* of reality, and the range
+# is then narrower than the truth. The source is the remote itself now, and the
+# claim is gone rather than qualified.
+ci::git::destination_base() {
+  local tip="$1" remote="${CI_GATE_PUSH_REMOTE:-}" _db_ref _db_mb _db_best=""
+  [ -n "$remote" ] || return 0
+  [ -n "$tip" ] || return 0
+  # The destination's current tips, not this clone's memory of them. A base
+  # taken from a stale `refs/remotes/<remote>/*` narrows the range past commits
+  # the destination no longer has, and every history check -- git-safety, the
+  # signature walk, the changeset scan -- then skips exactly the commits this
+  # push is about to make reachable again. Empty on failure, and empty here
+  # means "no base", which sends push_range to the whole tip: more work, and
+  # the safe direction.
+  local _db_tips
+  _db_tips="$(ci::git::_remote_tips "$remote")" || return 0
+  [ -n "$_db_tips" ] || return 0
+  while IFS= read -r _db_ref; do
+    [ -n "$_db_ref" ] || continue
+    _db_mb="$(git merge-base "$tip" "$_db_ref" 2>/dev/null || true)"
+    [ -n "$_db_mb" ] || continue
+    if [ -z "$_db_best" ]; then
+      _db_best="$_db_mb"
+    elif git merge-base --is-ancestor "$_db_best" "$_db_mb" 2>/dev/null; then
+      _db_best="$_db_mb"
+    fi
+  done <<< "$_db_tips"
+  printf '%s' "$_db_best"
+}
+
 # ci::git::push_range – echo the `A..B` range a pre-push gate is standing behind.
 #
 # Lives here rather than in one check because two of them need the same answer,
@@ -44,38 +193,6 @@ ci::git::has_conflict_markers_in_staged() {
 # base with the remote default branch, then the local default branch, and only
 # then the whole of HEAD — which is what a genuine first push contains anyway.
 # `ci::changeset::detect pre-push` resolves the same question the same way.
-# The newest commit on the way to <tip> that the destination remote is already
-# known to hold, or nothing when there is no such record.
-#
-# "Already on the destination" is not "already gated somewhere": the answer is
-# read only from refs/remotes/<destination>/, never from every remote at once.
-#
-# The newest of the per-ref merge bases, because that is the one that excludes
-# the most while excluding only commits the remote has. Two refs whose bases are
-# incomparable -- neither an ancestor of the other -- leave the first in place,
-# which scans more than strictly necessary and never less.
-#
-# Remote-tracking refs can be stale, and stale here means the record is behind
-# reality: the base is older than the truth, so the range is wider. That is the
-# safe direction, and it is the same direction the rest of this file accepts
-# from the same source.
-ci::git::destination_base() {
-  local tip="$1" remote="${CI_GATE_PUSH_REMOTE:-}" _db_ref _db_mb _db_best=""
-  [ -n "$remote" ] || return 0
-  [ -n "$tip" ] || return 0
-  while IFS= read -r _db_ref; do
-    [ -n "$_db_ref" ] || continue
-    _db_mb="$(git merge-base "$tip" "$_db_ref" 2>/dev/null || true)"
-    [ -n "$_db_mb" ] || continue
-    if [ -z "$_db_best" ]; then
-      _db_best="$_db_mb"
-    elif git merge-base --is-ancestor "$_db_best" "$_db_mb" 2>/dev/null; then
-      _db_best="$_db_mb"
-    fi
-  done <<< "$(git for-each-ref --format='%(refname)' "refs/remotes/${remote}/" 2>/dev/null || true)"
-  printf '%s' "$_db_best"
-}
-
 ci::git::push_range() {
   local old_sha="${CI_GATE_PUSH_OLD_SHA:-${GITHUB_EVENT_BEFORE:-}}"
   local new_sha="${CI_GATE_PUSH_NEW_SHA:-HEAD}"
@@ -199,21 +316,26 @@ ci::git::has_conflict_markers_in_changed() {
 # `release.prod` -- matched `releaseXprod/main`. A `-`, `+` or `[` does the same
 # thing in its own way.
 #
-# Remote-tracking refs can be stale, and stale makes this stricter rather than
-# looser: fewer refs contain the commit, so the answer is refuse.
+# Asked of the destination, not of this clone's memory of it.
+#
+# This walked `git branch -r --contains`, whose `-r` filters local
+# remote-tracking records. Those are a snapshot from the last fetch, and the way
+# they go wrong is not symmetric: stale-behind refuses, which is safe, but a
+# force-push or a branch deletion by another actor leaves a tracking ref still
+# containing a commit the destination has dropped -- and this then reports it as
+# already gated. A tag pushed on that commit republishes it while the content
+# lanes validate the current checkout, so the one tree nothing ever looked at is
+# the one being made reachable.
+#
+# ci::git::_reachable_from_destination asks the remote instead, and fails closed
+# when it cannot: no remote name, no answer from `ls-remote`, or a tip this
+# clone cannot walk all mean "not proven published", which is a refusal with a
+# followable remedy rather than a silent pass.
 ci::git::published_to_destination() {
-  local sha="$1" remote="${CI_GATE_PUSH_REMOTE:-}" _pd_line _pd_pfx
+  local sha="$1" remote="${CI_GATE_PUSH_REMOTE:-}"
   [ -n "$remote" ] || return 1
   [ -n "$sha" ] || return 1
-  _pd_pfx="${remote}/"
-  while IFS= read -r _pd_line; do
-    _pd_line="${_pd_line#"${_pd_line%%[![:space:]]*}"}"
-    [ -n "$_pd_line" ] || continue
-    if [ "${_pd_line:0:${#_pd_pfx}}" = "$_pd_pfx" ]; then
-      return 0
-    fi
-  done <<< "$(git branch -r --contains "$sha" 2>/dev/null || true)"
-  return 1
+  ci::git::_reachable_from_destination "$sha" "$remote"
 }
 
 # ci::git::worktree_covers_push – 0 when the worktree can stand in for what is
@@ -242,6 +364,55 @@ ci::git::published_to_destination() {
 # Unset means nobody said, which is CI and every direct invocation: those run
 # against whatever is checked out by design, and there is no second tree to be
 # wrong about.
+# Whether this push adds a label and no content.
+#
+# A push whose every record is a tag (or another non-branch ref) pointing at a
+# commit the destination already carries publishes a name, nothing else: there
+# is no tree going out that a content lane could report on. ci/preflight.sh had
+# one content-free path and it was keyed on deletions alone, so an ordinary
+# `git tag v1.2 <published commit>; git push origin v1.2` ran test-layout, the
+# node lane, python, the build and the shell suites against whatever happened to
+# be checked out -- and any pre-existing failure there blocked a release that
+# sends none of that tree. The half-hour the shell suites take was spent on it
+# too.
+#
+# Deliberately narrower than worktree_covers_push, which also returns 0 for an
+# ordinary branch push whose tip is the checkout. That push *is* content and its
+# lanes must run. The two conditions here are what make this one different:
+#
+#   - the push names no branch destination at all. Set-and-empty is the hook
+#     saying it read the records and none targets refs/heads/*; unset means
+#     nobody told us, and then this cannot be concluded.
+#   - every tag and other-namespace tip is already on the destination. A tag on
+#     an *unpublished* commit -- including one on HEAD -- carries that commit out
+#     with it, and the lanes over HEAD are exactly the right thing to run.
+#
+# published_to_destination asks the remote and fails closed, so an unreachable
+# destination yields "not label-only" and the full plan runs. More work, and the
+# safe direction.
+ci::git::push_is_label_only() {
+  [ -n "${CI_GATE_PUSH_REMOTE_REFS+set}" ] || return 1
+  [ -z "${CI_GATE_PUSH_REMOTE_REFS}" ] || return 1
+  # A deletion-only push is content-free for its own reason and has its own
+  # path; this rule is about what a push *publishes*.
+  [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ] && return 1
+
+  local _lo_tip _lo_res _lo_seen=0
+  # Word-splitting is how the lists are carried; the shas cannot hold whitespace.
+  # shellcheck disable=SC2086
+  for _lo_tip in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-}; do
+    _lo_seen=1
+    _lo_res="$(git rev-parse --verify "${_lo_tip}^{commit}" 2>/dev/null || true)"
+    # An unreadable tip is not evidence of anything, as everywhere else here.
+    [ -n "$_lo_res" ] || return 1
+    ci::git::published_to_destination "$_lo_res" || return 1
+  done
+  # No records at all is not a label-only push; it is a push this function
+  # cannot describe, and the caller's full plan is the right answer.
+  [ "$_lo_seen" -eq 1 ] || return 1
+  return 0
+}
+
 ci::git::worktree_covers_push() {
   local tip="${CI_GATE_PUSH_NEW_SHA:-}"
   # "Nobody said" is every list being empty, not the scalar being empty.
@@ -365,14 +536,18 @@ ci::git::worktree_covers_push() {
   # checked.
   #
   # What settles it is whether the tagged commit has already been published. A
-  # commit contained in a remote-tracking branch went out as part of a branch
-  # push and was gated then, so the tag adds a label and no content -- there is
-  # nothing here for a content lane to vouch for. A tag on a commit no remote
-  # branch contains is carrying that commit out with it, and that is a tree
-  # nothing has ever checked.
+  # commit the destination already carries went out as part of a branch push and
+  # was gated then, so the tag adds a label and no content -- there is nothing
+  # here for a content lane to vouch for. A tag on a commit the destination does
+  # not have is carrying that commit out with it, and that is a tree nothing has
+  # ever checked.
   #
-  # Remote-tracking refs can be stale, and stale makes this stricter rather than
-  # looser: fewer refs contain the commit, so the answer is refuse.
+  # "The destination carries it" is asked of the destination, not of this
+  # clone's remote-tracking refs. The sentence that used to sit here said
+  # staleness only made the test stricter; that is true of one direction of
+  # staleness and false of the other, and the false one is the direction a
+  # force-push produces. published_to_destination now queries the remote and
+  # fails closed when it cannot.
   #
   # Set-and-empty, not unset: unset means nobody told us and there is no second
   # tree to be wrong about, which the early return above already handles.

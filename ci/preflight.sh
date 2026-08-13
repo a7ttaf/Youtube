@@ -684,15 +684,85 @@ run_ship_deletion_only_checks() {
   run_phase "branch-protection:./ci/checks/branch-protection.sh"
 }
 
+# The other push that carries no content: one that publishes only a name.
+#
+# `git tag v1.2 <commit the destination already has>; git push origin v1.2`
+# sends no tree. ci::git::worktree_covers_push accepts it on exactly that
+# ground -- the tag adds a label and no content -- and then this dispatch ran
+# the complete ship plan anyway, because deletions were the only content-free
+# case it knew. So test-layout, the node lane, python, the build and the shell
+# suites all ran against whatever happened to be checked out, and any failure
+# already sitting there blocked an ordinary release. Same reasoning as the
+# deletions path above, and the same exception: destination protection still
+# runs, because where a push is going is a question a label-only push still
+# answers.
+run_ship_label_only_checks() {
+  echo "Push publishes only refs the destination already carries; no tree is going out."
+  echo "  Destination protection still runs."
+  run_phase "branch-protection:./ci/checks/branch-protection.sh"
+}
+
+# ci/checks/typecheck.sh is scheduled here, and was not scheduled anywhere.
+#
+# It is registered in ci/checks/manifest.yml with `severity: blocker`, and no
+# mode ran it: `typecheck-js` survives only as a changeset id that
+# _lane_for_check maps back to the combined `node` lane above, so the file has
+# never executed in quick, full or ship. Registered at one layer and run at
+# none, which is the failure this whole branch is about.
+#
+# Through ci/checks/typecheck-js.sh rather than typecheck.sh directly: run_phase
+# splits a phase entry on the first `:` and executes the command path, so an
+# entry cannot carry CI_GATE_CHECK_ID, and typecheck.sh's default is `all` --
+# which would run the Python, Go and Rust typecheckers under a `-js` label,
+# duplicating the `python` lane beside it. ci/checks/tests-shell.sh is the same
+# wrapper for the same reason.
+#
+# It is not a duplicate of what `node` does. The node lane runs the workspace's
+# own `typecheck` script, whatever that script happens to compile; this lane
+# compiles the root project and then every other discovered project by name. A
+# workspace whose script is `tsc -p tsconfig.app.json --noEmit` has
+# tsconfig.node.json checked by this lane and by nothing else -- and the
+# argument rule in ci/checks/node.sh accepts that script *because* this lane
+# covers the rest. That justification was written before this line existed and
+# was false until it did.
 run_full_or_ship_checks() {
   run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "branch-protection:./ci/checks/branch-protection.sh"     "test-layout:./ci/checks/test-layout.sh"
   run_phase     "security:./ci/checks/security.sh"
   run_phase     "node:./ci/checks/node.sh"     "python:./ci/checks/python.sh"     "build:./ci/checks/build.sh"
+  run_phase     "typecheck-js:./ci/checks/typecheck-js.sh"
   run_phase     "tests-shell:./ci/checks/tests-shell.sh"
   run_phase     "debt:./ci/checks/debt.sh"
 }
 
 run_mode() {
+  # Whether a push carries a tree is a fact about the push, and it is settled
+  # before any scheduler is chosen.
+  #
+  # These two cases used to live inside the `full|ship` arm below, past a
+  # `return 0`: with CI_GATE_USE_LANES=1 and ci/config/lanes.conf present -- a
+  # supported configuration -- a deletion-only push ran the whole lane list over
+  # whatever happened to be checked out, and never reached the content-free
+  # path. Worse in that mode than in this one, because lanes.conf carries no
+  # branch-protection entry:
+  #
+  #   grep -c 'branch-protection' ci/config/lanes.conf   -> 0
+  #
+  # so the one check that both content-free paths deliberately keep -- where the
+  # push is going -- was the single check that could not run. The narrow path
+  # and the wide path were each missing the other's protection.
+  #
+  # Hoisted rather than duplicated into the lanes branch: a rule stated twice is
+  # a rule that will be true in one place, which is the shape of nearly every
+  # finding on this branch.
+  if [ "$MODE" = "ship" ] && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
+    run_ship_deletion_only_checks
+    return 0
+  fi
+  if [ "$MODE" = "ship" ] && ci::git::push_is_label_only; then
+    run_ship_label_only_checks
+    return 0
+  fi
+
   # If lanes.conf exists and CI_GATE_USE_LANES=1, read it. Otherwise use hardcoded defaults.
   if [ "${CI_GATE_USE_LANES:-0}" = "1" ] && [ -f "ci/config/lanes.conf" ]; then
     # lanes.conf has 5 columns (id|name|command|blocking|description); only id and
@@ -715,13 +785,11 @@ run_mode() {
       run_common_checks
       ;;
     full|ship)
-      # Only ship, and only when the hook said so: `full` is a deliberate
-      # whole-tree run and must not be narrowed by an environment variable.
-      if [ "$MODE" = "ship" ] && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "1" ]; then
-        run_ship_deletion_only_checks
-      else
-        run_full_or_ship_checks
-      fi
+      # The content-free cases are decided at the top of this function, above
+      # the scheduler choice. Only ship reaches them, and only when the hook
+      # said so: `full` is a deliberate whole-tree run and must not be narrowed
+      # by an environment variable.
+      run_full_or_ship_checks
       ;;
     debt)
       run_phase "git-safety:./ci/checks/git-safety.sh"
