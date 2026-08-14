@@ -215,6 +215,23 @@ typecheck::run_js() {
     return 0
   fi
 
+  # Narrowing the project list to HEAD chose *which* files are compiled and
+  # said nothing about their *contents*. This lane runs the workspace's own tsc
+  # over the worktree, so a type error committed in HEAD and fixed only on disk
+  # compiled clean and the push carrying it was reported PASS.
+  #
+  # ci/checks/node.sh has refused this since "Workspace files differ between
+  # HEAD and the worktree", and typecheck-js never asked because it is
+  # scheduled as its own blocker lane and does not go through node.sh. Asked
+  # here through the shared reader rather than a second copy of the comparison.
+  if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+    local _tc_ws
+    while IFS= read -r _tc_ws; do
+      [ -n "$_tc_ws" ] || continue
+      ci::common::refuse_on_workspace_drift "$_tc_ws"
+    done <<< "$workspaces"
+  fi
+
   local ws rc
   while IFS= read -r ws; do
     [ -n "$ws" ] || continue

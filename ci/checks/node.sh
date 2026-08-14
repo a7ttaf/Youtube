@@ -3075,6 +3075,72 @@ assert_no_persistent_filter() {
 
 # The non-narrowing flag allow-list, as its own function so a package script
 # reached through another one is read the same way as a direct command.
+# _reject_non_building_mode <script_name> <cmd> – refuse a build script whose
+# bundler is invoked in a mode that produces no bundle.
+#
+# `_script_names_a_checker` asks whether a known bundler appears in command
+# position, which is the right question and not the whole of it: `vite
+# --version` and `webpack --help` both name their bundler, both exit 0, and
+# neither packages anything. A workspace that switched production bundling off
+# by editing one word of its manifest stayed green.
+#
+# The same distinction `_reject_narrowing_flags` and the tsc guard draw between
+# a mode that checks and one that reports -- enumerated by behaviour rather than
+# by name resemblance, for the reason recorded there about `--listFiles` and
+# `--listFilesOnly`.
+#
+# Two families, and they are separated because they need different treatment:
+#
+#   flags every one of these tools shares      --version -v --help -h -?
+#   subcommands that serve instead of build    dev serve preview start watch
+#
+# `vite`, `next`, `nuxt`, `astro`, `parcel`, `remix`, `ng` and `react-scripts`
+# all take a subcommand, and for every one of them the build subcommand is
+# spelled `build` while the ones above run a server. `webpack serve` is the same
+# shape. Watch modes are refused with them: `webpack --watch` does build, but it
+# does not terminate, so a gate that runs it hangs until the lane's timeout and
+# reports infrastructure failure instead of a result.
+#
+# Scanned only after the bundler itself is in hand, so `echo --version && vite
+# build` is not refused for a word that belongs to `echo`. `-?` is quoted for
+# the reason the tsc list quotes it: unquoted, `?` matches any single character
+# and the arm would swallow every short flag these tools have.
+_reject_non_building_mode() {
+  local script_name="$1" cmd="$2" tok _seen=0 _rnb
+  # shellcheck disable=SC2086
+  set -f
+  for tok in $cmd; do
+    _rnb="${tok##*/}"
+    _rnb="${_rnb%\'}" ; _rnb="${_rnb#\'}"
+    _rnb="${_rnb%\"}" ; _rnb="${_rnb#\"}"
+    case "$_rnb" in
+      ';'|'&&'|'||'|'|'|'&') _seen=0 ; continue ;;
+    esac
+    if [ "$_seen" -eq 0 ]; then
+      case "$_rnb" in
+        vite|webpack|rollup|rspack|next|nuxt|astro|tsup|esbuild|parcel|remix|ng|react-scripts)
+          _seen=1 ;;
+      esac
+      continue
+    fi
+    case "$_rnb" in
+      --version|-v|--help|-h|'-?'|--watch|-w \
+        |dev|serve|preview|start|watch)
+        set +f
+        echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a non-building bundler mode in its"
+        echo "  '${script_name}' script:"
+        echo "    ${script_name}: ${cmd}"
+        echo "    offending argument: ${tok}"
+        echo "  That mode produces no bundle, so the lane reports PASS having built"
+        echo "  nothing. A dev server is not a build and a version banner is not a"
+        echo "  bundle. Use the tool's build subcommand."
+        exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        ;;
+    esac
+  done
+  set +f
+}
+
 _reject_narrowing_flags() {
   local script_name="$1" cmd="$2" runner="${3:-}" tok _tp_state=0 _ep_state=0 _pp_state=0 _pm_name="" _rnf_word
   # shellcheck disable=SC2086
@@ -4062,6 +4128,13 @@ if [ -n "$_BUNDLER_CONFIGS" ]; then
 
   _bd_cmd="$(script_command build)"
   _reject_untrustworthy_composition build "$_bd_cmd"
+  # Naming the bundler is not running it. `"build": "vite --version"` prints a
+  # version and exits 0, and `webpack --help` does the same -- both satisfy a
+  # rule that only asks whether a known bundler appears, so the lane reported
+  # PASS for a workspace whose production packaging had been switched off by a
+  # manifest edit. The same distinction the tsc guard above draws between
+  # `--noEmit` and `--showconfig`, one tool over.
+  _reject_non_building_mode build "$_bd_cmd"
   _bd_ok=0
   # set -f for the same reason the typecheck predicate uses it: word-splitting
   # is wanted here and globbing against the workspace is not.

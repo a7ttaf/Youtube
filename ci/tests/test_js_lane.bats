@@ -6612,3 +6612,100 @@ ship_ws_run() {
   done
   rm -rf "$NODE_SB"
 }
+
+@test "node lane: a build script that names its bundler but runs no build is refused" {
+  # The bundler guard asked only whether a known bundler appeared in command
+  # position. `"build": "vite --version"` satisfies that, prints a banner and
+  # exits 0, so a workspace whose production packaging had been switched off by
+  # a one-word manifest edit stayed green -- the same distinction the tsc guard
+  # draws between `--noEmit` and `--showconfig`, one tool over.
+  #
+  # Driven through the predicate rather than the lane: reaching it through the
+  # lane needs a real install, and the question here is one pass of parsing.
+  local fn="$BATS_TEST_TMPDIR/rnb.sh"
+  awk '/^_reject_non_building_mode\(\) \{/,/^\}/' "$REPO_ROOT/ci/checks/node.sh" > "$fn"
+  bash -n "$fn" || { echo "extraction is not valid shell" >&2; return 1; }
+  [ -s "$fn" ] || { echo "extracted nothing" >&2; return 1; }
+
+  _rnb() {
+    bash -c '. "$1"; CI_RESULT_FAIL_NEW_ISSUE=20; CI_GATE_NODE_WORKSPACE=ws
+             _reject_non_building_mode build "$2"; echo ACCEPTED' _ "$fn" "$1" 2>&1
+  }
+
+  local bad
+  for bad in "vite --version" "webpack --help" "next dev" "parcel watch" \
+             "react-scripts start" "vite build --watch" "vite serve" "next start"; do
+    run _rnb "$bad"
+    [[ "$output" != *ACCEPTED* ]] \
+      || { echo "accepted a script that builds nothing: ${bad}" >&2; return 1; }
+    [[ "$output" == *"non-building bundler mode"* ]] \
+      || { echo "refused '${bad}' with the wrong message: $output" >&2; return 1; }
+  done
+
+  # The controls, and they are the point: a rule that refused every build
+  # script would satisfy the loop above by refusing everything.
+  local good
+  for good in "vite build" "webpack" "next build" "vite build --mode production" \
+              "parcel build src/index.html" "react-scripts build" "rollup -c" \
+              "tsup src/index.ts" "ng build --configuration production"; do
+    run _rnb "$good"
+    [[ "$output" == *ACCEPTED* ]] \
+      || { echo "refused a real build: ${good}" >&2; echo "$output" >&2; return 1; }
+  done
+
+  # A non-building word that belongs to another command is not this bundler's.
+  run _rnb "echo --version && vite build"
+  [[ "$output" == *ACCEPTED* ]] \
+    || { echo "read a word belonging to echo as the bundler's mode" >&2; return 1; }
+}
+
+@test "js lane: a ship run refuses a worktree that differs from the push" {
+  # Narrowing the project and test lists to HEAD chose *which* files these
+  # lanes read and said nothing about their *contents*: both run the
+  # workspace's own tooling over the worktree. A type error committed in HEAD
+  # and fixed only on disk compiled clean, and a test failing in HEAD and
+  # repaired only on disk passed, each reporting PASS for a push that still
+  # carries the problem.
+  #
+  # ci/checks/node.sh has refused this since "Workspace files differ between
+  # HEAD and the worktree". typecheck-js and tests-js are scheduled as their
+  # own blocker lanes and never go through node.sh, so neither asked.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/frontend"
+  (
+    cd "$sb"
+    git init -q -b main .
+    git config user.email t@t && git config user.name t
+    printf 'ci/\n' > .gitignore
+    printf '{"name":"f","private":true,"scripts":{"test":"vitest run"}}\n' > frontend/package.json
+    printf '{}\n' > frontend/tsconfig.json
+    printf 'let x: number = 1\n' > frontend/app.ts
+    git add -A && git commit -qm c1
+  ) >/dev/null 2>&1
+  cp -r "$REPO_ROOT/ci" "$sb/ci"
+
+  # The control first: a worktree that matches HEAD is not refused, or the
+  # assertions below pass by refusing everything.
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [[ "$output" != *"differ between HEAD and the worktree"* ]] \
+    || { echo "refused a clean worktree: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # Now a committed file changed only on disk. Both lanes have to refuse.
+  printf 'let x: number = 2\n' > "$sb/frontend/app.ts"
+  local lane
+  for lane in "typecheck-js:ci/checks/typecheck.sh" "tests-js:ci/checks/tests.sh"; do
+    run bash -c "cd '$sb' && CI_GATE_MODE=ship CI_GATE_CHECK_ID=${lane%%:*} bash ${lane#*:} 2>&1"
+    [[ "$output" == *"differ between HEAD and the worktree"* ]] \
+      || { echo "${lane%%:*} reported on a worktree that is not the push: $output" >&2; rm -rf "$sb"; return 1; }
+    [[ "$output" == *"frontend/app.ts"* ]] \
+      || { echo "${lane%%:*} did not name the drifted file: $output" >&2; rm -rf "$sb"; return 1; }
+  done
+
+  # And quick mode is untouched: it stands behind the worktree, so the worktree
+  # differing from HEAD is exactly what it is there to check.
+  run bash -c "cd '$sb' && CI_GATE_MODE=quick CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [[ "$output" != *"differ between HEAD and the worktree"* ]] \
+    || { echo "quick mode refused its own tree: $output" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}

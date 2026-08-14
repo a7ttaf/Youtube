@@ -81,8 +81,25 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
     if [ "$_ts_ig_rc" -ne 0 ]; then
       printf '%s\n' "$SCAN_UNREADABLE"
     else
+      # Narrowed to the files these suites actually read, which is what the
+      # scan is for: an ignored path only matters here if it could stand in for
+      # one the pushed commits delete, and the suites read shell and bats.
+      #
+      # Pruning by name did not scale. `.ci-gate`, `ci/reports/` and
+      # `ci/artifacts/` were each added after the gate blocked itself on its own
+      # output, and the list was still short by every cache this repository's
+      # own tooling writes under ci/ -- all of these are ignored, all were
+      # reported as drift, and each one exits 20 before a single suite runs:
+      #
+      #   ci/__pycache__/x.pyc          ci/.ruff_cache/z
+      #   ci/lib/__pycache__/y.pyc      ci/tests/.pytest_cache/w
+      #
+      # A deny-list has to name every generated directory that will ever exist,
+      # including the ones a tool added last week. What the suites read is a
+      # closed set, so it is the set that is named.
       printf '%s\n' "$_ts_ig" \
-        | grep -Ev '(^|/)(\.ci-gate|node_modules)/|^ci/(reports|artifacts)/' || true
+        | grep -Ev '(^|/)(\.ci-gate|node_modules)/|^ci/(reports|artifacts)/' \
+        | grep -E '\.(sh|bats|bash)$|(^|/)\.gitignore$|(^|/)\.githooks/|(^|/)README\.md$' || true
     fi
   } | sort -u | sed '/^$/d')"
   case "$SHELL_DRIFT" in

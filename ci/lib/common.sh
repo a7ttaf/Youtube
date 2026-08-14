@@ -58,9 +58,151 @@ ci::common::_manifest_in_scope() {
   git cat-file -e "HEAD:${1#./}" 2>/dev/null
 }
 
+# ci::common::workspace_drift <path> – paths under <path> that differ between
+# HEAD and the worktree, on stdout. Returns 1 when there are any, 2 when the
+# comparison could not be made, 0 when the two agree.
+#
+# The lanes that read the worktree need this before they report on a push.
+# ci/checks/node.sh has had it since "Workspace files differ between HEAD and
+# the worktree", and ci/checks/tests-shell.sh has its own for the gate's own
+# sources -- but `typecheck-js` and `tests-js` are scheduled as standalone
+# blocker lanes that never go through node.sh, and neither asked. Narrowing the
+# project and test lists to HEAD, which is what this branch just did, chooses
+# *which* files are read and says nothing about their *contents*:
+#
+#   CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh
+#
+# compiled the worktree's copy, so a type error committed in HEAD and fixed only
+# on disk was reported PASS for a push that still carries it. The same for a
+# failing test repaired locally and not committed.
+#
+# Untracked files count. A test or a source module that exists only on disk is
+# read by the runner and is not in the push, which is the same divergence from
+# the other side. Ignored files do not: those are build output and caches, and
+# ci/checks/tests-shell.sh's scan is the record of what listing them costs.
+#
+# Both statuses are taken, and separately from the output. `git diff` and
+# `git ls-files` each answer half the question, and a pipeline's status answers
+# for its last stage -- so an unreadable index produced an empty list that reads
+# exactly like "the worktree matches", which is the failure this returns 2 for.
+ci::common::workspace_drift() {
+  local ws="${1:-.}" _wd_a _wd_b _wd_rc=0
+  command -v git >/dev/null 2>&1 || return 0
+  git rev-parse --git-dir >/dev/null 2>&1 || return 0
+  git rev-parse --verify HEAD >/dev/null 2>&1 || return 0
+
+  _wd_a="$(git diff --name-only HEAD -- "$ws" 2>/dev/null)" || _wd_rc=2
+  [ "$_wd_rc" -eq 0 ] || return 2
+  _wd_b="$(git ls-files --others --exclude-standard -- "$ws" 2>/dev/null)" || _wd_rc=2
+  [ "$_wd_rc" -eq 0 ] || return 2
+
+  local _wd_all
+  _wd_all="$(printf '%s\n%s\n' "$_wd_a" "$_wd_b" | sed '/^$/d' | sort -u)"
+  [ -n "$_wd_all" ] || return 0
+  printf '%s\n' "$_wd_all"
+  return 1
+}
+
+# ci::common::refuse_on_workspace_drift <path> – the shared diagnostic for the
+# above, for a lane that is about to read the worktree in ship mode. Exits;
+# does not return, unless there is nothing to report.
+#
+# The wording follows ci/checks/node.sh's, because a developer who has hit that
+# one should not have to work out that this is the same condition.
+ci::common::refuse_on_workspace_drift() {
+  local ws="${1:-.}" _rd_out _rd_rc=0 _rd_p
+  _rd_out="$(ci::common::workspace_drift "$ws")" || _rd_rc=$?
+  case "$_rd_rc" in
+    0) return 0 ;;
+    2)
+      echo "Cannot compare ${ws} against HEAD."
+      echo "  Refusing to report a clean comparison from a listing that failed"
+      echo "  to produce one."
+      exit "${CI_RESULT_FAIL_INFRA:-30}"
+      ;;
+  esac
+  echo "Workspace files differ between HEAD and the worktree:"
+  while IFS= read -r _rd_p; do
+    [ -n "$_rd_p" ] || continue
+    echo "    $_rd_p"
+  done <<< "$_rd_out"
+  echo "  This lane reads the worktree, so it would report on content the pushed"
+  echo "  commits do not contain. Commit the rest, stash it, or discard it."
+  exit "${CI_RESULT_FAIL_NEW_ISSUE:-20}"
+}
+
+# Manifests the push carries that this worktree cannot supply.
+#
+# `_manifest_in_scope` narrows the walk to what the push carries, which drops an
+# untracked scratch/package.json correctly. It cannot add a manifest HEAD
+# carries that the walk never offered -- and that case was once documented as
+# "still absent", which is a false pass rather than a narrowing:
+#
+#   rm -rf frontend
+#   CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh
+#   -> skipped: no package.json found        exit 0
+#
+# for a push whose HEAD still carries frontend/package.json. Inventing the
+# workspace is not the fix -- nothing can install a directory that is not there
+# -- but "no workspace" is not the truth either. The truth is that this run
+# cannot check the push, so it says so and the caller records FAIL_INFRA.
+#
+# A function, called before node_workspaces' first return rather than after its
+# last. It lived at the end of the walk, and the root-manifest branch returns
+# above that -- so a pushed tree carrying a root package.json beside
+# packages/app/package.json, with packages/app/ missing locally, emitted `.` and
+# never reached the check. The node, tests and typecheck lanes then ran the root
+# alone and the pushed child's scripts were skipped: the same false pass, by the
+# one path that returns before the guard.
+#
+# Returns 1 with the paths on stderr, 0 when there is nothing to report --
+# including when the question cannot be asked, since could-not-ask must not
+# empty a list the way a failure to enumerate would.
+ci::common::_head_manifests_present() {
+  local manifest="${1:-package.json}"
+  [ "${CI_GATE_MODE:-}" = "ship" ] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  git rev-parse --git-dir >/dev/null 2>&1 || return 0
+  git rev-parse --verify HEAD >/dev/null 2>&1 || return 0
+
+  local _nw_head _nw_missing="" _nw_dir _nw_found
+  # `--full-tree` so the answer does not depend on where this was called from:
+  # `git ls-tree` applies the current directory as an implicit path filter, and
+  # an empty listing reads exactly like "the push carries no manifests".
+  _nw_head="$(git ls-tree -r --full-tree --name-only HEAD 2>/dev/null)" || return 0
+  while IFS= read -r _nw_found; do
+    [ -n "$_nw_found" ] || continue
+    case "$_nw_found" in
+      "$manifest") _nw_dir="." ;;
+      *"/$manifest") _nw_dir="${_nw_found%"/$manifest"}" ;;
+      *) continue ;;
+    esac
+    if [ "$_nw_dir" != "." ] && ci::common::is_vendored_path "$_nw_dir"; then
+      continue
+    fi
+    # An `if`, not `[ -f ] && continue`: the latter is a statement whose status
+    # is the test's, so on the last iteration it decides the loop's.
+    if [ -f "$_nw_found" ]; then continue; fi
+    _nw_missing="${_nw_missing} ${_nw_found}"
+  done <<< "$_nw_head"
+
+  [ -n "$_nw_missing" ] || return 0
+  {
+    echo "These ${manifest} files are in the commit being pushed but not in this"
+    echo "  worktree:${_nw_missing}"
+    echo "  The lane cannot install, typecheck or test a directory that is not"
+    echo "  there, and reporting no workspace would pass the push having checked"
+    echo "  none of it. Restore the worktree, or push from one that matches HEAD."
+  } >&2
+  return 1
+}
+
 ci::common::node_workspaces() {
   local manifest="${1:-package.json}"
   local found dir
+
+  # Before the root-manifest branch below, because that branch returns.
+  ci::common::_head_manifests_present "$manifest" || return 1
 
   # A root manifest that the push does not carry is not this run's root: ship
   # mode falls through to the walk below, which skips it for the same reason.
@@ -259,59 +401,6 @@ ci::common::node_workspaces() {
       echo "  at its own root. Declare which this is before the lane can cover it."
     } >&2
     return 1
-  fi
-
-  # The other direction of the same question, and the one the intersection above
-  # cannot answer. `_manifest_in_scope` narrows the walk to what the push
-  # carries, which drops an untracked scratch/package.json correctly. It cannot
-  # add a manifest HEAD carries that the walk never offered -- and that case was
-  # documented above as "still absent", which is a false pass rather than a
-  # narrowing:
-  #
-  #   rm -rf frontend
-  #   CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh
-  #   -> skipped: no package.json found        exit 0
-  #
-  # for a push whose HEAD still carries frontend/package.json. Inventing the
-  # workspace is not the fix -- nothing can install a directory that is not
-  # there -- but "no workspace" is not the truth either. The truth is that this
-  # run cannot check the push, so it says so and the caller records FAIL_INFRA.
-  if [ "${CI_GATE_MODE:-}" = "ship" ] \
-    && command -v git >/dev/null 2>&1 \
-    && git rev-parse --git-dir >/dev/null 2>&1 \
-    && git rev-parse --verify HEAD >/dev/null 2>&1; then
-    local _nw_head _nw_missing="" _nw_dir
-    # `--full-tree` so the answer does not depend on where this was called from:
-    # `git ls-tree` applies the current directory as an implicit path filter,
-    # and an empty listing here reads exactly like "the push carries no
-    # manifests", which is the false pass this block exists to prevent.
-    if _nw_head="$(git ls-tree -r --full-tree --name-only HEAD 2>/dev/null)"; then
-      while IFS= read -r found; do
-        [ -n "$found" ] || continue
-        case "$found" in
-          "$manifest") _nw_dir="." ;;
-          *"/$manifest") _nw_dir="${found%"/$manifest"}" ;;
-          *) continue ;;
-        esac
-        if [ "$_nw_dir" != "." ] && ci::common::is_vendored_path "$_nw_dir"; then
-          continue
-        fi
-        # An `if`, not `[ -f ] && continue`: the latter is a statement whose
-        # status is the test's, so on the last iteration it decides the loop's.
-        if [ -f "$found" ]; then continue; fi
-        _nw_missing="${_nw_missing} ${found}"
-      done <<< "$_nw_head"
-    fi
-    if [ -n "$_nw_missing" ]; then
-      {
-        echo "These ${manifest} files are in the commit being pushed but not in this"
-        echo "  worktree:${_nw_missing}"
-        echo "  The lane cannot install, typecheck or test a directory that is not"
-        echo "  there, and reporting no workspace would pass the push having checked"
-        echo "  none of it. Restore the worktree, or push from one that matches HEAD."
-      } >&2
-      return 1
-    fi
   fi
 
   _i=0

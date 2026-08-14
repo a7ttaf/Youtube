@@ -502,6 +502,23 @@ tests::run_js() {
     return 0
   fi
 
+  # The push range narrowed *which* tests are selected and nothing about the
+  # code they run against: the runner executes the worktree. A test failing in
+  # HEAD and repaired only on disk therefore passed, and the push carrying the
+  # failure was reported green -- the enabled JS test check skipped by local
+  # WIP rather than validating the pushed tree.
+  #
+  # ci/checks/node.sh refuses this already; tests-js is scheduled as its own
+  # blocker lane and never goes through it. Same shared reader as typecheck-js,
+  # so there is one answer to "does this worktree match the push" and not three.
+  if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+    local _tj_ws
+    while IFS= read -r _tj_ws; do
+      [ -n "$_tj_ws" ] || continue
+      ci::common::refuse_on_workspace_drift "$_tj_ws"
+    done <<< "$workspaces"
+  fi
+
   local jest_pattern=""
   local js_tests=""
   local pattern

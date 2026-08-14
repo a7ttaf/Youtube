@@ -2681,3 +2681,90 @@ YML
   [[ "$output" != *node* ]]
   rm -rf "$sb"
 }
+
+@test "tests-shell: a local cache under ci/ is not shell-suite drift" {
+  # The ignored-file half of the drift scan pruned by name -- `.ci-gate`,
+  # `ci/reports/`, `ci/artifacts/` -- and each of those was added after the gate
+  # blocked itself on its own output. The list was still short by every cache
+  # this repository's own tooling writes under ci/, and any one of them exits 20
+  # before a single suite runs, on a push whose commits and suite files are
+  # unchanged.
+  #
+  # A deny-list has to name every generated directory that will ever exist. What
+  # the suites read is a closed set, so the filter names that instead.
+  local flt='(^|/)(\.ci-gate|node_modules)/|^ci/(reports|artifacts)/'
+  local keep='\.(sh|bats|bash)$|(^|/)\.gitignore$|(^|/)\.githooks/|(^|/)README\.md$'
+
+  # The filter is taken from the lane rather than restated, or this case pins a
+  # copy of the rule and not the rule.
+  grep -qF -- "$keep" "$REPO_ROOT/ci/checks/tests-shell.sh" \
+    || { echo "the lane no longer uses this filter; update this case" >&2; return 1; }
+
+  _drift_reports() {
+    printf '%s\n' "$1" | grep -Ev "$flt" | grep -E "$keep"
+  }
+
+  local noise
+  for noise in "ci/__pycache__/x.pyc" "ci/lib/__pycache__/y.pyc" "ci/.ruff_cache/z" \
+               "ci/tmp/local.txt" "ci/tests/.pytest_cache/w" "ci/reports/junit.xml" \
+               "ci/.ci-gate/state"; do
+    run _drift_reports "$noise"
+    [ -z "$output" ] \
+      || { echo "a path the suites never read was reported as drift: $noise" >&2; return 1; }
+  done
+
+  # The control, and it is what the ignored half exists for: a commit that
+  # deletes a bats file and ignores its path leaves the worktree replacement
+  # invisible to the tracked and untracked lists, and this is the scan that can
+  # still see it. Dropping caches must not drop that.
+  local real
+  for real in "ci/tests/test_hooks.bats" "ci/lib/git.sh" "ci/checks/node.sh" \
+              ".githooks/pre-push" ".gitignore" "frontend/README.md" "ci/lib/helper.bash"; do
+    run _drift_reports "$real"
+    [ -n "$output" ] \
+      || { echo "a file the suites do read was dropped from the scan: $real" >&2; return 1; }
+  done
+}
+
+@test "js lane: the root-manifest branch checks HEAD children too" {
+  # The missing-workspace guard sat at the end of the walk, and the
+  # root-manifest branch returns above it. So a pushed tree carrying a root
+  # package.json beside packages/app/package.json, with packages/app/ missing
+  # locally, emitted `.` and never reached the guard -- the node, tests and
+  # typecheck lanes then ran the root alone and the pushed child's scripts were
+  # skipped. The same false pass the guard exists to stop, by the one path that
+  # returns before it.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/packages/app"
+  (
+    cd "$sb"
+    git init -q -b main .
+    git config user.email t@t && git config user.name t
+    printf '{"name":"root","private":true,"workspaces":["packages/*"]}\n' > package.json
+    printf '{"name":"app"}\n' > packages/app/package.json
+    printf 'x\n' > a.txt
+    git add -A && git commit -qm c1
+  ) >/dev/null 2>&1
+
+  # The premise: with both present this is the nested-workspace ambiguity, which
+  # is a different refusal and proves the fixture really has a root and a child.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json 2>&1"
+  [[ "$output" == *"nested one(s)"* ]] \
+    || { echo "fixture is not a root-plus-child layout: $output" >&2; rm -rf "$sb"; return 1; }
+
+  ( cd "$sb" && rm -rf packages/app )
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json 2>/dev/null"
+  [ "$status" -ne 0 ] \
+    || { echo "the root branch answered '$output' for a push whose child is missing" >&2; rm -rf "$sb"; return 1; }
+  [ -z "$output" ] \
+    || { echo "emitted a workspace list for a tree it cannot check: $output" >&2; rm -rf "$sb"; return 1; }
+
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json 2>&1 1>/dev/null"
+  [[ "$output" == *"packages/app/package.json"* ]] \
+    || { echo "the refusal does not name the missing child: $output" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
