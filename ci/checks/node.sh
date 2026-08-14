@@ -2263,9 +2263,21 @@ _pm_advance() {
   # _reject_narrowing_flags is keyed by runner: one list cannot describe five
   # vocabularies. `-p` is `--package` to `npx` and `--parseable` to `pnpm`, so a
   # shared list either misses npx's value or eats pnpm's command.
+  # `-c`/`--call` is deliberately absent. npm documents it as taking a *command
+  # string* -- `npm exec --package jest -c 'jest --ci'` runs that string with the
+  # package's binaries on PATH -- so the word after it is the command, not an
+  # inert option value. Consumed as a value, `npx -c 'jest --ci'` left this
+  # reader with no command at all, and a script that names no runner is one this
+  # lane refuses: a legitimate test script rejected for running no test runner.
+  #
+  # Skipping it as an ordinary boolean is what makes the payload's first word
+  # arrive in command position, which is where the caller already unquotes it.
+  # ci/checks/tests.sh reads the same spelling through its own `--call` arm, and
+  # `js lane: the two runner readers agree about the same test script` pins the
+  # two together so they cannot drift apart about it again.
   case "${_pm_name}|$1" in
-    'npx|-p'|'npx|--package'|'npx|-c'|'npx|--call' \
-      |'npm|-p'|'npm|--package'|'npm|-c'|'npm|--call' \
+    'npx|-p'|'npx|--package' \
+      |'npm|-p'|'npm|--package' \
       |'npm|--prefix'|'npm|-w'|'npm|--workspace'|'npm|-C' \
       |'pnpm|--filter'|'pnpm|-F'|'pnpm|--dir'|'pnpm|-C'|'pnpm|--workspace-dir' \
       |'yarn|--cwd' \
@@ -2410,6 +2422,74 @@ _reject_escaped_word() {
 # being dropped, so `"test": "bash scripts/test.sh tests/a.test.ts"` over that
 # wrapper collected one file and the lane exited 0. Two halves of one question
 # with only one of them asked.
+# _rejoin_quoted <tok> <rest...> – put a quoted value that word-splitting tore
+# apart back into one token. Leaves the result in _RJ_TOK and the number of
+# extra words it consumed in _RJ_N, so the caller can shift past them.
+#
+# Both readers below split their command with `set -- $cmd`, which does not
+# reinterpret quotes: `--reporter "my reporter"` arrives as `--reporter`, `"my`,
+# `reporter"`, and the tail word then has no flag in front of it and is read as
+# a positional test filter. That refused legitimate scripts for narrowing a
+# suite they do not narrow. Two arms because there are two spellings -- the
+# value as its own word, and attached after an `=` -- and the attached one was
+# missed when the first was fixed, because the token starts with `-` rather
+# than with the quote.
+#
+# Globals rather than a return value: the caller has the remaining words in its
+# own `$@`, which cannot be handed back through a command substitution without
+# losing a token containing whitespace or a newline -- the exact thing being
+# reassembled here.
+# Rolls back rather than consuming to the end when the quote never closes. An
+# unbalanced quote is not a value with a space in it, and treating it as one
+# absorbs every word after it -- including a genuine positional filter, which is
+# precisely what this reader exists to catch. Measured: the forwarded-argument
+# string can arrive with its closing quote already lost upstream, and consuming
+# to the end then turned `--outputFile="my dir/out.xml tests/only.test.ts` into
+# a single accepted "value" and let the lane pass a script that narrows its
+# suite. Failing closed here leaves the trailing words to be judged one by one,
+# which is the behaviour a reader that cannot parse the string should have.
+_rejoin_quoted() {
+  local _orig="$1" _q _qv _n=0
+  _RJ_TOK="$1"
+  _RJ_N=0
+  shift
+  case "$_RJ_TOK" in
+    \"*|\'*)
+      _q="${_RJ_TOK:0:1}"
+      while [ "${#_RJ_TOK}" -lt 2 ] || [ "${_RJ_TOK: -1}" != "$_q" ]; do
+        if [ "$#" -eq 0 ]; then
+          _RJ_TOK="$_orig"
+          _RJ_N=0
+          return 0
+        fi
+        _RJ_TOK="$_RJ_TOK $1"
+        shift
+        _n=$((_n + 1))
+      done
+      _RJ_N="$_n"
+      ;;
+    # Measured on the value rather than the whole token, so the flag name and
+    # the `=` cannot be mistaken for the closing quote, and `--reporter=json`
+    # never enters here at all -- the pattern requires a quote after the `=`.
+    -*=\"*|-*=\'*)
+      _qv="${_RJ_TOK#*=}"
+      _q="${_qv:0:1}"
+      while [ "${#_qv}" -lt 2 ] || [ "${_qv: -1}" != "$_q" ]; do
+        if [ "$#" -eq 0 ]; then
+          _RJ_TOK="$_orig"
+          _RJ_N=0
+          return 0
+        fi
+        _RJ_TOK="$_RJ_TOK $1"
+        shift
+        _n=$((_n + 1))
+        _qv="${_RJ_TOK#*=}"
+      done
+      _RJ_N="$_n"
+      ;;
+  esac
+}
+
 _reject_forwarded_args() {
   local script_name="$1" args="$2" tok _rfa_tool="${1##*/}"
   case "$args" in
@@ -2455,14 +2535,24 @@ _reject_forwarded_args() {
   _reject_narrowing_flags "$script_name" "$args"
   set -f
   # shellcheck disable=SC2086
-  for tok in $args; do
+  set -- $args
+  set +f
+  # A while/shift loop rather than `for tok in $args`, so a quoted value split
+  # across words can be put back together before it is judged: a `for` cannot
+  # consume the words that follow the one in hand. Without it
+  # `--outputFile="my dir/out.xml"` left `dir/out.xml"` standing alone as a bare
+  # word, and this wrapper rule refused a script that narrows nothing -- the
+  # same defect _reject_positional_filters carries the other half of.
+  while [ "$#" -gt 0 ]; do
+    _rejoin_quoted "$@"
+    tok="$_RJ_TOK"
+    [ "$_RJ_N" -gt 0 ] && shift "$_RJ_N"
     case "$tok" in
-      -*) continue ;;
+      -*) shift ; continue ;;
       # Forwarding on again is not an argument this reader can resolve either
       # way, and refusing it would refuse every wrapper of a wrapper.
-      '"$@"'|'$@'|'"$*"'|'$*') continue ;;
+      '"$@"'|'$@'|'"$*"'|'$*') shift ; continue ;;
     esac
-    set +f
     echo "Workspace ${CI_GATE_NODE_WORKSPACE} passes an argument into the"
     echo "  '${script_name}' wrapper:"
     echo "    arguments: ${args# }"
@@ -2475,7 +2565,6 @@ _reject_forwarded_args() {
     echo "  not run."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
   done
-  set +f
 }
 
 # A checker whose status is inverted is not a checker this gate can report on.
@@ -2690,7 +2779,7 @@ _script_names_a_checker() {
   local expect_cmd=1 runner="" target="" found=0 seq_after=0 hit=0 pending_exit=0
   local _rdt_fwd=0
   # What the current delegation is being handed, if anything.
-  local _fwd=""
+  local _fwd="" _fwd_raw=""
   # Whether the command now being read is prefixed by `!`, which inverts its
   # status. Per command, cleared at every separator, because that is the scope
   # the shell gives it: in `! command -v foo && vitest run` the negation belongs
@@ -2701,6 +2790,15 @@ _script_names_a_checker() {
   local _mi=-1 _seg_i=0
   # shellcheck disable=SC2086
   for tok in $cmd; do
+    # Kept before the quotes come off, for the forwarded-argument string built
+    # below. _unquote_tok strips a leading and a trailing quote independently,
+    # so a value split by word-splitting arrives half-stripped: `--outputFile=
+    # "my` keeps its quote and `dir/out.xml"` loses its, and the string handed
+    # to _reject_forwarded_args then has an opening quote that never closes.
+    # That reader cannot reassemble what it is no longer given -- and reading an
+    # unbalanced quote as a value runs to the end of the arguments, swallowing a
+    # genuine positional filter with it.
+    _fwd_raw="$tok"
     _unquote_tok
     _mi=$((_mi + 1))
     case "$tok" in
@@ -2887,7 +2985,7 @@ _script_names_a_checker() {
       case "$tok" in
         run|exec|dlx|--) continue ;;
       esac
-      _fwd="${_fwd} ${tok}"
+      _fwd="${_fwd} ${_fwd_raw}"
       continue
     fi
     # A package manager's own option can take its value as a separate word, and
@@ -3439,7 +3537,7 @@ _reject_undeclared_project() {
 # The compiler's own argument rules: the modes that do not typecheck, and the
 # positionals that make it ignore tsconfig.json.
 _reject_tsc_args() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp _tp_state=0 _ep_state=0 _pp_state=0 _pm_name=""
+  local script_name="$1" cmd="$2" runner="$3" tok prev low _tp _tp_state=0 _ep_state=0 _pp_state=0 _pm_name="" _ts_build=0
   prev=""
   set -f
   # shellcheck disable=SC2086
@@ -3580,6 +3678,17 @@ _reject_tsc_args() {
         ;;
       [A-Za-z_]*=*)
         prev="" ; shift ; continue ;;
+      # Build mode recorded as state, not merely as `prev`. `prev` holds the one
+      # token before the current word, and the arm below that reads a project
+      # out of it therefore only survives while `-b` is *immediately* in front:
+      # `tsc -b --verbose tsconfig.app.json --noEmit` spent it on `--verbose`,
+      # so the project arrived as a bare word and this scan refused it as a
+      # source file -- blocking a legitimate typecheck script before the
+      # compiler ran. tsc still treats the path after those flags as a build
+      # project (`--build` builds one or more projects, `--verbose` only logs),
+      # so the mode has to outlive the token that follows it.
+      -b|--build)
+        _ts_build=1 ; prev="$low" ; shift ; continue ;;
       -*)
         prev="$low" ; shift ; continue ;;
     esac
@@ -3690,6 +3799,18 @@ _reject_tsc_args() {
         |--newline|--reactnamespace)
         ;;
       *)
+        # In build mode a bare word is a project, not a source file, and it
+        # stays that way across the flags between `-b` and the path -- which is
+        # what the `prev`-based arm above cannot express once anything else has
+        # been recorded. Checked here, after the value-taking options have
+        # claimed their own arguments, so `tsc -b --outDir dist tsconfig.json`
+        # still reads `dist` as --outDir's value rather than as a project.
+        if [ "$_ts_build" -eq 1 ]; then
+          if _ts_project_arg_ok "$tok"; then
+            shift ; continue
+          fi
+          _reject_undeclared_project "$script_name" "$cmd" "$tok" '-b <file>'
+        fi
         echo "Workspace ${CI_GATE_NODE_WORKSPACE} points its '${script_name}' script at"
         echo "  individual files:"
         echo "    ${script_name}: ${cmd}"
@@ -3714,7 +3835,9 @@ _reject_tsc_args() {
 # rule held for the direct spelling and not for the one layer down, which is
 # the same right-rule-wrong-tree shape this lane has had to fix twice.
 _reject_positional_filters() {
-  local script_name="$1" cmd="$2" runner="$3" tok prev _q _tp_state=0 _ep_state=0 _pp_state=0 _pm_name="" _rpf_head
+  # _RJ_TOK/_RJ_N are _rejoin_quoted's output, declared local here so the helper
+  # writes into this call's scope rather than leaving globals behind.
+  local script_name="$1" cmd="$2" runner="$3" tok prev _RJ_TOK _RJ_N _tp_state=0 _ep_state=0 _pp_state=0 _pm_name="" _rpf_head
   prev=""
   # shellcheck disable=SC2086
   set -- $cmd
@@ -3783,16 +3906,12 @@ _reject_positional_filters() {
     # verdict is unchanged for a value and for a filter alike: the run is one
     # token, and whether that token is a filter is the same question as for any
     # other. `vitest run "tests/a b.test.ts"` is still refused.
-    case "$tok" in
-      \"*|\'*)
-        _q="${tok:0:1}"
-        while [ "${#tok}" -lt 2 ] || [ "${tok: -1}" != "$_q" ]; do
-          [ "$#" -gt 1 ] || break
-          shift
-          tok="$tok $1"
-        done
-        ;;
-    esac
+    # Rejoined through the shared helper, so this reader and the wrapper reader
+    # cannot drift apart about a spelling -- the attached `=` form was already
+    # fixed in one of them and missed in the other once.
+    _rejoin_quoted "$@"
+    tok="$_RJ_TOK"
+    [ "$_RJ_N" -gt 0 ] && shift "$_RJ_N"
     # The runner compared by basename, because a delegated script names it by
     # path: `exec ./scripts/vitest run` puts `./scripts/vitest` here, which the
     # literal arm below cannot match, and the runner itself was then read as a
@@ -4157,6 +4276,25 @@ if [ -n "$_BUNDLER_CONFIGS" ]; then
   fi
 fi
 
+# What "this file is a test" means to the two scans below, written once so they
+# cannot drift apart about a runner -- the same drift this file already carries
+# a note about at the top.
+#
+# `.cy.` is Cypress's documented default: its e2e specPattern is
+# `cypress/e2e/**/*.cy.{js,jsx,ts,tsx}`, so a Cypress workspace's suite matched
+# neither `*.test.*` nor `*.spec.*`. Both scans therefore read a Cypress-only
+# workspace as test-free: deleting `test` and `test:unit` left the orphan guard
+# silent, both scripts were skipped, and the lane exited PASS having run no
+# suite at all -- and the lost-suite scan below could never fire either, because
+# a workspace it always reads as empty has nothing to have lost.
+#
+# The other runners this file recognises are already covered: vitest, jest and
+# playwright all collect `.test.`/`.spec.` by default. Deliberately not shared
+# with ci/checks/test-layout.sh's TEST_SUFFIXES, which answers a different
+# question -- which files Vitest's own include would collect -- and where a
+# Cypress spec is correctly not a member.
+_NODE_TEST_NAME_PRED=( '(' -name '*.test.*' -o -name '*.spec.*' -o -name '*.cy.*' ')' )
+
 # A workspace that ships tests must be able to run them. run_script only logs
 # "Skipping missing script", so deleting or renaming `test` would remove the
 # whole suite from the gate while the lane still exits 0 — the suite passing by
@@ -4165,7 +4303,7 @@ fi
 # workspace and a genuinely test-free workspace is unaffected.
 if ! script_exists "test" && ! script_exists "test:unit"; then
   ORPHAN_TESTS="$(find . \( -name 'node_modules' -o -name 'dist' -o -name 'build' \) -prune -o \
-    -type f \( -name '*.test.*' -o -name '*.spec.*' \) -print 2>/dev/null | head -5 || true)"
+    -type f "${_NODE_TEST_NAME_PRED[@]}" -print 2>/dev/null | head -5 || true)"
   if [ -n "$ORPHAN_TESTS" ]; then
     echo "Workspace ${CI_GATE_NODE_WORKSPACE} ships tests but defines no 'test' or 'test:unit' script."
     echo "  These would never run:"
@@ -4192,7 +4330,7 @@ fi
 if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
   && git rev-parse --verify HEAD >/dev/null 2>&1; then
   WORKTREE_TESTS="$(find . \( -name 'node_modules' -o -name 'dist' -o -name 'build' \) -prune -o \
-    -type f \( -name '*.test.*' -o -name '*.spec.*' \) -print 2>/dev/null | head -1 || true)"
+    -type f "${_NODE_TEST_NAME_PRED[@]}" -print 2>/dev/null | head -1 || true)"
   if [ -z "$WORKTREE_TESTS" ]; then
     # Which commit is "before"? HEAD is right for the pre-commit gate, where the
     # deletion is still only staged. In ship mode the deletion is already

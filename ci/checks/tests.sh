@@ -94,7 +94,14 @@ fi
 # first character.
 _tests_glob_to_regex() {
   local _g="$1"
-  _g="$(printf '%s' "$_g" | sed -e 's/[].[^$()+{}|\\]/\\&/g')"
+  # `$` sits last in the bracket expression rather than beside `(`. A POSIX
+  # bracket expression is an unordered set, so the escaped characters are
+  # exactly the same either way -- but spelled `$()` the literal text reads as a
+  # command substitution that single quotes will never expand, which is a real
+  # mistake in most contexts and one ShellCheck is right to flag on sight
+  # (SH-2016). Ordering the set around the linter is cheaper than teaching every
+  # future reader that this one `$(` is inert.
+  _g="$(printf '%s' "$_g" | sed -e 's/[].[^(){}+|\\$]/\\&/g')"
   _g="${_g//\*\*\//<<ANY_DIRS>>}"
   _g="${_g//\*\*/<<ANY>>}"
   _g="${_g//\*/[^\/]*}"
@@ -201,6 +208,54 @@ _tests_js_declared_runner() {
 
 # Which runner a command string names, following the delegations a manifest is
 # allowed to use to reach one.
+# _tests_js_take_payload – consume the words of a `-c`-style command payload
+# and leave it in `_pl`, one layer of surrounding quoting removed.
+#
+# Gathered word by word so a separator *outside* the payload ends it: in
+# `bash -c 'echo hi' && vitest run` the payload is `echo hi` and vitest is the
+# command after it, while in `bash -c 'jest --ci && echo done'` the `&&` is
+# inside the quotes and the payload runs to the end. Quote state is what tells
+# those apart, and it is tracked here only -- the scan at large deliberately
+# keeps quotes attached to their words, which is what stops `"a&&vitest"` from
+# promoting an argument to a runner.
+#
+# Reads and advances `_words`/`_i`/`_n` from _tests_js_scan_runner, its only
+# caller, rather than taking them as arguments: an array cannot be passed by
+# value in the Bash 3.2 this suite still targets, and `local -n` arrived in 4.3.
+# Shared by the shell `-c` arm and npm's `--call`, which are the same grammar
+# under two spellings -- one copy so a fix to one cannot miss the other.
+_tests_js_take_payload() {
+  _pl="" ; _q=""
+  while [ "$_i" -lt "$_n" ]; do
+    _tok="${_words[$_i]}"
+    if [ -z "$_q" ]; then
+      case "$_tok" in
+        ';'|'&&'|'||'|'|'|'&') break ;;
+      esac
+    fi
+    if [ -n "$_pl" ]; then _pl="$_pl $_tok" ; else _pl="$_tok" ; fi
+    _k=0
+    while [ "$_k" -lt "${#_tok}" ]; do
+      _ch="${_tok:$_k:1}"
+      if [ -z "$_q" ]; then
+        case "$_ch" in "'"|'"') _q="$_ch" ;; esac
+      elif [ "$_ch" = "$_q" ]; then
+        _q=""
+      fi
+      _k=$((_k + 1))
+    done
+    _i=$((_i + 1))
+  done
+  # One layer of surrounding quoting comes off. The payload is shell, and what
+  # the shell strips before running it has to come off before it is read as
+  # shell.
+  if [ "${#_pl}" -ge 2 ]; then
+    case "$_pl" in
+      "'"*"'"|'"'*'"') _pl="${_pl:1:$((${#_pl} - 2))}" ;;
+    esac
+  fi
+}
+
 _tests_js_scan_runner() {
   local _cmd="$1" _depth="${2:-0}"
   local _w _sub _pl _q _tok _k _ch
@@ -303,6 +358,30 @@ _tests_js_scan_runner() {
       esac
     elif [ "$_ep" -eq 2 ]; then _ep=1 ; continue
     fi
+    # npm and npx spell a shell's `-c` as their own: `npm exec --package jest
+    # -c 'jest --ci'` runs that string with the package's binaries on PATH, so
+    # the value is the command, not an inert option payload. Consumed as an
+    # ordinary option value it declared nothing -- and nothing is what sends a
+    # workspace carrying a local Vitest to the installed-runner fallback, so
+    # Vitest ran over the Jest suite the manifest names, collected nothing it
+    # recognised, exited 0, and tests-js reported PASS. The same fail-open the
+    # `--package` case above was written to close, reached by the next spelling.
+    #
+    # Ahead of the package-manager block because `exec` ends that state while
+    # leaving `_pm_name` set, so `npm exec -c` arrives here with `_pp` back at
+    # 0 and would otherwise be skipped by the generic `-*` option arm. `_pp` of
+    # 2 is excluded: the word is then some other option's value, not a flag.
+    if [ "$_pp" -ne 2 ]; then
+      case "${_pm_name}|$_w" in
+        'npm|-c'|'npm|--call'|'npx|-c'|'npx|--call')
+          _tests_js_take_payload
+          _sub="$(_tests_js_scan_runner "$_pl" "$((_depth + 1))")"
+          if [ -n "$_sub" ]; then printf '%s' "$_sub" ; return 0 ; fi
+          # The payload is what ran and it named no runner; what trails it is
+          # an argument to the payload, exactly as in the shell `-c` arm.
+          _pp=0 ; _expect=0 ; continue ;;
+      esac
+    fi
     if [ "$_pp" -eq 1 ]; then
       # Keyed by which manager is in front, which is how ci/checks/node.sh's
       # _pm_advance reads the same grammar. One list cannot describe five
@@ -330,8 +409,8 @@ _tests_js_scan_runner() {
         'bun|x'|'npm|x') continue ;;
       esac
       case "${_pm_name}|$_w" in
-        'npx|-p'|'npx|--package'|'npx|-c'|'npx|--call' \
-          |'npm|-p'|'npm|--package'|'npm|-c'|'npm|--call' \
+        'npx|-p'|'npx|--package' \
+          |'npm|-p'|'npm|--package' \
           |'npm|--prefix'|'npm|-w'|'npm|--workspace'|'npm|-C' \
           |'pnpm|--filter'|'pnpm|-F'|'pnpm|--dir'|'pnpm|-C'|'pnpm|--workspace-dir' \
           |'yarn|--cwd' \
@@ -359,35 +438,7 @@ _tests_js_scan_runner() {
           # and it is tracked here only -- the scan at large deliberately keeps
           # quotes attached to their words, which is what stops `"a&&vitest"`
           # from promoting an argument to a runner.
-          _pl="" ; _q=""
-          while [ "$_i" -lt "$_n" ]; do
-            _tok="${_words[$_i]}"
-            if [ -z "$_q" ]; then
-              case "$_tok" in
-                ';'|'&&'|'||'|'|'|'&') break ;;
-              esac
-            fi
-            if [ -n "$_pl" ]; then _pl="$_pl $_tok" ; else _pl="$_tok" ; fi
-            _k=0
-            while [ "$_k" -lt "${#_tok}" ]; do
-              _ch="${_tok:$_k:1}"
-              if [ -z "$_q" ]; then
-                case "$_ch" in "'"|'"') _q="$_ch" ;; esac
-              elif [ "$_ch" = "$_q" ]; then
-                _q=""
-              fi
-              _k=$((_k + 1))
-            done
-            _i=$((_i + 1))
-          done
-          # One layer of surrounding quoting comes off. The payload is shell,
-          # and what the shell strips before running it has to come off before
-          # it is read as shell.
-          if [ "${#_pl}" -ge 2 ]; then
-            case "$_pl" in
-              "'"*"'"|'"'*'"') _pl="${_pl:1:$((${#_pl} - 2))}" ;;
-            esac
-          fi
+          _tests_js_take_payload
           _sub="$(_tests_js_scan_runner "$_pl" "$((_depth + 1))")"
           if [ -n "$_sub" ]; then printf '%s' "$_sub" ; return 0 ; fi
           # The payload is what ran, and it named no runner. Whatever trails it
@@ -440,6 +491,36 @@ _tests_js_scan_runner() {
 }
 # --- END declared-runner reader -----------------------------------------------
 
+# The path-filter option under the spelling the installed Jest actually has.
+#
+# Jest 30 renamed `--testPathPattern` to `--testPathPatterns` and removed the
+# singular form, so emitting it unconditionally makes Jest 30 reject the
+# invocation before it executes a single test -- affected-test narrowing turning
+# a working suite into a lane failure, on exactly the workspaces the narrowing
+# was meant to speed up. Older majors only know the singular spelling, so this
+# cannot simply be switched over either; the version decides.
+#
+# Read from the workspace's own installed copy, for the same reason the runner
+# is: a global Jest is not the version this workspace pins. `jest` is the
+# package the CLI ships under, `jest-cli` the one it delegates to, and a
+# workspace may carry either. Undetectable falls back to the singular spelling,
+# which is what every major before 30 accepts and what this lane emitted before
+# the option existed in two spellings.
+_tests_jest_path_flag() {
+  local _v=""
+  if ci::common::command_exists node; then
+    _v="$(node -e "for(const p of ['./node_modules/jest/package.json','./node_modules/jest-cli/package.json']){try{process.stdout.write(String(require(p).version||''));break}catch(e){}}" 2>/dev/null || true)"
+  fi
+  case "${_v%%.*}" in
+    ''|*[!0-9]*) printf '%s' '--testPathPattern' ; return 0 ;;
+  esac
+  if [ "${_v%%.*}" -ge 30 ]; then
+    printf '%s' '--testPathPatterns'
+  else
+    printf '%s' '--testPathPattern'
+  fi
+}
+
 _tests_js_have_runner() {
   local _c
   for _c in "node_modules/.bin/$1" "node_modules/.bin/$1.exe" "node_modules/.bin/$1.cmd"; do
@@ -488,12 +569,18 @@ _tests_js_workspace() {
   if [ "$declared" != "vitest" ]; then
     for candidate in node_modules/.bin/jest node_modules/.bin/jest.exe node_modules/.bin/jest.cmd; do
       if [ -x "$candidate" ]; then
+        # Spelled here rather than by the caller: the caller builds one pattern
+        # for every workspace, and the spelling is a property of the Jest each
+        # workspace installs. Quoted, unlike the bare expansion this replaced --
+        # the value is one argument, and a regex is not a list of words.
+        local _jest_flag
+        _jest_flag="$(_tests_jest_path_flag)"
         if ci::common::command_exists node && node -e "require.resolve('jest-junit')" >/dev/null 2>&1; then
           JEST_JUNIT_OUTPUT_FILE="$junit_out" \
-            "$candidate" --ci --reporters=default --reporters=jest-junit ${jest_pattern:+$jest_pattern}
+            "$candidate" --ci --reporters=default --reporters=jest-junit ${jest_pattern:+"${_jest_flag}=${jest_pattern}"}
           return $?
         fi
-        "$candidate" --ci ${jest_pattern:+$jest_pattern}
+        "$candidate" --ci ${jest_pattern:+"${_jest_flag}=${jest_pattern}"}
         return $?
       fi
     done
@@ -564,7 +651,9 @@ tests::run_js() {
         jest_pattern="$pattern"
       fi
     done <<< "$js_tests"
-    [ -n "$jest_pattern" ] && jest_pattern="--testPathPattern=${jest_pattern}"
+    # Left as the bare regex. The option's name is chosen per workspace, from
+    # the Jest that workspace installs, because Jest 30 removed the singular
+    # spelling this used to hard-code.
   fi
 
   mkdir -p "$JUNIT_DIR"

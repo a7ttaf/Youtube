@@ -343,7 +343,7 @@ ci::common::node_workspaces() {
   # because its name resembles the sentinel being filtered. `${found%"/$manifest"}`
   # is a literal suffix strip and cannot do that.
   local candidate
-  local _cands=() _n=0 _i=0 _j=0 _nested=0
+  local _cands=() _n=0 _i=0 _j=0 _nested=0 _vendored=0
   # Through a file, so the enumeration's own status is something this function
   # can act on. `< <(find ... | sort)` is a subshell: a `find` that fails on an
   # unreadable subtree, or a `sort` that cannot allocate, delivered partial or
@@ -389,7 +389,10 @@ ci::common::node_workspaces() {
     [ "$found" = "$manifest" ] && continue
     candidate="${found%"/$manifest"}"
     [ "$candidate" != "$found" ] || continue
-    ci::common::is_vendored_path "$candidate" && continue
+    if ci::common::is_vendored_path "$candidate"; then
+      _vendored=$((_vendored + 1))
+      continue
+    fi
     # Before the nesting check below, for the reason the root branch filters
     # before its own: an untracked manifest under a real workspace reports a
     # nested monorepo and fails the lane, without ever being pushed.
@@ -398,6 +401,28 @@ ci::common::node_workspaces() {
     _n=$((_n + 1))
   done < "$_nw_list"
   rm -f "$_nw_list"
+
+  # "Every manifest was pruned" and "there are no manifests" leave this function
+  # looking identical -- empty stdout, exit 0 -- and the callers print the same
+  # "skipped: no package.json found" for both. The second sentence is true; the
+  # first is a repository whose only manifests sit under a name this predicate
+  # calls build output, whose tests, typecheck and build are then skipped
+  # entirely by a lane that reports it found nothing at all.
+  #
+  # Said out loud rather than guessed at. Which names should count as output is
+  # a policy question this function does not own -- ci/checks/git-safety.sh
+  # blocks the same `*/build/*`, `*/dist/*`, `*/coverage/*` and `*/htmlcov/*`
+  # paths from being pushed, so the two rules currently agree and narrowing one
+  # alone would make a workspace the node lane runs and the push gate refuses.
+  # Reporting is what turns a silent skip into a visible one without taking that
+  # decision here.
+  if [ "$_n" -eq 0 ] && [ "$_vendored" -gt 0 ]; then
+    echo "Found ${_vendored} ${manifest} file(s), all under paths treated as vendored" >&2
+    echo "  or build output (node_modules, dist, build, coverage, htmlcov, .venv," >&2
+    echo "  fixtures). No workspace is reported, so this lane runs nothing here." >&2
+    echo "  If one of those is first-party source, it needs a name this gate does" >&2
+    echo "  not read as build output -- see ci::common::is_vendored_path." >&2
+  fi
 
   # A manifest nested under another manifest is the same ambiguity the root
   # branch reports, and it was only ever asked about the repository root. A

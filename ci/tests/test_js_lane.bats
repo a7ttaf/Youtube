@@ -572,6 +572,11 @@ ws_run() {
     'true;vitest run|vitest' \
     'npx --package vitest jest --ci|jest' \
     'npx --package=vitest jest --ci|jest' \
+    "npm exec -c 'jest --ci'|jest" \
+    "npm exec --call 'jest --ci'|jest" \
+    "npx -c 'jest --ci'|jest" \
+    "npx --call 'vitest run'|vitest" \
+    "npm exec --package jest -c 'jest --ci'|jest" \
     'pnpm -p vitest run|vitest' \
     'timeout 300 vitest run|vitest' \
     'env FOO=1 jest --ci|jest' \
@@ -603,6 +608,46 @@ ws_run() {
   [[ "$output" == *"not appear to run a test runner"* ]]
   rm -rf "$sb"
   rm -rf "$NODE_SB"
+}
+
+@test "js lane: the Jest path filter is spelled the way the installed Jest spells it" {
+  # Jest 30 renamed --testPathPattern to --testPathPatterns and removed the
+  # singular form, so emitting it unconditionally makes Jest 30 reject the
+  # invocation before running a single test -- affected-test narrowing turning a
+  # working suite into a lane failure. Older majors know only the singular, so
+  # this cannot simply be switched over either.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/node_modules/jest"
+
+  _flag() {
+    printf '{"version":"%s"}' "$1" > "$sb/node_modules/jest/package.json"
+    ( cd "$sb" && bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+                          eval \"\$(sed -n '/^_tests_jest_path_flag()/,/^}\$/p' '$REPO_ROOT/ci/checks/tests.sh')\"
+                          _tests_jest_path_flag" )
+  }
+
+  [ "$(_flag 29.7.0)" = "--testPathPattern" ]
+  [ "$(_flag 28.1.0)" = "--testPathPattern" ]
+  [ "$(_flag 30.0.0)" = "--testPathPatterns" ]
+  [ "$(_flag 30.2.1)" = "--testPathPatterns" ]
+
+  # jest-cli is the package the CLI delegates to, and a workspace may carry
+  # either name.
+  rm -rf "$sb/node_modules/jest"
+  mkdir -p "$sb/node_modules/jest-cli"
+  printf '{"version":"30.1.0"}' > "$sb/node_modules/jest-cli/package.json"
+  [ "$( cd "$sb" && bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+        eval \"\$(sed -n '/^_tests_jest_path_flag()/,/^}\$/p' '$REPO_ROOT/ci/checks/tests.sh')\"
+        _tests_jest_path_flag" )" = "--testPathPatterns" ]
+
+  # Undetectable falls back to the spelling every major before 30 accepts,
+  # which is what this lane emitted before the option had two names.
+  rm -rf "$sb/node_modules"
+  [ "$( cd "$sb" && bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+        eval \"\$(sed -n '/^_tests_jest_path_flag()/,/^}\$/p' '$REPO_ROOT/ci/checks/tests.sh')\"
+        _tests_jest_path_flag" )" = "--testPathPattern" ]
+  rm -rf "$sb"
 }
 
 @test "js lane: every reader of 'is this a TypeScript project' knows the same names" {
@@ -2432,6 +2477,95 @@ ws_run() {
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a quoted flag value with a space is not read as a filter" {
+  # `--outputFile="my dir/out.xml"` word-splits into `--outputFile="my` and
+  # `dir/out.xml"`. The rejoin that fixed the separate-word spelling only fires
+  # on a token that *starts* with a quote, so the attached `=` form fell past it
+  # and the tail word arrived with no flag in front of it -- a legitimate script
+  # refused for narrowing a suite it does not narrow.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --outputFile=\"my dir/out.xml\" --reporter=json" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The control the rejoin must not swallow: a quoted value is not a licence to
+  # narrow. A genuine positional filter beside it is still refused, by the rule,
+  # before the script is executed at all.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --outputFile=\"my dir/out.xml\" tests/only.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"only.test.ts"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a Cypress suite is a suite the test script may not lose" {
+  # The orphan guard keyed on `*.test.*`/`*.spec.*`, and Cypress's documented
+  # default specPattern is `cypress/e2e/**/*.cy.{js,jsx,ts,tsx}` -- so a Cypress
+  # workspace read as test-free. Dropping both `test` and `test:unit` then left
+  # the guard silent, every script skipped, and the lane exiting PASS over a
+  # suite nothing ran.
+  # The seeded .test.ts is removed so the Cypress spec is the *only* suite left:
+  # the guard firing then says the `.cy.` convention was read, rather than the
+  # ordinary suffix being found as it always was.
+  ws_setup
+  rm -f "$NODE_SB/ws/tests/a.test.ts"
+  mkdir -p "$NODE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/cypress/e2e/login.cy.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ships tests but defines no"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"login.cy.ts"* ]]
+  rm -rf "$NODE_SB"
+
+  # The control: with the Cypress spec gone too there is no suite at all, and a
+  # genuinely test-free workspace must stay unaffected -- so the widened pattern
+  # has not turned every workspace into one that ships tests.
+  ws_setup
+  rm -f "$NODE_SB/ws/tests/a.test.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"ships tests but defines no"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: build mode survives the flags between -b and its project" {
+  # `tsc -b --verbose tsconfig.app.json --noEmit` is a valid build-mode
+  # typecheck: --build takes one or more projects and --verbose only logs. The
+  # scan tracked build mode in `prev`, which holds exactly one token, so
+  # --verbose overwrote it and the project behind it was refused as a source
+  # file -- a legitimate typecheck script blocked before the compiler ran.
+  ws_setup
+  printf '{ "compilerOptions": { "noEmit": true } }\n' > "$NODE_SB/ws/tsconfig.app.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc -b --verbose tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"points its 'typecheck' script at"* ]] \
+    || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The control that keeps this from being "build mode accepts anything": naming
+  # a project this workspace does not have is still refused, and as an
+  # undeclared project rather than as a stray source file. The workspace still
+  # carries a real project, or it would not be a TypeScript workspace at all and
+  # the tsc rules would never be consulted -- which would pass this case without
+  # asserting anything.
+  ws_setup
+  printf '{ "compilerOptions": { "noEmit": true } }\n' > "$NODE_SB/ws/tsconfig.app.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc -b --verbose tsconfig.absent.json" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"a project this workspace does not have"* ]] || { echo "$output" >&2; false; }
   rm -rf "$NODE_SB"
 }
 

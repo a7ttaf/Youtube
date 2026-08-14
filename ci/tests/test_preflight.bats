@@ -2416,6 +2416,100 @@ YML
   rm -rf "$sb"
 }
 
+@test "git-safety: a path holding a glob character is deduplicated as text" {
+  # The seen-set is a `case` membership test, and a `case` pattern is a glob --
+  # so if the path were interpolated unquoted, an earlier `docs/a0bin` would
+  # make a later `docs/a?bin` look already seen, the second file would never be
+  # added, and a >5MB artifact could slip the size block by putting a pattern
+  # character in its name. The path is quoted inside the pattern, which makes it
+  # literal; this pins that, because the quotes are easy to lose in an edit.
+  local lf p1 p2 seen
+  lf=$'\n'
+  p1='docs/a0bin'
+  p2='docs/a?bin'
+  seen="${lf}${p1}${lf}"
+
+  # The real spelling from ci/checks/git-safety.sh: quoted, therefore literal.
+  case "$seen" in
+    *"${lf}${p2}${lf}"*) echo "quoted pattern matched a different path" >&2 ; return 1 ;;
+  esac
+
+  # The control that proves this case can tell the difference: unquoted, the
+  # same comparison does match, which is the bug being guarded against.
+  local matched=0
+  # shellcheck disable=SC2295
+  case "$seen" in
+    *${lf}${p2}${lf}*) matched=1 ;;
+  esac
+  [ "$matched" -eq 1 ] || { echo "control did not match; case is not discriminating" >&2 ; return 1; }
+
+  # And the same for `*`, the other metacharacter a filename may legally carry.
+  case "$seen" in
+    *"${lf}docs/a*bin${lf}"*) echo "quoted star pattern matched" >&2 ; return 1 ;;
+  esac
+
+  # An identical path must still be recognised, or the guard would size every
+  # file twice rather than once.
+  case "$seen" in
+    *"${lf}${p1}${lf}"*) ;;
+    *) echo "an identical path was not recognised as seen" >&2 ; return 1 ;;
+  esac
+
+  # The line under test still carries the quotes.
+  grep -q 'case "\$_gs_seen" in \*"\${_gs_lf}\${path}\${_gs_lf}"\*' \
+    "$REPO_ROOT/ci/checks/git-safety.sh"
+}
+
+@test "runner: a timeout this host cannot enforce is refused, not dropped" {
+  # The case above covers a timeout the *configuration* cannot express. This is
+  # the other half: the value is fine, and the host has neither `timeout` nor
+  # `gtimeout` to apply it. That left timeout_cmd empty and the check ran with
+  # no deadline at all -- so a hung blocker stalls preflight for as long as the
+  # caller will wait, under a configuration that explicitly asked for a bound.
+  # A stock macOS box is exactly this host until coreutils is installed.
+  run bash -c ". '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    out=\"\$(PATH=/nonexistent-dir ci::runner::_timeout_cmd 900)\" && st=0 || st=\$?; \
+    printf 'st=%s out=[%s]\n' \"\$st\" \"\$out\""
+  [[ "$output" == *"st=1"* ]]
+  [[ "$output" == *"out=[]"* ]]
+
+  # And submit acts on that refusal rather than launching unbounded.
+  local sb
+  sb="$(mktemp -d)"
+  printf '#!/usr/bin/env bash\ntouch "%s/ran"\nexit 0\n' "$sb" > "$sb/check.sh"
+  chmod +x "$sb/check.sh"
+
+  # PATH is narrowed for the submit call only: init and the readers still need a
+  # working environment, and the decision under test is made inside submit.
+  run bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1; \
+    . '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+    export CI_CHECKS_CONFIG='$sb/absent.yml' CI_GATE_PARALLEL=1 CI_GATE_TIMEOUT=900; \
+    ci::runner::init 1 >/dev/null 2>&1; \
+    PATH=/nonexistent-dir ci::runner::submit alpha '$sb/check.sh' >/dev/null 2>&1; \
+    ci::runner::wait_all >/dev/null 2>&1; \
+    printf 'rc=%s\n' \"\$(ci::runner::get_result alpha)\"; \
+    ci::runner::get_output alpha"
+  [[ "$output" == *"rc=30"* ]]
+  [[ "$output" == *"cannot enforce"* ]]
+  # The point: an unbounded run of a blocking lane is what is being refused.
+  [ ! -f "$sb/ran" ]
+
+  # The control: with a usable timeout utility the same check submits and runs,
+  # so the refusal above is about the missing utility and nothing else.
+  if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    run bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1; \
+      . '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
+      export CI_CHECKS_CONFIG='$sb/absent.yml' CI_GATE_PARALLEL=1 CI_GATE_TIMEOUT=900; \
+      ci::runner::init 1 >/dev/null 2>&1; \
+      ci::runner::submit alpha '$sb/check.sh' >/dev/null 2>&1; \
+      ci::runner::wait_all >/dev/null 2>&1; \
+      printf 'rc=%s\n' \"\$(ci::runner::get_result alpha)\""
+    [[ "$output" == *"rc=0"* ]]
+    [ -f "$sb/ran" ]
+  fi
+  rm -rf "$sb"
+}
+
 @test "git: the destination is asked what it holds, not this clone's memory of it" {
   # `refs/remotes/<remote>/*` records what this clone last *saw* the destination
   # holding, and two rules read it as what the destination *has*. The two differ

@@ -172,6 +172,25 @@ ci::runner::_declared_timeout() {
   ' "$file"
 }
 
+# ci::runner::_timeout_cmd <seconds> – echo the command prefix that enforces
+# <seconds>, or return 1 when this host has nothing that can enforce it.
+#
+# Split out of submit so the "no utility available" answer is a value the
+# caller has to handle rather than an empty string it can fall through on --
+# which is exactly how the bound used to get dropped in silence.
+ci::runner::_timeout_cmd() {
+  local secs="$1"
+  if command -v timeout >/dev/null 2>&1; then
+    printf 'timeout %s' "$secs"
+    return 0
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    printf 'gtimeout %s' "$secs"
+    return 0
+  fi
+  return 1
+}
+
 ci::runner::submit() {
   local job_id="$1"
   shift
@@ -224,12 +243,36 @@ ci::runner::submit() {
   fi
   [ -n "$declared_timeout" ] && check_timeout="$declared_timeout"
 
-  local timeout_cmd=""
+  local timeout_cmd="" timeout_rc=0
   if [ -n "$check_timeout" ] && [ "$check_timeout" != "0" ]; then
-    if command -v timeout >/dev/null 2>&1; then
-      timeout_cmd="timeout ${check_timeout}"
-    elif command -v gtimeout >/dev/null 2>&1; then
-      timeout_cmd="gtimeout ${check_timeout}"
+    # Assigned separately from `local` on purpose: `local x="$(cmd)"` reports the
+    # status of `local`, not of cmd, so the refusal below would never be seen.
+    timeout_cmd="$(ci::runner::_timeout_cmd "$check_timeout")" || timeout_rc=$?
+    if [ "$timeout_rc" -ne 0 ]; then
+      # FIX: a bound was asked for and this host has no utility that can keep
+      # it. Falling through to the unbounded branch below is the same mistake
+      # the declared-timeout arm above refuses: the cap exists because someone
+      # decided this check must not run forever, so dropping it silently is how
+      # a hung blocker like `tests-shell` stalls preflight for as long as the
+      # caller will wait, with nothing in the log saying the bound was skipped.
+      #
+      # Not a hypothetical host, either -- a stock macOS box has neither
+      # `timeout` nor `gtimeout` until coreutils is installed, so this is a
+      # configuration the runner has to refuse rather than assume away.
+      # Recorded exactly like that arm, so the pool's bookkeeping sees an
+      # ordinary completed job rather than a launch that never happened.
+      {
+        echo "Check '${job_id}' asks for a ${check_timeout}s timeout this host cannot enforce."
+        echo "  Neither 'timeout' nor 'gtimeout' is on PATH, so the bound cannot be"
+        echo "  applied. Install GNU coreutils (on macOS 'brew install coreutils'"
+        echo "  provides gtimeout), or clear the timeout rather than have the check"
+        echo "  run unbounded under a configuration that asked for a bound."
+      } > "$log_file" 2>&1
+      printf '%d' "$CI_RESULT_FAIL_INFRA" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.rc"
+      printf '%s' "$(ci::runner::_epoch)" > "$start_file"
+      printf '%s' "$(ci::runner::_epoch)" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.end"
+      printf '%d' "$$" > "$pid_file"
+      return 0
     fi
   fi
 

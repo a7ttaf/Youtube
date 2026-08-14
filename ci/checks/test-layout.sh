@@ -195,9 +195,21 @@ path_is_pruned() {
 # and this repository states a Bash 3.2 floor in ci/lib/runner.sh, which is the
 # platform whose sort is least likely to have it -- a gate that dies on the
 # machine it is meant to protect is not portable in any useful sense. The scan
-# is quadratic in the number of candidates and the number is small: 219 in this
-# repository, so at most a few thousand string compares done by the shell
-# itself, against three subprocesses and a pipe for the sort it replaces.
+# is quadratic in the number of candidates and the number is small: measured at
+# 153 incoming paths deduplicating to 112 (`git ls-files -- frontend` gives 112,
+# the test-suffix `find` another 41), so on the order of 8,500 string compares
+# done by the shell itself, against three subprocesses and a pipe for the sort
+# it replaces. An earlier version of this note said 219, which no longer matched
+# the tree it described.
+#
+# The cost scales with every tracked file under frontend/, not only the test
+# files, and that is deliberate rather than an oversight: the __tests__ scan
+# below has to see paths this file would not call test-like -- a plain
+# frontend/src/__tests__/helper.ts names a retired directory just as a
+# .test.ts under it does -- so narrowing the candidate list to test suffixes
+# here would blind that rule. If the frontend tree ever grows to where this
+# shows up in the lane's runtime, the fix is an associative-array dedup behind
+# a `BASH_VERSINFO[0] -ge 4` guard, not a narrower list.
 ALL_CANDIDATES=()
 # Through a temp file rather than `< <(candidate_files)`.
 #
