@@ -261,6 +261,59 @@ ci::common::node_workspaces() {
     return 1
   fi
 
+  # The other direction of the same question, and the one the intersection above
+  # cannot answer. `_manifest_in_scope` narrows the walk to what the push
+  # carries, which drops an untracked scratch/package.json correctly. It cannot
+  # add a manifest HEAD carries that the walk never offered -- and that case was
+  # documented above as "still absent", which is a false pass rather than a
+  # narrowing:
+  #
+  #   rm -rf frontend
+  #   CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh
+  #   -> skipped: no package.json found        exit 0
+  #
+  # for a push whose HEAD still carries frontend/package.json. Inventing the
+  # workspace is not the fix -- nothing can install a directory that is not
+  # there -- but "no workspace" is not the truth either. The truth is that this
+  # run cannot check the push, so it says so and the caller records FAIL_INFRA.
+  if [ "${CI_GATE_MODE:-}" = "ship" ] \
+    && command -v git >/dev/null 2>&1 \
+    && git rev-parse --git-dir >/dev/null 2>&1 \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    local _nw_head _nw_missing="" _nw_dir
+    # `--full-tree` so the answer does not depend on where this was called from:
+    # `git ls-tree` applies the current directory as an implicit path filter,
+    # and an empty listing here reads exactly like "the push carries no
+    # manifests", which is the false pass this block exists to prevent.
+    if _nw_head="$(git ls-tree -r --full-tree --name-only HEAD 2>/dev/null)"; then
+      while IFS= read -r found; do
+        [ -n "$found" ] || continue
+        case "$found" in
+          "$manifest") _nw_dir="." ;;
+          *"/$manifest") _nw_dir="${found%"/$manifest"}" ;;
+          *) continue ;;
+        esac
+        if [ "$_nw_dir" != "." ] && ci::common::is_vendored_path "$_nw_dir"; then
+          continue
+        fi
+        # An `if`, not `[ -f ] && continue`: the latter is a statement whose
+        # status is the test's, so on the last iteration it decides the loop's.
+        if [ -f "$found" ]; then continue; fi
+        _nw_missing="${_nw_missing} ${found}"
+      done <<< "$_nw_head"
+    fi
+    if [ -n "$_nw_missing" ]; then
+      {
+        echo "These ${manifest} files are in the commit being pushed but not in this"
+        echo "  worktree:${_nw_missing}"
+        echo "  The lane cannot install, typecheck or test a directory that is not"
+        echo "  there, and reporting no workspace would pass the push having checked"
+        echo "  none of it. Restore the worktree, or push from one that matches HEAD."
+      } >&2
+      return 1
+    fi
+  fi
+
   _i=0
   while [ "$_i" -lt "$_n" ]; do
     printf '%s\n' "${_cands[_i]}"

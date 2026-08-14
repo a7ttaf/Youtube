@@ -61,6 +61,74 @@ _tc_js_workspace() {
     echo "  An empty list reads exactly like a package with none." >&2
     return 30
   fi
+  # Which tree this list describes. `find` stats the worktree, and in ship mode
+  # the worktree is the commit being built, not the one being pushed -- so an
+  # untracked `local-only/tsconfig.json` was compiled as part of a push that
+  # will never carry it, and a tracked project deleted locally was skipped by a
+  # push that still does. The same narrowing ci::common::node_workspaces applies
+  # to manifests, one layer down, through the reader they share: a fifth answer
+  # to "is this file part of the push" is what the comment above is warning
+  # about.
+  if [ "${CI_GATE_MODE:-}" = "ship" ] \
+    && command -v git >/dev/null 2>&1 \
+    && git rev-parse --git-dir >/dev/null 2>&1 \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    # Two spellings of the same location, and they are not interchangeable.
+    # `HEAD:<dir>` names a tree and is what ls-tree takes; a single file is
+    # `HEAD:<dir>/<file>`. Built as one rev with a second colon it is not a path
+    # at all -- `git cat-file -e HEAD:frontend:tsconfig.json` is fatal, every
+    # project failed the test, and the narrowing emptied a list it was only
+    # supposed to filter. That reports "no TypeScript project" for a workspace
+    # that has one, which is the false pass this block exists to prevent.
+    local _tc_rev="HEAD" _tc_pfx="" _tc_keep _tc_p _tc_head _tc_missing=""
+    if [ "$ws" != "." ]; then
+      _tc_rev="HEAD:${ws}"
+      _tc_pfx="${ws}/"
+    fi
+    _tc_keep="$(mktemp 2>/dev/null)" || { rm -f "$_tc_list"; return 30; }
+    while IFS= read -r _tc_p; do
+      [ -n "$_tc_p" ] || continue
+      if git cat-file -e "HEAD:${_tc_pfx}${_tc_p#./}" 2>/dev/null; then
+        printf '%s\n' "$_tc_p" >> "$_tc_keep"
+      fi
+    done < "$_tc_list"
+    mv -f "$_tc_keep" "$_tc_list" 2>/dev/null || { rm -f "$_tc_keep" "$_tc_list"; return 30; }
+
+    # And the direction narrowing cannot reach: a project the push carries that
+    # is not on disk. Reporting "no TypeScript project" for it would pass the
+    # push having compiled none of it, so this run says it cannot check it.
+    # `--full-tree`, because this runs after `cd "$ws"` and `git ls-tree`
+    # applies the current directory as an implicit path filter. From inside
+    # frontend/, listing the tree `HEAD:frontend` -- whose entries are
+    # `package.json` and `tsconfig.json` -- filters them against the prefix
+    # `frontend/`, matches nothing, and hands back an empty listing. Empty reads
+    # exactly like "the push carries no projects", so the missing-project
+    # refusal below never fired and the lane reported a skip instead.
+    if _tc_head="$(git ls-tree -r --full-tree --name-only "$_tc_rev" 2>/dev/null)"; then
+      while IFS= read -r _tc_p; do
+        case "$_tc_p" in
+          tsconfig.json|tsconfig.*.json|jsconfig.json|jsconfig.*.json \
+            |*/tsconfig.json|*/tsconfig.*.json|*/jsconfig.json|*/jsconfig.*.json) ;;
+          *) continue ;;
+        esac
+        case "$_tc_p" in */node_modules/*|node_modules/*) continue ;; esac
+        # `[ -f x ] && continue` is a statement whose status is the test's, and
+        # this file runs under `set -Eeuo pipefail`: on the last iteration a
+        # present file makes it 0 and an absent one makes the loop's status 1.
+        # Spelled as an `if` so the check cannot decide the function's exit code.
+        if [ -f "$_tc_p" ]; then continue; fi
+        _tc_missing="${_tc_missing} ${_tc_p}"
+      done <<< "$_tc_head"
+    fi
+    if [ -n "$_tc_missing" ]; then
+      rm -f "$_tc_list"
+      echo "These TypeScript projects are in the commit being pushed but not in" >&2
+      echo "  ${ws}:${_tc_missing}" >&2
+      echo "  Reporting none would pass the push having compiled none of it." >&2
+      return 30
+    fi
+  fi
+
   if [ ! -s "$_tc_list" ]; then
     rm -f "$_tc_list"
     # A package root with no TypeScript project has nothing for this lane to

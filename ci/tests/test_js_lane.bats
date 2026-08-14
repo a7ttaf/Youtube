@@ -499,7 +499,7 @@ ws_run() {
     printf '{ "name": "w", "scripts": { "test": %s } }\n' "$1" > "$sb/package.json"
     ( cd "$sb" && bash -c '. ci/lib/log.sh 2>/dev/null
                            . ci/lib/common.sh
-                           eval "$(sed -n "/^_tests_js_declared_runner()/,/^}/p" ci/checks/tests.sh)"
+                           eval "$(sed -n "/BEGIN declared-runner reader/,/END declared-runner reader/p" ci/checks/tests.sh)"
                            _tests_js_declared_runner || printf ""' )
   }
 
@@ -551,7 +551,7 @@ ws_run() {
     printf '{ "name": "w", "scripts": { "test": %s } }\n' "$1" > "$sb/package.json"
     ( cd "$sb" && bash -c '. ci/lib/log.sh 2>/dev/null
                            . ci/lib/common.sh
-                           eval "$(sed -n "/^_tests_js_declared_runner()/,/^}/p" ci/checks/tests.sh)"
+                           eval "$(sed -n "/BEGIN declared-runner reader/,/END declared-runner reader/p" ci/checks/tests.sh)"
                            _tests_js_declared_runner || printf ""' )
   }
   # The node.sh side is asked through the lane itself rather than through one of
@@ -4918,8 +4918,12 @@ lane_setup() {
   mkdir -p "$LANE_SB/ci/checks" "$LANE_SB/ci/lib" "$LANE_SB/ci/config" \
            "$LANE_SB/ws/node_modules/.bin" "$LANE_SB/ws/tests"
   cp "$REPO_ROOT/ci/checks/tests.sh" "$REPO_ROOT/ci/checks/typecheck.sh" "$LANE_SB/ci/checks/"
+  # git.sh among them: tests.sh sources it for ci::git::push_range, which is
+  # where the ship-mode affected-test narrowing gets the commits being pushed.
+  # A sandbox missing a lib the lane sources fails on the source line, with a
+  # message about nothing the case is asking about.
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
-     "$REPO_ROOT/ci/lib/junit.sh" "$LANE_SB/ci/lib/"
+     "$REPO_ROOT/ci/lib/junit.sh" "$REPO_ROOT/ci/lib/git.sh" "$LANE_SB/ci/lib/"
   printf 'it("x", () => {});\n' > "$LANE_SB/ws/tests/a.test.ts"
 }
 
@@ -5716,12 +5720,20 @@ ws_tools() {
 # here is one line of parsing. `bash -n` first, so a mis-extraction fails loudly
 # instead of quietly defining nothing.
 declared_runner_for() {
+  declared_runner_for_manifest \
+    "$(printf '{ "name": "w", "private": true, "scripts": { "test": "%s" } }' "$1")"
+}
+
+# The same, for a whole manifest. A script that delegates -- `npm run test:unit`
+# -- is only answerable against the manifest that defines the delegate, so the
+# fixture has to be more than one script.
+declared_runner_for_manifest() {
   local sb fn
   sb="$(mktemp -d)"
   fn="$(mktemp)"
-  awk '/^_tests_js_declared_runner\(\) \{/,/^\}/' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
+  awk '/BEGIN declared-runner reader/,/END declared-runner reader/' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
   bash -n "$fn" || { rm -rf "$sb" "$fn"; echo "<extraction failed>"; return 1; }
-  printf '{ "name": "w", "private": true, "scripts": { "test": "%s" } }\n' "$1" > "$sb/package.json"
+  printf '%s\n' "$1" > "$sb/package.json"
   (
     cd "$sb" || exit 1
     # shellcheck disable=SC1090
@@ -5820,6 +5832,9 @@ node_lane_runner_for() {
     "pnpm --filter web vitest run" \
     "npx vitest run" \
     "pnpm --filter jest vitest run" \
+    "bun x jest --ci" \
+    "npm x jest --ci" \
+    "bun x vitest run" \
     "env -u vitest jest --ci"; do
     run declared_runner_for "$spelling"
     ours="$output"
@@ -5838,6 +5853,131 @@ node_lane_runner_for() {
   [ "$output" = "vitest" ]
 
   run declared_runner_for "npm run jest:ci"
+  [ "$output" = "<none>" ]
+}
+
+@test "tests-js: a shell -c payload is the command that runs" {
+  # `"test": "bash -c 'jest --ci'"` left this reader holding `bash` -- an
+  # unknown command, nothing declared -- and nothing is what sends the caller to
+  # the installed-runner fallback. In a workspace carrying a local Vitest that
+  # ran Vitest over the Jest suite the manifest names: Vitest collects nothing
+  # it recognises, exits 0, and tests-js reports PASS with every Jest test
+  # uncollected.
+  run declared_runner_for "bash -c 'jest --ci'"
+  [ "$output" = "jest" ]
+  run declared_runner_for 'sh -c \"vitest run\"'
+  [ "$output" = "vitest" ]
+
+  # Short options bundle, and the payload is still the payload.
+  run declared_runner_for "bash -ec 'jest --ci'"
+  [ "$output" = "jest" ]
+
+  # Where the payload ends is the whole difficulty, and it is quoting that says.
+  # A separator inside the quotes belongs to the payload; the same separator
+  # outside them ends it and starts a new command. Both directions asserted,
+  # because a reader that stops at the first separator gets the first of these
+  # wrong and one that never stops gets the second wrong.
+  run declared_runner_for "bash -c 'jest --ci && echo done'"
+  [ "$output" = "jest" ]
+  run declared_runner_for "bash -c 'echo hi' && vitest run"
+  [ "$output" = "vitest" ]
+
+  # The one that actually discriminates, and it took a mutation to find: with
+  # the boundary removed the two above still answer correctly, because the
+  # payload is rescanned by this same function and a separator inside it resets
+  # command position exactly as one outside it would. What does *not* survive is
+  # the quote strip -- a payload that runs to the end of the string is no longer
+  # a matched pair, so the runner keeps its leading quote and matches no arm.
+  #
+  #   payload ends at the separator ->  'jest --ci'  -> stripped -> jest
+  #   payload runs to the end       ->  'jest --ci' && echo done -> `'jest` -> none
+  run declared_runner_for "bash -c 'jest --ci' && echo done"
+  [ "$output" = "jest" ]
+
+  # The disposition this branch already made, now pinned rather than argued:
+  # `bash -c 'true' vitest` does not run vitest. The payload is `true` and the
+  # trailing word is a positional handed to it, so the honest answer is that
+  # this script names no runner.
+  run declared_runner_for "bash -c 'true' vitest"
+  [ "$output" = "<none>" ]
+
+  # And a shell that is running a *script* is untouched: the runner named after
+  # it is an argument to that script, not the command.
+  run declared_runner_for "bash scripts/test.sh vitest"
+  [ "$output" = "<none>" ]
+}
+
+@test "js lane: bun x and npm x hand the next word to a runner" {
+  # `bun --help` lists `x` as executing a package binary "(bunx)", and npm
+  # documents `x` as the alias of `npm exec`. Both readers entered
+  # package-manager mode on the manager and then read `x` as an ordinary
+  # command, so `"test": "bun x jest --ci"` named no runner in either file.
+  local spelling
+  for spelling in "bun x jest --ci" "npm x jest --ci"; do
+    run declared_runner_for "$spelling"
+    [ "$output" = "jest" ] || { echo "tests.sh: '$spelling' -> '$output'" >&2; return 1; }
+    run node_lane_runner_for "$spelling"
+    [ "$output" = "jest" ] || { echo "node.sh: '$spelling' -> '$output'" >&2; return 1; }
+  done
+
+  # Keyed to the two managers that document it, which is the whole reason it is
+  # not in the `exec|dlx|...` lists that pass through unconditionally. A bare
+  # `x` is an ordinary name, and a project whose own script is called `x` must
+  # not have the word after it promoted to the command.
+  run declared_runner_for "x vitest"
+  [ "$output" = "<none>" ]
+  run node_lane_runner_for "x vitest"
+  [ "$output" = "x" ]
+
+  # Six readers in node.sh reach this grammar through _pm_advance, so the
+  # spelling has to arrive at all of them at once. Enumerated from the source:
+  # a reader that steps a manager's prefix without going through that function
+  # is one this fix did not reach.
+  local _hits
+  _hits="$(grep -c '_pm_advance "\$_\?tok"' "$REPO_ROOT/ci/checks/node.sh" || true)"
+  [ "$_hits" -ge 5 ] || { echo "only ${_hits} readers route through _pm_advance" >&2; return 1; }
+}
+
+@test "tests-js: a delegated npm run script is followed to the runner it names" {
+  # `npm run test:unit` does not run a command called `test:unit`; it runs the
+  # script of that name. Unfollowed, a manifest that delegates declared nothing,
+  # and a workspace with only a local Vitest ran Vitest and reported PASS over
+  # the Jest suite the delegate actually names.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "npm run test:unit",
+    "test:unit": "npx --package jest jest --ci" } }'
+  [ "$output" = "jest" ]
+
+  # Through a chain, and through the other managers' spelling of it.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "pnpm run a", "a": "yarn run b", "b": "vitest run" } }'
+  [ "$output" = "vitest" ]
+
+  # A cycle terminates and declares nothing. Nothing is the safe answer: the
+  # caller refuses a workspace that installs both runners and declares neither,
+  # so a chain this reader cannot follow is reported rather than guessed at.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "npm run a", "a": "npm run b", "b": "npm run a" } }'
+  [ "$output" = "<none>" ]
+
+  # Self-delegation is the one-script spelling of the same cycle.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": { "test": "npm run test" } }'
+  [ "$output" = "<none>" ]
+
+  # The control that keeps the old reading alive: where the manifest defines no
+  # script of that name, the word is read in command position exactly as before.
+  # `bun run vitest` is how a workspace with no `vitest` script invokes the
+  # binary, and it has to keep resolving.
+  run declared_runner_for "bun run vitest"
+  [ "$output" = "vitest" ]
+  run declared_runner_for "npm run jest:ci"
+  [ "$output" = "<none>" ]
+
+  # A delegate that names no runner does not fall back to reading its own
+  # arguments in command position. What the delegate runs is what the workspace
+  # runs, and it named nothing.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "npm run build vitest", "build": "tsc -b" } }'
   [ "$output" = "<none>" ]
 }
 
@@ -6346,7 +6486,15 @@ ship_ws_run() {
 
   # The premise. Without it an unconditional `return 1` passes every assertion
   # above while turning the cache off for everything.
-  _check_is_cacheable format \
+  #
+  # `changed-files`, not `format`. This used to name a check id the preflight
+  # plan does not schedule, which was cacheable only because the function
+  # returned 0 for everything it had not heard of -- so the premise was
+  # satisfied by the very tail that let security, build and debt be cached.
+  # With the default closed it has to name a lane that is *deliberately*
+  # cacheable, and there is exactly one: its answer is a function of the
+  # changed-file list the key is made of.
+  _check_is_cacheable changed-files \
     || { echo "nothing is cacheable any more; this case no longer tests the rule" >&2; return 1; }
 }
 
@@ -6388,15 +6536,34 @@ ship_ws_run() {
   [[ "$output" != *scratch* ]] \
     || { echo "ship mode counted a workspace the push does not send: $output" >&2; rm -rf "$sb"; return 1; }
 
-  # And the narrowing is an intersection with HEAD, never a substitute for the
-  # walk: a workspace in HEAD and gone from disk stays absent, because discovery
-  # never offered it. This is the half a "read HEAD instead" fix would invert,
-  # producing a workspace no lane can install.
+  # And a workspace in HEAD that is gone from disk. This case used to assert
+  # only that it "stays absent", on the reasoning that a "read HEAD instead" fix
+  # would invert the narrowing and produce a workspace no lane can install.
+  # Half right: inventing it is still wrong, and stdout must stay empty. But
+  # absent is not the same as answered, and reporting no workspace is how
+  #
+  #   rm -rf frontend
+  #   CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh
+  #   -> skipped: no package.json found        exit 0
+  #
+  # passed a push whose HEAD still carries frontend/package.json. There is a
+  # third reading and it is the right one: this run cannot check the push, so it
+  # says so and the callers record FAIL_INFRA. Both halves are pinned below,
+  # because a fix satisfying either one alone is a defect.
   ( cd "$sb" && rm -rf frontend )
   run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
-                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json"
-  [[ "$output" != *frontend* ]] \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json 2>/dev/null"
+  [ "$status" -ne 0 ] \
+    || { echo "a workspace the worktree cannot supply was answered cleanly: '$output'" >&2; rm -rf "$sb"; return 1; }
+  [ -z "$output" ] \
     || { echo "a workspace deleted from disk was invented from HEAD: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # The refusal names what is missing, or it is not actionable. stderr only,
+  # since the assertion above is about stdout carrying no workspace.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json 2>&1 1>/dev/null"
+  [[ "$output" == *"frontend/package.json"* ]] \
+    || { echo "the refusal does not say which manifest is missing: $output" >&2; rm -rf "$sb"; return 1; }
   rm -rf "$sb"
 }
 

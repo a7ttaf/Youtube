@@ -2246,6 +2246,19 @@ _pm_advance() {
     1) ;;
     *) return 1 ;;
   esac
+  # `bun x` is the two-word spelling of `bunx`, and `npm x` is the documented
+  # alias of `npm exec`. Both hand the next word to a package runner, so the
+  # manager's prefix continues rather than ending here -- read as the command,
+  # `x` made `bun x jest --ci` name no runner at all.
+  #
+  # Keyed, and not added to the `exec|dlx|...` lists that pass through
+  # unconditionally, because a bare `x` is not a package runner: it is as good a
+  # name for a project's own script as any other, and `x vitest` has to keep
+  # meaning that script. Six readers reach this grammar through this one
+  # function, so they learn the spelling together.
+  case "${_pm_name}|$1" in
+    'bun|x'|'npm|x') return 0 ;;
+  esac
   # Keyed by which manager is in front, for the reason the flag allow-list in
   # _reject_narrowing_flags is keyed by runner: one list cannot describe five
   # vocabularies. `-p` is `--package` to `npx` and `--parseable` to `pnpm`, so a

@@ -171,8 +171,19 @@ _bp_check_signed_commits() {
     ci::log::info "No HEAD commit; skipping signed commit check."
     return 0
   fi
-  local range
-  if ! range="$(_bp_commit_range)"; then
+  # "There is no push to measure" and "this push cannot be measured" were one
+  # condition here, and this check draws opposite conclusions from them: the
+  # first is a skip, the second is the whole reason the check exists. Status 3
+  # is push_range refusing a push that publishes more than one lineage -- it
+  # used to hand back a HEAD-derived range instead, and the signatures of the
+  # checked-out branch were reported as though they were the pushed ones.
+  local range _bp_rc=0
+  range="$(_bp_commit_range)" || _bp_rc=$?
+  if [ "$_bp_rc" -eq 3 ]; then
+    _bp_infra "This push publishes commits on more than one lineage, so their signatures cannot be walked as one range. Push the refs separately."
+    return 0
+  fi
+  if [ "$_bp_rc" -ne 0 ]; then
     ci::log::info "No push range available; skipping signed commit check."
     return 0
   fi
@@ -230,8 +241,14 @@ _bp_check_linear_history() {
   # Where the push is going is not where the working tree is standing, which is
   # the same distinction _bp_check_protected_branch above already draws for the
   # same reason.
-  local range
-  if ! range="$(_bp_commit_range)"; then
+  # Same two conditions as the signature check above, told apart the same way.
+  local range _bp_rc=0
+  range="$(_bp_commit_range)" || _bp_rc=$?
+  if [ "$_bp_rc" -eq 3 ]; then
+    _bp_infra "This push publishes commits on more than one lineage, so merge commits cannot be counted over one range. Push the refs separately."
+    return 0
+  fi
+  if [ "$_bp_rc" -ne 0 ]; then
     ci::log::info "No push range available; skipping linear-history check."
     return 0
   fi

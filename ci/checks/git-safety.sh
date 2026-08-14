@@ -78,11 +78,23 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] && [ "${CI_GATE_PUSH_DELETIONS_ONLY:-0}" = "
 fi
 
 if [ "${CI_GATE_MODE:-}" = "ship" ]; then
-  GATE_RANGE="$(ci::git::push_range 2>/dev/null || true)"
+  # The diagnostic is kept rather than sent to /dev/null. push_range refuses a
+  # push that publishes more than one lineage -- it cannot be written as a
+  # single range, and it used to be answered with a HEAD-derived one instead --
+  # and the refusal says which refs to push separately. Discarding it left this
+  # message standing alone, which says what happened and not what to do.
+  #
+  # Removed inline rather than by an EXIT trap: `trap secret_cleanup EXIT` below
+  # replaces any trap set here, so a second one would silently leak the file.
+  _GS_RANGE_ERR="$(mktemp)"
+  GATE_RANGE="$(ci::git::push_range 2>"$_GS_RANGE_ERR" || true)"
   if [ -z "$GATE_RANGE" ]; then
     echo "Cannot determine the range being pushed; refusing to report on it."
+    if [ -s "$_GS_RANGE_ERR" ]; then cat "$_GS_RANGE_ERR"; fi
+    rm -f "$_GS_RANGE_ERR"
     exit "$CI_RESULT_FAIL_INFRA"
   fi
+  rm -f "$_GS_RANGE_ERR"
   GATE_WHAT="in the pushed commits"
 
   # Enumerated once, and fail-closed. Every scan below walks this list, and each
@@ -214,10 +226,28 @@ fi
 # exist. A sensitive file with an accent in its name walked straight through.
 # `-z` is git's documented way to get the literal bytes.
 #
-# Additions, copies, renames and modifications only. A path being *removed* is
-# not content this commit introduces, and listing deletions blocked the one
-# change that fixes the problem: committing `git rm secrets.env` failed the gate
-# for the file it deletes. The index form had the same flaw and the same cure.
+# Additions, copies, renames, modifications and type changes. A path being
+# *removed* is not content this commit introduces, and listing deletions blocked
+# the one change that fixes the problem: committing `git rm secrets.env` failed
+# the gate for the file it deletes. The index form had the same flaw and the
+# same cure.
+#
+# `T` belongs with the four that stay, and was missing. A type change is not a
+# removal -- the path is still there afterwards, holding content this commit
+# introduced -- so the reason `D` is excluded does not reach it. Git reports the
+# mode swap and nothing else, and every scan below reads this list:
+#
+#   c1  config.env is a symlink (mode 120000) pointing at a harmless file
+#   c2  it is replaced by a regular file (mode 100644) holding an AWS key
+#
+#   git diff --name-status               -> T   config.env
+#   --diff-filter=ACMR                   -> (nothing)
+#   --diff-filter=ACMRT                  -> config.env
+#
+# so the sensitive-file, build-artifact and large-blob rules all reported clean
+# over a secret that the push was carrying. `U`, `X` and `B` are deliberately
+# not here: unmerged paths have no single blob to scan, and the other two are
+# git-internal states this gate never runs in.
 #
 # The producer's status is not discarded here. `|| true` turned "the path list
 # could not be produced" into "this push adds no files", and the sensitive-file,
@@ -225,7 +255,7 @@ fi
 # reporting clean over a list nobody could build. The caller decides; this
 # reports.
 _gs_content_files() {
-  _gs_diff --name-only -z --diff-filter=ACMR 2>/dev/null
+  _gs_diff --name-only -z --diff-filter=ACMRT 2>/dev/null
 }
 
 # `--check` reports through its exit status, and _gs_diff swallows that: it runs

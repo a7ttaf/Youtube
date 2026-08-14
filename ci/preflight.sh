@@ -514,8 +514,47 @@ _check_is_cacheable() {
     # the key would work; not caching a check whose input is the history is
     # simpler and cannot drift out of step with what the check reads.
     git-safety | branch-protection) return 1 ;;
+    # security runs `pnpm audit` / `yarn npm audit` / `npm audit` against a live
+    # advisory database. Its answer changes when a CVE is published and no file
+    # in this repository changes at all, so there is nothing for the key to
+    # move: same paths, same contents, same tool versions, same checks.yml, and
+    # a PASS from before the advisory landed is served after it.
+    security) return 1 ;;
+    # build runs `bash -n` and, where it is installed, shellcheck over
+    # `ci/*.sh ci/checks/*.sh ci/lib/*.sh ci/scripts/*.sh .githooks/*` plus
+    # install.sh and deploy.sh -- the whole set, not the changed part of it.
+    # This is the tests-shell argument one lane over: a PASS cached for a
+    # docs-only branch and then rebased onto a base carrying a syntax error in
+    # ci/checks/node.sh has an identical key, because that file is not in the
+    # changeset the key describes.
+    build) return 1 ;;
+    # debt executes the underlying tools across the repository and counts
+    # signature occurrences in their output against ci/debt/known-failures.yml.
+    # What it reads is whatever those tools read, which is everything; the
+    # ratchet it compares against is a file the changeset need never mention.
+    debt) return 1 ;;
+    # Named positively, and it is the only one: this lane writes the three file
+    # lists under ci/reports/ and returns PASS, and nothing else in the gate
+    # reads them. Its output is a function of exactly the thing the key is made
+    # of, so a hit and a run produce the same bytes.
+    changed-files) return 0 ;;
   esac
-  return 0
+  # Closed by default, and that is the fix behind the three arms above.
+  #
+  # This was `return 0`: a list of lanes that may not be cached, with everything
+  # else cacheable for not being on it. An exclusion has no tail -- it has to
+  # name every lane that must never reach the default, including the ones added
+  # after it was written -- and security, build and debt were three that never
+  # were. The same shape, in the same file, that made `--mode debt` run the full
+  # plan for not being `quick`.
+  #
+  # Turned round, a lane nobody has classified is simply run. That costs time
+  # and cannot report a PASS for work that did not happen, which is the
+  # direction to be wrong in. `preflight: every lane it schedules is classified
+  # for the cache` enumerates the plan and fails on a lane this function has
+  # never heard of, so the classification is made deliberately rather than by
+  # falling off the end of a case.
+  return 1
 }
 
 # _tool_fingerprint <tool> – echo "<tool>-<version>", or "<tool>-absent".

@@ -174,6 +174,62 @@ gs_run() {
   rm -rf "$GS_SB"
 }
 
+@test "git-safety: a path that changes file type is still scanned" {
+  # The counterpart to the case above, and the letter that was missing from it.
+  # `D` is excluded because a removal introduces no content; `T` was excluded
+  # with it, and a type change is not a removal -- the path is still there
+  # afterwards, holding whatever the commit put in it.
+  #
+  # A tracked symlink replaced by a regular file is the shape: git reports the
+  # mode swap as `T` and nothing else, so the sensitive-file, build-artifact and
+  # large-blob scans all read a list this path was not on.
+  #
+  # Built with plumbing rather than `ln -s`, because the case has to mean the
+  # same thing on a checkout where the filesystem has no symlinks.
+  gs_setup
+  local blob base
+  blob="$( cd "$GS_SB" && printf 'a.txt' | git hash-object -w --stdin )"
+  ( cd "$GS_SB" && git update-index --add --cacheinfo "120000,${blob},config.env" \
+      && git -c user.email=t@t -c user.name=t commit -qm "config.env as a symlink" ) >/dev/null 2>&1
+  base="$( cd "$GS_SB" && git rev-parse HEAD )"
+
+  # Through gs_secret_line, not spelled out: ci/checks/common.sh defines the
+  # secret patterns as literal text and git-safety refuses a push whose
+  # additions match them, so a fixture that writes one out is a line this
+  # repository cannot push through its own gate. `tests: no fixture spells out a
+  # string the gate refuses to push` is the case that says so, and it caught
+  # this one.
+  blob="$( cd "$GS_SB" && gs_secret_line | git hash-object -w --stdin )"
+  ( cd "$GS_SB" && git update-index --cacheinfo "100644,${blob},config.env" \
+      && git -c user.email=t@t -c user.name=t commit -qm "and now a regular file" ) >/dev/null 2>&1
+
+  # The premise, asserted rather than assumed: git really does call this `T`,
+  # and the filter this gate used really did drop it. Without both, the run
+  # below could pass for a reason that has nothing to do with the fix.
+  run bash -c "cd '$GS_SB' && git diff --name-status '$base' HEAD"
+  [[ "$output" == T*"config.env"* ]]
+  run bash -c "cd '$GS_SB' && git diff --name-only --diff-filter=ACMR '$base' HEAD"
+  [ -z "$output" ]
+  run bash -c "cd '$GS_SB' && git diff --name-only --diff-filter=ACMRT '$base' HEAD"
+  [ "$output" = "config.env" ]
+
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"config.env"* ]]
+
+  # And the reason `D` stays out is unchanged by this: deleting the file is
+  # still the fix, not a second offence.
+  gs_setup
+  printf 'SECRET=1\n' > "$GS_SB/secrets.env"
+  gs_commit "add secret"
+  base="$( cd "$GS_SB" && git rev-parse HEAD )"
+  ( cd "$GS_SB" && git rm -q secrets.env ) >/dev/null 2>&1
+  gs_commit "drop secret"
+  run bash -c "cd '$GS_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 0 ]
+  rm -rf "$GS_SB"
+}
+
 @test "git-safety: a secret added and removed within the push is still caught" {
   # `git diff base..HEAD` collapses the endpoints, so a token added by one
   # outgoing commit and removed by a later one vanishes from the net diff while
@@ -586,12 +642,180 @@ _pf_fns() {
   local fns="$BATS_TEST_TMPDIR/cache.sh"
   _pf_fns "$fns" _check_is_cacheable
   local id rc
-  for id in test-layout tests-shell node python git-safety branch-protection; do
+  # security reaches a live advisory database, build shellchecks the whole ci/
+  # tree, and debt runs the underlying tools repo-wide against a ratchet file.
+  # None of the three is described by a key made of the changed paths.
+  for id in test-layout tests-shell node python git-safety branch-protection \
+            security build debt typecheck-js; do
     rc=0
     # shellcheck disable=SC1090
     ( set +e; . "$fns"; _check_is_cacheable "$id"; exit $? ) || rc=$?
     [ "$rc" -eq 1 ] || { echo "cacheable but must not be: $id" >&2; return 1; }
   done
+
+  # The control, so this is a classification and not a blanket refusal: the one
+  # lane whose answer really is a function of the changed-file list still hits.
+  rc=0
+  # shellcheck disable=SC1090
+  ( set +e; . "$fns"; _check_is_cacheable changed-files; exit $? ) || rc=$?
+  [ "$rc" -eq 0 ] || { echo "changed-files should be cacheable" >&2; return 1; }
+}
+
+@test "preflight: every lane it schedules is classified for the cache" {
+  # The list of lanes that may not be cached was an exclusion, and an exclusion
+  # has no tail: everything it does not name was cacheable for not being named.
+  # security, build and debt were three that never were, and the same shape in
+  # this same file is what made `--mode debt` run the whole full plan for not
+  # being `quick`.
+  #
+  # The default is closed now, so a lane nobody classified is simply run. This
+  # case is the other half: it enumerates the lanes from the plan rather than
+  # restating them, and fails on one this function has never heard of -- so the
+  # classification is made deliberately instead of collected by falling off the
+  # end of a case.
+  local lanes
+  lanes="$(grep -oE '"[a-z-]+:\./ci/checks/[a-z-]+\.sh"' "$REPO_ROOT/ci/preflight.sh" \
+           | sed -E 's/^"([a-z-]+):.*/\1/' | sort -u)"
+  # The floor: a selector that matches nothing makes every assertion below
+  # vacuously true, which is how a meta-case comes to pass while testing air.
+  [ "$(printf '%s\n' "$lanes" | grep -c .)" -ge 8 ] \
+    || { echo "found only these lanes: $lanes" >&2; return 1; }
+
+  # And the lane file has to be covered too, since --mode full/ship reads its
+  # rows instead of the built-in plan when CI_GATE_USE_LANES=1.
+  local conf_lanes
+  conf_lanes="$(sed -E '/^#/d; /^$/d; s/\|.*//' "$REPO_ROOT/ci/config/lanes.conf" | sort -u)"
+  lanes="$(printf '%s\n%s\n' "$lanes" "$conf_lanes" | sort -u | grep -v '^$')"
+
+  local src="$REPO_ROOT/ci/preflight.sh" lane unclassified=""
+  while IFS= read -r lane; do
+    [ -n "$lane" ] || continue
+    # Named in an arm of _check_is_cacheable, either alone or beside another
+    # label in the same pattern.
+    grep -qE "^[[:space:]]*([a-z-]+[[:space:]]*\|[[:space:]]*)*${lane}([[:space:]]*\|[[:space:]]*[a-z-]+)*\)[[:space:]]*return [01]" "$src" \
+      || unclassified="${unclassified} ${lane}"
+  done <<< "$lanes"
+  [ -z "$unclassified" ] \
+    || { echo "lanes the cache has no ruling on:${unclassified}" >&2; return 1; }
+}
+
+@test "git: a push across two lineages is refused, not answered with HEAD" {
+  # The tag-range fix collapsed tips by ancestry and, for tips containing
+  # neither each other, set _pr_split and *fell through* -- to the code below it
+  # that defaults an unset new sha to HEAD. So a push publishing two unrelated
+  # lineages got a range describing the checked-out branch: non-empty, so
+  # git-safety's "cannot determine the range" guard never fired, and the
+  # signature walk, the merge count and every content scan reported on commits
+  # nobody was pushing while the orphan lineage went out unlooked-at.
+  #
+  #   old  ->  rc=0  <base>..HEAD   (main's commits; the orphan never scanned)
+  #   new  ->  rc=3  refused, naming what to do instead
+  #
+  # There is no honest single range here: every caller hands this string to
+  # `git log` or `git rev-list` as one argument, and git has no one-token
+  # spelling for the union of two disjoint ranges. Refusing says so; the old
+  # answer said something confident and false.
+  local sb l1 l2 base
+  sb="$(mktemp -d)"
+  git init -q --bare "$sb/dest.git"
+  git init -q -b main "$sb/w"
+  (
+    cd "$sb/w"
+    git config user.email t@t && git config user.name t
+    git remote add origin "file://$sb/dest.git"
+    printf 'base\n' > a.txt && git add -A && git commit -qm base
+    git push -q origin main
+    printf 'one\n' >> a.txt && git add -A && git commit -qm one && git tag v1
+    git checkout -q --orphan other
+    git rm -rq --cached . 2>/dev/null
+    printf 'two\n' > b.txt && git add -A && git commit -qm two && git tag v2
+    git checkout -q main
+  ) >/dev/null 2>&1
+  l1="$(cd "$sb/w" && git rev-parse v1^{commit})"
+  l2="$(cd "$sb/w" && git rev-parse v2^{commit})"
+
+  # The premise: these two really do contain neither each other, or the case
+  # below is asserting nothing about split lineages at all.
+  run bash -c "cd '$sb/w' && git merge-base --is-ancestor '$l1' '$l2'"
+  [ "$status" -ne 0 ]
+  run bash -c "cd '$sb/w' && git merge-base --is-ancestor '$l2' '$l1'"
+  [ "$status" -ne 0 ]
+
+  _pr_ask() { # <tag tips>
+    bash -c "cd '$sb/w' && CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_TAG_TIPS='$1' \
+             CI_GATE_PUSH_NEW_SHA= bash -c \". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+             . '$REPO_ROOT/ci/lib/git.sh'
+             ci::git::push_range\" 2>&1"
+  }
+
+  run _pr_ask "$l1 $l2"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"more than one"* ]]
+  [[ "$output" == *"separately"* ]]
+  # Nothing that could be read as a range, and in particular not one ending in
+  # HEAD -- that was the old answer.
+  [[ "$output" != *".."* ]]
+
+  # One new lineage still resolves.
+  run _pr_ask "$l1"
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  run bash -c "cd '$sb/w' && git rev-list --count $output"
+  [ "$output" -eq 1 ]
+
+  # And the refusal is narrowed to pushes that need it. `git push origin v1 v2`
+  # with both tags on commits the destination already carries is the ordinary
+  # release shape: it publishes nothing, so it has no split to refuse. Without
+  # the published-tip filter this is a false refusal of a routine push, which is
+  # the trap the first attempt at the tag range fell into.
+  ( cd "$sb/w" && git push -q origin v1 v2 ) >/dev/null 2>&1
+  run _pr_ask "$l1 $l2"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"more than one"* ]]
+  base="$(cd "$sb/w" && git rev-list --count "$output" 2>/dev/null || echo BAD)"
+  [ "$base" -eq 0 ]
+  rm -rf "$sb"
+}
+
+@test "branch-protection: an unmeasurable push is not a skipped signature check" {
+  # "There is no push to measure" and "this push cannot be measured" were one
+  # condition, and this check draws opposite conclusions from them. push_range
+  # returning non-zero meant "skip", so the moment it started refusing a
+  # split-lineage push the signature and linear-history checks would have gone
+  # quietly silent on exactly the push that could not be scanned -- trading a
+  # wrong answer for no answer, on the check the ruleset exists to enforce.
+  local sb l1 l2
+  sb="$(mktemp -d)"
+  git init -q --bare "$sb/dest.git"
+  git init -q -b main "$sb/w"
+  mkdir -p "$sb/w/ci/lib" "$sb/w/ci/checks"
+  cp "$REPO_ROOT/ci/checks/branch-protection.sh" "$REPO_ROOT/ci/checks/common.sh" "$sb/w/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb/w/ci/lib/"
+  (
+    cd "$sb/w"
+    git config user.email t@t && git config user.name t
+    git remote add origin "file://$sb/dest.git"
+    printf 'ci/\n' > .gitignore
+    printf 'base\n' > a.txt && git add -A && git commit -qm base
+    git push -q origin main
+    printf 'one\n' >> a.txt && git add -A && git commit -qm one && git tag v1
+    git checkout -q --orphan other
+    git rm -rq --cached . 2>/dev/null
+    printf 'two\n' > b.txt && git add -A && git commit -qm two && git tag v2
+    git checkout -q main
+  ) >/dev/null 2>&1
+  l1="$(cd "$sb/w" && git rev-parse v1^{commit})"
+  l2="$(cd "$sb/w" && git rev-parse v2^{commit})"
+
+  run bash -c "cd '$sb/w' && CI_GATE_MODE=ship CI_GATE_REQUIRE_SIGNED_COMMITS=1 \
+    CI_GATE_REQUIRE_LINEAR_HISTORY=1 CI_GATE_PUSH_REMOTE=origin \
+    CI_GATE_PUSH_TAG_TIPS='$l1 $l2' CI_GATE_PUSH_NEW_SHA= CI_GATE_PUSH_REMOTE_REFS=refs/tags/v1 \
+    bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"more than one lineage"* ]]
+  # And it did not quietly say it was skipping instead.
+  [[ "$output" != *"skipping signed commit check"* ]]
+  rm -rf "$sb"
 }
 
 @test "git: a local default-branch guess equal to the tip is discarded" {

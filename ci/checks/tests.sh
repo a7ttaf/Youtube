@@ -14,6 +14,18 @@ source "$ROOT_DIR/ci/lib/log.sh"
 source "$ROOT_DIR/ci/lib/junit.sh"
 # shellcheck source=ci/lib/affected.sh
 source "$ROOT_DIR/ci/lib/affected.sh" 2>/dev/null || true
+# shellcheck source=ci/lib/git.sh
+# For ci::git::push_range: in ship mode the affected-test narrowing below has to
+# come from the commits being pushed, and this is the one place that answers
+# which those are. Sourced rather than reimplemented, for the reason git.sh's
+# own header gives -- a second copy is how the last duplicated range in this
+# gate drifted out of step with the first.
+#
+# Unguarded, like branch-protection.sh, changed-files.sh, git-safety.sh and
+# node.sh source it: a missing ci/lib/git.sh is a broken checkout, not an
+# optional feature. affected.sh above is guarded because the narrowing really is
+# optional; the range this run stands behind is not.
+source "$ROOT_DIR/ci/lib/git.sh"
 
 cd "$ROOT_DIR"
 
@@ -25,10 +37,37 @@ OVERALL_RESULT=$CI_RESULT_PASS
 # ---------------------------------------------------------------------------
 AFFECTED_TESTS=""
 if type ci::affected::get_affected_tests >/dev/null 2>&1 && [ -f "ci/config/affected.yml" ]; then
-  _changed_files="$(git diff --cached --name-only 2>/dev/null || true)"
-  if [ -z "$_changed_files" ]; then
-    ci::log::info "No staged files found; falling back to unstaged changes for ad-hoc test selection."
-    _changed_files="$(git diff --name-only 2>/dev/null || true)"
+  # Which tree this narrowing is derived from. The index and the worktree are
+  # the right answer for quick, and the wrong one for ship: a push carries
+  # *committed* changes, which appear in neither. So a branch whose frontend
+  # work is committed and clean, with one unrelated Python edit staged, produced
+  # an AFFECTED_TESTS that was non-empty and contained only Python patterns --
+  # and a non-empty list narrows. `_tests_filter_affected javascript` then came
+  # back empty and tests-js reported "skipped: no affected JavaScript tests"
+  # over a push whose JS the gate never ran.
+  #
+  # Non-empty is what narrows, so being unable to ask has to leave this empty
+  # rather than partly filled: no narrowing runs every suite, which is the
+  # direction that cannot skip a pushed change. That covers a bare tip too --
+  # push_range returns one when it finds no base, and `git diff --name-only
+  # <tip>` would compare the tip against the worktree rather than listing what
+  # the push adds.
+  _changed_files=""
+  if [ "${CI_GATE_MODE:-}" = "ship" ]; then
+    _tests_range=""
+    if type ci::git::push_range >/dev/null 2>&1; then
+      _tests_range="$(ci::git::push_range 2>/dev/null || true)"
+    fi
+    case "$_tests_range" in
+      *..*) _changed_files="$(git diff --name-only "$_tests_range" 2>/dev/null || true)" ;;
+      *)    ci::log::info "No push range to narrow by; running every suite." ;;
+    esac
+  else
+    _changed_files="$(git diff --cached --name-only 2>/dev/null || true)"
+    if [ -z "$_changed_files" ]; then
+      ci::log::info "No staged files found; falling back to unstaged changes for ad-hoc test selection."
+      _changed_files="$(git diff --name-only 2>/dev/null || true)"
+    fi
   fi
   if [ -n "$_changed_files" ]; then
     AFFECTED_TESTS="$(while IFS= read -r f; do
@@ -100,10 +139,45 @@ _tests_record_failure() {
 # Read with node, the same way ci/checks/node.sh reads this file, because a
 # manifest is JSON and a grep for a runner's name finds it in a dependency entry
 # or a comment-shaped string just as readily as in the script that runs it.
+# --- BEGIN declared-runner reader ---------------------------------------------
+#
+# Cut out as a block by ci/tests/test_js_lane.bats, which drives this reader
+# directly rather than through the lane -- reaching it through the lane means
+# installing and running a real suite for a question that is one pass of
+# parsing. Three cases there used to cut on `/^_tests_js_declared_runner()/,/^}/`
+# and so could only ever see one function; the markers are what they cut on now,
+# so a helper added here arrives in all three without a fourth extraction site
+# having to be found.
+
+# How far a `<pm> run <script>` chain is followed before the reader gives up.
+# Two scripts that name each other, or one that names itself, would otherwise
+# not terminate. Giving up declares nothing, and nothing is the safe answer
+# here: the caller refuses a workspace that installs both runners and declares
+# neither, so a chain this reader cannot follow is reported rather than guessed.
+_TESTS_JS_RUNNER_MAX_DEPTH=8
+
+# The body of a named script in ./package.json, or nothing.
+#
+# Read with node, for the reason the `test` script is read with node: a manifest
+# is JSON, and a script name is a key, not a line.
+_tests_js_script_body() {
+  ci::common::command_exists node || return 1
+  node -e "try{const p=require('./package.json');const s=(p.scripts||{})[process.argv[1]];if(typeof s!=='string')process.exit(4);process.stdout.write(s)}catch(e){process.exit(3)}" "$1" 2>/dev/null
+}
+
 _tests_js_declared_runner() {
-  local _cmd _w
+  local _cmd
   ci::common::command_exists node || return 1
   _cmd="$(node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{}).test||''))}catch(e){process.exit(3)}" 2>/dev/null)" || return 1
+  _tests_js_scan_runner "$_cmd" 0
+}
+
+# Which runner a command string names, following the delegations a manifest is
+# allowed to use to reach one.
+_tests_js_scan_runner() {
+  local _cmd="$1" _depth="${2:-0}"
+  local _w _sub _pl _q _tok _k _ch
+  [ "$_depth" -lt "$_TESTS_JS_RUNNER_MAX_DEPTH" ] || return 0
   # In command position, not anywhere in the string.
   #
   # This scanned every word, so a runner named as an *argument* declared the
@@ -155,13 +229,31 @@ _tests_js_declared_runner() {
     _norm="$_norm${_cmd:$_ci:1}"
     _ci=$((_ci + 1))
   done
-  _cmd="$_norm"
+  # Indexed, rather than `for _w in $_norm`, because the shell `-c` arm below
+  # needs the words that come *after* the one in hand and a for-loop cannot look
+  # at them. Globbing off while the array is built: this string is a script, and
+  # a `*.test.ts` in it would otherwise be expanded against whatever directory
+  # the lane happens to be standing in -- the same exposure the for-loop had,
+  # carried over rather than introduced, and `set -f` is the fix for both.
+  local -a _words=()
+  local _reset_f=1
+  case "$-" in *f*) ;; *) _reset_f=0 ;; esac
+  set -f
+  # shellcheck disable=SC2206
+  _words=( $_norm )
+  [ "$_reset_f" -eq 1 ] || set +f
 
-  local _expect=1 _tp=0 _ep=0 _pp=0 _pm_name=""
-  for _w in $_cmd; do
+  local _n=${#_words[@]} _i=0
+  local _expect=1 _tp=0 _ep=0 _pp=0 _pm_name="" _sh=0
+  while [ "$_i" -lt "$_n" ]; do
+    _w="${_words[$_i]}"
+    _i=$((_i + 1))
     case "$_w" in
       ';'|'&&'|'||'|'|'|'&'|'('|')'|'{'|'}')
-        _expect=1 ; _tp=0 ; _ep=0 ; _pp=0 ; continue ;;
+        # `_pm_name` and `_sh` are cleared here too. They are only meaningful
+        # for the command they were set by, and a manager's name outliving its
+        # own command lets `npm ci && run x` read `x` as a delegated script.
+        _expect=1 ; _tp=0 ; _ep=0 ; _pp=0 ; _pm_name="" ; _sh=0 ; continue ;;
     esac
     [ "$_expect" -eq 1 ] || continue
     # A wrapper's own option can take its value as a separate word, and that
@@ -196,6 +288,20 @@ _tests_js_declared_runner() {
       # `--package` as valueless and declared `vitest` as the command, so in a
       # workspace carrying both runners this lane ran Vitest while the
       # manifest's Jest suite never ran and the lane reported PASS.
+      # `bun x` is the two-word spelling of `bunx`, and `npm x` is the
+      # documented alias of `npm exec`. Both hand the next word to a package
+      # runner, so both have to stay in package-manager position rather than
+      # ending it: read as an ordinary command, `x` made `bun x jest --ci`
+      # declare nothing, and nothing sends a workspace carrying a local Vitest
+      # to the installed-runner fallback -- Vitest over a Jest suite, nothing
+      # collected, exit 0, PASS.
+      #
+      # Keyed by manager, not added to the transparent list below, because a
+      # bare `x` is not a package runner: it is as good a name for a project's
+      # own script as any other, and `x vitest` must keep meaning the script.
+      case "${_pm_name}|$_w" in
+        'bun|x'|'npm|x') continue ;;
+      esac
       case "${_pm_name}|$_w" in
         'npx|-p'|'npx|--package'|'npx|-c'|'npx|--call' \
           |'npm|-p'|'npm|--package'|'npm|-c'|'npm|--call' \
@@ -211,13 +317,89 @@ _tests_js_declared_runner() {
       esac
     elif [ "$_pp" -eq 2 ]; then _pp=1 ; continue
     fi
+    # A shell's `-c` payload is the command that runs, so it is read as one.
+    # `"test": "bash -c 'jest --ci'"` left the reader with `bash` -- an unknown
+    # command, nothing declared -- and a workspace carrying a local Vitest then
+    # ran Vitest over the Jest suite the manifest names and reported PASS.
+    if [ "$_sh" -eq 1 ]; then
+      case "$_w" in
+        -c|-[a-zA-Z]*c)
+          # The payload, gathered word by word so a separator *outside* it ends
+          # it: in `bash -c 'echo hi' && vitest run` the payload is `echo hi`
+          # and vitest is the command after it, while in
+          # `bash -c 'jest --ci && echo done'` the `&&` is inside the quotes and
+          # the payload runs to the end. Quote state is what tells those apart,
+          # and it is tracked here only -- the scan at large deliberately keeps
+          # quotes attached to their words, which is what stops `"a&&vitest"`
+          # from promoting an argument to a runner.
+          _pl="" ; _q=""
+          while [ "$_i" -lt "$_n" ]; do
+            _tok="${_words[$_i]}"
+            if [ -z "$_q" ]; then
+              case "$_tok" in
+                ';'|'&&'|'||'|'|'|'&') break ;;
+              esac
+            fi
+            if [ -n "$_pl" ]; then _pl="$_pl $_tok" ; else _pl="$_tok" ; fi
+            _k=0
+            while [ "$_k" -lt "${#_tok}" ]; do
+              _ch="${_tok:$_k:1}"
+              if [ -z "$_q" ]; then
+                case "$_ch" in "'"|'"') _q="$_ch" ;; esac
+              elif [ "$_ch" = "$_q" ]; then
+                _q=""
+              fi
+              _k=$((_k + 1))
+            done
+            _i=$((_i + 1))
+          done
+          # One layer of surrounding quoting comes off. The payload is shell,
+          # and what the shell strips before running it has to come off before
+          # it is read as shell.
+          if [ "${#_pl}" -ge 2 ]; then
+            case "$_pl" in
+              "'"*"'"|'"'*'"') _pl="${_pl:1:$((${#_pl} - 2))}" ;;
+            esac
+          fi
+          _sub="$(_tests_js_scan_runner "$_pl" "$((_depth + 1))")"
+          if [ -n "$_sub" ]; then printf '%s' "$_sub" ; return 0 ; fi
+          # The payload is what ran, and it named no runner. Whatever trails it
+          # is an argument to the payload -- `bash -c 'true' tsc` passes `tsc`
+          # to the payload as a positional, it does not run it.
+          _sh=0 ; _expect=0 ; continue ;;
+        -*) continue ;;
+      esac
+      _sh=0
+    fi
     case "${_w##*/}" in
       vitest|vitest.cmd|vitest.exe) printf 'vitest' ; return 0 ;;
       jest|jest.cmd|jest.exe) printf 'jest' ; return 0 ;;
       timeout) _tp=1 ; continue ;;
       env|cross-env) _ep=1 ; continue ;;
       npx|bunx|pnpx|pnpm|yarn|npm|bun) _pm_name="${_w##*/}" ; _pp=1 ; continue ;;
-      nohup|command|exec|time|dlx|run|--) continue ;;
+      sh|bash|zsh|dash|ksh|ash) _sh=1 ; continue ;;
+      run|run-script)
+        # `npm run test:unit` does not run a command called `test:unit`; it runs
+        # the script of that name, and what *that* names is what this workspace
+        # runs. Unfollowed, a manifest that delegates declared nothing, and the
+        # caller reads nothing as "fall back to whichever runner is installed"
+        # -- so `"test": "npm run test:unit"` over a Jest suite ran Vitest and
+        # reported PASS.
+        #
+        # Only where a manager is in front, and only for a name the manifest
+        # actually defines. Where it defines no such script the word is left to
+        # be read in command position exactly as before, which is what keeps
+        # `bun run vitest` resolving to vitest.
+        if [ -n "$_pm_name" ] && [ "$_i" -lt "$_n" ]; then
+          _sub="$(_tests_js_script_body "${_words[$_i]}" || true)"
+          if [ -n "$_sub" ]; then
+            _sub="$(_tests_js_scan_runner "$_sub" "$((_depth + 1))")"
+            if [ -n "$_sub" ]; then printf '%s' "$_sub" ; return 0 ; fi
+            _i=$((_i + 1)) ; _expect=0 ; continue
+          fi
+        fi
+        continue ;;
+      nohup|command|exec|time|dlx|--) continue ;;
     esac
     case "$_w" in
       -*) continue ;;
@@ -229,6 +411,7 @@ _tests_js_declared_runner() {
   done
   return 0
 }
+# --- END declared-runner reader -----------------------------------------------
 
 _tests_js_have_runner() {
   local _c

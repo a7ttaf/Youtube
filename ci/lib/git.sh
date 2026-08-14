@@ -269,30 +269,70 @@ ci::git::push_range() {
   # checks a range, and it is the only reader of that question.
   #
   # Collapsed by ancestry, the same rule the dispatcher applies to branch tips.
-  # Tips containing neither each other cannot be written as one `A..B` -- every
-  # caller passes this string to `git log` or `git rev-list` as a single
-  # argument -- so that case is left exactly as it behaves today rather than
-  # answered wrongly with one of them. This fills in a range where one exists
-  # and narrows nothing.
+  # Tips containing neither each other cannot be written as one `A..B`, because
+  # every caller passes this string to `git log` or `git rev-list` as a single
+  # argument and git has no one-token spelling for the union of two disjoint
+  # ranges.
+  #
+  # That case used to fall through to the `@{upstream}` guesses below, which is
+  # the worst of the three things it could do: `new_sha` is unset for a tag-only
+  # push, so `tip` became HEAD and the history checks were handed a range with
+  # no relationship to the refs being pushed -- non-empty, so git-safety's
+  # "cannot determine the range" guard did not fire, and it reported on the
+  # checked-out branch instead. A confident answer about the wrong commits.
+  #
+  # Refused now, and the refusal is narrowed to the pushes that actually need
+  # it: a tip the destination already carries publishes no commits, so it can be
+  # neither the range nor a reason there is no single range. Dropping those
+  # first is what keeps `git push origin v1.0 v2.0` -- two tags on commits that
+  # are already upstream, the ordinary release shape -- from being refused for a
+  # split it does not have. What is left over is two or more lineages of
+  # genuinely unpublished commits, and there is no honest single range for that.
   if [ -z "${CI_GATE_PUSH_NEW_SHA:-}" ] \
     && [ -n "${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}" ]; then
-    local _pr_tip _pr_best="" _pr_split=0
+    # Two questions over the same list, and they are kept apart because the
+    # answers come from different subsets. `_pr_best` is the tip to measure and
+    # is collapsed over every tip, published or not -- a push of nothing but
+    # already-published tags still has to resolve to that tag's empty range
+    # rather than falling through to HEAD. `_pr_split` is whether a single range
+    # can express the push at all, and only unpublished tips can make it false.
+    local _pr_tip _pr_best="" _pr_split=0 _pr_res _pr_db _pr_new=""
     # Word splitting is the point: these are space-separated object names.
     # shellcheck disable=SC2086
     for _pr_tip in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-}; do
       [ -n "$_pr_tip" ] || continue
-      git rev-parse --verify "${_pr_tip}^{commit}" >/dev/null 2>&1 || continue
+      _pr_res="$(git rev-parse --verify "${_pr_tip}^{commit}" 2>/dev/null)" || continue
       if [ -z "$_pr_best" ]; then
         _pr_best="$_pr_tip"
       elif git merge-base --is-ancestor "$_pr_best" "$_pr_tip" 2>/dev/null; then
         _pr_best="$_pr_tip"
-      elif git merge-base --is-ancestor "$_pr_tip" "$_pr_best" 2>/dev/null; then
+      fi
+
+      _pr_db="$(ci::git::destination_base "$_pr_tip")"
+      # Already published: nothing goes out under this one, so it is not a
+      # lineage this push has to scan and cannot be a reason there is no range.
+      [ -n "$_pr_db" ] && [ "$_pr_db" = "$_pr_res" ] && continue
+      if [ -z "$_pr_new" ]; then
+        _pr_new="$_pr_tip"
+      elif git merge-base --is-ancestor "$_pr_new" "$_pr_tip" 2>/dev/null; then
+        _pr_new="$_pr_tip"
+      elif git merge-base --is-ancestor "$_pr_tip" "$_pr_new" 2>/dev/null; then
         : # already the descendant; keep it
       else
         _pr_split=1
       fi
     done
-    if [ -n "$_pr_best" ] && [ "$_pr_split" -eq 0 ]; then
+    if [ "$_pr_split" -eq 1 ]; then
+      # Nothing on stdout, so no caller can mistake this for a range, and a
+      # status of its own so "there is no push to measure" stays distinguishable
+      # from "this push cannot be measured". Those two were one condition, and
+      # the checks that read it draw opposite conclusions from them.
+      echo "ci::git::push_range: this push publishes commits on more than one" >&2
+      echo "  lineage, and they cannot be expressed as a single commit range." >&2
+      echo "  Push the refs separately so each one can be scanned." >&2
+      return 3
+    fi
+    if [ -n "$_pr_best" ]; then
       # Same base as a branch tip gets: what the destination actually holds,
       # asked of the destination. A tag on a commit the destination already
       # carries yields an empty range, which is the true answer for it -- and
