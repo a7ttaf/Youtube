@@ -76,6 +76,33 @@ if type ci::affected::get_affected_tests >/dev/null 2>&1 && [ -f "ci/config/affe
   fi
 fi
 
+# A glob from ci/config/affected.yml as the regex Jest actually wants.
+#
+# `--testPathPattern` is documented as a regexp, and the values in affected.yml
+# are globs -- `frontend/tests/**/*.test.ts`. Passed through unchanged they are
+# not that pattern in a stricter dialect; they are a different pattern. `**` is
+# a quantifier applied to a quantifier, which JavaScript's RegExp rejects
+# outright ("Nothing to repeat"), and where it does parse, `.` matches any
+# character so `a.test.ts` would also match `axtestxts`.
+#
+# Vitest is unaffected -- it takes its filter positionally as a substring -- so
+# this only ever bit a Jest workspace, which is why nothing here caught it.
+#
+# Order matters: the regex metacharacters are escaped first, so `.` is already
+# `\.` and the `*` handling below cannot be confused by one. Then `**\/` before
+# `**` before `*`, longest first, or the shorter rule eats the longer one's
+# first character.
+_tests_glob_to_regex() {
+  local _g="$1"
+  _g="$(printf '%s' "$_g" | sed -e 's/[].[^$()+{}|\\]/\\&/g')"
+  _g="${_g//\*\*\//<<ANY_DIRS>>}"
+  _g="${_g//\*\*/<<ANY>>}"
+  _g="${_g//\*/[^\/]*}"
+  _g="${_g//<<ANY_DIRS>>/(.*\/)?}"
+  _g="${_g//<<ANY>>/.*}"
+  printf '%s' "$_g"
+}
+
 _tests_filter_affected() {
   local lang="$1"
   local pattern
@@ -530,6 +557,7 @@ tests::run_js() {
     fi
     while IFS= read -r pattern; do
       [ -z "$pattern" ] && continue
+      pattern="$(_tests_glob_to_regex "$pattern")"
       if [ -n "$jest_pattern" ]; then
         jest_pattern="${jest_pattern}|${pattern}"
       else

@@ -78,8 +78,28 @@ ci::common::_manifest_in_scope() {
 #
 # Untracked files count. A test or a source module that exists only on disk is
 # read by the runner and is not in the push, which is the same divergence from
-# the other side. Ignored files do not: those are build output and caches, and
-# ci/checks/tests-shell.sh's scan is the record of what listing them costs.
+# the other side.
+#
+# Ignored files count too, and the first version of this said they did not --
+# "those are build output and caches", which is true of most of them and not of
+# the one that matters. A commit that deletes frontend/src/helper.ts and adds
+# that path to .gitignore leaves the local copy on disk, and it is invisible to
+# both lists above: HEAD does not carry the path, so nothing is different about
+# it, and --exclude-standard drops exactly this file. Measured:
+#
+#   file on disk: YES      in HEAD: NO
+#   git diff --name-only HEAD -- frontend            -> (nothing)
+#   git ls-files --others --exclude-standard         -> (nothing)
+#   git ls-files --others --ignored --exclude-standard -> frontend/src/helper.ts
+#
+# so the lane compiled and ran a file the push deletes. That is precisely the
+# case ci/checks/tests-shell.sh's ignored scan exists for, one lane over, and
+# excluding ignored files here threw it away.
+#
+# Narrowed the way that scan is narrowed, and for the same reason: listing every
+# ignored path means node_modules and every build directory, which is the cost
+# that made a deny-list unfinishable there. What these lanes read is a closed
+# set of source and test extensions, so that is what is named.
 #
 # Both statuses are taken, and separately from the output. `git diff` and
 # `git ls-files` each answer half the question, and a pipeline's status answers
@@ -96,8 +116,18 @@ ci::common::workspace_drift() {
   _wd_b="$(git ls-files --others --exclude-standard -- "$ws" 2>/dev/null)" || _wd_rc=2
   [ "$_wd_rc" -eq 0 ] || return 2
 
+  # The ignored ones, filtered to files these lanes read. node_modules and the
+  # usual build outputs are pruned first: those are ignored on purpose and
+  # listing them would bury the one path that matters in tens of thousands.
+  local _wd_c
+  _wd_c="$(git ls-files --others --ignored --exclude-standard -- "$ws" 2>/dev/null)" || _wd_rc=2
+  [ "$_wd_rc" -eq 0 ] || return 2
+  _wd_c="$(printf '%s\n' "$_wd_c" \
+    | grep -Ev '(^|/)(node_modules|dist|build|out|coverage|\.next|\.nuxt|\.turbo|\.cache|__pycache__)/' \
+    | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|cts|mts|vue|svelte|json)$' || true)"
+
   local _wd_all
-  _wd_all="$(printf '%s\n%s\n' "$_wd_a" "$_wd_b" | sed '/^$/d' | sort -u)"
+  _wd_all="$(printf '%s\n%s\n%s\n' "$_wd_a" "$_wd_b" "$_wd_c" | sed '/^$/d' | sort -u)"
   [ -n "$_wd_all" ] || return 0
   printf '%s\n' "$_wd_all"
   return 1
