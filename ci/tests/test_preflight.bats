@@ -2669,6 +2669,53 @@ YML
   # discovered project by name.
   [[ "$output" == *node* ]]
 
+  # In quick as well, and this half was missing while the case read as though it
+  # covered the rule. The `-p` acceptance in ci/checks/node.sh is not
+  # mode-aware: it accepts a script naming one of several projects in every
+  # mode, on the strength of this lane compiling the rest. The lane was
+  # scheduled only from run_full_or_ship_checks, so in quick the acceptance
+  # stood while the thing making it true never ran --
+  #
+  #   --mode quick  ->  git-safety node test-layout
+  #   --mode ship   ->  ... node ... typecheck-js
+  #
+  # -- and a type error in the project the script does not name passed the
+  # pre-commit gate. Asserting the rule in one mode is how that survived.
+  # Staged, never committed, and put back afterwards. quick reads the index, so
+  # nothing here needs a commit -- and the ship control at the end of this case
+  # measures the range from `js_tip`, so a commit added in the middle would
+  # silently turn its docs-only range into one carrying JavaScript. That is what
+  # the first draft of this block did, and the control failed for a reason that
+  # had nothing to do with what it tests.
+  _tc_lanes_quick() {
+    ( cd "$sb" && env "$@" CI_GATE_USE_LANES=0 bash ci/preflight.sh --mode quick 2>&1 ) \
+      | grep -o 'RAN:[a-z-]*' | sed 's/RAN://' | sort -u | tr '\n' ' '
+  }
+  ( cd "$sb" && printf 'export const q = 3;\n' > frontend/src/q.ts \
+    && git add frontend/src/q.ts ) >/dev/null 2>&1
+  run _tc_lanes_quick
+  [[ "$output" == *typecheck* ]] \
+    || { echo "quick did not schedule the typecheck lane for a staged JS change: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" == *node* ]] \
+    || { echo "quick lost the node lane: $output" >&2; rm -rf "$sb"; return 1; }
+  ( cd "$sb" && git rm -q --cached frontend/src/q.ts && rm -f frontend/src/q.ts ) >/dev/null 2>&1
+
+  # And its cost stays bounded by the changeset the way every other language
+  # lane's does, or scheduling it in quick would tax every commit in the repo.
+  #
+  # Staged by name, not `git add -A`: the preflight runs above write their own
+  # output under ci/reports/, and `-A` sweeps that in, so the "docs-only" change
+  # would not be docs-only.
+  ( cd "$sb" && printf '# doc\n' > README.md && git add README.md ) >/dev/null 2>&1
+  # The premise, or "no typecheck lane" proves nothing.
+  run bash -c "cd '$sb' && git diff --cached --name-only"
+  [ "$output" = "README.md" ] \
+    || { echo "fixture staged more than the doc: $output" >&2; rm -rf "$sb"; return 1; }
+  run _tc_lanes_quick
+  [[ "$output" != *typecheck* ]] \
+    || { echo "a docs-only change scheduled the typecheck lane: $output" >&2; rm -rf "$sb"; return 1; }
+  ( cd "$sb" && git checkout -q -- README.md && git reset -q ) >/dev/null 2>&1
+
   # The control: it is a language lane, so a change touching no JavaScript
   # still filters it out. Without this the case would be satisfied by wiring it
   # into the always-run list, which is a different and worse thing.

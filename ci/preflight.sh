@@ -721,6 +721,31 @@ run_phase() {
 run_common_checks() {
   run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "test-layout:./ci/checks/test-layout.sh"
   run_phase     "node:./ci/checks/node.sh"     "python:./ci/checks/python.sh"
+  # typecheck-js belongs to every mode that runs the node lane, not to full and
+  # ship alone.
+  #
+  # ci/checks/node.sh accepts a typecheck script that names one of several
+  # discovered projects -- `tsc -p tsconfig.app.json --noEmit` in a workspace
+  # that also has tsconfig.node.json -- and the entire justification for
+  # accepting it is that this lane compiles the rest. The comment carrying that
+  # justification says so, and says the two are one decision.
+  #
+  # They had come apart by mode. This lane was scheduled only from
+  # run_full_or_ship_checks, so in quick the acceptance stood while the lane
+  # that makes it true never ran:
+  #
+  #   --mode quick  ->  git-safety node test-layout
+  #   --mode ship   ->  ... node ... typecheck-js
+  #
+  # and a type error in tsconfig.node.json passed the pre-commit gate, surfacing
+  # only at the next full or ship run. That is the same "reasoning about a lane
+  # instead of checking that it runs" the comment above the -p rule was written
+  # to record, one mode over.
+  #
+  # Cost is bounded by the changeset the way every other language lane is: this
+  # id maps from `node`, so a commit touching no JavaScript filters it out
+  # before it executes.
+  run_phase     "typecheck-js:./ci/checks/typecheck-js.sh"
 }
 
 # A push that carries no content has nothing for a content lane to report on.
