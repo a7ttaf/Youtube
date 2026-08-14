@@ -247,6 +247,67 @@ ci::git::push_range() {
     return 0
   fi
 
+  # A tag can be the only thing carrying a commit out.
+  #
+  # ci/hook-dispatch.sh leaves the scalar tip unset for a push that names no
+  # branch, deliberately: a tag on an unrelated lineage must not displace the
+  # branch tip, and what may go out under a tag is decided per ref by
+  # ci::git::worktree_covers_push. It exports the per-ref tip lists instead.
+  # This function read neither of them, so a tag-only push fell through to the
+  # `@{upstream}` guesses below -- and for a tag at a HEAD the checkout's
+  # upstream already contains, `merge-base HEAD @{upstream}` is HEAD and the
+  # range is `HEAD..HEAD`. Zero commits walked by git-safety, the signature
+  # check and the linear-history check, while the tag is publishing that commit
+  # to a destination that may not have it.
+  #
+  # Here rather than in the dispatcher, which was the first attempt and was
+  # wrong: seeding the scalar there broke `hook: only a branch record moves the
+  # collapsed history tip` and `hook: only a branch destination has to fit the
+  # one range`, and turned two unpublished tags on separate lineages into a hard
+  # refusal of `git push origin v1.0 v2.0`. The dispatcher is answering the
+  # branch question correctly; this function is the one that owes the history
+  # checks a range, and it is the only reader of that question.
+  #
+  # Collapsed by ancestry, the same rule the dispatcher applies to branch tips.
+  # Tips containing neither each other cannot be written as one `A..B` -- every
+  # caller passes this string to `git log` or `git rev-list` as a single
+  # argument -- so that case is left exactly as it behaves today rather than
+  # answered wrongly with one of them. This fills in a range where one exists
+  # and narrows nothing.
+  if [ -z "${CI_GATE_PUSH_NEW_SHA:-}" ] \
+    && [ -n "${CI_GATE_PUSH_TAG_TIPS:-}${CI_GATE_PUSH_OTHER_TIPS:-}" ]; then
+    local _pr_tip _pr_best="" _pr_split=0
+    # Word splitting is the point: these are space-separated object names.
+    # shellcheck disable=SC2086
+    for _pr_tip in ${CI_GATE_PUSH_TAG_TIPS:-} ${CI_GATE_PUSH_OTHER_TIPS:-}; do
+      [ -n "$_pr_tip" ] || continue
+      git rev-parse --verify "${_pr_tip}^{commit}" >/dev/null 2>&1 || continue
+      if [ -z "$_pr_best" ]; then
+        _pr_best="$_pr_tip"
+      elif git merge-base --is-ancestor "$_pr_best" "$_pr_tip" 2>/dev/null; then
+        _pr_best="$_pr_tip"
+      elif git merge-base --is-ancestor "$_pr_tip" "$_pr_best" 2>/dev/null; then
+        : # already the descendant; keep it
+      else
+        _pr_split=1
+      fi
+    done
+    if [ -n "$_pr_best" ] && [ "$_pr_split" -eq 0 ]; then
+      # Same base as a branch tip gets: what the destination actually holds,
+      # asked of the destination. A tag on a commit the destination already
+      # carries yields an empty range, which is the true answer for it -- and
+      # ci::git::push_is_label_only routes that push past the content lanes
+      # separately.
+      base="$(ci::git::destination_base "$_pr_best")"
+      if [ -n "$base" ]; then
+        printf '%s..%s' "$base" "$_pr_best"
+      else
+        printf '%s' "$_pr_best"
+      fi
+      return 0
+    fi
+  fi
+
   # Everything below measures against the tip being pushed, not the literal
   # HEAD. The hook can supply a new sha without an old one — a brand-new branch,
   # or `git push origin some-other-branch` — and measuring that against HEAD

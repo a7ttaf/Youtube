@@ -1934,6 +1934,72 @@ YML
   fi
 }
 
+@test "git: a tag-only push gets the range the tag is publishing" {
+  # ci/hook-dispatch.sh leaves the scalar tip unset for a push naming no branch
+  # -- deliberately, so a tag on an unrelated lineage cannot displace a branch
+  # tip -- and exports the per-ref tip lists instead. push_range read neither,
+  # so a tag-only push fell to the `@{upstream}` guesses: for a tag at a HEAD
+  # the checkout's upstream already contains, that is `HEAD..HEAD`. git-safety,
+  # the signature walk and the linear-history check then reported on nothing
+  # while the tag published that commit.
+  #
+  # Measured on the fixture below, before and after:
+  #   old  ->  <tip>..HEAD      0 commits
+  #   new  ->  <published>..<tip>   1 commit
+  local sb
+  sb="$(mktemp -d)"
+  (
+    cd "$sb"
+    git init -q -b main .
+    printf 'a
+' > a.txt && git add -A
+    git -c user.email=t@t -c user.name=t commit -qm c1
+  ) >/dev/null 2>&1
+  local published
+  published="$(cd "$sb" && git rev-parse HEAD)"
+  ci::tests::publish "$sb" origin main "$published"
+  ( cd "$sb" && printf 'b
+' > b.txt && git add -A     && git -c user.email=t@t -c user.name=t commit -qm c2     && git branch --set-upstream-to=origin/main main ) >/dev/null 2>&1
+  local tip
+  tip="$(cd "$sb" && git rev-parse HEAD)"
+  # The stale record that produced the empty range: this clone believes the
+  # destination already has HEAD. The destination itself does not.
+  ( cd "$sb" && git update-ref refs/remotes/origin/main "$tip" ) >/dev/null 2>&1
+
+  # env assignments as real arguments rather than interpolated into one string:
+  # `env $* ci::git::push_range` asks env to exec a shell *function*, which it
+  # cannot see, and the whole thing exits 127 with the assertion below blaming
+  # the range.
+  _pr_range() { # _pr_range <VAR=value...>
+    ( cd "$sb" && env "$@" bash -c ". '$REPO_ROOT/ci/lib/git.sh' && ci::git::push_range" )
+  }
+
+  # The tag publishes the commit the destination does not have, so the range has
+  # to contain it.
+  run _pr_range CI_GATE_PUSH_NEW_SHA= CI_GATE_PUSH_BRANCH_TIPS= \
+                CI_GATE_PUSH_TAG_TIPS="$tip" CI_GATE_PUSH_REMOTE=origin
+  [ "$status" -eq 0 ]
+  [ "$output" = "${published}..${tip}" ]     || { echo "a tag-only push got range '$output', expected ${published}..${tip}" >&2; rm -rf "$sb"; return 1; }
+  run bash -c "cd '$sb' && git rev-list --count '${published}..${tip}'"
+  [ "$output" = "1" ]     || { echo "the range walks $output commits, expected 1" >&2; rm -rf "$sb"; return 1; }
+
+  # A tag on a commit the destination already carries is publishing nothing, and
+  # an empty range is the true answer for it -- push_is_label_only routes that
+  # push past the content lanes separately.
+  run _pr_range CI_GATE_PUSH_NEW_SHA= CI_GATE_PUSH_BRANCH_TIPS= \
+                CI_GATE_PUSH_TAG_TIPS="$published" CI_GATE_PUSH_REMOTE=origin
+  [ "$status" -eq 0 ]
+  [ "$output" = "${published}..${published}" ]     || { echo "an already-published tag got range '$output'" >&2; rm -rf "$sb"; return 1; }
+
+  # The control: a branch push is untouched by any of this. The tip it supplies
+  # is the tip it gets, and the tag list beside it changes nothing.
+  run _pr_range CI_GATE_PUSH_NEW_SHA="$tip" CI_GATE_PUSH_TAG_TIPS="$published" \
+                CI_GATE_PUSH_REMOTE=origin
+  [ "$status" -eq 0 ]
+  [ "$output" = "${published}..${tip}" ]     || { echo "a branch push range changed: '$output'" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
+
 # --- the suites' own hygiene ---------------------------------------------------
 #
 # Both of these are about the harness rather than about a check, and both exist
