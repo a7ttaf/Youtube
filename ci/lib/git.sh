@@ -332,17 +332,34 @@ ci::git::push_range() {
       echo "  Push the refs separately so each one can be scanned." >&2
       return 3
     fi
-    if [ -n "$_pr_best" ]; then
+    # Measured over the tip that is publishing something, and `_pr_best` only
+    # when nothing is.
+    #
+    # `_pr_best` collapses over *every* tip, published or not, and it collapses
+    # by ancestry -- so a push listing an already-published tag before an
+    # unpublished one on an unrelated lineage kept the published tag, because
+    # neither is the other's ancestor. The range came out `published..published`:
+    # empty, and non-empty as a *string*, so git-safety's "cannot determine the
+    # range" guard did not fire and it walked zero commits. The signature and
+    # linear-history checks read the same range and walked zero too, while the
+    # unpublished tagged history went out unexamined. The content lanes still
+    # ran against HEAD, which is what kept it from being visible.
+    #
+    # `_pr_new` is already the right tip and was already computed: it is the
+    # collapse over the *unpublished* tips alone, and `_pr_split` above has
+    # refused the case where there is more than one lineage of them. Falling
+    # back to `_pr_best` keeps a push of nothing but published tags resolving to
+    # that tag's empty range -- the true answer for it, and the one
+    # ci::git::push_is_label_only routes past the content lanes separately.
+    local _pr_pick="${_pr_new:-$_pr_best}"
+    if [ -n "$_pr_pick" ]; then
       # Same base as a branch tip gets: what the destination actually holds,
-      # asked of the destination. A tag on a commit the destination already
-      # carries yields an empty range, which is the true answer for it -- and
-      # ci::git::push_is_label_only routes that push past the content lanes
-      # separately.
-      base="$(ci::git::destination_base "$_pr_best")"
+      # asked of the destination.
+      base="$(ci::git::destination_base "$_pr_pick")"
       if [ -n "$base" ]; then
-        printf '%s..%s' "$base" "$_pr_best"
+        printf '%s..%s' "$base" "$_pr_pick"
       else
-        printf '%s' "$_pr_best"
+        printf '%s' "$_pr_pick"
       fi
       return 0
     fi

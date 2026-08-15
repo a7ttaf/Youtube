@@ -577,6 +577,26 @@ _tool_fingerprint() {
   fi
 }
 
+# _cached_reports_for <label> – the report files this lane owns, one per line.
+#
+# A cached lane does not run, so anything it writes besides its result and its
+# output is simply not written. `changed-files` produces three file lists under
+# ci/reports/ and a hit restored neither of them: they were left as whatever an
+# earlier run had put there, or absent on a fresh checkout, while the lane
+# reported PASS. An audit trail describing a different tree is worse than none,
+# and "the lane passed" standing beside it is the false confidence the rest of
+# this gate is built to refuse.
+#
+# Empty for every other lane, which is the honest answer today: those lanes are
+# not cached, and one that becomes cacheable has to declare what it owns here.
+_cached_reports_for() {
+  case "$1" in
+    changed-files)
+      printf '%s\n' changed-files.txt staged-files.txt untracked-files.txt
+      ;;
+  esac
+}
+
 _compute_cache_key() {
   local label="$1"
   local tool_ver="unknown"
@@ -596,6 +616,28 @@ _compute_cache_key() {
   else
     files_hash="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
   fi
+
+  # The one cached lane is keyed on what it reports, not on the changeset.
+  #
+  # `changed-files` writes three lists -- changed, staged and untracked -- and
+  # the changeset the key above is made of is at most one of them: in quick mode
+  # it is the staged paths whenever there are any. Two trees with identical
+  # staging and different unstaged or untracked files therefore share a key, and
+  # a hit serves counts and lists describing the other one. Hashing the three
+  # lists themselves makes a hit possible exactly when the answer is the same
+  # answer, which is also what lets the entry carry those lists back (see
+  # _cached_reports_for).
+  case "$label" in
+    changed-files)
+      files_hash="$(ci::cache::_sha256 "$(
+        ci::git::changed_files 2>/dev/null || true
+        printf '\036'
+        ci::git::staged_files 2>/dev/null || true
+        printf '\036'
+        ci::git::untracked_files 2>/dev/null || true
+      )")"
+      ;;
+  esac
 
   local config_hash=""
   if [ -f "ci/config/checks.yml" ]; then
@@ -647,25 +689,45 @@ run_phase() {
       cache_digest="$(_compute_cache_key "$label")"
       local cache_dest="${CI_REPORT_DIR}/.cache/${label}"
       if ci::cache::get "$cache_digest" "$cache_dest"; then
-        echo "  [cache hit] $label"
-        cache_hit=1
-        if [ -f "$cache_dest/result.txt" ]; then
-          local cached_rc
-          cached_rc="$(cat "$cache_dest/result.txt")"
-          local cached_output=""
-          [ -f "$cache_dest/output.txt" ] && cached_output="$(cat "$cache_dest/output.txt")"
-          # Write cached output to runner log file so get_output works
-          local log_file="${CI_REPORT_DIR}/${label}.log"
-          printf '%s' "$cached_output" > "$log_file"
-          if [ -z "${_CI_RUNNER_JOBS_DIR:-}" ]; then
-            _ensure_runner_init
+        # The reports this lane owns come back with it, and an entry that cannot
+        # produce one of them is not a hit. Written before the result is, so a
+        # half-restored ci/reports/ never sits beside a PASS -- and treated as a
+        # miss rather than patched up, because an entry stored by an older
+        # revision of this file has no way to know what it was supposed to
+        # carry. Running the lane is the cheap, correct answer.
+        local _cr_name _cr_ok=1
+        while IFS= read -r _cr_name; do
+          [ -n "$_cr_name" ] || continue
+          if [ -f "${cache_dest}/${_cr_name}" ]; then
+            cp -f "${cache_dest}/${_cr_name}" "${CI_REPORT_DIR}/${_cr_name}" || _cr_ok=0
+          else
+            _cr_ok=0
           fi
-          if [ -n "${_CI_RUNNER_JOBS_DIR:-}" ]; then
-            mkdir -p "$_CI_RUNNER_JOBS_DIR"
-            printf '%d' "$$" > "${_CI_RUNNER_JOBS_DIR}/${label}.pid"
-            printf '%d' "$cached_rc" > "${_CI_RUNNER_JOBS_DIR}/${label}.rc"
-            printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.start"
-            printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.end"
+        done <<< "$(_cached_reports_for "$label")"
+        if [ "$_cr_ok" -ne 1 ]; then
+          echo "  [cache entry incomplete] $label — running it"
+          rm -rf "$cache_dest"
+        else
+          echo "  [cache hit] $label"
+          cache_hit=1
+          if [ -f "$cache_dest/result.txt" ]; then
+            local cached_rc
+            cached_rc="$(cat "$cache_dest/result.txt")"
+            local cached_output=""
+            [ -f "$cache_dest/output.txt" ] && cached_output="$(cat "$cache_dest/output.txt")"
+            # Write cached output to runner log file so get_output works
+            local log_file="${CI_REPORT_DIR}/${label}.log"
+            printf '%s' "$cached_output" > "$log_file"
+            if [ -z "${_CI_RUNNER_JOBS_DIR:-}" ]; then
+              _ensure_runner_init
+            fi
+            if [ -n "${_CI_RUNNER_JOBS_DIR:-}" ]; then
+              mkdir -p "$_CI_RUNNER_JOBS_DIR"
+              printf '%d' "$$" > "${_CI_RUNNER_JOBS_DIR}/${label}.pid"
+              printf '%d' "$cached_rc" > "${_CI_RUNNER_JOBS_DIR}/${label}.rc"
+              printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.start"
+              printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.end"
+            fi
           fi
         fi
       fi
@@ -709,6 +771,17 @@ run_phase() {
       mkdir -p "$cache_dest"
       printf '%d' "$rc" > "$cache_dest/result.txt"
       printf '%s' "$output" > "$cache_dest/output.txt"
+      # And whatever this lane owns besides its result, or the entry cannot
+      # stand in for the run. A report the lane did not write is not stored:
+      # the restore side treats a missing one as a miss, which is the same
+      # answer and reached without guessing here what a failed run should have
+      # produced.
+      local _cs_name
+      while IFS= read -r _cs_name; do
+        [ -n "$_cs_name" ] || continue
+        [ -f "${CI_REPORT_DIR}/${_cs_name}" ] || continue
+        cp -f "${CI_REPORT_DIR}/${_cs_name}" "${cache_dest}/${_cs_name}" || true
+      done <<< "$(_cached_reports_for "$lbl")"
       local put_digest
       # Same composite content-hash digest as the cache-get call site above.
       put_digest="$(_compute_cache_key "$lbl")"

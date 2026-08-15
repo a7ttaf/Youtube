@@ -1025,7 +1025,20 @@ test_block_props() {
         if (c == "}" || c == "]" || c == ")") { depth--; continue }
         if (c == ":" && depth == 0) { colon = i; break }
       }
-      if (colon == 0) { print unquote(seg) "\t"; return }
+      # No colon at this depth means the segment is not `name: value`. A
+      # shorthand property -- `{ include }` -- binds the property to the
+      # variable of that name, and that value is nowhere in this config text; a
+      # method or getter is the same statement one shape over.
+      #
+      # Reported under a sentinel rather than under its own name with an empty
+      # value, which is what it used to do. `include: [broad], include` emitted
+      # a second `include` line carrying nothing: JavaScript applies the later
+      # property, so vitest collected whatever the *variable* holds, while the
+      # reader below still saw the earlier broad array in the list and passed
+      # the config. A value this scan cannot read is not an empty value, and the
+      # allow-list cannot judge a property whose value it never saw either -- so
+      # the whole block is answered as unevaluable, the way a spread already is.
+      if (colon == 0) { print "!shorthand" "\t" unquote(seg); return }
       name = unquote(substr(seg, 1, colon - 1))
       value = trim(substr(seg, colon + 1))
       print name "\t" value
@@ -1276,7 +1289,7 @@ check_one_config() {
     # property that cannot reduce what is collected or run is named here, and
     # everything else stops the guard until someone decides which it is.
     unknown_props="$(printf '%s\n' "$props" | awk -F'\t' '
-      $1 == "" || $1 == "..." { next }
+      $1 == "" || $1 == "..." || $1 == "!shorthand" || $1 == "!unbalanced" { next }
       {
         ok = "|include|environment|environmentOptions|globals|setupFiles|globalSetup" \
              "|css|coverage|reporters|outputFile|restoreMocks|clearMocks|mockReset" \
@@ -1296,6 +1309,16 @@ check_one_config() {
     # allow-list. Answered before any of them, because each of those is a
     # statement about a complete reading.
     printf 'props-unreadable'
+  elif printf '%s\n' "$props" | grep -q '^!shorthand'; then
+    # A property whose value is a name rather than a literal. JavaScript applies
+    # the last property of a given name, so `include: [broad], include` runs
+    # whatever the *variable* holds -- and the reader saw the broad array,
+    # because a shorthand used to be emitted under its own name with an empty
+    # value and an empty value loses to the earlier one. Answered before the
+    # include rules for the same reason props-unreadable is: each of them is a
+    # statement about a value this scan actually read.
+    printf 'shorthand-prop\t%s' \
+      "$(printf '%s\n' "$props" | awk -F'\t' '$1 == "!shorthand" { print $2 }' | tr '\n' ' ')"
   elif [ -n "$active_include" ] && ! printf '%s\n' "$active_include" | value_is_literal_array; then
     # A non-literal include cannot be read by searching its text: in
     # `cond ? [glob] : ["tests/only.test.ts"]` the glob is present and inactive,
@@ -1490,6 +1513,19 @@ else
         echo "  Move the regular expression out of the test block — into a"
         echo "  named const above the config — or teach this reader about"
         echo "  regular expressions in the same commit."
+        ;;
+      shorthand-prop)
+        fail "${_label} has a test property whose value this guard cannot read: ${_detail}"
+        echo "  A shorthand property -- { include } rather than include: [...] --"
+        echo "  takes its value from a variable of that name, and that value is"
+        echo "  nowhere in this file. JavaScript applies the last property of a"
+        echo "  given name, so"
+        echo "    test: { include: [\"${DECLARED_GLOB}\"], include }"
+        echo "  runs whatever the variable holds while the declared glob sits"
+        echo "  above it, unused and satisfying every check here. A method or a"
+        echo "  getter of an allowed name does the same thing."
+        echo "  Write the property out -- include: [\"${DECLARED_GLOB}\"] -- so what"
+        echo "  vitest collects is what this file says it collects."
         ;;
       composed-config)
         fail "${_label} composes its exported config, so the block read here may not be the one vitest uses."

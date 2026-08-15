@@ -2937,3 +2937,210 @@ YML
     || { echo "the refusal does not name the missing child: $output" >&2; rm -rf "$sb"; return 1; }
   rm -rf "$sb"
 }
+
+@test "typecheck: a tree it could not list is not a workspace with no project" {
+  # `ls_tree_paths` returns non-zero exactly when it could not enumerate the
+  # tree -- a failed read, or a path it cannot spell without splitting it -- and
+  # the caller tested it in an `if`, so either one skipped the missing-project
+  # scan entirely. The empty `_tc_list` beside it then reads as "this workspace
+  # carries no TypeScript project", the lane returns 3, and the push passes
+  # having compiled none of it. Could-not-ask and nothing-there, one more time,
+  # at the producer this block had just been given.
+  local sb; sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ws"
+  cp "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  cp "$REPO_ROOT/ci/checks/typecheck.sh" "$sb/ci/checks/"
+  # common.sh with the reader forced to its unspellable-path status, which is
+  # the branch a real repository reaches only with a newline in a file name.
+  {
+    cat "$REPO_ROOT/ci/lib/common.sh"
+    printf '\nci::common::ls_tree_paths() { return 2; }\n'
+  } > "$sb/ci/lib/common.sh"
+  (
+    cd "$sb" || exit 1
+    git init -q -b main . && git config user.email t@t && git config user.name t
+    printf '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit" } }\n' > ws/package.json
+    printf '{}\n' > ws/tsconfig.json
+    git add -A && git commit -qm base
+  ) >/dev/null 2>&1 || { rm -rf "$sb"; echo "fixture failed" >&2; return 1; }
+
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [ "$status" -ne 0 ] \
+    || { rm -rf "$sb"; echo "an unreadable tree passed the lane: $output" >&2; return 1; }
+  [[ "$output" == *"Cannot read"* ]] \
+    || { rm -rf "$sb"; echo "refused without saying the listing failed: $output" >&2; return 1; }
+  [[ "$output" == *"carries a newline"* ]] \
+    || { rm -rf "$sb"; echo "did not name the reason for status 2: $output" >&2; return 1; }
+  [[ "$output" != *"no TypeScript project"* ]] \
+    || { rm -rf "$sb"; echo "reported the workspace as having no project: $output" >&2; return 1; }
+  rm -rf "$sb"
+
+  # The control: with the reader working, the same tree is checked as before and
+  # this refusal does not fire. Without it the case is satisfied by a lane that
+  # refuses everything.
+  local sb2; sb2="$(mktemp -d)"
+  mkdir -p "$sb2/ci/lib" "$sb2/ci/checks" "$sb2/ws"
+  cp "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/common.sh" "$sb2/ci/lib/"
+  cp "$REPO_ROOT/ci/checks/typecheck.sh" "$sb2/ci/checks/"
+  (
+    cd "$sb2" || exit 1
+    git init -q -b main . && git config user.email t@t && git config user.name t
+    printf '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit" } }\n' > ws/package.json
+    printf '{}\n' > ws/tsconfig.json
+    git add -A && git commit -qm base
+  ) >/dev/null 2>&1 || { rm -rf "$sb2"; echo "control fixture failed" >&2; return 1; }
+  run bash -c "cd '$sb2' && CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [[ "$output" != *"Cannot read"* ]] \
+    || { rm -rf "$sb2"; echo "a readable tree was refused as unreadable: $output" >&2; return 1; }
+  rm -rf "$sb2"
+}
+
+@test "git: a tag-only push is measured over the tag that publishes something" {
+  # `_pr_best` collapses over every tip, published or not, and it collapses by
+  # ancestry -- so a push listing an already-published tag before an unpublished
+  # one on an unrelated lineage kept the published tag, because neither is the
+  # other's ancestor. The range came out `published..published`: zero commits,
+  # and a non-empty *string*, so git-safety's "cannot determine the range" guard
+  # did not fire. It and the signature and linear-history checks all walked
+  # nothing while the unpublished tagged history went out unexamined.
+  local root; root="$(mktemp -d)"
+  (
+    cd "$root" || exit 1
+    git init -q --bare remote.git
+    git init -q -b main work
+    cd work || exit 1
+    git config user.email t@t && git config user.name t
+    printf 'a\n' > a.txt && git add -A && git commit -qm a
+    git tag old
+    git checkout -q --orphan side && git rm -qrf . && printf 'b\n' > b.txt \
+      && git add -A && git commit -qm b
+    git tag new
+    git checkout -q main
+    git remote add origin "$root/remote.git"
+    # Only `old` is published. `new` is a lineage the destination has never seen.
+    git push -q origin main refs/tags/old
+    printf '%s %s\n' "$(git rev-parse old)" "$(git rev-parse new)" > .shas
+  ) >/dev/null 2>&1 || { rm -rf "$root"; echo "fixture failed" >&2; return 1; }
+
+  local pub unpub
+  read -r pub unpub < "$root/work/.shas"
+
+  local range
+  range="$(bash -c "cd '$root/work' && . '$REPO_ROOT/ci/lib/git.sh' >/dev/null 2>&1 \
+    && CI_GATE_PUSH_NEW_SHA='' CI_GATE_PUSH_OLD_SHA='' CI_GATE_PUSH_BRANCH_TIPS='' \
+       CI_GATE_PUSH_TAG_TIPS='$pub $unpub' CI_GATE_PUSH_OTHER_TIPS='' \
+       CI_GATE_PUSH_REMOTE=origin ci::git::push_range 2>/dev/null")"
+
+  # The assertion is the number of commits the history checks would walk, not
+  # the text of the range: `published..published` is a perfectly well-formed
+  # range and that is exactly what made it dangerous.
+  local walked
+  walked="$(cd "$root/work" && git rev-list --count $range 2>/dev/null || echo 0)"
+  [ "${walked:-0}" -ge 1 ] \
+    || { rm -rf "$root"; echo "the range [$range] walks ${walked} commits; the push publishes one" >&2; return 1; }
+  [[ "$range" == *"$unpub"* ]] \
+    || { rm -rf "$root"; echo "the range [$range] does not reach the unpublished tag" >&2; return 1; }
+
+  # The control, and it is the reason `_pr_best` is still the fallback: a push
+  # of nothing but already-published tags publishes nothing, and its true range
+  # is that tag's empty one. ci::git::push_is_label_only routes such a push past
+  # the content lanes separately.
+  local pubrange
+  pubrange="$(bash -c "cd '$root/work' && . '$REPO_ROOT/ci/lib/git.sh' >/dev/null 2>&1 \
+    && CI_GATE_PUSH_NEW_SHA='' CI_GATE_PUSH_OLD_SHA='' CI_GATE_PUSH_BRANCH_TIPS='' \
+       CI_GATE_PUSH_TAG_TIPS='$pub' CI_GATE_PUSH_OTHER_TIPS='' \
+       CI_GATE_PUSH_REMOTE=origin ci::git::push_range 2>/dev/null")"
+  [ "$pubrange" = "${pub}..${pub}" ] \
+    || { rm -rf "$root"; echo "a published-only push no longer resolves to its own empty range: [$pubrange]" >&2; return 1; }
+  rm -rf "$root"
+}
+
+@test "preflight: the one cached lane carries the reports it owns" {
+  # A cached lane does not run, so anything it writes besides its result is not
+  # written. `changed-files` produces three file lists under ci/reports/ and a
+  # hit restored neither of them -- they were left as an earlier run had them,
+  # or absent on a fresh checkout, while the lane reported PASS. An audit trail
+  # describing a different tree, with a green result beside it.
+  local fns="$BATS_TEST_TMPDIR/reports.sh"
+  _pf_fns "$fns" _cached_reports_for _check_is_cacheable
+
+  local owned
+  # shellcheck disable=SC1090
+  owned="$( . "$fns"; _cached_reports_for changed-files | tr '\n' ' ' )"
+  local f
+  for f in changed-files.txt staged-files.txt untracked-files.txt; do
+    [[ "$owned" == *"$f"* ]] \
+      || { echo "the cache does not carry ${f}, which the lane writes" >&2; return 1; }
+  done
+
+  # Every report the lane actually writes has to be in that list, read from the
+  # lane rather than restated -- a fourth one added there and not here is the
+  # same stale-artifact bug again.
+  local written
+  written="$(grep -oE 'ci/reports/[a-z-]+\.txt' "$REPO_ROOT/ci/checks/changed-files.sh" \
+    | sed 's|ci/reports/||' | sort -u)"
+  [ -n "$written" ] || { echo "could not read what the lane writes" >&2; return 1; }
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [[ "$owned" == *"$f"* ]] \
+      || { echo "the lane writes ${f} and the cache would not restore it" >&2; return 1; }
+  done <<< "$written"
+
+  # The control: every other lane owns nothing, so this is a declaration and not
+  # a blanket copy of ci/reports/.
+  local lane
+  for lane in node python typecheck-js git-safety test-layout; do
+    # shellcheck disable=SC1090
+    [ -z "$( . "$fns"; _cached_reports_for "$lane" )" ] \
+      || { echo "${lane} claims to own reports but is not cached" >&2; return 1; }
+  done
+
+  # And the restore side treats an entry that cannot produce one of them as a
+  # miss rather than patching it up: an entry written by an older revision of
+  # this file has no way to know what it was supposed to carry.
+  grep -q 'cache entry incomplete' "$REPO_ROOT/ci/preflight.sh" \
+    || { echo "an incomplete cache entry is still served as a hit" >&2; return 1; }
+}
+
+@test "preflight: the changed-files key describes the lists that lane reports" {
+  # The key is made of the changeset, and in quick mode the changeset is the
+  # staged paths whenever there are any -- while this lane reports on changed,
+  # staged *and* untracked. Two trees with identical staging and different
+  # untracked files therefore shared a key, and a hit served counts and lists
+  # describing the other one.
+  local fns="$BATS_TEST_TMPDIR/key.sh"
+  _pf_fns "$fns" _compute_cache_key _tool_fingerprint _changeset_content_hash
+
+  local sb; sb="$(mktemp -d)"
+  (
+    cd "$sb" || exit 1
+    git init -q -b main . && git config user.email t@t && git config user.name t
+    printf 'a\n' > a.txt && git add -A && git commit -qm a
+    printf 'b\n' > staged.txt && git add staged.txt
+  ) >/dev/null 2>&1 || { rm -rf "$sb"; echo "fixture failed" >&2; return 1; }
+
+  _key() {
+    bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1 \
+      && . '$REPO_ROOT/ci/lib/git.sh' >/dev/null 2>&1 \
+      && . '$REPO_ROOT/ci/lib/cache.sh' >/dev/null 2>&1 \
+      && . '$fns' && _compute_cache_key changed-files"
+  }
+
+  local before after
+  before="$(_key)"
+  [ -n "$before" ] || { rm -rf "$sb"; echo "no key was produced" >&2; return 1; }
+
+  # An untracked file appears. Staging is untouched, so the changeset the key
+  # used to be made of is byte-identical -- and the lane's untracked count is not.
+  printf 'c\n' > "$sb/untracked.txt"
+  after="$(_key)"
+  [ "$before" != "$after" ] \
+    || { rm -rf "$sb"; echo "an untracked file did not move the key" >&2; return 1; }
+
+  # The control: nothing changed, so the key is stable. Without it the case is
+  # satisfied by a key that is different every time, which caches nothing and
+  # tests nothing.
+  [ "$after" = "$(_key)" ] \
+    || { rm -rf "$sb"; echo "the key is not stable for an unchanged tree" >&2; return 1; }
+  rm -rf "$sb"
+}

@@ -104,22 +104,42 @@ _tc_js_workspace() {
     # `frontend/`, matches nothing, and hands back an empty listing. Empty reads
     # exactly like "the push carries no projects", so the missing-project
     # refusal below never fired and the lane reported a skip instead.
-    if _tc_head="$(ci::common::ls_tree_paths -r --full-tree --name-only "$_tc_rev")"; then
-      while IFS= read -r _tc_p; do
-        case "$_tc_p" in
-          tsconfig.json|tsconfig.*.json|jsconfig.json|jsconfig.*.json \
-            |*/tsconfig.json|*/tsconfig.*.json|*/jsconfig.json|*/jsconfig.*.json) ;;
-          *) continue ;;
-        esac
-        case "$_tc_p" in */node_modules/*|node_modules/*) continue ;; esac
-        # `[ -f x ] && continue` is a statement whose status is the test's, and
-        # this file runs under `set -Eeuo pipefail`: on the last iteration a
-        # present file makes it 0 and an absent one makes the loop's status 1.
-        # Spelled as an `if` so the check cannot decide the function's exit code.
-        if [ -f "$_tc_p" ]; then continue; fi
-        _tc_missing="${_tc_missing} ${_tc_p}"
-      done <<< "$_tc_head"
+    #
+    # Captured fail-closed, not tested in an `if`. `ls_tree_paths` returns
+    # non-zero precisely when it could not enumerate the tree reliably -- a
+    # failed read, or a path it cannot spell -- and skipping the scan on that
+    # leaves the empty `_tc_list` below to be read as "this workspace carries no
+    # TypeScript project", which returns 3 and passes the push having compiled
+    # none of it. That is the same could-not-ask/nothing-there conflation this
+    # block was written to remove, reintroduced at its own producer. A listing
+    # that failed is broken infrastructure and says so.
+    local _tc_lt_rc=0
+    _tc_head="$(ci::common::ls_tree_paths -r --full-tree --name-only "$_tc_rev")" || _tc_lt_rc=$?
+    if [ "$_tc_lt_rc" -ne 0 ]; then
+      rm -f "$_tc_list"
+      echo "Cannot read ${_tc_rev} to find the TypeScript projects this push carries." >&2
+      if [ "$_tc_lt_rc" -eq 2 ]; then
+        echo "  A path in that tree carries a newline, which this listing cannot" >&2
+        echo "  carry without splitting it into two entries that match nothing." >&2
+      fi
+      echo "  Refusing to conclude the workspace has no project from a listing" >&2
+      echo "  that failed to produce one." >&2
+      return 30
     fi
+    while IFS= read -r _tc_p; do
+      case "$_tc_p" in
+        tsconfig.json|tsconfig.*.json|jsconfig.json|jsconfig.*.json \
+          |*/tsconfig.json|*/tsconfig.*.json|*/jsconfig.json|*/jsconfig.*.json) ;;
+        *) continue ;;
+      esac
+      case "$_tc_p" in */node_modules/*|node_modules/*) continue ;; esac
+      # `[ -f x ] && continue` is a statement whose status is the test's, and
+      # this file runs under `set -Eeuo pipefail`: on the last iteration a
+      # present file makes it 0 and an absent one makes the loop's status 1.
+      # Spelled as an `if` so the check cannot decide the function's exit code.
+      if [ -f "$_tc_p" ]; then continue; fi
+      _tc_missing="${_tc_missing} ${_tc_p}"
+    done <<< "$_tc_head"
     if [ -n "$_tc_missing" ]; then
       rm -f "$_tc_list"
       echo "These TypeScript projects are in the commit being pushed but not in" >&2

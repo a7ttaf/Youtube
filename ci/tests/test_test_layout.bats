@@ -2702,3 +2702,71 @@ CFG
     || { echo "a repository with no frontend was not skipped: $output" >&2; rm -rf "$sb" "$sb2"; return 1; }
   rm -rf "$sb" "$sb2"
 }
+
+@test "test-layout: a shorthand property inside the test block is not an empty one" {
+  # `{ include: [broad], include }` applies the *shorthand* last -- JavaScript
+  # takes the final property of a given name -- so vitest collected whatever the
+  # variable holds. The scan emitted the shorthand under its own name with an
+  # empty value, the reader kept the earlier broad array, and every check passed
+  # while most of the suite was never collected. The outer-level version of this
+  # was already refused; this is the same spelling one object in.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const include = ["tests/only.test.ts"];
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"], include },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot read"* ]] \
+    || { echo "refused for the wrong reason: $output" >&2; return 1; }
+
+  # `exclude` reaches the same place: a shorthand there used to produce an empty
+  # value, and an empty value is what the exclude rule reads as "there is none".
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+const exclude = ["tests/lib/**"];
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.{ts,tsx}"], exclude },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+
+  # And a method of an allowed name is the same statement again.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    coverage() { return { enabled: false }; },
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 20 ]
+
+  # The control, and it is the whole point: the ordinary written-out config is
+  # untouched. Without it this case is satisfied by a guard that refuses every
+  # test block.
+  cat > "$SANDBOX/frontend/vitest.config.ts" <<'EOF'
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["tests/**/*.test.{ts,tsx}"],
+    globals: true,
+    environment: "jsdom",
+  },
+});
+EOF
+  run_guard
+  [ "$status" -eq 0 ] \
+    || { echo "refused a conforming config: $output" >&2; return 1; }
+}
