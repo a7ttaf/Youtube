@@ -610,7 +610,7 @@ _pf_fns() {
   # Every callee too. A helper missing from the extraction is "command not
   # found" -> non-zero -> read as a decision, and the case would then pass
   # without the code under test having run.
-  _pf_fns "$fns" _check_should_skip _check_disabled_in_config \
+  _pf_fns "$fns" _check_should_skip _checks_config_file _check_disabled_in_config \
     _all_related_checks_disabled _checks_for_lane_label
   local rc=0
   # shellcheck disable=SC1090
@@ -926,8 +926,13 @@ _pf_fns() {
   # branch of it is pinned here: nested and list forms, comments on the id line
   # and on the value, a check with no `enabled:` at all, and a top-level key
   # that ends the block mid-file.
+  # `_checks_config_file` too: the reader asks it which copy of checks.yml to
+  # parse -- the worktree's outside ship mode, HEAD's inside it -- so lifting the
+  # parser without it leaves the parser calling a function that is not there.
+  # This case is about the parse and drives it in a non-ship mode, where the
+  # answer is the worktree file it always was.
   local fns="$BATS_TEST_TMPDIR/cfg.sh"
-  _pf_fns "$fns" _check_disabled_in_config
+  _pf_fns "$fns" _checks_config_file _check_disabled_in_config
   local sb="$BATS_TEST_TMPDIR/cfgsb"
   mkdir -p "$sb/ci/config"
   cat > "$sb/ci/config/checks.yml" <<'YML'
@@ -3475,4 +3480,104 @@ YML
   rm -rf "$sb"
   [ "$old" = "$new" ] \
     || { echo "the portable form is not equivalent: maxdepth=[$old] prune=[$new]" >&2; return 1; }
+}
+
+@test "preflight: in ship mode the check toggles come from HEAD, not the worktree" {
+  # These toggles decide which lanes run at all, and reading them from the
+  # worktree let an *unstaged* edit switch lanes off for a push that does not
+  # carry the edit. Setting tests-shell, tests-js and typecheck-js to false is
+  # enough on its own: lint-js and format-js are already disabled, so
+  # _all_related_checks_disabled then drops the whole `node` lane as well, and
+  # tests-shell is the lane that would have reported the config file as drift.
+  # A pushed frontend commit with failing tests passes on toggles that exist in
+  # nobody's tree but the pusher's.
+  local sb drv
+  sb="$(mktemp -d)"
+  drv="$(mktemp)"
+  {
+    sed -n '/^_CHECKS_CONFIG_FILE=/,/^trap _checks_config_cleanup EXIT$/p' "$REPO_ROOT/ci/preflight.sh"
+    sed -n '/^_checks_config_file()/,/^}/p' "$REPO_ROOT/ci/preflight.sh"
+    sed -n '/^_check_disabled_in_config()/,/^}/p' "$REPO_ROOT/ci/preflight.sh"
+  } > "$drv"
+  bash -n "$drv" || { rm -rf "$sb" "$drv"; echo "the extraction is not valid shell" >&2; return 1; }
+
+  mkdir -p "$sb/ci/config"
+  cat > "$sb/ci/config/checks.yml" <<'YML'
+checks:
+  tests-shell:
+    enabled: true
+  tests-js:
+    enabled: true
+  typecheck-js:
+    enabled: true
+YML
+  (
+    cd "$sb"
+    git init -q -b work .
+    git config user.email t@t
+    git config user.name t
+    git add -A
+    git commit -qm base
+  ) >/dev/null 2>&1
+  # The unstaged edit, present only on disk.
+  cat > "$sb/ci/config/checks.yml" <<'YML'
+checks:
+  tests-shell:
+    enabled: false
+  tests-js:
+    enabled: false
+  typecheck-js:
+    enabled: false
+YML
+
+  # A helper that reports each toggle under a given MODE.
+  _n_toggles() {
+    (
+      cd "$sb" || exit 1
+      MODE="$1"
+      # shellcheck disable=SC1090
+      . "$drv"
+      local c
+      for c in tests-shell tests-js typecheck-js; do
+        if _check_disabled_in_config "$c"; then printf '%s=OFF ' "$c"; else printf '%s=ON ' "$c"; fi
+      done
+    ) 2>/dev/null
+  }
+
+  local ship quick
+  ship="$(_n_toggles ship)"
+  [[ "$ship" == *"tests-shell=ON"* ]] && [[ "$ship" == *"tests-js=ON"* ]] \
+    && [[ "$ship" == *"typecheck-js=ON"* ]] \
+    || { rm -rf "$sb" "$drv"; echo "an unstaged edit switched ship-mode lanes off: [$ship]" >&2; return 1; }
+
+  # `full` and `quick` are deliberately whole-tree runs against the worktree and
+  # keep reading it -- the rule is about what a *push* is measured against, and
+  # asserting it here stops the fix widening into modes it was not for.
+  quick="$(_n_toggles quick)"
+  [[ "$quick" == *"tests-shell=OFF"* ]] \
+    || { rm -rf "$sb" "$drv"; echo "quick mode stopped reading the worktree: [$quick]" >&2; return 1; }
+
+  # Committing the same edit makes it HEAD's, and then ship mode honours it --
+  # the control that keeps this from becoming "ignore the configuration".
+  ( cd "$sb" && git add -A && git commit -qm 'disable the lanes' ) >/dev/null 2>&1
+  ship="$(_n_toggles ship)"
+  [[ "$ship" == *"tests-shell=OFF"* ]] \
+    || { rm -rf "$sb" "$drv"; echo "a committed toggle was ignored: [$ship]" >&2; return 1; }
+
+  # And an unreadable HEAD copy runs every lane rather than falling back to the
+  # worktree: an empty configuration disables nothing, so the failure direction
+  # is more work, not less.
+  # `git rm` of the last file in ci/config/ takes the directory with it, so the
+  # worktree copy has to be re-created before it can be written.
+  ( cd "$sb" && git rm -q ci/config/checks.yml && git commit -qm 'drop the config' ) >/dev/null 2>&1
+  mkdir -p "$sb/ci/config"
+  cat > "$sb/ci/config/checks.yml" <<'YML'
+checks:
+  tests-shell:
+    enabled: false
+YML
+  ship="$(_n_toggles ship)"
+  rm -rf "$sb" "$drv"
+  [[ "$ship" == *"tests-shell=ON"* ]] \
+    || { echo "an unreadable HEAD copy fell back to the worktree: [$ship]" >&2; return 1; }
 }

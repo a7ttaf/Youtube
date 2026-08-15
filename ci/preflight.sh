@@ -283,10 +283,71 @@ run_check() {
 # call took 34 seconds, and _check_should_skip makes one per lane plus one per
 # related check, so a `quick` run spent minutes deciding what to run before it
 # ran anything -- against a mode that declares a pre-commit budget.
-_check_disabled_in_config() {
-  local wanted="$1"
+# Which copy of ci/config/checks.yml the toggles are read from, resolved once.
+#
+# In ship mode: HEAD's, for the reason the lane plan is read from HEAD one
+# function down. These toggles decide which lanes run at all, and reading them
+# from the worktree let an *unstaged* edit switch lanes off for a push that does
+# not carry the edit. Setting `tests-shell`, `tests-js` and `typecheck-js` to
+# false is enough on its own -- `lint-js` and `format-js` are already disabled,
+# so `_all_related_checks_disabled` then drops the whole `node` lane too, and
+# `tests-shell` is the lane that would have reported the config file as drift.
+# A pushed frontend commit with failing tests passes on toggles that exist in
+# nobody's tree but the pusher's.
+#
+# Resolved once and cached because `_check_should_skip` asks per lane *and* per
+# related check: materialising HEAD's copy per call would be one `git show` per
+# question, against a mode with a budget.
+#
+# An unreadable HEAD copy falls back to `/dev/null`, not to the worktree. An
+# empty configuration disables nothing, so every lane runs -- the failure
+# direction is more work, not less, which is the same direction the lane plan
+# takes when its own HEAD read fails. `full` is deliberately a whole-tree run
+# against the worktree and keeps reading it.
+_CHECKS_CONFIG_FILE=""
+_CHECKS_CONFIG_TMP=""
+# Removed at exit rather than after the first read: the answer is cached for the
+# whole run, so the file has to outlive every caller. Always returns 0 -- an EXIT
+# trap that reports a status of its own can overwrite the one being reported.
+_checks_config_cleanup() {
+  [ -n "${_CHECKS_CONFIG_TMP:-}" ] && rm -f "$_CHECKS_CONFIG_TMP"
+  return 0
+}
+trap _checks_config_cleanup EXIT
 
-  [ -f "ci/config/checks.yml" ] || return 1
+_checks_config_file() {
+  # `${...:-}` rather than a bare expansion: ci/tests/test_preflight.bats lifts
+  # these functions out one at a time, so the cache variable's top-level
+  # initialiser is not necessarily in scope where they run. A helper that only
+  # works when the whole file is present is a helper the suite cannot drive.
+  if [ -n "${_CHECKS_CONFIG_FILE:-}" ]; then
+    printf '%s' "$_CHECKS_CONFIG_FILE"
+    return 0
+  fi
+  _CHECKS_CONFIG_FILE="ci/config/checks.yml"
+  if [ "${MODE:-}" = "ship" ]; then
+    local _cc_tmp=""
+    if command -v git >/dev/null 2>&1 \
+      && git rev-parse --verify HEAD >/dev/null 2>&1 \
+      && _cc_tmp="$(mktemp 2>/dev/null)" \
+      && git show "HEAD:ci/config/checks.yml" > "$_cc_tmp" 2>/dev/null \
+      && [ -s "$_cc_tmp" ]; then
+      _CHECKS_CONFIG_FILE="$_cc_tmp"
+      _CHECKS_CONFIG_TMP="$_cc_tmp"
+    else
+      [ -n "$_cc_tmp" ] && rm -f "$_cc_tmp"
+      _CHECKS_CONFIG_FILE="/dev/null"
+      echo "ci/config/checks.yml is not readable in HEAD; running every lane." >&2
+    fi
+  fi
+  printf '%s' "$_CHECKS_CONFIG_FILE"
+}
+
+_check_disabled_in_config() {
+  local wanted="$1" _cc_file
+  _cc_file="$(_checks_config_file)"
+
+  [ -f "$_cc_file" ] || return 1
 
   awk -v want="$wanted" '
     BEGIN { in_checks = 0; in_list = 0; id = ""; enabled = "true" }
@@ -330,7 +391,7 @@ _check_disabled_in_config() {
       if (id == want && enabled == "false") { disabled = 1; exit }
     }
     END { exit(disabled ? 0 : 1) }
-  ' "ci/config/checks.yml"
+  ' "$_cc_file"
 }
 
 _checks_for_lane_label() {
