@@ -4399,11 +4399,34 @@ fi
 # with ci/checks/test-layout.sh's TEST_SUFFIXES, which answers a different
 # question -- which files Vitest's own include would collect -- and where a
 # Cypress spec is correctly not a member.
+#
+# Mocha is on the recognised-runner list and names nothing. Its default spec is
+# `./test/*.{js,cjs,mjs}` -- no suffix at all -- so an ordinary `test/login.js`
+# suite was invisible to both scans here: the orphan guard let `test` and
+# `test:unit` be deleted from a workspace that ships one, and the lost-suite
+# scan below saw a workspace that never had tests to lose. Matched by *position*
+# rather than by name, which is what Mocha does: the workspace's own top-level
+# `test/` directory, one level deep, since `test/helpers/db.js` is not a spec
+# and a nested `src/test/` belongs to something else.
+#
+# `! -path './test/*/*'` is what holds it to one level: find's `-path` glob is
+# not a shell glob and its `*` crosses `/`, so `-path './test/*.js'` alone also
+# matched `./test/helpers/db.js`. That is a helper, not a spec -- and it made
+# this half of the check disagree with the HEAD-side expression below, which is
+# the asymmetry the comment there is about.
 _NODE_TEST_NAME_PRED=(
   '(' -name '*.test.*' -o -name '*.spec.*' \
     -o -name '*.cy.js' -o -name '*.cy.jsx' -o -name '*.cy.mjs' -o -name '*.cy.cjs' \
-    -o -name '*.cy.ts' -o -name '*.cy.tsx' -o -name '*.cy.mts' -o -name '*.cy.cts' ')'
+    -o -name '*.cy.ts' -o -name '*.cy.tsx' -o -name '*.cy.mts' -o -name '*.cy.cts' \
+    -o '(' -path './test/*' ! -path './test/*/*' \
+      '(' -name '*.js' -o -name '*.cjs' -o -name '*.mjs' \
+        -o -name '*.ts' -o -name '*.cts' -o -name '*.mts' ')' ')' ')'
 )
+
+# The same rule for a listing rather than a filesystem walk: paths arrive
+# without the `./` that find emits, so the HEAD side spells it anchored at the
+# start of the path.
+_NODE_TEST_PATH_RE='\.(test|spec|cy)\.[cm]?[jt]sx?$|^test/[^/]+\.[cm]?[jt]s$'
 
 # A workspace that ships tests must be able to run them. run_script only logs
 # "Skipping missing script", so deleting or renaming `test` would remove the
@@ -4479,8 +4502,12 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
     # still has tests is what makes this scan skip entirely. Anchored to the
     # same extensions the predicate above uses, for the same reason: a bare
     # `\.cy\.` would count `messages.cy.json` as a suite.
+    #
+    # One expression for both halves now, rather than two spellings of the same
+    # intention kept in step by hand -- which is exactly what let Cypress reach
+    # one of them and not the other, and Mocha's suffix-less `test/` neither.
     HEAD_TESTS="$(printf '%s\n' "$_lost_raw" \
-      | grep -E '\.(test|spec|cy)\.[cm]?[jt]sx?$' | head -5 || true)"
+      | grep -E "$_NODE_TEST_PATH_RE" | head -5 || true)"
     if [ -n "$HEAD_TESTS" ]; then
       echo "Workspace ${CI_GATE_NODE_WORKSPACE} has lost its entire test suite."
       echo "  ${_lost_ref} carries test files here and this tree has none, so the"

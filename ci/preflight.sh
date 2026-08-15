@@ -947,19 +947,53 @@ run_mode() {
   if [ "${CI_GATE_USE_LANES:-0}" = "1" ] \
      && { [ "$MODE" = "full" ] || [ "$MODE" = "ship" ]; } \
      && [ -f "ci/config/lanes.conf" ]; then
-    # lanes.conf has 5 columns (id|name|command|blocking|description); only id and
-    # command are consumed here. Unused columns are read into `_` so shellcheck does
-    # not flag them (SC2034) while still consuming every delimited field.
-    local lane_id="" lane_cmd=""
-    while IFS='|' read -r lane_id _ lane_cmd _ _; do
-      lane_id="$(echo "$lane_id" | tr -d ' ')"
-      lane_cmd="$(echo "$lane_cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-      [ -z "$lane_id" ] && continue
-      case "$lane_id" in '#'* ) continue ;; esac
-      [ -z "$lane_cmd" ] && continue
-      run_phase "${lane_id}:${lane_cmd}"
-    done < "ci/config/lanes.conf"
-    return 0
+    # In ship mode the plan is read from the pushed tree, not from disk.
+    #
+    # This branch selected the lanes *and* read them from the worktree copy, so
+    # an unstaged edit deleting the `node` and `tests-shell` rows removed the
+    # frontend tests from the run and -- with `tests-shell` gone -- removed the
+    # one lane whose drift scan would have reported the edit. A pushed commit
+    # carrying a failing frontend test then passed, on a plan that is not in the
+    # push. Which lanes run is gate configuration like any other, and ship mode
+    # reports on HEAD.
+    #
+    # An unreadable HEAD copy falls through to the standard ship plan below
+    # rather than to the worktree file. That plan is the wider one -- it runs
+    # every lane rather than the configured subset -- so the failure direction
+    # is more work, not less, and it needs no error path of its own. `full` is
+    # deliberately a whole-tree run against the worktree and keeps reading it.
+    local _lp_file="ci/config/lanes.conf" _lp_tmp="" _lp_ok=1
+    if [ "$MODE" = "ship" ]; then
+      _lp_ok=0
+      if command -v git >/dev/null 2>&1 \
+        && git rev-parse --verify HEAD >/dev/null 2>&1 \
+        && _lp_tmp="$(mktemp 2>/dev/null)" \
+        && git show "HEAD:ci/config/lanes.conf" > "$_lp_tmp" 2>/dev/null \
+        && [ -s "$_lp_tmp" ]; then
+        _lp_file="$_lp_tmp"
+        _lp_ok=1
+      else
+        [ -n "$_lp_tmp" ] && rm -f "$_lp_tmp"
+        _lp_tmp=""
+        echo "ci/config/lanes.conf is not readable in HEAD; running the full ship plan." >&2
+      fi
+    fi
+    if [ "$_lp_ok" -eq 1 ]; then
+      # lanes.conf has 5 columns (id|name|command|blocking|description); only id and
+      # command are consumed here. Unused columns are read into `_` so shellcheck does
+      # not flag them (SC2034) while still consuming every delimited field.
+      local lane_id="" lane_cmd=""
+      while IFS='|' read -r lane_id _ lane_cmd _ _; do
+        lane_id="$(echo "$lane_id" | tr -d ' ')"
+        lane_cmd="$(echo "$lane_cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        [ -z "$lane_id" ] && continue
+        case "$lane_id" in '#'* ) continue ;; esac
+        [ -z "$lane_cmd" ] && continue
+        run_phase "${lane_id}:${lane_cmd}"
+      done < "$_lp_file"
+      [ -n "$_lp_tmp" ] && rm -f "$_lp_tmp"
+      return 0
+    fi
   fi
 
   case "$MODE" in

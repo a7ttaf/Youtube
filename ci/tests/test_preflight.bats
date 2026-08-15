@@ -2967,12 +2967,19 @@ YML
   run bash -c "cd '$sb' && CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
   [ "$status" -ne 0 ] \
     || { rm -rf "$sb"; echo "an unreadable tree passed the lane: $output" >&2; return 1; }
-  [[ "$output" == *"Cannot read"* ]] \
+  # Either refusal is the right one, and which fires depends on how far the lane
+  # gets: workspace enumeration reads the same listing and now refuses there
+  # first, before this lane has a workspace to look at. The pair is the rule --
+  # what must never happen is the run continuing to a verdict about a tree it
+  # could not read.
+  [[ "$output" == *"Cannot read"* || "$output" == *"Cannot list"* ]] \
     || { rm -rf "$sb"; echo "refused without saying the listing failed: $output" >&2; return 1; }
   [[ "$output" == *"carries a newline"* ]] \
     || { rm -rf "$sb"; echo "did not name the reason for status 2: $output" >&2; return 1; }
   [[ "$output" != *"no TypeScript project"* ]] \
     || { rm -rf "$sb"; echo "reported the workspace as having no project: $output" >&2; return 1; }
+  [[ "$output" != *"skipped"* ]] \
+    || { rm -rf "$sb"; echo "reported a skip for a tree it could not read: $output" >&2; return 1; }
   rm -rf "$sb"
 
   # The control: with the reader working, the same tree is checked as before and
@@ -3142,5 +3149,165 @@ YML
   # tests nothing.
   [ "$after" = "$(_key)" ] \
     || { rm -rf "$sb"; echo "the key is not stable for an unchanged tree" >&2; return 1; }
+  rm -rf "$sb"
+}
+
+@test "preflight: the ship lane plan is the one in the push" {
+  # This branch selected the lanes *and* read them from the worktree copy of
+  # ci/config/lanes.conf. An unstaged edit deleting the content-lane rows
+  # therefore removed those lanes from the run and, with the gate's own
+  # self-check lanes gone with them, removed what would have reported the edit
+  # -- so a pushed commit carrying a failing frontend test passed, on a plan
+  # that is not in the push.
+  #
+  # Driven through run_mode with run_phase stubbed, rather than through a whole
+  # preflight run: the question here is which file the lane list is read from,
+  # and a real run answers it only indirectly -- through whichever lanes that
+  # sandbox happens to be able to execute.
+  local fns="$BATS_TEST_TMPDIR/lanes.sh"
+  _pf_fns "$fns" run_mode
+
+  local sb; sb="$(mktemp -d)"
+  (
+    cd "$sb" || exit 1
+    git init -q -b main . && git config user.email t@t && git config user.name t
+    mkdir -p ci/config
+    printf 'node|Node|./ci/checks/node.sh|yes|d
+' > ci/config/lanes.conf
+    printf 'test-layout|Layout|./ci/checks/test-layout.sh|yes|d
+' >> ci/config/lanes.conf
+    printf 'lint|Lint|./ci/checks/lint.sh|no|d
+' >> ci/config/lanes.conf
+    git add -A && git commit -qm base
+  ) >/dev/null 2>&1 || { rm -rf "$sb"; echo "fixture failed" >&2; return 1; }
+
+  # run_mode reaches the lane branch and then the mode dispatch; both are
+  # stubbed so what comes back is the plan and nothing else.
+  _plan() { # _plan <mode>
+    bash -c "cd '$sb' && . '$fns' >/dev/null 2>&1
+      run_phase() { for e in \"\$@\"; do printf 'LANE:%s ' \"\${e%%:*}\"; done; }
+      run_common_checks() { printf 'FULLPLAN '; }
+      run_full_or_ship_checks() { printf 'FULLPLAN '; }
+      _push_is_content_free() { return 1; }
+      MODE=\"$1\" CI_GATE_USE_LANES=1 run_mode 2>/dev/null" _ "$1"
+  }
+
+  local before
+  before="$(_plan ship)"
+  [[ "$before" == *"LANE:node"* ]]     || { rm -rf "$sb"; echo "the lane branch was not reached at all: [$before]" >&2; return 1; }
+
+  # The edit: on disk only, nothing staged, nothing committed.
+  ( cd "$sb" && printf 'lint|Lint|./ci/checks/lint.sh|no|d
+' > ci/config/lanes.conf ) >/dev/null 2>&1
+
+  local after
+  after="$(_plan ship)"
+  [ "$before" = "$after" ]     || { rm -rf "$sb"; echo "an unstaged lanes.conf edit changed the ship plan: [$before] -> [$after]" >&2; return 1; }
+
+  # The control, and it is what keeps this from being "ship ignores
+  # lanes.conf": the same removal, committed, is genuinely not scheduled.
+  ( cd "$sb" && git add -A && git commit -qm 'drop the content lanes' ) >/dev/null 2>&1
+  local committed
+  committed="$(_plan ship)"
+  [[ "$committed" != *"LANE:node"* ]]     || { rm -rf "$sb"; echo "a committed removal was ignored, so HEAD is not being read: [$committed]" >&2; return 1; }
+  [[ "$committed" == *"LANE:lint"* ]]     || { rm -rf "$sb"; echo "the committed plan did not run either: [$committed]" >&2; return 1; }
+
+  # And `full` is deliberately a whole-tree run against the worktree, so it
+  # still reads the file on disk -- the narrowing is a ship rule, not a new
+  # rule for every mode.
+  ( cd "$sb" && git checkout -q -- ci/config/lanes.conf       && printf 'lint|Lint|./ci/checks/lint.sh|no|d
+' > ci/config/lanes.conf ) >/dev/null 2>&1
+  local full
+  full="$(_plan full)"
+  [[ "$full" != *"LANE:node"* ]]     || { rm -rf "$sb"; echo "full mode stopped reading the worktree: [$full]" >&2; return 1; }
+  rm -rf "$sb"
+}
+
+@test "runner: a check that ignores SIGTERM still meets its deadline" {
+  # `timeout N` is not a deadline on its own. It sends TERM, and TERM only ends
+  # a process that does not catch it -- so a check that traps it, or whose child
+  # ignores it, outlives the timeout and `timeout` waits on it forever. The lane
+  # then never reports at all, which is worse than the FAIL_INFRA the deadline
+  # exists to produce: a gate that hangs gets killed by hand and the push goes
+  # out unjudged.
+  local prefix
+  prefix="$( . "$REPO_ROOT/ci/lib/runner.sh" >/dev/null 2>&1
+             ci::runner::_timeout_cmd 300 )"
+  [[ "$prefix" == *"--kill-after="* ]] \
+    || { echo "the timeout prefix cannot escalate: [$prefix]" >&2; return 1; }
+  [[ "$prefix" == *" 300" ]] \
+    || { echo "the declared timeout is no longer the last word: [$prefix]" >&2; return 1; }
+
+  # Both arms, because which one a host reaches depends on what it has
+  # installed, and the escalation was added to one of them once already.
+  local body
+  body="$(sed -n '/^ci::runner::_timeout_cmd() {/,/^}/p' "$REPO_ROOT/ci/lib/runner.sh")"
+  [ "$(printf '%s\n' "$body" | grep -c -- '--kill-after=')" -eq 2 ] \
+    || { echo "one of the two timeout utilities still has no escalation" >&2; return 1; }
+
+  # And it works. Run under an outer guard so a regression here fails the case
+  # instead of hanging the suite -- which is the very failure being tested.
+  command -v timeout >/dev/null 2>&1 || skip "no timeout(1) on this host"
+  local rc=0
+  timeout 20 timeout --kill-after=1s 2 \
+    bash -c 'trap "" TERM; while :; do sleep 0.2; done' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 137 ] \
+    || { echo "a TERM-ignoring child was not killed (rc=$rc; 124 means the outer guard fired)" >&2; return 1; }
+}
+
+@test "common: a HEAD listing that failed is not a push with no workspaces" {
+  # `|| return 0` read "could not ask" -- the three preconditions, which really
+  # are nothing to report -- into a fourth case that is not one: HEAD exists, it
+  # was asked, and the answer did not come back. With a name in the tree that
+  # ls_tree_paths refuses to fold and a committed workspace missing locally,
+  # this returned 0, node_workspaces handed back an empty list with status 0,
+  # and ship-mode tests-js and typecheck-js printed "skipped: no package.json
+  # found" for a push that carries one.
+  local sb; sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib"
+  {
+    cat "$REPO_ROOT/ci/lib/common.sh"
+    printf '\nci::common::ls_tree_paths() { return 2; }\n'
+  } > "$sb/ci/lib/common.sh"
+  (
+    cd "$sb" || exit 1
+    git init -q -b main . && git config user.email t@t && git config user.name t
+    mkdir -p frontend && printf '{ "name": "f", "private": true }\n' > frontend/package.json
+    git add -A && git commit -qm base
+    rm -rf frontend
+  ) >/dev/null 2>&1 || { rm -rf "$sb"; echo "fixture failed" >&2; return 1; }
+
+  local rc=0
+  ( cd "$sb" && . ci/lib/common.sh >/dev/null 2>&1 \
+    && CI_GATE_MODE=ship ci::common::_head_manifests_present package.json ) >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$sb"; echo "an unreadable HEAD listing reported nothing to report" >&2; return 1; }
+
+  # It reaches the caller, which is the half that matters: node_workspaces
+  # returning an empty list with status 0 is what the lanes read as "no
+  # workspace here".
+  rc=0
+  ( cd "$sb" && . ci/lib/common.sh >/dev/null 2>&1 \
+    && CI_GATE_MODE=ship ci::common::node_workspaces package.json ) >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$sb"; echo "node_workspaces passed an unreadable tree through as empty" >&2; return 1; }
+
+  # The controls. The three preconditions are still nothing to report, or this
+  # function starts refusing every pre-commit run.
+  rc=0
+  ( cd "$sb" && . ci/lib/common.sh >/dev/null 2>&1 \
+    && CI_GATE_MODE=quick ci::common::_head_manifests_present package.json ) >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] \
+    || { rm -rf "$sb"; echo "a non-ship run was refused" >&2; return 1; }
+
+  # And with the reader working, the same tree is answered as before: the
+  # workspace is committed and absent locally, which is the case this function
+  # was written for and still has to report as 1.
+  cp -f "$REPO_ROOT/ci/lib/common.sh" "$sb/ci/lib/common.sh"
+  rc=0
+  ( cd "$sb" && . ci/lib/common.sh >/dev/null 2>&1 \
+    && CI_GATE_MODE=ship ci::common::_head_manifests_present package.json ) >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$sb"; echo "a genuinely missing workspace stopped being reported" >&2; return 1; }
   rm -rf "$sb"
 }

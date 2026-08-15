@@ -7196,3 +7196,64 @@ ship_ws_run() {
   [ "$nl_rc" -eq 2 ] \
     || { echo "a path containing a newline was folded into the list (rc=$nl_rc)" >&2; return 1; }
 }
+
+@test "node lane: a Mocha suite is a suite the test script may not lose" {
+  # Mocha is on this file's recognised-runner list and it names nothing: its
+  # default spec is `./test/*.{js,cjs,mjs}`, no suffix at all. So an ordinary
+  # `test/login.js` suite was invisible to both scans -- the orphan guard let
+  # `test` and `test:unit` be deleted from a workspace that ships one, and the
+  # lost-suite scan saw a workspace that never had tests to lose. Same shape as
+  # the Cypress case one runner over, and found the same way: by asking what
+  # each recognised runner actually collects.
+  local pred re
+  pred="$(sed -n '/^_NODE_TEST_NAME_PRED=(/,/^)/p' "$REPO_ROOT/ci/checks/node.sh")"
+  re="$(sed -n "s/^_NODE_TEST_PATH_RE='\(.*\)'$/\1/p" "$REPO_ROOT/ci/checks/node.sh")"
+  [ -n "$pred" ] && [ -n "$re" ] \
+    || { echo "could not lift the suite predicates from the lane" >&2; return 1; }
+  bash -n <<< "$pred" || { echo "the extraction is not valid shell" >&2; return 1; }
+  eval "$pred"
+
+  local sb; sb="$(mktemp -d)"
+  local f
+  for f in test/login.js test/api.mjs test/helpers/db.js test/README.md \
+           src/app.js src/a.test.ts e2e/x.cy.ts messages.cy.json \
+           node_modules/x/test/a.js; do
+    mkdir -p "$sb/$(dirname "$f")" && : > "$sb/$f"
+  done
+
+  # The two halves have to agree about what a test file is, and an asymmetry
+  # here is not a missed case but an inverted one: the worktree side deciding a
+  # workspace still has tests is what makes the lost-suite scan skip entirely.
+  # So they are compared to each other, not each to a list written twice.
+  local from_find from_re
+  from_find="$( cd "$sb" && find . \( -name 'node_modules' -o -name 'dist' -o -name 'build' \) -prune -o \
+    -type f "${_NODE_TEST_NAME_PRED[@]}" -print 2>/dev/null | sed 's|^\./||' | sort | tr '\n' ' ' )"
+  from_re="$( printf '%s\n' test/login.js test/api.mjs test/helpers/db.js test/README.md \
+    src/app.js src/a.test.ts e2e/x.cy.ts messages.cy.json \
+    | grep -E "$re" | sort | tr '\n' ' ' )"
+  [ "$from_find" = "$from_re" ] \
+    || { rm -rf "$sb"; echo "the two suite scans disagree: find=[$from_find] head=[$from_re]" >&2; return 1; }
+
+  # And what they agree on is the right set. Mocha's default directory counts;
+  # a helper one level further down does not, and neither does a README beside
+  # the specs -- `-path './test/*.js'` alone matched the helper, because find's
+  # glob crosses `/` where a shell one would not.
+  [[ "$from_find" == *"test/login.js"* ]] \
+    || { rm -rf "$sb"; echo "a Mocha suite is still invisible: [$from_find]" >&2; return 1; }
+  [[ "$from_find" == *"test/api.mjs"* ]] \
+    || { rm -rf "$sb"; echo "only one of Mocha's default extensions counts: [$from_find]" >&2; return 1; }
+  [[ "$from_find" != *"test/helpers/db.js"* ]] \
+    || { rm -rf "$sb"; echo "a helper under test/ counts as a suite: [$from_find]" >&2; return 1; }
+  [[ "$from_find" != *"test/README.md"* ]] \
+    || { rm -rf "$sb"; echo "a README beside the specs counts as a suite: [$from_find]" >&2; return 1; }
+  [[ "$from_find" != *"messages.cy.json"* ]] \
+    || { rm -rf "$sb"; echo "a Welsh locale file is back: [$from_find]" >&2; return 1; }
+
+  # The controls that stop this being satisfied by a predicate matching
+  # everything: the suffix-named suites the scans already knew are still found.
+  [[ "$from_find" == *"src/a.test.ts"* ]] && [[ "$from_find" == *"e2e/x.cy.ts"* ]] \
+    || { rm -rf "$sb"; echo "the suffix-named suites were lost: [$from_find]" >&2; return 1; }
+  [[ "$from_find" != *"src/app.js"* ]] \
+    || { rm -rf "$sb"; echo "ordinary source counts as a test: [$from_find]" >&2; return 1; }
+  rm -rf "$sb"
+}

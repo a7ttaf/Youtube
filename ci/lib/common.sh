@@ -237,9 +237,14 @@ ci::common::ls_tree_paths() {
   printf '%s' "$_lt_out"
 }
 
-# Returns 1 with the paths on stderr, 0 when there is nothing to report --
-# including when the question cannot be asked, since could-not-ask must not
-# empty a list the way a failure to enumerate would.
+# Returns 1 with a reason on stderr, 0 when there is nothing to report.
+#
+# "Nothing to report" is the three preconditions -- not a ship run, no git, no
+# HEAD -- where there is no question to ask in the first place. It is NOT a
+# question that was asked and did not come back: a listing that failed returns 1
+# with the rest, because could-not-read must not empty a list the way a genuine
+# absence would. Those two were the same arm, and the difference is the whole
+# point of this function.
 ci::common::_head_manifests_present() {
   local manifest="${1:-package.json}"
   [ "${CI_GATE_MODE:-}" = "ship" ] || return 0
@@ -251,7 +256,31 @@ ci::common::_head_manifests_present() {
   # `--full-tree` so the answer does not depend on where this was called from:
   # `git ls-tree` applies the current directory as an implicit path filter, and
   # an empty listing reads exactly like "the push carries no manifests".
-  _nw_head="$(ci::common::ls_tree_paths -r --full-tree --name-only HEAD)" || return 0
+  #
+  # A listing that failed is reported, not swallowed. `|| return 0` was reading
+  # "could not ask" -- the three preconditions above, which really are nothing
+  # to report -- into a fourth case that is not one: HEAD exists, it was asked,
+  # and the answer did not come back. With a name in the tree that
+  # `ls_tree_paths` refuses to fold (status 2) and a committed workspace missing
+  # locally, this returned 0, `node_workspaces` handed back an empty list with
+  # status 0, and ship-mode `tests-js` and `typecheck-js` printed
+  # "skipped: no package.json found" for a push that carries one. The whole
+  # point of this function is that an unreadable answer must not empty a list,
+  # and it was emptying its own.
+  local _nw_lt_rc=0
+  _nw_head="$(ci::common::ls_tree_paths -r --full-tree --name-only HEAD)" || _nw_lt_rc=$?
+  if [ "$_nw_lt_rc" -ne 0 ]; then
+    {
+      echo "Cannot list the ${manifest} files in the commit being pushed."
+      if [ "$_nw_lt_rc" -eq 2 ]; then
+        echo "  A path in HEAD carries a newline, which this listing cannot hold"
+        echo "  without splitting it into two entries that match nothing."
+      fi
+      echo "  Reporting no workspace would pass the push having checked none of"
+      echo "  it, so this run says it cannot check it instead."
+    } >&2
+    return 1
+  fi
   while IFS= read -r _nw_found; do
     [ -n "$_nw_found" ] || continue
     case "$_nw_found" in

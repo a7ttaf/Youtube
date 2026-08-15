@@ -172,6 +172,11 @@ ci::runner::_declared_timeout() {
   ' "$file"
 }
 
+# How long a timed-out check is given between TERM and KILL. Named rather than
+# inlined because both arms below have to use the same number, and the one that
+# is reached depends on which utility the host has.
+: "${_CI_RUNNER_KILL_AFTER:=10s}"
+
 # ci::runner::_timeout_cmd <seconds> – echo the command prefix that enforces
 # <seconds>, or return 1 when this host has nothing that can enforce it.
 #
@@ -180,12 +185,22 @@ ci::runner::_declared_timeout() {
 # which is exactly how the bound used to get dropped in silence.
 ci::runner::_timeout_cmd() {
   local secs="$1"
+  # `--kill-after`, because `timeout N` alone is not a deadline. It sends TERM,
+  # and TERM only ends a process that does not catch it -- so a check that traps
+  # it to clean up, or a runner whose child ignores it, outlives the timeout and
+  # `timeout` waits on it forever. The lane then never reports at all, which is
+  # worse than the FAIL_INFRA the deadline exists to produce: a gate that hangs
+  # gets killed by hand and the push goes out unjudged.
+  #
+  # The grace period is fixed rather than proportional. It is time for a trap to
+  # finish writing what it was writing, not a second deadline, and 10s is long
+  # enough for that and short enough that a hung blocker is over in seconds.
   if command -v timeout >/dev/null 2>&1; then
-    printf 'timeout %s' "$secs"
+    printf 'timeout --kill-after=%s %s' "$_CI_RUNNER_KILL_AFTER" "$secs"
     return 0
   fi
   if command -v gtimeout >/dev/null 2>&1; then
-    printf 'gtimeout %s' "$secs"
+    printf 'gtimeout --kill-after=%s %s' "$_CI_RUNNER_KILL_AFTER" "$secs"
     return 0
   fi
   return 1
