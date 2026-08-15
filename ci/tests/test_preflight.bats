@@ -3408,16 +3408,71 @@ YML
   # The control that keeps the filter a filter: the vendored and generated trees
   # this deliberately prunes stay pruned, or every workspace is permanently
   # drifted and the refusal means nothing.
+  #
+  # `.vite` and `htmlcov` are in here for a reason, not for symmetry. This copy
+  # of the pruned set was missing them while every other copy in the repository
+  # had them, and `frontend/.vite/cache.js` is ignored, generated, and ends in an
+  # extension the filter keeps — so ship-mode tests-js and typecheck-js refused
+  # an otherwise clean push over a build cache. A guard that refuses correct
+  # pushes gets switched off, which is the same outcome as not having it.
+  local d
   (
     cd "$sb"
-    mkdir -p frontend/node_modules/x frontend/dist
+    mkdir -p frontend/node_modules/x frontend/dist frontend/.vite frontend/htmlcov \
+             frontend/.turbo frontend/coverage
     printf 'a{}\n' > frontend/node_modules/x/a.css
     printf 'b{}\n' > frontend/dist/b.css
-    printf 'node_modules/\ndist/\nfrontend/src/theme.css\n' > .gitignore
+    printf 'cached\n'  > frontend/.vite/cache.js
+    printf '<html>\n'  > frontend/htmlcov/index.html
+    printf 'x\n'       > frontend/.turbo/log.json
+    printf 'y{}\n'     > frontend/coverage/style.css
+    printf 'node_modules/\ndist/\n.vite/\nhtmlcov/\n.turbo/\ncoverage/\nfrontend/src/theme.css\n' > .gitignore
   ) >/dev/null 2>&1
   out="$( cd "$sb" && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
           && ci::common::workspace_drift frontend || true )"
-  [[ "$out" != *"node_modules"* ]] && [[ "$out" != *"frontend/dist/"* ]] \
-    || { rm -rf "$sb"; echo "a pruned tree came back as drift: [$out]" >&2; return 1; }
+  for d in node_modules 'frontend/dist/' 'frontend/.vite/' 'frontend/htmlcov/' \
+           'frontend/.turbo/' 'frontend/coverage/'; do
+    [[ "$out" != *"$d"* ]] \
+      || { rm -rf "$sb"; echo "a pruned tree came back as drift: ${d} in [$out]" >&2; return 1; }
+  done
+  # And the shadow is still reported through all of that, so the controls have
+  # not simply emptied the answer.
+  [[ "$out" == *"frontend/src/theme.css"* ]] \
+    || { rm -rf "$sb"; echo "the shadow was lost once the pruned trees existed: [$out]" >&2; return 1; }
   rm -rf "$sb"
+}
+
+@test "gate: no check reaches for a find flag POSIX does not define" {
+  # `-maxdepth` is implemented by GNU and BSD find, which is why every use of it
+  # here worked — but "both of the two we expect" is a smaller guarantee than the
+  # standard, and this gate runs wherever a developer's shell does. `-quit` is
+  # narrower still: it is not in every find that has `-maxdepth`.
+  #
+  # Each site was replaced by a prune of the depth it excluded — `./*/*/*` is
+  # depth three and below — or, where the question was really "the files in this
+  # one directory", by a glob. Both are POSIX, and each replacement was checked
+  # to select the identical set.
+  # `-e` rather than a bare pattern, because the patterns begin with `-`; and
+  # ci/tests/ is excluded because this case and the equivalence check below both
+  # have to name the flag in order to talk about it.
+  local hits
+  hits="$(grep -rn --include='*.sh' --exclude-dir=tests \
+            -e '-maxdepth' -e '-print -quit' "$REPO_ROOT/ci" 2>/dev/null \
+          | grep -v '^[^:]*:[0-9]*: *#' || true)"
+  [ -z "$hits" ] \
+    || { echo "a non-POSIX find flag is back in the gate:" >&2; echo "$hits" >&2; return 1; }
+
+  # The equivalence the replacement rests on, asserted rather than assumed: a
+  # prune of `./*/*/*` selects what `-maxdepth 2` selected.
+  local sb; sb="$(mktemp -d)"
+  local f
+  for f in a.conf x/b.conf x/y/c.conf x/y/z/d.conf; do
+    mkdir -p "$sb/$(dirname "$f")"; : > "$sb/$f"
+  done
+  local old new
+  old="$(cd "$sb" && find . -maxdepth 2 -type f -name '*.conf' 2>/dev/null | sort | tr '\n' ' ')"
+  new="$(cd "$sb" && find . -path './*/*/*' -prune -o -type f -name '*.conf' -print 2>/dev/null | sort | tr '\n' ' ')"
+  rm -rf "$sb"
+  [ "$old" = "$new" ] \
+    || { echo "the portable form is not equivalent: maxdepth=[$old] prune=[$new]" >&2; return 1; }
 }

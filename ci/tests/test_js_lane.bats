@@ -7478,7 +7478,7 @@ ship_ws_run() {
 
   local sb; sb="$(mktemp -d)"
   local f
-  for f in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js            test/README.md test/fixtures/data.json src/app.js src/a.test.ts            __tests__/login.js src/__tests__/deep/a.tsx            e2e/x.cy.ts messages.cy.json openapi.spec.json            test-login.js login-test.js login_test.js test.js            src/test/util.js test-fixtures.json            tests/build/checkout.test.ts build/out.test.js node_modules/x/test/a.js            coverage/old.test.js .next/x.test.js; do
+  for f in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js            test/README.md test/fixtures/data.json src/app.js src/a.test.ts            __tests__/login.js src/__tests__/deep/a.tsx            e2e/x.cy.ts messages.cy.json openapi.spec.json            test-login.js login-test.js login_test.js test.js            src/test/util.js test-fixtures.json            spec/loginSpec.js spec/nested/authSpec.mjs spec/helpers/setup.js            spec/support/jasmine.json            tests/build/checkout.test.ts build/out.test.js node_modules/x/test/a.js            coverage/old.test.js .next/x.test.js; do
     mkdir -p "$sb/$(dirname "$f")" && : > "$sb/$f"
   done
 
@@ -7488,7 +7488,7 @@ ship_ws_run() {
 
   # Collected, and nothing else.
   local want
-  for want in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js               __tests__/login.js src/__tests__/deep/a.tsx               test-login.js login-test.js login_test.js test.js               src/a.test.ts e2e/x.cy.ts tests/build/checkout.test.ts; do
+  for want in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js               __tests__/login.js src/__tests__/deep/a.tsx               test-login.js login-test.js login_test.js test.js               spec/loginSpec.js spec/nested/authSpec.mjs               src/a.test.ts e2e/x.cy.ts tests/build/checkout.test.ts; do
     [[ "$from_find" == *"$want"* ]]       || { rm -rf "$sb"; echo "a suite was not collected: ${want} (got [$from_find])" >&2; return 1; }
   done
   # `test/helpers/db.js` is in that list on purpose: it is a helper to a reader,
@@ -7504,7 +7504,7 @@ ship_ws_run() {
   # permanently, and deleting every real suite passes. The anchor stays, and
   # this case is what says so.
   local unwanted
-  for unwanted in openapi.spec.json messages.cy.json test/README.md                   test/fixtures/data.json src/app.js build/out.test.js test-fixtures.json                   src/test/util.js                   node_modules/x/test/a.js coverage/old.test.js .next/x.test.js; do
+  for unwanted in openapi.spec.json messages.cy.json test/README.md                   test/fixtures/data.json src/app.js build/out.test.js test-fixtures.json                   src/test/util.js spec/helpers/setup.js spec/support/jasmine.json                   node_modules/x/test/a.js coverage/old.test.js .next/x.test.js; do
     [[ "$from_find" != *"$unwanted"* ]]       || { rm -rf "$sb"; echo "not a suite, but collected: ${unwanted} (got [$from_find])" >&2; return 1; }
   done
 
@@ -7514,7 +7514,7 @@ ship_ws_run() {
   # So they are compared to each other, not each to a list written twice.
   local from_re
   from_re="$( printf '%s
-' test/login.js test/api.mjs test/integration/login.js     test/helpers/db.js test/README.md test/fixtures/data.json src/app.js     __tests__/login.js src/__tests__/deep/a.tsx     test-login.js login-test.js login_test.js test.js src/test/util.js     test-fixtures.json     src/a.test.ts e2e/x.cy.ts messages.cy.json openapi.spec.json     tests/build/checkout.test.ts     | grep -E "$re" | grep -E "$ext_re" | sort | tr '
+' test/login.js test/api.mjs test/integration/login.js     test/helpers/db.js test/README.md test/fixtures/data.json src/app.js     __tests__/login.js src/__tests__/deep/a.tsx     test-login.js login-test.js login_test.js test.js src/test/util.js     test-fixtures.json     spec/loginSpec.js spec/nested/authSpec.mjs spec/helpers/setup.js     spec/support/jasmine.json     src/a.test.ts e2e/x.cy.ts messages.cy.json openapi.spec.json     tests/build/checkout.test.ts     | grep -E "$re" | grep -E "$ext_re" | sort | tr '
 ' ' ' )"
   [ "$from_find" = "$from_re" ]     || { rm -rf "$sb"; echo "the two suite scans disagree: find=[$from_find] head=[$from_re]" >&2; return 1; }
   rm -rf "$sb"
@@ -7612,4 +7612,66 @@ ship_ws_run() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"frontend/tests/"* ]] \
     || { echo "the unquoted path mapped to no frontend suite: [$output]" >&2; return 1; }
+}
+
+@test "node lane: a configless bundler workspace cannot drop its build script" {
+  # A bundler run with its defaults writes no configuration file, so the guard
+  # that asks about config presence switched itself off for exactly the
+  # workspaces whose build contract is least visible. A configless `vite build`
+  # deleted from the manifest left the config list empty, `run_script build`
+  # logging "Skipping missing script", and the lane reporting PASS having
+  # produced no production bundle at all.
+  ws_setup
+  (
+    cd "$NODE_SB"
+    git init -q -b work .
+    git config user.email t@t
+    git config user.name t
+  ) >/dev/null 2>&1
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "./scripts/vitest run", "typecheck": "tsc --noEmit",
+    "build": "vite build" } }'
+  ( cd "$NODE_SB" && git add -A && git commit -qm base ) >/dev/null 2>&1
+
+  # The premise: this workspace really does carry no bundler configuration, so
+  # the config-based half of the guard cannot see it.
+  run bash -c "cd '$NODE_SB/ws' && ls vite.config.* webpack.config.* rollup.config.* 2>/dev/null | wc -l"
+  [ "$(printf '%s' "$output" | tr -d '[:space:]')" = "0" ] \
+    || { rm -rf "$NODE_SB"; echo "the fixture grew a bundler config: $output" >&2; return 1; }
+
+  # The control first: with the script still there, this branch says nothing.
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"no longer defines one"* ]] \
+    || { rm -rf "$NODE_SB"; echo "a workspace that still builds was refused: $output" >&2; return 1; }
+
+  # Now the removal.
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "./scripts/vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] \
+    || { rm -rf "$NODE_SB"; echo "dropping a configless build script was not refused (status=$status)" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"had a 'build' script"* ]] \
+    || { rm -rf "$NODE_SB"; echo "refused, but not for this reason: $output" >&2; return 1; }
+  rm -rf "$NODE_SB"
+
+  # And the control that keeps the rule from becoming "every workspace must
+  # build": one that never declared a build script is not refused for lacking
+  # one. Removal is the signal, not absence.
+  ws_setup
+  (
+    cd "$NODE_SB"
+    git init -q -b work .
+    git config user.email t@t
+    git config user.name t
+  ) >/dev/null 2>&1
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "./scripts/vitest run", "typecheck": "tsc --noEmit" } }'
+  ( cd "$NODE_SB" && git add -A && git commit -qm base ) >/dev/null 2>&1
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"no longer defines one"* ]] \
+    || { rm -rf "$NODE_SB"; echo "a workspace that never built was refused: $output" >&2; return 1; }
+  rm -rf "$NODE_SB"
 }

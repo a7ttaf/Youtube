@@ -119,6 +119,15 @@ ci::common::workspace_drift() {
   # The ignored ones, filtered to files these lanes read. node_modules and the
   # usual build outputs are pruned first: those are ignored on purpose and
   # listing them would bury the one path that matters in tens of thousands.
+  #
+  # The pruned set is the one this repository already agrees on -- the same
+  # eleven directories ci::common::is_vendored_path names and ci/checks/node.sh's
+  # suite scans prune. `.vite` and `htmlcov` were missing from this copy alone,
+  # and a missing entry here is not a quiet one: `frontend/.vite/cache.js` is
+  # ignored, generated, and ends in an extension this filter keeps, so ship-mode
+  # tests-js and typecheck-js refused an otherwise clean push over a build cache.
+  # A guard that refuses correct pushes gets switched off, which is the same
+  # outcome as not having it.
   local _wd_c
   _wd_c="$(git ls-files --others --ignored --exclude-standard -- "$ws" 2>/dev/null)" || _wd_rc=2
   [ "$_wd_rc" -eq 0 ] || return 2
@@ -133,7 +142,7 @@ ci::common::workspace_drift() {
   # the asset types a bundler inlines, and the config files these lanes read to
   # decide what to run at all.
   _wd_c="$(printf '%s\n' "$_wd_c" \
-    | grep -Ev '(^|/)(node_modules|dist|build|out|coverage|\.next|\.nuxt|\.turbo|\.cache|__pycache__)/' \
+    | grep -Ev '(^|/)(node_modules|dist|build|out|coverage|htmlcov|\.next|\.nuxt|\.turbo|\.vite|\.cache|__pycache__)/' \
     | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|cts|mts|vue|svelte|json|css|scss|sass|less|styl|pcss|svg|html|py|yml|yaml|toml)$|(^|/)(package\.json|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|vitest\.config\.[cm]?[jt]s)$' || true)"
 
   local _wd_all

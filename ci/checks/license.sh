@@ -84,7 +84,13 @@ _license_check_npm() {
       pkg_name="$(basename "$(dirname "$pkg_json")")"
       _license_violation "Disallowed license '${lic}' in npm package: ${pkg_name}"
     fi
-  done < <(find node_modules -maxdepth 3 -name 'package.json' 2>/dev/null || true)
+  # `node_modules/*/*/*/*` is depth four and below, so pruning it leaves the
+  # three levels this walk wants -- `node_modules/x/package.json` and the scoped
+  # `node_modules/@scope/x/package.json`. A prune rather than `-maxdepth`, which
+  # is not POSIX: GNU and BSD both have it, and "both of the two we expect" is a
+  # smaller guarantee than the standard.
+  done < <(find node_modules -path 'node_modules/*/*/*/*' -prune -o \
+             -name 'package.json' -print 2>/dev/null || true)
 }
 
 # ---------------------------------------------------------------------------

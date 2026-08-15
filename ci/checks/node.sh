@@ -4307,7 +4307,15 @@ _bundler_config_files() {
   # Depth-limited, unlike the tsconfig scan: a bundler configuration under
   # src/ or in a fixture belongs to something else, while a tsconfig anywhere
   # in the workspace really is a project this workspace must typecheck.
-  find . -maxdepth 2 -name 'node_modules' -prune -o -name '.git' -prune -o \
+  #
+  # Spelled as a prune rather than `-maxdepth 2`. `-maxdepth` is not POSIX --
+  # GNU and BSD both implement it, which is why this ran, but "both of the two
+  # we expect" is a smaller guarantee than the standard and not one worth
+  # relying on in a gate that has to run wherever a developer's shell does.
+  # `./*/*/*` is everything at depth three or deeper, so pruning it leaves
+  # exactly the two levels this scan wants, in a form every find has.
+  find . -path './*/*/*' -prune -o \
+    -name 'node_modules' -prune -o -name '.git' -prune -o \
     -type f \( -name 'vite.config.*' -o -name 'webpack.config.*' \
                -o -name 'rollup.config.*' -o -name 'rspack.config.*' \
                -o -name 'next.config.*' -o -name 'nuxt.config.*' \
@@ -4320,6 +4328,50 @@ _bundler_config_files() {
   fi
   sed 's|^\./||' "$_bc_list" | sort
   rm -f "$_bc_list"
+}
+
+# Which commit is "before".
+#
+# HEAD is right for the pre-commit gate, where the change is still only staged.
+# In ship mode it is already committed, so HEAD carries the *new* state, a
+# comparison against it finds nothing missing, and a push that removes something
+# passes by becoming the new HEAD. The push base is what the remote still has,
+# so it is what "before" means for a push. Falls back to HEAD when no base is
+# available -- the pre-commit gate, and a first push, which has no earlier state
+# to have lost anything from.
+#
+# One function because there are now two readers of this question, and the
+# comment at the top of this file is about what happens when a rule is written
+# twice.
+_node_previous_ref() {
+  local _pr_ref="HEAD" _pr_range
+  if [ "${CI_GATE_MODE:-}" = "ship" ] && type ci::git::push_range >/dev/null 2>&1; then
+    _pr_range="$(ci::git::push_range 2>/dev/null || true)"
+    case "$_pr_range" in
+      *..*) _pr_ref="${_pr_range%%..*}" ;;
+    esac
+    git rev-parse --verify "${_pr_ref}^{commit}" >/dev/null 2>&1 || _pr_ref="HEAD"
+  fi
+  printf '%s' "$_pr_ref"
+}
+
+# Whether <ref> declared a non-empty script of this name for *this* workspace.
+#
+#   0 – declared    1 – not declared    2 – could not tell
+#
+# `<ref>:./package.json` resolves relative to the current directory, which is the
+# workspace this lane has cd'd into -- the same relative reading the lost-suite
+# scan gets from `-- .`. Read with node because a manifest is JSON and a script
+# name is a key, not a line.
+_head_script_exists() {
+  local _hs_ref="$1" _hs_name="$2" _hs_body
+  ci::common::command_exists node || return 2
+  _hs_body="$(git show "${_hs_ref}:./package.json" 2>/dev/null)" || return 2
+  printf '%s' "$_hs_body" | node -e "
+    let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+      try{const p=JSON.parse(s);const v=(p.scripts||{})[process.argv[1]];
+        process.exit(typeof v==='string'&&v.trim()!==''?0:1)}
+      catch(e){process.exit(2)}})" "$_hs_name"
 }
 
 # Could-not-look is not found-nothing, the same as for the project scan above:
@@ -4373,6 +4425,49 @@ if [ -n "$_BUNDLER_CONFIGS" ]; then
     echo "  delegates to one. Add yours here if it belongs."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
   fi
+elif ! script_exists "build"; then
+  # A bundler used with its defaults writes no configuration file, so the whole
+  # guard above -- which asks about config presence -- switched itself off for
+  # exactly the workspaces whose build contract is least visible. A configless
+  # `vite build` deleted from the manifest left `_BUNDLER_CONFIGS` empty,
+  # `run_script build` logging "Skipping missing script", and the lane reporting
+  # PASS having produced no production bundle at all.
+  #
+  # The evidence a configless workspace does leave is what it used to declare.
+  # Losing a `build` script is the removal this guard exists to catch, config or
+  # no config, and it is the same orphan-script question the test scripts are
+  # already asked one section down.
+  #
+  # Deliberately *only* removal here, not "this workspace depends on a bundler".
+  # A declared dependency is the tempting second signal and it is not safe: a
+  # test-only workspace can carry `vite` because Vitest is built on it, so
+  # refusing on the dependency would fail workspaces that correctly have no
+  # build at all. Removal has no such ambiguity -- something that existed and
+  # was taken away.
+  if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
+    && git rev-parse --verify HEAD >/dev/null 2>&1; then
+    _bd_prev="$(_node_previous_ref)"
+    _bd_prev_rc=0
+    _head_script_exists "$_bd_prev" build || _bd_prev_rc=$?
+    if [ "$_bd_prev_rc" -eq 2 ]; then
+      # Could-not-look is not declared-nothing, the same rule the config scan
+      # above follows: reading it the second way lets the removal through.
+      echo "Workspace ${CI_GATE_NODE_WORKSPACE}: cannot read ${_bd_prev} to find out"
+      echo "  whether it used to define a 'build' script."
+      echo "  Refusing to conclude one was never there from a read that failed."
+      exit "$CI_RESULT_FAIL_INFRA"
+    fi
+    if [ "$_bd_prev_rc" -eq 0 ]; then
+      echo "Workspace ${CI_GATE_NODE_WORKSPACE} had a 'build' script at ${_bd_prev} and"
+      echo "  no longer defines one, so nothing here produces a production bundle."
+      echo "  It carries no bundler configuration either, which is what a bundler"
+      echo "  run with its defaults looks like -- so the config-based check above"
+      echo "  cannot see this workspace and no other lane builds it."
+      echo "  Restore the script, or say in the PR why this workspace stopped"
+      echo "  needing one."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+    fi
+  fi
 fi
 
 # What "this file is a test" means to the two scans below, written once so they
@@ -4418,6 +4513,7 @@ fi
 #   jest            `**/__tests__/**/*.[jt]s?(x)`     -- by directory, any depth
 #   cypress         `cypress/e2e/**/*.cy.{js,jsx,ts,tsx}`
 #   mocha           `./test/*.{js,cjs,mjs}`           -- by directory, one level
+#   jasmine         `spec/**/*[sS]pec.?(m)js`         -- directory *and* name
 #   node --test     `**/*.test.?(c|m)js`  `**/*-test.?(c|m)js`
 #                   `**/*_test.?(c|m)js`  `**/test-*.?(c|m)js`
 #                   `**/test.?(c|m)js`    `**/test/**/*.?(c|m)js`
@@ -4475,13 +4571,28 @@ _NODE_TEST_DIR_PRED=(
     -o -path './__tests__/*' -o -path '*/__tests__/*' ')'
 )
 
+# Jasmine, which is a directory rule *and* a name rule at once and so cannot
+# join either list above.
+#
+# Its default `spec_dir`/`spec_files` is `spec/**/*[sS]pec.?(m)js` -- both halves
+# required. Taking only the directory would make every helper under `spec/` a
+# suite, which is the shape measured to switch the lost-suite guard off for a
+# workspace permanently; taking only the name would make `mySpec.js` anywhere in
+# the tree a suite. Jasmine asks for both, so this asks for both, and
+# `spec/support/jasmine.json` -- its own configuration -- stays out on the
+# extension.
+_NODE_TEST_JASMINE_PRED=(
+  '(' -path './spec/*' '(' -name '*spec.*' -o -name '*Spec.*' ')' ')'
+)
+
 _NODE_TEST_EXT_PRED=(
   '(' -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
     -o -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.cts' ')'
 )
 
 _NODE_TEST_NAME_PRED=(
-  '(' "${_NODE_TEST_STEM_PRED[@]}" -o "${_NODE_TEST_DIR_PRED[@]}" ')' \
+  '(' "${_NODE_TEST_STEM_PRED[@]}" -o "${_NODE_TEST_DIR_PRED[@]}" \
+      -o "${_NODE_TEST_JASMINE_PRED[@]}" ')' \
   "${_NODE_TEST_EXT_PRED[@]}"
 )
 
@@ -4497,8 +4608,11 @@ _NODE_TEST_STEM_RE='(^|/)([^/]*\.(test|spec|cy)\.|[^/]*[-_]test\.|test-|(test|sp
 # `^test/` and not `(^|/)test/`, to match the anchor the predicate above keeps
 # and for the reason recorded there. `__tests__` is at any depth in both.
 _NODE_TEST_DIR_RE='^test/|(^|/)__tests__/'
+# Jasmine's two halves, kept together for the reason the predicate keeps them
+# together: either one alone is a different and wrong rule.
+_NODE_TEST_JASMINE_RE='^spec/.*[sS]pec\.'
 _NODE_TEST_EXT_RE='\.[cm]?[jt]sx?$'
-_NODE_TEST_PATH_RE="${_NODE_TEST_STEM_RE}|${_NODE_TEST_DIR_RE}"
+_NODE_TEST_PATH_RE="${_NODE_TEST_STEM_RE}|${_NODE_TEST_DIR_RE}|${_NODE_TEST_JASMINE_RE}"
 
 # A workspace that ships tests must be able to run them. run_script only logs
 # "Skipping missing script", so deleting or renaming `test` would remove the
@@ -4547,14 +4661,12 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
     # for a push. Falls back to HEAD when no base is available, which is the
     # pre-commit gate and a first push; a first push that carries no tests at
     # all has no earlier state to have lost them from.
-    _lost_ref="HEAD"
-    if [ "${CI_GATE_MODE:-}" = "ship" ] && type ci::git::push_range >/dev/null 2>&1; then
-      _lost_range="$(ci::git::push_range 2>/dev/null || true)"
-      case "$_lost_range" in
-        *..*) _lost_ref="${_lost_range%%..*}" ;;
-      esac
-      git rev-parse --verify "${_lost_ref}^{commit}" >/dev/null 2>&1 || _lost_ref="HEAD"
-    fi
+    #
+    # Through _node_previous_ref, which is where that reasoning now lives: the
+    # build-contract guard above asks the same question, and two spellings of
+    # "which commit is before" is how the two would answer differently about the
+    # same push.
+    _lost_ref="$(_node_previous_ref)"
     # "Could not inspect the previous tree" is not "the previous tree had no
     # tests", and reading it the second way lets a deleted suite through: the
     # guard sees nothing to have lost and continues. The producer status is
