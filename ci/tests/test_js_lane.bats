@@ -6225,6 +6225,194 @@ node_lane_runner_for() {
   [ "$output" = "<none>" ]
 }
 
+# Print _tests_js_declared_env's answer for a whole manifest, one assignment per
+# line joined by spaces, or "<none>". The same extraction the runner side uses,
+# because it is the same block and the same walk -- which is the property the
+# second case below is here to hold.
+declared_env_for_manifest() {
+  local sb fn
+  sb="$(mktemp -d)"
+  fn="$(mktemp)"
+  awk '/BEGIN declared-runner reader/,/END declared-runner reader/' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
+  bash -n "$fn" || { rm -rf "$sb" "$fn"; echo "<extraction failed>"; return 1; }
+  printf '%s\n' "$1" > "$sb/package.json"
+  (
+    cd "$sb" || exit 1
+    # shellcheck disable=SC1090
+    . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1
+    # shellcheck disable=SC1090
+    . "$fn"
+    local _e
+    _e="$(_tests_js_declared_env)"
+    _e="$(printf '%s' "$_e" | tr '\n' ' ')"
+    _e="${_e% }"
+    printf '%s' "${_e:-<none>}"
+  )
+  rm -rf "$sb" "$fn"
+}
+
+declared_env_for() {
+  declared_env_for_manifest \
+    "$(printf '{ "name": "w", "private": true, "scripts": { "test": "%s" } }' "$1")"
+}
+
+@test "tests-js: the declared script's environment reaches the runner it names" {
+  # This lane runs the pinned runner binary instead of the declared script, and
+  # what that dropped was not only the script's wording but the environment it
+  # establishes. `RUN_INTEGRATION=1 vitest run` over a suite whose integration
+  # cases are guarded on that variable ran with it unset: the unit cases were
+  # collected, the integration cases skipped themselves, and the lane reported
+  # PASS over fewer tests than the contract declares. A skipped case is not a
+  # failing one, so nothing about it was loud.
+  run declared_env_for 'RUN_INTEGRATION=1 vitest run'
+  [ "$output" = "RUN_INTEGRATION=1" ]
+
+  # Every assignment, in order, and the two portable spellings of the same
+  # prefix are transparent to it for the reason the runner reader treats them as
+  # transparent.
+  run declared_env_for 'RUN=1 DB=pg://x vitest run'
+  [ "$output" = "RUN=1 DB=pg://x" ]
+  run declared_env_for 'cross-env RUN=1 DB=pg://x vitest run'
+  [ "$output" = "RUN=1 DB=pg://x" ]
+  run declared_env_for 'env -u NODE_ENV RUN=1 jest --ci'
+  [ "$output" = "RUN=1" ]
+
+  # A quoted value spans words once the scan has split on whitespace, and half
+  # an assignment is not one. The quotes come off because the quotes are what
+  # the shell strips before the assignment happens.
+  # Through the manifest helper, not the one-line one: that interpolates the
+  # script into JSON, where a bare `"` ends the string rather than quoting a
+  # value.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "TITLE=\"a b\" vitest run" } }'
+  [ "$output" = "TITLE=a b" ]
+
+  # The prefix belongs to the one command it precedes. This is the half that
+  # makes it a rule rather than a scrape: in the first the variable goes to
+  # seed.js and the runner must not see it, in the second it goes to the runner
+  # and must.
+  run declared_env_for 'SEED=1 node seed.js && vitest run'
+  [ "$output" = "<none>" ]
+  run declared_env_for 'node seed.js && RUN=1 vitest run'
+  [ "$output" = "RUN=1" ]
+
+  # `A=b` among a command's arguments is a positional that command reads, not an
+  # assignment the shell performs.
+  run declared_env_for 'vitest run --reporter=A=B'
+  [ "$output" = "<none>" ]
+  run declared_env_for 'vitest run'
+  [ "$output" = "<none>" ]
+
+  # A delegation carries both prefixes: the outer one is exported to the
+  # manager, which passes its environment to the script it runs, so the runner
+  # sees the two and the outer comes first.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "RUN=1 npm run t", "t": "X=2 vitest run" } }'
+  [ "$output" = "RUN=1 X=2" ]
+
+  # And through the payload spellings, which is the whole reason this is a
+  # projection of the runner walk rather than a second parser: `-c`, `--call`,
+  # and a package runner's option grammar in front of them all decide where the
+  # command begins. A separate reader would have had to model them again, and a
+  # second model is a second answer.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "bash -c \"RUN=1 jest --ci\"" } }'
+  [ "$output" = "RUN=1" ]
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "npm exec --package jest -c \"RUN=1 jest --ci\"" } }'
+  [ "$output" = "RUN=1" ]
+}
+
+@test "tests-js: both projections of the reader settle on the same command" {
+  # The environment answer is only right if it is the prefix of the command the
+  # *runner* answer settled on. Asserting the two together is what stops them
+  # drifting: a change that moves where one thinks the command begins fails here
+  # rather than silently handing the runner another command's variables.
+  local script cmd rest want_runner want_env
+
+  for script in \
+    'RUN=1 vitest run|vitest|RUN=1' \
+    'echo vitest && RUN=1 jest --ci|jest|RUN=1' \
+    'SEED=1 node seed.js && vitest run|vitest|<none>' \
+    'timeout 300 RUN=1 vitest run|vitest|RUN=1' \
+    '/usr/bin/env NODE_ENV=test vitest run|vitest|NODE_ENV=test' \
+    'bash scripts/test.sh vitest|<none>|<none>' \
+    'RUN=1 bash scripts/test.sh|<none>|<none>'; do
+    cmd="${script%%|*}" ; rest="${script#*|}"
+    want_runner="${rest%%|*}" ; want_env="${rest#*|}"
+    run declared_runner_for "$cmd"
+    [ "$output" = "$want_runner" ] || { echo "runner for [$cmd]: '$output' != '$want_runner'"; return 1; }
+    run declared_env_for "$cmd"
+    [ "$output" = "$want_env" ] || { echo "env for [$cmd]: '$output' != '$want_env'"; return 1; }
+  done
+
+  # A quoted value used to end command position: `b"` is not an assignment and
+  # is not an option, so the scan read it as a command and never reached the
+  # runner behind it. Both projections were wrong together, which is how a
+  # workspace carrying both runners was refused for declaring neither.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "TITLE=\"a b\" vitest run" } }'
+  [ "$output" = "vitest" ]
+
+  # The other direction of the same gathering, held because it is the direction
+  # that matters: an unbalanced quote is a script this reader cannot parse, and
+  # the gathering runs to the end of it rather than guessing where the value
+  # stops. Declaring nothing is what refuses a workspace installing both
+  # runners, so a malformed script fails closed instead of resolving to whatever
+  # word happens to follow.
+  run declared_runner_for_manifest "{ \"name\": \"w\", \"scripts\": {
+    \"test\": \"A='x vitest run\" } }"
+  [ "$output" = "<none>" ]
+}
+
+@test "tests-js: the runner is invoked with the declared environment applied" {
+  # The cases above answer what the environment is; this one asserts the lane
+  # applies it, which is a separate claim and the one that decides whether any
+  # of it reaches a test.
+  local sb drv
+  sb="$(mktemp -d)"
+  drv="$(mktemp)"
+  {
+    sed -n '/BEGIN declared-runner reader/,/END declared-runner reader/p' \
+      "$REPO_ROOT/ci/checks/tests.sh"
+    for _fn in _tests_js_have_runner _tests_js_run_declared_env \
+               _tests_jest_path_flag _tests_js_workspace; do
+      sed -n "/^${_fn}()/,/^}/p" "$REPO_ROOT/ci/checks/tests.sh"
+    done
+  } > "$drv"
+  bash -n "$drv" || { rm -rf "$sb" "$drv"; echo "<extraction failed>"; return 1; }
+
+  mkdir -p "$sb/node_modules/.bin"
+  cat > "$sb/node_modules/.bin/vitest" <<'FAKE'
+#!/usr/bin/env bash
+printf 'RUN_INTEGRATION=%s\n' "${RUN_INTEGRATION:-<unset>}"
+printf 'TITLE=%s\n' "${TITLE:-<unset>}"
+printf 'ARGV=%s\n' "$*"
+FAKE
+  chmod +x "$sb/node_modules/.bin/vitest"
+  cat > "$sb/package.json" <<'MANIFEST'
+{ "name": "w", "private": true,
+  "scripts": { "test": "RUN_INTEGRATION=1 TITLE=\"a b\" vitest run" } }
+MANIFEST
+
+  run bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+               . '$drv'
+               _tests_js_workspace '$sb' '$sb/junit.xml' ''"
+  rm -rf "$sb" "$drv"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"RUN_INTEGRATION=1"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"TITLE=a b"* ]] || { echo "$output"; false; }
+  # What the lane invokes is unchanged by any of this: the environment is added
+  # beside the command, not folded into it.
+  [[ "$output" == *"ARGV=run --reporter=junit --outputFile="* ]] || { echo "$output"; false; }
+
+  # The exports end with the runner rather than following the next workspace in
+  # the caller's loop.
+  [ -z "${RUN_INTEGRATION:-}" ]
+  [ -z "${TITLE:-}" ]
+}
+
+
 @test "node lane: a package manager's value-taking options are its own, not one list" {
   # The grammar that steps over a manager's options carried one list for all
   # five of them, so `npx --package typescript tsc --noEmit` -- the documented

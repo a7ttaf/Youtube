@@ -257,8 +257,13 @@ _tests_js_take_payload() {
 }
 
 _tests_js_scan_runner() {
-  local _cmd="$1" _depth="${2:-0}"
-  local _w _sub _pl _q _tok _k _ch
+  # `_mode` selects the projection, not the parse: `runner` (the default, and
+  # what every caller but _tests_js_declared_env passes) yields the runner's
+  # name, `env` the assignment prefix the shell would apply to it. Both walk
+  # the identical grammar, which is the point -- see the comment on
+  # _tests_js_declared_env.
+  local _cmd="$1" _depth="${2:-0}" _mode="${3:-runner}"
+  local _w _sub _pl _q _tok _k _ch _env=""
   [ "$_depth" -lt "$_TESTS_JS_RUNNER_MAX_DEPTH" ] || return 0
   # In command position, not anywhere in the string.
   #
@@ -335,7 +340,13 @@ _tests_js_scan_runner() {
         # `_pm_name` and `_sh` are cleared here too. They are only meaningful
         # for the command they were set by, and a manager's name outliving its
         # own command lets `npm ci && run x` read `x` as a delegated script.
-        _expect=1 ; _tp=0 ; _ep=0 ; _pp=0 ; _pm_name="" ; _sh=0 ; continue ;;
+        #
+        # `_env` for the same reason and it matters more: an assignment prefix
+        # belongs to the one command it precedes, so in
+        # `SEED=1 node seed.js && vitest run` it reaches seed.js and the runner
+        # never sees it. Carrying it forward would hand the runner an
+        # environment the shell would not.
+        _expect=1 ; _tp=0 ; _ep=0 ; _pp=0 ; _pm_name="" ; _sh=0 ; _env="" ; continue ;;
     esac
     [ "$_expect" -eq 1 ] || continue
     # A wrapper's own option can take its value as a separate word, and that
@@ -353,7 +364,7 @@ _tests_js_scan_runner() {
       case "$_w" in
         -u|--unset|-C|--chdir|-S|--split-string) _ep=2 ; continue ;;
         -*) continue ;;
-        [A-Za-z_]*=*) continue ;;
+        [A-Za-z_]*=*) _tests_js_env_take "$_w" ; continue ;;
         *) _ep=0 ;;
       esac
     elif [ "$_ep" -eq 2 ]; then _ep=1 ; continue
@@ -376,7 +387,9 @@ _tests_js_scan_runner() {
         'npm|-c'|'npm|--call'|'npx|-c'|'npx|--call')
           _tests_js_take_payload
           _sub="$(_tests_js_scan_runner "$_pl" "$((_depth + 1))")"
-          if [ -n "$_sub" ]; then printf '%s' "$_sub" ; return 0 ; fi
+          if [ -n "$_sub" ]; then
+            _tests_js_scan_yield "$_sub" "$_pl" "$((_depth + 1))" ; return 0
+          fi
           # The payload is what ran and it named no runner; what trails it is
           # an argument to the payload, exactly as in the shell `-c` arm.
           _pp=0 ; _expect=0 ; continue ;;
@@ -461,7 +474,9 @@ _tests_js_scan_runner() {
           # from promoting an argument to a runner.
           _tests_js_take_payload
           _sub="$(_tests_js_scan_runner "$_pl" "$((_depth + 1))")"
-          if [ -n "$_sub" ]; then printf '%s' "$_sub" ; return 0 ; fi
+          if [ -n "$_sub" ]; then
+            _tests_js_scan_yield "$_sub" "$_pl" "$((_depth + 1))" ; return 0
+          fi
           # The payload is what ran, and it named no runner. Whatever trails it
           # is an argument to the payload -- `bash -c 'true' tsc` passes `tsc`
           # to the payload as a positional, it does not run it.
@@ -471,8 +486,8 @@ _tests_js_scan_runner() {
       _sh=0
     fi
     case "${_w##*/}" in
-      vitest|vitest.cmd|vitest.exe) printf 'vitest' ; return 0 ;;
-      jest|jest.cmd|jest.exe) printf 'jest' ; return 0 ;;
+      vitest|vitest.cmd|vitest.exe) _tests_js_scan_yield 'vitest' ; return 0 ;;
+      jest|jest.cmd|jest.exe) _tests_js_scan_yield 'jest' ; return 0 ;;
       timeout) _tp=1 ; continue ;;
       env|cross-env) _ep=1 ; continue ;;
       npx|bunx|pnpx|pnpm|yarn|npm|bun) _pm_name="${_w##*/}" ; _pp=1 ; continue ;;
@@ -493,7 +508,11 @@ _tests_js_scan_runner() {
           _sub="$(_tests_js_script_body "${_words[$_i]}" || true)"
           if [ -n "$_sub" ]; then
             _sub="$(_tests_js_scan_runner "$_sub" "$((_depth + 1))")"
-            if [ -n "$_sub" ]; then printf '%s' "$_sub" ; return 0 ; fi
+            if [ -n "$_sub" ]; then
+              _tests_js_scan_yield "$_sub" \
+                "$(_tests_js_script_body "${_words[$_i]}" || true)" "$((_depth + 1))"
+              return 0
+            fi
             _i=$((_i + 1)) ; _expect=0 ; continue
           fi
         fi
@@ -502,13 +521,127 @@ _tests_js_scan_runner() {
     esac
     case "$_w" in
       -*) continue ;;
-      [A-Za-z_]*=*) continue ;;
+      [A-Za-z_]*=*) _tests_js_env_take "$_w" ; continue ;;
     esac
     # Some other command. What follows are its arguments, and a runner named
     # among them is not the one this script runs.
-    _expect=0
+    #
+    # Whatever prefix was collected went to *this* command, so it is dropped
+    # here rather than left standing: `SEED=1 node seed.js && vitest run` gives
+    # seed.js the variable and the runner nothing.
+    _expect=0 ; _env=""
   done
   return 0
+}
+
+# _tests_js_declared_env – the environment the workspace's own `test` script
+# establishes for the runner it names, one `NAME=value` per line.
+#
+# This lane runs the pinned runner binary rather than the declared script, for
+# the reason the no-PATH-fallback comment further down gives. What that skipped
+# was not only the script's wording but the environment it sets:
+# `"test": "RUN_INTEGRATION=1 vitest run"` over a suite whose integration cases
+# are guarded on that variable ran with it unset, collected the unit cases
+# only, and reported PASS -- fewer tests than the declared contract, with
+# nothing on screen to say so. A skipped case is not a failing one, so there is
+# no noise to notice.
+#
+# Only the assignments that prefix the command the shell would actually run,
+# because that is the whole of what an assignment prefix means: in
+# `seed.js && RUN=1 vitest run` the prefix belongs to vitest, and in
+# `RUN=1 seed.js && vitest run` it belongs to seed.js and reaches the runner
+# never. A separator therefore drops what was collected before it rather than
+# carrying it forward.
+#
+# Not a second parser. `env`/`cross-env`, a shell `-c` payload, npm's `--call`,
+# a package runner's option grammar and a `<pm> run <script>` delegation all
+# decide where the command begins, and a reader that modelled them a second
+# time would be a reader that could disagree with the first about which command
+# the assignments prefix. So this is the same walk under a second projection:
+# _tests_js_scan_runner takes a mode, and `env` makes it yield the prefix of the
+# command it settles on instead of that command's name. One grammar, two
+# answers, and no way for them to drift apart.
+#
+# Nothing else in the declared script is reproduced. A setup *command* before
+# the runner cannot be re-run without running the script, which is a change to
+# how every JS lane invokes tests and not one to make inside a review round; it
+# is stated on the review thread instead of guessed at here.
+
+# Advances `_q` -- the caller's open-quote character, or empty -- across one
+# word. Reads and writes the caller's locals for the reason
+# _tests_js_take_payload does: Bash 3.2 has no name references.
+_tests_js_env_qstep() {
+  local _t="$1" _k=0 _ch
+  while [ "$_k" -lt "${#_t}" ]; do
+    _ch="${_t:$_k:1}"
+    if [ -z "$_q" ]; then
+      case "$_ch" in "'"|'"') _q="$_ch" ;; esac
+    elif [ "$_ch" = "$_q" ]; then
+      _q=""
+    fi
+    _k=$((_k + 1))
+  done
+}
+
+# One `NAME=value` line, with one layer of quoting off the value. The quotes
+# are what the shell strips before the assignment happens, so they have to come
+# off before the value is handed to `export`; the name cannot be quoted, so
+# only the value is unwrapped.
+_tests_js_env_emit() {
+  local _nm="${1%%=*}" _vl="${1#*=}"
+  if [ "${#_vl}" -ge 2 ]; then
+    case "$_vl" in
+      "'"*"'"|'"'*'"') _vl="${_vl:1:$((${#_vl} - 2))}" ;;
+    esac
+  fi
+  printf '%s=%s\n' "$_nm" "$_vl"
+}
+
+# Collects the assignment in hand into `_env`, taking further words while its
+# value carries an unclosed quote: the scan splits on whitespace, so
+# `TITLE="a b"` arrives as `TITLE="a` and `b"`, and half an assignment is not
+# one. Advancing `_i` past the remainder is also what stops `b"` from being
+# read as a command and ending command position -- which is why
+# `TITLE="a b" vitest run` used to declare no runner at all.
+#
+# Reads and writes `_env`/`_q`/`_words`/`_i`/`_n` from _tests_js_scan_runner for
+# the reason _tests_js_take_payload does: Bash 3.2 has no name references.
+_tests_js_env_take() {
+  local _p="$1"
+  _q=""
+  _tests_js_env_qstep "$_p"
+  while [ -n "$_q" ] && [ "$_i" -lt "$_n" ]; do
+    _p="$_p ${_words[$_i]}"
+    _tests_js_env_qstep "${_words[$_i]}"
+    _i=$((_i + 1))
+  done
+  _env="${_env}$(_tests_js_env_emit "$_p")
+"
+}
+
+# What the scan settles on, under the projection asked for: in `runner` mode the
+# runner's name, in `env` mode the assignments the shell would apply to it.
+#
+#   $1 – the runner this scan reached
+#   $2 – the command string it reached it *through*, if it delegated, so the
+#        assignments inside that string can be gathered under the same grammar
+#   $3 – the depth to re-enter at
+#
+# A delegation carries both: `RUN=1 npm run t` with `"t": "X=2 vitest run"`
+# exports RUN to npm, which passes its environment on to the script, so the
+# runner sees both and the prefix here comes first.
+_tests_js_scan_yield() {
+  if [ "${_mode}" != env ]; then printf '%s' "$1" ; return 0 ; fi
+  local _se=""
+  [ -z "${2:-}" ] || _se="$(_tests_js_scan_runner "$2" "${3:-0}" env)"
+  printf '%s' "${_env}${_se}"
+}
+
+_tests_js_declared_env() {
+  local _cmd
+  ci::common::command_exists node || return 1
+  _cmd="$(node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{}).test||''))}catch(e){process.exit(3)}" 2>/dev/null)" || return 1
+  _tests_js_scan_runner "$_cmd" 0 env
 }
 # --- END declared-runner reader -----------------------------------------------
 
@@ -554,6 +687,26 @@ _tests_js_have_runner() {
   return 1
 }
 
+# Runs "$@" under the environment the declared `test` script sets, and nothing
+# else changed. A subshell, so the exports reach the runner and end with it
+# rather than following the next workspace in the loop.
+#
+# Reads `_TJ_DECLARED_ENV` from _tests_js_workspace, its only caller, which
+# declares the array before anything can reach here; guarded on the count
+# because expanding an empty array under `set -u` is an error in the Bash 3.2
+# this suite still targets.
+_tests_js_run_declared_env() {
+  (
+    local _kv
+    if [ "${#_TJ_DECLARED_ENV[@]}" -gt 0 ]; then
+      for _kv in "${_TJ_DECLARED_ENV[@]}"; do
+        export "${_kv%%=*}=${_kv#*=}"
+      done
+    fi
+    "$@"
+  )
+}
+
 _tests_js_workspace() {
   local ws="$1" junit_out="$2" jest_pattern="$3"
   cd "$ws" || return 30
@@ -562,6 +715,16 @@ _tests_js_workspace() {
   _tests_js_have_runner vitest && have_vitest=1
   _tests_js_have_runner jest && have_jest=1
   declared="$(_tests_js_declared_runner || true)"
+
+  # The environment the declared script establishes, carried onto the runner
+  # this lane invokes in the script's place. Read here beside the runner so the
+  # two answers come from one reading of one manifest.
+  local -a _TJ_DECLARED_ENV=()
+  local _tj_kv
+  while IFS= read -r _tj_kv; do
+    [ -n "$_tj_kv" ] || continue
+    _TJ_DECLARED_ENV+=( "$_tj_kv" )
+  done < <(_tests_js_declared_env 2>/dev/null || true)
 
   # Two runners installed and nothing saying which owns the suite is a question
   # this lane cannot answer, and answering it by order is how the wrong suite
@@ -585,7 +748,8 @@ _tests_js_workspace() {
   if [ "$declared" != "jest" ]; then
     for candidate in node_modules/.bin/vitest node_modules/.bin/vitest.exe node_modules/.bin/vitest.cmd; do
       if [ -x "$candidate" ]; then
-        "$candidate" run --reporter=junit --outputFile="$junit_out"
+        _tests_js_run_declared_env \
+          "$candidate" run --reporter=junit --outputFile="$junit_out"
         return $?
       fi
     done
@@ -601,11 +765,18 @@ _tests_js_workspace() {
         local _jest_flag
         _jest_flag="$(_tests_jest_path_flag)"
         if ci::common::command_exists node && node -e "require.resolve('jest-junit')" >/dev/null 2>&1; then
-          JEST_JUNIT_OUTPUT_FILE="$junit_out" \
+          # Appended after the declared assignments rather than written as a
+          # command prefix, and the order is the point: the last export wins, so
+          # this lane's own reporter path still overrides a same-named variable
+          # the script sets -- which is the precedence the command-prefix
+          # spelling this replaced already had.
+          _TJ_DECLARED_ENV+=( "JEST_JUNIT_OUTPUT_FILE=${junit_out}" )
+          _tests_js_run_declared_env \
             "$candidate" --ci --reporters=default --reporters=jest-junit ${jest_pattern:+"${_jest_flag}=${jest_pattern}"}
           return $?
         fi
-        "$candidate" --ci ${jest_pattern:+"${_jest_flag}=${jest_pattern}"}
+        _tests_js_run_declared_env \
+          "$candidate" --ci ${jest_pattern:+"${_jest_flag}=${jest_pattern}"}
         return $?
       fi
     done
