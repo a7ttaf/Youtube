@@ -128,6 +128,63 @@ _enabled_value() {
   [[ "$output" == *"frontend/tests/"* ]]
 }
 
+@test "affected: a configured glob reaches pytest as files, not as a glob" {
+  # `pytest` documents its positionals as `file_or_dir` and takes neither a
+  # shell glob nor anything else it cannot open: `pytest 'tests/**/test_*.py'`
+  # exits 4 with a usage error, having collected nothing. affected.yml maps
+  # every Python source to exactly that pattern, so the narrowing had never
+  # selected a Python test -- it only ever broke the run that tried to use it.
+  local fn; fn="$(mktemp)"
+  sed -n '/^_tests_expand_glob()/,/^}/p' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
+  [ -s "$fn" ] || { rm -f "$fn"; echo "could not lift the expander from the lane" >&2; return 1; }
+  bash -n "$fn" || { rm -f "$fn"; echo "the extraction is not valid shell" >&2; return 1; }
+  # shellcheck disable=SC1090
+  . "$fn"
+  rm -f "$fn"
+
+  local sb; sb="$(mktemp -d)"
+  mkdir -p "$sb/tests/unit/deep" "$sb/tests/integration"
+  : > "$sb/tests/unit/test_a.py"
+  : > "$sb/tests/unit/deep/test_b.py"
+  : > "$sb/tests/integration/c_test.py"
+  : > "$sb/tests/helper.py"
+
+  local got
+  got="$(cd "$sb" && _tests_expand_glob 'tests/**/test_*.py' | sort | tr '\n' ' ')"
+  # Nested, which is the half a plain shell glob loses: `**` is only a distinct
+  # pattern under `shopt -s globstar`, a Bash 4 feature, and this gate targets
+  # the 3.2 that ships on macOS -- so `tests/**/test_*.py` would expand as
+  # `tests/*/test_*.py` and drop `tests/unit/deep/test_b.py` silently. A
+  # narrowing that runs part of the affected suite and reports on all of it is
+  # worse than one that fails.
+  [[ "$got" == *"tests/unit/test_a.py"* ]] \
+    && [[ "$got" == *"tests/unit/deep/test_b.py"* ]] \
+    || { rm -rf "$sb"; echo "the expansion missed a test: [$got]" >&2; return 1; }
+  [[ "$got" != *"helper.py"* ]] \
+    || { rm -rf "$sb"; echo "a non-test was selected: [$got]" >&2; return 1; }
+
+  got="$(cd "$sb" && _tests_expand_glob 'tests/**/*_test.py' | sort | tr '\n' ' ')"
+  [[ "$got" == *"tests/integration/c_test.py"* ]] \
+    || { rm -rf "$sb"; echo "the other configured spelling missed its test: [$got]" >&2; return 1; }
+
+  # Directories after the `**` are matched on the path, not the basename.
+  got="$(cd "$sb" && _tests_expand_glob 'tests/**/unit/test_*.py' | sort | tr '\n' ' ')"
+  [[ "$got" == *"tests/unit/test_a.py"* ]] && [[ "$got" != *"integration"* ]] \
+    || { rm -rf "$sb"; echo "a pattern naming a directory after ** was mishandled: [$got]" >&2; return 1; }
+
+  # A pattern that names nothing here yields nothing, which is what the lane
+  # reads as "do not narrow" rather than as "no tests".
+  got="$(cd "$sb" && _tests_expand_glob 'tests/**/nope_*.py' | tr -d '\n')"
+  [ -z "$got" ] || { rm -rf "$sb"; echo "a pattern matching nothing produced [$got]" >&2; return 1; }
+  rm -rf "$sb"
+
+  # And the lane does not narrow on an empty expansion. Pinned against the
+  # lane's own text: the alternative is a full pytest run in a bats case.
+  grep -qF 'Affected Python patterns match no file here; running every Python test.' \
+    "$REPO_ROOT/ci/checks/tests.sh" \
+    || { echo "the lane no longer falls back to the full suite; update this case" >&2; return 1; }
+}
+
 # --- child exit codes keep their meaning --------------------------------------
 
 @test "result contract: a package script exiting 1 is a new issue, not infra" {
@@ -7399,12 +7456,17 @@ ship_ws_run() {
   # And the prune in front of them was unanchored: `tests/build/checkout.test.ts`
   # is first-party, and every directory called `build` at any depth was being
   # dropped with the workspace's own output directory.
-  local pred re
-  pred="$(sed -n '/^_NODE_TEST_NAME_PRED=(/,/^)/p' "$REPO_ROOT/ci/checks/node.sh")"
-  re="$(grep -m1 '^_NODE_TEST_PATH_RE=' "$REPO_ROOT/ci/checks/node.sh" | cut -d"'" -f2)"
-  [ -n "$pred" ] && [ -n "$re" ]     || { echo "could not lift the suite predicates from the lane" >&2; return 1; }
+  # Both sides lifted as one block and evaluated, rather than the regex being
+  # cut out of its own assignment: it is composed from the shape and directory
+  # halves now, so a `cut` on the quoting would lift the composition rather than
+  # its value and silently test a different expression than the lane runs.
+  local pred
+  pred="$(sed -n '/^_NODE_TEST_STEM_PRED=(/,/^_NODE_TEST_PATH_RE=/p' "$REPO_ROOT/ci/checks/node.sh")"
+  [ -n "$pred" ]     || { echo "could not lift the suite predicates from the lane" >&2; return 1; }
   bash -n <<< "$pred" || { echo "the extraction is not valid shell" >&2; return 1; }
   eval "$pred"
+  local re="$_NODE_TEST_PATH_RE" ext_re="$_NODE_TEST_EXT_RE"
+  [ -n "$re" ] && [ -n "$ext_re" ]     || { echo "the lane's path expressions came back empty" >&2; return 1; }
 
   # The prune is pinned to the lane rather than lifted from it -- the same shape
   # `tests-shell: a local cache under ci/ is not shell-suite drift` uses: state
@@ -7416,7 +7478,7 @@ ship_ws_run() {
 
   local sb; sb="$(mktemp -d)"
   local f
-  for f in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js            test/README.md test/fixtures/data.json src/app.js src/a.test.ts            __tests__/login.js src/__tests__/deep/a.tsx            e2e/x.cy.ts messages.cy.json openapi.spec.json            tests/build/checkout.test.ts build/out.test.js node_modules/x/test/a.js            coverage/old.test.js .next/x.test.js; do
+  for f in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js            test/README.md test/fixtures/data.json src/app.js src/a.test.ts            __tests__/login.js src/__tests__/deep/a.tsx            e2e/x.cy.ts messages.cy.json openapi.spec.json            test-login.js login-test.js login_test.js test.js            src/test/util.js test-fixtures.json            tests/build/checkout.test.ts build/out.test.js node_modules/x/test/a.js            coverage/old.test.js .next/x.test.js; do
     mkdir -p "$sb/$(dirname "$f")" && : > "$sb/$f"
   done
 
@@ -7426,14 +7488,23 @@ ship_ws_run() {
 
   # Collected, and nothing else.
   local want
-  for want in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js               __tests__/login.js src/__tests__/deep/a.tsx               src/a.test.ts e2e/x.cy.ts tests/build/checkout.test.ts; do
+  for want in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js               __tests__/login.js src/__tests__/deep/a.tsx               test-login.js login-test.js login_test.js test.js               src/a.test.ts e2e/x.cy.ts tests/build/checkout.test.ts; do
     [[ "$from_find" == *"$want"* ]]       || { rm -rf "$sb"; echo "a suite was not collected: ${want} (got [$from_find])" >&2; return 1; }
   done
   # `test/helpers/db.js` is in that list on purpose: it is a helper to a reader,
-  # and `node --test` runs it. What keeps the directory rule honest is the
-  # extension list, not a depth limit.
+  # and `node --test` runs it. What keeps the directory rule honest below the
+  # root is the extension list, not a depth limit.
+  #
+  # `src/test/util.js` is in the list below for the opposite reason, and it is
+  # the sharper half. `node --test` documents its directory rule as
+  # `**/test/**`, so matching a `test/` at any depth would be the faithful
+  # reading -- and it was measured to take this gate from REJECT to ACCEPT: a
+  # Vitest or Jest workspace with any helper tree named `test/` then always
+  # looks like it still has tests, the lost-suite comparison is skipped for it
+  # permanently, and deleting every real suite passes. The anchor stays, and
+  # this case is what says so.
   local unwanted
-  for unwanted in openapi.spec.json messages.cy.json test/README.md                   test/fixtures/data.json src/app.js build/out.test.js                   node_modules/x/test/a.js coverage/old.test.js .next/x.test.js; do
+  for unwanted in openapi.spec.json messages.cy.json test/README.md                   test/fixtures/data.json src/app.js build/out.test.js test-fixtures.json                   src/test/util.js                   node_modules/x/test/a.js coverage/old.test.js .next/x.test.js; do
     [[ "$from_find" != *"$unwanted"* ]]       || { rm -rf "$sb"; echo "not a suite, but collected: ${unwanted} (got [$from_find])" >&2; return 1; }
   done
 
@@ -7443,7 +7514,7 @@ ship_ws_run() {
   # So they are compared to each other, not each to a list written twice.
   local from_re
   from_re="$( printf '%s
-' test/login.js test/api.mjs test/integration/login.js     test/helpers/db.js test/README.md test/fixtures/data.json src/app.js     __tests__/login.js src/__tests__/deep/a.tsx     src/a.test.ts e2e/x.cy.ts messages.cy.json openapi.spec.json     tests/build/checkout.test.ts     | grep -E "$re" | sort | tr '
+' test/login.js test/api.mjs test/integration/login.js     test/helpers/db.js test/README.md test/fixtures/data.json src/app.js     __tests__/login.js src/__tests__/deep/a.tsx     test-login.js login-test.js login_test.js test.js src/test/util.js     test-fixtures.json     src/a.test.ts e2e/x.cy.ts messages.cy.json openapi.spec.json     tests/build/checkout.test.ts     | grep -E "$re" | grep -E "$ext_re" | sort | tr '
 ' ' ' )"
   [ "$from_find" = "$from_re" ]     || { rm -rf "$sb"; echo "the two suite scans disagree: find=[$from_find] head=[$from_re]" >&2; return 1; }
   rm -rf "$sb"

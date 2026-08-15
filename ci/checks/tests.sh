@@ -110,6 +110,45 @@ _tests_glob_to_regex() {
   printf '%s' "$_g"
 }
 
+# The files a configured test glob from ci/config/affected.yml actually names,
+# one per line, or nothing.
+#
+# The values there are globs -- `tests/**/test_*.py` -- and a glob is not a path.
+# Which runners can take one is a property of the runner: Vitest reads a
+# positional as a substring filter, Jest takes a regex (which is what
+# _tests_glob_to_regex above exists to produce), and pytest takes neither. It
+# documents its positionals as `file_or_dir`, and hands anything else back as a
+# usage error before collecting a single test.
+#
+# Walked with `find` rather than left to the shell, because `**` is only a
+# distinct pattern under `shopt -s globstar` -- a Bash 4 feature, and this gate
+# still targets the 3.2 that ships on macOS. Without it `tests/**/test_*.py`
+# expands as `tests/*/test_*.py`, which silently drops every test nested deeper
+# than one level: a narrowing that runs some of the affected suite and reports
+# on all of it.
+_tests_expand_glob() {
+  local _g="$1" _root _name
+  case "$_g" in
+    *'**/'*)
+      _root="${_g%%\*\**}"
+      _name="${_g##*\*\*/}"
+      ;;
+    *)
+      # No `**` to walk: it is either a path that exists or it is nothing.
+      [ -e "$_g" ] && printf '%s\n' "$_g"
+      return 0 ;;
+  esac
+  _root="${_root%/}"
+  [ -n "$_root" ] || _root="."
+  [ -d "$_root" ] || return 0
+  # A `/` surviving in the tail means the pattern names directories after the
+  # `**` -- `tests/**/unit/test_*.py` -- and `-name` matches a basename only.
+  case "$_name" in
+    */*) find "$_root" -type f -path "*/$_name" 2>/dev/null | sed 's|^\./||' ;;
+    *)   find "$_root" -type f -name "$_name" 2>/dev/null | sed 's|^\./||' ;;
+  esac
+}
+
 _tests_filter_affected() {
   local lang="$1"
   local pattern
@@ -932,11 +971,36 @@ tests::run_python() {
       ci::log::info "skipped: no affected Python tests"
       return 0
     fi
-    local pytest_args=()
-    while IFS= read -r pattern; do
-      [ -n "$pattern" ] && pytest_args+=("$pattern")
+    # Expanded to files first. `pytest` takes paths and node IDs, never shell
+    # globs -- `pytest 'tests/**/test_*.py'` exits 4 with a usage error, having
+    # collected nothing -- so every changeset that mapped to a Python pattern
+    # failed this lane with a usage error instead of running the affected
+    # suite. The narrowing has therefore never selected a Python test; it has
+    # only ever broken the run that tried to use it.
+    local _py_files="" _pat
+    while IFS= read -r _pat; do
+      [ -n "$_pat" ] || continue
+      _py_files="${_py_files}$(_tests_expand_glob "$_pat")
+"
     done <<< "$python_tests"
-    pytest --junitxml="$JUNIT_DIR/python.xml" "${pytest_args[@]}" || rc=$?
+    _py_files="$(printf '%s' "$_py_files" | grep -v '^[[:space:]]*$' | sort -u || true)"
+
+    if [ -z "$_py_files" ]; then
+      # The patterns named no file that is actually here. Not narrowing is the
+      # only answer that cannot skip a pushed change -- the same rule the range
+      # reader at the top of this file follows where it cannot ask, and the
+      # opposite of the "skipped: no affected Python tests" branch above, which
+      # is reached when the changeset maps to no Python pattern at all rather
+      # than when the patterns turn out to match nothing.
+      ci::log::info "Affected Python patterns match no file here; running every Python test."
+      pytest --junitxml="$JUNIT_DIR/python.xml" || rc=$?
+    else
+      local pytest_args=() _pyf
+      while IFS= read -r _pyf; do
+        [ -n "$_pyf" ] && pytest_args+=("$_pyf")
+      done <<< "$_py_files"
+      pytest --junitxml="$JUNIT_DIR/python.xml" "${pytest_args[@]}" || rc=$?
+    fi
   else
     pytest --junitxml="$JUNIT_DIR/python.xml" || rc=$?
   fi

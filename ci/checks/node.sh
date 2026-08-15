@@ -4400,50 +4400,105 @@ fi
 # question -- which files Vitest's own include would collect -- and where a
 # Cypress spec is correctly not a member.
 #
-# Two conventions, and they are different rules rather than one loose one.
+# Two conditions, not one loose expression: a **name shape or a directory**, and
+# then an **extension some runner could execute**. Both halves are needed, and
+# for opposite reasons. `*.test.*` and `*.spec.*` alone are a claim about any
+# file whatsoever -- `openapi.spec.json` is an API description, and a workspace
+# shipping one and no test at all was failed here for "shipping tests". A
+# directory alone is the same mistake spelled the other way, and the extension
+# list, not a depth limit, is what keeps `test/fixtures/data.json` and
+# `test/README.md` out.
 #
-# By suffix, for the runners that collect by name -- and only on a file some
-# runner could execute. `*.test.*` and `*.spec.*` on their own are a claim about
-# any file whatsoever: `openapi.spec.json` is an API description, and a workspace
-# shipping one and no test at all was failed here for "shipping tests". The
-# HEAD-side expression below already held these to JS and TS; this half did not,
-# which is the asymmetry that comment is about, arriving from the other side.
+# What the recognised runners actually collect, transcribed from their own
+# documentation rather than remembered. Each of these arrived a round after the
+# one above it, so the list is written out in full to make the next one a lookup:
 #
-# By position, for the runners that collect by directory and name nothing. Three
-# of them, and each was found only after the one before it was added:
+#   vitest / jest   `**/?(*.)+(spec|test).[jt]s?(x)`  -- so `a.test.ts` *and*
+#                   a bare `test.ts`, which is what the `?(*.)` allows
+#   jest            `**/__tests__/**/*.[jt]s?(x)`     -- by directory, any depth
+#   cypress         `cypress/e2e/**/*.cy.{js,jsx,ts,tsx}`
+#   mocha           `./test/*.{js,cjs,mjs}`           -- by directory, one level
+#   node --test     `**/*.test.?(c|m)js`  `**/*-test.?(c|m)js`
+#                   `**/*_test.?(c|m)js`  `**/test-*.?(c|m)js`
+#                   `**/test.?(c|m)js`    `**/test/**/*.?(c|m)js`
 #
-#   mocha        ./test/*.{js,cjs,mjs}
-#   node --test  test/** , recursively
-#   jest         **/__tests__/**/*.[jt]s?(x)   (its default testMatch)
+# The `node --test` *name* patterns are the whole of its documented set, taken
+# together this time. Half of them were added last round and the other half were
+# not, so `test-login.js`, `login-test.js` and `login_test.js` -- three spellings
+# Node collects and runs -- were invisible to both scans, and a workspace whose
+# suite is named that way could have its test script removed, or the suite
+# deleted, with the orphan guard and the lost-suite scan alike having nothing to
+# report and the lane exiting 0.
 #
-# Recursive, because two of the three are -- and holding the directory rule to
-# one level left `test/integration/login.js` invisible to both scans, after
-# which the orphan guard let `test` and `test:unit` be deleted from a workspace
-# that ships one and the lost-suite scan saw a workspace that never had tests to
-# lose. It is why `test/helpers/db.js` counts here despite being a helper:
-# `node --test` runs it. The extension list, not a depth limit, is what keeps
-# `test/fixtures/data.json` and `test/README.md` out.
+# Its *directory* pattern is `**/test/**` and this rule is not, deliberately.
+# Recursive below `./test/`, which is what makes `test/helpers/db.js` count here
+# despite being a helper -- `node --test` runs it -- but anchored at the
+# workspace root rather than matching a `test/` at any depth. Widening it was
+# tried and measured, and it takes the gate from REJECT to ACCEPT on a shape
+# that is far more common than the one it would cover: a Vitest or Jest
+# workspace holding any helper tree named `test/` -- `src/test/util.js`,
+# `lib/test/fixtures.ts` -- then always looks like it still has tests, so the
+# lost-suite comparison is skipped for that workspace permanently and deleting
+# every real suite passes. What is given up is narrower: a `node --test`
+# workspace whose tests live *only* under a non-root `test/` directory. A guard
+# that is off for a common layout is worse than one that is blind to a rare one,
+# so the anchor stays and the trade is recorded rather than rediscovered.
+#
+# Where a shape is wider than a single runner's rule -- `foo-test.config.js`
+# matches the name half here and no runner would execute it -- that is the
+# direction this predicate errs on purpose. It cannot know which runner owns the
+# workspace, so it is the union of what any recognised one collects. The risk of
+# something *generated* taking the role of "a suite still exists" is real and is
+# handled where it lives, in the prune in front of both scans, not by narrowing
+# these names.
+#
+# `.cy.` is spelled through the extension half rather than as a bare `*.cy.*`
+# because `cy` is the ISO-639-1 code for Welsh: `messages.cy.json` is an
+# ordinary locale file, and reading it as a test both refused a legitimate
+# workspace and -- worse -- made a workspace holding one always look like it
+# still has tests, so the lost-suite check was skipped and deleting every real
+# test passed.
 #
 # Deliberately not shared with ci/checks/test-layout.sh's TEST_SUFFIXES, which
 # answers a different question -- which files Vitest's own include would collect
 # -- and where a Cypress spec is correctly not a member.
 
-
-_NODE_TEST_NAME_PRED=(
-  '(' \
-    '(' '(' -name '*.test.*' -o -name '*.spec.*' -o -name '*.cy.*' ')' \
-        '(' -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
-          -o -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.cts' ')' ')' \
-    -o '(' '(' -path './test/*' -o -path '*/__tests__/*' -o -path './__tests__/*' ')' \
-        '(' -name '*.js' -o -name '*.jsx' -o -name '*.cjs' -o -name '*.mjs' \
-          -o -name '*.ts' -o -name '*.tsx' -o -name '*.cts' -o -name '*.mts' ')' ')' \
-  ')'
+# The name shapes above, minus the directory conventions.
+_NODE_TEST_STEM_PRED=(
+  '(' -name '*.test.*' -o -name '*.spec.*' -o -name '*.cy.*' \
+    -o -name 'test.*' -o -name 'spec.*' \
+    -o -name '*-test.*' -o -name '*_test.*' -o -name 'test-*' ')'
 )
 
-# The same rule for a listing rather than a filesystem walk: paths arrive
-# without the `./` that find emits, so the HEAD side spells it anchored at the
-# start of the path.
-_NODE_TEST_PATH_RE='\.(test|spec|cy)\.[cm]?[jt]sx?$|^test/.*\.[cm]?[jt]sx?$|(^|/)__tests__/.*\.[cm]?[jt]sx?$'
+_NODE_TEST_DIR_PRED=(
+  '(' -path './test/*' \
+    -o -path './__tests__/*' -o -path '*/__tests__/*' ')'
+)
+
+_NODE_TEST_EXT_PRED=(
+  '(' -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
+    -o -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.cts' ')'
+)
+
+_NODE_TEST_NAME_PRED=(
+  '(' "${_NODE_TEST_STEM_PRED[@]}" -o "${_NODE_TEST_DIR_PRED[@]}" ')' \
+  "${_NODE_TEST_EXT_PRED[@]}"
+)
+
+# The same rule for a listing rather than a filesystem walk. Two expressions
+# rather than one, and chained rather than alternated, because that is what the
+# predicate above is: `(name shape OR directory) AND extension`. Folded into a
+# single alternation each branch has to re-state the extension, and a branch
+# that has to say "contains `.test.`" *and* "ends with `.js`" cannot say both in
+# one pass without repeating itself once per shape -- which is how the two sides
+# drift. Paths arrive without the `./` that find emits, so the anchors are
+# `(^|/)` rather than `^`.
+_NODE_TEST_STEM_RE='(^|/)([^/]*\.(test|spec|cy)\.|[^/]*[-_]test\.|test-|(test|spec)\.)'
+# `^test/` and not `(^|/)test/`, to match the anchor the predicate above keeps
+# and for the reason recorded there. `__tests__` is at any depth in both.
+_NODE_TEST_DIR_RE='^test/|(^|/)__tests__/'
+_NODE_TEST_EXT_RE='\.[cm]?[jt]sx?$'
+_NODE_TEST_PATH_RE="${_NODE_TEST_STEM_RE}|${_NODE_TEST_DIR_RE}"
 
 # A workspace that ships tests must be able to run them. run_script only logs
 # "Skipping missing script", so deleting or renaming `test` would remove the
@@ -4524,7 +4579,8 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
     # intention kept in step by hand -- which is exactly what let Cypress reach
     # one of them and not the other, and Mocha's suffix-less `test/` neither.
     HEAD_TESTS="$(printf '%s\n' "$_lost_raw" \
-      | grep -E "$_NODE_TEST_PATH_RE" | head -5 || true)"
+      | grep -E "$_NODE_TEST_PATH_RE" \
+      | grep -E "$_NODE_TEST_EXT_RE" | head -5 || true)"
     if [ -n "$HEAD_TESTS" ]; then
       echo "Workspace ${CI_GATE_NODE_WORKSPACE} has lost its entire test suite."
       echo "  ${_lost_ref} carries test files here and this tree has none, so the"
