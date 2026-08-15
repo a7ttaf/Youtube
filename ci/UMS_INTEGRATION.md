@@ -68,7 +68,7 @@ it was measured at.
 It is much longer when your changeset includes a shell script, because that
 schedules `tests-shell` — the bats suites under `ci/tests/`, which drive
 preflight, the node lane and the layout guard against synthetic trees and spawn
-a package manager or init a repository in many of them. That is roughly 380
+a package manager or init a repository in many of them. That is roughly 530
 cases and around half an hour; `ci/config/checks.yml` gives the lane a
 3600-second timeout for exactly that reason, because at the 20-minute gate
 default it was being killed and reported as broken infrastructure. A run that
@@ -77,6 +77,21 @@ has been sitting in `tests-shell` for twenty minutes is not hung.
 The gate's own scripts are all shell, so "I edited something under `ci/`" and
 "this run will take half an hour" are the same statement. `make ci-quick` is the
 fast pre-commit pass; the long lane belongs to the pre-push gate.
+
+That lane needs **bats**, and it is the one prerequisite `uv sync` does not
+install. It is a blocker on purpose — a lane that reports PASS without running
+those suites leaves the layout, node and changeset gates unguarded — so on a
+machine without bats every push touching `ci/` is refused with `FAIL_INFRA`
+rather than passing quietly. Provision a pinned copy into the worktree:
+
+```
+make bats-install
+```
+
+It installs under `.ci-gate/bats/` (already git-ignored): no sudo, nothing
+outside the repository, and `rm -rf .ci-gate/bats` undoes it. A `bats` already on
+`PATH` — from a platform package, or `npm i -g bats` — is used in preference.
+`ci/install-hooks.sh` says the same thing at the moment it makes the hook live.
 
 ## When the gate fails
 

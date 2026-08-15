@@ -149,11 +149,34 @@ rules:
     also: "frontend/tests/**/*.test.tsx"
 
   # Python: module -> test file
+  #
+  # Both naming conventions from both rules, and the catch-all needs it more than
+  # the specific one. pytest collects `test_*.py` and `*_test.py` alike, and the
+  # narrowing hands it a concrete file list -- so a rule emitting only the prefix
+  # pattern, in a repository that has any prefix-style test, produces a non-empty
+  # list that omits the changed suffix-style file. Non-empty is what narrows, so
+  # `tests/payments_test.py` is edited, pytest runs on somebody else's tests, and
+  # the change passes unexecuted.
+  #
+  # Latent until the expansion landed: before it, these patterns reached pytest
+  # verbatim and it exited 4 on all of them, so the asymmetry could not select
+  # the wrong subset because it never selected anything.
   - source: "src/**/*.py"
     tests: "tests/**/test_*.py"
     also: "tests/**/*_test.py"
   - source: "**/*.py"
     tests: "tests/**/test_*.py"
+    also: "tests/**/*_test.py"
+  # The same "**" collapse the frontend rules above carry a note about, found
+  # while probing the two rules above: `**/*.py` requires at least one directory
+  # separator, so a Python file at the repository root -- `conftest.py`,
+  # `setup.py`, a root-level `payments_test.py` -- matched no rule at all and
+  # contributed no pattern. On its own that does not narrow; in a changeset with
+  # any other mapped file it is a silent omission, which is the same shape as the
+  # finding this rule was edited for.
+  - source: "*.py"
+    tests: "tests/**/test_*.py"
+    also: "tests/**/*_test.py"
 
   # Go: package -> package tests
   - source: "**/*.go"

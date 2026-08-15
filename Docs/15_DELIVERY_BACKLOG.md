@@ -680,11 +680,12 @@ single P-tier above.
   Claude Code (`@claude`) GitHub Action workflow (PR #107) — the only file in
   `.github/workflows/` today.
 - ✅ Frontend test layout unified + the JS gate lanes switched on (2026-08-09,
-  branch `opus/peaceful-gauss-2bf1e6`) — the suite had been split between 35
-  co-located `src/**/__tests__/` files and 3 under `frontend/tests/`, and Qodo
-  compliance rule 1052070 ("place all automated test files under the top-level
-  `tests/` directory") fired on every PR touching a co-located one. **All 35
-  moved into `frontend/tests/`**, mirroring `src/` minus the `__tests__`
+  branch `opus/peaceful-gauss-2bf1e6`) — the suite had been split between 38
+  co-located `src/**/__tests__/` files and 3 already under `frontend/tests/`, and
+  Qodo compliance rule 1052070 ("place all automated test files under the
+  top-level `tests/` directory") fired on every PR touching a co-located one.
+  **All 38 moved into `frontend/tests/`**, leaving **41** collected there,
+  mirroring `src/` minus the `__tests__`
   segment. Pure `git mv`: every test imports through the `@/` alias, so there
   were **zero** relative-import fixes and zero content edits — 314 tests passed
   identically before and after. `test.include` in `vitest.config.ts` now
@@ -721,7 +722,7 @@ single P-tier above.
   Windows shims (`vitest.exe`/`.bunx`) don't match the names it expects — in
   this checkout it found a different Vitest major against a different Vite and
   produced ~160 phantom failures indistinguishable from real breakage. Lanes now
-  green: 38 files / 314 tests via JUnit, `tsc --noEmit` clean, `vite build` ok.
+  green: 41 files / 314 tests via JUnit, `tsc --noEmit` clean, `vite build` ok.
   Review caught that *making the lanes work* and *making them run* are two
   different things, in three places. (1) `ci/config/checks.yml` had all four JS
   checks `enabled: false`, and preflight drops a lane when every related check
@@ -798,7 +799,7 @@ single P-tier above.
   filesystem walk and `git ls-files`, so a stray file that is only staged, or
   only on disk, fails either way. `test.exclude` was unchecked, so a correct
   include could still collect nothing — `exclude: ["tests/lib/**"]` drops 23 of
-  38 files while every include assertion passes; the guard now refuses an
+  41 files while every include assertion passes; the guard now refuses an
   exclude it cannot evaluate. `.mts`/`.cts` were missing from the changeset
   classifier, so module-suffixed **source** scheduled no lane at all. And the
   bats suites themselves were never scheduled: a change to `ci/checks/*.sh`
@@ -996,7 +997,7 @@ single P-tier above.
   space — was split into a bare `>=` and rejected as malformed, blocking a
   conforming environment; operator and operand are rejoined before evaluation.
   `testNamePattern` made vitest exit 0 with **every test reported skipped**
-  while the guard called all 38 files runnable; that is the third route to a
+  while the guard called all 41 files runnable; that is the third route to a
   silent drop after `exclude` and the spread, so the rule is now an **allow-list**
   — a property that cannot reduce what is collected is named in the script, and
   anything else stops the guard until someone decides which it is. An `include`
@@ -1103,7 +1104,7 @@ single P-tier above.
   additions, copies, renames and modifications, which cures the index form too.
   A twenty-second round found eight, four P1, and every one of them is a
   **guard that fires only in the arrangement its author happened to picture**.
-  The suite-loss check sat under "and no test script", so deleting all 38 test
+  The suite-loss check sat under "and no test script", so deleting all 41 test
   files was safe as long as `vitest run --passWithNoTests` stayed behind — the
   one script somebody actually leaves. The orphan-configuration scan sat under
   "the repository has no workspace at all", which made an orphan a property of
@@ -1637,7 +1638,7 @@ single P-tier above.
   pending delegation before anything resolved it — so resolution moved into its
   own function that runs wherever a command ends.
   Three more: a shorthand, method or getter `test` overrides the colon-form
-  block and only the colon form was recognised (38 files reported runnable while
+  block and only the colon form was recognised (41 files reported runnable while
   vitest listed four); an index entry whose blob git cannot produce was dropped
   silently, leaving the worktree copy validated alone, now FAIL_INFRA; and
   `timeout_sec` was filtered rather than validated, so `1e3` became 13 and `-1`
@@ -1645,7 +1646,7 @@ single P-tier above.
   finding went with them — `sort -z -u` is a GNU extension against a stated Bash
   3.2 floor, so the dedupe is done in the shell, quadratic over 219 candidates
   and cheaper than the subprocess it replaces.
-  Combined suite: `bats ci/tests/` = 350 cases, 0 failures.
+  Combined suite: `bats ci/tests/` = 536 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

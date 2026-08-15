@@ -20,6 +20,23 @@ source "$ROOT_DIR/ci/lib/common.sh"
 
 cd "$ROOT_DIR"
 
+# The worktree-local bats, if one has been provisioned.
+#
+# This lane is a blocker that refuses with FAIL_INFRA when it cannot find its
+# runner -- correct, because a lane reporting PASS without running these suites
+# is worse than no lane. What was missing was the other half: nothing installed
+# bats. `uv sync` does not, and neither did ci/install-hooks.sh, so a fresh clone
+# of a supported machine had every push touching ci/ blocked with no in-repo way
+# to unblock it. `ci/scripts/install-bats.sh` provisions a pinned copy here, and
+# this is what makes it take effect without anyone exporting PATH by hand.
+#
+# Appended rather than prepended: a bats the developer or the image already has
+# stays the one that runs, and this is only the fallback.
+if [ -x "$ROOT_DIR/.ci-gate/bats/bin/bats" ]; then
+  PATH="${PATH}:${ROOT_DIR}/.ci-gate/bats/bin"
+  export PATH
+fi
+
 # The suites run from the worktree, which is the tree this lane is entitled to
 # report on only in the pre-commit gate. In ship mode the commit already exists,
 # so a gate script, a bats file or .gitignore broken in an outgoing commit and
@@ -153,7 +170,15 @@ if ! ci::common::command_exists bats; then
   echo "bats is not installed, so the ci/tests/ suites cannot run."
   echo "  This lane is scheduled as a blocker precisely so those suites execute;"
   echo "  reporting PASS here would mean the layout and node gates are unguarded."
-  echo "  Install bats (e.g. 'npm i -g bats', or your platform's package manager)."
+  echo ""
+  echo "  Provision it into this worktree (pinned, no sudo, nothing installed"
+  echo "  outside the repository, and 'rm -rf .ci-gate/bats' undoes it):"
+  echo ""
+  echo "      make bats-install"
+  echo ""
+  echo "  Or use a copy you already have -- anything named 'bats' on PATH is"
+  echo "  preferred over the provisioned one. A platform package or"
+  echo "  'npm i -g bats' both work."
   exit "$CI_RESULT_FAIL_INFRA"
 fi
 

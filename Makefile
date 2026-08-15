@@ -9,6 +9,7 @@
 
 .PHONY: verify ci-quick ci-full ci-ship ci-debt ci-all ci-fix ci-profile \
         impact test-plan smart ship install-hooks ci-self-test docs bats \
+        bats-install \
         lint-ci
 
 # Windows gnuwin32 make sometimes launches with HOME=/, which breaks uv's
@@ -90,6 +91,12 @@ docs:
 
 bats:
 	bats ci/tests/
+
+# The tests-shell lane is a blocker and refuses when bats is missing, so a
+# fresh clone needs a way to get it that does not depend on the machine.
+# Pinned, worktree-local, no sudo; `rm -rf .ci-gate/bats` undoes it.
+bats-install:
+	bash ci/scripts/install-bats.sh
 
 lint-ci:
 	@for f in ci/*.sh ci/checks/*.sh ci/lib/*.sh ci/hook-dispatch.sh; do \

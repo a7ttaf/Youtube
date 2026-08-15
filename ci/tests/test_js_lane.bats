@@ -7675,3 +7675,37 @@ ship_ws_run() {
     || { rm -rf "$NODE_SB"; echo "a workspace that never built was refused: $output" >&2; return 1; }
   rm -rf "$NODE_SB"
 }
+
+@test "affected: a Python test maps to both naming conventions, wherever it sits" {
+  # pytest collects `test_*.py` and `*_test.py` alike, and since the narrowing
+  # started expanding its patterns to concrete files, a rule that emits only one
+  # convention produces a non-empty list that omits the changed file -- and
+  # non-empty is what narrows. `tests/payments_test.py` edited, pytest run over
+  # somebody else's tests, the change passing unexecuted.
+  source ci/lib/affected.sh
+  local p
+  for p in tests/payments_test.py tests/unit/test_payments.py backend/ums/x_test.py; do
+    run ci::affected::get_affected_tests "$p"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tests/**/test_*.py"* ]] && [[ "$output" == *"tests/**/*_test.py"* ]] \
+      || { echo "one convention missing for ${p}: $output" >&2; return 1; }
+  done
+
+  # A Python file at the repository root. `**/*.py` requires at least one
+  # directory separator -- the same "**" collapse the frontend rules carry a note
+  # about -- so `conftest.py` and a root-level `payments_test.py` matched no rule
+  # at all and contributed nothing. Alone that does not narrow; in a changeset
+  # with any other mapped file it is a silent omission.
+  for p in conftest.py payments_test.py setup.py; do
+    run ci::affected::get_affected_tests "$p"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tests/**/test_*.py"* ]] \
+      || { echo "a root-level Python file mapped to nothing: ${p} -> [$output]" >&2; return 1; }
+  done
+
+  # The control: a Python rule must not start claiming the frontend suite, or
+  # "narrowing" means "run everything" and the lane has no budget left.
+  run ci::affected::get_affected_tests backend/ums/main.py
+  [[ "$output" != *"frontend/tests/"* ]] \
+    || { echo "a Python source mapped to the frontend suite: $output" >&2; return 1; }
+}

@@ -3581,3 +3581,57 @@ YML
   [[ "$ship" == *"tests-shell=ON"* ]] \
     || { echo "an unreadable HEAD copy fell back to the worktree: [$ship]" >&2; return 1; }
 }
+
+@test "tests-shell: a fresh clone has a way to satisfy the blocker it just enabled" {
+  # The refusal itself is right and stays: a lane that reports PASS without
+  # running these suites leaves the layout, node and changeset gates unguarded.
+  # What was missing was the other half. `uv sync` does not provision bats and
+  # neither did ci/install-hooks.sh, so a fresh clone that followed the
+  # documented setup had every push touching ci/ blocked -- with the refusal
+  # arriving at push time and naming no remedy that exists in this repository.
+  local sb; sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/ci/tests" "$sb/.ci-gate/bats/bin"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT"/ci/lib/*.sh "$sb/ci/lib/"
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/a.bats"
+
+  # A PATH with no bats on it. Set explicitly rather than filtered, because
+  # "which entries of the caller's PATH contain a bats" is a question with a
+  # different answer on every machine this runs on.
+  local clean="/usr/bin:/bin"
+  run bash -c "cd '$sb' && PATH='$clean' bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 30 ] \
+    || { rm -rf "$sb"; echo "a missing bats was not FAIL_INFRA (status=$status)" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"make bats-install"* ]] \
+    || { rm -rf "$sb"; echo "the refusal names no in-repo remedy: $output" >&2; return 1; }
+
+  # And the remedy takes effect without anyone exporting PATH by hand, which is
+  # the half that makes it a fix rather than a message.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/.ci-gate/bats/bin/bats"
+  chmod +x "$sb/.ci-gate/bats/bin/bats"
+  run bash -c "cd '$sb' && PATH='$clean' bash ci/checks/tests-shell.sh 2>&1"
+  [[ "$output" != *"bats is not installed"* ]] \
+    || { rm -rf "$sb"; echo "a provisioned .ci-gate/bats was not found: $output" >&2; return 1; }
+  rm -rf "$sb"
+
+  # The installer the message names has to exist and be runnable, or the remedy
+  # is a string. Not executed here -- it clones from the network -- but its
+  # syntax and its pin are asserted.
+  [ -f "$REPO_ROOT/ci/scripts/install-bats.sh" ] \
+    || { echo "ci/scripts/install-bats.sh is missing" >&2; return 1; }
+  bash -n "$REPO_ROOT/ci/scripts/install-bats.sh" \
+    || { echo "the installer is not valid shell" >&2; return 1; }
+  grep -qE '^BATS_VERSION="\$\{BATS_VERSION:-v[0-9]+\.[0-9]+\.[0-9]+\}"' \
+    "$REPO_ROOT/ci/scripts/install-bats.sh" \
+    || { echo "the installer does not pin a bats version" >&2; return 1; }
+
+  # `make bats-install` is what the refusal, the hook installer and the docs all
+  # tell the reader to run, so the target has to be there.
+  grep -q '^bats-install:' "$REPO_ROOT/Makefile" \
+    || { echo "the Makefile has no bats-install target" >&2; return 1; }
+
+  # And ci/install-hooks.sh says it at the moment it makes the hook live, which
+  # is the difference between finding out at setup and finding out at push.
+  grep -q 'make bats-install' "$REPO_ROOT/ci/install-hooks.sh" \
+    || { echo "install-hooks.sh does not mention the prerequisite" >&2; return 1; }
+}
