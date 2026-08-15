@@ -104,7 +104,7 @@ _tc_js_workspace() {
     # `frontend/`, matches nothing, and hands back an empty listing. Empty reads
     # exactly like "the push carries no projects", so the missing-project
     # refusal below never fired and the lane reported a skip instead.
-    if _tc_head="$(git ls-tree -r --full-tree --name-only "$_tc_rev" 2>/dev/null)"; then
+    if _tc_head="$(ci::common::ls_tree_paths -r --full-tree --name-only "$_tc_rev")"; then
       while IFS= read -r _tc_p; do
         case "$_tc_p" in
           tsconfig.json|tsconfig.*.json|jsconfig.json|jsconfig.*.json \

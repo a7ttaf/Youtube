@@ -2833,34 +2833,62 @@ YML
   #
   # A deny-list has to name every generated directory that will ever exist. What
   # the suites read is a closed set, so the filter names that instead.
-  local flt='(^|/)(\.ci-gate|node_modules)/|^ci/(reports|artifacts)/'
-  local keep='\.(sh|bats|bash)$|(^|/)\.gitignore$|(^|/)\.githooks/|(^|/)README\.md$'
+  #
+  # The prune is written by *shape* rather than by name: `__pycache__` and any
+  # dot-directory carrying `cache` cover the four that had to be added one at a
+  # time, and the one a tool adds next week. That is what lets the keep-list
+  # below be the real input set -- these suites read the configuration beside
+  # them, not only shell and bats, and while it was suffix-filtered a commit
+  # that deleted ci/config/affected.yml and ignored the path left a worktree
+  # copy no scan could see.
+  local flt='(^|/)(\.ci-gate|node_modules|__pycache__|\.venv|\.[^/]*cache[^/]*)/|^ci/(reports|artifacts)/'
+  local keep='\.(sh|bats|bash|yml|yaml|conf|toml|json|py|js|cjs|mjs|ts|go|mod|md)$|(^|/)(\.gitignore|VERSION)$|(^|/)\.githooks/'
 
-  # The filter is taken from the lane rather than restated, or this case pins a
-  # copy of the rule and not the rule.
+  # Both halves are taken from the lane rather than restated, or this case pins
+  # a copy of the rule and not the rule.
   grep -qF -- "$keep" "$REPO_ROOT/ci/checks/tests-shell.sh" \
-    || { echo "the lane no longer uses this filter; update this case" >&2; return 1; }
+    || { echo "the lane no longer uses this keep-list; update this case" >&2; return 1; }
+  grep -qF -- "$flt" "$REPO_ROOT/ci/checks/tests-shell.sh" \
+    || { echo "the lane no longer uses this prune; update this case" >&2; return 1; }
 
   _drift_reports() {
     printf '%s\n' "$1" | grep -Ev "$flt" | grep -E "$keep"
   }
 
+  # Every one of these is the gate's own scratch, and reporting any of them
+  # exits 20 before a suite runs -- on a push whose commits and suite files are
+  # unchanged. The `.json` and `.py` entries are the ones the widened keep-list
+  # would have caught if the prune had stayed a list of four names, and
+  # `.pytest_cache/.gitignore` was already reported before it was widened.
   local noise
   for noise in "ci/__pycache__/x.pyc" "ci/lib/__pycache__/y.pyc" "ci/.ruff_cache/z" \
                "ci/tmp/local.txt" "ci/tests/.pytest_cache/w" "ci/reports/junit.xml" \
-               "ci/.ci-gate/state"; do
+               "ci/.ci-gate/state" "ci/.ruff_cache/0.6.9.json" \
+               "ci/tests/.pytest_cache/.gitignore" "ci/.mypy_cache/meta.json" \
+               "ci/.venv/lib/site.py" "ci/artifacts/report.json"; do
     run _drift_reports "$noise"
     [ -z "$output" ] \
       || { echo "a path the suites never read was reported as drift: $noise" >&2; return 1; }
   done
 
   # The control, and it is what the ignored half exists for: a commit that
-  # deletes a bats file and ignores its path leaves the worktree replacement
+  # deletes a suite input and ignores its path leaves the worktree replacement
   # invisible to the tracked and untracked lists, and this is the scan that can
   # still see it. Dropping caches must not drop that.
+  #
+  # The configuration is listed with the shell because that is most of what
+  # these suites assert on: test_js_lane reads checks.yml and affected.yml,
+  # test_preflight reads lanes.conf, the layout suite reads manifest.yml, and
+  # the language lanes run the fixtures under ci/tests/fixtures/ as real
+  # projects.
   local real
   for real in "ci/tests/test_hooks.bats" "ci/lib/git.sh" "ci/checks/node.sh" \
-              ".githooks/pre-push" ".gitignore" "frontend/README.md" "ci/lib/helper.bash"; do
+              ".githooks/pre-push" ".gitignore" "frontend/README.md" "ci/lib/helper.bash" \
+              "ci/config/affected.yml" "ci/config/checks.yml" "ci/config/lanes.conf" \
+              "ci/config/path-rules.conf" "ci/checks/manifest.yml" "ci/VERSION" \
+              "ci/config/schema/gate.schema.json" "ci/debt/known-failures.yml" \
+              "ci/tests/fixtures/node/package.json" "ci/tests/fixtures/node/src/hello.js" \
+              "ci/tests/fixtures/python/pyproject.toml" "ci/tests/fixtures/go/go.mod"; do
     run _drift_reports "$real"
     [ -n "$output" ] \
       || { echo "a file the suites do read was dropped from the scan: $real" >&2; return 1; }

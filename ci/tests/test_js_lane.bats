@@ -6953,3 +6953,246 @@ ship_ws_run() {
     || { echo "quick mode refused its own tree: $output" >&2; rm -rf "$sb"; return 1; }
   rm -rf "$sb"
 }
+
+@test "js lane: a package runner's subcommand does not end its option grammar" {
+  # `--package` is an option of `npm exec`, not of `npm`, so the documented
+  # spelling of "fetch this tool and run this command" is
+  # `npm exec --package <pkg> <cmd>`. Both readers ended package-manager mode
+  # at `exec` -- it reached their unconditional `exec|dlx|...` lists, and the
+  # arm that sends a bare word there is the arm that clears the state -- so
+  # `--package` was skipped as a boolean and the *package* was read as the
+  # command. `npm exec --package vitest jest --ci` therefore declared vitest:
+  # tests.sh ran Vitest over the Jest suite the manifest names, collected
+  # nothing it recognised, exited 0 and the lane reported PASS.
+  #
+  # The `x` alias was right only because it was listed by name. This is the
+  # same rule reaching the other spellings of the same subcommand.
+  local spelling
+  for spelling in "npm exec --package vitest jest --ci" \
+                  "pnpm dlx --package vitest jest --ci" \
+                  "yarn dlx --package vitest jest --ci" \
+                  "npm exec --package vitest -c 'jest --ci'" \
+                  "npm x --package vitest jest --ci"; do
+    run declared_runner_for "$spelling"
+    [ "$output" = "jest" ] \
+      || { echo "tests.sh: '$spelling' -> '$output' (wanted jest)" >&2; return 1; }
+  done
+
+  # node.sh answers the same question for its own rules and had the same hole:
+  # it returned the package name, so every argument rule downstream judged
+  # jest's invocation against vitest's vocabulary. The `-c` payload is left out
+  # of this loop on purpose -- the two readers differ about `--call` by design,
+  # which `node lane: a package manager's value-taking options are its own, not
+  # one list` records and pins.
+  for spelling in "npm exec --package vitest jest --ci" \
+                  "pnpm dlx --package vitest jest --ci" \
+                  "yarn dlx --package vitest jest --ci"; do
+    run node_lane_runner_for "$spelling"
+    [ "$output" = "jest" ] \
+      || { echo "node.sh: '$spelling' -> '$output' (wanted jest)" >&2; return 1; }
+  done
+
+  # The controls, and they carry the fix: `exec` only continues a *manager's*
+  # prefix, so a bare `exec` is still the shell builtin and the word after it is
+  # still the command. Without this the loops above would be satisfied by a
+  # reader that treated every `exec` as transparent-and-stateful.
+  run declared_runner_for "exec vitest run"
+  [ "$output" = "vitest" ]
+  run node_lane_runner_for "exec vitest run"
+  [ "$output" = "vitest" ]
+
+  # And a subcommand followed by the command directly is unchanged: nothing
+  # here promotes an option's value when there is no option.
+  run declared_runner_for "npm exec vitest run"
+  [ "$output" = "vitest" ]
+  run declared_runner_for "pnpm dlx jest --ci"
+  [ "$output" = "jest" ]
+
+  # A manager's own value-taking option survives its subcommand too, which is
+  # the same defect seen from the other side: `pnpm exec --filter web vitest
+  # run` is the standard monorepo invocation and it declared nothing at all.
+  run declared_runner_for "pnpm exec --filter web vitest run"
+  [ "$output" = "vitest" ]
+}
+
+@test "node lane: a bundler flag split across quotes is still that flag" {
+  # The shell concatenates the quoted and unquoted runs of one word, so
+  # `vite --ver'sion'` reaches vite as `--version`: it prints a banner, exits 0
+  # and packages nothing. The scan stripped one leading and one trailing quote,
+  # which leaves `--ver'sion` -- a token matching nothing in either list -- so
+  # the guard against exactly this false PASS was bypassed by a quoting.
+  local fn="$BATS_TEST_TMPDIR/rnb_q.sh"
+  awk '/^_reject_non_building_mode\(\) \{/,/^\}/' "$REPO_ROOT/ci/checks/node.sh" > "$fn"
+  bash -n "$fn" || { echo "extraction is not valid shell" >&2; return 1; }
+  [ -s "$fn" ] || { echo "extracted nothing" >&2; return 1; }
+
+  _rnbq() {
+    bash -c '. "$1"; CI_RESULT_FAIL_NEW_ISSUE=20; CI_GATE_NODE_WORKSPACE=ws
+             _reject_non_building_mode build "$2"; echo ACCEPTED' _ "$fn" "$1" 2>&1
+  }
+
+  local bad
+  for bad in "vite --ver'sion'" "vite --version''" "vite ''--version" \
+             'webpack "--he"lp' "next de'v'"; do
+    run _rnbq "$bad"
+    [[ "$output" != *ACCEPTED* ]] \
+      || { echo "a quoting bypassed the bundler-mode guard: ${bad}" >&2; return 1; }
+  done
+
+  # The opposite error, and it is the one that gets a guard switched off: the
+  # subcommand words were matched wherever they appeared, so `--mode dev` and
+  # `--configuration dev` -- a mode name and a configuration name, both handed
+  # to the option in front of them -- refused two ordinary production builds.
+  # A subcommand is only a subcommand in positional position.
+  local good
+  for good in "vite build --mode dev" "ng build --configuration dev" \
+              "next build --experimental-build-mode start" \
+              "astro build --site preview" "vite build --mode staging" \
+              "vite build --outDir preview"; do
+    run _rnbq "$good"
+    [[ "$output" == *ACCEPTED* ]] \
+      || { echo "refused a real build script: ${good} -> $output" >&2; return 1; }
+  done
+
+  # The controls that keep the narrowing honest: a flag means the same wherever
+  # it sits, a subcommand in positional position is still refused, and
+  # `vite --mode dev` -- which carries no subcommand for `dev` to be the value
+  # of -- is still the dev server. That last one is the one the option test
+  # alone got wrong, and the before/after matrix is what surfaced it.
+  local still_bad
+  for still_bad in "vite build --watch" "next dev" "parcel watch" "vite serve" \
+                   "vite --mode dev"; do
+    run _rnbq "$still_bad"
+    [[ "$output" != *ACCEPTED* ]] \
+      || { echo "stopped refusing a non-building mode: ${still_bad}" >&2; return 1; }
+  done
+}
+
+@test "tests-shell: the drift scan reads every input these suites read" {
+  # The ignored-file half of the scan was filtered to shell and bats, and these
+  # suites are mostly *about* the configuration beside them: test_js_lane reads
+  # ci/config/checks.yml and affected.yml, test_preflight reads lanes.conf, the
+  # layout suite reads ci/checks/manifest.yml. A commit that deleted one of
+  # those and added its path to .gitignore left a worktree copy no scan could
+  # see -- the tracked diff because the path is untracked now, the untracked
+  # scan because --exclude-standard drops it, and this one because of its
+  # suffix. The suites then validated a configuration the pushed tree does not
+  # contain, and the lane reported PASS.
+  #
+  # The filter is lifted out of the lane and run verbatim, so this asserts on
+  # the shipped expression rather than on a restatement of it.
+  local frag
+  frag="$(awk '/^ *printf .*_ts_ig/ { f = 1 }
+               f { print }
+               f && /\|\| true$/ { exit }' "$REPO_ROOT/ci/checks/tests-shell.sh")"
+  [ -n "$frag" ] || { echo "could not lift the scan filter from the lane" >&2; return 1; }
+
+  local sb; sb="$(mktemp -d)"
+  (
+    cd "$sb" || exit 1
+    git init -q . && git config user.email t@t && git config user.name t
+    mkdir -p ci/config ci/tests
+    echo x > ci/config/affected.yml
+    echo '#!/bin/sh' > ci/gate.sh
+    printf 'node_modules/\n.pytest_cache/\n__pycache__/\n.ruff_cache/\n' > .gitignore
+    git add -A && git commit -qm base
+    git rm -q ci/config/affected.yml
+    printf 'node_modules/\n.pytest_cache/\n__pycache__/\n.ruff_cache/\nci/config/affected.yml\n' > .gitignore
+    git add -A && git commit -qm 'delete the config and ignore its path'
+    # Recreated: `git rm` took the directory with the last file in it, and the
+    # worktree replacement is the whole point of the fixture.
+    mkdir -p ci/config
+    echo TAMPERED > ci/config/affected.yml
+  ) >/dev/null 2>&1 || { rm -rf "$sb"; echo "fixture failed" >&2; return 1; }
+
+  local out
+  out="$(cd "$sb" \
+    && _ts_ig="$(git ls-files --others --ignored --exclude-standard -- ci .githooks .gitignore)" \
+    && eval "$frag")"
+  [[ "$out" == *"ci/config/affected.yml"* ]] \
+    || { rm -rf "$sb"; echo "a deleted-and-ignored config is invisible to the scan: [$out]" >&2; return 1; }
+
+  # The control, and it is the reason the filter is not simply "everything":
+  # this repository's tooling writes caches under ci/ on every run, and
+  # reporting those as drift is the gate blocking its own push -- which is how
+  # the filter came to be narrow in the first place. The prune is written by
+  # shape now, so the cache a tool adds next week is covered by the same rule
+  # rather than by a name nobody has added yet.
+  ( cd "$sb" && mkdir -p ci/lib/__pycache__ ci/.ruff_cache ci/tests/.pytest_cache \
+      && echo p > ci/lib/__pycache__/m.pyc \
+      && echo j > ci/.ruff_cache/0.6.9.json \
+      && printf '' > ci/tests/.pytest_cache/.gitignore ) >/dev/null 2>&1
+  local scratch
+  scratch="$(cd "$sb" \
+    && _ts_ig="$(git ls-files --others --ignored --exclude-standard -- ci \
+                 | grep -E '__pycache__|ruff_cache|pytest_cache')" \
+    && eval "$frag")"
+  [ -z "$scratch" ] \
+    || { rm -rf "$sb"; echo "the lane would block its own push on: [$scratch]" >&2; return 1; }
+  rm -rf "$sb"
+}
+
+@test "node lane: a workspace whose path git quotes is still a workspace" {
+  # `git ls-tree --name-only` does not print a path, it prints git's C-string
+  # quoting of one whenever the name carries a non-ASCII byte -- so
+  # `cafe/package.json` with an accent arrives as `"caf\303\251/package.json"`,
+  # trailing quote included, and the anchored `(^|/)package\.json$` every reader
+  # here applies matched nothing. In ship mode that workspace simply was not in
+  # the listing: the lane installed nothing, ran no test, no typecheck and no
+  # build, and exited PASS. The three scans that exist to notice a workspace
+  # going missing read the same listing and missed it identically.
+  local acc; acc="$(printf 'caf\303\251')"
+  local sb; sb="$(mktemp -d)"
+  (
+    cd "$sb" || exit 1
+    git init -q . && git config user.email t@t && git config user.name t
+    mkdir -p "$acc/src" apps/plain
+    echo '{}' > "$acc/package.json"
+    echo '{}' > "$acc/tsconfig.json"
+    echo 'test' > "$acc/src/a.test.ts"
+    echo '{}' > apps/plain/package.json
+    git add -A && git commit -qm base
+  ) >/dev/null 2>&1 || { rm -rf "$sb"; echo "fixture failed" >&2; return 1; }
+
+  # Ship-mode workspace discovery, through the filter the lane applies.
+  local seen
+  seen="$(cd "$sb" \
+    && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+    && ci::common::ls_tree_paths -r --name-only HEAD | grep -cE '(^|/)package\.json$')"
+  [ "$seen" = "2" ] \
+    || { rm -rf "$sb"; echo "ship-mode discovery found ${seen} of 2 workspaces" >&2; return 1; }
+
+  # And the lost-suite scan, which reads the same tree and whose empty answer
+  # means "this workspace never had tests" -- the reading that lets a deleted
+  # suite through.
+  local tests
+  tests="$(cd "$sb" \
+    && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+    && ci::common::ls_tree_paths -r --name-only HEAD -- . \
+       | grep -cE '\.(test|spec|cy)\.[cm]?[jt]sx?$')"
+  [ "$tests" = "1" ] \
+    || { rm -rf "$sb"; echo "the suite under an accented path was invisible" >&2; return 1; }
+  rm -rf "$sb"
+
+  # A listing that could not be produced is not a tree with nothing in it. The
+  # status has to come from git and not from the `tr` that follows it, which is
+  # what every caller's FAIL_INFRA branch hangs on.
+  local rc=0
+  ( cd "$BATS_TEST_TMPDIR" \
+    && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+    && ci::common::ls_tree_paths -r --name-only definitely-not-a-ref >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -ne 0 ] || { echo "an unreadable ref produced a clean empty listing" >&2; return 1; }
+
+  # The one name this newline-joined shape cannot carry. A path with a newline
+  # in it would arrive as two entries, each matching nothing, and a listing
+  # silently short by an entry is the failure above in another spelling -- so it
+  # is refused rather than shortened. Driven with a synthetic listing because
+  # the host filesystem need not allow such a name.
+  local nl_rc=0
+  ( _lt_out="$(printf 'a/package.json\000b\nc/package.json\000' | tr '\000\012' '\012\001'
+               exit "${PIPESTATUS[0]}")" || exit 1
+    case "$_lt_out" in *$'\001'*) exit 2 ;; esac
+    printf '%s' "$_lt_out" ) >/dev/null 2>&1 || nl_rc=$?
+  [ "$nl_rc" -eq 2 ] \
+    || { echo "a path containing a newline was folded into the list (rc=$nl_rc)" >&2; return 1; }
+}

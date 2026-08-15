@@ -110,7 +110,7 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
       # listing's status is taken before the filter runs: grep exits 1 when it
       # matches nothing, which is an answer, and the enumeration failing is not.
       _idx_head=""
-      _idx_head="$(git ls-tree -r --name-only HEAD 2>/dev/null)" || _idx_rc=$?
+      _idx_head="$(ci::common::ls_tree_paths -r --name-only HEAD)" || _idx_rc=$?
       if [ "$_idx_rc" -eq 0 ]; then
         _idx_raw="$(printf '%s\n' "$_idx_head" | grep -E '(^|/)package\.json$' || true)"
       fi
@@ -224,7 +224,7 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
     # above: a tree that could not be listed is not a tree with nothing in it,
     # and this is the scan whose empty answer reads as "nothing was lost".
     _oc_rc=0
-    _oc_head="$(git ls-tree -r --name-only HEAD 2>/dev/null)" || _oc_rc=$?
+    _oc_head="$(ci::common::ls_tree_paths -r --name-only HEAD)" || _oc_rc=$?
     if [ "$_oc_rc" -ne 0 ]; then
       echo "Cannot read the pushed tree to look for workspaces that lost a manifest."
       echo "  A tree that could not be listed is not a tree with nothing in it."
@@ -2256,8 +2256,23 @@ _pm_advance() {
   # name for a project's own script as any other, and `x vitest` has to keep
   # meaning that script. Six readers reach this grammar through this one
   # function, so they learn the spelling together.
+  #
+  # `exec` and `dlx` are keyed here for the same reason, and they were not.
+  # Reaching the unconditional list meant leaving this function first, and
+  # leaving it at a bare word is what clears `_pp_state` -- so the manager's
+  # option grammar ended at the very subcommand that introduces it. `--package`
+  # is an option of `npm exec`, not of `npm`, which made
+  # `npm exec --package vitest jest --ci` the one shape the `--package` arm
+  # below could never see: the flag was skipped as a boolean and `vitest`, the
+  # package to fetch, was returned as the command the script runs. Every
+  # argument rule downstream then judged jest's invocation against vitest's
+  # vocabulary. Keyed rather than unconditional because `exec` with no manager
+  # in front is the shell builtin, and `exec vitest run` must keep meaning
+  # vitest.
   case "${_pm_name}|$1" in
-    'bun|x'|'npm|x') return 0 ;;
+    'bun|x'|'npm|x' \
+      |'npm|exec'|'pnpm|exec'|'yarn|exec'|'bun|exec' \
+      |'pnpm|dlx'|'yarn|dlx') return 0 ;;
   esac
   # Keyed by which manager is in front, for the reason the flag allow-list in
   # _reject_narrowing_flags is keyed by runner: one list cannot describe five
@@ -2278,9 +2293,14 @@ _pm_advance() {
   # PASS. Fail-open, where this reader's answer is fail-closed. The two readers
   # therefore differ about `--call` by design, which is why the cross-reader
   # case does not list it among the spellings they must agree on.
+  #
+  # `pnpm dlx` and `yarn dlx` take `--package` too, in its long spelling only:
+  # pnpm's `-p` is `--parseable` and takes no value, so keying the short form to
+  # them would swallow the command instead of an argument.
   case "${_pm_name}|$1" in
     'npx|-p'|'npx|--package'|'npx|-c'|'npx|--call' \
       |'npm|-p'|'npm|--package'|'npm|-c'|'npm|--call' \
+      |'pnpm|--package'|'yarn|--package' \
       |'npm|--prefix'|'npm|-w'|'npm|--workspace'|'npm|-C' \
       |'pnpm|--filter'|'pnpm|-F'|'pnpm|--dir'|'pnpm|-C'|'pnpm|--workspace-dir' \
       |'yarn|--cwd' \
@@ -3224,37 +3244,76 @@ assert_no_persistent_filter() {
 # build` is not refused for a word that belongs to `echo`. `-?` is quoted for
 # the reason the tsc list quotes it: unquoted, `?` matches any single character
 # and the arm would swallow every short flag these tools have.
+#
+# The two families are also matched in different places, and that is the second
+# thing this function got wrong. A flag means the same wherever it sits, but a
+# subcommand is a subcommand only in positional position: `--mode dev` and
+# `--configuration dev` are a mode name and a configuration name handed to the
+# option in front of them, and `vite build --mode dev` and
+# `ng build --configuration dev` -- both ordinary production builds -- were
+# refused for the word `dev`. A guard that blocks real build scripts gets
+# switched off, so the narrow reading is the one that survives. Judged by
+# whether the previous word was an option, which is what separates an option's
+# value from an argument of the command without needing a value-taking list per
+# bundler.
+#
+# And only once the tool has a positional to have taken one. `vite --mode dev`
+# carries no subcommand at all, so `dev` there is not standing in for a mode
+# name -- it is the dev server, and the option test alone let it through. The
+# before/after matrix for this change is what found it: a word can only be an
+# option's value where the command it belongs to has already been named.
 _reject_non_building_mode() {
-  local script_name="$1" cmd="$2" tok _seen=0 _rnb
+  local script_name="$1" cmd="$2" tok _seen=0 _rnb _prev_opt=0 _pos_seen=0 _bad=0
   # shellcheck disable=SC2086
   set -f
   for tok in $cmd; do
-    _rnb="${tok##*/}"
-    _rnb="${_rnb%\'}" ; _rnb="${_rnb#\'}"
-    _rnb="${_rnb%\"}" ; _rnb="${_rnb#\"}"
+    # Every quote in the token, not just the ones on its ends. The shell
+    # concatenates the quoted and unquoted runs of one word, so `--ver'sion'`
+    # reaches vite as `--version` and prints a banner -- while stripping one
+    # leading and one trailing quote left `--ver'sion` here, which matches
+    # nothing in either list. `--version''` and `''--version` were the same
+    # bypass in two more spellings, and each one is the exact false PASS this
+    # guard exists to refuse, reached by a quoting the scanner could not read.
+    # Removed before the basename is taken, so a quoted path spelling
+    # (`'/usr/bin/vite'`) still reduces to the tool's own name.
+    _rnb="${tok//\'/}"
+    _rnb="${_rnb//\"/}"
+    _rnb="${_rnb##*/}"
     case "$_rnb" in
-      ';'|'&&'|'||'|'|'|'&') _seen=0 ; continue ;;
+      ';'|'&&'|'||'|'|'|'&') _seen=0 ; _prev_opt=0 ; _pos_seen=0 ; continue ;;
     esac
     if [ "$_seen" -eq 0 ]; then
       case "$_rnb" in
         vite|webpack|rollup|rspack|next|nuxt|astro|tsup|esbuild|parcel|remix|ng|react-scripts)
           _seen=1 ;;
       esac
+      _prev_opt=0
+      _pos_seen=0
       continue
     fi
     case "$_rnb" in
-      --version|-v|--help|-h|'-?'|--watch|-w \
-        |dev|serve|preview|start|watch)
-        set +f
-        echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a non-building bundler mode in its"
-        echo "  '${script_name}' script:"
-        echo "    ${script_name}: ${cmd}"
-        echo "    offending argument: ${tok}"
-        echo "  That mode produces no bundle, so the lane reports PASS having built"
-        echo "  nothing. A dev server is not a build and a version banner is not a"
-        echo "  bundle. Use the tool's build subcommand."
-        exit "$CI_RESULT_FAIL_NEW_ISSUE"
-        ;;
+      --version|-v|--help|-h|'-?'|--watch|-w) _bad=1 ;;
+    esac
+    if [ "$_bad" -eq 0 ] && { [ "$_prev_opt" -eq 0 ] || [ "$_pos_seen" -eq 0 ]; }; then
+      case "$_rnb" in
+        dev|serve|preview|start|watch) _bad=1 ;;
+      esac
+    fi
+    if [ "$_bad" -eq 1 ]; then
+      set +f
+      echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a non-building bundler mode in its"
+      echo "  '${script_name}' script:"
+      echo "    ${script_name}: ${cmd}"
+      echo "    offending argument: ${tok}"
+      echo "  That mode produces no bundle, so the lane reports PASS having built"
+      echo "  nothing. A dev server is not a build and a version banner is not a"
+      echo "  bundle. Use the tool's build subcommand."
+      exit "$CI_RESULT_FAIL_NEW_ISSUE"
+    fi
+    case "$_rnb" in
+      -*) _prev_opt=1 ;;
+      *) [ "$_prev_opt" -eq 1 ] || _pos_seen=1
+         _prev_opt=0 ;;
     esac
   done
   set +f
@@ -4406,7 +4465,7 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
     # guard sees nothing to have lost and continues. The producer status is
     # taken before its output is filtered.
     _lost_rc=0
-    _lost_raw="$(git ls-tree -r --name-only "$_lost_ref" -- . 2>/dev/null)" || _lost_rc=$?
+    _lost_raw="$(ci::common::ls_tree_paths -r --name-only "$_lost_ref" -- .)" || _lost_rc=$?
     if [ "$_lost_rc" -ne 0 ]; then
       echo "Cannot read ${_lost_ref} to find out which tests this push had."
       echo "  Refusing to conclude the suite was never there from a listing"

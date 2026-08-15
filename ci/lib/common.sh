@@ -185,6 +185,58 @@ ci::common::refuse_on_workspace_drift() {
 # alone and the pushed child's scripts were skipped: the same false pass, by the
 # one path that returns before the guard.
 #
+# ci::common::ls_tree_paths <git-ls-tree-args...> – the paths in a tree, one
+# per line, spelled the way they actually are.
+#
+# `git ls-tree --name-only` does not print a path; it prints git's C-string
+# quoting of one whenever the name carries a non-ASCII byte, a quote, a
+# backslash or a control character. `café/package.json` comes back as
+# `"caf\303\251/package.json"` -- trailing quote and all -- so every reader here
+# that filters the listing with an anchored `(^|/)package\.json$` matched
+# nothing and the workspace simply was not there. In ship mode that is a lane
+# that installs nothing, runs no test, no typecheck, no build, and reports PASS;
+# and the three scans that exist to notice a workspace going missing read the
+# same listing and miss it the same way. An accent in a directory name is not an
+# attack, which is what makes it worth being fail-closed about.
+#
+# The fix this repository already applies elsewhere -- ci/checks/git-safety.sh
+# and ci/checks/test-layout.sh both read NUL-delimited for exactly this reason,
+# and three drift scans one screen below in node.sh already pass
+# `-c core.quotepath=false`. It was applied to the diff and ls-files readers and
+# not to the ls-tree ones, so it lives here now and they share it.
+#
+# `-z` rather than `core.quotepath=false`, because that option still quotes a
+# name containing `"`, `\` or a control byte. NUL separation quotes nothing at
+# all -- which leaves one name this newline-joined shape cannot carry, a path
+# with a newline in it, and that returns 2 rather than a listing silently short
+# by a line. Returns 1 when the enumeration itself failed. Callers refuse on
+# both: a path that cannot be spelled is not a path that is absent.
+ci::common::ls_tree_paths() {
+  local _lt_out
+  # The translation happens inside the pipeline because a command substitution
+  # strips NUL bytes -- capturing `-z` output into a variable first throws away
+  # the only separator the listing has and hands back every path concatenated
+  # into one word. Bash says so out loud ("ignored null byte in input") and then
+  # carries on, which is the quiet kind of wrong this file keeps finding.
+  #
+  # One `tr` doing two jobs: NUL becomes the newline that joins the list, and a
+  # newline *inside a path* becomes \001 -- a byte no path can contain. Without
+  # that second mapping such a path would arrive as two entries, each matching
+  # nothing, and a listing silently short by an entry is exactly what this
+  # function exists to refuse. Done in the same pass so the tree is walked once.
+  #
+  # `exit "${PIPESTATUS[0]}"` carries the producer's status out: `git | tr`
+  # answers for `tr`, which succeeds at translating nothing, so a failed
+  # enumeration would otherwise arrive as an empty listing and read as "the tree
+  # holds no workspaces".
+  _lt_out="$(git ls-tree -z "$@" 2>/dev/null | tr '\000\012' '\012\001'
+             exit "${PIPESTATUS[0]}")" || return 1
+  case "$_lt_out" in
+    *$'\001'*) return 2 ;;
+  esac
+  printf '%s' "$_lt_out"
+}
+
 # Returns 1 with the paths on stderr, 0 when there is nothing to report --
 # including when the question cannot be asked, since could-not-ask must not
 # empty a list the way a failure to enumerate would.
@@ -199,7 +251,7 @@ ci::common::_head_manifests_present() {
   # `--full-tree` so the answer does not depend on where this was called from:
   # `git ls-tree` applies the current directory as an implicit path filter, and
   # an empty listing reads exactly like "the push carries no manifests".
-  _nw_head="$(git ls-tree -r --full-tree --name-only HEAD 2>/dev/null)" || return 0
+  _nw_head="$(ci::common::ls_tree_paths -r --full-tree --name-only HEAD)" || return 0
   while IFS= read -r _nw_found; do
     [ -n "$_nw_found" ] || continue
     case "$_nw_found" in

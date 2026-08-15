@@ -405,12 +405,33 @@ _tests_js_scan_runner() {
       # Keyed by manager, not added to the transparent list below, because a
       # bare `x` is not a package runner: it is as good a name for a project's
       # own script as any other, and `x vitest` must keep meaning the script.
+      #
+      # `exec` and `dlx` are the same kind of word and were not treated as one.
+      # They reached the transparent list further down, and the arm that sends
+      # them there runs `_pp=0` on the way past -- so the option grammar ended
+      # at the very subcommand that introduces it. `--package` is not an option
+      # of `npm`; it is an option of `npm exec`, which makes
+      # `npm exec --package vitest -c 'jest --ci'` -- the documented spelling --
+      # the one shape the `--package` case above could never see. `--package`
+      # was skipped as an ordinary flag and `vitest` was read as the command, so
+      # a workspace carrying both runners ran Vitest while the payload's Jest
+      # suite never ran and the lane reported PASS. `npm x` was right only
+      # because it was listed here.
       case "${_pm_name}|$_w" in
-        'bun|x'|'npm|x') continue ;;
+        'bun|x'|'npm|x' \
+          |'npm|exec'|'pnpm|exec'|'yarn|exec'|'bun|exec' \
+          |'pnpm|dlx'|'yarn|dlx') continue ;;
       esac
+      #
+      # `pnpm dlx` and `yarn dlx` take `--package` too, and only in its long
+      # spelling: pnpm's `-p` is `--parseable`, which takes no value, so keying
+      # the short form to them would eat the command instead of an argument.
+      # Without the long form `pnpm dlx --package vitest jest --ci` declared
+      # vitest, which is the package to fetch and not the command that runs.
       case "${_pm_name}|$_w" in
         'npx|-p'|'npx|--package' \
           |'npm|-p'|'npm|--package' \
+          |'pnpm|--package'|'yarn|--package' \
           |'npm|--prefix'|'npm|-w'|'npm|--workspace'|'npm|-C' \
           |'pnpm|--filter'|'pnpm|-F'|'pnpm|--dir'|'pnpm|-C'|'pnpm|--workspace-dir' \
           |'yarn|--cwd' \

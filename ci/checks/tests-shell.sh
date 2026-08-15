@@ -83,7 +83,20 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
     else
       # Narrowed to the files these suites actually read, which is what the
       # scan is for: an ignored path only matters here if it could stand in for
-      # one the pushed commits delete, and the suites read shell and bats.
+      # one the pushed commits delete.
+      #
+      # Which is not only shell and bats, and reading it that way left the
+      # config these suites are mostly *about* outside the scan. `test_js_lane`
+      # asserts on ci/config/checks.yml and ci/config/affected.yml,
+      # `test_preflight` on ci/config/lanes.conf, the layout suite on
+      # ci/checks/manifest.yml, and the language lanes run the fixtures under
+      # ci/tests/fixtures/ as real projects. A commit that deleted
+      # ci/config/affected.yml and ignored the path left a worktree copy that
+      # all three scans missed -- the tracked diff sees no change because the
+      # path is untracked now, --exclude-standard drops it, and this filter
+      # dropped it for having the wrong suffix -- so the suites validated a
+      # configuration the pushed tree does not contain and the lane reported
+      # PASS. The suffix set below is every input type these directories carry.
       #
       # Pruning by name did not scale. `.ci-gate`, `ci/reports/` and
       # `ci/artifacts/` were each added after the gate blocked itself on its own
@@ -97,9 +110,17 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
       # A deny-list has to name every generated directory that will ever exist,
       # including the ones a tool added last week. What the suites read is a
       # closed set, so it is the set that is named.
+      #
+      # The prune stays, and it is now written by shape rather than by name:
+      # every one of those four is `__pycache__` or a dot-directory with
+      # `cache` in its name, and so is the next tool's. Naming the shape is
+      # what stops the widened suffix set below from reporting a cached `.json`
+      # or `.py` as drift and blocking the push on the gate's own scratch
+      # output -- the failure this prune was added for, and one a wider
+      # allow-list would otherwise have brought straight back.
       printf '%s\n' "$_ts_ig" \
-        | grep -Ev '(^|/)(\.ci-gate|node_modules)/|^ci/(reports|artifacts)/' \
-        | grep -E '\.(sh|bats|bash)$|(^|/)\.gitignore$|(^|/)\.githooks/|(^|/)README\.md$' || true
+        | grep -Ev '(^|/)(\.ci-gate|node_modules|__pycache__|\.venv|\.[^/]*cache[^/]*)/|^ci/(reports|artifacts)/' \
+        | grep -E '\.(sh|bats|bash|yml|yaml|conf|toml|json|py|js|cjs|mjs|ts|go|mod|md)$|(^|/)(\.gitignore|VERSION)$|(^|/)\.githooks/' || true
     fi
   } | sort -u | sed '/^$/d')"
   case "$SHELL_DRIFT" in
