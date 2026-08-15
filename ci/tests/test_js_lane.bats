@@ -7519,3 +7519,97 @@ ship_ws_run() {
   [ "$from_find" = "$from_re" ]     || { rm -rf "$sb"; echo "the two suite scans disagree: find=[$from_find] head=[$from_re]" >&2; return 1; }
   rm -rf "$sb"
 }
+
+@test "tests-js: an environment this lane cannot reproduce is refused, not approximated" {
+  # The environment fix one round ago unquoted the value and exported the text.
+  # `RUN_INTEGRATION="$ENABLE_INTEGRATION"` is `1` to the shell that runs the
+  # script and the literal 20 characters `$ENABLE_INTEGRATION` to a reader that
+  # only unquotes -- so the runner got a *different* environment than the
+  # manifest declares, a test guarded on `=== "1"` skipped itself, and the lane
+  # reported PASS. Worse than not setting it, because it looks set.
+  #
+  # Expanding it here is not the alternative: a value is arbitrary shell, and
+  # `RUN=$(rm -rf build)` is as valid a manifest as any.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "RUN_INTEGRATION=\"$ENABLE_INTEGRATION\" vitest run" } }'
+  [ "$output" = "!expansion RUN_INTEGRATION" ] \
+    || { echo "a substitution was not marked unreproducible: [$output]" >&2; return 1; }
+
+  # Unquoted and command-substituted spellings of the same thing.
+  run declared_env_for 'RUN=$ENABLE vitest run'
+  [ "$output" = "!expansion RUN" ]
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "REV=\"$(git rev-parse HEAD)\" vitest run" } }'
+  [ "$output" = "!expansion REV" ]
+
+  # Single quotes are exempt because the shell exempts them: in `RUN='"'"'$LITERAL'"'"'`
+  # the dollar sign *is* the value, and re-exporting it verbatim is exact.
+  run declared_env_for_manifest "{ \"name\": \"w\", \"scripts\": {
+    \"test\": \"RUN='\$LITERAL' vitest run\" } }"
+  [ "$output" = "RUN=\$LITERAL" ] \
+    || { echo "a single-quoted literal was refused: [$output]" >&2; return 1; }
+
+  # And an ordinary value is still an ordinary value.
+  run declared_env_for 'RUN_INTEGRATION=1 vitest run'
+  [ "$output" = "RUN_INTEGRATION=1" ]
+
+  # The lane refuses on the marker rather than exporting it. Pinned against the
+  # lane's own text: reaching this through _tests_js_workspace needs an
+  # installed runner, and the verdict is what is under test, not the plumbing.
+  grep -qF "declares a test environment this lane cannot reproduce" \
+    "$REPO_ROOT/ci/checks/tests.sh" \
+    || { echo "the lane no longer refuses an unreproducible environment" >&2; return 1; }
+  grep -qF "'!expansion '*)" "$REPO_ROOT/ci/checks/tests.sh" \
+    || { echo "the lane no longer reads the marker this reader emits" >&2; return 1; }
+}
+
+@test "affected: a changed path git has to quote still narrows the right suite" {
+  # `git diff --name-only` renders a path carrying a non-ASCII byte as a
+  # C-quoted string -- `frontend/src/café.ts` arrives as
+  # `"frontend/src/caf\303\251.ts"` -- and that string matches no rule in
+  # ci/config/affected.yml. On its own that is one file contributing no pattern;
+  # with any mapped Python file in the same range it is a *skip*, because
+  # AFFECTED_TESTS is then non-empty, the JavaScript slice is empty, and a
+  # non-empty list narrows: `skipped: no affected JavaScript tests` over a push
+  # that changed the frontend.
+  local fn; fn="$(mktemp)"
+  sed -n '/_tests_diff_paths() {/,/^  }/p' "$REPO_ROOT/ci/checks/tests.sh" | sed 's/^  //' > "$fn"
+  [ -s "$fn" ] || { rm -f "$fn"; echo "could not lift the path reader from the lane" >&2; return 1; }
+  bash -n "$fn" || { rm -f "$fn"; echo "the extraction is not valid shell" >&2; return 1; }
+
+  local sb; sb="$(mktemp -d)"
+  (
+    cd "$sb"
+    git init -q -b main .
+    mkdir -p frontend/src
+    printf 'x\n' > frontend/src/a.ts
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm base
+    printf 'y\n' > "frontend/src/caf$(printf '\303\251').ts"
+    git add -A
+  ) >/dev/null 2>&1
+
+  # The premise: git really does quote it.
+  local quoted
+  quoted="$(cd "$sb" && git diff --cached --name-only)"
+  [[ "$quoted" == *'\303\251'* ]] \
+    || { rm -rf "$sb" ; rm -f "$fn"; echo "the premise failed: git did not quote [$quoted]" >&2; return 1; }
+
+  local got
+  got="$(cd "$sb" && . "$fn" && _tests_diff_paths --cached | tr '\n' ' ')"
+  rm -rf "$sb"; rm -f "$fn"
+  [[ "$got" != *'\303\251'* ]] \
+    || { echo "the reader still returned the quoted form: [$got]" >&2; return 1; }
+  [[ "$got" == *"frontend/src/caf"* ]] \
+    || { echo "the changed frontend file did not survive the read: [$got]" >&2; return 1; }
+
+  # And the affected rules match what comes back, which is the half that decides
+  # whether the suite runs.
+  source ci/lib/affected.sh
+  local one
+  one="$(printf '%s' "$got" | tr ' ' '\n' | grep 'caf' | head -1)"
+  run ci::affected::get_affected_tests "$one"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]] \
+    || { echo "the unquoted path mapped to no frontend suite: [$output]" >&2; return 1; }
+}

@@ -122,9 +122,19 @@ ci::common::workspace_drift() {
   local _wd_c
   _wd_c="$(git ls-files --others --ignored --exclude-standard -- "$ws" 2>/dev/null)" || _wd_rc=2
   [ "$_wd_rc" -eq 0 ] || return 2
+  # The extension list is what these lanes *load*, not what a person would call
+  # source. Vite and Vitest resolve a stylesheet import like any other module, and
+  # ci/config/affected.yml already treats a stylesheet change as a reason to run
+  # the frontend suite -- so a push that deletes and ignores
+  # `frontend/src/theme.css` while an ignored local copy remains left every one
+  # of these three scans empty, and ship-mode tests-js ran against the shadow and
+  # passed over a pushed tree whose import does not resolve. The same argument
+  # covers the other things a build graph pulls in by import: the CSS dialects,
+  # the asset types a bundler inlines, and the config files these lanes read to
+  # decide what to run at all.
   _wd_c="$(printf '%s\n' "$_wd_c" \
     | grep -Ev '(^|/)(node_modules|dist|build|out|coverage|\.next|\.nuxt|\.turbo|\.cache|__pycache__)/' \
-    | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|cts|mts|vue|svelte|json)$' || true)"
+    | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|cts|mts|vue|svelte|json|css|scss|sass|less|styl|pcss|svg|html|py|yml|yaml|toml)$|(^|/)(package\.json|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|vitest\.config\.[cm]?[jt]s)$' || true)"
 
   local _wd_all
   _wd_all="$(printf '%s\n%s\n%s\n' "$_wd_a" "$_wd_b" "$_wd_c" | sed '/^$/d' | sort -u)"

@@ -3311,3 +3311,113 @@ YML
     || { rm -rf "$sb"; echo "a genuinely missing workspace stopped being reported" >&2; return 1; }
   rm -rf "$sb"
 }
+
+@test "branch-protection: a required policy whose range will not resolve is infra, not a pass" {
+  # These two logged a skip and left OVERALL_RESULT at PASS, so with the policies
+  # required and a tip that cannot be read -- CI_GATE_PUSH_NEW_SHA naming an
+  # object this clone does not carry -- the run reported success having checked
+  # neither policy. push_range returns non-zero only where the tip itself will
+  # not resolve; every case where there is simply nothing new to measure returns
+  # 0 with an empty or bare-tip range and still reaches the walk. So a non-zero
+  # status is the tool failing, not the push being empty.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks"
+  cp "$REPO_ROOT/ci/checks/branch-protection.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  (
+    cd "$sb"
+    # Not a protected name. The protected-branch check is a different verdict
+    # reached before this one, and on `main` it would mask what is under test.
+    git init -q -b work .
+    printf 'a\n' > a.txt
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm base
+  ) >/dev/null 2>&1
+
+  local unreadable=0123456789012345678901234567890123456789
+  run bash -c "cd '$sb' && git cat-file -e '$unreadable' 2>&1"
+  [ "$status" -ne 0 ] || { rm -rf "$sb"; echo "the premise failed: that object is readable" >&2; return 1; }
+
+  run bash -c "cd '$sb' && CI_GATE_REQUIRE_SIGNED_COMMITS=1 CI_GATE_REQUIRE_LINEAR_HISTORY=1 \
+    CI_GATE_MODE=ship CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_NEW_SHA='$unreadable' \
+    bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -ne 0 ] \
+    || { rm -rf "$sb"; echo "an unresolvable tip reported PASS over two required policies" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"Cannot resolve the range this push publishes"* ]] \
+    || { rm -rf "$sb"; echo "the refusal did not name its reason: $output" >&2; return 1; }
+  [[ "$output" != *"skipping signed commit check"* ]] \
+    || { rm -rf "$sb"; echo "still reported as a skip" >&2; return 1; }
+
+  # The control that keeps this from becoming "refuse everything": with the
+  # policies off, an unresolvable tip is not this check's business.
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship CI_GATE_PUSH_REMOTE=origin \
+    CI_GATE_PUSH_NEW_SHA='$unreadable' bash ci/checks/branch-protection.sh 2>&1"
+  [ "$status" -eq 0 ] \
+    || { rm -rf "$sb"; echo "an unresolvable tip failed a run that requires neither policy" >&2; echo "$output" >&2; return 1; }
+
+  # And the control that keeps a real push passing: a resolvable tip with no
+  # merge in it, both policies still required, must not be refused by this
+  # branch. (Signatures are a separate verdict and are not asserted here.)
+  local tip
+  tip="$(cd "$sb" && git rev-parse HEAD)"
+  run bash -c "cd '$sb' && CI_GATE_REQUIRE_LINEAR_HISTORY=1 CI_GATE_MODE=ship \
+    CI_GATE_PUSH_REMOTE=origin CI_GATE_PUSH_NEW_SHA='$tip' \
+    bash ci/checks/branch-protection.sh 2>&1"
+  [[ "$output" != *"Cannot resolve the range this push publishes"* ]] \
+    || { rm -rf "$sb"; echo "a resolvable tip was reported unresolvable: $output" >&2; return 1; }
+  rm -rf "$sb"
+}
+
+@test "ship drift: an ignored shadow of a deleted stylesheet is drift" {
+  # The extension list is what these lanes *load*, not what a person would call
+  # source. Vite and Vitest resolve a stylesheet import like any other module,
+  # and ci/config/affected.yml already treats a stylesheet change as a reason to
+  # run the frontend suite. So a push that deletes and ignores
+  # frontend/src/theme.css while an ignored local copy remains left the tracked
+  # scan, the untracked scan and the ignored scan all empty -- and ship-mode
+  # tests-js ran against the shadow and passed over a pushed tree whose import
+  # does not resolve.
+  local sb
+  sb="$(mktemp -d)"
+  (
+    cd "$sb"
+    git init -q -b main .
+    mkdir -p frontend/src
+    printf 'body{}\n' > frontend/src/theme.css
+    printf 'import "./theme.css"\n' > frontend/src/app.ts
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm base
+    git rm -q frontend/src/theme.css
+    printf 'frontend/src/theme.css\n' > .gitignore
+    git add .gitignore
+    git -c user.email=t@t -c user.name=t commit -qm 'delete and ignore the stylesheet'
+    printf 'body{}\n' > frontend/src/theme.css
+  ) >/dev/null 2>&1
+
+  local out rc=0
+  out="$( cd "$sb" \
+          && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+          && ci::common::workspace_drift frontend )" || rc=$?
+  [ "$rc" -eq 1 ] \
+    || { rm -rf "$sb"; echo "the ignored shadow was not reported as drift (rc=$rc, out=[$out])" >&2; return 1; }
+  [[ "$out" == *"frontend/src/theme.css"* ]] \
+    || { rm -rf "$sb"; echo "drift was reported but not for the shadow: [$out]" >&2; return 1; }
+
+  # The control that keeps the filter a filter: the vendored and generated trees
+  # this deliberately prunes stay pruned, or every workspace is permanently
+  # drifted and the refusal means nothing.
+  (
+    cd "$sb"
+    mkdir -p frontend/node_modules/x frontend/dist
+    printf 'a{}\n' > frontend/node_modules/x/a.css
+    printf 'b{}\n' > frontend/dist/b.css
+    printf 'node_modules/\ndist/\nfrontend/src/theme.css\n' > .gitignore
+  ) >/dev/null 2>&1
+  out="$( cd "$sb" && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+          && ci::common::workspace_drift frontend || true )"
+  [[ "$out" != *"node_modules"* ]] && [[ "$out" != *"frontend/dist/"* ]] \
+    || { rm -rf "$sb"; echo "a pruned tree came back as drift: [$out]" >&2; return 1; }
+  rm -rf "$sb"
+}

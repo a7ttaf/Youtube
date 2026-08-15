@@ -52,6 +52,36 @@ if type ci::affected::get_affected_tests >/dev/null 2>&1 && [ -f "ci/config/affe
   # push_range returns one when it finds no base, and `git diff --name-only
   # <tip>` would compare the tip against the worktree rather than listing what
   # the push adds.
+  # Read with `-z`, because git quotes what it cannot print. By default
+  # `git diff --name-only` renders a path with a non-ASCII byte in it as a
+  # C-quoted string -- `frontend/src/café.ts` arrives as
+  # `"frontend/src/caf\303\251.ts"` -- and that string matches no rule in
+  # ci/config/affected.yml. On its own that means one file contributes no
+  # pattern; combined with any mapped Python file in the same range it is a
+  # skip, because AFFECTED_TESTS is then non-empty, the JavaScript slice is
+  # empty, and a non-empty list narrows. `skipped: no affected JavaScript tests`
+  # over a push that changed the frontend.
+  #
+  # ci/lib/changeset.sh already reads its list this way, and ci/lib/common.sh's
+  # ls_tree_paths does the same for a tree listing -- so this is the third
+  # reader of a git path list in this gate and the last one still taking the
+  # quoted form.
+  #
+  # A path carrying a newline cannot survive the newline-joined shape this
+  # feeds, and a list silently short by an entry is the same skip in another
+  # spelling. So it is refused, and a refusal here leaves the list empty --
+  # which does not narrow, and running every suite is the direction that cannot
+  # skip a pushed change.
+  _tests_diff_paths() {
+    local _dp_out
+    _dp_out="$(git diff -z --name-only "$@" 2>/dev/null | tr '\000\012' '\012\001'
+               exit "${PIPESTATUS[0]}")" || return 1
+    case "$_dp_out" in
+      *$'\001'*) return 2 ;;
+    esac
+    printf '%s' "$_dp_out"
+  }
+
   _changed_files=""
   if [ "${CI_GATE_MODE:-}" = "ship" ]; then
     _tests_range=""
@@ -59,14 +89,14 @@ if type ci::affected::get_affected_tests >/dev/null 2>&1 && [ -f "ci/config/affe
       _tests_range="$(ci::git::push_range 2>/dev/null || true)"
     fi
     case "$_tests_range" in
-      *..*) _changed_files="$(git diff --name-only "$_tests_range" 2>/dev/null || true)" ;;
+      *..*) _changed_files="$(_tests_diff_paths "$_tests_range" || true)" ;;
       *)    ci::log::info "No push range to narrow by; running every suite." ;;
     esac
   else
-    _changed_files="$(git diff --cached --name-only 2>/dev/null || true)"
+    _changed_files="$(_tests_diff_paths --cached || true)"
     if [ -z "$_changed_files" ]; then
       ci::log::info "No staged files found; falling back to unstaged changes for ad-hoc test selection."
-      _changed_files="$(git diff --name-only 2>/dev/null || true)"
+      _changed_files="$(_tests_diff_paths || true)"
     fi
   fi
   if [ -n "$_changed_files" ]; then
@@ -622,15 +652,41 @@ _tests_js_env_qstep() {
   done
 }
 
-# One `NAME=value` line, with one layer of quoting off the value. The quotes
-# are what the shell strips before the assignment happens, so they have to come
-# off before the value is handed to `export`; the name cannot be quoted, so
+# One `NAME=value` line, with one layer of quoting off the value -- or a
+# `!expansion <NAME>` line where the value is one this lane cannot reproduce.
+#
+# The quotes are what the shell strips before the assignment happens, so they
+# come off before the value is handed to `export`; the name cannot be quoted, so
 # only the value is unwrapped.
+#
+# What cannot come off is a substitution. `RUN_INTEGRATION="$ENABLE_INTEGRATION"`
+# is `1` to the shell that runs the script and the eight literal characters
+# `$ENABLE_INTEGRATION` to a reader that only unquotes -- so exporting the text
+# gives the runner a *different* environment than the manifest declares, and a
+# test guarded on `=== "1"` skips itself while the lane reports PASS. That is
+# worse than not setting the variable at all, because it looks like it was set.
+#
+# Expanding it here is not the alternative: a value is arbitrary shell, and
+# `RUN=$(rm -rf build)` is as valid a manifest as any. So the assignment is
+# reported as unreproducible and the caller refuses the workspace -- the same
+# answer, and for the same reason, as the branch that refuses a workspace
+# installing both runners and declaring neither. `!expansion` follows
+# ci/checks/test-layout.sh's `!shorthand` verdict, which marks the same kind of
+# thing: a value that is present, well-formed, and not evaluable here.
+#
+# Single quotes are exempt, because the shell exempts them: in `RUN='$LITERAL'`
+# the dollar sign *is* the value, and re-exporting it verbatim is exact.
 _tests_js_env_emit() {
-  local _nm="${1%%=*}" _vl="${1#*=}"
+  local _nm="${1%%=*}" _vl="${1#*=}" _sq=0
   if [ "${#_vl}" -ge 2 ]; then
     case "$_vl" in
-      "'"*"'"|'"'*'"') _vl="${_vl:1:$((${#_vl} - 2))}" ;;
+      "'"*"'") _vl="${_vl:1:$((${#_vl} - 2))}" ; _sq=1 ;;
+      '"'*'"') _vl="${_vl:1:$((${#_vl} - 2))}" ;;
+    esac
+  fi
+  if [ "$_sq" -eq 0 ]; then
+    case "$_vl" in
+      *'$'*|*'`'*) printf '!expansion %s\n' "$_nm" ; return 0 ;;
     esac
   fi
   printf '%s=%s\n' "$_nm" "$_vl"
@@ -762,6 +818,23 @@ _tests_js_workspace() {
   local _tj_kv
   while IFS= read -r _tj_kv; do
     [ -n "$_tj_kv" ] || continue
+    # An assignment whose value is a substitution is one this lane cannot
+    # reproduce, and reproducing it *wrongly* is the failure: the runner would
+    # get the literal `$VAR` where the script's own shell gives it a value, so a
+    # test guarded on that value skips itself and the lane reports PASS over a
+    # suite that never ran the cases the contract enables. Refused rather than
+    # approximated, which is the answer the both-runners branch above gives to
+    # the same shape of question.
+    case "$_tj_kv" in
+      '!expansion '*)
+        echo "Workspace ${ws} declares a test environment this lane cannot reproduce." >&2
+        echo "  '${_tj_kv#!expansion }' is assigned from a shell substitution in the 'test'" >&2
+        echo "  script, and this lane runs the pinned runner rather than that script, so" >&2
+        echo "  the value would arrive as the literal text instead of what the shell would" >&2
+        echo "  produce. A test gated on it then skips itself and this lane reports PASS." >&2
+        echo "  Inline the value in the script, or set it outside the manifest." >&2
+        return 30 ;;
+    esac
     _TJ_DECLARED_ENV+=( "$_tj_kv" )
   done < <(_tests_js_declared_env 2>/dev/null || true)
 

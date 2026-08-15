@@ -183,8 +183,18 @@ _bp_check_signed_commits() {
     _bp_infra "This push publishes commits on more than one lineage, so their signatures cannot be walked as one range. Push the refs separately."
     return 0
   fi
+  # And a range that could not be resolved is not an empty push either.
+  #
+  # This logged a skip and left OVERALL_RESULT at PASS, so with signed commits
+  # required and a tip that cannot be read -- CI_GATE_PUSH_NEW_SHA naming an
+  # object this clone does not carry -- the check reported success having
+  # verified no signature at all. push_range returns 1 only where the tip itself
+  # will not resolve; every case where there is simply nothing new to measure
+  # returns 0 with an empty or bare-tip range, and those still reach the walk
+  # below. So a non-zero status here is the tool failing, not the push being
+  # empty, and this is the check where the two must not be confused.
   if [ "$_bp_rc" -ne 0 ]; then
-    ci::log::info "No push range available; skipping signed commit check."
+    _bp_infra "Cannot resolve the range this push publishes, so no commit signature can be checked. Signed commits are required (CI_GATE_REQUIRE_SIGNED_COMMITS=1)."
     return 0
   fi
 
@@ -248,8 +258,11 @@ _bp_check_linear_history() {
     _bp_infra "This push publishes commits on more than one lineage, so merge commits cannot be counted over one range. Push the refs separately."
     return 0
   fi
+  # Same distinction as the signature check above, and the same conclusion: a
+  # required policy that cannot be evaluated is an infrastructure failure, not a
+  # pass. Both were skips, so a single unreadable tip reported PASS twice over.
   if [ "$_bp_rc" -ne 0 ]; then
-    ci::log::info "No push range available; skipping linear-history check."
+    _bp_infra "Cannot resolve the range this push publishes, so merge commits cannot be counted. Linear history is required (CI_GATE_REQUIRE_LINEAR_HISTORY=1)."
     return 0
   fi
 
