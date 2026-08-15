@@ -7223,12 +7223,12 @@ ship_ws_run() {
   # it here and require the lane to still carry it, so a change there fails this
   # case loudly instead of leaving it testing a copy.
   local prune
-  prune="find . \( -name 'node_modules' -o -path './dist' -o -path './build' \) -prune"
+  prune="find . \( -name 'node_modules' -o -path './dist' -o -path './build' -o -path './out' -o -path './coverage' -o -path './htmlcov' -o -path './.next' -o -path './.nuxt' -o -path './.turbo' -o -path './.vite' -o -path './.cache' \) -prune"
   grep -qF -- "$prune" "$REPO_ROOT/ci/checks/node.sh"     || { echo "the lane no longer uses this prune; update this case" >&2; return 1; }
 
   local sb; sb="$(mktemp -d)"
   local f
-  for f in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js            test/README.md test/fixtures/data.json src/app.js src/a.test.ts            e2e/x.cy.ts messages.cy.json openapi.spec.json            tests/build/checkout.test.ts build/out.test.js node_modules/x/test/a.js; do
+  for f in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js            test/README.md test/fixtures/data.json src/app.js src/a.test.ts            __tests__/login.js src/__tests__/deep/a.tsx            e2e/x.cy.ts messages.cy.json openapi.spec.json            tests/build/checkout.test.ts build/out.test.js node_modules/x/test/a.js            coverage/old.test.js .next/x.test.js; do
     mkdir -p "$sb/$(dirname "$f")" && : > "$sb/$f"
   done
 
@@ -7238,14 +7238,14 @@ ship_ws_run() {
 
   # Collected, and nothing else.
   local want
-  for want in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js               src/a.test.ts e2e/x.cy.ts tests/build/checkout.test.ts; do
+  for want in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js               __tests__/login.js src/__tests__/deep/a.tsx               src/a.test.ts e2e/x.cy.ts tests/build/checkout.test.ts; do
     [[ "$from_find" == *"$want"* ]]       || { rm -rf "$sb"; echo "a suite was not collected: ${want} (got [$from_find])" >&2; return 1; }
   done
   # `test/helpers/db.js` is in that list on purpose: it is a helper to a reader,
   # and `node --test` runs it. What keeps the directory rule honest is the
   # extension list, not a depth limit.
   local unwanted
-  for unwanted in openapi.spec.json messages.cy.json test/README.md                   test/fixtures/data.json src/app.js build/out.test.js                   node_modules/x/test/a.js; do
+  for unwanted in openapi.spec.json messages.cy.json test/README.md                   test/fixtures/data.json src/app.js build/out.test.js                   node_modules/x/test/a.js coverage/old.test.js .next/x.test.js; do
     [[ "$from_find" != *"$unwanted"* ]]       || { rm -rf "$sb"; echo "not a suite, but collected: ${unwanted} (got [$from_find])" >&2; return 1; }
   done
 
@@ -7255,7 +7255,7 @@ ship_ws_run() {
   # So they are compared to each other, not each to a list written twice.
   local from_re
   from_re="$( printf '%s
-' test/login.js test/api.mjs test/integration/login.js     test/helpers/db.js test/README.md test/fixtures/data.json src/app.js     src/a.test.ts e2e/x.cy.ts messages.cy.json openapi.spec.json     tests/build/checkout.test.ts     | grep -E "$re" | sort | tr '
+' test/login.js test/api.mjs test/integration/login.js     test/helpers/db.js test/README.md test/fixtures/data.json src/app.js     __tests__/login.js src/__tests__/deep/a.tsx     src/a.test.ts e2e/x.cy.ts messages.cy.json openapi.spec.json     tests/build/checkout.test.ts     | grep -E "$re" | sort | tr '
 ' ' ' )"
   [ "$from_find" = "$from_re" ]     || { rm -rf "$sb"; echo "the two suite scans disagree: find=[$from_find] head=[$from_re]" >&2; return 1; }
   rm -rf "$sb"

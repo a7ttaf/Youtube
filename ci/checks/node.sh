@@ -4409,35 +4409,41 @@ fi
 # HEAD-side expression below already held these to JS and TS; this half did not,
 # which is the asymmetry that comment is about, arriving from the other side.
 #
-# By position, for the runners that collect by directory and name nothing.
-# Mocha's default spec is `./test/*.{js,cjs,mjs}` and `node --test` collects
-# `test/**` recursively, so `test/integration/login.js` is a suite to one of
-# them -- and holding this to one level left it invisible to both scans: the
-# orphan guard let `test` and `test:unit` be deleted from a workspace that ships
-# one, and the lost-suite scan saw a workspace that never had tests to lose.
-# Recursive covers both conventions, and it is why `test/helpers/db.js` counts
-# here despite being a helper: `node --test` runs it. The extension list is what
-# keeps `test/fixtures/data.json` and `test/README.md` out.
+# By position, for the runners that collect by directory and name nothing. Three
+# of them, and each was found only after the one before it was added:
+#
+#   mocha        ./test/*.{js,cjs,mjs}
+#   node --test  test/** , recursively
+#   jest         **/__tests__/**/*.[jt]s?(x)   (its default testMatch)
+#
+# Recursive, because two of the three are -- and holding the directory rule to
+# one level left `test/integration/login.js` invisible to both scans, after
+# which the orphan guard let `test` and `test:unit` be deleted from a workspace
+# that ships one and the lost-suite scan saw a workspace that never had tests to
+# lose. It is why `test/helpers/db.js` counts here despite being a helper:
+# `node --test` runs it. The extension list, not a depth limit, is what keeps
+# `test/fixtures/data.json` and `test/README.md` out.
 #
 # Deliberately not shared with ci/checks/test-layout.sh's TEST_SUFFIXES, which
 # answers a different question -- which files Vitest's own include would collect
 # -- and where a Cypress spec is correctly not a member.
+
 
 _NODE_TEST_NAME_PRED=(
   '(' \
     '(' '(' -name '*.test.*' -o -name '*.spec.*' -o -name '*.cy.*' ')' \
         '(' -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
           -o -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.cts' ')' ')' \
-    -o '(' -path './test/*' \
-        '(' -name '*.js' -o -name '*.cjs' -o -name '*.mjs' \
-          -o -name '*.ts' -o -name '*.cts' -o -name '*.mts' ')' ')' \
+    -o '(' '(' -path './test/*' -o -path '*/__tests__/*' -o -path './__tests__/*' ')' \
+        '(' -name '*.js' -o -name '*.jsx' -o -name '*.cjs' -o -name '*.mjs' \
+          -o -name '*.ts' -o -name '*.tsx' -o -name '*.cts' -o -name '*.mts' ')' ')' \
   ')'
 )
 
 # The same rule for a listing rather than a filesystem walk: paths arrive
 # without the `./` that find emits, so the HEAD side spells it anchored at the
 # start of the path.
-_NODE_TEST_PATH_RE='\.(test|spec|cy)\.[cm]?[jt]sx?$|^test/.*\.[cm]?[jt]s$'
+_NODE_TEST_PATH_RE='\.(test|spec|cy)\.[cm]?[jt]sx?$|^test/.*\.[cm]?[jt]sx?$|(^|/)__tests__/.*\.[cm]?[jt]sx?$'
 
 # A workspace that ships tests must be able to run them. run_script only logs
 # "Skipping missing script", so deleting or renaming `test` would remove the
@@ -4446,7 +4452,7 @@ _NODE_TEST_PATH_RE='\.(test|spec|cy)\.[cm]?[jt]sx?$|^test/.*\.[cm]?[jt]s$'
 # presence of test files rather than on checks.yml, so the rule travels with the
 # workspace and a genuinely test-free workspace is unaffected.
 if ! script_exists "test" && ! script_exists "test:unit"; then
-  ORPHAN_TESTS="$(find . \( -name 'node_modules' -o -path './dist' -o -path './build' \) -prune -o \
+  ORPHAN_TESTS="$(find . \( -name 'node_modules' -o -path './dist' -o -path './build' -o -path './out' -o -path './coverage' -o -path './htmlcov' -o -path './.next' -o -path './.nuxt' -o -path './.turbo' -o -path './.vite' -o -path './.cache' \) -prune -o \
     -type f "${_NODE_TEST_NAME_PRED[@]}" -print 2>/dev/null | head -5 || true)"
   if [ -n "$ORPHAN_TESTS" ]; then
     echo "Workspace ${CI_GATE_NODE_WORKSPACE} ships tests but defines no 'test' or 'test:unit' script."
@@ -4473,7 +4479,7 @@ fi
 # there is anything left for it to run.
 if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
   && git rev-parse --verify HEAD >/dev/null 2>&1; then
-  WORKTREE_TESTS="$(find . \( -name 'node_modules' -o -path './dist' -o -path './build' \) -prune -o \
+  WORKTREE_TESTS="$(find . \( -name 'node_modules' -o -path './dist' -o -path './build' -o -path './out' -o -path './coverage' -o -path './htmlcov' -o -path './.next' -o -path './.nuxt' -o -path './.turbo' -o -path './.vite' -o -path './.cache' \) -prune -o \
     -type f "${_NODE_TEST_NAME_PRED[@]}" -print 2>/dev/null | head -1 || true)"
   if [ -z "$WORKTREE_TESTS" ]; then
     # Which commit is "before"? HEAD is right for the pre-commit gate, where the
