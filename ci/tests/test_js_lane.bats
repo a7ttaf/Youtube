@@ -7197,63 +7197,66 @@ ship_ws_run() {
     || { echo "a path containing a newline was folded into the list (rc=$nl_rc)" >&2; return 1; }
 }
 
-@test "node lane: a Mocha suite is a suite the test script may not lose" {
-  # Mocha is on this file's recognised-runner list and it names nothing: its
-  # default spec is `./test/*.{js,cjs,mjs}`, no suffix at all. So an ordinary
-  # `test/login.js` suite was invisible to both scans -- the orphan guard let
-  # `test` and `test:unit` be deleted from a workspace that ships one, and the
-  # lost-suite scan saw a workspace that never had tests to lose. Same shape as
-  # the Cypress case one runner over, and found the same way: by asking what
-  # each recognised runner actually collects.
+@test "node lane: what each recognised runner collects is what counts as a suite" {
+  # Two conventions, and they had been read as one loose rule.
+  #
+  # By suffix: `*.test.*` and `*.spec.*` on their own are a claim about any file
+  # whatsoever, so `openapi.spec.json` -- an API description -- failed a
+  # workspace for "shipping tests" while it shipped none. By position: Mocha
+  # collects `./test/*.{js,cjs,mjs}` and `node --test` collects `test/**`
+  # recursively, both naming nothing, so `test/login.js` and
+  # `test/integration/login.js` were invisible to both scans and the orphan
+  # guard let `test` and `test:unit` be deleted from a workspace that ships one.
+  #
+  # And the prune in front of them was unanchored: `tests/build/checkout.test.ts`
+  # is first-party, and every directory called `build` at any depth was being
+  # dropped with the workspace's own output directory.
   local pred re
   pred="$(sed -n '/^_NODE_TEST_NAME_PRED=(/,/^)/p' "$REPO_ROOT/ci/checks/node.sh")"
-  re="$(sed -n "s/^_NODE_TEST_PATH_RE='\(.*\)'$/\1/p" "$REPO_ROOT/ci/checks/node.sh")"
-  [ -n "$pred" ] && [ -n "$re" ] \
-    || { echo "could not lift the suite predicates from the lane" >&2; return 1; }
+  re="$(grep -m1 '^_NODE_TEST_PATH_RE=' "$REPO_ROOT/ci/checks/node.sh" | cut -d"'" -f2)"
+  [ -n "$pred" ] && [ -n "$re" ]     || { echo "could not lift the suite predicates from the lane" >&2; return 1; }
   bash -n <<< "$pred" || { echo "the extraction is not valid shell" >&2; return 1; }
   eval "$pred"
 
+  # The prune is pinned to the lane rather than lifted from it -- the same shape
+  # `tests-shell: a local cache under ci/ is not shell-suite drift` uses: state
+  # it here and require the lane to still carry it, so a change there fails this
+  # case loudly instead of leaving it testing a copy.
+  local prune
+  prune="find . \( -name 'node_modules' -o -path './dist' -o -path './build' \) -prune"
+  grep -qF -- "$prune" "$REPO_ROOT/ci/checks/node.sh"     || { echo "the lane no longer uses this prune; update this case" >&2; return 1; }
+
   local sb; sb="$(mktemp -d)"
   local f
-  for f in test/login.js test/api.mjs test/helpers/db.js test/README.md \
-           src/app.js src/a.test.ts e2e/x.cy.ts messages.cy.json \
-           node_modules/x/test/a.js; do
+  for f in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js            test/README.md test/fixtures/data.json src/app.js src/a.test.ts            e2e/x.cy.ts messages.cy.json openapi.spec.json            tests/build/checkout.test.ts build/out.test.js node_modules/x/test/a.js; do
     mkdir -p "$sb/$(dirname "$f")" && : > "$sb/$f"
+  done
+
+  local from_find
+  from_find="$( cd "$sb" && eval "$prune" -o -type f '"${_NODE_TEST_NAME_PRED[@]}"' -print 2>/dev/null     | sed 's|^\./||' | sort | tr '
+' ' ' )"
+
+  # Collected, and nothing else.
+  local want
+  for want in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js               src/a.test.ts e2e/x.cy.ts tests/build/checkout.test.ts; do
+    [[ "$from_find" == *"$want"* ]]       || { rm -rf "$sb"; echo "a suite was not collected: ${want} (got [$from_find])" >&2; return 1; }
+  done
+  # `test/helpers/db.js` is in that list on purpose: it is a helper to a reader,
+  # and `node --test` runs it. What keeps the directory rule honest is the
+  # extension list, not a depth limit.
+  local unwanted
+  for unwanted in openapi.spec.json messages.cy.json test/README.md                   test/fixtures/data.json src/app.js build/out.test.js                   node_modules/x/test/a.js; do
+    [[ "$from_find" != *"$unwanted"* ]]       || { rm -rf "$sb"; echo "not a suite, but collected: ${unwanted} (got [$from_find])" >&2; return 1; }
   done
 
   # The two halves have to agree about what a test file is, and an asymmetry
   # here is not a missed case but an inverted one: the worktree side deciding a
   # workspace still has tests is what makes the lost-suite scan skip entirely.
   # So they are compared to each other, not each to a list written twice.
-  local from_find from_re
-  from_find="$( cd "$sb" && find . \( -name 'node_modules' -o -name 'dist' -o -name 'build' \) -prune -o \
-    -type f "${_NODE_TEST_NAME_PRED[@]}" -print 2>/dev/null | sed 's|^\./||' | sort | tr '\n' ' ' )"
-  from_re="$( printf '%s\n' test/login.js test/api.mjs test/helpers/db.js test/README.md \
-    src/app.js src/a.test.ts e2e/x.cy.ts messages.cy.json \
-    | grep -E "$re" | sort | tr '\n' ' ' )"
-  [ "$from_find" = "$from_re" ] \
-    || { rm -rf "$sb"; echo "the two suite scans disagree: find=[$from_find] head=[$from_re]" >&2; return 1; }
-
-  # And what they agree on is the right set. Mocha's default directory counts;
-  # a helper one level further down does not, and neither does a README beside
-  # the specs -- `-path './test/*.js'` alone matched the helper, because find's
-  # glob crosses `/` where a shell one would not.
-  [[ "$from_find" == *"test/login.js"* ]] \
-    || { rm -rf "$sb"; echo "a Mocha suite is still invisible: [$from_find]" >&2; return 1; }
-  [[ "$from_find" == *"test/api.mjs"* ]] \
-    || { rm -rf "$sb"; echo "only one of Mocha's default extensions counts: [$from_find]" >&2; return 1; }
-  [[ "$from_find" != *"test/helpers/db.js"* ]] \
-    || { rm -rf "$sb"; echo "a helper under test/ counts as a suite: [$from_find]" >&2; return 1; }
-  [[ "$from_find" != *"test/README.md"* ]] \
-    || { rm -rf "$sb"; echo "a README beside the specs counts as a suite: [$from_find]" >&2; return 1; }
-  [[ "$from_find" != *"messages.cy.json"* ]] \
-    || { rm -rf "$sb"; echo "a Welsh locale file is back: [$from_find]" >&2; return 1; }
-
-  # The controls that stop this being satisfied by a predicate matching
-  # everything: the suffix-named suites the scans already knew are still found.
-  [[ "$from_find" == *"src/a.test.ts"* ]] && [[ "$from_find" == *"e2e/x.cy.ts"* ]] \
-    || { rm -rf "$sb"; echo "the suffix-named suites were lost: [$from_find]" >&2; return 1; }
-  [[ "$from_find" != *"src/app.js"* ]] \
-    || { rm -rf "$sb"; echo "ordinary source counts as a test: [$from_find]" >&2; return 1; }
+  local from_re
+  from_re="$( printf '%s
+' test/login.js test/api.mjs test/integration/login.js     test/helpers/db.js test/README.md test/fixtures/data.json src/app.js     src/a.test.ts e2e/x.cy.ts messages.cy.json openapi.spec.json     tests/build/checkout.test.ts     | grep -E "$re" | sort | tr '
+' ' ' )"
+  [ "$from_find" = "$from_re" ]     || { rm -rf "$sb"; echo "the two suite scans disagree: find=[$from_find] head=[$from_re]" >&2; return 1; }
   rm -rf "$sb"
 }

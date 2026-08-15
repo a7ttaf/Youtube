@@ -4400,33 +4400,44 @@ fi
 # question -- which files Vitest's own include would collect -- and where a
 # Cypress spec is correctly not a member.
 #
-# Mocha is on the recognised-runner list and names nothing. Its default spec is
-# `./test/*.{js,cjs,mjs}` -- no suffix at all -- so an ordinary `test/login.js`
-# suite was invisible to both scans here: the orphan guard let `test` and
-# `test:unit` be deleted from a workspace that ships one, and the lost-suite
-# scan below saw a workspace that never had tests to lose. Matched by *position*
-# rather than by name, which is what Mocha does: the workspace's own top-level
-# `test/` directory, one level deep, since `test/helpers/db.js` is not a spec
-# and a nested `src/test/` belongs to something else.
+# Two conventions, and they are different rules rather than one loose one.
 #
-# `! -path './test/*/*'` is what holds it to one level: find's `-path` glob is
-# not a shell glob and its `*` crosses `/`, so `-path './test/*.js'` alone also
-# matched `./test/helpers/db.js`. That is a helper, not a spec -- and it made
-# this half of the check disagree with the HEAD-side expression below, which is
-# the asymmetry the comment there is about.
+# By suffix, for the runners that collect by name -- and only on a file some
+# runner could execute. `*.test.*` and `*.spec.*` on their own are a claim about
+# any file whatsoever: `openapi.spec.json` is an API description, and a workspace
+# shipping one and no test at all was failed here for "shipping tests". The
+# HEAD-side expression below already held these to JS and TS; this half did not,
+# which is the asymmetry that comment is about, arriving from the other side.
+#
+# By position, for the runners that collect by directory and name nothing.
+# Mocha's default spec is `./test/*.{js,cjs,mjs}` and `node --test` collects
+# `test/**` recursively, so `test/integration/login.js` is a suite to one of
+# them -- and holding this to one level left it invisible to both scans: the
+# orphan guard let `test` and `test:unit` be deleted from a workspace that ships
+# one, and the lost-suite scan saw a workspace that never had tests to lose.
+# Recursive covers both conventions, and it is why `test/helpers/db.js` counts
+# here despite being a helper: `node --test` runs it. The extension list is what
+# keeps `test/fixtures/data.json` and `test/README.md` out.
+#
+# Deliberately not shared with ci/checks/test-layout.sh's TEST_SUFFIXES, which
+# answers a different question -- which files Vitest's own include would collect
+# -- and where a Cypress spec is correctly not a member.
+
 _NODE_TEST_NAME_PRED=(
-  '(' -name '*.test.*' -o -name '*.spec.*' \
-    -o -name '*.cy.js' -o -name '*.cy.jsx' -o -name '*.cy.mjs' -o -name '*.cy.cjs' \
-    -o -name '*.cy.ts' -o -name '*.cy.tsx' -o -name '*.cy.mts' -o -name '*.cy.cts' \
-    -o '(' -path './test/*' ! -path './test/*/*' \
-      '(' -name '*.js' -o -name '*.cjs' -o -name '*.mjs' \
-        -o -name '*.ts' -o -name '*.cts' -o -name '*.mts' ')' ')' ')'
+  '(' \
+    '(' '(' -name '*.test.*' -o -name '*.spec.*' -o -name '*.cy.*' ')' \
+        '(' -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
+          -o -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.cts' ')' ')' \
+    -o '(' -path './test/*' \
+        '(' -name '*.js' -o -name '*.cjs' -o -name '*.mjs' \
+          -o -name '*.ts' -o -name '*.cts' -o -name '*.mts' ')' ')' \
+  ')'
 )
 
 # The same rule for a listing rather than a filesystem walk: paths arrive
 # without the `./` that find emits, so the HEAD side spells it anchored at the
 # start of the path.
-_NODE_TEST_PATH_RE='\.(test|spec|cy)\.[cm]?[jt]sx?$|^test/[^/]+\.[cm]?[jt]s$'
+_NODE_TEST_PATH_RE='\.(test|spec|cy)\.[cm]?[jt]sx?$|^test/.*\.[cm]?[jt]s$'
 
 # A workspace that ships tests must be able to run them. run_script only logs
 # "Skipping missing script", so deleting or renaming `test` would remove the
@@ -4435,7 +4446,7 @@ _NODE_TEST_PATH_RE='\.(test|spec|cy)\.[cm]?[jt]sx?$|^test/[^/]+\.[cm]?[jt]s$'
 # presence of test files rather than on checks.yml, so the rule travels with the
 # workspace and a genuinely test-free workspace is unaffected.
 if ! script_exists "test" && ! script_exists "test:unit"; then
-  ORPHAN_TESTS="$(find . \( -name 'node_modules' -o -name 'dist' -o -name 'build' \) -prune -o \
+  ORPHAN_TESTS="$(find . \( -name 'node_modules' -o -path './dist' -o -path './build' \) -prune -o \
     -type f "${_NODE_TEST_NAME_PRED[@]}" -print 2>/dev/null | head -5 || true)"
   if [ -n "$ORPHAN_TESTS" ]; then
     echo "Workspace ${CI_GATE_NODE_WORKSPACE} ships tests but defines no 'test' or 'test:unit' script."
@@ -4462,7 +4473,7 @@ fi
 # there is anything left for it to run.
 if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
   && git rev-parse --verify HEAD >/dev/null 2>&1; then
-  WORKTREE_TESTS="$(find . \( -name 'node_modules' -o -name 'dist' -o -name 'build' \) -prune -o \
+  WORKTREE_TESTS="$(find . \( -name 'node_modules' -o -path './dist' -o -path './build' \) -prune -o \
     -type f "${_NODE_TEST_NAME_PRED[@]}" -print 2>/dev/null | head -1 || true)"
   if [ -z "$WORKTREE_TESTS" ]; then
     # Which commit is "before"? HEAD is right for the pre-commit gate, where the
