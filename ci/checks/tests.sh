@@ -509,7 +509,11 @@ _tests_js_scan_runner() {
 _tests_jest_path_flag() {
   local _v=""
   if ci::common::command_exists node; then
-    _v="$(node -e "for(const p of ['./node_modules/jest/package.json','./node_modules/jest-cli/package.json']){try{process.stdout.write(String(require(p).version||''));break}catch(e){}}" 2>/dev/null || true)"
+    # Breaks on a version, not on a successful require: a manifest that parses
+    # but carries no `version` used to end the search having written nothing, so
+    # a workspace whose `jest/package.json` is a stub while `jest-cli` holds the
+    # real 30.x fell back to the singular spelling Jest 30 has removed.
+    _v="$(node -e "for(const p of ['./node_modules/jest/package.json','./node_modules/jest-cli/package.json']){try{const v=String(require(p).version||'');if(v){process.stdout.write(v);break}}catch(e){}}" 2>/dev/null || true)"
   fi
   case "${_v%%.*}" in
     ''|*[!0-9]*) printf '%s' '--testPathPattern' ; return 0 ;;

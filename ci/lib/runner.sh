@@ -258,7 +258,12 @@ ci::runner::submit() {
       #
       # Not a hypothetical host, either -- a stock macOS box has neither
       # `timeout` nor `gtimeout` until coreutils is installed, so this is a
-      # configuration the runner has to refuse rather than assume away.
+      # configuration the runner has to refuse rather than assume away. Nor is
+      # it opt-in: ci/config/gate.yml carries default_timeout_sec, so on such a
+      # host this arm answers for every scheduled check and the whole run stops
+      # on infrastructure. That is the intended reading -- a gate that cannot
+      # bound its checks has not validated anything -- and it is why the message
+      # names the install that fixes it rather than only the condition.
       # Recorded exactly like that arm, so the pool's bookkeeping sees an
       # ordinary completed job rather than a launch that never happened.
       {

@@ -572,11 +572,6 @@ ws_run() {
     'true;vitest run|vitest' \
     'npx --package vitest jest --ci|jest' \
     'npx --package=vitest jest --ci|jest' \
-    "npm exec -c 'jest --ci'|jest" \
-    "npm exec --call 'jest --ci'|jest" \
-    "npx -c 'jest --ci'|jest" \
-    "npx --call 'vitest run'|vitest" \
-    "npm exec --package jest -c 'jest --ci'|jest" \
     'pnpm -p vitest run|vitest' \
     'timeout 300 vitest run|vitest' \
     'env FOO=1 jest --ci|jest' \
@@ -608,6 +603,57 @@ ws_run() {
   [[ "$output" == *"not appear to run a test runner"* ]]
   rm -rf "$sb"
   rm -rf "$NODE_SB"
+}
+
+@test "js lane: an npm --call payload names the runner it runs" {
+  # `npm exec --package jest -c 'jest --ci'` runs that string with the package's
+  # binaries on PATH, so the payload is the command. tests.sh consumed it as an
+  # inert option value and declared nothing -- and nothing is what sends a
+  # workspace carrying a local Vitest to the installed-runner fallback, so
+  # Vitest ran over the Jest suite the manifest names, collected nothing it
+  # recognised, exited 0, and tests-js reported PASS.
+  #
+  # tests.sh only. ci/checks/node.sh reads `--call` as a value-taking option and
+  # refuses the script, which is fail-closed and is pinned by `node lane: a
+  # package manager's value-taking options are its own, not one list`. The two
+  # readers differ here on purpose -- opposite failure directions -- so this is
+  # deliberately not folded into the cross-reader case above.
+  local sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+
+  _declared_call() {
+    printf '{ "name": "w", "scripts": { "test": %s } }\n' "$1" > "$sb/package.json"
+    ( cd "$sb" && bash -c '. ci/lib/log.sh 2>/dev/null
+                           . ci/lib/common.sh
+                           eval "$(sed -n "/BEGIN declared-runner reader/,/END declared-runner reader/p" ci/checks/tests.sh)"
+                           _tests_js_declared_runner || printf ""' )
+  }
+
+  local spec truth got
+  for spec in \
+    "npm exec -c 'jest --ci'|jest" \
+    "npm exec --call 'jest --ci'|jest" \
+    "npx -c 'jest --ci'|jest" \
+    "npx --call 'vitest run'|vitest" \
+    "npm exec --package jest -c 'jest --ci'|jest" \
+    "npm exec -c 'echo hi' && vitest run|vitest" \
+    "bash -c 'jest --ci'|jest"
+  do
+    truth="${spec##*|}"
+    spec="${spec%|*}"
+    got="$(_declared_call "\"$spec\"")"
+    [ "$got" = "$truth" ] \
+      || { echo "read '$spec' as '${got:-<none>}', shell runs '$truth'" >&2; rm -rf "$sb"; return 1; }
+  done
+
+  # The control: a payload naming no runner still declares nothing, so the
+  # `--call` arm cannot be a way to make any script look like a test script.
+  got="$(_declared_call "\"npm exec -c 'echo nothing'\"")"
+  [ -z "$got" ] || { echo "expected nothing, got '$got'" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
 }
 
 @test "js lane: the Jest path filter is spelled the way the installed Jest spells it" {
@@ -1402,24 +1448,26 @@ ws_run() {
   elapsed="$(printf '%s\n' "$output" | sed -n 's/^elapsed=//p')"
   [ -n "$elapsed" ]
 
-  # ci::runner::submit wraps the check only when `timeout` or `gtimeout` exists
-  # and runs it bare otherwise, which is documented behaviour and not a defect.
-  # Asserting rc=124 unconditionally therefore made this case fail on a machine
-  # that has neither, for the one reason the runner is entitled to. Both
-  # branches are asserted instead of skipping either: a skip on the machine that
-  # lacks the tool is indistinguishable from a skip on the machine where the
-  # feature regressed.
+  # Both branches are asserted rather than skipping either: a skip on the
+  # machine that lacks the tool is indistinguishable from a skip on the machine
+  # where the feature regressed.
   if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
     # 124 is what `timeout` returns, and what preflight maps to FAIL_INFRA, so
     # a killed check is reported as one rather than as a mystery.
     [[ "$output" == *"rc=124"* ]]
     [ "$elapsed" -lt 5 ]
   else
-    # No timeout tool: the check must still run to completion and report its own
-    # result. What must never happen is the runner inventing a timeout it cannot
-    # enforce.
-    [[ "$output" == *"rc=0"* ]]
-    [ "$elapsed" -ge 5 ]
+    # No timeout tool. This branch used to assert the opposite -- that the check
+    # runs to completion and reports its own result -- on the grounds that
+    # running bare was documented behaviour rather than a defect. It is a defect:
+    # the cap exists because someone decided this check must not run forever, so
+    # dropping it silently is how a hung blocker stalls preflight for as long as
+    # the caller will wait, with nothing in the log saying the bound was skipped.
+    # A bound that cannot be enforced is now recorded as infrastructure and the
+    # check is not run at all, which is what `runner: a timeout this host cannot
+    # enforce is refused, not dropped` in ci/tests/test_preflight.bats pins.
+    [[ "$output" == *"rc=30"* ]]
+    [ "$elapsed" -lt 5 ]
   fi
 }
 
@@ -2503,6 +2551,28 @@ ws_run() {
   [ "$status" -eq 20 ]
   [[ "$output" == *"only.test.ts"* ]] || { echo "$output" >&2; false; }
   rm -rf "$NODE_SB"
+
+  # A token carrying TWO `=` is where the first version of this rejoin lost the
+  # guard. The delimiter was taken from the first `=` while the arm was entered
+  # on a quote after the second, so `_q` became `s` -- the first letter of
+  # `singleThread` -- and the loop then ran until a word ended with `s`.
+  # `tests/only.test.ts` does, so the filter was absorbed into a token starting
+  # with `-` and skipped as a flag. The lane went from refusing this to passing
+  # it. Both readers are covered: the wrapper path and the direct runner path.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --poolOptions=singleThread=\"a b\" tests/only.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "./scripts/vitest run --sequence=shuffle=\"a b\" tests/only.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"narrows its own suite"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
 }
 
 @test "node lane: a Cypress suite is a suite the test script may not lose" {
@@ -2536,6 +2606,23 @@ ws_run() {
   run ws_run
   [[ "$output" != *"ships tests but defines no"* ]]
   rm -rf "$NODE_SB"
+
+  # `cy` is the ISO-639-1 code for Welsh, so `messages.cy.json` is a locale file
+  # and not a suite. A bare `*.cy.*` counted it, which refused this workspace
+  # here -- and did something worse to the lost-suite scan, which is skipped
+  # entirely whenever the worktree still looks like it has tests: one such file
+  # meant every real test could be deleted and the push would pass. The
+  # predicate is bounded to Cypress's documented extensions for that reason.
+  ws_setup
+  rm -f "$NODE_SB/ws/tests/a.test.ts"
+  mkdir -p "$NODE_SB/ws/src/i18n"
+  printf '{ "hello": "helo" }\n' > "$NODE_SB/ws/src/i18n/messages.cy.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"ships tests but defines no"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"messages.cy.json"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
 }
 
 @test "node lane: build mode survives the flags between -b and its project" {
@@ -2566,6 +2653,29 @@ ws_run() {
   run ws_run
   [ "$status" -ne 0 ]
   [[ "$output" == *"a project this workspace does not have"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # Making build mode outlive its token also made `-d` reach the project arm.
+  # In build mode `-d` is tsc's short `--dry`: it reports what it would build
+  # and compiles nothing, so this would pass the lane having checked nothing --
+  # the very thing the `--clean`/`--dry` arm above exists to refuse.
+  ws_setup
+  printf '{ "compilerOptions": { "noEmit": true } }\n' > "$NODE_SB/ws/tsconfig.app.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc -b -d tsconfig.app.json" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # And the control that keeps the refusal conditional: outside build mode `-d`
+  # is `--declaration`, which does type check, so it must still be accepted.
+  ws_setup
+  printf '{ "compilerOptions": { "noEmit": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc -p tsconfig.json -d --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]] || { echo "$output" >&2; false; }
   rm -rf "$NODE_SB"
 }
 

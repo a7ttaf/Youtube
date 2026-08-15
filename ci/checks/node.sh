@@ -2263,21 +2263,24 @@ _pm_advance() {
   # _reject_narrowing_flags is keyed by runner: one list cannot describe five
   # vocabularies. `-p` is `--package` to `npx` and `--parseable` to `pnpm`, so a
   # shared list either misses npx's value or eats pnpm's command.
-  # `-c`/`--call` is deliberately absent. npm documents it as taking a *command
-  # string* -- `npm exec --package jest -c 'jest --ci'` runs that string with the
-  # package's binaries on PATH -- so the word after it is the command, not an
-  # inert option value. Consumed as a value, `npx -c 'jest --ci'` left this
-  # reader with no command at all, and a script that names no runner is one this
-  # lane refuses: a legitimate test script rejected for running no test runner.
+  # `-c`/`--call` stays a value-taking option here, and that is a decision this
+  # file has already made deliberately rather than an omission. `node lane: a
+  # package manager's value-taking options are its own, not one list` pins it,
+  # and says why: this scan word-splits, so even the quoted `npx -c 'tsc
+  # --noEmit'` arrives as separate tokens and there is no command for the option
+  # to hand over. Refusing that script is the fail-closed answer, and it is the
+  # answer the case asserts.
   #
-  # Skipping it as an ordinary boolean is what makes the payload's first word
-  # arrive in command position, which is where the caller already unquotes it.
-  # ci/checks/tests.sh reads the same spelling through its own `--call` arm, and
-  # `js lane: the two runner readers agree about the same test script` pins the
-  # two together so they cannot drift apart about it again.
+  # ci/checks/tests.sh reads the same spelling differently, on purpose. Its
+  # failure direction is the opposite one: returning "nothing declared" there
+  # sends a workspace carrying a local Vitest to the installed-runner fallback,
+  # so Vitest runs over a Jest suite, collects nothing and the lane reports
+  # PASS. Fail-open, where this reader's answer is fail-closed. The two readers
+  # therefore differ about `--call` by design, which is why the cross-reader
+  # case does not list it among the spellings they must agree on.
   case "${_pm_name}|$1" in
-    'npx|-p'|'npx|--package' \
-      |'npm|-p'|'npm|--package' \
+    'npx|-p'|'npx|--package'|'npx|-c'|'npx|--call' \
+      |'npm|-p'|'npm|--package'|'npm|-c'|'npm|--call' \
       |'npm|--prefix'|'npm|-w'|'npm|--workspace'|'npm|-C' \
       |'pnpm|--filter'|'pnpm|-F'|'pnpm|--dir'|'pnpm|-C'|'pnpm|--workspace-dir' \
       |'yarn|--cwd' \
@@ -2468,11 +2471,29 @@ _rejoin_quoted() {
       done
       _RJ_N="$_n"
       ;;
-    # Measured on the value rather than the whole token, so the flag name and
-    # the `=` cannot be mistaken for the closing quote, and `--reporter=json`
-    # never enters here at all -- the pattern requires a quote after the `=`.
-    -*=\"*|-*=\'*)
+    # The value begins immediately after the FIRST `=`, and the delimiter has to
+    # be read from there.
+    #
+    # A pattern of `-*=\"*` matches a quote following *any* `=` in the token,
+    # while the body strips to the first one -- so on a token carrying two,
+    # `_q` became an ordinary letter and the loop then ran until some later word
+    # happened to end with it. `--poolOptions=singleThread="a b"` took `s` from
+    # `singleThread`, and `tests/only.test.ts` ends with `s`: the trailing
+    # positional test filter was absorbed into a token beginning with `-`, which
+    # both readers skip as a flag, so the filter was never judged and the lane
+    # passed a script that narrows its own suite. The rollback below could not
+    # catch it either -- a terminator *was* found, just the wrong one.
+    #
+    # So the arm is entered on any `-*=*` and the decision is made on the value:
+    # a quote there or nothing happens at all. `--reporter=json` and
+    # `--poolOptions=singleThread="a` alike are left exactly as they arrived,
+    # which is what bebd24d3 did with them and is the fail-closed answer.
+    -*=*)
       _qv="${_RJ_TOK#*=}"
+      case "$_qv" in
+        \"*|\'*) ;;
+        *) return 0 ;;
+      esac
       _q="${_qv:0:1}"
       while [ "${#_qv}" -lt 2 ] || [ "${_qv: -1}" != "$_q" ]; do
         if [ "$#" -eq 0 ]; then
@@ -3678,6 +3699,25 @@ _reject_tsc_args() {
         ;;
       [A-Za-z_]*=*)
         prev="" ; shift ; continue ;;
+      # The short spelling of `--dry`, which the arm above refuses by its long
+      # name only. tsc reads `-d` as `--declaration` outside build mode -- which
+      # does type check -- and as `--dry` inside it, where it reports what it
+      # would do and compiles nothing. So it cannot be denied outright, and
+      # leaving it to the generic flag arm let `tsc -b -d tsconfig.json` reach
+      # the project arm below and pass the lane having checked nothing. `low` is
+      # lowercased before this case, so `-D` arrives here as `-d` too.
+      -d)
+        if [ "$_ts_build" -eq 1 ]; then
+          echo "Workspace ${CI_GATE_NODE_WORKSPACE} runs a non-compiling tsc mode in its"
+          echo "  '${script_name}' script:"
+          echo "    ${script_name}: ${cmd}"
+          echo "    offending argument: ${tok}"
+          echo "  In build mode '-d' is --dry: it reports what it would build and"
+          echo "  compiles nothing, so the lane reports PASS having checked"
+          echo "  nothing. Drop it, or use 'tsc -b <project>' without it."
+          exit "$CI_RESULT_FAIL_NEW_ISSUE"
+        fi
+        prev="$low" ; shift ; continue ;;
       # Build mode recorded as state, not merely as `prev`. `prev` holds the one
       # token before the current word, and the arm below that reads a project
       # out of it therefore only survives while `-b` is *immediately* in front:
@@ -4285,15 +4325,26 @@ fi
 # neither `*.test.*` nor `*.spec.*`. Both scans therefore read a Cypress-only
 # workspace as test-free: deleting `test` and `test:unit` left the orphan guard
 # silent, both scripts were skipped, and the lane exited PASS having run no
-# suite at all -- and the lost-suite scan below could never fire either, because
-# a workspace it always reads as empty has nothing to have lost.
+# suite at all.
+#
+# Spelled out to the extensions rather than as `*.cy.*`, which is not a
+# tightening for its own sake: `cy` is the ISO-639-1 code for Welsh, so
+# `messages.cy.json` is an ordinary locale file and a bare `*.cy.*` read it as a
+# test. That refused a legitimate workspace through the orphan guard, and did
+# something worse through the scan below -- a workspace holding one such file
+# always looks like it still has tests, so the lost-suite check is skipped and
+# deleting every real test passes.
 #
 # The other runners this file recognises are already covered: vitest, jest and
 # playwright all collect `.test.`/`.spec.` by default. Deliberately not shared
 # with ci/checks/test-layout.sh's TEST_SUFFIXES, which answers a different
 # question -- which files Vitest's own include would collect -- and where a
 # Cypress spec is correctly not a member.
-_NODE_TEST_NAME_PRED=( '(' -name '*.test.*' -o -name '*.spec.*' -o -name '*.cy.*' ')' )
+_NODE_TEST_NAME_PRED=(
+  '(' -name '*.test.*' -o -name '*.spec.*' \
+    -o -name '*.cy.js' -o -name '*.cy.jsx' -o -name '*.cy.mjs' -o -name '*.cy.cjs' \
+    -o -name '*.cy.ts' -o -name '*.cy.tsx' -o -name '*.cy.mts' -o -name '*.cy.cts' ')'
+)
 
 # A workspace that ships tests must be able to run them. run_script only logs
 # "Skipping missing script", so deleting or renaming `test` would remove the
@@ -4362,8 +4413,15 @@ if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1 \
       echo "  that failed to produce one."
       exit "$CI_RESULT_FAIL_INFRA"
     fi
+    # `cy` alongside the other two, so the two halves of this check agree about
+    # what a test file is. They did not: the worktree side above was widened to
+    # know Cypress and this one was left behind, and an asymmetry here is not a
+    # missed case but an inverted one -- the worktree side deciding a workspace
+    # still has tests is what makes this scan skip entirely. Anchored to the
+    # same extensions the predicate above uses, for the same reason: a bare
+    # `\.cy\.` would count `messages.cy.json` as a suite.
     HEAD_TESTS="$(printf '%s\n' "$_lost_raw" \
-      | grep -E '\.(test|spec)\.[cm]?[jt]sx?$' | head -5 || true)"
+      | grep -E '\.(test|spec|cy)\.[cm]?[jt]sx?$' | head -5 || true)"
     if [ -n "$HEAD_TESTS" ]; then
       echo "Workspace ${CI_GATE_NODE_WORKSPACE} has lost its entire test suite."
       echo "  ${_lost_ref} carries test files here and this tree has none, so the"
