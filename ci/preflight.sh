@@ -307,23 +307,26 @@ run_check() {
 _CHECKS_CONFIG_FILE=""
 _CHECKS_CONFIG_TMP=""
 # Removed at exit rather than after the first read: the answer is cached for the
-# whole run, so the file has to outlive every caller. Always returns 0 -- an EXIT
-# trap that reports a status of its own can overwrite the one being reported.
-_checks_config_cleanup() {
-  [ -n "${_CHECKS_CONFIG_TMP:-}" ] && rm -f "$_CHECKS_CONFIG_TMP"
-  return 0
-}
-trap _checks_config_cleanup EXIT
+# whole run, so the file has to outlive every caller. Guarded rather than
+# unconditional, so the trap is inert until there is something to remove, and
+# written inline rather than as a function so it is visibly the command that
+# runs -- a named helper here is a definition with no call site any linter can
+# see. `[ -z ]` short-circuits to status 0 when there is nothing to do, which
+# keeps the trap from reporting a status of its own.
+trap '[ -z "${_CHECKS_CONFIG_TMP:-}" ] || rm -f "$_CHECKS_CONFIG_TMP"' EXIT
 
-_checks_config_file() {
+# Sets `_CHECKS_CONFIG_FILE`; prints nothing.
+#
+# Assignment rather than output, and it is not a style choice: a caller reading
+# this through `$(...)` would run it in a subshell, where both the cached answer
+# and the temp file's lifetime die with the substitution -- the `git show` would
+# repeat on every question, which is the cost this cache exists to avoid.
+_checks_config_resolve() {
   # `${...:-}` rather than a bare expansion: ci/tests/test_preflight.bats lifts
   # these functions out one at a time, so the cache variable's top-level
   # initialiser is not necessarily in scope where they run. A helper that only
   # works when the whole file is present is a helper the suite cannot drive.
-  if [ -n "${_CHECKS_CONFIG_FILE:-}" ]; then
-    printf '%s' "$_CHECKS_CONFIG_FILE"
-    return 0
-  fi
+  [ -z "${_CHECKS_CONFIG_FILE:-}" ] || return 0
   _CHECKS_CONFIG_FILE="ci/config/checks.yml"
   if [ "${MODE:-}" = "ship" ]; then
     local _cc_tmp=""
@@ -340,12 +343,13 @@ _checks_config_file() {
       echo "ci/config/checks.yml is not readable in HEAD; running every lane." >&2
     fi
   fi
-  printf '%s' "$_CHECKS_CONFIG_FILE"
 }
 
 _check_disabled_in_config() {
   local wanted="$1" _cc_file
-  _cc_file="$(_checks_config_file)"
+  # A plain call, not `$(...)`: see _checks_config_resolve.
+  _checks_config_resolve
+  _cc_file="$_CHECKS_CONFIG_FILE"
 
   [ -f "$_cc_file" ] || return 1
 

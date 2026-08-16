@@ -610,7 +610,7 @@ _pf_fns() {
   # Every callee too. A helper missing from the extraction is "command not
   # found" -> non-zero -> read as a decision, and the case would then pass
   # without the code under test having run.
-  _pf_fns "$fns" _check_should_skip _checks_config_file _check_disabled_in_config \
+  _pf_fns "$fns" _check_should_skip _checks_config_resolve _check_disabled_in_config \
     _all_related_checks_disabled _checks_for_lane_label
   local rc=0
   # shellcheck disable=SC1090
@@ -926,13 +926,13 @@ _pf_fns() {
   # branch of it is pinned here: nested and list forms, comments on the id line
   # and on the value, a check with no `enabled:` at all, and a top-level key
   # that ends the block mid-file.
-  # `_checks_config_file` too: the reader asks it which copy of checks.yml to
+  # `_checks_config_resolve` too: the reader asks it which copy of checks.yml to
   # parse -- the worktree's outside ship mode, HEAD's inside it -- so lifting the
   # parser without it leaves the parser calling a function that is not there.
   # This case is about the parse and drives it in a non-ship mode, where the
   # answer is the worktree file it always was.
   local fns="$BATS_TEST_TMPDIR/cfg.sh"
-  _pf_fns "$fns" _checks_config_file _check_disabled_in_config
+  _pf_fns "$fns" _checks_config_resolve _check_disabled_in_config
   local sb="$BATS_TEST_TMPDIR/cfgsb"
   mkdir -p "$sb/ci/config"
   cat > "$sb/ci/config/checks.yml" <<'YML'
@@ -3495,8 +3495,8 @@ YML
   sb="$(mktemp -d)"
   drv="$(mktemp)"
   {
-    sed -n '/^_CHECKS_CONFIG_FILE=/,/^trap _checks_config_cleanup EXIT$/p' "$REPO_ROOT/ci/preflight.sh"
-    sed -n '/^_checks_config_file()/,/^}/p' "$REPO_ROOT/ci/preflight.sh"
+    sed -n '/^_CHECKS_CONFIG_FILE=/,/^_CHECKS_CONFIG_TMP=""$/p' "$REPO_ROOT/ci/preflight.sh"
+    sed -n '/^_checks_config_resolve()/,/^}/p' "$REPO_ROOT/ci/preflight.sh"
     sed -n '/^_check_disabled_in_config()/,/^}/p' "$REPO_ROOT/ci/preflight.sh"
   } > "$drv"
   bash -n "$drv" || { rm -rf "$sb" "$drv"; echo "the extraction is not valid shell" >&2; return 1; }
