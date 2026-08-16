@@ -68,7 +68,7 @@ it was measured at.
 It is much longer when your changeset includes a shell script, because that
 schedules `tests-shell` — the bats suites under `ci/tests/`, which drive
 preflight, the node lane and the layout guard against synthetic trees and spawn
-a package manager or init a repository in many of them. That is roughly 530
+a package manager or init a repository in many of them. That is roughly 540
 cases and around half an hour; `ci/config/checks.yml` gives the lane a
 3600-second timeout for exactly that reason, because at the 20-minute gate
 default it was being killed and reported as broken infrastructure. A run that

@@ -1646,7 +1646,7 @@ single P-tier above.
   finding went with them — `sort -z -u` is a GNU extension against a stated Bash
   3.2 floor, so the dedupe is done in the shell, quadratic over 219 candidates
   and cheaper than the subprocess it replaces.
-  Combined suite: `bats ci/tests/` = 536 cases, 0 failures.
+  Combined suite: `bats ci/tests/` = 539 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

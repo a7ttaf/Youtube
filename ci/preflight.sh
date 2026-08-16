@@ -1102,6 +1102,21 @@ fi
 # gate and stands behind HEAD, which is already committed.
 export CI_GATE_MODE="$MODE"
 
+# The runner reads its per-check `timeout_sec` from checks.yml too, and it was
+# reading the worktree's while scheduling read HEAD's. Same file, two answers,
+# and both directions bite: an unstaged `timeout_sec: 1` on typecheck-js kills an
+# unrelated outgoing check seconds in and blocks the push, while an unstaged
+# increase weakens the budget using configuration the push does not carry.
+#
+# Pointed at the copy _checks_config_resolve already materialised, so there is
+# one HEAD-derived file and not a second `git show`. Resolved here rather than
+# left to the first lane, because this is the point where the value has to be in
+# the environment the runner inherits. Outside ship mode the resolver hands back
+# the worktree path, which is what `full` and `quick` are supposed to read, so
+# the export is correct in every mode rather than conditional on one.
+_checks_config_resolve
+export CI_CHECKS_CONFIG="$_CHECKS_CONFIG_FILE"
+
 # And is that tree the one being pushed? Ship mode resolves its *ranges* from
 # the hook's SHAs, so the history checks read the right commits — but every
 # check that runs content reads the worktree, and `git push origin

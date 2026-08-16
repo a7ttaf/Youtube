@@ -297,7 +297,7 @@ ws_seed_fingerprint() {
       "$(ci::common::hash_file bun.lock)" \
       "$(ci::common::hash_file package.json)" \
       "$(ci::common::node_runtime_id)" \
-      > "$NODE_SB/.ci-gate/node_modules-ws.hash" )
+      > "$NODE_SB/.ci-gate/node_modules-$(ci::common::workspace_slug ws).hash" )
 }
 
 ws_run() {
@@ -449,7 +449,9 @@ ws_run() {
   # "Before invoking the workspace" is the point: an install under an undeclared
   # toolchain has already produced the tree the run would be judged on.
   ws_setup
-  rm -f "$NODE_SB/.ci-gate/node_modules-ws.hash"
+  # A glob rather than the computed name: this only has to unseed whatever
+  # fingerprint is there, and the filename is the lane's business.
+  rm -f "$NODE_SB"/.ci-gate/node_modules-*.hash
   ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0" }, "scripts": { "test": "bash scripts/fail.sh" } }'
   run ws_run
   [ "$status" -eq 30 ]
@@ -2679,6 +2681,81 @@ ws_run() {
   run ws_run
   [[ "$output" != *"ships tests but defines no"* ]] || { echo "$output" >&2; false; }
   [[ "$output" != *"messages.cy.json"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a Cypress suite counted as present is a suite that has to run" {
+  # The case above made `.cy.` count as suite presence. This one is the other
+  # half of that: presence is not execution. `run_script` invokes `test` and
+  # `test:unit`, and Cypress is the one convention in that predicate belonging
+  # to a runner neither of them has to name -- so a workspace with vitest units
+  # and `"test:e2e": "cypress run"` had its specs counted as proof the suite is
+  # there while the lane ran the vitest half and passed with no Cypress case
+  # executed. Worse than a missed check: the specs also switch the lost-suite
+  # scan off, so their presence made the rest of the suite harder to lose
+  # noticeably.
+  ws_setup
+  ws_tools cypress
+  mkdir -p "$NODE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/cypress/e2e/login.cy.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "test:e2e": "cypress run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Cypress specs that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"login.cy.ts"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The remedy the message names has to be one that works, so it is exercised
+  # rather than described: `test` delegating to the e2e script is accepted, and
+  # accepted through a real run -- the reader follows `npm run` to the script it
+  # names, and the lane then executes both halves.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/cypress/e2e/login.cy.ts"
+  # A wrapper the sandbox can execute, the same stand-in `scripts/vitest` is for
+  # the unit runner and for the same reason: the .bin stubs ws_tools writes are
+  # shell scripts, which this gate can see but a package manager on Windows will
+  # not execute. Running the accepted script is the point of this half.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/cypress"
+  chmod +x "$NODE_SB/ws/scripts/cypress"
+  printf '#!/usr/bin/env bash\n./scripts/cypress run "$@"\n' > "$NODE_SB/ws/scripts/e2e.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh && npm run test:e2e", "test:e2e": "bash scripts/e2e.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"ships Cypress specs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # Naming the runner is not running it. `echo cypress run` has the word in the
+  # right place for a grep and executes echo, which is the mistake
+  # _script_names_a_checker exists to not make -- so the delegation reader is
+  # used here rather than a search of the script's text.
+  ws_setup
+  ws_tools cypress
+  mkdir -p "$NODE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/cypress/e2e/login.cy.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh && echo cypress run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Cypress specs that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The control, and it is the one that keeps this guard from becoming the Welsh
+  # locale bug in a new place: a workspace with no Cypress spec at all -- only a
+  # `.cy.json` that is not one -- is untouched by any of it.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/src/i18n"
+  printf '{ "hello": "helo" }\n' > "$NODE_SB/ws/src/i18n/messages.cy.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"ships Cypress specs"* ]] || { echo "$output" >&2; false; }
   rm -rf "$NODE_SB"
 }
 
@@ -5303,6 +5380,133 @@ lane_run_typecheck() {
   rm -rf "$LANE_SB"
 }
 
+@test "tests lane: a workspace with no suite to run is not a broken install" {
+  # "No runner" and "nothing to run" were one branch. Discovery schedules this
+  # lane for every package.json it finds, so a build-only package -- a shared
+  # config, a generated client -- reached the missing-runner refusal and turned
+  # a blocking lane infra-red over a workspace that is not broken and has no
+  # suite to be broken. ci/checks/node.sh runs the same package's `build` and
+  # passes it.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"No JavaScript suite in ws"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"No workspace-local JS test runner"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # And the half that makes the skip safe. A workspace that still ships a file
+  # vitest or jest would collect has lost its script *and* its runner, and that
+  # is exactly the state where reporting PASS means a real suite quietly stopped
+  # running. Deleting a script is one keystroke; the files are the evidence that
+  # something was meant to run, so they keep the refusal.
+  lane_setup
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"No workspace-local JS test runner"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # A declared script is a stated contract, and a missing runner is that
+  # contract unmet whether or not any file survives to prove it.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"No workspace-local JS test runner"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # `test:unit` counts as that contract too -- the node lane accepts either, and
+  # a rule that reads only `test` would skip a workspace whose whole suite runs
+  # under the other name.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test:unit": "vitest run" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # A manifest that cannot be read has not been shown to declare nothing, and
+  # reading "could not look" as "found nothing" is what turns an unparseable
+  # package.json into a skipped workspace.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  printf '{ not json\n' > "$LANE_SB/ws/package.json"
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"No JavaScript suite in ws"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+}
+
+@test "tests lane: the suite scan here is vitest's and jest's, not the node lane's" {
+  # Two lanes, two questions. ci/checks/node.sh runs the workspace's own `test`
+  # script, so whichever runner owns a Cypress spec or a Mocha `test/` file is
+  # the one it invokes, and its predicate counts them. This lane runs `vitest`
+  # or `jest` itself and nothing else, so the only files that bear on whether it
+  # has something to run are the ones those two collect. Asking node.sh's wider
+  # question here would refuse a Cypress-only workspace for not having installed
+  # a runner it does not use.
+  #
+  # The refusal that case gives up is not lost: node.sh's orphan guard fails a
+  # workspace shipping Cypress specs with no test script, and
+  # `node lane: a Cypress suite is a suite the test script may not lose` is
+  # where that is asserted.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  mkdir -p "$LANE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$LANE_SB/ws/cypress/e2e/login.cy.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"No JavaScript suite in ws"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # `openapi.spec.json` is an API description, not a suite: the name shape alone
+  # is a claim about any file whatsoever, so the extension has to agree.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  printf '{ "openapi": "3.0.0" }\n' > "$LANE_SB/ws/openapi.spec.json"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # Jest collects by directory at any depth, so a `__tests__` tree is a suite
+  # this lane could have run even with nothing named `.test.`.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  mkdir -p "$LANE_SB/ws/src/__tests__"
+  printf 'it("x", () => {});\n' > "$LANE_SB/ws/src/__tests__/login.tsx"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # A bare `test.ts` is what vitest's and jest's `?(*.)` allows, and reading the
+  # pattern as `*.test.*` only would skip a workspace whose entire suite is one
+  # such file.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  printf 'it("x", () => {});\n' > "$LANE_SB/ws/tests/test.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # Build output is not a suite. A `dist/` copy of a compiled test would keep
+  # every workspace looking as though it still has one.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  mkdir -p "$LANE_SB/ws/dist"
+  printf 'it("x", () => {});\n' > "$LANE_SB/ws/dist/a.test.js"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+}
+
 @test "typecheck lane: a nested tsconfig is ordinary TypeScript" {
   # Discovery asked node_workspaces about tsconfig.json, which applies the
   # package-manager ambiguity rule -- a statement about lockfiles. A normal
@@ -5484,7 +5688,7 @@ lane_run_typecheck() {
       "$(ci::common::hash_file bun.lock)" \
       "$(ci::common::hash_file package.json)" \
       "v0.0.0-otherplatform-otherarch" \
-      > "$NODE_SB/.ci-gate/node_modules-ws.hash" )
+      > "$NODE_SB/.ci-gate/node_modules-$(ci::common::workspace_slug ws).hash" )
   run ws_run
   [[ "$output" != *"Skipping install"* ]]
   rm -rf "$NODE_SB"

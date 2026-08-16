@@ -128,8 +128,24 @@ ci::common::workspace_drift() {
   # tests-js and typecheck-js refused an otherwise clean push over a build cache.
   # A guard that refuses correct pushes gets switched off, which is the same
   # outcome as not having it.
+  #
+  # Excluded in the *query*, not only in the filter below. The grep was doing
+  # the right job in the wrong place: `git ls-files --others --ignored` had
+  # already materialised every ignored path under node_modules into a shell
+  # variable before a single one was dropped — hundreds of thousands of entries
+  # for an installed frontend, on a code path every ship-mode JS check runs.
+  # Pathspec magic keeps them out of the answer in the first place; the grep
+  # stays because a pathspec cannot express "at any depth" as cheaply and the
+  # two together are what the comment above claims.
   local _wd_c
-  _wd_c="$(git ls-files --others --ignored --exclude-standard -- "$ws" 2>/dev/null)" || _wd_rc=2
+  _wd_c="$(git ls-files --others --ignored --exclude-standard -- "$ws" \
+             ':(exclude,glob)**/node_modules/**' ':(exclude,glob)node_modules/**' \
+             ':(exclude,glob)**/dist/**' ':(exclude,glob)**/build/**' \
+             ':(exclude,glob)**/out/**' ':(exclude,glob)**/coverage/**' \
+             ':(exclude,glob)**/htmlcov/**' ':(exclude,glob)**/.next/**' \
+             ':(exclude,glob)**/.nuxt/**' ':(exclude,glob)**/.turbo/**' \
+             ':(exclude,glob)**/.vite/**' ':(exclude,glob)**/.cache/**' \
+             ':(exclude,glob)**/__pycache__/**' 2>/dev/null)" || _wd_rc=2
   [ "$_wd_rc" -eq 0 ] || return 2
   # The extension list is what these lanes *load*, not what a person would call
   # source. Vite and Vitest resolve a stylesheet import like any other module, and
@@ -327,6 +343,33 @@ ci::common::_head_manifests_present() {
   return 1
 }
 
+# ============================================================================
+# Purpose: Answer "which directories in this repository are JavaScript
+#   workspaces" for every lane that needs to know — the single discovery entry
+#   point behind node, tests-js and typecheck-js.
+# Database/ORM: None.
+# Standards: Emits one path per line and returns non-zero where it could not
+#   determine the set. That distinction is the contract: an empty list means
+#   "there are no workspaces", a non-zero status means "this could not be
+#   asked", and a caller that reads the second as the first passes a push
+#   having checked none of it. Every caller is required to take the status
+#   separately from the output, which is why the callers capture into a
+#   variable and test `$?` rather than piping this into a loop.
+# Blast Radius: Whether the JavaScript lanes run at all. A workspace this
+#   function omits is a workspace nothing installs, typechecks, builds or
+#   tests, and the omission is silent by construction — no lane reports on a
+#   directory it was never told about.
+# Connections:
+#   - File: ci/checks/node.sh -> Iterates this list to install, build and run
+#     each workspace's scripts; its orphan and lost-suite guards only cover
+#     workspaces that appear here.
+#   - File: ci/checks/tests.sh -> tests::run_js walks the same list; a
+#     non-zero status is FAIL_INFRA there rather than "no JavaScript tests".
+#   - File: ci/checks/typecheck.sh -> Same list, same status contract.
+#   - File: ci/lib/common.sh -> Uses _head_manifests_present (ship mode must
+#     discover from the pushed tree) and ls_tree_paths (NUL-safe listing, so a
+#     non-ASCII workspace path is not dropped).
+# ============================================================================
 ci::common::node_workspaces() {
   local manifest="${1:-package.json}"
   local found dir
@@ -634,6 +677,55 @@ ci::common::hash_file() {
   elif ci::common::command_exists cksum; then
     crc="$(cksum "$file" | awk '{print $1}')"
     printf '%064x\n' "$crc"
+  else
+    echo "No supported hashing tool found." >&2
+    return 1
+  fi
+}
+
+# The dependency-cache filename for a workspace path.
+#
+# `tr '/' '-'` alone is not injective: `a/b-c` and `a-b/c` both become `a-b-c`,
+# so two independent workspaces shared one fingerprint file. With both manifests
+# updated in the same commit, the first workspace writes the new fingerprint and
+# the second then matches it against its own stale node_modules and skips the
+# frozen install it was owed -- one workspace validating another's dependency
+# tree, which is precisely what the fingerprint exists to prevent.
+#
+# The readable slug is kept and a hash of the *undamaged* path appended, so the
+# filename still says which workspace it belongs to while the suffix is what
+# makes it unique. Truncated to 12 hex characters: this is a local cache key, not
+# a security boundary, and a full digest makes the name unreadable for nothing.
+#
+# Shared rather than inlined at its one call site because ci/tests/ has to be
+# able to seed the same filename; a fixture that derives the name by hand is a
+# fixture that stops matching the day the rule changes.
+ci::common::workspace_slug() {
+  local ws="${1:-.}"
+  if [ "$ws" = "." ]; then
+    printf 'root'
+    return 0
+  fi
+  local readable digest
+  readable="$(printf '%s' "$ws" | tr '/' '-')"
+  digest="$(ci::common::hash_string "$ws")" || return 1
+  printf '%s-%s' "$readable" "$(printf '%s' "$digest" | cut -c1-12)"
+}
+
+# hash_file's tool fallbacks over a string rather than a file, so a caller with
+# no file to point at does not have to make one.
+ci::common::hash_string() {
+  local s="$1"
+  if ci::common::command_exists sha256sum; then
+    printf '%s' "$s" | sha256sum | cut -d' ' -f1
+  elif ci::common::command_exists shasum; then
+    printf '%s' "$s" | shasum -a 256 | cut -d' ' -f1
+  elif ci::common::command_exists openssl; then
+    printf '%s' "$s" | openssl dgst -sha256 | sed 's/^.*= //'
+  elif ci::common::command_exists md5sum; then
+    printf '%s' "$s" | md5sum | cut -d' ' -f1
+  elif ci::common::command_exists cksum; then
+    printf '%s' "$s" | cksum | awk '{printf "%08x", $1}'
   else
     echo "No supported hashing tool found." >&2
     return 1

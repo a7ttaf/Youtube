@@ -782,6 +782,65 @@ _tests_js_have_runner() {
   return 1
 }
 
+# 0 when the manifest declares a script this lane's suite would run through, 1
+# when it definitively declares none, 2 when the manifest could not be read.
+#
+# Three answers rather than two, because "could not look" is not "found
+# nothing", and reading it the second way is what turns an unreadable manifest
+# into a skipped workspace. `_tests_js_script_body` says which happened: 4 is
+# "no such script", while 1 (no node) and 3 (the manifest does not parse) are
+# both the reader failing, and those keep the refusal.
+_tests_js_declared_test_contract() {
+  local _s _rc
+  for _s in test test:unit; do
+    _rc=0
+    _tests_js_script_body "$_s" >/dev/null 2>&1 || _rc=$?
+    case "$_rc" in
+      0) return 0 ;;
+      4) ;;
+      *) return 2 ;;
+    esac
+  done
+  return 1
+}
+
+# Does this workspace ship a file *this lane* would have run?
+#
+# Vitest's and Jest's documented default collection, and deliberately only
+# theirs. ci/checks/node.sh asks a wider question -- "does this workspace ship
+# tests" -- and counts Cypress specs, Mocha's `test/` and Jasmine's `spec/`
+# with them, which is right there: that lane runs the workspace's own `test`
+# script, so whichever runner owns those files is the one it invokes. This lane
+# runs `vitest` or `jest` itself and nothing else, so the only files that bear
+# on whether it has something to run are the ones those two collect. Asking
+# node.sh's question here would refuse a Cypress-only workspace for not having
+# installed a runner it does not use; asking this one there would let a Cypress
+# suite be deleted unnoticed. Two questions, two predicates, and this is why
+# they are not shared -- the same reason node.sh records for not sharing with
+# ci/checks/test-layout.sh's TEST_SUFFIXES.
+#
+#   vitest / jest   `**/?(*.)+(spec|test).[jt]s?(x)`  -- `a.test.ts` and a bare
+#                   `test.ts`, which is what the `?(*.)` allows
+#   jest            `**/__tests__/**/*.[jt]s?(x)`     -- by directory, any depth
+#
+# Both halves required -- a name shape *and* an extension a runner executes --
+# for the reason node.sh records for its own predicate: `openapi.spec.json` is
+# an API description, and a workspace shipping one and no test at all must not
+# be read as shipping a suite. `*-test.*`, `*_test.*` and Mocha's bare `test/`
+# are absent for the opposite reason: neither vitest nor jest collects them, so
+# counting them here would refuse a workspace over files this lane could not
+# have run either way.
+_tests_js_has_suite() {
+  local _f
+  _f="$(find . \( -name 'node_modules' -o -path './dist' -o -path './build' -o -path './out' -o -path './coverage' -o -path './htmlcov' -o -path './.next' -o -path './.nuxt' -o -path './.turbo' -o -path './.vite' -o -path './.cache' \) -prune -o \
+    -type f \( -name '*.test.*' -o -name '*.spec.*' -o -name 'test.*' -o -name 'spec.*' \
+      -o -path './__tests__/*' -o -path '*/__tests__/*' \) \
+    \( -name '*.js' -o -name '*.jsx' -o -name '*.mjs' -o -name '*.cjs' \
+      -o -name '*.ts' -o -name '*.tsx' -o -name '*.mts' -o -name '*.cts' \) \
+    -print 2>/dev/null | head -1)"
+  [ -n "$_f" ]
+}
+
 # Runs "$@" under the environment the declared `test` script sets, and nothing
 # else changed. A subshell, so the exports reach the runner and end with it
 # rather than following the next workspace in the loop.
@@ -894,6 +953,33 @@ _tests_js_workspace() {
     done
   fi
 
+  # A workspace can also have nothing here to run. Discovery finds `package.json`
+  # and schedules this lane for whatever it finds, and a build-only package --
+  # a shared config, a generated client, an assets bundle -- has no `test`
+  # script, no runner in its dependencies and no file either runner would
+  # collect. Reported as FAIL_INFRA, that blocked the push over a workspace
+  # that is not broken and has no suite to be broken, while ci/checks/node.sh
+  # runs the same package's `build` and passes it.
+  #
+  # All three conditions, and each one carries its own half of the guard:
+  #
+  #   no declared script  -- a workspace that says `"test": "vitest run"` has
+  #     stated a contract, and a missing runner is that contract unmet. Skipping
+  #     it is the failure this branch exists to prevent.
+  #   an unreadable manifest is not a missing one -- return 2 keeps the refusal,
+  #     because a workspace whose manifest cannot be parsed has not been shown
+  #     to declare nothing.
+  #   no collectable file -- and this is the one that matters most. A workspace
+  #     that ships `a.test.ts` and has lost its script *and* its runner is
+  #     exactly the state where reporting PASS means a real suite silently
+  #     stopped running. Deleting a script is one keystroke; the files are the
+  #     evidence that something was meant to run.
+  local _tj_contract=0
+  _tests_js_declared_test_contract || _tj_contract=$?
+  if [ "$_tj_contract" -eq 1 ] && ! _tests_js_has_suite; then
+    return 126
+  fi
+
   # Deliberately no PATH fallback. A global runner is not the version this
   # workspace pins, and the comment above this function is the evidence: an
   # unpinned Vitest against a different Vite produced ~160 phantom failures in
@@ -984,13 +1070,24 @@ tests::run_js() {
     # Subshell so the cd cannot leak into later languages.
     ( _tests_js_workspace "$ws" "$junit_out" "$jest_pattern" ) || rc=$?
 
+    if [ "$rc" -eq 126 ]; then
+      # Not a skip this lane decided on its own: the workspace was inspected and
+      # found to declare no test script, install no runner and ship no file
+      # either runner collects. See the branch in _tests_js_workspace that
+      # returns this for why all three are required before it counts.
+      ci::log::info "No JavaScript suite in ${ws} (no test script, no runner, no test files); nothing to run."
+      continue
+    fi
+
     if [ "$rc" -eq 127 ]; then
-      # A detected workspace with no runner is broken infrastructure, not a
-      # skip. Reaching here means discovery found a manifest and this lane was
-      # scheduled for it, so "no runner" does not mean "nothing to run" -- it
-      # means the suite that exists could not be executed, and continuing let
-      # tests-js exit 0 having run no JavaScript at all. An uninstalled
-      # node_modules or a missing binary would take a blocking lane green.
+      # A workspace that has a suite and no runner is broken infrastructure,
+      # not a skip. The branch above has already separated out the workspace
+      # that has neither, so reaching here means something in this workspace --
+      # a declared script, a collectable file, or a manifest that could not be
+      # read to rule either out -- says a suite is meant to run and it could
+      # not be. Continuing let tests-js exit 0 having run no JavaScript at all:
+      # an uninstalled node_modules or a missing binary would take a blocking
+      # lane green.
       #
       # The same rule ci/checks/tests-shell.sh applies to a missing bats: an
       # enabled blocker that cannot find its runner has not passed.

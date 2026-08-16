@@ -49,7 +49,11 @@ command -v git >/dev/null 2>&1 || {
 }
 
 echo "Installing bats ${BATS_VERSION} into ${DEST} ..."
-SRC="$(mktemp -d)"
+# Templated, because BSD `mktemp` -- which is what macOS ships -- requires a
+# template and fails without one. Under `set -e` that aborts here, so the one
+# command this repository offers for provisioning bats would fail on the
+# platform whose Bash 3.2 the gate is written for.
+SRC="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
 trap 'rm -rf "$SRC"' EXIT
 # --depth 1 against the tag: this is a tool checkout, not history anyone reads.
 git clone --quiet --depth 1 --branch "$BATS_VERSION" "$BATS_REPO" "$SRC/bats-core"

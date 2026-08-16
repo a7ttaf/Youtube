@@ -603,11 +603,17 @@ fi
 
 # Dependency-cache fingerprints stay at the repo root so enabling a
 # subdirectory workspace does not scatter .ci-gate/ dirs through the tree.
-if [ "$CI_GATE_NODE_WORKSPACE" = "." ]; then
-  WS_SLUG="root"
-else
-  WS_SLUG="$(printf '%s' "$CI_GATE_NODE_WORKSPACE" | tr '/' '-')"
-fi
+#
+# Named through ci::common::workspace_slug, which is where the injectivity
+# argument lives: `tr '/' '-'` on its own collapses `a/b-c` and `a-b/c` onto one
+# filename, and one fingerprint shared between two workspaces lets the second
+# skip a frozen install on the strength of the first one's.
+WS_SLUG="$(ci::common::workspace_slug "$CI_GATE_NODE_WORKSPACE")" || {
+  echo "Cannot derive a cache key for workspace ${CI_GATE_NODE_WORKSPACE}."
+  echo "  No hashing tool is available, and a non-unique key would let one"
+  echo "  workspace validate another's dependency tree."
+  exit "$CI_RESULT_FAIL_INFRA"
+}
 NODE_HASH_FILE="$ROOT_DIR/.ci-gate/node_modules-${WS_SLUG}.hash"
 
 if ! ci::common::command_exists node; then
@@ -4632,6 +4638,66 @@ if ! script_exists "test" && ! script_exists "test:unit"; then
       echo "    $_orphan"
     done <<< "$ORPHAN_TESTS"
     echo "  Restore the script in package.json, or remove the tests."
+    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+  fi
+fi
+
+# Counting a suite is not running it, and for Cypress those were two different
+# answers.
+#
+# `.cy.` joined the predicate above so that deleting the test script from a
+# Cypress workspace would be caught. It is the one convention in that predicate
+# belonging to a runner this lane never invokes: `run_script` executes `test`
+# and `test:unit`, and every other shape there -- `*.test.*`, `*.spec.*`,
+# Mocha's `test/`, Jasmine's `spec/` -- is collected by whichever runner those
+# scripts already name. So a workspace with `"test": "vitest run"` beside
+# `"test:e2e": "cypress run"` had its Cypress specs counted as proof that its
+# suite is present, while the lane ran the vitest half, passed, and executed not
+# one Cypress case. Worse than a missed check: the specs also switch the
+# lost-suite scan below off, so their presence made the *rest* of the suite
+# harder to lose noticeably.
+#
+# Refused rather than run. Executing the e2e script here is the other reading of
+# "run each detected runner", and it is not available to this gate: Cypress
+# wants a browser and usually a server it can talk to, and this runs on every
+# commit. What the lane can do honestly is decline to call a workspace passed
+# when part of its suite was never offered to it, and say which script has to
+# reach the runner. That is the same answer ci/checks/tests.sh gives a workspace
+# installing two runners and declaring neither -- state the question the
+# manifest has to answer rather than guess at it.
+#
+# Bounded to the extensions for the reason the predicate above is: `cy` is the
+# ISO-639-1 code for Welsh, so an unbounded `*.cy.*` reads `messages.cy.json` as
+# a Cypress spec and refuses a workspace that has none.
+_NODE_CYPRESS_SPEC_PRED=(
+  '(' -name '*.cy.*' ')' "${_NODE_TEST_EXT_PRED[@]}"
+)
+CYPRESS_SPECS="$(find . \( -name 'node_modules' -o -path './dist' -o -path './build' -o -path './out' -o -path './coverage' -o -path './htmlcov' -o -path './.next' -o -path './.nuxt' -o -path './.turbo' -o -path './.vite' -o -path './.cache' \) -prune -o \
+  -type f "${_NODE_CYPRESS_SPEC_PRED[@]}" -print 2>/dev/null | head -5 || true)"
+if [ -n "$CYPRESS_SPECS" ]; then
+  _CY_REACHED=0
+  for _cy_script in test test:unit; do
+    script_exists "$_cy_script" || continue
+    _cy_cmd="$(script_command "$_cy_script")"
+    [ -n "$_cy_cmd" ] || continue
+    # The delegation-following reader, not a grep for the word: `"test": "echo
+    # cypress run"` names cypress in its text and runs echo. Command position is
+    # what makes a token evidence that a runner executes, and this reader is
+    # where that rule already lives -- the same one assert_no_persistent_filter
+    # uses one screen below, given a one-tool list here because the question is
+    # about this runner and not about runners in general.
+    if _script_names_a_checker "$_cy_cmd" "cypress"; then _CY_REACHED=1; break; fi
+  done
+  if [ "$_CY_REACHED" -eq 0 ]; then
+    echo "Workspace ${CI_GATE_NODE_WORKSPACE} ships Cypress specs that this lane never runs."
+    echo "  These are collected by cypress, and neither 'test' nor 'test:unit'"
+    echo "  reaches it, so the lane would report PASS with none of them executed:"
+    while IFS= read -r _cy_spec; do
+      [ -n "$_cy_spec" ] || continue
+      echo "    $_cy_spec"
+    done <<< "$CYPRESS_SPECS"
+    echo "  Have 'test' delegate to the Cypress run -- 'vitest run && npm run test:e2e'"
+    echo "  is enough -- or remove the specs."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
   fi
 fi
