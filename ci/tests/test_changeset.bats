@@ -10,7 +10,7 @@ setup() {
   source "$REPO_ROOT/ci/lib/common.sh"
   source "$REPO_ROOT/ci/lib/changeset.sh"
 
-  TEST_REPO="$(mktemp -d)"
+  TEST_REPO="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   cd "$TEST_REPO"
   git init -q
   git config user.email "test@test.com"
@@ -275,7 +275,7 @@ teardown() {
   local py=python3
   command -v python3 >/dev/null 2>&1 || py=python
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   cat > "$sb/check.py" <<'PY'
 import io, json, sys
 with io.open(sys.argv[1], encoding='utf-8') as fh:

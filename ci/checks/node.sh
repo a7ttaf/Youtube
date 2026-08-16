@@ -4182,7 +4182,7 @@ run_script() {
 # ci/lib/common.sh already follows: could not look is not found nothing.
 _ts_project_files() {
   local _tp_list _tp_rc=0
-  _tp_list="$(mktemp 2>/dev/null)" || return 2
+  _tp_list="$(ci::common::mktemp_file ts-projects 2>/dev/null)" || return 2
   # Every name TypeScript's own scaffolds use, not only the default one.
   #
   # `tsconfig.app.json` and `tsconfig.node.json` are what `npm create vite` ends
@@ -4329,7 +4329,7 @@ fi
 # bundles nothing is unaffected.
 _bundler_config_files() {
   local _bc_list _bc_rc=0
-  _bc_list="$(mktemp 2>/dev/null)" || return 2
+  _bc_list="$(ci::common::mktemp_file bundler-configs 2>/dev/null)" || return 2
   # Depth-limited, unlike the tsconfig scan: a bundler configuration under
   # src/ or in a fixture belongs to something else, while a tsconfig anywhere
   # in the workspace really is a project this workspace must typecheck.
@@ -4662,65 +4662,157 @@ if ! script_exists "test" && ! script_exists "test:unit"; then
   fi
 fi
 
-# Counting a suite is not running it, and for Cypress those were two different
-# answers.
+# Counting a suite is not running it, and for four runners those were two
+# different answers.
 #
-# `.cy.` joined the predicate above so that deleting the test script from a
-# Cypress workspace would be caught. It is the one convention in that predicate
-# belonging to a runner this lane never invokes: `run_script` executes `test`
-# and `test:unit`, and every other shape there -- `*.test.*`, `*.spec.*`,
-# Mocha's `test/`, Jasmine's `spec/` -- is collected by whichever runner those
-# scripts already name. So a workspace with `"test": "vitest run"` beside
-# `"test:e2e": "cypress run"` had its Cypress specs counted as proof that its
-# suite is present, while the lane ran the vitest half, passed, and executed not
-# one Cypress case. Worse than a missed check: the specs also switch the
-# lost-suite scan below off, so their presence made the *rest* of the suite
-# harder to lose noticeably.
+# The predicate above answers "does this workspace ship tests", and it has to be
+# wide: it is what stops a test script from being deleted out from under a suite.
+# But `run_script` invokes `test` and `test:unit` and nothing else, so a
+# convention in that predicate belonging to a runner those two scripts never
+# reach gets counted as proof the suite is present while none of it executes. A
+# workspace with `"test": "vitest run"` beside `"test:e2e": "cypress run"` is the
+# shape; `"test:legacy": "mocha"` over `test/login.js` is the same shape with a
+# different runner, which is how this arrived a second time.
 #
-# Refused rather than run. Executing the e2e script here is the other reading of
-# "run each detected runner", and it is not available to this gate: Cypress
-# wants a browser and usually a server it can talk to, and this runs on every
-# commit. What the lane can do honestly is decline to call a workspace passed
-# when part of its suite was never offered to it, and say which script has to
-# reach the runner. That is the same answer ci/checks/tests.sh gives a workspace
-# installing two runners and declaring neither -- state the question the
-# manifest has to answer rather than guess at it.
+# It is worse than a missed check, and that is the part worth stating: those same
+# files also switch the lost-suite scan below off, so their presence makes the
+# *rest* of the suite harder to lose noticeably.
 #
-# Bounded to the extensions for the reason the predicate above is: `cy` is the
-# ISO-639-1 code for Welsh, so an unbounded `*.cy.*` reads `messages.cy.json` as
-# a Cypress spec and refuses a workspace that has none.
-_NODE_CYPRESS_SPEC_PRED=(
-  '(' -name '*.cy.*' ')' "${_NODE_TEST_EXT_PRED[@]}"
-)
-CYPRESS_SPECS="$(find . \( -name 'node_modules' -o -path './dist' -o -path './build' -o -path './out' -o -path './coverage' -o -path './htmlcov' -o -path './.next' -o -path './.nuxt' -o -path './.turbo' -o -path './.vite' -o -path './.cache' \) -prune -o \
-  -type f "${_NODE_CYPRESS_SPEC_PRED[@]}" -print 2>/dev/null | head -5 || true)"
-if [ -n "$CYPRESS_SPECS" ]; then
-  _CY_REACHED=0
-  for _cy_script in test test:unit; do
-    script_exists "$_cy_script" || continue
-    _cy_cmd="$(script_command "$_cy_script")"
-    [ -n "$_cy_cmd" ] || continue
-    # The delegation-following reader, not a grep for the word: `"test": "echo
-    # cypress run"` names cypress in its text and runs echo. Command position is
-    # what makes a token evidence that a runner executes, and this reader is
-    # where that rule already lives -- the same one assert_no_persistent_filter
-    # uses one screen below, given a one-tool list here because the question is
-    # about this runner and not about runners in general.
-    if _script_names_a_checker "$_cy_cmd" "cypress"; then _CY_REACHED=1; break; fi
-  done
-  if [ "$_CY_REACHED" -eq 0 ]; then
-    echo "Workspace ${CI_GATE_NODE_WORKSPACE} ships Cypress specs that this lane never runs."
-    echo "  These are collected by cypress, and neither 'test' nor 'test:unit'"
-    echo "  reaches it, so the lane would report PASS with none of them executed:"
-    while IFS= read -r _cy_spec; do
-      [ -n "$_cy_spec" ] || continue
-      echo "    $_cy_spec"
-    done <<< "$CYPRESS_SPECS"
-    echo "  Have 'test' delegate to the Cypress run -- 'vitest run && npm run test:e2e'"
-    echo "  is enough -- or remove the specs."
-    exit "$CI_RESULT_FAIL_NEW_ISSUE"
+# Refused rather than run. Executing the other script here is the other reading
+# of "run each detected runner" and it is not available to this gate -- Cypress
+# wants a browser and usually a server, and this runs on every commit. What the
+# lane can do honestly is decline to call a workspace passed when part of its
+# suite was never offered to it, and name the script that has to reach the
+# runner. That is the same answer ci/checks/tests.sh gives a workspace installing
+# two runners and declaring neither.
+#
+# Two classes of marker, and the difference decides whether files alone are
+# enough to ask the question:
+#
+#   unambiguous -- `.cy.` is Cypress's and no other recognised runner collects
+#     it; `spec/**/*[sS]pec.*`, minus the `.spec.` shape vitest and jest take, is
+#     Jasmine's. Files of these belong to that runner or to nothing, so their
+#     presence is the whole question.
+#   ambiguous -- Mocha's `test/` is also `node --test`'s documented directory,
+#     and `*-test.*` / `*_test.*` / `test-*` are node's naming *and* the shape of
+#     ordinary helpers like `test-utils.ts`. Asking on files alone would refuse a
+#     plain Vitest workspace for shipping a helper, which is a false refusal of
+#     correct work -- the failure this file has been bitten by more than once,
+#     most recently over a Welsh locale file. So these ask only when a package
+#     script actually names the runner, which is the evidence the finding
+#     describes: `test:legacy` invoking Mocha is what makes `test/login.js` a
+#     Mocha suite rather than a file.
+#
+# `node --test` additionally requires the flag, because bare `node` in a script
+# is a build step and not a runner -- the same distinction
+# assert_no_persistent_filter draws one screen below.
+
+# The runner each family's files belong to.
+_node_family_runner() {
+  case "$1" in
+    cypress) printf 'cypress' ;;
+    jasmine) printf 'jasmine' ;;
+    mocha)   printf 'mocha' ;;
+    node)    printf 'node' ;;
+  esac
+}
+
+# The runner's name as a reader would write it, for the refusal message.
+_node_family_label() {
+  case "$1" in
+    cypress) printf 'Cypress' ;;
+    jasmine) printf 'Jasmine' ;;
+    mocha)   printf 'Mocha' ;;
+    node)    printf 'node --test' ;;
+  esac
+}
+
+# Up to five of this workspace's files that belong to <family>.
+#
+# The vitest/jest shapes are excluded from the ambiguous arms rather than left
+# in: `test/a.test.js` is collected by whichever runner `test` already names, so
+# counting it here would ask about a file that does run.
+_node_family_files() {
+  local _ff_pred=()
+  case "$1" in
+    cypress) _ff_pred=( '(' -name '*.cy.*' ')' ) ;;
+    jasmine) _ff_pred=( -path './spec/*' '(' -name '*spec.*' -o -name '*Spec.*' ')'
+                        ! -name '*.spec.*' ! -name 'spec.*' ) ;;
+    mocha)   _ff_pred=( -path './test/*'
+                        ! -name '*.test.*' ! -name '*.spec.*'
+                        ! -name 'test.*'   ! -name 'spec.*' ) ;;
+    node)    _ff_pred=( '(' -name '*-test.*' -o -name '*_test.*' -o -name 'test-*' ')' ) ;;
+    *) return 0 ;;
+  esac
+  find . \( -name 'node_modules' -o -path './dist' -o -path './build' -o -path './out' -o -path './coverage' -o -path './htmlcov' -o -path './.next' -o -path './.nuxt' -o -path './.turbo' -o -path './.vite' -o -path './.cache' \) -prune -o \
+    -type f "${_ff_pred[@]}" "${_NODE_TEST_EXT_PRED[@]}" -print 2>/dev/null | head -5 || true
+}
+
+# 0 when <command> runs this family's runner.
+#
+# The delegation-following reader, not a grep for the word: `"test": "echo mocha"`
+# names the runner in its text and runs echo. Command position is what makes a
+# token evidence that a runner executes, and that rule already lives in
+# _script_names_a_checker -- given a one-tool list here because the question is
+# about this runner and not about runners in general.
+_node_command_runs_family() {
+  local _cf_fam="$1" _cf_cmd="$2" _cf_bin
+  [ -n "$_cf_cmd" ] || return 1
+  _cf_bin="$(_node_family_runner "$_cf_fam")"
+  [ -n "$_cf_bin" ] || return 1
+  _script_names_a_checker "$_cf_cmd" "$_cf_bin" || return 1
+  # Bare `node` takes its program from stdin and exits 0 under this gate, so it
+  # is a runner only in test mode. Matched as a whole argument, with the joined
+  # spelling beside it, so a path containing those letters is not the flag.
+  if [ "$_cf_fam" = "node" ]; then
+    case " $_cf_cmd " in
+      *" --test "*|*" --test="*) ;;
+      *) return 1 ;;
+    esac
   fi
-fi
+  return 0
+}
+
+# 0 when some script in this manifest names the family's runner. Only the
+# ambiguous families consult this; see the note above for why.
+_node_family_declared() {
+  local _fd_fam="$1" _fd_name
+  while IFS= read -r _fd_name; do
+    [ -n "$_fd_name" ] || continue
+    _node_command_runs_family "$_fd_fam" "$(script_command "$_fd_name")" && return 0
+  done <<< "$PACKAGE_SCRIPTS"
+  return 1
+}
+
+for _rf_fam in cypress jasmine mocha node; do
+  _RF_FILES="$(_node_family_files "$_rf_fam")"
+  [ -n "$_RF_FILES" ] || continue
+  case "$_rf_fam" in
+    mocha|node) _node_family_declared "$_rf_fam" || continue ;;
+  esac
+
+  _RF_REACHED=0
+  for _rf_script in test test:unit; do
+    script_exists "$_rf_script" || continue
+    if _node_command_runs_family "$_rf_fam" "$(script_command "$_rf_script")"; then
+      _RF_REACHED=1
+      break
+    fi
+  done
+  [ "$_RF_REACHED" -eq 0 ] || continue
+
+  _RF_BIN="$(_node_family_label "$_rf_fam")"
+  echo "Workspace ${CI_GATE_NODE_WORKSPACE} ships ${_RF_BIN} tests that this lane never runs."
+  echo "  These are collected by ${_RF_BIN}, and neither 'test' nor 'test:unit'"
+  echo "  reaches it, so the lane would report PASS with none of them executed:"
+  while IFS= read -r _rf_one; do
+    [ -n "$_rf_one" ] || continue
+    echo "    $_rf_one"
+  done <<< "$_RF_FILES"
+  echo "  Have 'test' delegate to that run -- 'vitest run && npm run test:e2e' is"
+  echo "  enough -- or remove those files."
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+done
 
 # A workspace that had a suite must still have one. Deleting every file under
 # tests/ leaves nothing to be orphaned, test-layout reports "0 file(s)" quite

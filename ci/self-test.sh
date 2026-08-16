@@ -16,7 +16,7 @@ fail() { FAILED=$((FAILED + 1)); echo "  FAIL: $1 — $2"; }
 echo "========== CI Self-Tests =========="
 echo ""
 
-TMPDIR=$(mktemp -d)
+TMPDIR=$(mktemp -d "${TMPDIR:-/tmp}/ums-selftest.XXXXXX")
 ORIGINAL_HOOKS_PATH="$(git config core.hooksPath 2>/dev/null || true)"
 HAD_HOOKS_PATH=0
 if git config --get core.hooksPath >/dev/null 2>&1; then

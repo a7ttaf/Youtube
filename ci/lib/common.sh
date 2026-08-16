@@ -409,11 +409,11 @@ ci::common::node_workspaces() {
     # 0, which is the exact harm the ambiguity report above exists to prevent.
     local child_count=0
     local _rw_raw _rw_list _rw_rc=0
-    _rw_raw="$(mktemp 2>/dev/null)" || {
+    _rw_raw="$(ci::common::mktemp_file ws-raw 2>/dev/null)" || {
       echo "Cannot create a temporary file to enumerate workspaces." >&2
       return 1
     }
-    _rw_list="$(mktemp 2>/dev/null)" || {
+    _rw_list="$(ci::common::mktemp_file ws-list 2>/dev/null)" || {
       rm -f "$_rw_raw"
       echo "Cannot create a temporary file to enumerate workspaces." >&2
       return 1
@@ -502,11 +502,11 @@ ci::common::node_workspaces() {
   # which is not a thing the caller should have to know: the producer is asked
   # directly instead, the way the tsc lane and the marker scan already do it.
   local _nw_raw _nw_list _nw_rc=0
-  _nw_raw="$(mktemp 2>/dev/null)" || {
+  _nw_raw="$(ci::common::mktemp_file nw-raw 2>/dev/null)" || {
     echo "Cannot create a temporary file to enumerate workspaces." >&2
     return 1
   }
-  _nw_list="$(mktemp 2>/dev/null)" || {
+  _nw_list="$(ci::common::mktemp_file nw-list 2>/dev/null)" || {
     rm -f "$_nw_raw"
     echo "Cannot create a temporary file to enumerate workspaces." >&2
     return 1
@@ -710,6 +710,37 @@ ci::common::workspace_slug() {
   readable="$(printf '%s' "$ws" | tr '/' '-')"
   digest="$(ci::common::hash_string "$ws")" || return 1
   printf '%s-%s' "$readable" "$(printf '%s' "$digest" | cut -c1-12)"
+}
+
+# ci::common::mktemp_file [name] – a temporary file, created with a template.
+# ci::common::mktemp_dir  [name] – the same for a directory.
+#
+# `mktemp` with no operand is a GNU extension. BSD mktemp -- which is what macOS
+# ships, and macOS is the platform whose Bash 3.2 floor this whole gate is
+# written against -- documents `template ...` as required and exits with a usage
+# error without one. Every bare call in this repository therefore failed on a
+# stock macOS host, and the lanes read that failure exactly as they should: as
+# "could not create a temporary file", reported FAIL_INFRA, and stopped. So
+# ci/checks/test-layout.sh exited on its first scheduled run and every run after
+# it, without inspecting a single test, on a platform this gate claims to
+# support. ci/scripts/install-bats.sh already carried this reasoning for its own
+# `mktemp -d`; it is a property of the tool, not of that script.
+#
+# `${TMPDIR:-/tmp}` rather than a bare `/tmp`, because that is where the platform
+# says to put it and both implementations honour a directory written into the
+# template. The name only makes the file recognisable in a listing when
+# something does leak; the six X's are what make it unique.
+#
+# One helper rather than the template written out at each of the two dozen call
+# sites: a convention repeated is a convention that drifts, and the case
+# `common: no bare mktemp survives in the gate` is what keeps a new bare call
+# from arriving.
+ci::common::mktemp_file() {
+  mktemp "${TMPDIR:-/tmp}/ums-${1:-gate}.XXXXXX"
+}
+
+ci::common::mktemp_dir() {
+  mktemp -d "${TMPDIR:-/tmp}/ums-${1:-gate}.XXXXXX"
 }
 
 # hash_file's tool fallbacks over a string rather than a file, so a caller with

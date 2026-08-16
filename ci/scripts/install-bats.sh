@@ -30,13 +30,47 @@ cd "$ROOT_DIR"
 DEST="${ROOT_DIR}/.ci-gate/bats"
 BIN="${DEST}/bin/bats"
 
+# Already provisioned is not already *current*.
+#
+# This branch used to exit on the file existing, which made BATS_VERSION a
+# comment for everyone who had ever run this script: bump the pin, re-run, and
+# the stale runner stays. The whole point of pinning is that the version which
+# runs the suites decides what "passing" means, and the setup and the handoff
+# both describe the worktree copy as pinned -- so a developer would be running
+# semantics the repository does not claim while being told otherwise. `FORCE=1`
+# could not reach the reinstall either, because it was only consulted further
+# down.
+#
+# Compared against the tag rather than recorded separately: `bats --version`
+# prints `Bats <semver>` and BATS_VERSION is a `v`-prefixed tag, so the `v` comes
+# off before the comparison. A version that cannot be read at all is treated as a
+# mismatch -- reinstalling is cheap and recoverable, and running an unidentified
+# runner is the thing this is here to prevent.
+REPLACING=0
 if [ -x "$BIN" ]; then
-  echo "bats is already provisioned at ${BIN}"
-  "$BIN" --version || true
-  exit 0
+  INSTALLED="$("$BIN" --version 2>/dev/null | awk '{ print $2 }')" || INSTALLED=""
+  WANT="${BATS_VERSION#v}"
+  if [ -n "$INSTALLED" ] && [ "$INSTALLED" = "$WANT" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "bats ${INSTALLED} is already provisioned at ${BIN}"
+    exit 0
+  fi
+  REPLACING=1
+  if [ -z "$INSTALLED" ]; then
+    echo "The copy at ${BIN} does not report a version; replacing it."
+  elif [ "$INSTALLED" != "$WANT" ]; then
+    echo "Provisioned bats is ${INSTALLED}, this repository pins ${WANT}; replacing it."
+  else
+    echo "FORCE=1: reinstalling bats ${WANT}."
+  fi
 fi
 
-if command -v bats >/dev/null 2>&1; then
+# Guarded on REPLACING, and that guard is the point rather than a tidiness.
+# `.ci-gate/bats/bin` is on PATH inside the lane and can be on a developer's, and
+# a system-wide bats puts one there too -- so without this, a stale worktree copy
+# that the branch above had just decided to replace would find *some* bats here
+# and exit 0, leaving the stale one in place. That is the same bug this commit
+# fixes, one branch further down.
+if [ "$REPLACING" -eq 0 ] && command -v bats >/dev/null 2>&1; then
   echo "bats is already on PATH: $(command -v bats)"
   bats --version || true
   echo "Nothing to do. Provision into .ci-gate/ anyway with:  FORCE=1 $0"

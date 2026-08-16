@@ -16,7 +16,7 @@ setup() {
 
   # Sandbox with the real script and libs, but a synthetic frontend/ tree, so a
   # case can be built without touching the repository's own layout.
-  SANDBOX="$(mktemp -d)"
+  SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$SANDBOX/ci/checks" "$SANDBOX/ci/lib"
   cp "$REPO_ROOT/ci/checks/test-layout.sh" "$SANDBOX/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$SANDBOX/ci/lib/"
@@ -2646,7 +2646,7 @@ CFG
   # worktree while HEAD still carries it switched the always-run layout guard
   # off for a push that contains it. A stash or a partial checkout is enough.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib"
   cp "$REPO_ROOT/ci/checks/test-layout.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
@@ -2690,7 +2690,7 @@ CFG
     || { echo "quick stopped standing behind the worktree: $output" >&2; rm -rf "$sb"; return 1; }
 
   local sb2
-  sb2="$(mktemp -d)"
+  sb2="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb2/ci/checks" "$sb2/ci/lib"
   cp "$REPO_ROOT/ci/checks/test-layout.sh" "$sb2/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb2/ci/lib/"

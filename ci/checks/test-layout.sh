@@ -220,7 +220,7 @@ ALL_CANDIDATES=()
 # the producer status something the caller can act on -- and it has to be a
 # file, because the stream is NUL-delimited and a command substitution cannot
 # carry a NUL byte.
-_CAND_TMP="$(mktemp 2>/dev/null)" || _CAND_TMP=""
+_CAND_TMP="$(ci::common::mktemp_file layout-cands 2>/dev/null)" || _CAND_TMP=""
 if [ -z "$_CAND_TMP" ]; then
   echo "Cannot create a private temporary file to enumerate candidate tests." >&2
   exit "$CI_RESULT_FAIL_INFRA"
@@ -877,7 +877,7 @@ _emit_config_copy() {
     esac
     return 0
   fi
-  _tmp="$(mktemp 2>/dev/null)" || _tmp=""
+  _tmp="$(ci::common::mktemp_file layout-scan 2>/dev/null)" || _tmp=""
   if [ -z "$_tmp" ]; then
     echo "Cannot create a private temporary file to read the ${_what} ${VITEST_CONFIG}." >&2
     exit "$CI_RESULT_FAIL_INFRA"
@@ -923,7 +923,7 @@ config_sources() {
   if command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
     if git cat-file -e ":$VITEST_CONFIG" 2>/dev/null; then
       local staged
-      staged="$(mktemp 2>/dev/null)" || staged=""
+      staged="$(ci::common::mktemp_file layout-staged 2>/dev/null)" || staged=""
       if [ -z "$staged" ]; then
         echo "Cannot create a private temporary file to read the staged ${VITEST_CONFIG}." >&2
         exit "$CI_RESULT_FAIL_INFRA"

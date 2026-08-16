@@ -42,7 +42,7 @@ _tc_js_workspace() {
   # Through a file so the producer's status is something this can act on: an
   # unreadable subtree must not read as a package with no TypeScript in it.
   local _tc_list _tc_rc=0
-  _tc_list="$(mktemp 2>/dev/null)" || return 30
+  _tc_list="$(ci::common::mktemp_file tc-projects 2>/dev/null)" || return 30
   # The same name list as _ts_project_files in ci/checks/node.sh, which decides
   # whether this workspace is *required* to have a typecheck script. When the
   # two disagree the gate demands a check of a project this lane then declines
@@ -72,7 +72,7 @@ _tc_js_workspace() {
   # two lists have to agree or the gate demands a check of a project this lane
   # declines to compile, which is the comment above this block.
   local _tc_keepf _tc_one
-  _tc_keepf="$(mktemp 2>/dev/null)" || { rm -f "$_tc_list"; return 30; }
+  _tc_keepf="$(ci::common::mktemp_file tc-keep 2>/dev/null)" || { rm -f "$_tc_list"; return 30; }
   while IFS= read -r _tc_one; do
     [ -n "$_tc_one" ] || continue
     ci::common::is_vendored_path "$_tc_one" && continue
@@ -103,7 +103,7 @@ _tc_js_workspace() {
       _tc_rev="HEAD:${ws}"
       _tc_pfx="${ws}/"
     fi
-    _tc_keep="$(mktemp 2>/dev/null)" || { rm -f "$_tc_list"; return 30; }
+    _tc_keep="$(ci::common::mktemp_file tc-vouched 2>/dev/null)" || { rm -f "$_tc_list"; return 30; }
     while IFS= read -r _tc_p; do
       [ -n "$_tc_p" ] || continue
       if git cat-file -e "HEAD:${_tc_pfx}${_tc_p#./}" 2>/dev/null; then

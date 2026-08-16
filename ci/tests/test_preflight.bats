@@ -87,7 +87,7 @@ gs_secret_line() {
 }
 
 gs_setup() {
-  GS_SB="$(mktemp -d)"
+  GS_SB="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$GS_SB/ci/lib" "$GS_SB/ci/checks"
   cp "$REPO_ROOT/ci/checks/git-safety.sh" "$REPO_ROOT/ci/checks/common.sh" "$GS_SB/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/git.sh" "$GS_SB/ci/lib/"
@@ -293,7 +293,7 @@ gs_run() {
   # is validated in its repaired form while the broken version is pushed — the
   # node lane's defect, over this lane's inputs.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
   cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -317,7 +317,7 @@ gs_run() {
   # the suites' result claims anything about, and failing on it would make the
   # ship gate unusable rather than stricter.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests" "$sb/app"
   cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -347,7 +347,7 @@ gs_run() {
   # ".", so in a repository laid out that way nothing was recognised as being
   # inside one, and an imported asset could change with no node lane at all.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/src"
   printf '{ "name": "root" }\n' > "$sb/package.json"
   printf '{}\n' > "$sb/src/data.json"
@@ -367,7 +367,7 @@ gs_run() {
   # The control. Anchoring on a manifest is what keeps this from claiming every
   # file in a Python repository belongs to a Node workspace.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/src"
   printf '{}\n' > "$sb/src/data.json"
   run bash -c "
@@ -386,7 +386,7 @@ gs_run() {
   # --exclude-standard alike, so the suites ran the replacement for a commit
   # that removes their own coverage.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
   cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -597,6 +597,19 @@ _pf_fns() {
       return 1
     }
   done
+  # The library helpers those functions call. preflight.sh sources
+  # ci/lib/common.sh before any of them runs, so an extraction that carries only
+  # the preflight half leaves the case measuring "command not found" -- read as a
+  # decision by the very branches under test -- instead of the code it is about.
+  # Every temporary file in the gate goes through mktemp_file now, so that is the
+  # one that has to travel with them.
+  for fn in ci::common::mktemp_file ci::common::mktemp_dir; do
+    sed -n "/^${fn}() {/,/^}/p" "$REPO_ROOT/ci/lib/common.sh" >> "$out"
+    grep -q "^${fn}() {" "$out" || {
+      echo "no such function in ci/lib/common.sh: ${fn}" >&2
+      return 1
+    }
+  done
   bash -n "$out"
 }
 
@@ -716,7 +729,7 @@ _pf_fns() {
   # spelling for the union of two disjoint ranges. Refusing says so; the old
   # answer said something confident and false.
   local sb l1 l2 base
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   git init -q --bare "$sb/dest.git"
   git init -q -b main "$sb/w"
   (
@@ -785,7 +798,7 @@ _pf_fns() {
   # quietly silent on exactly the push that could not be scanned -- trading a
   # wrong answer for no answer, on the check the ruleset exists to enforce.
   local sb l1 l2
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   git init -q --bare "$sb/dest.git"
   git init -q -b main "$sb/w"
   mkdir -p "$sb/w/ci/lib" "$sb/w/ci/checks"
@@ -824,7 +837,7 @@ _pf_fns() {
   # changed" over a push carrying the whole branch: the pre-push gate skipping
   # itself at the last moment before the commits leave.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb"
     git init -q -b main .
@@ -854,7 +867,7 @@ _pf_fns() {
   # directory found" and reported PASS, so the gate would approve the removal
   # of the whole regression net it exists to enforce.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
   cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -891,7 +904,7 @@ _pf_fns() {
   # deletion, and the scan that would have seen the replacement was not looking
   # there. The suites then ran against rules the push removes.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
   cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -999,7 +1012,7 @@ YML
   # whose sha is the rest of the warning text. A false failure on the check
   # that decides whether a push may proceed.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/bin"
   cp "$REPO_ROOT/ci/checks/branch-protection.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
@@ -1093,7 +1106,7 @@ YML
   # `git push origin :main` (a deletion) went the same way. The pre-push hook is
   # handed the destination for every ref on stdin and now passes it on.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks"
   cp "$REPO_ROOT/ci/checks/branch-protection.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
@@ -1152,7 +1165,7 @@ YML
   # script, or a manual push of a tested commit -- skipped the count entirely and
   # reported PASS over a range containing a merge.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks"
   cp "$REPO_ROOT/ci/checks/branch-protection.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
@@ -1290,7 +1303,7 @@ YML
   # no content. A commit no remote branch contains is carried out by the tag
   # itself, and nothing has ever checked that tree.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/remote"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
      "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
@@ -1380,7 +1393,7 @@ YML
   # before the first run_phase -- the one that removes the HEAD copy of
   # ci/config/checks.yml materialized for a ship run -- so every ship validation
   # leaked one temporary file, silently and forever.
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   run bash -c "
     set -Eeuo pipefail
     . '$REPO_ROOT/ci/lib/runner.sh'
@@ -1427,6 +1440,58 @@ YML
   [ -n "$_jobs" ] || { echo "$output" >&2; rm -rf "$sb"; false; }
   [ ! -d "$_jobs" ] || { echo "the runner's jobs dir survived: $_jobs" >&2; rm -rf "$sb"; false; }
   rm -rf "$sb"
+}
+
+@test "common: no bare mktemp survives in the gate or its suites" {
+  # `mktemp` with no operand is a GNU extension. BSD mktemp -- what macOS ships,
+  # and macOS is the platform whose Bash 3.2 floor this gate is written against
+  # -- documents `template ...` as required and exits with a usage error without
+  # one. Every bare call failed there, and the lanes reported that failure
+  # correctly and uselessly: ci/checks/test-layout.sh runs this on every
+  # scheduled quick, full and ship run, so it exited FAIL_INFRA before inspecting
+  # a single test, on every run, on a supported platform.
+  #
+  # ci/scripts/install-bats.sh already carried this reasoning for its own
+  # `mktemp -d`. It is a property of the tool rather than of that script, which
+  # is why the rule is repo-wide and why it is asserted rather than remembered.
+  #
+  # Matched only where the tool is actually invoked -- inside a command
+  # substitution -- so the word appearing in a comment or in an error message is
+  # not a finding, and `ci::common::mktemp_file` is not one either. This comment
+  # deliberately does not spell the substitution out: the scan reads this file
+  # too, and prose that quotes the pattern is a finding about itself.
+  # Extracted first and filtered second, rather than written as one expression:
+  # an optional ` -d` inside the pattern can always match empty, so a single
+  # regex reports the templated `-d` form as bare by skipping the flag it was
+  # meant to consume. Two passes cannot do that.
+  local bare
+  bare="$(grep -rnoE '\$\(mktemp[^)]{0,14}' \
+            --include='*.sh' --include='*.bats' --include='*.bash' ci \
+          | grep -vE 'mktemp (-d )?"' || true)"
+  [ -z "$bare" ] || { echo "mktemp called without a template:"$'\n'"$bare" >&2; return 1; }
+
+  # And the helper the lanes use has to actually produce a file, under the
+  # directory the platform names rather than a hard-coded /tmp.
+  local f d
+  f="$(cd "$REPO_ROOT" && . ci/lib/common.sh >/dev/null 2>&1 && ci::common::mktemp_file probe)"
+  [ -f "$f" ] || { echo "mktemp_file produced no file: [$f]" >&2; return 1; }
+  case "$f" in
+    "${TMPDIR:-/tmp}"/ums-probe.*) ;;
+    *) rm -f "$f"; echo "mktemp_file ignored TMPDIR: $f" >&2; return 1 ;;
+  esac
+  rm -f "$f"
+
+  d="$(cd "$REPO_ROOT" && . ci/lib/common.sh >/dev/null 2>&1 && ci::common::mktemp_dir probe)"
+  [ -d "$d" ] || { echo "mktemp_dir produced no directory: [$d]" >&2; return 1; }
+  rmdir "$d"
+
+  # Two calls must not collide -- the six X's are what make the name unique, and
+  # a template without them is a fixed path two concurrent lanes would share.
+  local a b
+  a="$(cd "$REPO_ROOT" && . ci/lib/common.sh >/dev/null 2>&1 && ci::common::mktemp_file probe)"
+  b="$(cd "$REPO_ROOT" && . ci/lib/common.sh >/dev/null 2>&1 && ci::common::mktemp_file probe)"
+  [ "$a" != "$b" ] || { rm -f "$a"; echo "two calls returned the same path: $a" >&2; return 1; }
+  rm -f "$a" "$b"
 }
 
 @test "hook: the destination tips query matches the one git.sh falls back to" {
@@ -1492,7 +1557,7 @@ YML
   # seconds in and reported an infrastructure timeout the configuration never
   # asked for -- a lane that does not finish is a lane that does not run.
   local cfg
-  cfg="$(mktemp)"
+  cfg="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   printf 'checks:\n  alpha:\n    timeout_sec: 1e3\n  beta:\n    timeout_sec: -1\n  gamma:\n    timeout_sec: 900\n' > "$cfg"
 
   run bash -c ". '$REPO_ROOT/ci/lib/runner.sh' >/dev/null 2>&1; \
@@ -1530,7 +1595,7 @@ YML
   # means discovery found a tsconfig.json and this lane was scheduled for it, so
   # "no tsc" does not mean "nothing to check".
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ws/node_modules/.bin"
   cp "$REPO_ROOT/ci/checks/typecheck.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -1576,7 +1641,7 @@ YML
   # -- so a fixture built through git would pass against the broken code too and
   # assert nothing. The producer is the only thing replaced.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   # The extraction now starts at the temp file the collector reads through
   # rather than at the array, because the producer's status has to be checkable
   # and a process substitution is a subshell that swallows it. Two names the
@@ -1587,6 +1652,11 @@ YML
     printf '%s\n' 'CI_RESULT_FAIL_INFRA=30'
     printf '%s\n' 'GATE_WHAT=staged'
     printf '%s\n' '_gs_content_files() { printf "%s\0" "$NL1" "$NL1" "plain.py" "plain.py" "$NL2" "$NL1"; }'
+    # The library helper the extracted block reads through. git-safety.sh sources
+    # ci/lib/common.sh before it, so leaving it out makes the collector fail on
+    # "command not found" and the case would assert the dedup against a block
+    # that never ran.
+    sed -n '/^ci::common::mktemp_file() {/,/^}/p' "$REPO_ROOT/ci/lib/common.sh"
     sed -n '/^_GS_PATHLIST=/,/^rm -f "\$_GS_PATHLIST"/p' "$REPO_ROOT/ci/checks/git-safety.sh"
     printf '%s\n' 'printf "nl=%s ordinary=%s\n" "${#_GS_NL_PATHS[@]}" "${#_GS_PATHS[@]}"'
   } > "$sb/drive.sh"
@@ -1614,7 +1684,7 @@ YML
   # signature check and the changeset scan all skipped every commit up to
   # `main`. A secret in the omitted history uploads past a green gate.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb"
     git init -q -b main .
@@ -1682,7 +1752,7 @@ YML
   # gate then approves a tree the destination has never seen while the lanes
   # validate the repaired HEAD.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb"
     git init -q -b main .
@@ -1724,7 +1794,7 @@ YML
   # and this is the one of the three scans that can see a worktree replacement
   # for a path the pushed commits delete.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/ci/tests" "$sb/.githooks" "$sb/bin"
   cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -1772,7 +1842,7 @@ YML
   # on the flag; the ship *plan* did not, which is the same rule missing one
   # tree over.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   cp -r "$REPO_ROOT/ci" "$sb/ci"
   rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
   # Every check becomes a stub that names itself and passes, so what the run
@@ -1932,7 +2002,7 @@ YML
   # the lane reported PASS over zero tests -- found-nothing read as
   # everything-passed, the exact state this wrapper says it exists to prevent.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/ci/tests/fixtures/shell/tests"
   cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -1971,7 +2041,7 @@ YML
   # and a perfectly non-empty file list. git-safety is the lane that blocks
   # exactly those paths, and it never ran.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   cp -r "$REPO_ROOT/ci" "$sb/ci"
   rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
   local f
@@ -2060,7 +2130,7 @@ YML
   # paths deliberately keep, and the narrow path was unreachable, so each was
   # missing the other's protection.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   cp -r "$REPO_ROOT/ci" "$sb/ci"
   rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
   local f
@@ -2147,7 +2217,7 @@ YML
   # bats suite, about an hour here against a 30s pre-commit budget. A commit
   # could then fail on a gate self-test unrelated to anything staged.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   cp -r "$REPO_ROOT/ci" "$sb/ci"
   rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
   local f
@@ -2288,7 +2358,7 @@ YML
   #   old  ->  <tip>..HEAD      0 commits
   #   new  ->  <published>..<tip>   1 commit
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb"
     git init -q -b main .
@@ -2473,7 +2543,7 @@ YML
   # to hang, announced as an infrastructure timeout nobody configured, or not
   # announced at all.
   local cfg
-  cfg="$(mktemp)"
+  cfg="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   printf 'checks:\n  alpha:\n    timeout_sec: banana\n  gamma:\n    timeout_sec: 900\n' > "$cfg"
 
   # The status is the answer; the empty output is what it used to be mistaken for.
@@ -2501,7 +2571,7 @@ YML
   # contract calls a gate that cannot do its job -- rather than launched without
   # the bound its configuration asked for.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   printf 'checks:\n  alpha:\n    timeout_sec: banana\n  gamma:\n    timeout_sec: 900\n' > "$sb/checks.yml"
   printf '#!/usr/bin/env bash\ntouch "%s/ran"\nexit 0\n' "$sb" > "$sb/check.sh"
   chmod +x "$sb/check.sh"
@@ -2592,7 +2662,7 @@ YML
 
   # And submit acts on that refusal rather than launching unbounded.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   printf '#!/usr/bin/env bash\ntouch "%s/ran"\nexit 0\n' "$sb" > "$sb/check.sh"
   chmod +x "$sb/check.sh"
 
@@ -2640,7 +2710,7 @@ YML
   # push_range narrows past it so git-safety, the signature walk and the
   # changeset scan never look at it either.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/up"
   (
     cd "$sb/up"
@@ -2731,7 +2801,7 @@ YML
   # checked out, and a failure already sitting there blocked a release that
   # sends none of it.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   cp -r "$REPO_ROOT/ci" "$sb/ci"
   rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
   local f
@@ -2840,7 +2910,7 @@ YML
   # ever taken back out of the plan, this case fails and that rule has to change
   # with it -- the two are one decision.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   cp -r "$REPO_ROOT/ci" "$sb/ci"
   rm -rf "$sb/ci/tests" "$sb/ci/reports" "$sb/ci/artifacts"
   local f
@@ -3021,7 +3091,7 @@ YML
   # skipped. The same false pass the guard exists to stop, by the one path that
   # returns before it.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/packages/app"
   (
     cd "$sb"
@@ -3063,7 +3133,7 @@ YML
   # carries no TypeScript project", the lane returns 3, and the push passes
   # having compiled none of it. Could-not-ask and nothing-there, one more time,
   # at the producer this block had just been given.
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ws"
   cp "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
   cp "$REPO_ROOT/ci/checks/typecheck.sh" "$sb/ci/checks/"
@@ -3102,7 +3172,7 @@ YML
   # The control: with the reader working, the same tree is checked as before and
   # this refusal does not fire. Without it the case is satisfied by a lane that
   # refuses everything.
-  local sb2; sb2="$(mktemp -d)"
+  local sb2; sb2="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb2/ci/lib" "$sb2/ci/checks" "$sb2/ws"
   cp "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/common.sh" "$sb2/ci/lib/"
   cp "$REPO_ROOT/ci/checks/typecheck.sh" "$sb2/ci/checks/"
@@ -3127,7 +3197,7 @@ YML
   # and a non-empty *string*, so git-safety's "cannot determine the range" guard
   # did not fire. It and the signature and linear-history checks all walked
   # nothing while the unpublished tagged history went out unexamined.
-  local root; root="$(mktemp -d)"
+  local root; root="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$root" || exit 1
     git init -q --bare remote.git
@@ -3235,7 +3305,7 @@ YML
   local fns="$BATS_TEST_TMPDIR/key.sh"
   _pf_fns "$fns" _compute_cache_key _tool_fingerprint _changeset_content_hash
 
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb" || exit 1
     git init -q -b main . && git config user.email t@t && git config user.name t
@@ -3284,7 +3354,7 @@ YML
   local fns="$BATS_TEST_TMPDIR/lanes.sh"
   _pf_fns "$fns" run_mode
 
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb" || exit 1
     git init -q -b main . && git config user.email t@t && git config user.name t
@@ -3380,7 +3450,7 @@ YML
   # this returned 0, node_workspaces handed back an empty list with status 0,
   # and ship-mode tests-js and typecheck-js printed "skipped: no package.json
   # found" for a push that carries one.
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib"
   {
     cat "$REPO_ROOT/ci/lib/common.sh"
@@ -3438,7 +3508,7 @@ YML
   # 0 with an empty or bare-tip range and still reaches the walk. So a non-zero
   # status is the tool failing, not the push being empty.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/checks"
   cp "$REPO_ROOT/ci/checks/branch-protection.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
@@ -3497,7 +3567,7 @@ YML
   # tests-js ran against the shadow and passed over a pushed tree whose import
   # does not resolve.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb"
     git init -q -b main .
@@ -3581,7 +3651,7 @@ YML
 
   # The equivalence the replacement rests on, asserted rather than assumed: a
   # prune of `./*/*/*` selects what `-maxdepth 2` selected.
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   local f
   for f in a.conf x/b.conf x/y/c.conf x/y/z/d.conf; do
     mkdir -p "$sb/$(dirname "$f")"; : > "$sb/$f"
@@ -3604,10 +3674,16 @@ YML
   # A pushed frontend commit with failing tests passes on toggles that exist in
   # nobody's tree but the pusher's.
   local sb drv
-  sb="$(mktemp -d)"
-  drv="$(mktemp)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  drv="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   {
     sed -n '/^_CHECKS_CONFIG_FILE=/,/^_CHECKS_CONFIG_TMP=""$/p' "$REPO_ROOT/ci/preflight.sh"
+    # The library helper the resolver materializes HEAD's copy through.
+    # preflight.sh sources ci/lib/common.sh before it runs; an extraction that
+    # leaves it out makes the resolver fail on "command not found", fall back to
+    # the worktree, and this case would then report the worktree's answer as
+    # HEAD's -- which is exactly the confusion it exists to detect.
+    sed -n '/^ci::common::mktemp_file() {/,/^}/p' "$REPO_ROOT/ci/lib/common.sh"
     sed -n '/^_checks_config_resolve()/,/^}/p' "$REPO_ROOT/ci/preflight.sh"
     sed -n '/^_check_disabled_in_config()/,/^}/p' "$REPO_ROOT/ci/preflight.sh"
   } > "$drv"
@@ -3701,7 +3777,7 @@ YML
   # neither did ci/install-hooks.sh, so a fresh clone that followed the
   # documented setup had every push touching ci/ blocked -- with the refusal
   # arriving at push time and naming no remedy that exists in this repository.
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/ci/tests" "$sb/.ci-gate/bats/bin"
   cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT"/ci/lib/*.sh "$sb/ci/lib/"

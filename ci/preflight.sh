@@ -332,7 +332,7 @@ _checks_config_resolve() {
     local _cc_tmp=""
     if command -v git >/dev/null 2>&1 \
       && git rev-parse --verify HEAD >/dev/null 2>&1 \
-      && _cc_tmp="$(mktemp 2>/dev/null)" \
+      && _cc_tmp="$(ci::common::mktemp_file checks-config 2>/dev/null)" \
       && git show "HEAD:ci/config/checks.yml" > "$_cc_tmp" 2>/dev/null \
       && [ -s "$_cc_tmp" ]; then
       _CHECKS_CONFIG_FILE="$_cc_tmp"
@@ -1032,7 +1032,7 @@ run_mode() {
       _lp_ok=0
       if command -v git >/dev/null 2>&1 \
         && git rev-parse --verify HEAD >/dev/null 2>&1 \
-        && _lp_tmp="$(mktemp 2>/dev/null)" \
+        && _lp_tmp="$(ci::common::mktemp_file lane-plan 2>/dev/null)" \
         && git show "HEAD:ci/config/lanes.conf" > "$_lp_tmp" 2>/dev/null \
         && [ -s "$_lp_tmp" ]; then
         _lp_file="$_lp_tmp"

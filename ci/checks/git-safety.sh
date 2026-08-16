@@ -86,7 +86,7 @@ if [ "${CI_GATE_MODE:-}" = "ship" ]; then
   #
   # Removed inline rather than by an EXIT trap: `trap secret_cleanup EXIT` below
   # replaces any trap set here, so a second one would silently leak the file.
-  _GS_RANGE_ERR="$(mktemp)"
+  _GS_RANGE_ERR="$(ci::common::mktemp_file gs-range)"
   GATE_RANGE="$(ci::git::push_range 2>"$_GS_RANGE_ERR" || true)"
   if [ -z "$GATE_RANGE" ]; then
     echo "Cannot determine the range being pushed; refusing to report on it."
@@ -297,7 +297,7 @@ fi
 # is indistinguishable from grep's "no match", and it also *overrides* grep's
 # "matched" under pipefail. So the one scan that can see a conflict marker could
 # be silenced by the thing feeding it.
-_GS_MARKERS="$(mktemp 2>/dev/null)" || {
+_GS_MARKERS="$(ci::common::mktemp_file gs-markers 2>/dev/null)" || {
   echo "Cannot create a temporary file for the conflict-marker scan."
   exit "$CI_RESULT_FAIL_INFRA"
 }
@@ -359,7 +359,7 @@ fi
 # below then run over a path list nobody could build. The stream is
 # NUL-delimited, so it has to be a file -- a command substitution cannot carry a
 # NUL byte. Same shape, and same cure, as config_sources in test-layout.sh.
-_GS_PATHLIST="$(mktemp 2>/dev/null)" || {
+_GS_PATHLIST="$(ci::common::mktemp_file gs-paths 2>/dev/null)" || {
   echo "Cannot create a temporary file to enumerate the files ${GATE_WHAT}."
   exit "$CI_RESULT_FAIL_INFRA"
 }
@@ -528,7 +528,7 @@ while [ "$_gs_idx" -lt "${#_GS_PATHS[@]}" ]; do
   fi
 done
 
-secret_pattern_file="$(mktemp)"
+secret_pattern_file="$(ci::common::mktemp_file gs-secret-patterns)"
 secret_cleanup() {
   rm -f "$secret_pattern_file" 2>/dev/null || true
 }
@@ -554,7 +554,7 @@ secret_rc=0
 # exactly like "no secret found", and under pipefail it could also overwrite
 # grep's "matched" with the producer's failure. The one scan whose whole purpose
 # is to notice a secret was silenced by the thing feeding it.
-_GS_SECRET_DIFF="$(mktemp 2>/dev/null)" || {
+_GS_SECRET_DIFF="$(ci::common::mktemp_file gs-secret-diff 2>/dev/null)" || {
   echo "Cannot create a temporary file for the secret scan."
   exit "$CI_RESULT_FAIL_INFRA"
 }

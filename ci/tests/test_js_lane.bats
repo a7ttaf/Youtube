@@ -134,7 +134,7 @@ _enabled_value() {
   # exits 4 with a usage error, having collected nothing. affected.yml maps
   # every Python source to exactly that pattern, so the narrowing had never
   # selected a Python test -- it only ever broke the run that tried to use it.
-  local fn; fn="$(mktemp)"
+  local fn; fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   sed -n '/^_tests_expand_glob()/,/^}/p' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
   [ -s "$fn" ] || { rm -f "$fn"; echo "could not lift the expander from the lane" >&2; return 1; }
   bash -n "$fn" || { rm -f "$fn"; echo "the extraction is not valid shell" >&2; return 1; }
@@ -142,7 +142,7 @@ _enabled_value() {
   . "$fn"
   rm -f "$fn"
 
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/tests/unit/deep" "$sb/tests/integration"
   : > "$sb/tests/unit/test_a.py"
   : > "$sb/tests/unit/deep/test_b.py"
@@ -233,7 +233,7 @@ _enabled_value() {
 # exercise the lane's decisions rather than a package manager.
 
 ws_setup() {
-  NODE_SB="$(mktemp -d)"
+  NODE_SB="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$NODE_SB/ci/checks" "$NODE_SB/ci/lib" \
            "$NODE_SB/ws/tests" "$NODE_SB/ws/node_modules" "$NODE_SB/.ci-gate"
   cp "$REPO_ROOT/ci/checks/node.sh" "$NODE_SB/ci/checks/"
@@ -550,7 +550,7 @@ ws_run() {
   # mean `--package` to npx and `--parseable` to pnpm without one eating the
   # other's command.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib"
   cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -599,7 +599,7 @@ ws_run() {
   # The second is the sharper one -- tests.sh would run Vitest over a Jest suite,
   # collect nothing, and report PASS. This case is that claim made true.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib"
   cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -678,7 +678,7 @@ ws_run() {
   # readers differ here on purpose -- opposite failure directions -- so this is
   # deliberately not folded into the cross-reader case above.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib"
   cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -722,7 +722,7 @@ ws_run() {
   # working suite into a lane failure. Older majors know only the singular, so
   # this cannot simply be switched over either.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/node_modules/jest"
 
   _flag() {
@@ -1481,7 +1481,7 @@ ws_run() {
   # the timeout applied only on the background path, a supported mode ignored
   # both the declared value and the global one and could hang indefinitely.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/lib" "$sb/ci/config"
   cp "$REPO_ROOT/ci/lib/runner.sh" "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
   printf 'checks:\n  slowcheck:\n    enabled: true\n    timeout_sec: 1\n' > "$sb/ci/config/checks.yml"
@@ -1568,7 +1568,7 @@ ws_run() {
   # present-but-broken executable exits non-zero — before a single check has
   # run, with a message about nothing the commit touched.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   printf '#!/usr/bin/env bash\necho boom >&2\nexit 1\n' > "$sb/bun"
   chmod +x "$sb/bun"
 
@@ -2039,7 +2039,7 @@ ws_run() {
   source ci/lib/common.sh
   source ci/lib/changeset.sh
   local tmp
-  tmp="$(mktemp -d)"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   CI_CHANGESET_JSON="$tmp/changeset.json"
   _CI_CHANGESET_MODE="test"
   _CI_CHANGESET_FILES_RAW="$(printf 'R100\tfrontend/src/x.ts\tDocs/x.md')"
@@ -2703,7 +2703,7 @@ ws_run() {
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
-  [[ "$output" == *"ships Cypress specs that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Cypress tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
   [[ "$output" == *"login.cy.ts"* ]] || { echo "$output" >&2; false; }
   rm -rf "$NODE_SB"
 
@@ -2726,7 +2726,7 @@ ws_run() {
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
-  [[ "$output" != *"ships Cypress specs"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"ships Cypress tests"* ]] || { echo "$output" >&2; false; }
   rm -rf "$NODE_SB"
 
   # Naming the runner is not running it. `echo cypress run` has the word in the
@@ -2742,7 +2742,7 @@ ws_run() {
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
-  [[ "$output" == *"ships Cypress specs that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Cypress tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
   rm -rf "$NODE_SB"
 
   # The control, and it is the one that keeps this guard from becoming the Welsh
@@ -2755,7 +2755,111 @@ ws_run() {
   ws_seed_fingerprint
   run ws_run
   [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
-  [[ "$output" != *"ships Cypress specs"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"ships Cypress tests"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: every runner whose files are here has to be reached, not just Cypress" {
+  # The Cypress case above was one instance of a rule. `run_script` invokes
+  # `test` and `test:unit` and nothing else, so any convention in the suite
+  # predicate belonging to a runner those two never reach is counted as proof the
+  # suite is present while none of it executes -- and the same files switch the
+  # lost-suite scan off, making the rest of the suite harder to lose noticeably.
+  #
+  # Mocha, with the evidence that makes `test/login.js` a suite rather than a
+  # file: a script that actually names the runner.
+  ws_setup
+  ws_tools mocha
+  mkdir -p "$NODE_SB/ws/test"
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/test/login.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "test:legacy": "mocha" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Mocha tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"test/login.js"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # And the reason that evidence is required rather than assumed. `test/` is also
+  # `node --test`'s documented directory, so the same files with no script naming
+  # any runner for them are an ordinary helper tree -- refusing here would fail a
+  # plain Vitest workspace for shipping helpers, which is the false refusal this
+  # file has been bitten by before.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/test"
+  printf 'export const db = 1;\n' > "$NODE_SB/ws/test/helpers.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # Jasmine's `spec/**/*[sS]pec.*` is unambiguous -- no other recognised runner
+  # collects `loginSpec.js` -- so the files alone are the question, exactly as
+  # for Cypress.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/spec"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/spec/loginSpec.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Jasmine tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # `node --test` needs the flag as well as the runner: bare `node` in a script
+  # is a build step, and `test-utils.ts` is an ordinary helper name.
+  ws_setup
+  printf 'export const wrap = 1;\n' > "$NODE_SB/ws/test-utils.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "prepare": "node scripts/gen.js" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  ws_setup
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/login_test.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "test:node": "node --test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships node --test tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The umbrella delegating is accepted for every family, not only for the one
+  # the message happens to name.
+  ws_setup
+  ws_tools mocha
+  mkdir -p "$NODE_SB/ws/test"
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/test/login.js"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/mocha"
+  chmod +x "$NODE_SB/ws/scripts/mocha"
+  printf '#!/usr/bin/env bash\n./scripts/mocha "$@"\n' > "$NODE_SB/ws/scripts/legacy.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh && npm run test:legacy", "test:legacy": "bash scripts/legacy.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # And a file the invoked runner does collect is not one of these: `test/a.test.js`
+  # is vitest's by name, so it must not be read as an unreached Mocha suite.
+  ws_setup
+  ws_tools mocha
+  mkdir -p "$NODE_SB/ws/test"
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/test/a.test.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "test:legacy": "mocha" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"never runs"* ]] || { echo "$output" >&2; false; }
   rm -rf "$NODE_SB"
 }
 
@@ -2869,7 +2973,7 @@ ws_run() {
   # and node.sh then printed "No package.json found" and exited 0. Scheduling
   # and execution have to mean the same thing by "workspace".
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/packages/app" "$sb/node_modules/dep" "$sb/packages/app/dist"
   printf '{}\n' > "$sb/packages/app/package.json"
   printf '{}\n' > "$sb/node_modules/dep/package.json"
@@ -2888,7 +2992,7 @@ ws_run() {
   # lane refuse the install and report FAIL_INFRA for a directory that exists to
   # be a fixture. Pruned only under a test tree, so packages/fixtures/ survives.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/tests/fixtures/node" "$sb/packages/fixtures" "$sb/app/testdata/pkg"
   printf '{}\n' > "$sb/ci/tests/fixtures/node/package.json"
   printf '{}\n' > "$sb/packages/fixtures/package.json"
@@ -3196,7 +3300,7 @@ ws_run() {
   # lane refuses to install a workspace that has none -- so that reading turns
   # every real monorepo red. The ambiguity is reported instead.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/packages/app"
   printf '{}' > "$sb/package.json"
   printf '{}' > "$sb/packages/app/package.json"
@@ -3218,7 +3322,7 @@ ws_run() {
   # `package.json` as a regex makes every `.` a wildcard -- so a workspace
   # directory named `package-json` matched the pattern and was skipped.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/package-json" "$sb/frontend"
   printf '{}' > "$sb/package-json/package.json"
   printf '{}' > "$sb/frontend/package.json"
@@ -5168,7 +5272,7 @@ SH
   # which is the rule config_sources and the git-safety path collector already
   # follow.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/bin" "$sb/frontend"
   printf '{ "name": "f", "private": true }\n' > "$sb/frontend/package.json"
   printf '#!/usr/bin/env bash\nexit 71\n' > "$sb/bin/find"
@@ -5292,7 +5396,7 @@ SH
 # languages' tools are not required.
 
 lane_setup() {
-  LANE_SB="$(mktemp -d)"
+  LANE_SB="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$LANE_SB/ci/checks" "$LANE_SB/ci/lib" "$LANE_SB/ci/config" \
            "$LANE_SB/ws/node_modules/.bin" "$LANE_SB/ws/tests"
   cp "$REPO_ROOT/ci/checks/tests.sh" "$REPO_ROOT/ci/checks/typecheck.sh" "$LANE_SB/ci/checks/"
@@ -5614,7 +5718,7 @@ lane_run_typecheck() {
   # takes the *enumeration* down before this loop is reached, so the case would
   # assert a different message than the one it is about. What is under test is
   # what the loop does with a 30, so the loop is given a 30.
-  local drv; drv="$(mktemp)"
+  local drv; drv="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   sed -n '/^typecheck::run_js()/,/^}/p' "$REPO_ROOT/ci/checks/typecheck.sh" > "$drv"
   bash -n "$drv" || { rm -f "$drv" "$LANE_SB"; echo "extraction is not valid shell" >&2; return 1; }
 
@@ -5636,7 +5740,7 @@ lane_run_typecheck() {
 
   # The control, and it is what stops the branch from swallowing real failures:
   # a compiler that exits non-zero for any other reason is still a type error.
-  drv="$(mktemp)"
+  drv="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   sed -n '/^typecheck::run_js()/,/^}/p' "$REPO_ROOT/ci/checks/typecheck.sh" > "$drv"
   run bash -c "
     set -Eeuo pipefail
@@ -6166,7 +6270,7 @@ ws_tools() {
   # alone and exit 0 -- which is precisely the harm the ambiguity report exists
   # to prevent.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/bin" "$sb/packages/app"
   printf '{ "name": "root", "private": true }\n' > "$sb/package.json"
   printf '{ "name": "app", "private": true }\n' > "$sb/packages/app/package.json"
@@ -6361,8 +6465,8 @@ declared_runner_for() {
 # fixture has to be more than one script.
 declared_runner_for_manifest() {
   local sb fn
-  sb="$(mktemp -d)"
-  fn="$(mktemp)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   awk '/BEGIN declared-runner reader/,/END declared-runner reader/' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
   bash -n "$fn" || { rm -rf "$sb" "$fn"; echo "<extraction failed>"; return 1; }
   printf '%s\n' "$1" > "$sb/package.json"
@@ -6425,7 +6529,7 @@ declared_runner_for_manifest() {
 # rather than a restatement of what it is believed to do.
 node_lane_runner_for() {
   local fn _f
-  fn="$(mktemp)"
+  fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   for _f in _blank_quoted _unquote_tok _normalize_command _timeout_advance \
             _env_advance _pm_advance _command_runner; do
     awk -v n="^${_f}\\\\(\\\\) \\\\{" '$0 ~ n, /^\}/' "$REPO_ROOT/ci/checks/node.sh" >> "$fn"
@@ -6619,8 +6723,8 @@ node_lane_runner_for() {
 # second case below is here to hold.
 declared_env_for_manifest() {
   local sb fn
-  sb="$(mktemp -d)"
-  fn="$(mktemp)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   awk '/BEGIN declared-runner reader/,/END declared-runner reader/' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
   bash -n "$fn" || { rm -rf "$sb" "$fn"; echo "<extraction failed>"; return 1; }
   printf '%s\n' "$1" > "$sb/package.json"
@@ -6758,8 +6862,8 @@ declared_env_for() {
   # applies it, which is a separate claim and the one that decides whether any
   # of it reaches a test.
   local sb drv
-  sb="$(mktemp -d)"
-  drv="$(mktemp)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  drv="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   {
     sed -n '/BEGIN declared-runner reader/,/END declared-runner reader/p' \
       "$REPO_ROOT/ci/checks/tests.sh"
@@ -6882,7 +6986,7 @@ MANIFEST
 
 # A sandbox laid out as a real repository, with a frontend workspace committed.
 ship_ws_setup() {
-  SHIP_SB="$(mktemp -d)"
+  SHIP_SB="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$SHIP_SB/ci/checks" "$SHIP_SB/ci/lib" "$SHIP_SB/frontend/tests" "$SHIP_SB/.ci-gate"
   cp "$REPO_ROOT/ci/checks/node.sh" "$SHIP_SB/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/git.sh" \
@@ -7330,7 +7434,7 @@ ship_ws_run() {
   # would have made a fourth answer to a question this branch keeps finding
   # answered three different ways.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/frontend"
   printf '{"name":"f"}\n' > "$sb/frontend/package.json"
   ( cd "$sb" && git init -q -b main . && git add -A \
@@ -7491,7 +7595,7 @@ ship_ws_run() {
   # HEAD and the worktree". typecheck-js and tests-js are scheduled as their
   # own blocker lanes and never go through node.sh, so neither asked.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/frontend"
   (
     cd "$sb"
@@ -7663,7 +7767,7 @@ ship_ws_run() {
                f && /\|\| true$/ { exit }' "$REPO_ROOT/ci/checks/tests-shell.sh")"
   [ -n "$frag" ] || { echo "could not lift the scan filter from the lane" >&2; return 1; }
 
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb" || exit 1
     git init -q . && git config user.email t@t && git config user.name t
@@ -7718,7 +7822,7 @@ ship_ws_run() {
   # build, and exited PASS. The three scans that exist to notice a workspace
   # going missing read the same listing and missed it identically.
   local acc; acc="$(printf 'caf\303\251')"
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb" || exit 1
     git init -q . && git config user.email t@t && git config user.name t
@@ -7807,7 +7911,7 @@ ship_ws_run() {
   prune="find . \( -name 'node_modules' -o -path './dist' -o -path './build' -o -path './out' -o -path './coverage' -o -path './htmlcov' -o -path './.next' -o -path './.nuxt' -o -path './.turbo' -o -path './.vite' -o -path './.cache' \) -prune"
   grep -qF -- "$prune" "$REPO_ROOT/ci/checks/node.sh"     || { echo "the lane no longer uses this prune; update this case" >&2; return 1; }
 
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   local f
   for f in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js            test/README.md test/fixtures/data.json src/app.js src/a.test.ts            __tests__/login.js src/__tests__/deep/a.tsx            e2e/x.cy.ts messages.cy.json openapi.spec.json            test-login.js login-test.js login_test.js test.js            src/test/util.js test-fixtures.json            spec/loginSpec.js spec/nested/authSpec.mjs spec/helpers/setup.js            spec/support/jasmine.json            tests/build/checkout.test.ts build/out.test.js node_modules/x/test/a.js            coverage/old.test.js .next/x.test.js; do
     mkdir -p "$sb/$(dirname "$f")" && : > "$sb/$f"
@@ -7903,12 +8007,12 @@ ship_ws_run() {
   # AFFECTED_TESTS is then non-empty, the JavaScript slice is empty, and a
   # non-empty list narrows: `skipped: no affected JavaScript tests` over a push
   # that changed the frontend.
-  local fn; fn="$(mktemp)"
+  local fn; fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   sed -n '/_tests_diff_paths() {/,/^  }/p' "$REPO_ROOT/ci/checks/tests.sh" | sed 's/^  //' > "$fn"
   [ -s "$fn" ] || { rm -f "$fn"; echo "could not lift the path reader from the lane" >&2; return 1; }
   bash -n "$fn" || { rm -f "$fn"; echo "the extraction is not valid shell" >&2; return 1; }
 
-  local sb; sb="$(mktemp -d)"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb"
     git init -q -b main .

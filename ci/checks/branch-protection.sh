@@ -58,7 +58,7 @@ _bp_err_setup() {
   # redirects git's stderr onto whatever the symlink names, with this process's
   # privileges. A gate that cannot obtain a private temp file has no business
   # continuing; there is nothing to fall back to that is not worse.
-  _BP_ERR_FILE="$(mktemp 2>/dev/null)" || _BP_ERR_FILE=""
+  _BP_ERR_FILE="$(ci::common::mktemp_file bp-err 2>/dev/null)" || _BP_ERR_FILE=""
   if [ -z "$_BP_ERR_FILE" ]; then
     ci::log::error "Cannot create a private temporary file (mktemp failed)."
     OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"

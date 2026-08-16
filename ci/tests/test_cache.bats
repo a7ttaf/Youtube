@@ -10,7 +10,7 @@ setup() {
   source "$REPO_ROOT/ci/lib/common.sh"
   source "$REPO_ROOT/ci/lib/cache.sh" 2>/dev/null || true
 
-  export CI_GATE_CACHE_DIR="$(mktemp -d)"
+  export CI_GATE_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
 }
 
 teardown() {
@@ -38,7 +38,7 @@ teardown() {
     skip "cache library not loaded"
   fi
   ci::cache::init
-  src="$(mktemp -d)"
+  src="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   # These filenames are the cache contract, not arbitrary fixture names:
   # ci::cache::hit requires result.txt, and ci/preflight.sh writes result.txt
   # and output.txt. A fixture using result/output.log stores an entry that can
@@ -59,7 +59,7 @@ teardown() {
     skip "cache library not loaded"
   fi
   ci::cache::init
-  src="$(mktemp -d)"
+  src="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   echo "test output" > "$src/output.txt"
 
   ci::cache::put "test-key-incomplete" "$src"

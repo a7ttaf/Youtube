@@ -577,7 +577,7 @@ ci::changeset::_name_status() {
   # No predictable fallback: see branch-protection.sh. A guessable path opened
   # for writing is a symlink target waiting to happen, and detection failing is
   # already a condition this reports rather than papers over.
-  tmp="$(mktemp 2>/dev/null)" || tmp=""
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ums-changeset.XXXXXX" 2>/dev/null)" || tmp=""
   [ -n "$tmp" ] || return 1
   git "$@" --name-status -z > "$tmp" 2>/dev/null || rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -682,7 +682,7 @@ ci::changeset::detect() {
       # NUL-delimited for the same reason the diff modes are: `git ls-files`
       # quotes a non-ASCII path, and a quoted path classifies as unknown.
       local f _ls_tmp
-      _ls_tmp="$(mktemp 2>/dev/null)" || _ls_tmp=""
+      _ls_tmp="$(mktemp "${TMPDIR:-/tmp}/ums-changeset-ls.XXXXXX" 2>/dev/null)" || _ls_tmp=""
       [ -n "$_ls_tmp" ] || return 1
       git ls-files -z > "$_ls_tmp" 2>/dev/null || _rc=$?
       if [ "$_rc" -ne 0 ]; then

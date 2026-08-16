@@ -44,7 +44,7 @@ setup() {
 _hd_sandbox() {
   # A repo with two lineages: main..feature (related, feature ahead) and an
   # orphan branch sharing no history with either.
-  HD_SB="$(mktemp -d)"
+  HD_SB="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$HD_SB/ci/lib"
   cp "$REPO_ROOT/ci/hook-dispatch.sh" "$HD_SB/ci/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$HD_SB/ci/lib/"
@@ -321,7 +321,7 @@ SH
   # refuse every tag push. Driven through the real script with preflight stubbed,
   # rather than asserting on the source text.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci" "$sb/.githooks"
   cp "$REPO_ROOT/ci/hook-dispatch.sh" "$sb/ci/"
   cp "$REPO_ROOT/.githooks/pre-push" "$sb/.githooks/"
@@ -445,7 +445,7 @@ SH
   # does carry no content. That remedy is followable, which is the test this
   # gate applies to its own refusals.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb"
     git init -q -b main .
@@ -765,7 +765,7 @@ refs/tags/new %s refs/tags/new %s
   # which was the right fix, one range is the branch question -- so this is its
   # other half, and the pair is the whole rule.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   (
     cd "$sb"
     git init -q -b main .
@@ -838,7 +838,7 @@ refs/tags/new %s refs/tags/new %s
   # ci/preflight.sh, which ends non-zero only for 20 and 30. This one skipped
   # the translation by skipping the translator.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib"
   cp "$REPO_ROOT/ci/hook-dispatch.sh" "$sb/ci/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -878,7 +878,7 @@ refs/tags/new %s refs/tags/new %s
   # The debt command's own status is taken with `set +e` a few lines up and both
   # ruff greps carry `|| true`, so this file knows the rule; one line did not.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/ci/debt" "$sb/ci/reports"
   cp "$REPO_ROOT/ci/checks/debt.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
@@ -931,7 +931,7 @@ YML
   # so an ignored generated module with a syntax error passes `ruff check` and
   # stops here.
   local sb
-  sb="$(mktemp -d)"
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/pkg"
   cp "$REPO_ROOT/ci/checks/python.sh" "$sb/ci/checks/"
   cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
