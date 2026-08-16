@@ -63,7 +63,15 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
   # nothing had compared them to. The sentinel survives the pipeline and is
   # checked before the output is read as a list of paths.
   SCAN_UNREADABLE="__ci_gate_unreadable__"
-  SHELL_INPUTS=(ci .githooks .gitignore frontend/README.md)
+  # `Makefile` is in this list for the reason the other four are: the suites read
+  # it. `ci/tests/test_preflight.bats` asserts the `bats-install` target exists
+  # and matches the refusal message this lane prints -- against the *worktree*
+  # copy, since that is the file bats opens. So a push whose HEAD carries a
+  # broken Makefile, with an unstaged local repair, ran that assertion against
+  # the repair and approved a commit that fails its own provisioning check. The
+  # comparison scope and what the suites actually read have to be the same set,
+  # which is the lesson the three-scopes-for-one-question note above records.
+  SHELL_INPUTS=(ci .githooks .gitignore Makefile frontend/README.md)
   SHELL_DRIFT="$( {
     git diff --name-only HEAD -- "${SHELL_INPUTS[@]}" 2>/dev/null || printf '%s\n' "$SCAN_UNREADABLE"
     git ls-files --others --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null || printf '%s\n' "$SCAN_UNREADABLE"

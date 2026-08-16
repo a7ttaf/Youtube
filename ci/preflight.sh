@@ -474,9 +474,19 @@ _check_should_skip() {
     # destination, and renaming .gitignore away filtered out the suite that
     # guards it. The `ci/` and `.githooks/` entries are prefixes and were never
     # affected.
+    #
+    # `Makefile` joined that list because the suites assert on it. The
+    # classifier derives a language from each path and `Makefile` yields `make`,
+    # which no lane maps -- so a commit touching only the Makefile scheduled
+    # nothing, and `ci/tests/test_preflight.bats` asserts that the `bats-install`
+    # target exists and is what the lane's own refusal message names. Deleting or
+    # breaking that target could therefore pass the gate and leave the documented
+    # remedy for a missing Bats unusable, which is the one failure a provisioning
+    # target has. The rule here is the same one the other four entries follow: a
+    # path a suite reads is a path that schedules the suite.
     if [ "$found" = "0" ] && [ "$label" = "tests-shell" ] \
       && printf '%s\n' "${_CI_CHANGESET_FILES_RAW:-}" \
-        | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|$)|frontend/README\.md([[:space:]]|$))'; then
+        | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|$)|Makefile([[:space:]]|$)|frontend/README\.md([[:space:]]|$))'; then
       found=1
     fi
 

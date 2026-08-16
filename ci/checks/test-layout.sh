@@ -40,18 +40,52 @@ DECLARED_GLOB='tests/**/*.test.{ts,tsx}'
 # reporting on files no destination receives. Same rule as every other reader of
 # this question on the branch -- which tree a run vouches for chooses the
 # sources, it does not add to them.
+# 0 when the tree this run stands behind has a frontend, 1 when it does not, and
+# 2 when that could not be established.
+#
+# Three answers, because two of them were being spelled the same way. The
+# substitution here reduced a failed `git ls-tree` -- an unavailable tree object
+# in a partial or damaged checkout, a repository that cannot be read -- to empty
+# output, which is exactly what an absent frontend produces. The caller then
+# logged "skipped: no frontend/ directory" and returned PASS, so the one guard
+# standing between a misplaced test and a green build that never ran it was
+# switched off by an unreadable object rather than by a decision. Could-not-ask
+# is not found-nothing; that rule is applied at every other enumeration in this
+# gate and this was the reader that had not been told.
+#
+# The status is taken through PIPESTATUS: `| head -n 1` answers for head, which
+# succeeds whatever the producer did.
 frontend_present() {
   if [ "${CI_GATE_MODE:-}" = "ship" ] \
     && command -v git >/dev/null 2>&1 \
     && git rev-parse --git-dir >/dev/null 2>&1 \
     && git rev-parse --verify HEAD >/dev/null 2>&1; then
-    [ -n "$(git ls-tree --name-only "HEAD:${FRONTEND_DIR}" 2>/dev/null | head -n 1)" ]
+    local _fp_out _fp_rc=0
+    _fp_out="$(git ls-tree --name-only "HEAD:${FRONTEND_DIR}" 2>/dev/null | head -n 1
+               exit "${PIPESTATUS[0]}")" || _fp_rc=$?
+    # git exits non-zero both for "that path is not in HEAD" and for "the tree
+    # could not be read", and only the second is infrastructure. They are told
+    # apart by asking whether HEAD carries the path at all, which is a question
+    # about the index rather than about the object store.
+    if [ "$_fp_rc" -ne 0 ]; then
+      git cat-file -e "HEAD:${FRONTEND_DIR}" 2>/dev/null || return 1
+      return 2
+    fi
+    [ -n "$_fp_out" ]
     return
   fi
   [ -d "$FRONTEND_DIR" ]
 }
 
-if ! frontend_present; then
+_FP_RC=0
+frontend_present || _FP_RC=$?
+if [ "$_FP_RC" -eq 2 ]; then
+  ci::log::error "Cannot read HEAD:${FRONTEND_DIR} to find out whether this push has a frontend."
+  ci::log::error "  Refusing to conclude there is none from a listing that failed to"
+  ci::log::error "  produce one: that would skip the layout guard for the push."
+  exit "$CI_RESULT_FAIL_INFRA"
+fi
+if [ "$_FP_RC" -ne 0 ]; then
   ci::log::info "skipped: no frontend/ directory"
   exit "$CI_RESULT_PASS"
 fi

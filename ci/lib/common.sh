@@ -541,8 +541,20 @@ ci::common::node_workspaces() {
     echo "Cannot create a temporary file to enumerate workspaces." >&2
     return 1
   }
+  # `-print0`, through the shared NUL reader, for the reason the ignored scan
+  # above reads `-z`: a line-delimited list cannot represent a path that holds a
+  # newline. `odd\nname/package.json` arrived here as two records, discovery
+  # derived the workspace `name` from the tail, and the node, tests and typecheck
+  # lanes then reported FAIL_INFRA for a directory that does not exist -- or, one
+  # spelling over, inspected a different one than the push carries. A path that
+  # cannot be carried is refused rather than split, which is what the reader
+  # returns 2 for.
   find . -name 'node_modules' -prune -o -name '.git' -prune -o \
-    -type f -name "$manifest" -print 2>/dev/null > "$_nw_raw" || _nw_rc=$?
+    -type f -name "$manifest" -print0 2>/dev/null \
+    | ci::common::nul_to_lines > "$_nw_raw" || _nw_rc=$?
+  if [ "$_nw_rc" -eq 0 ] && [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    _nw_rc="${PIPESTATUS[0]}"
+  fi
   if [ "$_nw_rc" -eq 0 ]; then
     sort -u < "$_nw_raw" > "$_nw_list" || _nw_rc=$?
   fi

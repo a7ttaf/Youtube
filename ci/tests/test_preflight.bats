@@ -896,6 +896,60 @@ _pf_fns() {
   rm -rf "$sb"
 }
 
+@test "tests-shell: a Makefile the suites read is in scope both ways" {
+  # Two halves of one rule, and the suites are the reason for both:
+  # ci/tests/test_preflight.bats asserts that the `bats-install` target exists
+  # and matches the refusal message this lane prints -- against the *worktree*
+  # Makefile, since that is the file bats opens.
+  #
+  # Half one, the ship comparison. A push whose HEAD carries a broken Makefile,
+  # with an unstaged local repair, ran that assertion against the repair and
+  # approved a commit that fails its own provisioning check. The comparison scope
+  # and what the suites read have to be the same set.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  printf 'nothing\n' > "$sb/.gitignore"
+  printf 'bats-install:\n\t@echo broken\n' > "$sb/Makefile"
+  (
+    cd "$sb"
+    git init -q -b feature/x .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+  ) >/dev/null 2>&1
+  # The unstaged repair: on disk, not in the commit being pushed.
+  printf 'bats-install:\n\t@bash ci/scripts/install-bats.sh\n' > "$sb/Makefile"
+
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 20 ] || { rm -rf "$sb"; echo "$output" >&2; return 1; }
+  [[ "$output" == *"Makefile"* ]] || { rm -rf "$sb"; echo "$output" >&2; return 1; }
+  rm -rf "$sb"
+
+  # Half two, the scheduler. `Makefile` classifies as the language `make`, which
+  # no lane maps, so a commit touching only it scheduled nothing at all -- and
+  # the provisioning assertion above is in the suite that would not have run.
+  # Pinned to the expression rather than driven through a whole changeset: what
+  # has to hold is that this path forces the lane, and the four entries beside it
+  # are asserted with it so a rewrite cannot quietly drop one.
+  local expr
+  expr="$(grep -oE "\(\^\|\[\[:space:\]\]\)\([^']*" "$REPO_ROOT/ci/preflight.sh" | head -1)"
+  [ -n "$expr" ] || { echo "could not lift the tests-shell path exception" >&2; return 1; }
+  local p
+  for p in 'Makefile' 'ci/checks/node.sh' '.githooks/pre-push' '.gitignore' 'frontend/README.md'; do
+    printf 'M\t%s\n' "$p" | grep -qE "$expr" \
+      || { echo "this path no longer forces tests-shell: ${p}" >&2; return 1; }
+  done
+  # And a path that must not force it, or the exception is not an exception.
+  for p in 'backend/app/main.py' 'frontend/src/app.ts' 'Makefile.bak'; do
+    printf 'M\t%s\n' "$p" | grep -qE "$expr" \
+      && { echo "an unrelated path forces tests-shell: ${p}" >&2; return 1; }
+  done
+  return 0
+}
+
 @test "tests-shell: a deleted .gitignore replaced only on disk is drift" {
   # Three scopes for one question is how they came to disagree: the tracked
   # scan covered .gitignore, the untracked and ignored scans covered ci and
@@ -3503,6 +3557,94 @@ YML
     bash -c 'trap "" TERM; while :; do sleep 0.2; done' >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 137 ] \
     || { echo "a TERM-ignoring child was not killed (rc=$rc; 124 means the outer guard fired)" >&2; return 1; }
+}
+
+@test "common: a workspace path holding a newline is refused, not split" {
+  # `find -print` is line-delimited, so `odd\nname/package.json` arrived as two
+  # records and discovery derived the workspace `name` -- a directory that does
+  # not exist. The node, tests and typecheck lanes then reported FAIL_INFRA for
+  # it, or, one spelling over, would have inspected a different directory than
+  # the push carries. Refused rather than split, which is what the shared NUL
+  # reader returns 2 for and what every other path collector here already does.
+  local sb nl
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  nl="$(printf 'odd\nname')"
+  mkdir -p "$sb/$nl" 2>/dev/null || { rm -rf "$sb"; skip "this filesystem cannot hold a newline in a path"; }
+  printf '{ "name": "w" }\n' > "$sb/$nl/package.json" 2>/dev/null \
+    || { rm -rf "$sb"; skip "this filesystem cannot hold a newline in a path"; }
+  printf '{}\n' > "$sb/$nl/package-lock.json"
+
+  local out rc=0
+  out="$( cd "$sb" && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+          && ci::common::node_workspaces package.json )" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$sb"; echo "a split path was reported as a workspace: [$out]" >&2; return 1; }
+  [[ "$out" != *"name"* ]] \
+    || { rm -rf "$sb"; echo "the tail of the path was emitted as a workspace: [$out]" >&2; return 1; }
+
+  # The control: an ordinary tree beside it still enumerates, so this refuses the
+  # path it cannot carry rather than every repository that has one.
+  rm -rf "$sb/$nl"
+  mkdir -p "$sb/frontend"
+  printf '{ "name": "w" }\n' > "$sb/frontend/package.json"
+  printf '{}\n' > "$sb/frontend/package-lock.json"
+  rc=0
+  out="$( cd "$sb" && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+          && ci::common::node_workspaces package.json )" || rc=$?
+  [ "$rc" -eq 0 ] && [ "$out" = "frontend" ] \
+    || { rm -rf "$sb"; echo "an ordinary tree stopped enumerating (rc=$rc): [$out]" >&2; return 1; }
+  rm -rf "$sb"
+}
+
+@test "test-layout: a frontend it could not read is not a repository without one" {
+  # `$(git ls-tree ... | head -n 1)` reduced a failed listing -- an unavailable
+  # tree object in a partial or damaged checkout -- to empty output, which is
+  # exactly what an absent frontend produces. The caller logged "skipped: no
+  # frontend/ directory" and returned PASS, so the one guard standing between a
+  # misplaced test and a green build that never ran it was switched off by an
+  # unreadable object rather than by a decision.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/frontend/tests" "$sb/bin"
+  cp "$REPO_ROOT/ci/checks/test-layout.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf 'it("x", () => {});\n' > "$sb/frontend/tests/a.test.ts"
+  printf 'export default { test: { include: ["tests/**/*.test.ts"] } };\n' > "$sb/frontend/vitest.config.ts"
+  ( cd "$sb" && git init -q -b main . && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm base ) >/dev/null 2>&1
+
+  # A git that answers every question except listing a tree.
+  local realgit
+  realgit="$(command -v git)"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'if [ "${1:-}" = "ls-tree" ]; then exit 128; fi\n'
+    printf 'exec "%s" "$@"\n' "$realgit"
+  } > "$sb/bin/git"
+  chmod +x "$sb/bin/git"
+
+  run bash -c "cd '$sb' && PATH=\"$sb/bin:\$PATH\" CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 30 ] \
+    || { rm -rf "$sb"; echo "an unreadable tree did not refuse (status=$status): $output" >&2; return 1; }
+  [[ "$output" == *"Cannot read HEAD:frontend"* ]] \
+    || { rm -rf "$sb"; echo "$output" >&2; return 1; }
+  [[ "$output" != *"skipped: no frontend"* ]] \
+    || { rm -rf "$sb"; echo "$output" >&2; return 1; }
+
+  # The control that keeps the three answers apart: a repository that genuinely
+  # has no frontend in HEAD is still a skip, not an infrastructure failure.
+  local sb2
+  sb2="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb2/ci/checks" "$sb2/ci/lib"
+  cp "$REPO_ROOT/ci/checks/test-layout.sh" "$sb2/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb2/ci/lib/"
+  printf 'x\n' > "$sb2/a.txt"
+  ( cd "$sb2" && git init -q -b main . && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm base ) >/dev/null 2>&1
+  run bash -c "cd '$sb2' && CI_GATE_MODE=ship bash ci/checks/test-layout.sh 2>&1"
+  [ "$status" -eq 0 ] || { rm -rf "$sb" "$sb2"; echo "$output" >&2; return 1; }
+  [[ "$output" == *"skipped: no frontend"* ]] || { rm -rf "$sb" "$sb2"; echo "$output" >&2; return 1; }
+  rm -rf "$sb" "$sb2"
 }
 
 @test "common: generated output is not a workspace nested under one" {
