@@ -91,6 +91,34 @@ extract_shell_fn() {
 
 # --- outside-tree scan --------------------------------------------------------
 
+@test "test-layout: generated output is not a stray test" {
+  # `.cache` was the one directory in the repository-wide ignore list this prune
+  # set did not carry, so `frontend/.cache/generated.test.ts` -- ignored,
+  # generated, and named like a test because the generator names it that way --
+  # was walked and reported as a stray test. That blocks an otherwise valid
+  # commit on a file nobody wrote, and a guard that refuses correct work gets
+  # switched off, which is the same outcome as not having one.
+  #
+  # `out`, `htmlcov` and `.nuxt` are asserted with it: they were missing from
+  # this copy too, and an entry present in three copies of the pruned set and
+  # absent from a fourth is how the last several of these arrived.
+  local d
+  for d in .cache out htmlcov .nuxt dist build coverage .next .turbo .vite; do
+    mkdir -p "$SANDBOX/frontend/$d"
+    printf 'it("generated", () => {});\n' > "$SANDBOX/frontend/$d/generated.test.ts"
+  done
+  run_guard
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"generated.test.ts"* ]] || { echo "$output" >&2; false; }
+
+  # The control that keeps the prune a prune: a real stray beside them is still
+  # caught, so this did not simply switch the scan off.
+  printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/src/app.test.ts"
+  run_guard
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"frontend/src/app.test.ts"* ]] || { echo "$output" >&2; false; }
+}
+
 @test "test-layout: catches a test under frontend/src" {
   printf 'it("skipped", () => {});\n' > "$SANDBOX/frontend/src/app.test.ts"
   run_guard

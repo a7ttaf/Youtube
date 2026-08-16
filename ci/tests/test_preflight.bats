@@ -1548,14 +1548,23 @@ YML
     'aaaaaaa6	HEAD' \
     'bbbbbbb1	refs/pull/7/head' \
     'bbbbbbb2	refs/pull/7/merge' \
-    'bbbbbbb3	refs/merge-requests/9/head')"
-  kept="$(printf '%s\n' "$sample" | awk '$2 !~ /^refs\/(pull|merge-requests)\// { print $1 }' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+    'bbbbbbb3	refs/merge-requests/9/head' \
+    'bbbbbbb4	refs/changes/34/1234/1' \
+    'bbbbbbb5	refs/changes/34/1234/meta')"
+  # Through the pipeline lifted from the lane above, not a copy of it written
+  # here: a transcription is a third place the namespace list can drift, and the
+  # Gerrit namespace arrived by being missing from exactly that kind of copy.
+  kept="$(printf '%s\n' "$sample" | eval "$q_git" | tr '\n' ' ')"
   local want
   for want in aaaaaaa1 aaaaaaa2 aaaaaaa3 aaaaaaa4 aaaaaaa5 aaaaaaa6; do
     [[ "$kept" == *"$want"* ]] || { echo "a published ref was dropped: ${want} (got [$kept])" >&2; return 1; }
   done
   local unwanted
-  for unwanted in bbbbbbb1 bbbbbbb2 bbbbbbb3; do
+  # Gerrit's `refs/changes/*` is the sharpest of the three and arrived a round
+  # after the other two: there every change lives in that namespace until it is
+  # submitted, so on a Gerrit remote counting them as published is not an edge
+  # case but the normal state of unmerged work.
+  for unwanted in bbbbbbb1 bbbbbbb2 bbbbbbb3 bbbbbbb4 bbbbbbb5; do
     [[ "$kept" != *"$unwanted"* ]] || { echo "a proposal ref counted as published: ${unwanted}" >&2; return 1; }
   done
 }

@@ -116,9 +116,13 @@ ci::git::_remote_tips() {
   #
   # Minus the forge's own pull-request mirrors, and that exclusion is the part
   # worth being careful about, because it is the only fail-open direction here.
-  # `refs/pull/*` (GitHub) and `refs/merge-requests/*` (GitLab) are refs the
-  # forge writes for *proposed* changes; a commit reachable only from one of
-  # them has not been merged anywhere. Counting it as published would let
+  # `refs/pull/*` (GitHub), `refs/merge-requests/*` (GitLab) and
+  # `refs/changes/*` (Gerrit) are refs the forge writes for *proposed* changes;
+  # a commit reachable only from one of them has not been merged anywhere.
+  # Gerrit is the sharpest of the three, and arrived a round after the other
+  # two: there *every* change lives in that namespace until it is submitted, so
+  # on a Gerrit remote the omission was not an edge case but the normal state of
+  # unmerged work. Counting any of them as published would let
   # ci::git::push_is_label_only call a tag push on an unmerged fork head
   # content-free and skip every content lane. Merged work is unaffected -- it is
   # an ancestor of a branch tip, and the loop above tests ancestry, not
@@ -139,7 +143,7 @@ ci::git::_remote_tips() {
   if [ "$_rt_rc" -ne 0 ]; then
     return 1
   fi
-  _CI_GIT_REMOTE_TIPS="$(printf '%s\n' "$_rt_out" | awk '$2 !~ /^refs\/(pull|merge-requests)\// { print $1 }' | sed '/^$/d' | sort -u)"
+  _CI_GIT_REMOTE_TIPS="$(printf '%s\n' "$_rt_out" | awk '$2 !~ /^refs\/(pull|merge-requests|changes)\// { print $1 }' | sed '/^$/d' | sort -u)"
   _CI_GIT_REMOTE_TIPS_RC=0
   printf '%s' "$_CI_GIT_REMOTE_TIPS"
   return 0

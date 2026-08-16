@@ -404,12 +404,14 @@ case "$HOOK_NAME" in
     # ci::git::worktree_covers_push already models other namespaces; the query
     # was the narrower half.
     #
-    # Minus the forge's pull-request mirrors, which is the one fail-open
-    # direction in widening this: a commit reachable only from `refs/pull/*` or
-    # `refs/merge-requests/*` is *proposed*, not merged, and counting it as
-    # published would let push_is_label_only skip every content lane for a tag
-    # push on an unmerged fork head. Merged work is unaffected, being an
-    # ancestor of a branch tip.
+    # Minus the forge's proposal namespaces, which is the one fail-open
+    # direction in widening this: a commit reachable only from `refs/pull/*`
+    # (GitHub), `refs/merge-requests/*` (GitLab) or `refs/changes/*` (Gerrit) is
+    # *proposed*, not merged, and counting it as published would let
+    # push_is_label_only skip every content lane for a tag push on it. Gerrit is
+    # the sharpest of the three: there *every* change lives in that namespace
+    # until it is submitted, so unmerged work is the normal state rather than an
+    # edge case. Merged work is unaffected, being an ancestor of a branch tip.
     #
     # Kept character-for-character identical to ci/lib/git.sh's copy -- that
     # file is deliberately standalone and cannot share a helper with this one --
@@ -419,7 +421,7 @@ case "$HOOK_NAME" in
       _rt_raw=""
       if _rt_raw="$(git ls-remote "$CI_GATE_PUSH_REMOTE" 2>/dev/null)"; then
         CI_GATE_PUSH_REMOTE_TIPS="$(printf '%s
-' "$_rt_raw" | awk '$2 !~ /^refs\/(pull|merge-requests)\// { print $1 }' | sed '/^$/d' | sort -u)"
+' "$_rt_raw" | awk '$2 !~ /^refs\/(pull|merge-requests|changes)\// { print $1 }' | sed '/^$/d' | sort -u)"
         export CI_GATE_PUSH_REMOTE_TIPS
         export CI_GATE_PUSH_REMOTE_TIPS_FOR="$CI_GATE_PUSH_REMOTE"
       fi

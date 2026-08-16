@@ -268,10 +268,37 @@ _tests_js_script_body() {
   node -e "try{const p=require('./package.json');const s=(p.scripts||{})[process.argv[1]];if(typeof s!=='string')process.exit(4);process.stdout.write(s)}catch(e){process.exit(3)}" "$1" 2>/dev/null
 }
 
+# The command whose contract this lane reproduces: the workspace's `test`
+# script, or `test:unit` when there is no `test`.
+#
+# Both are a test contract as far as this lane is concerned. The branch that
+# decides a workspace is not test-free accepts either, and ci/checks/node.sh
+# runs both -- so a reader that only ever looked at `test` was answering about a
+# script that need not exist. A workspace whose whole suite is
+# `"test:unit": "RUN_INTEGRATION=1 vitest run"` had its runner resolved from an
+# empty string and its environment read as none, so the pinned runner was
+# invoked with RUN_INTEGRATION unset, every case guarded on that value skipped
+# itself, and the lane reported PASS over a suite that ran its cheap half.
+#
+# `test` first when both exist, because that is the script the node lane's
+# umbrella rule treats as the entry point and the one a delegation would go
+# through.
+#
+# One reader for both questions -- which runner, and which environment -- since
+# they are two projections of one command and the whole point of the scanner
+# below is that they come from a single parse. Asking them of different scripts
+# is the same drift one layer up.
+_tests_js_contract_command() {
+  ci::common::command_exists node || return 1
+  local _cc=""
+  _cc="$(_tests_js_script_body test 2>/dev/null || true)"
+  [ -n "$_cc" ] || _cc="$(_tests_js_script_body test:unit 2>/dev/null || true)"
+  printf '%s' "$_cc"
+}
+
 _tests_js_declared_runner() {
   local _cmd
-  ci::common::command_exists node || return 1
-  _cmd="$(node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{}).test||''))}catch(e){process.exit(3)}" 2>/dev/null)" || return 1
+  _cmd="$(_tests_js_contract_command)" || return 1
   _tests_js_scan_runner "$_cmd" 0
 }
 
@@ -734,8 +761,7 @@ _tests_js_scan_yield() {
 
 _tests_js_declared_env() {
   local _cmd
-  ci::common::command_exists node || return 1
-  _cmd="$(node -e "try{const p=require('./package.json');process.stdout.write(String((p.scripts||{}).test||''))}catch(e){process.exit(3)}" 2>/dev/null)" || return 1
+  _cmd="$(_tests_js_contract_command)" || return 1
   _tests_js_scan_runner "$_cmd" 0 env
 }
 # --- END declared-runner reader -----------------------------------------------

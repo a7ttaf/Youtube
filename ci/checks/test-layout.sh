@@ -114,10 +114,25 @@ CANDIDATE_PRUNE=(
   '(' -name 'node_modules'
   -o -path "$FRONTEND_DIR/dist"
   -o -path "$FRONTEND_DIR/build"
+  -o -path "$FRONTEND_DIR/out"
   -o -path "$FRONTEND_DIR/coverage"
+  -o -path "$FRONTEND_DIR/htmlcov"
   -o -path "$FRONTEND_DIR/.next"
+  -o -path "$FRONTEND_DIR/.nuxt"
   -o -path "$FRONTEND_DIR/.turbo"
   -o -path "$FRONTEND_DIR/.vite"
+  # `.cache` was the one directory in the repository-wide ignore list that this
+  # copy of the prune set did not carry, so `frontend/.cache/generated.test.ts`
+  # -- ignored, generated, and named like a test because the generator names it
+  # that way -- was walked here and classified as a stray test. That blocks an
+  # otherwise valid commit on a file nobody wrote, and a guard that refuses
+  # correct work gets switched off, which is the same outcome as not having one.
+  #
+  # The rest of the list is squared with ci::common::is_vendored_path and
+  # ci/checks/node.sh's suite scans while this is being corrected: `out`,
+  # `htmlcov` and `.nuxt` were missing here too, and an entry present in three
+  # copies and absent from a fourth is how the last several of these arrived.
+  -o -path "$FRONTEND_DIR/.cache"
   ')' -prune -o
 )
 

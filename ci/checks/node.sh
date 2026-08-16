@@ -1374,11 +1374,43 @@ fi
 # looking current: the install was skipped and the lane validated a tree a clean
 # install would not produce. See ci::common::node_runtime_id, which is shared
 # with the test fixtures so both compute the same value.
+# And the manager's own configuration, because the lockfile says which versions
+# and the configuration says what installing them *does*.
+#
+# `.yarnrc.yml` can turn lifecycle scripts off, `.npmrc` can redirect a scope to
+# a different registry or set `ignore-scripts`, `.pnpmrc` and
+# `pnpm-workspace.yaml` decide hoisting and which packages may build. None of
+# those touch package.json or the lockfile, so changing one left this
+# fingerprint identical, the existing node_modules looking current, and the
+# frozen install skipped -- and the lane then tested and built against artifacts
+# a clean install under the committed configuration would not have produced. The
+# fingerprint's whole job is to answer "would a fresh install give me this
+# tree", and it was answering a narrower question.
+#
+# Every name, not the ones this manager reads: which manager is in play is a
+# property of the tree too, and a repository that switches from npm to pnpm
+# changes what matters without changing what exists. Hashing an absent file is
+# already how the lockfile arm behaves for a workspace that has none.
+#
+# Sorted and read one per line so the order cannot depend on the shell's glob.
+_deps_manager_config_id() {
+  local _mc _mc_out=""
+  for _mc in .npmrc .yarnrc .yarnrc.yml .pnpmrc .pnpmfile.cjs pnpm-workspace.yaml bunfig.toml; do
+    if [ -f "$_mc" ]; then
+      _mc_out="${_mc_out}${_mc}:$(ci::common::hash_file "$_mc") "
+    else
+      _mc_out="${_mc_out}${_mc}:- "
+    fi
+  done
+  printf '%s' "${_mc_out% }"
+}
+
 _deps_fingerprint() {
-  printf '%s %s %s\n' \
+  printf '%s %s %s %s\n' \
     "$(ci::common::hash_file "$LOCKFILE")" \
     "$(ci::common::hash_file package.json)" \
-    "$(ci::common::node_runtime_id)"
+    "$(ci::common::node_runtime_id)" \
+    "$(_deps_manager_config_id)"
 }
 
 SKIP_INSTALL=0

@@ -291,17 +291,72 @@ ws_seed_fingerprint() {
   # and these cases would fail for a reason that has nothing to do with what
   # they assert. Deriving the fixture from the code under test is the same rule
   # the extension-coverage case above follows.
+  # The manager-configuration arm is *lifted* from the lane rather than restated,
+  # for the reason the hash tool is: a fixture that computes the fingerprint
+  # differently seeds a value node.sh will never produce, every case then
+  # attempts a real install, and they all fail for a reason that has nothing to
+  # do with what they assert. That arm grows entries over time, so restating it
+  # here would only postpone that by one commit.
   ( cd "$NODE_SB/ws" \
     && . "$REPO_ROOT/ci/lib/common.sh" \
-    && printf '%s %s %s\n' \
+    && eval "$(sed -n '/^_deps_manager_config_id()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh")" \
+    && printf '%s %s %s %s\n' \
       "$(ci::common::hash_file bun.lock)" \
       "$(ci::common::hash_file package.json)" \
       "$(ci::common::node_runtime_id)" \
+      "$(_deps_manager_config_id)" \
       > "$NODE_SB/.ci-gate/node_modules-$(ci::common::workspace_slug ws).hash" )
 }
 
 ws_run() {
   ( cd "$NODE_SB" && CI_GATE_NODE_WORKSPACE=ws bash ci/checks/node.sh 2>&1 )
+}
+
+@test "node lane: the dependency fingerprint covers the manager's configuration" {
+  # The lockfile says which versions and the manager's configuration says what
+  # installing them *does*. `.yarnrc.yml` can turn lifecycle scripts off,
+  # `.npmrc` can point a scope at another registry or set `ignore-scripts`,
+  # `.pnpmfile.cjs` rewrites the dependency graph outright -- and none of them
+  # touch package.json or the lockfile. So changing one left the fingerprint
+  # identical, an existing node_modules looking current, and the frozen install
+  # skipped; the lane then tested and built against artifacts a clean install
+  # under the committed configuration would not have produced.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"node_modules up to date"* ]] || { echo "$output" >&2; false; }
+
+  # The seed is now stale for a tree whose configuration changed, so the lane
+  # must stop skipping. It has no package manager to run here, which is the
+  # point: reaching the install at all is the observable difference.
+  local f
+  for f in .npmrc .yarnrc .yarnrc.yml .pnpmrc .pnpmfile.cjs pnpm-workspace.yaml bunfig.toml; do
+    printf 'enableScripts: false\n' > "$NODE_SB/ws/$f"
+    run ws_run
+    [[ "$output" != *"node_modules up to date"* ]] \
+      || { echo "${f} did not invalidate the fingerprint: $output" >&2; rm -rf "$NODE_SB"; false; }
+    rm -f "$NODE_SB/ws/$f"
+  done
+
+  # And removing them all puts it back: the fingerprint is a function of the
+  # tree, not a one-way switch that stays flipped once anything has changed.
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"node_modules up to date"* ]] || { echo "$output" >&2; false; }
+
+  # Editing one, not only adding it: a configuration that already exists and is
+  # changed is the case the finding describes.
+  printf 'enableScripts: true\n' > "$NODE_SB/ws/.yarnrc.yml"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"node_modules up to date"* ]] || { echo "$output" >&2; false; }
+  printf 'enableScripts: false\n' > "$NODE_SB/ws/.yarnrc.yml"
+  run ws_run
+  [[ "$output" != *"node_modules up to date"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
 }
 
 @test "node lane: a workspace shipping tests without a test script fails closed" {
@@ -6746,6 +6801,44 @@ declared_env_for_manifest() {
 declared_env_for() {
   declared_env_for_manifest \
     "$(printf '{ "name": "w", "private": true, "scripts": { "test": "%s" } }' "$1")"
+}
+
+@test "tests-js: the contract this lane reads is test, or test:unit when there is no test" {
+  # Both readers looked at `scripts.test` alone, while the lane accepts either as
+  # a test contract -- the branch that decides a workspace is not test-free takes
+  # `test:unit`, and ci/checks/node.sh runs both. So a workspace whose whole
+  # suite is `"test:unit": "RUN_INTEGRATION=1 vitest run"` had its runner
+  # resolved from an empty string and its environment read as none: the pinned
+  # runner was invoked with RUN_INTEGRATION unset, every case guarded on that
+  # value skipped itself, and the lane reported PASS over the cheap half of a
+  # suite.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test:unit": "RUN_INTEGRATION=1 vitest run" } }'
+  [ "$output" = "RUN_INTEGRATION=1" ] || { echo "got [$output]" >&2; false; }
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test:unit": "RUN_INTEGRATION=1 vitest run" } }'
+  [ "$output" = "vitest" ] || { echo "got [$output]" >&2; false; }
+
+  # `test` wins when both exist: it is the script the node lane's umbrella rule
+  # treats as the entry point, and a delegation would go through it.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "MODE=umbrella vitest run", "test:unit": "MODE=unit jest --ci" } }'
+  [ "$output" = "MODE=umbrella" ] || { echo "got [$output]" >&2; false; }
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "MODE=umbrella vitest run", "test:unit": "MODE=unit jest --ci" } }'
+  [ "$output" = "vitest" ] || { echo "got [$output]" >&2; false; }
+
+  # An empty `test` is not a contract to prefer over a real `test:unit`: the
+  # fallback is keyed on there being nothing to read, not on the key's absence.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "", "test:unit": "jest --ci" } }'
+  [ "$output" = "jest" ] || { echo "got [$output]" >&2; false; }
+
+  # And a workspace with neither still declares nothing, rather than the reader
+  # inventing an answer from some third script.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test:e2e": "cypress run", "build": "vite build" } }'
+  [ "$output" = "<none>" ] || { echo "got [$output]" >&2; false; }
 }
 
 @test "tests-js: the declared script's environment reaches the runner it names" {
