@@ -601,6 +601,16 @@ ci::common::node_workspaces() {
   # alone would make a workspace the node lane runs and the push gate refuses.
   # Reporting is what turns a silent skip into a visible one without taking that
   # decision here.
+  #
+  # Put to the repository owner on 2026-08-17 and **decided: keep both rules
+  # agreeing**. The reasoning is that the skip is not a route for unvalidated
+  # code to reach a branch -- git-safety.sh refuses `packages/build/**` on the
+  # push itself, with no override -- so what is left is a developer-facing
+  # surprise, which the report above answers. Narrowing would have had to widen
+  # what the push gate permits, which is a larger change than the case for it.
+  # Recorded here so a later round re-raising `packages/build/` finds the answer
+  # rather than re-deriving it; what would reopen it is a first-party workspace
+  # actually needing one of these four names, which no repository here has.
   if [ "$_n" -eq 0 ] && [ "$_vendored" -gt 0 ]; then
     echo "Found ${_vendored} ${manifest} file(s), all under paths treated as vendored" >&2
     echo "  or build output (node_modules, dist, build, coverage, htmlcov, .venv," >&2

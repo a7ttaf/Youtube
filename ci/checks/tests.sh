@@ -1051,6 +1051,21 @@ _tests_js_workspace() {
   # this very checkout, indistinguishable from real breakage. Reporting the
   # runner as unavailable is recoverable; a green run of the wrong binary, or a
   # red one nobody can reproduce, is not.
+  #
+  # Invoking the pinned runner rather than the declared `test` script follows
+  # from that, and it was reviewed on its own terms: put to the repository owner
+  # on 2026-08-17 and **decided: keep invoking the pinned runner**. The half of
+  # that gap which was silent is closed -- _TJ_DECLARED_ENV above carries the
+  # script's own assignments onto the runner, so a suite gated on
+  # `RUN_INTEGRATION=1` no longer skips itself into a green lane. What remains
+  # is a setup *command* in the script not running, and unlike a variable, that
+  # surfaces as the runner failing rather than as fewer tests passing quietly.
+  # The two alternatives were running the script and asserting the runner
+  # afterwards -- which hands binary resolution back to the package manager, the
+  # thing that produced the phantom failures above -- and refusing any script
+  # this lane cannot reproduce, which turns currently-green real workspaces into
+  # FAIL_INFRA. Recorded so a later round finds the answer rather than
+  # re-deriving it.
   return 127
 }
 

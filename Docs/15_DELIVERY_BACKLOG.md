@@ -1646,6 +1646,18 @@ single P-tier above.
   finding went with them — `sort -z -u` is a GNU extension against a stated Bash
   3.2 floor, so the dedupe is done in the shell, quadratic over 219 candidates
   and cheaper than the subprocess it replaces.
+  Two findings were put to the owner rather than changed inside a review round,
+  and both were decided on 2026-08-17 as **keep as it is**, with the reasoning
+  written at the code rather than only on the thread. `is_vendored_path` treats
+  any `build`, `dist`, `coverage` or `htmlcov` segment as output, so a
+  first-party `packages/build/` is skipped — but `ci/checks/git-safety.sh`
+  refuses to push those same paths with no override, so the skip is not a route
+  to a branch, and narrowing would have had to widen the push gate in the same
+  change. The JS test lane invokes the pinned runner rather than the declared
+  `test` script; the silent half of that is fixed (the script's own environment
+  now reaches the runner), and the residual is a setup *command* not running,
+  which surfaces as the runner failing rather than as fewer tests passing
+  quietly. Both comments name the condition that would reopen them.
   Combined suite: `bats ci/tests/` = 558 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
