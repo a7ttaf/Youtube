@@ -288,12 +288,27 @@ _tests_js_script_body() {
 # they are two projections of one command and the whole point of the scanner
 # below is that they come from a single parse. Asking them of different scripts
 # is the same drift one layer up.
+# Non-zero when the manifest could not be read at all, which is not the same
+# answer as "it declares no test script" and must not be spelled the same way.
+# `_tests_js_script_body` says which happened: 4 is "no such script", while 3 --
+# the manifest does not parse -- and 1 -- no node to parse it with -- are the
+# reader failing. Swallowing those let a workspace with `{ invalid json` and one
+# installed runner reach the loop below and run that runner directly.
 _tests_js_contract_command() {
   ci::common::command_exists node || return 1
-  local _cc=""
-  _cc="$(_tests_js_script_body test 2>/dev/null || true)"
-  [ -n "$_cc" ] || _cc="$(_tests_js_script_body test:unit 2>/dev/null || true)"
-  printf '%s' "$_cc"
+  local _cc="" _cc_rc=0
+  _cc="$(_tests_js_script_body test)" || _cc_rc=$?
+  case "$_cc_rc" in
+    0) [ -z "$_cc" ] || { printf '%s' "$_cc" ; return 0 ; } ;;
+    4) ;;
+    *) return 1 ;;
+  esac
+  _cc="" ; _cc_rc=0
+  _cc="$(_tests_js_script_body test:unit)" || _cc_rc=$?
+  case "$_cc_rc" in
+    0|4) printf '%s' "$_cc" ; return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 _tests_js_declared_runner() {
@@ -894,7 +909,31 @@ _tests_js_workspace() {
   local candidate declared="" have_vitest=0 have_jest=0
   _tests_js_have_runner vitest && have_vitest=1
   _tests_js_have_runner jest && have_jest=1
-  declared="$(_tests_js_declared_runner || true)"
+
+  # A manifest that could not be read is not a manifest that declares nothing.
+  #
+  # `|| true` collapsed the two, and the consequence was the worse half of this
+  # lane's contract: with `{ invalid json` on disk and a single installed runner,
+  # `declared` came back empty, the both-runners refusal did not apply, and the
+  # loop below ran that runner directly -- reporting PASS for a workspace whose
+  # test contract nobody could read. The lane was inferring a contract from what
+  # happened to be installed, which is exactly the substitution the
+  # declared-but-absent branch below refuses.
+  #
+  # Status 1 is what the reader returns for both "no node" and "the manifest
+  # does not parse", and neither is an answer. It is FAIL_INFRA rather than a
+  # failing test, for the reason the missing-runner branch is: nothing was found
+  # wrong with the code, the check could not be performed.
+  local _tj_dr_rc=0
+  declared="$(_tests_js_declared_runner)" || _tj_dr_rc=$?
+  if [ "$_tj_dr_rc" -ne 0 ]; then
+    echo "Cannot read ${ws}/package.json to find out which runner owns its suite." >&2
+    echo "  A manifest that does not parse -- or a missing node to parse it --" >&2
+    echo "  is not a workspace that declares no runner, and running whichever" >&2
+    echo "  binary happens to be installed would report PASS over a contract" >&2
+    echo "  nobody could read." >&2
+    return 30
+  fi
 
   # The environment the declared script establishes, carried onto the runner
   # this lane invokes in the script's place. Read here beside the runner so the

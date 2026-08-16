@@ -137,15 +137,31 @@ ci::common::workspace_drift() {
   # Pathspec magic keeps them out of the answer in the first place; the grep
   # stays because a pathspec cannot express "at any depth" as cheaply and the
   # two together are what the comment above claims.
-  local _wd_c
-  _wd_c="$(git ls-files --others --ignored --exclude-standard -- "$ws" \
+  # `-z`, and through the shared NUL reader. git quotes by default, so an
+  # ignored `frontend/src/café.ts` arrived here as
+  # `"frontend/src/caf\303\251.ts"` -- ending in a quote character rather than
+  # in `.ts`, so the extension filter below discarded it and this function
+  # reported clean. A committed deletion of that path with a local shadow left
+  # ship-mode tests-js and typecheck-js validating a file the push does not
+  # carry, which is the exact fail-open this scan exists to close, reachable by
+  # one accented letter.
+  #
+  # Two statuses, taken separately: the producer's through PIPESTATUS, and the
+  # reader's for a path holding a newline. Both mean "could not compare", which
+  # is 2 -- an empty list from either would read exactly like "the worktree
+  # matches".
+  local _wd_c _wd_c_rc=0
+  _wd_c="$(git ls-files -z --others --ignored --exclude-standard -- "$ws" \
              ':(exclude,glob)**/node_modules/**' ':(exclude,glob)node_modules/**' \
              ':(exclude,glob)**/dist/**' ':(exclude,glob)**/build/**' \
              ':(exclude,glob)**/out/**' ':(exclude,glob)**/coverage/**' \
              ':(exclude,glob)**/htmlcov/**' ':(exclude,glob)**/.next/**' \
              ':(exclude,glob)**/.nuxt/**' ':(exclude,glob)**/.turbo/**' \
              ':(exclude,glob)**/.vite/**' ':(exclude,glob)**/.cache/**' \
-             ':(exclude,glob)**/__pycache__/**' 2>/dev/null)" || _wd_rc=2
+             ':(exclude,glob)**/__pycache__/**' 2>/dev/null \
+           | ci::common::nul_to_lines
+           exit "${PIPESTATUS[0]}")" || _wd_c_rc=$?
+  [ "$_wd_c_rc" -eq 0 ] || return 2
   [ "$_wd_rc" -eq 0 ] || return 2
   # The extension list is what these lanes *load*, not what a person would call
   # source. Vite and Vitest resolve a stylesheet import like any other module, and
@@ -637,11 +653,22 @@ ci::common::node_workspaces() {
 # Build output and dependency trees are pruned by name because those names are
 # universal. A fixture directory is pruned only *under a test tree*, so a
 # genuine packages/fixtures/ workspace is still discovered.
+#
+# `.nuxt` joined the list a round after `.cache` joined ci/checks/test-layout.sh's,
+# and for the same reason spelled differently: Nuxt writes a real
+# `.nuxt/package.json`, so recursive discovery read it as a child package,
+# node_workspaces reported `frontend/.nuxt` as a workspace nested under
+# `frontend`, and the whole enumeration failed -- quick and full validation
+# blocked on an ordinary workspace after ordinary tooling had run in it. Every
+# other Node scan in this repository already classified `.nuxt` as generated
+# output; this predicate, which is meant to be the single definition, was the
+# copy that did not. That is now the fourth finding of exactly that shape, which
+# is why the whole list is checked against its siblings when any entry moves.
 ci::common::is_vendored_path() {
   case "/$1/" in
     */node_modules/* | */.git/* \
       | */dist/* | */build/* | */coverage/* | */htmlcov/* \
-      | */.next/* | */.turbo/* | */.vite/* \
+      | */.next/* | */.nuxt/* | */.turbo/* | */.vite/* \
       | */.venv/* | */venv/* \
       | */tests/fixtures/* | */test/fixtures/* \
       | */__fixtures__/* | */testdata/*)
@@ -749,6 +776,36 @@ ci::common::workspace_slug() {
 # sites: a convention repeated is a convention that drifts, and the case
 # `common: no bare mktemp survives in the gate` is what keeps a new bare call
 # from arriving.
+# ci::common::nul_to_lines – read a NUL-delimited path list on stdin and print
+# one path per line. 0 when it could, 2 when a path contains a newline.
+#
+# git quotes by default. `git ls-files` renders a path holding a non-ASCII byte
+# as `"frontend/src/caf\303\251.ts"` -- with the quotes, with the octal escapes,
+# and *ending in a quote character rather than in `.ts`*. Every reader in this
+# repository that filters those paths by suffix or extension therefore dropped
+# them silently, which is the fail-open direction: an ignored shadow of a file
+# the push deletes stops being reported as drift, and the lane validates a tree
+# the push does not carry. `-z` is git's own answer -- its help calls it the
+# NUL-separated path mode -- and this is the shared reader for it.
+#
+# A path holding a *newline* is refused rather than carried, because one path
+# then arrives as two lines and the tail of it can be spelled to look like an
+# ordinary file: the same reason ci/checks/test-layout.sh reads its candidates
+# NUL-delimited. LF is mapped to \001 so it can be detected after the fact,
+# which is the shape ci/checks/tests.sh's changed-file reader already uses.
+#
+# The producer's status is the caller's business: this reads stdin, so a caller
+# piping git into it must take PIPESTATUS itself. Everything here is about the
+# bytes.
+ci::common::nul_to_lines() {
+  local _nl_out
+  _nl_out="$(tr '\000\012' '\012\001')" || return 1
+  case "$_nl_out" in
+    *$'\001'*) return 2 ;;
+  esac
+  printf '%s' "$_nl_out"
+}
+
 ci::common::mktemp_file() {
   mktemp "${TMPDIR:-/tmp}/ums-${1:-gate}.XXXXXX"
 }

@@ -5597,6 +5597,21 @@ lane_run_typecheck() {
   [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
   [[ "$output" != *"No JavaScript suite in ws"* ]] || { echo "$output" >&2; false; }
   rm -rf "$LANE_SB"
+
+  # And the sharper half of the same statement, which the row above cannot
+  # reach: with a runner *installed*, an unreadable manifest used to resolve to
+  # "declares no runner", the both-runners refusal did not apply, and the loop
+  # ran that single runner directly -- PASS for a workspace whose test contract
+  # nobody could read. The lane was inferring a contract from what happened to be
+  # installed, which is the substitution the declared-but-absent branch refuses.
+  lane_setup
+  lane_runner vitest VITEST
+  printf '{ not json\n' > "$LANE_SB/ws/package.json"
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"INVOKED=VITEST"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"Cannot read"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
 }
 
 @test "tests lane: the suite scan here is vitest's and jest's, not the node lane's" {

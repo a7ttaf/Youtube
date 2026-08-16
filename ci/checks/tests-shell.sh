@@ -92,8 +92,19 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
     # path the pushed commits delete: the suites would then validate code that
     # is not in the tree being pushed. Third instance of this shape in the same
     # sweep, and the two before it were also hidden behind a pipeline.
+    #
+    # `-z`, through the shared NUL reader. git quotes by default, so an ignored
+    # `ci/tests/café.bats` arrived as `"ci/tests/caf\303\251.bats"` -- ending in
+    # a quote character rather than in `.bats`, so the suffix filter below
+    # discarded it and this scan reported nothing. A commit that deletes and
+    # ignores that suite while the local copy remains then leaves bats executing
+    # coverage the pushed tree does not have, which is the precise fail-open
+    # this scan exists to close. Fourth reader in this repository with the same
+    # quoting fault, and the first three were found by sweeping for it.
     _ts_ig_rc=0
-    _ts_ig="$(git ls-files --others --ignored --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null)" \
+    _ts_ig="$(git ls-files -z --others --ignored --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null \
+              | ci::common::nul_to_lines
+              exit "${PIPESTATUS[0]}")" \
       || _ts_ig_rc=$?
     if [ "$_ts_ig_rc" -ne 0 ]; then
       printf '%s\n' "$SCAN_UNREADABLE"

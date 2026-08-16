@@ -1804,6 +1804,51 @@ YML
   rm -rf "$sb"
 }
 
+@test "tests-shell: an ignored suite with a non-ASCII name is still drift" {
+  # The same quoting fault as the workspace drift scan, in the reader that
+  # decides whether bats is about to run coverage the push does not carry. git
+  # renders `ci/tests/café.bats` as `"ci/tests/caf\303\251.bats"` -- ending in a
+  # quote character rather than in `.bats` -- so the suffix filter dropped it and
+  # the scan reported nothing. A commit that deletes and ignores that suite while
+  # the local copy stays then leaves the suites validating themselves against a
+  # tree that does not contain them.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/ci/tests" "$sb/.githooks"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf '#!/usr/bin/env bats\n@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  printf '#!/usr/bin/env bats\n@test "y" { true; }\n' > "$sb/ci/tests/café.bats"
+  printf '#!/usr/bin/env bash\ntrue\n' > "$sb/.githooks/pre-push"
+  printf 'nothing\n' > "$sb/.gitignore"
+  (
+    cd "$sb"
+    git init -q -b main .
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm init
+    git rm -q "ci/tests/café.bats"
+    printf 'nothing\nci/tests/café.bats\n' > .gitignore
+    git add .gitignore
+    git -c user.email=t@t -c user.name=t commit -qm 'delete and ignore the suite'
+    printf '#!/usr/bin/env bats\n@test "shadow" { true; }\n' > "ci/tests/café.bats"
+  ) >/dev/null 2>&1
+
+  if [ ! -f "$sb/ci/tests/café.bats" ]; then
+    rm -rf "$sb"; skip "this filesystem cannot hold a non-ASCII path"
+  fi
+  local quoted
+  quoted="$( cd "$sb" && git ls-files --others --ignored --exclude-standard -- ci )"
+  [[ "$quoted" == *'\303\251'* ]] \
+    || { rm -rf "$sb"; skip "git is not quoting here (core.quotepath off); the case cannot show the fault"; }
+
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -ne 0 ] \
+    || { rm -rf "$sb"; echo "the quoted shadow was not reported: $output" >&2; return 1; }
+  [[ "$output" == *"caf"* ]] \
+    || { rm -rf "$sb"; echo "something else refused, not the shadow: $output" >&2; return 1; }
+  rm -rf "$sb"
+}
+
 @test "tests-shell: an unreadable ignored listing is infrastructure, not a clean tree" {
   # `| grep ... || true` puts the `|| true` on the pipeline, so it answers for
   # grep -- which exits 1 whenever it filters everything out, the ordinary case
@@ -3460,6 +3505,48 @@ YML
     || { echo "a TERM-ignoring child was not killed (rc=$rc; 124 means the outer guard fired)" >&2; return 1; }
 }
 
+@test "common: generated output is not a workspace nested under one" {
+  # Nuxt writes a real `.nuxt/package.json`, so recursive discovery read it as a
+  # child package: node_workspaces reported `frontend/.nuxt` as a workspace
+  # nested under `frontend`, the ambiguity rule refused the pair, and the whole
+  # enumeration failed -- quick and full validation blocked on an ordinary
+  # workspace after ordinary tooling had run in it.
+  #
+  # `.nuxt` was in every other Node scan in this repository and missing from the
+  # predicate that is meant to be the single definition. That is the fourth
+  # finding of exactly that shape in this PR, so the siblings are asserted here
+  # too rather than the one entry that was reported.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/frontend"
+  printf '{ "name": "w", "private": true }\n' > "$sb/frontend/package.json"
+  printf '{}\n' > "$sb/frontend/package-lock.json"
+  local d
+  for d in .nuxt .next .turbo .vite dist build coverage htmlcov node_modules; do
+    mkdir -p "$sb/frontend/$d"
+    printf '{ "name": "generated" }\n' > "$sb/frontend/$d/package.json"
+  done
+
+  local out rc=0
+  out="$( cd "$sb" && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+          && ci::common::node_workspaces package.json )" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || { rm -rf "$sb"; echo "discovery failed over generated output (rc=$rc): [$out]" >&2; return 1; }
+  [ "$out" = "frontend" ] \
+    || { rm -rf "$sb"; echo "expected just frontend, got: [$out]" >&2; return 1; }
+
+  # The control: a genuine nested package is still seen, so this did not make
+  # discovery blind to real ones.
+  mkdir -p "$sb/frontend/packages/app"
+  printf '{ "name": "app", "private": true }\n' > "$sb/frontend/packages/app/package.json"
+  rc=0
+  out="$( cd "$sb" && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+          && ci::common::node_workspaces package.json )" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || { rm -rf "$sb"; echo "a real nested package was not noticed: [$out]" >&2; return 1; }
+  rm -rf "$sb"
+}
+
 @test "common: a HEAD listing that failed is not a push with no workspaces" {
   # `|| return 0` read "could not ask" -- the three preconditions, which really
   # are nothing to report -- into a fourth case that is not one: HEAD exists, it
@@ -3613,6 +3700,78 @@ YML
                | grep -v '|| {' || true)"
   [ -z "$unguarded" ] \
     || { echo "an unguarded mktemp_file remains in git-safety.sh:"$'\n'"$unguarded" >&2; return 1; }
+}
+
+@test "ship drift: an ignored shadow with a non-ASCII name is still drift" {
+  # git quotes by default. `git ls-files` renders `frontend/src/café.ts` as
+  # `"frontend/src/caf\303\251.ts"` -- with the quotes, with the octal escapes,
+  # and ending in a quote character rather than in `.ts`. So the extension filter
+  # discarded it, this function reported clean, and a committed deletion of that
+  # path with a local shadow left ship-mode tests-js and typecheck-js validating
+  # a file the push does not carry. One accented letter switched the guard off.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  (
+    cd "$sb"
+    git init -q -b main .
+    mkdir -p frontend/src
+    printf 'export const a = 1;\n' > "frontend/src/café.ts"
+    printf 'export const b = 2;\n' > frontend/src/app.ts
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm base
+    git rm -q "frontend/src/café.ts"
+    printf 'frontend/src/café.ts\n' > .gitignore
+    git add .gitignore
+    git -c user.email=t@t -c user.name=t commit -qm 'delete and ignore the module'
+    printf 'export const a = 999;\n' > "frontend/src/café.ts"
+  ) >/dev/null 2>&1
+
+  # The premise: git really does quote it, or this case is asserting nothing.
+  # Skipped rather than failed when the platform cannot hold the name at all.
+  if [ ! -f "$sb/frontend/src/café.ts" ]; then
+    rm -rf "$sb"; skip "this filesystem cannot hold a non-ASCII path"
+  fi
+  local quoted
+  quoted="$( cd "$sb" && git ls-files --others --ignored --exclude-standard -- frontend )"
+  [[ "$quoted" == *'\303\251'* ]] \
+    || { rm -rf "$sb"; skip "git is not quoting here (core.quotepath off); the case cannot show the fault"; }
+
+  local out rc=0
+  out="$( cd "$sb" \
+          && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+          && ci::common::workspace_drift frontend )" || rc=$?
+  [ "$rc" -eq 1 ] \
+    || { rm -rf "$sb"; echo "the quoted shadow was not reported as drift (rc=$rc, out=[$out])" >&2; return 1; }
+  [[ "$out" == *"caf"* ]] \
+    || { rm -rf "$sb"; echo "drift was reported but not for the shadow: [$out]" >&2; return 1; }
+  rm -rf "$sb"
+}
+
+@test "common: the NUL reader carries what git quotes and refuses what it cannot" {
+  # The shared half of the two quoting fixes, asserted directly: a caller pipes
+  # `git ls-files -z` into it, so what has to hold is that NUL becomes a line
+  # break and an embedded newline is refused rather than split into two paths --
+  # one path arriving as two is how a tail can be spelled to look like an
+  # ordinary file.
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local out rc
+
+  out="$(printf 'a.ts\000b c.ts\000café.ts\000' | ci::common::nul_to_lines)"
+  [ "$out" = "$(printf 'a.ts\nb c.ts\ncafé.ts')" ] \
+    || { echo "the reader did not carry the paths: [$out]" >&2; return 1; }
+
+  rc=0
+  printf 'a.ts\000bad\nname.ts\000' | ci::common::nul_to_lines >/dev/null || rc=$?
+  [ "$rc" -eq 2 ] \
+    || { echo "a path holding a newline was not refused (rc=$rc)" >&2; return 1; }
+
+  # Empty input is an answer, not a failure: a workspace with nothing ignored is
+  # the ordinary case, and returning non-zero for it would read as "could not
+  # compare" at every caller.
+  rc=0
+  out="$(printf '' | ci::common::nul_to_lines)" || rc=$?
+  [ "$rc" -eq 0 ] && [ -z "$out" ] \
+    || { echo "empty input was not carried (rc=$rc, out=[$out])" >&2; return 1; }
 }
 
 @test "ship drift: an ignored dotenv shadow is drift, and .envrc is not" {
