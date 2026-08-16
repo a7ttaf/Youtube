@@ -19,6 +19,7 @@ _CI_RUNNER_JOBS_DIR=""   # temp dir for PID files and result files
 #   <job_id>.end     – epoch seconds at job end
 
 _CI_RUNNER_JOBS_DIR_CLEANUP=""  # set to jobs dir path; cleaned on EXIT
+_CI_RUNNER_PREV_EXIT_TRAP=""    # the caller's EXIT handler, run after cleanup
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -28,6 +29,21 @@ ci::runner::_cleanup() {
   if [ -n "$_CI_RUNNER_JOBS_DIR_CLEANUP" ] && [ -d "$_CI_RUNNER_JOBS_DIR_CLEANUP" ]; then
     rm -rf "$_CI_RUNNER_JOBS_DIR_CLEANUP"
   fi
+  # Then whatever EXIT handler this library displaced; see ci::runner::init for
+  # why it has one to run and how it got hold of it.
+  #
+  # Run from inside the handler rather than spliced into the `trap` argument,
+  # which is not a style choice: a `trap "... ${var}" EXIT` expands `var` at
+  # declaration time, so the command has to be built from something that is
+  # still in scope then -- and building it that way is also what makes the trap
+  # string differ per call, which is the shape a reader cannot check. Here the
+  # trap argument is a fixed, single-quoted function name and the variable part
+  # is read when the signal arrives, which is when it means something.
+  #
+  # After the runner's own state, so a caller's handler never looks at a jobs
+  # directory this library was about to remove. Neither can change the script's
+  # exit status: bash takes that from the moment the trap fired.
+  [ -z "${_CI_RUNNER_PREV_EXIT_TRAP:-}" ] || eval "$_CI_RUNNER_PREV_EXIT_TRAP"
 }
 
 ci::runner::_epoch() {
@@ -146,9 +162,12 @@ ci::runner::init() {
   # ci::runner::_running_count already uses to restore the ERR trap, and for the
   # same reason: a handler containing a quote does not survive being re-quoted.
   #
-  # Cleanup runs first so the runner's own state is gone before a caller's
-  # handler looks at anything; neither can change the script's exit status,
-  # which bash takes from the moment the trap fired.
+  # Recorded in a variable and run from inside ci::runner::_cleanup rather than
+  # spliced into the `trap` argument. Splicing means `trap "... ${cmd}" EXIT`,
+  # which expands at *declaration* time -- the opposite of what a trap argument
+  # normally wants, and a shape a reader has to stop and verify every time. With
+  # the command in a variable the trap argument is a fixed, single-quoted
+  # function name and the part that varies is read when the signal arrives.
   local _re_prev _re_cmd=""
   _re_prev="$(trap -p EXIT 2>/dev/null || true)"
   if [ -n "$_re_prev" ]; then
@@ -156,22 +175,20 @@ ci::runner::init() {
     _re_prev="${_re_prev% EXIT}"
     eval "_re_cmd=${_re_prev}" 2>/dev/null || _re_cmd=""
   fi
-  # A second init must not chain this function onto itself: the handler would
-  # grow a copy per call, and `ci::runner::init` is reachable more than once.
+  # This library's own handler read back on a second init is not a caller's
+  # handler, and recording it would chain the cleanup onto itself.
   #
-  # Only this function's own prefix is stripped, not everything that mentions
-  # it. Clearing the whole command on a repeat call would drop the caller's
-  # handler on the second init while preserving it on the first -- the leak this
-  # block exists to close, reintroduced one call later.
+  # Assigned only when there is something to assign, which is what makes a
+  # repeat call safe: init #2 reads back this function's name, discards it here,
+  # and leaves the handler init #1 recorded in place. Clearing the variable
+  # unconditionally instead would drop the caller's handler on the second call
+  # while preserving it on the first -- the leak this block exists to close,
+  # reintroduced one call later.
   case "$_re_cmd" in
-    'ci::runner::_cleanup ; '*) _re_cmd="${_re_cmd#ci::runner::_cleanup ; }" ;;
     'ci::runner::_cleanup') _re_cmd="" ;;
   esac
-  if [ -n "$_re_cmd" ]; then
-    trap "ci::runner::_cleanup ; ${_re_cmd}" EXIT
-  else
-    trap 'ci::runner::_cleanup' EXIT
-  fi
+  [ -z "$_re_cmd" ] || _CI_RUNNER_PREV_EXIT_TRAP="$_re_cmd"
+  trap 'ci::runner::_cleanup' EXIT
 }
 
 # ci::runner::submit <job_id> <check_script> [args...]

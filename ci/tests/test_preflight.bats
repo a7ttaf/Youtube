@@ -1426,6 +1426,15 @@ YML
   _copies="$(printf '%s\n' "$output" | grep -c 'ci::runner::_cleanup' || true)"
   [ "$_copies" -eq 1 ] || { echo "cleanup appears ${_copies} times: $output" >&2; rm -rf "$sb"; false; }
 
+  # The trap argument itself stays a fixed string. Splicing the previous handler
+  # into it -- `trap "ci::runner::_cleanup ; ${cmd}" EXIT`, which is how this was
+  # written first -- expands at *declaration* time, so the argument differs per
+  # call and a reader has to verify the expansion every time. The chain lives in
+  # the handler now, which is also where a trap's variable part belongs: read
+  # when the signal arrives.
+  ! grep -nE '^[[:space:]]*trap +"' "$REPO_ROOT/ci/lib/runner.sh" \
+    || { echo "a trap argument in runner.sh interpolates at declaration time" >&2; rm -rf "$sb"; return 1; }
+
   # The runner's own state is still removed -- chaining must not cost the thing
   # the trap was installed for.
   run bash -c "
