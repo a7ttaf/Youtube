@@ -86,7 +86,17 @@ if [ "${CI_GATE_MODE:-}" = "ship" ]; then
   #
   # Removed inline rather than by an EXIT trap: `trap secret_cleanup EXIT` below
   # replaces any trap set here, so a second one would silently leak the file.
-  _GS_RANGE_ERR="$(ci::common::mktemp_file gs-range)"
+  # Guarded for the reason the secret-pattern file below is: unguarded under
+  # `set -Eeuo pipefail` a failing mktemp aborts with raw exit 1, outside the
+  # 0/10/20/30 contract, and this lane's whole job is to report a verdict.
+  _GS_RANGE_ERR="$(ci::common::mktemp_file gs-range 2>/dev/null)" || {
+    echo "Cannot create a temporary file to capture why the range failed." >&2
+    exit "$CI_RESULT_FAIL_INFRA"
+  }
+  [ -n "$_GS_RANGE_ERR" ] || {
+    echo "mktemp returned an empty path for the range diagnostics." >&2
+    exit "$CI_RESULT_FAIL_INFRA"
+  }
   GATE_RANGE="$(ci::git::push_range 2>"$_GS_RANGE_ERR" || true)"
   if [ -z "$GATE_RANGE" ]; then
     echo "Cannot determine the range being pushed; refusing to report on it."
@@ -528,7 +538,26 @@ while [ "$_gs_idx" -lt "${#_GS_PATHS[@]}" ]; do
   fi
 done
 
-secret_pattern_file="$(ci::common::mktemp_file gs-secret-patterns)"
+# Guarded, like every other temporary file in this lane. Unguarded under
+# `set -Eeuo pipefail` a failing mktemp -- a full or unwritable TMPDIR, a
+# restricted host -- aborts the script where it stands with raw exit 1, which is
+# outside the 0/10/20/30 contract preflight reads. The lane then looks like a
+# broken script rather than like infrastructure that could not run, and the
+# secret scan is the one place where "it did not run" must never be quiet.
+#
+# The empty-path arm is separate on purpose: an mktemp that exits 0 and prints
+# nothing would leave `> ""` writing to a path the shell cannot open, which is a
+# different failure with the same consequence.
+secret_pattern_file="$(ci::common::mktemp_file gs-secret-patterns 2>/dev/null)" || {
+  echo "Cannot create a temporary file for the secret-pattern regex." >&2
+  echo "  The secret scan cannot run without it, and a scan that did not run" >&2
+  echo "  is not a scan that found nothing." >&2
+  exit "$CI_RESULT_FAIL_INFRA"
+}
+[ -n "$secret_pattern_file" ] || {
+  echo "mktemp returned an empty path for the secret-pattern regex." >&2
+  exit "$CI_RESULT_FAIL_INFRA"
+}
 secret_cleanup() {
   rm -f "$secret_pattern_file" 2>/dev/null || true
 }

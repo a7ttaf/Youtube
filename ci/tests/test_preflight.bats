@@ -3566,6 +3566,109 @@ YML
   rm -rf "$sb"
 }
 
+@test "git-safety: a temporary file it cannot create is infrastructure, not exit 1" {
+  # Every temporary file in this lane goes through ci::common::mktemp_file now,
+  # and two of the call sites were left unguarded. Under `set -Eeuo pipefail` a
+  # failing mktemp -- a full or unwritable TMPDIR, a restricted host -- aborts
+  # the script where it stands with raw exit 1, which is outside the 0/10/20/30
+  # contract preflight reads. The lane then looks like a broken script rather
+  # than like infrastructure that could not run, and this is the lane where "it
+  # did not run" must never be quiet.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/bin"
+  cp "$REPO_ROOT/ci/checks/git-safety.sh" "$REPO_ROOT/ci/checks/common.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  mkdir -p "$sb/ci/config"
+  [ -f "$REPO_ROOT/ci/config/gate.yml" ] && cp "$REPO_ROOT/ci/config/gate.yml" "$sb/ci/config/"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$sb/bin/mktemp"
+  chmod +x "$sb/bin/mktemp"
+  ( cd "$sb" && git init -q -b main . \
+      && printf 'x\n' > a.txt && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm base ) >/dev/null 2>&1
+
+  run bash -c "cd '$sb' && PATH=\"$sb/bin:\$PATH\" CI_GATE_MODE=ship bash ci/checks/git-safety.sh 2>&1"
+  [ "$status" -eq 30 ] \
+    || { rm -rf "$sb"; echo "a failing mktemp left the contract (status=$status): $output" >&2; return 1; }
+  [[ "$output" == *"temporary file"* ]] \
+    || { rm -rf "$sb"; echo "the refusal did not say what failed: $output" >&2; return 1; }
+  rm -rf "$sb"
+
+  # And both call sites carry the guard, since the behavioural half above can
+  # only reach the first of them: the second is past a range this sandbox never
+  # resolves. Pinned to the shape rather than to the line, so moving the code
+  # keeps the assertion.
+  local unguarded
+  unguarded="$(grep -n 'ci::common::mktemp_file' "$REPO_ROOT/ci/checks/git-safety.sh" \
+               | grep -v '|| {' || true)"
+  [ -z "$unguarded" ] \
+    || { echo "an unguarded mktemp_file remains in git-safety.sh:"$'\n'"$unguarded" >&2; return 1; }
+}
+
+@test "ship drift: an ignored dotenv shadow is drift, and .envrc is not" {
+  # The sharpest version of the stylesheet case below, and the one class the
+  # extension filter could not see because it carries no extension at all. Vite
+  # and Vitest load `.env`, `.env.local`, `.env.<mode>` and `.env.<mode>.local`
+  # before a single test runs, and those files are ignored by convention -- so a
+  # push that deletes and ignores `frontend/.env.test` while a local copy remains
+  # left all three scans empty, and ship-mode tests-js read `VITE_*` settings
+  # that exist in nobody's tree but the pusher's. A value that switches a test
+  # off is the worst shape of it: the lane reports PASS having skipped exactly
+  # the cases the pushed tree would have run.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  (
+    cd "$sb"
+    git init -q -b main .
+    mkdir -p frontend/src
+    printf 'VITE_RUN_INTEGRATION=1\n' > frontend/.env.test
+    printf 'export const a = 1;\n'    > frontend/src/app.ts
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm base
+    git rm -q frontend/.env.test
+    printf 'frontend/.env.test\n' > .gitignore
+    git add .gitignore
+    git -c user.email=t@t -c user.name=t commit -qm 'delete and ignore the env file'
+    printf 'VITE_RUN_INTEGRATION=0\n' > frontend/.env.test
+  ) >/dev/null 2>&1
+
+  local out rc=0
+  out="$( cd "$sb" \
+          && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+          && ci::common::workspace_drift frontend )" || rc=$?
+  [ "$rc" -eq 1 ] \
+    || { rm -rf "$sb"; echo "the ignored dotenv shadow was not reported as drift (rc=$rc, out=[$out])" >&2; return 1; }
+  [[ "$out" == *"frontend/.env.test"* ]] \
+    || { rm -rf "$sb"; echo "drift was reported but not for the env file: [$out]" >&2; return 1; }
+  rm -rf "$sb"
+
+  # Every spelling Vite documents, asserted against the filter itself rather than
+  # through a second sandbox: what has to hold is which names the expression
+  # keeps, and a fixture per name would test the fixture.
+  #
+  # `.envrc` is direnv's and nothing here loads it, so it stays out. Keeping it
+  # would make a directory with direnv configured permanently drifted, and a
+  # guard that refuses correct pushes gets switched off.
+  local expr kept want unwanted
+  expr="$(grep -oE "\|\(\^\|/\)\\\\\.env[^']*" "$REPO_ROOT/ci/lib/common.sh" | head -1)"
+  [ -n "$expr" ] || { echo "could not lift the dotenv arm from ci/lib/common.sh" >&2; return 1; }
+  expr="${expr#|}"
+  kept="$(printf '%s\n' 'frontend/.env' 'frontend/.env.local' 'frontend/.env.test' \
+            'frontend/.env.test.local' 'frontend/.env.production' '.env' \
+            'frontend/.envrc' 'frontend/notes.txt' \
+          | grep -E "$expr" | tr '\n' ' ')"
+  for want in 'frontend/.env' 'frontend/.env.local' 'frontend/.env.test' \
+              'frontend/.env.test.local' 'frontend/.env.production' '.env'; do
+    [[ "$kept" == *"$want"* ]] \
+      || { echo "a dotenv Vite loads was dropped: ${want} (got [$kept])" >&2; return 1; }
+  done
+  for unwanted in 'frontend/.envrc' 'frontend/notes.txt'; do
+    [[ "$kept" != *"$unwanted"* ]] \
+      || { echo "not a dotenv, but kept: ${unwanted} (got [$kept])" >&2; return 1; }
+  done
+}
+
 @test "ship drift: an ignored shadow of a deleted stylesheet is drift" {
   # The extension list is what these lanes *load*, not what a person would call
   # source. Vite and Vitest resolve a stylesheet import like any other module,

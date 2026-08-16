@@ -157,9 +157,23 @@ ci::common::workspace_drift() {
   # covers the other things a build graph pulls in by import: the CSS dialects,
   # the asset types a bundler inlines, and the config files these lanes read to
   # decide what to run at all.
+  #
+  # Dotenv files are on that list for the sharpest version of the same argument,
+  # and they are the one class here that carries no extension at all -- which is
+  # exactly why an extension filter dropped them. Vite and Vitest load `.env`,
+  # `.env.local`, `.env.<mode>` and `.env.<mode>.local` before a single test
+  # runs, and those files are ignored by convention, so a push that deletes and
+  # ignores `frontend/.env.test` while a local copy remains left all three scans
+  # empty. Ship-mode tests-js then read `VITE_*` settings that exist in nobody's
+  # tree but the pusher's -- and a value that switches a test off is the worst
+  # shape of that, because the lane reports PASS having skipped the cases the
+  # pushed tree would have run.
+  #
+  # Anchored to `.env` as a whole basename or a `.env.`-prefixed one, so
+  # `.envrc` -- direnv's, which nothing here loads -- stays out.
   _wd_c="$(printf '%s\n' "$_wd_c" \
     | grep -Ev '(^|/)(node_modules|dist|build|out|coverage|htmlcov|\.next|\.nuxt|\.turbo|\.vite|\.cache|__pycache__)/' \
-    | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|cts|mts|vue|svelte|json|css|scss|sass|less|styl|pcss|svg|html|py|yml|yaml|toml)$|(^|/)(package\.json|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|vitest\.config\.[cm]?[jt]s)$' || true)"
+    | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|cts|mts|vue|svelte|json|css|scss|sass|less|styl|pcss|svg|html|py|yml|yaml|toml)$|(^|/)(package\.json|tsconfig[^/]*\.json|vite\.config\.[cm]?[jt]s|vitest\.config\.[cm]?[jt]s)$|(^|/)\.env(\.[^/]*)?$' || true)"
 
   local _wd_all
   _wd_all="$(printf '%s\n%s\n%s\n' "$_wd_a" "$_wd_b" "$_wd_c" | sed '/^$/d' | sort -u)"
