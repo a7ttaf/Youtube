@@ -5528,6 +5528,133 @@ lane_run_typecheck() {
   rm -rf "$LANE_SB"
 }
 
+@test "typecheck lane: a fixture or generated config is not a project to compile" {
+  # A config-shaped name is not by itself a first-party project.
+  # `tests/fixtures/broken/tsconfig.json` exists to hold errors on purpose and
+  # `dist/tsconfig.generated.json` is output, so `tsc -p` on either failed an
+  # otherwise valid tree over a file this repository already classifies as
+  # not-source -- and node.sh's _ts_project_files, reading the same names,
+  # demanded a `typecheck` script of a workspace on the same evidence.
+  #
+  # Filtered through ci::common::is_vendored_path in both, which is the
+  # definition ci::common::node_workspaces and ci/lib/changeset.sh's classifier
+  # already use. A fifth hand-written list is how the four drifted apart before.
+  lane_setup
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  mkdir -p "$LANE_SB/ws/tests/fixtures/broken" "$LANE_SB/ws/dist"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tests/fixtures/broken/tsconfig.json"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/dist/tsconfig.generated.json"
+  run lane_run_typecheck
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"no tsconfig.json in ws"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"INVOKED=TSC"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # The control, and it is the half that keeps this from becoming a hole: a
+  # genuine project below the root is still compiled. `e2e/tsconfig.json` is an
+  # ordinary shape and its own case above exists because it was once missed.
+  lane_setup
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  mkdir -p "$LANE_SB/ws/e2e" "$LANE_SB/ws/tests/fixtures/broken"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/e2e/tsconfig.json"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tests/fixtures/broken/tsconfig.json"
+  run lane_run_typecheck
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"INVOKED=TSC"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+}
+
+@test "node lane: a fixture config does not make a workspace owe a typecheck script" {
+  # The other reader of the same list. _ts_project_files decides whether the
+  # workspace is *required* to have a `typecheck` script, so a fixture config
+  # made a JavaScript-only package fail for not running tsc over a file
+  # ci/checks/typecheck.sh now declines to compile. The two lists have to agree
+  # or the gate demands a check nothing performs.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "build": "true" } }'
+  mkdir -p "$NODE_SB/ws/tests/fixtures/broken" "$NODE_SB/ws/dist"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tests/fixtures/broken/tsconfig.json"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/dist/tsconfig.generated.json"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"declares TypeScript configuration but"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The control: a real project still owes a typecheck script, or this would
+  # have switched the requirement off for every workspace.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "build": "true" } }'
+  mkdir -p "$NODE_SB/ws/e2e"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/e2e/tsconfig.json"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"declares TypeScript configuration but"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "typecheck lane: an enumeration failure is not reported as a type error" {
+  # _tc_js_workspace returns FAIL_INFRA deliberately and in more than one place
+  # -- the project enumeration failing, `mktemp` failing, a vouched-tree listing
+  # that could not be read. The catch-all below the missing-compiler branch
+  # turned every one of them into "tsc --noEmit failed", which sends someone
+  # looking for a type error that does not exist and reports a repository or
+  # tooling fault as a defect in the tree being pushed.
+  lane_setup
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tsconfig.json"
+
+  # Driven at the branch rather than through one of the faults that reaches it.
+  # Every real route -- a failed `mktemp`, a `find` that could not run, a
+  # vouched-tree listing that failed -- is a broken tool, and stubbing the tool
+  # takes the *enumeration* down before this loop is reached, so the case would
+  # assert a different message than the one it is about. What is under test is
+  # what the loop does with a 30, so the loop is given a 30.
+  local drv; drv="$(mktemp)"
+  sed -n '/^typecheck::run_js()/,/^}/p' "$REPO_ROOT/ci/checks/typecheck.sh" > "$drv"
+  bash -n "$drv" || { rm -f "$drv" "$LANE_SB"; echo "extraction is not valid shell" >&2; return 1; }
+
+  run bash -c "
+    set -Eeuo pipefail
+    . '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+    . '$REPO_ROOT/ci/lib/log.sh'    >/dev/null 2>&1
+    . '$drv'
+    ci::common::node_workspaces() { printf 'ws\n'; }
+    _tc_js_workspace() { return 30; }
+    OVERALL_RESULT=\"\$CI_RESULT_PASS\"
+    typecheck::run_js
+    echo \"RESULT=\$OVERALL_RESULT\""
+  rm -f "$drv"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"RESULT=${CI_RESULT_FAIL_INFRA}"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"could not be checked"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"tsc --noEmit failed"* ]] || { echo "$output" >&2; false; }
+
+  # The control, and it is what stops the branch from swallowing real failures:
+  # a compiler that exits non-zero for any other reason is still a type error.
+  drv="$(mktemp)"
+  sed -n '/^typecheck::run_js()/,/^}/p' "$REPO_ROOT/ci/checks/typecheck.sh" > "$drv"
+  run bash -c "
+    set -Eeuo pipefail
+    . '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+    . '$REPO_ROOT/ci/lib/log.sh'    >/dev/null 2>&1
+    . '$drv'
+    ci::common::node_workspaces() { printf 'ws\n'; }
+    _tc_js_workspace() { return 2; }
+    OVERALL_RESULT=\"\$CI_RESULT_PASS\"
+    typecheck::run_js
+    echo \"RESULT=\$OVERALL_RESULT\""
+  rm -f "$drv"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"RESULT=${CI_RESULT_FAIL_NEW_ISSUE}"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"tsc --noEmit failed"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+}
+
 @test "typecheck lane: a package root with no TypeScript project says so" {
   # The counterpart of discovering package roots: a JavaScript-only package has
   # no project to compile, which is a fact about the workspace rather than a

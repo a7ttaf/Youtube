@@ -130,8 +130,48 @@ ci::runner::init() {
   mkdir -p "$_CI_RUNNER_JOBS_DIR"
   _CI_RUNNER_JOBS_DIR_CLEANUP="$_CI_RUNNER_JOBS_DIR"
 
-  # Register cleanup trap (merge with any existing EXIT trap)
-  trap 'ci::runner::_cleanup' EXIT
+  # Register cleanup, chained onto any EXIT trap already installed.
+  #
+  # `trap ... EXIT` replaces rather than adds, and this line has claimed to
+  # merge since it was written without doing it. ci/preflight.sh installs an
+  # EXIT trap of its own before the first run_phase -- the one that removes the
+  # HEAD copy of ci/config/checks.yml materialized for a ship run -- so the
+  # replacement here leaked one temporary file per ship validation, silently and
+  # forever. A library that takes a process-wide resource away from its caller
+  # has to give it back.
+  #
+  # `trap -p EXIT` prints a re-executable `trap -- '<cmd>' EXIT`, so the command
+  # comes back carrying bash's own quoting and is unwrapped by assigning through
+  # `eval` rather than by unquoting it here by hand -- the same idiom
+  # ci::runner::_running_count already uses to restore the ERR trap, and for the
+  # same reason: a handler containing a quote does not survive being re-quoted.
+  #
+  # Cleanup runs first so the runner's own state is gone before a caller's
+  # handler looks at anything; neither can change the script's exit status,
+  # which bash takes from the moment the trap fired.
+  local _re_prev _re_cmd=""
+  _re_prev="$(trap -p EXIT 2>/dev/null || true)"
+  if [ -n "$_re_prev" ]; then
+    _re_prev="${_re_prev#trap -- }"
+    _re_prev="${_re_prev% EXIT}"
+    eval "_re_cmd=${_re_prev}" 2>/dev/null || _re_cmd=""
+  fi
+  # A second init must not chain this function onto itself: the handler would
+  # grow a copy per call, and `ci::runner::init` is reachable more than once.
+  #
+  # Only this function's own prefix is stripped, not everything that mentions
+  # it. Clearing the whole command on a repeat call would drop the caller's
+  # handler on the second init while preserving it on the first -- the leak this
+  # block exists to close, reintroduced one call later.
+  case "$_re_cmd" in
+    'ci::runner::_cleanup ; '*) _re_cmd="${_re_cmd#ci::runner::_cleanup ; }" ;;
+    'ci::runner::_cleanup') _re_cmd="" ;;
+  esac
+  if [ -n "$_re_cmd" ]; then
+    trap "ci::runner::_cleanup ; ${_re_cmd}" EXIT
+  else
+    trap 'ci::runner::_cleanup' EXIT
+  fi
 }
 
 # ci::runner::submit <job_id> <check_script> [args...]

@@ -395,11 +395,31 @@ case "$HOOK_NAME" in
     # Exported even when it fails, as an empty value with the remote recorded
     # only on success -- so a failed query does not read downstream as "the
     # destination has nothing", which is the fail-open this whole change closes.
+    #
+    # Every ref, not `--heads --tags`. Those two flags are what git's help says
+    # they are -- "limit to refs/heads" and "limit to refs/tags" -- so a
+    # destination reaching a commit only through a namespace of its own, say
+    # `refs/publish/prod`, read here as a destination that does not have that
+    # commit, and a tag push on it was judged to publish an unvalidated tree.
+    # ci::git::worktree_covers_push already models other namespaces; the query
+    # was the narrower half.
+    #
+    # Minus the forge's pull-request mirrors, which is the one fail-open
+    # direction in widening this: a commit reachable only from `refs/pull/*` or
+    # `refs/merge-requests/*` is *proposed*, not merged, and counting it as
+    # published would let push_is_label_only skip every content lane for a tag
+    # push on an unmerged fork head. Merged work is unaffected, being an
+    # ancestor of a branch tip.
+    #
+    # Kept character-for-character identical to ci/lib/git.sh's copy -- that
+    # file is deliberately standalone and cannot share a helper with this one --
+    # and `hook: the destination tips query matches the one git.sh falls back to`
+    # is the case that holds the two together.
     if command -v git >/dev/null 2>&1 && [ -n "${CI_GATE_PUSH_REMOTE:-}" ]       && [ "${CI_GATE_TRUST_TRACKING_REFS:-0}" != "1" ]; then
       _rt_raw=""
-      if _rt_raw="$(git ls-remote --heads --tags "$CI_GATE_PUSH_REMOTE" 2>/dev/null)"; then
+      if _rt_raw="$(git ls-remote "$CI_GATE_PUSH_REMOTE" 2>/dev/null)"; then
         CI_GATE_PUSH_REMOTE_TIPS="$(printf '%s
-' "$_rt_raw" | awk '{ print $1 }' | sed '/^$/d' | sort -u)"
+' "$_rt_raw" | awk '$2 !~ /^refs\/(pull|merge-requests)\// { print $1 }' | sed '/^$/d' | sort -u)"
         export CI_GATE_PUSH_REMOTE_TIPS
         export CI_GATE_PUSH_REMOTE_TIPS_FOR="$CI_GATE_PUSH_REMOTE"
       fi

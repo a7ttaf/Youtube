@@ -61,6 +61,24 @@ _tc_js_workspace() {
     echo "  An empty list reads exactly like a package with none." >&2
     return 30
   fi
+  # A config-shaped name is not by itself a project this lane should compile.
+  # `tests/fixtures/broken/tsconfig.json` holds errors on purpose and
+  # `dist/tsconfig.generated.json` is output, so `tsc -p` on either fails a
+  # valid tree over a file the repository already classifies as not-source.
+  #
+  # Through ci::common::is_vendored_path, which is the definition
+  # ci::common::node_workspaces and ci/lib/changeset.sh's classifier already
+  # read, and which _ts_project_files in ci/checks/node.sh now reads too -- the
+  # two lists have to agree or the gate demands a check of a project this lane
+  # declines to compile, which is the comment above this block.
+  local _tc_keepf _tc_one
+  _tc_keepf="$(mktemp 2>/dev/null)" || { rm -f "$_tc_list"; return 30; }
+  while IFS= read -r _tc_one; do
+    [ -n "$_tc_one" ] || continue
+    ci::common::is_vendored_path "$_tc_one" && continue
+    printf '%s\n' "$_tc_one" >> "$_tc_keepf"
+  done < "$_tc_list"
+  mv -f "$_tc_keepf" "$_tc_list" 2>/dev/null || { rm -f "$_tc_keepf" "$_tc_list"; return 30; }
   # Which tree this list describes. `find` stats the worktree, and in ship mode
   # the worktree is the commit being built, not the one being pushed -- so an
   # untracked `local-only/tsconfig.json` was compiled as part of a push that
@@ -133,6 +151,13 @@ _tc_js_workspace() {
         *) continue ;;
       esac
       case "$_tc_p" in */node_modules/*|node_modules/*) continue ;; esac
+      # The same not-first-party filter the worktree side above applies. Both
+      # halves have to agree about what a project is, and an asymmetry here is
+      # not a missed case but an inverted one: this side reports a project the
+      # push carries and the worktree does not, so a fixture config deleted
+      # locally would fail the push as a missing project the other side had
+      # already -- correctly -- decided not to look for.
+      if ci::common::is_vendored_path "$_tc_p"; then continue; fi
       # `[ -f x ] && continue` is a statement whose status is the test's, and
       # this file runs under `set -Eeuo pipefail`: on the last iteration a
       # present file makes it 0 and an absent one makes the loop's status 1.
@@ -283,6 +308,25 @@ typecheck::run_js() {
       ci::log::error "  workspace pins). This workspace declares tsconfig.json and was"
       ci::log::error "  scheduled, so reporting PASS here would mean its types were never"
       ci::log::error "  checked. Install its dependencies, or remove the workspace."
+      continue
+    fi
+
+    if [ "$rc" -eq "$CI_RESULT_FAIL_INFRA" ]; then
+      # _tc_js_workspace returns 30 deliberately, and in more than one place: the
+      # project enumeration failing, `mktemp` failing, and the vouched-tree
+      # listing failing -- ship mode meeting a path this repository's readers
+      # cannot quote is one way to reach the last of those. The catch-all below
+      # turned every one of them into "tsc --noEmit failed", which sends someone
+      # looking for a type error that does not exist and, worse, reports a
+      # repository or tooling fault as a defect in the tree being pushed.
+      #
+      # Kept as 30 rather than merged down, for the reason the branch above keeps
+      # it: FAIL_INFRA outranks FAIL_NEW_ISSUE in ci::common::merge_results, and
+      # "the check could not run" is the more urgent of the two statements. The
+      # same shape ci/checks/tests.sh carries beside its own missing-runner
+      # branch.
+      OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+      ci::log::error "TypeScript in ${ws} could not be checked (see above)."
       continue
     fi
 

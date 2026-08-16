@@ -103,13 +103,43 @@ ci::git::_remote_tips() {
     return 0
   fi
   command -v git >/dev/null 2>&1 || return 1
-  # --heads and --tags: a commit is published if any ref on the destination
-  # reaches it, and a release tag is as good a publication as a branch.
-  _rt_out="$(git ls-remote --heads --tags "$remote" 2>/dev/null)" || _rt_rc=$?
+  # Every ref on the destination: a commit is published if *any* of them reaches
+  # it, and a release tag is as good a publication as a branch.
+  #
+  # `--heads --tags` was those two namespaces and nothing else, which git's own
+  # help states plainly -- "limit to refs/heads" and "limit to refs/tags". A
+  # destination that reaches a commit only through a namespace of its own, say
+  # `refs/publish/prod`, therefore looked to this function as though it did not
+  # have that commit at all, and a tag push on it was judged to be publishing an
+  # unvalidated tree. ci::git::worktree_covers_push explicitly models other
+  # namespaces, so the query is the half that was narrower than the model.
+  #
+  # Minus the forge's own pull-request mirrors, and that exclusion is the part
+  # worth being careful about, because it is the only fail-open direction here.
+  # `refs/pull/*` (GitHub) and `refs/merge-requests/*` (GitLab) are refs the
+  # forge writes for *proposed* changes; a commit reachable only from one of
+  # them has not been merged anywhere. Counting it as published would let
+  # ci::git::push_is_label_only call a tag push on an unmerged fork head
+  # content-free and skip every content lane. Merged work is unaffected -- it is
+  # an ancestor of a branch tip, and the loop above tests ancestry, not
+  # equality.
+  #
+  # Filtered on the ref name rather than after taking the object name, since the
+  # object name alone cannot say which namespace it came from. Kept identical to
+  # ci/hook-dispatch.sh's copy of this query; `hook: the destination tips query
+  # matches the one git.sh falls back to` is the case that says so.
+  #
+  # And it costs nothing here, which was worth measuring rather than assuming:
+  # this repository's origin answers 329 refs unfiltered against 136 for
+  # `--heads --tags`, and after the exclusion above both produce the same 136
+  # object names -- 193 of the extra refs are `refs/pull/*`. destination_base
+  # runs one merge-base per tip, so an unfiltered widening would have tripled the
+  # slowest part of a ship run; this one leaves it where it was.
+  _rt_out="$(git ls-remote "$remote" 2>/dev/null)" || _rt_rc=$?
   if [ "$_rt_rc" -ne 0 ]; then
     return 1
   fi
-  _CI_GIT_REMOTE_TIPS="$(printf '%s\n' "$_rt_out" | awk '{ print $1 }' | sed '/^$/d' | sort -u)"
+  _CI_GIT_REMOTE_TIPS="$(printf '%s\n' "$_rt_out" | awk '$2 !~ /^refs\/(pull|merge-requests)\// { print $1 }' | sed '/^$/d' | sort -u)"
   _CI_GIT_REMOTE_TIPS_RC=0
   printf '%s' "$_CI_GIT_REMOTE_TIPS"
   return 0

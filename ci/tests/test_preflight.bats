@@ -1374,6 +1374,118 @@ YML
   rm -rf "$sb"
 }
 
+@test "runner: init keeps the EXIT trap its caller already installed" {
+  # `trap ... EXIT` replaces rather than adds, and ci::runner::init's own comment
+  # claimed a merge it never performed. ci/preflight.sh installs an EXIT trap
+  # before the first run_phase -- the one that removes the HEAD copy of
+  # ci/config/checks.yml materialized for a ship run -- so every ship validation
+  # leaked one temporary file, silently and forever.
+  local sb; sb="$(mktemp -d)"
+  run bash -c "
+    set -Eeuo pipefail
+    . '$REPO_ROOT/ci/lib/runner.sh'
+    printf 'x' > '$sb/caller.tmp'
+    trap 'rm -f \"$sb/caller.tmp\" ; echo CALLER_TRAP_RAN' EXIT
+    ci::runner::init 2 >/dev/null 2>&1
+    exit 0"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; rm -rf "$sb"; false; }
+  [[ "$output" == *"CALLER_TRAP_RAN"* ]] || { echo "$output" >&2; rm -rf "$sb"; false; }
+  [ ! -e "$sb/caller.tmp" ] || { echo "the caller's cleanup did not run" >&2; rm -rf "$sb"; false; }
+
+  # Twice, because the obvious guard against chaining this function onto itself
+  # -- clearing the whole previous command when it mentions the cleanup -- drops
+  # the caller's handler on the second call while preserving it on the first.
+  # That is the same leak one call later, so the repeat is the case that matters.
+  printf 'x' > "$sb/caller.tmp"
+  run bash -c "
+    set -Eeuo pipefail
+    . '$REPO_ROOT/ci/lib/runner.sh'
+    trap 'rm -f \"$sb/caller.tmp\" ; echo CALLER_TRAP_RAN' EXIT
+    ci::runner::init 2 >/dev/null 2>&1
+    ci::runner::init 2 >/dev/null 2>&1
+    trap -p EXIT
+    exit 0"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; rm -rf "$sb"; false; }
+  [[ "$output" == *"CALLER_TRAP_RAN"* ]] || { echo "$output" >&2; rm -rf "$sb"; false; }
+  [ ! -e "$sb/caller.tmp" ] || { echo "the caller's cleanup did not run twice" >&2; rm -rf "$sb"; false; }
+  # And the handler does not grow a copy of the cleanup per call.
+  local _copies
+  _copies="$(printf '%s\n' "$output" | grep -c 'ci::runner::_cleanup' || true)"
+  [ "$_copies" -eq 1 ] || { echo "cleanup appears ${_copies} times: $output" >&2; rm -rf "$sb"; false; }
+
+  # The runner's own state is still removed -- chaining must not cost the thing
+  # the trap was installed for.
+  run bash -c "
+    set -Eeuo pipefail
+    . '$REPO_ROOT/ci/lib/runner.sh'
+    trap 'echo CALLER_TRAP_RAN' EXIT
+    ci::runner::init 2 >/dev/null 2>&1
+    echo \"JOBS=\$_CI_RUNNER_JOBS_DIR\"
+    exit 0"
+  local _jobs
+  _jobs="$(printf '%s\n' "$output" | sed -n 's/^JOBS=//p')"
+  [ -n "$_jobs" ] || { echo "$output" >&2; rm -rf "$sb"; false; }
+  [ ! -d "$_jobs" ] || { echo "the runner's jobs dir survived: $_jobs" >&2; rm -rf "$sb"; false; }
+  rm -rf "$sb"
+}
+
+@test "hook: the destination tips query matches the one git.sh falls back to" {
+  # Two copies of one query, because ci/lib/git.sh is deliberately standalone --
+  # it reads no ci::common:: helper -- and ci/hook-dispatch.sh sources common.sh
+  # and log.sh only, so there is no file they can share a function through. What
+  # can be shared is this assertion: they are compared to each other rather than
+  # each to a string written twice here.
+  #
+  # An asymmetry would not be a missed case but an inverted one. The dispatcher's
+  # answer is exported and preferred; git.sh's runs only when it was not, so the
+  # two disagreeing means the same push is judged published or unpublished
+  # depending on whether it went through the hook.
+  local q_git q_hook
+  q_git="$(grep -o "awk '\$2 .*sort -u" ci/lib/git.sh | head -1)"
+  q_hook="$(grep -o "awk '\$2 .*sort -u" ci/hook-dispatch.sh | head -1)"
+  [ -n "$q_git" ]  || { echo "could not find the query in ci/lib/git.sh" >&2; return 1; }
+  [ -n "$q_hook" ] || { echo "could not find the query in ci/hook-dispatch.sh" >&2; return 1; }
+  [ "$q_git" = "$q_hook" ] \
+    || { echo "the two queries differ:"$'\n'"  git.sh:  $q_git"$'\n'"  hook:    $q_hook" >&2; return 1; }
+  # Both must query every namespace, so the assertion above cannot be satisfied
+  # by two identically *narrow* copies.
+  grep -qF 'git ls-remote "$remote"' ci/lib/git.sh \
+    || { echo "ci/lib/git.sh no longer queries every destination ref" >&2; return 1; }
+  grep -qF 'git ls-remote "$CI_GATE_PUSH_REMOTE"' ci/hook-dispatch.sh \
+    || { echo "ci/hook-dispatch.sh no longer queries every destination ref" >&2; return 1; }
+
+  # Neither may go back to limiting the query to two namespaces: that is the
+  # defect, not a detail of it. A destination reaching a commit only through
+  # `refs/publish/prod` read as a destination that does not have it.
+  ! grep -qF 'ls-remote --heads --tags' ci/lib/git.sh ci/hook-dispatch.sh \
+    || { echo "a namespace-limited ls-remote is back" >&2; return 1; }
+
+  # And the filter has to exclude the forge's proposal mirrors, which is the one
+  # fail-open direction in widening the query: a commit reachable only from
+  # refs/pull/* is proposed, not merged, and counting it as published lets
+  # push_is_label_only skip every content lane for a tag push on it.
+  local sample kept
+  sample="$(printf '%s\n' \
+    'aaaaaaa1	refs/heads/main' \
+    'aaaaaaa2	refs/tags/v1.0' \
+    'aaaaaaa3	refs/tags/v1.0^{}' \
+    'aaaaaaa4	refs/publish/prod' \
+    'aaaaaaa5	refs/notes/commits' \
+    'aaaaaaa6	HEAD' \
+    'bbbbbbb1	refs/pull/7/head' \
+    'bbbbbbb2	refs/pull/7/merge' \
+    'bbbbbbb3	refs/merge-requests/9/head')"
+  kept="$(printf '%s\n' "$sample" | awk '$2 !~ /^refs\/(pull|merge-requests)\// { print $1 }' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+  local want
+  for want in aaaaaaa1 aaaaaaa2 aaaaaaa3 aaaaaaa4 aaaaaaa5 aaaaaaa6; do
+    [[ "$kept" == *"$want"* ]] || { echo "a published ref was dropped: ${want} (got [$kept])" >&2; return 1; }
+  done
+  local unwanted
+  for unwanted in bbbbbbb1 bbbbbbb2 bbbbbbb3; do
+    [[ "$kept" != *"$unwanted"* ]] || { echo "a proposal ref counted as published: ${unwanted}" >&2; return 1; }
+  done
+}
+
 @test "runner: a malformed timeout_sec is rejected, not stripped into a number" {
   # `gsub(/[^0-9]/, "")` deleted the non-digits and joined what was left, so
   # `1e3` became 13 and `-1` became 1. The runner then killed a blocking check

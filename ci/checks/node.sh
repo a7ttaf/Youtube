@@ -4207,7 +4207,27 @@ _ts_project_files() {
     rm -f "$_tp_list"
     return 2
   fi
-  sed 's|^\./||' "$_tp_list" | sort
+  # And a config-shaped name is not by itself a first-party project.
+  #
+  # `tests/fixtures/broken/tsconfig.json` exists to hold errors on purpose, and
+  # `dist/tsconfig.generated.json` is output; this list is what requires a
+  # `typecheck` script of the workspace and what ci/checks/typecheck.sh then
+  # compiles, so either one made a valid workspace fail on a file the repository
+  # already classifies as not-source.
+  #
+  # Through ci::common::is_vendored_path rather than a prune set written out
+  # here, because that predicate is the definition ci::common::node_workspaces,
+  # ci/lib/changeset.sh's classifier and the orphan scan above already use.
+  # Writing a fifth list is how the four above drifted apart in the first place,
+  # and it would drift again the moment that predicate is narrowed. The two
+  # `-prune`s stay for speed -- not descending into node_modules is worth
+  # keeping -- but correctness is the filter's.
+  local _tp_one
+  while IFS= read -r _tp_one; do
+    [ -n "$_tp_one" ] || continue
+    ci::common::is_vendored_path "$_tp_one" && continue
+    printf '%s\n' "${_tp_one#./}"
+  done < "$_tp_list" | sort
   rm -f "$_tp_list"
 }
 
