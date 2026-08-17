@@ -1658,7 +1658,32 @@ single P-tier above.
   now reaches the runner), and the residual is a setup *command* not running,
   which surfaces as the runner failing rather than as fewer tests passing
   quietly. Both comments name the condition that would reopen them.
-  Combined suite: `bats ci/tests/` = 558 cases, 0 failures.
+  A thirty-eighth round found five, and the sharpest is a list that had drifted
+  five times. The generated-directory names lived in three copies inside
+  `ci/checks/test-layout.sh` — the legacy-directory find prune, the candidate
+  find prune, and `path_is_pruned` — and the round that added `.cache` reached
+  one of them. `path_is_pruned` is the copy that answers for the **index** side
+  of both scans, because `find` applies its own prune and `git ls-files` does
+  not, so it was simultaneously the most load-bearing and the one nobody looked
+  at: a generator writing `frontend/.cache/__tests__/` was reported as a retired
+  directory to delete, and driving the new case against the parent showed
+  `.cache`, `.nuxt` and `htmlcov` mis-flagged by the *candidate* scan as well —
+  wider than the finding said. Fixing the fifth instance of that is not a fix,
+  so the names have one definition and the three readers are built from it.
+  `.cache` was missing from `ci::common::is_vendored_path` too, from the
+  direction "check the siblings" does not cover: it was added to a prune list
+  and not to the predicate documented as the single definition, so a bundler
+  cache made discovery report a nested workspace and exit 1.
+  Three more: `tr '/' '-'` is not injective, so the independent workspaces
+  `a/b-c` and `a-b/c` both wrote `js-a-b-c.xml` and the second silently
+  overwrote the first's JUnit results; the non-ship half of the indexed-manifest
+  scan still read `git ls-files` line-oriented, so a committed `café/package.json`
+  arrived quoted and the lane refused a workspace that is in the index; and the
+  active plans still directed operators to `frontend/src/**/__tests__/`, which
+  this PR's guard now rejects — 38 references rewritten, each checked against
+  the working tree first, which caught five pointing at a `.ts` file that was
+  written as `.tsx`.
+  Combined suite: `bats ci/tests/` = 561 cases, 0 failures.
   The node lane was run end
   to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an

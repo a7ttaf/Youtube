@@ -8252,3 +8252,128 @@ ship_ws_run() {
   [[ "$output" != *"frontend/tests/"* ]] \
     || { echo "a Python source mapped to the frontend suite: $output" >&2; return 1; }
 }
+
+@test "tests-js: two workspaces cannot share one JUnit report path" {
+  # The report name came from `tr '/' '-'`, which is not injective: `a/b-c` and
+  # `a-b/c` are independent workspaces and both rendered `js-a-b-c.xml`. The
+  # loop runs them in sequence, so the second suite silently overwrote the
+  # first's results and diagnostics -- both contributed to the gate's verdict,
+  # and only one could be read afterwards to find out why it failed.
+  #
+  # The same transliteration was already fixed once for the dependency-cache
+  # key by ci::common::workspace_slug, which appends a digest of the original
+  # path; this call site was the copy that had not been moved over.
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/junit.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+
+  # The two spellings that collide, each a real workspace with a real suite.
+  local w
+  for w in 'a/b-c' 'a-b/c'; do
+    mkdir -p "$sb/$w/node_modules/.bin" "$sb/$w/tests"
+    printf '{ "name": "x", "private": true, "scripts": { "test": "vitest run" } }\n' \
+      > "$sb/$w/package.json"
+    printf '{}\n' > "$sb/$w/package-lock.json"
+    printf 'it("x", () => {});\n' > "$sb/$w/tests/a.test.ts"
+    # A stand-in vitest that writes the JUnit file it was told to write, naming
+    # the workspace inside it -- which is how an overwrite becomes visible.
+    cat > "$sb/$w/node_modules/.bin/vitest" <<STUB
+#!/usr/bin/env bash
+for _a in "\$@"; do
+  case "\$_a" in --outputFile=*) printf '<testsuites name="%s"/>' "$w" > "\${_a#--outputFile=}" ;; esac
+done
+exit 0
+STUB
+    chmod +x "$sb/$w/node_modules/.bin/vitest"
+  done
+
+  ( cd "$sb" && CI_GATE_CHECK_ID=tests-js bash ci/checks/tests.sh ) >/dev/null 2>&1 || true
+
+  local n
+  n="$(find "$sb/ci/reports/junit" -name 'js-*.xml' 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$n" -eq 2 ] \
+    || { echo "expected one report per workspace, found ${n}:" >&2
+         find "$sb/ci/reports/junit" -name '*.xml' >&2
+         rm -rf "$sb"; return 1; }
+
+  # Both workspaces must be represented; two files with the same content would
+  # mean the collision merely moved.
+  grep -qs 'name="a/b-c"'  "$sb"/ci/reports/junit/js-*.xml \
+    || { echo "a/b-c's results are not in any report" >&2; rm -rf "$sb"; return 1; }
+  grep -qs 'name="a-b/c"'  "$sb"/ci/reports/junit/js-*.xml \
+    || { echo "a-b/c's results are not in any report" >&2; rm -rf "$sb"; return 1; }
+
+  # The control: the readable part of the name is still the workspace path, so
+  # the digest did not make the reports unidentifiable.
+  find "$sb/ci/reports/junit" -name 'js-a-b-c-*.xml' | grep -q . \
+    || { echo "the report names are no longer readable:" >&2
+         find "$sb/ci/reports/junit" -name '*.xml' >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
+
+@test "node: a non-ASCII workspace is read from the index, not its quoted spelling" {
+  # The ship branch of this scan already went through ci::common::ls_tree_paths;
+  # the non-ship branch still read `git ls-files` line-oriented, and git renders
+  # a non-ASCII path in its quoted form. A committed `café/package.json` arrived
+  # as `"caf\303\251/package.json"` -- with the quotes and the octal escapes --
+  # the awk derived the workspace `"caf\303\251`, and the orphan scan then
+  # refused the lane: "A workspace manifest exists on disk but not in the git
+  # index", naming a path that is in the index and that git can see. Quick and
+  # full validation blocked on a valid workspace name.
+  #
+  # Driven through the real node.sh rather than by lifting its reader out. An
+  # extraction anchored on the fixed spelling cannot run against the broken one
+  # -- it fails with "could not lift", which shows the code changed rather than
+  # that the old code was wrong -- and the surrounding branch turned out not to
+  # be liftable by indentation either.
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/café/tests" 2>/dev/null \
+    || { rm -rf "$sb"; skip "this filesystem cannot hold a non-ASCII path"; }
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/café/node_modules/.bin" "$sb/bin"
+  cp "$REPO_ROOT/ci/checks/node.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  printf '{ "name": "c", "private": true, "scripts": { "test": "vitest run" } }\n' \
+    > "$sb/café/package.json"
+  printf '{}\n' > "$sb/café/package-lock.json"
+  printf 'it("x", () => {});\n' > "$sb/café/tests/a.test.ts"
+  # A stand-in npm so the case does not perform a real install. What is under
+  # test is which workspace name discovery produces, which is decided before
+  # anything is installed.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/bin/npm"
+  chmod +x "$sb/bin/npm"
+  ( cd "$sb" && git init -q -b main . && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm base ) >/dev/null 2>&1
+
+  local out
+  out="$( cd "$sb" && PATH="$sb/bin:$PATH" bash ci/checks/node.sh 2>&1 )" || true
+
+  # The quoted spelling must not appear anywhere: that string is the fictitious
+  # workspace, and it is what the refusal named.
+  [[ "$out" != *'caf\303\251'* ]] \
+    || { rm -rf "$sb"
+         echo "the lane read git's quoted spelling as a workspace:" >&2
+         printf '%s\n' "$out" | head -8 >&2; return 1; }
+  [[ "$out" == *"Node lane workspace: café"* ]] \
+    || { rm -rf "$sb"
+         echo "the real workspace name was not the one discovered:" >&2
+         printf '%s\n' "$out" | head -8 >&2; return 1; }
+  [[ "$out" != *"exists on disk but not in the git index"* ]] \
+    || { rm -rf "$sb"
+         echo "a committed manifest was reported as missing from the index:" >&2
+         printf '%s\n' "$out" | head -8 >&2; return 1; }
+
+  # The control: the orphan scan still fires for a manifest that genuinely is
+  # not in the index, so this did not simply switch that guard off.
+  mkdir -p "$sb/plain"
+  printf '{ "name": "p", "private": true }\n' > "$sb/plain/package.json"
+  printf '{}\n' > "$sb/plain/package-lock.json"
+  out="$( cd "$sb" && PATH="$sb/bin:$PATH" bash ci/checks/node.sh 2>&1 )" || true
+  [[ "$out" == *"exists on disk but not in the git index"* ]] \
+    || { rm -rf "$sb"
+         echo "an uncommitted manifest was no longer reported:" >&2
+         printf '%s\n' "$out" | head -8 >&2; return 1; }
+  rm -rf "$sb"
+}

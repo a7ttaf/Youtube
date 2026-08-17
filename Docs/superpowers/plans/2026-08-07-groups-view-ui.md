@@ -250,8 +250,8 @@ git commit -m "feat(frontend): group + sync API types, canManageGroups capabilit
 **Files:**
 - Create: `frontend/src/lib/api/useGroups.ts`
 - Create: `frontend/src/lib/api/useGroupSync.ts`
-- Test: `frontend/src/lib/api/__tests__/useGroups.test.tsx`
-- Test: `frontend/src/lib/api/__tests__/useGroupSync.test.tsx`
+- Test: `frontend/tests/lib/api/useGroups.test.tsx`
+- Test: `frontend/tests/lib/api/useGroupSync.test.tsx`
 
 All four hooks follow the two existing patterns EXACTLY — auto-fetch =
 `useChannels.ts` shape; mutations = `useChannelMappingAction` shape
@@ -377,7 +377,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/lib/api/useGroups.ts frontend/src/lib/api/useGroupSync.ts frontend/src/lib/api/types.ts frontend/src/lib/api/__tests__/useGroups.test.tsx frontend/src/lib/api/__tests__/useGroupSync.test.tsx
+git add frontend/src/lib/api/useGroups.ts frontend/src/lib/api/useGroupSync.ts frontend/src/lib/api/types.ts frontend/tests/lib/api/useGroups.test.tsx frontend/tests/lib/api/useGroupSync.test.tsx
 git commit -m "feat(frontend): group list + sync/clear/archive hooks"
 ```
 
@@ -386,8 +386,8 @@ git commit -m "feat(frontend): group list + sync/clear/archive hooks"
 **Files:**
 - Create: `frontend/src/components/srcc/ActionStepper.tsx`
 - Create: `frontend/src/components/srcc/OutcomeTable.tsx`
-- Test: `frontend/src/components/srcc/__tests__/ActionStepper.test.tsx`
-- Test: `frontend/src/components/srcc/__tests__/OutcomeTable.test.tsx`
+- Test: `frontend/tests/components/srcc/ActionStepper.test.tsx`
+- Test: `frontend/tests/components/srcc/OutcomeTable.test.tsx`
 
 Both are DUMB presentational components (flows own all state) — that is
 what makes them reusable by PR-B's import stepper. Style with the
@@ -447,7 +447,7 @@ chips via the existing `Badge` component from `shared.tsx`).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/components/srcc/ActionStepper.tsx frontend/src/components/srcc/OutcomeTable.tsx frontend/src/components/srcc/__tests__/ActionStepper.test.tsx frontend/src/components/srcc/__tests__/OutcomeTable.test.tsx
+git add frontend/src/components/srcc/ActionStepper.tsx frontend/src/components/srcc/OutcomeTable.tsx frontend/tests/components/srcc/ActionStepper.test.tsx frontend/tests/components/srcc/OutcomeTable.test.tsx
 git commit -m "feat(frontend): ActionStepper + OutcomeTable primitives"
 ```
 
@@ -455,7 +455,7 @@ git commit -m "feat(frontend): ActionStepper + OutcomeTable primitives"
 
 **Files:**
 - Create: `frontend/src/components/srcc/views/GroupsView.tsx`
-- Test: `frontend/src/components/srcc/views/__tests__/GroupsView.test.tsx`
+- Test: `frontend/tests/components/srcc/views/GroupsView.test.tsx`
 
 Props: `{ canManageGroups: boolean }`. House contract block at top.
 Structure (keep the file under ~450 lines by extracting row/dialog
@@ -499,7 +499,7 @@ expected request):
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/components/srcc/views/GroupsView.tsx frontend/src/components/srcc/views/__tests__/GroupsView.test.tsx
+git add frontend/src/components/srcc/views/GroupsView.tsx frontend/tests/components/srcc/views/GroupsView.test.tsx
 git commit -m "feat(frontend): GroupsView table with clear-stamp and archive actions"
 ```
 
@@ -507,7 +507,7 @@ git commit -m "feat(frontend): GroupsView table with clear-stamp and archive act
 
 **Files:**
 - Modify: `frontend/src/components/srcc/views/GroupsView.tsx`
-- Test: extend `frontend/src/components/srcc/views/__tests__/GroupsView.test.tsx`
+- Test: extend `frontend/tests/components/srcc/views/GroupsView.test.tsx`
 
 - Header: owner picker `<select>` fed by `useConnectors` filtered to
   `connector_key === "youtube-analytics"` and ACTIVE status entries
@@ -555,7 +555,7 @@ refetch):
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/components/srcc/views/GroupsView.tsx frontend/src/components/srcc/views/__tests__/GroupsView.test.tsx
+git add frontend/src/components/srcc/views/GroupsView.tsx frontend/tests/components/srcc/views/GroupsView.test.tsx
 git commit -m "feat(frontend): group sync stepper with credential-fed owner picker"
 ```
 
@@ -565,7 +565,7 @@ git commit -m "feat(frontend): group sync stepper with credential-fed owner pick
 - Modify: `frontend/src/lib/mock/data.ts` (:6 ViewKey, :17 VIEW_COPY, :49 NAV_GROUPS)
 - Modify: `frontend/src/components/srcc/icons.tsx` (NAV_ICONS entry)
 - Modify: `frontend/src/components/srcc/AppShell.tsx` (import, gate shape, render)
-- Test: extend `frontend/src/components/srcc/__tests__/AppShell.test.tsx`
+- Test: extend `frontend/tests/components/srcc/AppShell.test.tsx`
 
 - [ ] **Step 1: Failing test** — extend AppShell.test.tsx (mirror how it
 asserts existing nav items/views; read it first): clicking the "CMS
@@ -607,7 +607,7 @@ alongside the sibling views.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/src/lib/mock/data.ts frontend/src/components/srcc/icons.tsx frontend/src/components/srcc/AppShell.tsx frontend/src/components/srcc/__tests__/AppShell.test.tsx
+git add frontend/src/lib/mock/data.ts frontend/src/components/srcc/icons.tsx frontend/src/components/srcc/AppShell.tsx frontend/tests/components/srcc/AppShell.test.tsx
 git commit -m "feat(frontend): Groups nav item + view wiring"
 ```
 

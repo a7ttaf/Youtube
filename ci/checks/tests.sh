@@ -1140,7 +1140,26 @@ tests::run_js() {
       junit_out="$JUNIT_DIR/js.xml"
       label="JavaScript"
     else
-      junit_out="$JUNIT_DIR/js-$(printf '%s' "$ws" | tr '/' '-').xml"
+      # Through ci::common::workspace_slug, not `tr '/' '-'`, for the reason the
+      # dependency-cache key already goes through it: the transliteration is not
+      # injective. `a/b-c` and `a-b/c` are independent workspaces and both
+      # rendered `js-a-b-c.xml`, so the second suite in the loop overwrote the
+      # first one's JUnit report and its diagnostics -- both contributed to the
+      # gate's verdict, and only one could be read afterwards to find out why it
+      # failed. The slug appends a digest of the original path, so the readable
+      # part stays readable and the collision cannot happen.
+      #
+      # Its status is taken: the slug hashes, and a hash that could not be
+      # computed must not silently become a filename two workspaces share again.
+      local _ws_slug
+      _ws_slug="$(ci::common::workspace_slug "$ws")" || {
+        ci::log::error "Cannot derive a report filename for workspace ${ws}."
+        ci::log::error "  Two workspaces sharing one JUnit path lose a suite's results"
+        ci::log::error "  silently, so this is refused rather than approximated."
+        OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_INFRA")"
+        continue
+      }
+      junit_out="$JUNIT_DIR/js-${_ws_slug}.xml"
       label="JavaScript (${ws})"
     fi
 

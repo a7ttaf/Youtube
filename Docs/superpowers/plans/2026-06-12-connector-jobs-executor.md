@@ -2787,9 +2787,9 @@ def _stamp_credential_refresh(
     from `useConnectorRuns(...)` (line 520), resetting cursor/rows to page 1, and threading it
     `ConnectorsView -> ConnectorSidebar -> RunHistory -> RunHistoryFeed`
   - add an optional dry-run checkbox + reuse the existing month `<select>` over `MONTH_OPTIONS`
-- Test: `frontend/src/components/srcc/views/__tests__/ConnectorsView.test.tsx`,
-  `frontend/src/lib/api/__tests__/useConnectors.test.tsx`,
-  `frontend/src/components/srcc/__tests__/AppShell.test.tsx`
+- Test: `frontend/tests/components/srcc/views/ConnectorsView.test.tsx`,
+  `frontend/tests/lib/api/useConnectors.test.tsx`,
+  `frontend/tests/components/srcc/AppShell.test.tsx`
 
 Reuses the verified harness: `routeBoth`/`renderConnectorsView`/`runCalls`
 (`ConnectorsView.test.tsx:162-206`), the request-job test (515-566), the AdSense
@@ -2801,7 +2801,7 @@ from `canRunConnectorJobs` (`AppShell.tsx:123`).
 Steps:
 
 - [ ] Write the failing tests. In
-  `frontend/src/components/srcc/views/__tests__/ConnectorsView.test.tsx` add:
+  `frontend/tests/components/srcc/views/ConnectorsView.test.tsx` add:
 
 ```tsx
   it("Run pull POSTs report_month + dry_run and shows the submitted banner", async () => {
@@ -2927,7 +2927,7 @@ Steps:
   });
 ```
 
-  In `frontend/src/lib/api/__tests__/useConnectors.test.tsx` add (inside the
+  In `frontend/tests/lib/api/useConnectors.test.tsx` add (inside the
   `useConnectorJobActions` describe block, ~line 217):
 
 ```tsx
@@ -2982,7 +2982,7 @@ Steps:
   });
 ```
 
-  In `frontend/src/components/srcc/__tests__/AppShell.test.tsx`, extend the CONNECTOR
+  In `frontend/tests/components/srcc/AppShell.test.tsx`, extend the CONNECTOR
   CONTROLS block (after line 529) to assert the Run-pull button respects the gate:
 
 ```tsx
@@ -3185,7 +3185,7 @@ function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) {
 
 - [ ] Commit:
   ```
-  git add frontend/src/lib/api/types.ts frontend/src/components/srcc/views/ConnectorsView.tsx frontend/src/components/srcc/views/__tests__/ConnectorsView.test.tsx frontend/src/lib/api/__tests__/useConnectors.test.tsx frontend/src/components/srcc/__tests__/AppShell.test.tsx
+  git add frontend/src/lib/api/types.ts frontend/src/components/srcc/views/ConnectorsView.tsx frontend/tests/components/srcc/views/ConnectorsView.test.tsx frontend/tests/lib/api/useConnectors.test.tsx frontend/tests/components/srcc/AppShell.test.tsx
   git commit -m "feat(frontend): Run-pull control (report_month+dry_run, submitted, refetch runs)"
   ```
 

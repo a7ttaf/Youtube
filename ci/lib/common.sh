@@ -686,11 +686,26 @@ ci::common::node_workspaces() {
 # output; this predicate, which is meant to be the single definition, was the
 # copy that did not. That is now the fourth finding of exactly that shape, which
 # is why the whole list is checked against its siblings when any entry moves.
+#
+# `.cache` was the fifth, and it arrived from the direction that check does not
+# cover: it was added to ci/checks/test-layout.sh's candidate prune a round
+# earlier, and this predicate -- the one documented as the single definition --
+# was not squared with it in the same change. Parcel, Babel and several bundlers
+# write `frontend/.cache/<something>/package.json`, so discovery read the cache
+# as a package nested under `frontend`, the ambiguity rule refused the pair, and
+# node_workspaces exited 1: the node, tests and typecheck lanes all blocked on a
+# repository whose only fault was that ordinary tooling had run in it. Measured
+# before the fix: `rc=1  frontend/.cache/dependency (nested under frontend)`.
+#
+# The lesson from five of these is that "check the siblings when an entry moves"
+# only works if it runs in both directions, so the case below asserts this
+# predicate against the generated names the other scans prune rather than
+# against the entry that happened to be reported.
 ci::common::is_vendored_path() {
   case "/$1/" in
     */node_modules/* | */.git/* \
       | */dist/* | */build/* | */coverage/* | */htmlcov/* \
-      | */.next/* | */.nuxt/* | */.turbo/* | */.vite/* \
+      | */.next/* | */.nuxt/* | */.turbo/* | */.vite/* | */.cache/* \
       | */.venv/* | */venv/* \
       | */tests/fixtures/* | */test/fixtures/* \
       | */__fixtures__/* | */testdata/*)

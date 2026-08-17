@@ -3658,13 +3658,22 @@ YML
   # predicate that is meant to be the single definition. That is the fourth
   # finding of exactly that shape in this PR, so the siblings are asserted here
   # too rather than the one entry that was reported.
+  #
+  # `.cache` was the fifth, and it is in the list below for the reason the
+  # others are: Parcel, Babel and several bundlers write
+  # `frontend/.cache/<something>/package.json`, discovery read the cache as a
+  # package nested under `frontend`, and node_workspaces exited 1 -- the node,
+  # tests and typecheck lanes all blocked on a repository whose only fault was
+  # that ordinary tooling had run in it. It reached this predicate a round after
+  # it reached ci/checks/test-layout.sh's prune, which is the direction
+  # "check the siblings" does not cover, so the assertion below closes it.
   local sb
   sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
   mkdir -p "$sb/frontend"
   printf '{ "name": "w", "private": true }\n' > "$sb/frontend/package.json"
   printf '{}\n' > "$sb/frontend/package-lock.json"
   local d
-  for d in .nuxt .next .turbo .vite dist build coverage htmlcov node_modules; do
+  for d in .cache .nuxt .next .turbo .vite dist build coverage htmlcov node_modules; do
     mkdir -p "$sb/frontend/$d"
     printf '{ "name": "generated" }\n' > "$sb/frontend/$d/package.json"
   done

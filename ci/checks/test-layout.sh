@@ -107,17 +107,43 @@ fail() {
 # neither collected by vitest nor reported here — the precise hole this guard
 # exists to close. node_modules stays unanchored because nested copies are real
 # and are never first-party.
-PRUNE=(
-  '(' -path "$TESTS_DIR"
-  -o -name 'node_modules'
-  -o -path "$FRONTEND_DIR/dist"
-  -o -path "$FRONTEND_DIR/build"
-  -o -path "$FRONTEND_DIR/coverage"
-  -o -path "$FRONTEND_DIR/.next"
-  -o -path "$FRONTEND_DIR/.turbo"
-  -o -path "$FRONTEND_DIR/.vite"
-  ')' -prune -o
-)
+#
+# Named once, because it was written out three times in this file and the three
+# disagreed. The legacy-directory prune below, the candidate-file prune, and the
+# index-side predicate `path_is_pruned` are one question -- "does this path hold
+# first-party source" -- asked of three different inputs, and an entry added to
+# one copy did not reach the others. `.cache` was added to the candidate prune a
+# round ago and to neither of the others, so a generator writing
+# `frontend/.cache/__tests__/` was still reported as a retired directory the
+# developer must delete: measured exit 20, "Retired __tests__ directories still
+# present under frontend/: frontend/.cache/__tests__", blocking every quick and
+# full validation on state nobody wrote and cannot usefully remove. `out`,
+# `htmlcov` and `.nuxt` were missing from two of the three as well.
+#
+# The index-side copy is the one that mattered most and the one nobody looked
+# at: `find` applies its prune itself, but `git ls-files` does not, so
+# path_is_pruned answers for *both* scans on the index side. A staged
+# `frontend/.cache/generated.test.ts` was therefore still failing the candidate
+# scan after the round that supposedly fixed exactly that.
+#
+# Fixing the fifth instance of a list that has drifted five times is not a fix,
+# so the list has one definition and the three readers are built from it. That
+# is what makes "check the siblings when an entry moves" unnecessary here.
+GENERATED_DIRS=(dist build out coverage htmlcov .next .nuxt .turbo .vite .cache)
+
+# Two find prunes built from it. They differ in exactly one entry, deliberately:
+# TESTS_DIR is pruned for the legacy scan because that scan looks for *retired*
+# directories and the declared tree is not one, while the candidate scan has to
+# walk it. node_modules stays unanchored in both because nested copies are real
+# and are never first-party, whereas the generated names are anchored to
+# FRONTEND_DIR -- an unanchored -name 'build' also prunes a first-party
+# frontend/e2e/build/, and a test under it would be neither collected by vitest
+# nor reported here, which is the precise hole this guard exists to close.
+PRUNE=( '(' -path "$TESTS_DIR" -o -name 'node_modules' )
+for _tl_gd in "${GENERATED_DIRS[@]}"; do
+  PRUNE+=( -o -path "$FRONTEND_DIR/$_tl_gd" )
+done
+PRUNE+=( ')' -prune -o )
 
 # ---------------------------------------------------------------------------
 # 1. No test files may live outside the declared tests/ tree.
@@ -144,31 +170,11 @@ TEST_SUFFIXES=(
 # inside it to find files the include never collects. Only vendored packages and
 # build output are pruned here; which tree a candidate belongs to is decided by
 # the predicates below.
-CANDIDATE_PRUNE=(
-  '(' -name 'node_modules'
-  -o -path "$FRONTEND_DIR/dist"
-  -o -path "$FRONTEND_DIR/build"
-  -o -path "$FRONTEND_DIR/out"
-  -o -path "$FRONTEND_DIR/coverage"
-  -o -path "$FRONTEND_DIR/htmlcov"
-  -o -path "$FRONTEND_DIR/.next"
-  -o -path "$FRONTEND_DIR/.nuxt"
-  -o -path "$FRONTEND_DIR/.turbo"
-  -o -path "$FRONTEND_DIR/.vite"
-  # `.cache` was the one directory in the repository-wide ignore list that this
-  # copy of the prune set did not carry, so `frontend/.cache/generated.test.ts`
-  # -- ignored, generated, and named like a test because the generator names it
-  # that way -- was walked here and classified as a stray test. That blocks an
-  # otherwise valid commit on a file nobody wrote, and a guard that refuses
-  # correct work gets switched off, which is the same outcome as not having one.
-  #
-  # The rest of the list is squared with ci::common::is_vendored_path and
-  # ci/checks/node.sh's suite scans while this is being corrected: `out`,
-  # `htmlcov` and `.nuxt` were missing here too, and an entry present in three
-  # copies and absent from a fourth is how the last several of these arrived.
-  -o -path "$FRONTEND_DIR/.cache"
-  ')' -prune -o
-)
+CANDIDATE_PRUNE=( '(' -name 'node_modules' )
+for _tl_gd in "${GENERATED_DIRS[@]}"; do
+  CANDIDATE_PRUNE+=( -o -path "$FRONTEND_DIR/$_tl_gd" )
+done
+CANDIDATE_PRUNE+=( ')' -prune -o )
 
 # NUL-delimited, from every source, and read that way by the caller.
 #
@@ -231,9 +237,16 @@ path_is_test_like() {
 path_is_pruned() {
   case "$1" in
     */node_modules/*) return 0 ;;
-    "$FRONTEND_DIR"/dist/* | "$FRONTEND_DIR"/build/* | "$FRONTEND_DIR"/coverage/* \
-      | "$FRONTEND_DIR"/.next/* | "$FRONTEND_DIR"/.turbo/* | "$FRONTEND_DIR"/.vite/*) return 0 ;;
   esac
+  # From GENERATED_DIRS rather than a fourth spelling of it. This predicate is
+  # the index side of *both* scans -- find applies its own prune, git ls-files
+  # does not -- so it was the copy where a missing entry did the most damage and
+  # the copy nobody updated: `out`, `htmlcov`, `.nuxt` and `.cache` were all
+  # absent here after being added to the find prunes.
+  local _pp_gd
+  for _pp_gd in "${GENERATED_DIRS[@]}"; do
+    case "$1" in "$FRONTEND_DIR/$_pp_gd"/*) return 0 ;; esac
+  done
   return 1
 }
 

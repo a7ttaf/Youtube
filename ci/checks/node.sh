@@ -115,7 +115,26 @@ if [ -z "${CI_GATE_NODE_WORKSPACE:-}" ]; then
         _idx_raw="$(printf '%s\n' "$_idx_head" | grep -E '(^|/)package\.json$' || true)"
       fi
     else
-      _idx_raw="$(git ls-files -- 'package.json' '*/package.json' 2>/dev/null)" || _idx_rc=$?
+      # `-z`, through the shared NUL reader, for the reason the ship branch above
+      # already goes through ci::common::ls_tree_paths: without it git renders a
+      # non-ASCII path in its quoted form, so a committed `café/package.json`
+      # arrives as `"caf\303\251/package.json"` -- with the quotes and with the
+      # octal escapes -- and the awk below derives the workspace `"caf\303\251`.
+      # The manifest check then reported that workspace missing from the index
+      # and the node lane exited 20 against a directory the push carries and git
+      # can see, blocking quick and full validation on a valid workspace name.
+      #
+      # Both statuses are kept and the producer's wins: `| ci::common::nul_to_lines`
+      # answers for the reader, which succeeds whatever git did, and an empty list
+      # from a failed enumeration reads exactly like a tree with no manifests --
+      # which is the refusal the branch below exists to make.
+      _idx_raw="$(
+        git ls-files -z -- 'package.json' '*/package.json' 2>/dev/null \
+          | ci::common::nul_to_lines
+        _idx_st=( "${PIPESTATUS[@]}" )
+        [ "${_idx_st[0]}" -eq 0 ] || exit "${_idx_st[0]}"
+        exit "${_idx_st[1]}"
+      )" || _idx_rc=$?
     fi
     if [ "$_idx_rc" -ne 0 ]; then
       echo "Cannot read the tree this run stands behind to find its workspaces."

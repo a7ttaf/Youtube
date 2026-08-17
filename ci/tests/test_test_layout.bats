@@ -2798,3 +2798,54 @@ EOF
   [ "$status" -eq 0 ] \
     || { echo "refused a conforming config: $output" >&2; return 1; }
 }
+
+@test "test-layout: one generated-directory list, and the index side reads it too" {
+  # This list lived in three copies in test-layout.sh -- the legacy-directory
+  # find prune, the candidate-file find prune, and path_is_pruned -- and the
+  # three disagreed. `.cache` was added to one of them a round ago and to
+  # neither of the others, so a generator writing `frontend/.cache/__tests__/`
+  # was still reported as a retired directory the developer must delete, and a
+  # staged `frontend/.cache/x.test.ts` was still reported as a stray test.
+  #
+  # The index side is the half that had never been covered: `find` applies its
+  # own prune, `git ls-files` does not, so path_is_pruned answers for BOTH
+  # scans there. Every case below therefore stages its files.
+  #
+  # Asserted over the whole list rather than the entry that was reported, and
+  # behaviourally rather than by grepping for the array: what has to hold is
+  # that each of these names is invisible to both scans from both sources.
+  local dirs=(dist build out coverage htmlcov .next .nuxt .turbo .vite .cache)
+  local d
+  for d in "${dirs[@]}"; do
+    mkdir -p "$SANDBOX/frontend/$d/__tests__"
+    printf 'it("generated", () => {});\n' > "$SANDBOX/frontend/$d/__tests__/gen.test.ts"
+    # The other half of the same question: a generated file that is test-like
+    # but not under __tests__, which is what the candidate scan looks at.
+    printf 'it("generated", () => {});\n' > "$SANDBOX/frontend/$d/gen.test.ts"
+  done
+  ( cd "$SANDBOX" && git init -q -b main . && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm base ) >/dev/null 2>&1
+
+  run_guard
+  [ "$status" -eq 0 ] \
+    || { echo "generated output was reported as a layout failure:" >&2
+         echo "$output" >&2; return 1; }
+
+  # The control, and without it this case is satisfied by a guard that reports
+  # nothing at all: a genuine retired directory under src/ is still refused,
+  # from the index as well as from disk.
+  mkdir -p "$SANDBOX/frontend/src/lib/__tests__"
+  printf 'it("real", () => {});\n' > "$SANDBOX/frontend/src/lib/__tests__/old.test.ts"
+  ( cd "$SANDBOX" && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm legacy ) >/dev/null 2>&1
+  run_guard
+  [ "$status" -eq 20 ] \
+    || { echo "a real retired __tests__ directory was not refused: $output" >&2; return 1; }
+  [[ "$output" == *"frontend/src/lib/__tests__"* ]] \
+    || { echo "the refusal did not name the real directory: $output" >&2; return 1; }
+  # And it must not have picked up any of the generated ones on the way.
+  for d in "${dirs[@]}"; do
+    [[ "$output" != *"frontend/$d/"* ]] \
+      || { echo "generated directory ${d} was reported alongside it: $output" >&2; return 1; }
+  done
+}
