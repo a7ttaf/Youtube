@@ -20,7 +20,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "pydantic==2.13.4",
         "uvicorn[standard]==0.52.0",
         "sqlalchemy==2.0.51",
-        "alembic==1.18.5",
+        "alembic==1.19.1",
         "psycopg[binary]==3.3.4",
         "httpx==0.28.1",
         "celery==5.6.3",
@@ -38,7 +38,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
     expected_test_dependencies = {
         "pytest==9.1.1",
         "httpx==0.28.1",
-        "pypdf==6.15.0",
+        "pypdf==6.16.1",
     }
 
     assert pyproject["project"]["requires-python"] == ">=3.14,<3.15"
@@ -52,14 +52,14 @@ def test_stack_version_baseline_records_runtime_and_frontend_targets():
     assert STACK_VERSION_BASELINE["backend"]["fastapi"] == "0.141.1"
     assert STACK_VERSION_BASELINE["backend"]["pydantic"] == "2.13.4"
     assert STACK_VERSION_BASELINE["backend"]["sqlalchemy"] == "2.0.51"
-    assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.18.5"
+    assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.19.1"
     assert STACK_VERSION_BASELINE["backend"]["psycopg"] == "3.3.4"
     assert STACK_VERSION_BASELINE["backend"]["openpyxl"] == "3.1.5"
     assert STACK_VERSION_BASELINE["backend"]["reportlab"] == "5.0.0"
     assert STACK_VERSION_BASELINE["backend"]["python_pptx"] == "1.0.2"
     assert STACK_VERSION_BASELINE["backend"]["google_cloud_secret_manager"] == "2.30.0"
     assert STACK_VERSION_BASELINE["backend"]["google_cloud_storage"] == "3.13.0"
-    assert STACK_VERSION_BASELINE["backend"]["pypdf"] == "6.15.0"
+    assert STACK_VERSION_BASELINE["backend"]["pypdf"] == "6.16.1"
     assert STACK_VERSION_BASELINE["datastores"]["postgresql"] == "18.3"
     assert STACK_VERSION_BASELINE["frontend"]["next"] == "16.2.6"
     assert STACK_VERSION_BASELINE["frontend"]["react"] == "19.2.6"
