@@ -18,8 +18,8 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
     expected_dependencies = {
         "fastapi==0.141.1",
         "pydantic==2.13.4",
-        "uvicorn[standard]==0.52.0",
-        "sqlalchemy==2.0.51",
+        "uvicorn[standard]==0.52.3",
+        "sqlalchemy==2.0.52",
         "alembic==1.18.5",
         "psycopg[binary]==3.3.4",
         "httpx==0.28.1",
@@ -29,11 +29,11 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "reportlab==5.0.0",
         "python-pptx==1.0.2",
         "google-cloud-secret-manager==2.30.0",
-        "google-cloud-storage==3.13.0",
+        "google-cloud-storage==3.13.1",
         # Required by FastAPI to accept multipart/form-data. POST /channels/import
         # takes the channel roster as a CSV upload, and FastAPI raises at
         # route-registration time (not request time) without this installed.
-        "python-multipart==0.0.31",
+        "python-multipart==0.0.32",
     }
     expected_test_dependencies = {
         "pytest==9.1.1",
@@ -51,14 +51,14 @@ def test_stack_version_baseline_records_runtime_and_frontend_targets():
     assert STACK_VERSION_BASELINE["runtime"]["node_lts"] == "24.15.0"
     assert STACK_VERSION_BASELINE["backend"]["fastapi"] == "0.141.1"
     assert STACK_VERSION_BASELINE["backend"]["pydantic"] == "2.13.4"
-    assert STACK_VERSION_BASELINE["backend"]["sqlalchemy"] == "2.0.51"
+    assert STACK_VERSION_BASELINE["backend"]["sqlalchemy"] == "2.0.52"
     assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.18.5"
     assert STACK_VERSION_BASELINE["backend"]["psycopg"] == "3.3.4"
     assert STACK_VERSION_BASELINE["backend"]["openpyxl"] == "3.1.5"
     assert STACK_VERSION_BASELINE["backend"]["reportlab"] == "5.0.0"
     assert STACK_VERSION_BASELINE["backend"]["python_pptx"] == "1.0.2"
     assert STACK_VERSION_BASELINE["backend"]["google_cloud_secret_manager"] == "2.30.0"
-    assert STACK_VERSION_BASELINE["backend"]["google_cloud_storage"] == "3.13.0"
+    assert STACK_VERSION_BASELINE["backend"]["google_cloud_storage"] == "3.13.1"
     assert STACK_VERSION_BASELINE["backend"]["pypdf"] == "6.15.0"
     assert STACK_VERSION_BASELINE["datastores"]["postgresql"] == "18.3"
     assert STACK_VERSION_BASELINE["frontend"]["next"] == "16.2.6"
