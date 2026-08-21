@@ -350,18 +350,26 @@ class ChannelGroupRegistry:
     def transaction(self) -> Iterator[None]:
         """Journal this store's own writes on this thread; undo them on raise.
 
+        Compare-and-restore, mirroring ``ChannelRegistry.transaction`` (see
+        its docstring for the full semantics): an entry restores its
+        pre-image only while the key still holds the exact object this
+        boundary wrote, so a foreign writer landing after us keeps its value
+        — the SQL row-lock outcome (PR #196 round 2, qodo).
+
         Raises:
             RuntimeError: when entered while this THREAD already holds an
                 open boundary.
         """
         if getattr(self._txn, "undo", None) is not None:
             raise RuntimeError("ChannelGroupRegistry.transaction does not nest")
-        undo: list[tuple[str, ChannelGroupEntry | None]] = []
+        undo: list[tuple[str, ChannelGroupEntry | None, ChannelGroupEntry]] = []
         self._txn.undo = undo
         try:
             yield
         except BaseException:
-            for key, previous in reversed(undo):
+            for key, previous, written in reversed(undo):
+                if self._groups.get(key) is not written:
+                    continue
                 if previous is None:
                     self._groups.pop(key, None)
                 else:
@@ -370,13 +378,13 @@ class ChannelGroupRegistry:
         finally:
             self._txn.undo = None
 
-    def _journal(self, group_id: str) -> None:
-        """Record a key's pre-image before mutating it; no-op outside a boundary."""
-        undo: list[tuple[str, ChannelGroupEntry | None]] | None = getattr(
+    def _journal(self, group_id: str, written: ChannelGroupEntry) -> None:
+        """Record (key, pre-image, written-entry) for the active boundary, if any."""
+        undo: list[tuple[str, ChannelGroupEntry | None, ChannelGroupEntry]] | None = getattr(
             self._txn, "undo", None
         )
         if undo is not None:
-            undo.append((group_id, self._groups.get(group_id)))
+            undo.append((group_id, self._groups.get(group_id), written))
 
     def list_groups(self) -> list[ChannelGroupEntry]:
         # In-memory registry: every member is treated as active. The full
@@ -525,7 +533,7 @@ class ChannelGroupRegistry:
             cms_group_id=cms_group_id,
             content_owner_id=content_owner_id,
         )
-        self._journal(group.id)
+        self._journal(group.id, group)
         self._groups[group.id] = group
         return group
 
@@ -549,7 +557,7 @@ class ChannelGroupRegistry:
                 content_owner_id if content_owner_id is not None else group.content_owner_id
             ),
         )
-        self._journal(group_id)
+        self._journal(group_id, updated)
         self._groups[group_id] = updated
         return updated
 
@@ -567,7 +575,7 @@ class ChannelGroupRegistry:
                 f"channel group {group_id} has no content-owner stamp to clear"
             )
         updated = replace(group, content_owner_id=None)
-        self._journal(group_id)
+        self._journal(group_id, updated)
         self._groups[group_id] = updated
         return ClearedContentOwner(
             group=updated, previous_content_owner_id=previous_content_owner_id
@@ -578,7 +586,7 @@ class ChannelGroupRegistry:
         updated = replace(
             group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids]))
         )
-        self._journal(group_id)
+        self._journal(group_id, updated)
         self._groups[group_id] = updated
         return updated
 
@@ -588,7 +596,7 @@ class ChannelGroupRegistry:
             group,
             channel_ids=tuple(channel for channel in group.channel_ids if channel != channel_id),
         )
-        self._journal(group_id)
+        self._journal(group_id, updated)
         self._groups[group_id] = updated
         return updated
 

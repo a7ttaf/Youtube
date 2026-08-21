@@ -285,13 +285,20 @@ class ChannelRegistry:
     def transaction(self) -> Iterator[None]:
         """Journal this store's own writes on this thread; undo them on raise.
 
-        Each write method records its key's pre-image just before mutating;
-        on raise the entries replay in reverse (a key's oldest pre-image
-        wins), so the store ends as if this operation never wrote while
-        everything else that happened to the dict stands. Test-staged
-        "concurrent writers" mutate ``_channels`` directly for this reason —
-        a foreign transaction's committed write is not this store's write,
-        and the journal must not see it.
+        Each write method records ``(key, pre-image, written)`` just before
+        mutating; on raise the entries replay in reverse, and each one
+        restores its pre-image ONLY while the key still holds the exact entry
+        this boundary wrote (identity compare — entries are frozen and every
+        write installs a fresh object). A key holding anything else was
+        overwritten or deleted by a FOREIGN writer after us; SQL's row lock
+        would have serialized that writer BEHIND our rollback, ending on
+        their value, so the journal leaves it standing rather than clobbering
+        it with a stale pre-image (PR #196 round 2, qodo). Same-key writes
+        within one boundary chain naturally: each entry's ``written`` is the
+        next entry's pre-image, so the reversed replay walks back to the
+        oldest pre-image. Test-staged "concurrent writers" mutate
+        ``_channels`` directly — a foreign transaction's committed write is
+        not this store's write, and the journal must not see it.
 
         Raises:
             RuntimeError: when entered while this THREAD already holds an
@@ -300,12 +307,14 @@ class ChannelRegistry:
         """
         if getattr(self._txn, "undo", None) is not None:
             raise RuntimeError("ChannelRegistry.transaction does not nest")
-        undo: list[tuple[str, ChannelRegistryEntry | None]] = []
+        undo: list[tuple[str, ChannelRegistryEntry | None, ChannelRegistryEntry]] = []
         self._txn.undo = undo
         try:
             yield
         except BaseException:
-            for key, previous in reversed(undo):
+            for key, previous, written in reversed(undo):
+                if self._channels.get(key) is not written:
+                    continue
                 if previous is None:
                     self._channels.pop(key, None)
                 else:
@@ -314,13 +323,15 @@ class ChannelRegistry:
         finally:
             self._txn.undo = None
 
-    def _journal(self, youtube_channel_id: str) -> None:
-        """Record a key's pre-image before mutating it; no-op outside a boundary."""
-        undo: list[tuple[str, ChannelRegistryEntry | None]] | None = getattr(
+    def _journal(self, youtube_channel_id: str, written: ChannelRegistryEntry) -> None:
+        """Record (key, pre-image, written-entry) for the active boundary, if any."""
+        undo: list[tuple[str, ChannelRegistryEntry | None, ChannelRegistryEntry]] | None = getattr(
             self._txn, "undo", None
         )
         if undo is not None:
-            undo.append((youtube_channel_id, self._channels.get(youtube_channel_id)))
+            undo.append(
+                (youtube_channel_id, self._channels.get(youtube_channel_id), written)
+            )
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
         return sorted(
@@ -368,7 +379,7 @@ class ChannelRegistry:
             content_owner_id=normalize_optional_content_owner(content_owner_id),
             revenue_source_status=initial_revenue_source_status,
         )
-        self._journal(youtube_channel_id)
+        self._journal(youtube_channel_id, channel)
         self._channels[youtube_channel_id] = channel
         return channel
 
@@ -389,7 +400,7 @@ class ChannelRegistry:
             revenue_source_status=existing.revenue_source_status,
             active=existing.active,
         )
-        self._journal(youtube_channel_id)
+        self._journal(youtube_channel_id, updated)
         self._channels[youtube_channel_id] = updated
         return updated
 
@@ -409,7 +420,7 @@ class ChannelRegistry:
             revenue_source_status=existing.revenue_source_status,
             active=existing.active,
         )
-        self._journal(youtube_channel_id)
+        self._journal(youtube_channel_id, updated)
         self._channels[youtube_channel_id] = updated
         return updated
 
@@ -477,7 +488,7 @@ class ChannelRegistry:
         # AFTER require_pre_state: a refused write must leave no journal entry,
         # and the pre-image recorded is the write-boundary state the undo must
         # reinstate.
-        self._journal(youtube_channel_id)
+        self._journal(youtube_channel_id, updated)
         self._channels[youtube_channel_id] = updated
         return current, updated
 

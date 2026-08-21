@@ -71,7 +71,13 @@ def test_registry_boundary_leaves_a_foreign_write_standing() -> None:
     The direct dict mutation below is the established in-memory idiom for a
     concurrent writer's COMMITTED change (the import's race tests stage theirs
     the same way): SQL rollback cannot revert another transaction's committed
-    rows, so the journal must not either.
+    rows, so the journal must not either. This staging puts the foreign write
+    on a key this boundary ALSO wrote — the sharpest case: the restore is a
+    compare-and-restore, so the entry is reinstated only while the key still
+    holds the exact object this boundary wrote. Here it does not, and the
+    foreign value stands — the SQL end state, where the foreign writer would
+    have serialized BEHIND our rollback and then committed on top of it
+    (PR #196 round 2, qodo).
     """
     registry = ChannelRegistry([_seeded_channel()])
 
@@ -83,8 +89,8 @@ def test_registry_boundary_leaves_a_foreign_write_standing() -> None:
             content_owner_id="TestOwnerAAAAAAAAAAAAA",
             revenue_required=True,
         )
-        # The foreign writer lands AFTER our journaled write; its value is
-        # what the store holds when the boundary unwinds.
+        # The foreign writer lands AFTER our journaled write, on OUR key; its
+        # value is what the store holds when the boundary unwinds.
         current = registry._channels[CHANNEL_ID]
         registry._channels[CHANNEL_ID] = dataclasses.replace(
             current, content_owner_id=None
@@ -93,12 +99,34 @@ def test_registry_boundary_leaves_a_foreign_write_standing() -> None:
 
     stored = registry.get_channel(CHANNEL_ID)
     assert stored is not None
-    # Our rename was undone back to the journaled pre-image — which restores
-    # the whole entry as this store last wrote it, exactly as a SQL rollback
-    # returns OUR row version. The foreign clear rode on top of our
-    # uncommitted write, a state SQL's row lock makes unrepresentable, so the
-    # pre-image is the honest restore target.
-    assert stored.channel_name == "Old Name"
+    # The foreign overwrite survives the rollback — not our rename's
+    # pre-image, and not our rename either.
+    assert stored.channel_name == "Renamed Inside"
+    assert stored.content_owner_id is None
+
+
+def test_registry_boundary_does_not_resurrect_a_foreign_delete() -> None:
+    """A key a foreign writer DELETED after our write stays deleted.
+
+    The compare-and-restore's other half: our CREATE journaled
+    ``(key, None, written)``, a foreign writer then removed the key, and the
+    rollback must not put our pre-image (or anything) back — on SQL the
+    delete would have serialized behind our rollback and won.
+    """
+    registry = ChannelRegistry([])
+
+    with pytest.raises(_BoomError), registry.transaction():
+        registry.create_channel(
+            youtube_channel_id=CHANNEL_ID,
+            channel_name="Minted Then Foreign-Deleted",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+        del registry._channels[CHANNEL_ID]
+        raise _BoomError()
+
+    assert registry.get_channel(CHANNEL_ID) is None
 
 
 def test_registry_boundary_keeps_writes_on_success_and_journals_nothing_outside() -> None:
