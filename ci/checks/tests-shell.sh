@@ -186,14 +186,12 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
   esac
   if [ -n "$SHELL_DRIFT" ]; then
     echo "Gate inputs differ between HEAD and the worktree:"
-    # FIX: bash 3.2 has no <<< here-string; pipe the list instead so the
-    # drift report path works on the same Bash the gate targets.
+    # FIX: use <<< with a quoted expansion (data path, not reparsed as shell).
+    # An unquoted heredoc body would expand $(...) inside git-reported paths.
     while IFS= read -r _p; do
       [ -n "$_p" ] || continue
       echo "    $_p"
-    done <<EOF
-$SHELL_DRIFT
-EOF
+    done <<< "$SHELL_DRIFT"
     echo "  These suites read the worktree, so the run would report on files the"
     echo "  pushed commits do not contain. Commit the rest, stash it, or discard it."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
