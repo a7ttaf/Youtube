@@ -1414,21 +1414,27 @@ push regardless of the four gates.
 
 ### C. Deferred design questions from PR #184
 
-Both were escalated during review rather than guessed at, and both remain open
-on the merged PR. Each is a real change with a real failure mode, not a nit.
+Both were escalated during review rather than guessed at, and both were RULED
+on 2026-08-21 (operator decision, recorded per-question below). Each is a real
+change with a real failure mode, not a nit.
 
-1. **Bind the displayed plan contents to the fingerprint**
+1. ✅ **Bind the displayed plan contents to the fingerprint**
    (`PRRT_kwDOSZIgN86YC1sW`). `plan_fingerprint` is a server-computed digest the
    client cannot recompute — it folds in the server-resolved tenant. So a
    malformed 2xx that keeps a valid fingerprint while substituting a different
    but structurally valid plan passes every client-side check; Apply then echoes
    the original token with the original CSV and the backend writes the real
-   plan, though the operator reviewed different contents. Fixing it means
-   returning something the client CAN verify — a display digest over the
-   disclosed payload, or the resolved tenant — which is a **backend contract
-   change** and therefore its own PR.
+   plan, though the operator reviewed different contents. **Ruled: display
+   digest** (not the tenant-disclosure option) — and **shipped as PR #195**
+   (2026-08-22): `display_digest` = SHA-256 over canonical JSON of exactly the
+   disclosed reviewed set (counts, rows, content_owner_id, cms_status;
+   tenant-free, hence recomputable), optional `expected_display_digest` on the
+   apply checked independently of the fingerprint, either token opts into
+   strict pre-state enforcement, SPA echoes both tokens, contract + recipe in
+   Docs/12. One flagged residual on the PR: digest-ONLY applies are tenant-free
+   by that same design — cross-tenant binding stays the fingerprint's job.
 
-2. **Roll back inventory when group-action validation fails**
+2. ⏳ **Roll back inventory when group-action validation fails**
    (`PRRT_kwDOSZIgN86YGxak`). `_require_planned_group_actions` is a lock-free
    pre-flight that already runs BEFORE the first inventory write
    (`channel_import_apply.py:331`), which closed the direct-caller case. The
@@ -1436,9 +1442,12 @@ on the merged PR. Each is a real change with a real failure mode, not a nit.
    and the locked second pass: `_apply_inventory_writes` has already replaced
    every channel, and a store without a transaction cannot take those back when
    the group pass raises. Production SQL is transactional; the exposure is the
-   in-memory adapters used by direct/test/bootstrap callers. Fixing it means
-   either making both passes transactional for those adapters or adding a
-   compensating restore — a **store-layer refactor**, also its own PR.
+   in-memory adapters used by direct/test/bootstrap callers. **Ruled:
+   transaction boundary** (not a compensating restore) — an explicit boundary
+   on the store protocol: the SQL adapter maps it to its real database
+   transaction, the in-memory adapters implement snapshot-on-enter /
+   restore-on-raise, and the apply wraps BOTH passes in one boundary. Queued as
+   the next PR (3b) once #195 is dry.
 
 ### D. Analyzer dispositions carried forward — NOT defects
 
@@ -1464,7 +1473,7 @@ from the two that need design.
 | --- | --- | --- |
 | 1 | A1 (`path_separator = os`) + B (`candidates: list[Path]`) | two lines, plus a re-run of `tests/db/` and `tests/tenancy/` |
 | 2 | A2 — `httpx2` migration | dependency-wide; re-exercise the connector HTTP paths |
-| 3 | C1 and/or C2 — the two #184 design questions | one each; both need a decision before code |
+| 3 | C1 and/or C2 — the two #184 design questions | one each; both RULED 2026-08-21 — C1 shipped as PR #195 (3a), C2 queued (3b) |
 
 ## Hard problems to solve early
 
