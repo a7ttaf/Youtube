@@ -162,10 +162,31 @@ desktop.ini
 .pydevproject
 
 # Node / frontend (for the future frontend/ workspace)
-# The Python-convention lib/ rule above must not suppress frontend source.
+#
+# The Python-convention `lib/` rule above matches a *directory* at any depth, so
+# it swallows first-party source: frontend/src/lib/, the tests tree that mirrors
+# it, and the gate's own ci/lib/. A new file under any of them is silently
+# untracked — never committed, never run, with nothing on screen to say so.
+#
+# Each negation re-includes the directory and nothing more. That is deliberate:
+# `lib/` excluded the directory, and git will not evaluate rules for files under
+# an excluded directory, so un-excluding it is enough to make its contents
+# visible again — and they are then matched against every other rule as usual.
+# A `!<dir>/**` companion would instead re-include every descendant outright and
+# override the artifact and secret rules above it, which is how
+# ci/lib/__pycache__/x.pyc, ci/lib/x.pyc and ci/lib/.env became trackable.
 !frontend/src/lib/
-!frontend/src/lib/**
+!frontend/tests/lib/
+# The trees mirror each other, so a lib/ segment can appear at any depth —
+# frontend/tests/features/lib/widget.test.ts is missed by the root-level
+# negations alone.
+!frontend/tests/**/lib/
+!frontend/src/**/lib/
+!ci/lib/
 node_modules/
+# Generated dependency-cache fingerprints written by ci/checks/node.sh
+# and ci/checks/python.sh.
+.ci-gate/
 .next/
 out/
 build/

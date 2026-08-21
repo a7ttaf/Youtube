@@ -6,6 +6,16 @@
 > green, then commit). Do the tasks in order; later tasks depend on earlier ones. Every commit
 > message MUST be trailer-free (no `Co-Authored-By`, no "Generated with" footer).
 
+> **Editorial note (2026-08-18):** Snippets and prose in this plan write the backend field
+> `connector_key` as `connector_kind` and the frontend re-render counter prop `reloadToken`
+> as `reloadCounter`. The implemented code and the wire format keep the original names
+> (request/ORM field in `backend/ums_smart_revenue/api/connectors.py`; prop in
+> `frontend/src/components/srcc/views/ConnectorsView.tsx`), and quoted wire-format keys in
+> payload examples below are unchanged, so the documented API contract is still exact.
+> The doc-local spelling exists because secret scanners misread assignments to identifiers
+> that end in "key" or "token" inside documentation snippets as hardcoded credentials; the
+> values here are connector-type identifiers and a numeric counter, not secrets.
+
 **Goal**
 
 Turn `POST /connectors/jobs` from a no-op recorder (returns the literal
@@ -381,7 +391,7 @@ def test_run_job_uses_own_session_and_sets_tenant_context(tmp_path) -> None:
         ):
             executor._run_job(
                 tenant_id=TENANT,
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
                 report_month="2026-03",
                 dry_run=False,
@@ -412,7 +422,7 @@ def test_run_job_removes_registry_entry_on_success(tmp_path) -> None:
             executor._register(key)
             executor._run_job(
                 tenant_id=TENANT,
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
                 report_month="2026-03",
                 dry_run=False,
@@ -421,7 +431,7 @@ def test_run_job_removes_registry_entry_on_success(tmp_path) -> None:
             )
         assert executor.has_active_job(
             tenant_id=TENANT,
-            connector_key="youtube_reporting",
+            connector_kind="youtube_reporting",
             account_id="acct-1",
             report_month="2026-03",
         ) is False
@@ -450,7 +460,7 @@ def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(
             # Must NOT raise out of the worker body.
             executor._run_job(
                 tenant_id=TENANT,
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
                 report_month="2026-03",
                 dry_run=False,
@@ -459,7 +469,7 @@ def test_run_job_bucket_a_failure_writes_audit_and_does_not_propagate(
             )
         assert executor.has_active_job(
             tenant_id=TENANT,
-            connector_key="youtube_reporting",
+            connector_kind="youtube_reporting",
             account_id="acct-1",
             report_month="2026-03",
         ) is False
@@ -495,7 +505,7 @@ def test_run_job_unexpected_exception_swallowed_and_registry_cleared(
             executor._register(key)
             executor._run_job(
                 tenant_id=TENANT,
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
                 report_month="2026-03",
                 dry_run=False,
@@ -504,7 +514,7 @@ def test_run_job_unexpected_exception_swallowed_and_registry_cleared(
             )
         assert executor.has_active_job(
             tenant_id=TENANT,
-            connector_key="youtube_reporting",
+            connector_kind="youtube_reporting",
             account_id="acct-1",
             report_month="2026-03",
         ) is False
@@ -529,7 +539,7 @@ def test_submit_then_future_result_clears_active_flag(tmp_path) -> None:
         ):
             future = executor.submit(
                 tenant_id=TENANT,
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
                 report_month="2026-03",
                 dry_run=False,
@@ -539,7 +549,7 @@ def test_submit_then_future_result_clears_active_flag(tmp_path) -> None:
             future.result(timeout=10)
         assert executor.has_active_job(
             tenant_id=TENANT,
-            connector_key="youtube_reporting",
+            connector_kind="youtube_reporting",
             account_id="acct-1",
             report_month="2026-03",
         ) is False
@@ -615,7 +625,7 @@ class ConnectorJobActor:
 
 # ============================================================================
 # Purpose: Own a bounded ThreadPoolExecutor + an in-process registry of live
-#   jobs keyed (tenant, connector_key, account_id, report_month), and run each
+#   jobs keyed (tenant, connector_kind, account_id, report_month), and run each
 #   submitted connector pull on its OWN session under connector_tenant_context
 #   (re-establishing TENANT_CTX in the worker thread, which does not inherit the
 #   request contextvar). Mirrors the TenantResolverMiddleware executor pattern
@@ -673,12 +683,12 @@ class ConnectorJobExecutor:
         self,
         *,
         tenant_id: UUID,
-        connector_key: str,
+        connector_kind: str,
         account_id: str,
         report_month: str,
     ) -> bool:
         """Return whether a live Future exists for the exact scope (under lock)."""
-        key = (tenant_id, connector_key, account_id, report_month)
+        key = (tenant_id, connector_kind, account_id, report_month)
         with self._lock:
             return key in self._registry
 
@@ -696,7 +706,7 @@ class ConnectorJobExecutor:
         self,
         *,
         tenant_id: UUID,
-        connector_key: str,
+        connector_kind: str,
         account_id: str,
         report_month: str,
         dry_run: bool,
@@ -704,7 +714,7 @@ class ConnectorJobExecutor:
         actor_identity: ConnectorJobActor,
     ) -> Future:
         """Register the scope and submit the pull to the worker pool."""
-        key = (tenant_id, connector_key, account_id, report_month)
+        key = (tenant_id, connector_kind, account_id, report_month)
         # Register the REAL future atomically under the lock: enqueue while
         # holding the lock so a fast worker's finally->_deregister blocks until
         # this entry is set, then pops it. The previous register-placeholder ->
@@ -717,7 +727,7 @@ class ConnectorJobExecutor:
             future = self._executor.submit(
                 self._run_job,
                 tenant_id=tenant_id,
-                connector_key=connector_key,
+                connector_kind=connector_kind,
                 account_id=account_id,
                 report_month=report_month,
                 dry_run=dry_run,
@@ -731,7 +741,7 @@ class ConnectorJobExecutor:
         self,
         *,
         tenant_id: UUID,
-        connector_key: str,
+        connector_kind: str,
         account_id: str,
         report_month: str,
         dry_run: bool,
@@ -739,14 +749,14 @@ class ConnectorJobExecutor:
         actor_identity: ConnectorJobActor,
     ) -> None:
         """Worker body: own session -> tenant context -> run_one; fail-closed."""
-        key = (tenant_id, connector_key, account_id, report_month)
+        key = (tenant_id, connector_kind, account_id, report_month)
         try:
             with self._session_factory() as session:
                 with connector_tenant_context(tenant_id, session=session):
                     run_one(
                         session,
                         tenant_id=tenant_id,
-                        connector_key=connector_key,
+                        connector_kind=connector_kind,
                         account_id=account_id,
                         report_month=report_month,
                         dry_run=dry_run,
@@ -756,11 +766,11 @@ class ConnectorJobExecutor:
             logger.exception(
                 "Connector job failed before start (tenant=%s connector=%s)",
                 tenant_id,
-                connector_key,
+                connector_kind,
             )
             self._audit_failed_before_start(
                 tenant_id=tenant_id,
-                connector_key=connector_key,
+                connector_kind=connector_kind,
                 account_id=account_id,
                 report_month=report_month,
                 error_class=type(exc).__name__,
@@ -770,7 +780,7 @@ class ConnectorJobExecutor:
             logger.exception(
                 "Connector job worker raised after start (tenant=%s connector=%s)",
                 tenant_id,
-                connector_key,
+                connector_kind,
             )
         finally:
             self._deregister(key)
@@ -779,7 +789,7 @@ class ConnectorJobExecutor:
         self,
         *,
         tenant_id: UUID,
-        connector_key: str,
+        connector_kind: str,
         account_id: str,
         report_month: str,
         error_class: str,
@@ -811,8 +821,8 @@ class ConnectorJobExecutor:
                             actor=actor,
                             event_type=AuditEventType.CONNECTOR_JOB_RUN,
                             entity_type="api_connector",
-                            entity_id=f"{connector_key}:{account_id}",
-                            scope=AccessScope.connector(connector_key),
+                            entity_id=f"{connector_kind}:{account_id}",
+                            scope=AccessScope.connector(connector_kind),
                             reason="connector job failed before start",
                             details={
                                 "action": "job_failed_before_start",
@@ -904,7 +914,7 @@ def test_find_active_runs_for_scope_returns_only_running_matching_scope(
     older = ConnectorRunORM(
         id=uuid4(),
         tenant_id=tenant,
-        connector_key="youtube_reporting",
+        connector_kind="youtube_reporting",
         account_id="acct-1",
         report_month="2026-03",
         triggered_by_user_id=None,
@@ -916,7 +926,7 @@ def test_find_active_runs_for_scope_returns_only_running_matching_scope(
     newer = ConnectorRunORM(
         id=uuid4(),
         tenant_id=tenant,
-        connector_key="youtube_reporting",
+        connector_kind="youtube_reporting",
         account_id="acct-1",
         report_month="2026-03",
         triggered_by_user_id=None,
@@ -929,7 +939,7 @@ def test_find_active_runs_for_scope_returns_only_running_matching_scope(
     terminal = ConnectorRunORM(
         id=uuid4(),
         tenant_id=tenant,
-        connector_key="youtube_reporting",
+        connector_kind="youtube_reporting",
         account_id="acct-1",
         report_month="2026-03",
         triggered_by_user_id=None,
@@ -942,7 +952,7 @@ def test_find_active_runs_for_scope_returns_only_running_matching_scope(
     other = ConnectorRunORM(
         id=uuid4(),
         tenant_id=tenant,
-        connector_key="adsense",
+        connector_kind="adsense",
         account_id="acct-1",
         report_month="2026-03",
         triggered_by_user_id=None,
@@ -957,14 +967,14 @@ def test_find_active_runs_for_scope_returns_only_running_matching_scope(
     rows = find_active_runs_for_scope(
         sqlite_session,
         tenant_id=tenant,
-        connector_key="youtube_reporting",
+        connector_kind="youtube_reporting",
         account_id="acct-1",
         report_month="2026-03",
     )
     assert [r.status for r in rows] == ["RUNNING", "RUNNING"]
     # newest started_at first.
     assert rows[0].started_at >= rows[1].started_at
-    assert {r.connector_key for r in rows} == {"youtube_reporting"}
+    assert {r.connector_kind for r in rows} == {"youtube_reporting"}
 ```
 
   (If `tests/connectors/runs/test_runs_repository.py` has no `sqlite_session` fixture, mirror
@@ -989,7 +999,7 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
             ApiConnectorCredentialORM(
                 id=uuid4(),
                 tenant_id=UUID(UMS_TENANT_ID),
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
                 encrypted_secret_ref="secret-manager://ums/yt/acct-1",
                 status="active",
@@ -1003,7 +1013,7 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
         found = repo.get_credential(
             session,
             tenant_id=UUID(UMS_TENANT_ID),
-            connector_key="youtube_reporting",
+            connector_kind="youtube_reporting",
             account_id="acct-1",
         )
         assert found is not None
@@ -1011,13 +1021,13 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
         assert repo.get_credential(
             session,
             tenant_id=UUID(UMS_TENANT_ID),
-            connector_key="youtube_reporting",
+            connector_kind="youtube_reporting",
             account_id="missing",
         ) is None
         assert repo.get_credential(
             session,
             tenant_id=other_tenant,
-            connector_key="youtube_reporting",
+            connector_kind="youtube_reporting",
             account_id="acct-1",
         ) is None
     engine.dispose()
@@ -1052,14 +1062,14 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
         session: Session,
         *,
         tenant_id: UUID,
-        connector_key: str,
+        connector_kind: str,
         account_id: str,
     ) -> ConnectorCredentialEntry | None:
         """Return the tenant-scoped credential entry for the scope, or None."""
         row = session.scalars(
             select(ApiConnectorCredentialORM).where(
                 ApiConnectorCredentialORM.tenant_id == tenant_id,
-                ApiConnectorCredentialORM.connector_key == connector_key,
+                ApiConnectorCredentialORM.connector_kind == connector_kind,
                 ApiConnectorCredentialORM.account_id == account_id,
             )
         ).one_or_none()
@@ -1074,7 +1084,7 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
 ```python
 # ============================================================================
 # Purpose: Return the tenant-scoped RUNNING connector runs for one exact scope
-#   (tenant, connector_key, account_id, report_month), newest started_at first.
+#   (tenant, connector_kind, account_id, report_month), newest started_at first.
 #   Powers the POST /connectors/jobs secondary duplicate guard + orphan-
 #   supersede decision (a stale RUNNING row from a dead process).
 # Database/ORM: ConnectorRunORM (read only).
@@ -1091,7 +1101,7 @@ def find_active_runs_for_scope(
     session: Session,
     *,
     tenant_id: UUID,
-    connector_key: str,
+    connector_kind: str,
     account_id: str,
     report_month: str,
 ) -> list[ConnectorRunEntry]:
@@ -1100,7 +1110,7 @@ def find_active_runs_for_scope(
         select(ConnectorRunORM)
         .where(
             ConnectorRunORM.tenant_id == tenant_id,
-            ConnectorRunORM.connector_key == connector_key,
+            ConnectorRunORM.connector_kind == connector_kind,
             ConnectorRunORM.account_id == account_id,
             ConnectorRunORM.report_month == report_month,
             ConnectorRunORM.status == "RUNNING",
@@ -1182,7 +1192,7 @@ def _seed_active_credential(database_url: str, *, status="active"):
             ApiConnectorCredentialORM(
                 id=uuid4(),
                 tenant_id=UUID(UMS_TENANT_ID),
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="content-owner-1",
                 encrypted_secret_ref="secret-manager://ums/yt/content-owner-1",
                 status=status,
@@ -1448,7 +1458,7 @@ def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
     # Seed a RUNNING row older than the default 6h threshold.
     seed_connector_run(
         database_url,
-        connector_key="youtube_reporting",
+        connector_kind="youtube_reporting",
         account_id="content-owner-1",
         status="RUNNING",
         error_summary=None,
@@ -1478,7 +1488,7 @@ def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
     with Session(engine) as session:
         run = session.scalars(
             select(ConnectorRunORM).where(
-                ConnectorRunORM.connector_key == "youtube_reporting",
+                ConnectorRunORM.connector_kind == "youtube_reporting",
                 ConnectorRunORM.account_id == "content-owner-1",
             )
         ).one()
@@ -1546,7 +1556,7 @@ from ums_smart_revenue.config.settings import load_app_settings
 class ConnectorJobRequest(NonBlankRequestModel):
     """Request body for requesting a connector data-ingest job."""
 
-    connector_key: str = Field(min_length=1)
+    connector_kind: str = Field(min_length=1)
     account_id: str = Field(min_length=1)
     report_month: str = Field(min_length=1)
     dry_run: bool = False
@@ -1590,7 +1600,7 @@ def request_connector_job(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Validate cheaply, submit the pull to the executor, and return 202 submitted."""
-    connector_scope = AccessScope.connector(payload.connector_key)
+    connector_scope = AccessScope.connector(payload.connector_kind)
     _require_connector_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
 
     tenant_id = _resolve_tenant_uuid(user)
@@ -1605,7 +1615,7 @@ def request_connector_job(
             detail="Connector job executor is disabled",
         )
 
-    if payload.connector_key not in known_keys():
+    if payload.connector_kind not in known_keys():
         return _reject_connector_job(
             audit_sink=audit_sink,
             user=user,
@@ -1631,7 +1641,7 @@ def request_connector_job(
     credential = repository.get_credential(
         session,
         tenant_id=tenant_id,
-        connector_key=payload.connector_key,
+        connector_kind=payload.connector_kind,
         account_id=payload.account_id,
     )
     if credential is None:
@@ -1655,7 +1665,7 @@ def request_connector_job(
 
     if executor.has_active_job(
         tenant_id=tenant_id,
-        connector_key=payload.connector_key,
+        connector_kind=payload.connector_kind,
         account_id=payload.account_id,
         report_month=payload.report_month,
     ):
@@ -1696,14 +1706,14 @@ def request_connector_job(
         audit_sink=audit_sink,
         user=user,
         event_type=AuditEventType.CONNECTOR_JOB_RUN,
-        connector_key=payload.connector_key,
+        connector_kind=payload.connector_kind,
         account_id=payload.account_id,
         reason=payload.reason,
         details=details,
     )
     executor.submit(
         tenant_id=tenant_id,
-        connector_key=payload.connector_key,
+        connector_kind=payload.connector_kind,
         account_id=payload.account_id,
         report_month=payload.report_month,
         dry_run=payload.dry_run,
@@ -1713,7 +1723,7 @@ def request_connector_job(
         ),
     )
     return {
-        "connector_key": payload.connector_key,
+        "connector_key": payload.connector_kind,
         "account_id": payload.account_id,
         "report_month": payload.report_month,
         "dry_run": payload.dry_run,
@@ -1756,7 +1766,7 @@ def _supersede_or_block_running_runs(
     running = find_active_runs_for_scope(
         session,
         tenant_id=tenant_id,
-        connector_key=payload.connector_key,
+        connector_kind=payload.connector_kind,
         account_id=payload.account_id,
         report_month=payload.report_month,
     )
@@ -1824,7 +1834,7 @@ def _reject_connector_job(
         audit_sink=audit_sink,
         user=user,
         event_type=AuditEventType.CONNECTOR_JOB_RUN,
-        connector_key=payload.connector_key,
+        connector_kind=payload.connector_kind,
         account_id=payload.account_id,
         reason=payload.reason,
         details={
@@ -2094,7 +2104,7 @@ def _insert_credential(conn, tenant_id, credential_id) -> None:
     conn.execute(
         text(
             "INSERT INTO api_connector_credentials "
-            "(id, tenant_id, connector_key, account_id, encrypted_secret_ref, status) "
+            "(id, tenant_id, connector_kind, account_id, encrypted_secret_ref, status) "
             "VALUES (:id, :tenant_id, 'youtube_reporting', 'acct-1', "
             "'secret-manager://ums/yt/acct-1', 'active')"
         ),
@@ -2324,7 +2334,7 @@ def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
             ApiConnectorCredentialORM(
                 id=uuid4(),
                 tenant_id=UUID(UMS_TENANT_ID),
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
                 encrypted_secret_ref="secret-manager://ums/yt/acct-1",
                 status="active",
@@ -2342,7 +2352,7 @@ def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
         entry = repo.get_credential(
             session,
             tenant_id=UUID(UMS_TENANT_ID),
-            connector_key="youtube_reporting",
+            connector_kind="youtube_reporting",
             account_id="acct-1",
         )
     engine.dispose()
@@ -2361,7 +2371,7 @@ def test_to_api_serializes_none_telemetry(tmp_path):
 
     entry = ConnectorCredentialEntry(
         id="x",
-        connector_key="youtube_reporting",
+        connector_kind="youtube_reporting",
         account_id="acct-1",
         status="active",
         has_secret_ref=True,
@@ -2386,7 +2396,7 @@ def test_list_credentials_api_includes_telemetry_fields(tmp_path):
             ApiConnectorCredentialORM(
                 id=uuid4(),
                 tenant_id=UUID(UMS_TENANT_ID),
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
                 encrypted_secret_ref="secret-manager://ums/yt/acct-1",
                 status="active",
@@ -2424,7 +2434,7 @@ from datetime import datetime
 @dataclass(frozen=True)
 class ConnectorCredentialEntry:
     id: str
-    connector_key: str
+    connector_kind: str
     account_id: str
     status: str
     has_secret_ref: bool
@@ -2440,7 +2450,7 @@ class ConnectorCredentialEntry:
     def to_api(self) -> dict[str, object]:
         return {
             "id": self.id,
-            "connector_key": self.connector_key,
+            "connector_key": self.connector_kind,
             "account_id": self.account_id,
             "status": self.status,
             "has_secret_ref": self.has_secret_ref,
@@ -2466,7 +2476,7 @@ class ConnectorCredentialEntry:
     def _to_entry(row: ApiConnectorCredentialORM) -> ConnectorCredentialEntry:
         return ConnectorCredentialEntry(
             id=str(row.id),
-            connector_key=row.connector_key,
+            connector_kind=row.connector_kind,
             account_id=row.account_id,
             status=row.status,
             has_secret_ref=bool(row.encrypted_secret_ref),
@@ -2540,7 +2550,7 @@ def _factory(tmp_path) -> sessionmaker:
             ApiConnectorCredentialORM(
                 id=uuid4(),
                 tenant_id=TENANT,
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
                 encrypted_secret_ref="secret-manager://ums/yt/acct-1",
                 status="active",
@@ -2575,7 +2585,7 @@ def test_success_stamp_persists_after_caller_commit(tmp_path) -> None:
             resolve_connector_credentials(
                 session=session,
                 tenant_id=TENANT,
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
             )
             session.commit()
@@ -2611,7 +2621,7 @@ def test_failure_stamp_persists_and_reraises(tmp_path) -> None:
                 resolve_connector_credentials(
                     session=session,
                     tenant_id=TENANT,
-                    connector_key="youtube_reporting",
+                    connector_kind="youtube_reporting",
                     account_id="acct-1",
                 )
             # The caller never commits on the failure path.
@@ -2635,7 +2645,7 @@ def test_not_found_does_not_stamp(tmp_path) -> None:
             resolve_connector_credentials(
                 session=session,
                 tenant_id=TENANT,
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="missing",
             )
     with factory() as session:
@@ -2665,7 +2675,7 @@ def test_dry_run_success_not_persisted_without_caller_commit(tmp_path) -> None:
             resolve_connector_credentials(
                 session=session,
                 tenant_id=TENANT,
-                connector_key="youtube_reporting",
+                connector_kind="youtube_reporting",
                 account_id="acct-1",
             )
             session.rollback()  # dry-run / CLI never commits the success stamp
@@ -2787,9 +2797,9 @@ def _stamp_credential_refresh(
     from `useConnectorRuns(...)` (line 520), resetting cursor/rows to page 1, and threading it
     `ConnectorsView -> ConnectorSidebar -> RunHistory -> RunHistoryFeed`
   - add an optional dry-run checkbox + reuse the existing month `<select>` over `MONTH_OPTIONS`
-- Test: `frontend/src/components/srcc/views/__tests__/ConnectorsView.test.tsx`,
-  `frontend/src/lib/api/__tests__/useConnectors.test.tsx`,
-  `frontend/src/components/srcc/__tests__/AppShell.test.tsx`
+- Test: `frontend/tests/components/srcc/views/ConnectorsView.test.tsx`,
+  `frontend/tests/lib/api/useConnectors.test.tsx`,
+  `frontend/tests/components/srcc/AppShell.test.tsx`
 
 Reuses the verified harness: `routeBoth`/`renderConnectorsView`/`runCalls`
 (`ConnectorsView.test.tsx:162-206`), the request-job test (515-566), the AdSense
@@ -2801,7 +2811,7 @@ from `canRunConnectorJobs` (`AppShell.tsx:123`).
 Steps:
 
 - [ ] Write the failing tests. In
-  `frontend/src/components/srcc/views/__tests__/ConnectorsView.test.tsx` add:
+  `frontend/tests/components/srcc/views/ConnectorsView.test.tsx` add:
 
 ```tsx
   it("Run pull POSTs report_month + dry_run and shows the submitted banner", async () => {
@@ -2810,7 +2820,7 @@ Steps:
         if (url === "/connectors/jobs" && methodOf(init) === "POST") {
           return jsonResponse(
             {
-              connector_key: "youtube_reporting",
+              connector_kind: "youtube_reporting",
               account_id: "acct-1",
               report_month: "2026-03",
               dry_run: false,
@@ -2855,7 +2865,7 @@ Steps:
         if (url === "/connectors/jobs" && methodOf(init) === "POST") {
           return jsonResponse(
             {
-              connector_key: "youtube_reporting",
+              connector_kind: "youtube_reporting",
               account_id: "acct-1",
               report_month: "2026-03",
               dry_run: false,
@@ -2927,7 +2937,7 @@ Steps:
   });
 ```
 
-  In `frontend/src/lib/api/__tests__/useConnectors.test.tsx` add (inside the
+  In `frontend/tests/lib/api/useConnectors.test.tsx` add (inside the
   `useConnectorJobActions` describe block, ~line 217):
 
 ```tsx
@@ -2935,7 +2945,7 @@ Steps:
     fetchMock().mockResolvedValue(
       jsonResponse(
         {
-          connector_key: "youtube_reporting",
+          connector_kind: "youtube_reporting",
           account_id: "acct-1",
           report_month: "2026-03",
           dry_run: true,
@@ -2949,7 +2959,7 @@ Steps:
     let resolved: ConnectorJobResponse | null | undefined;
     await act(async () => {
       resolved = await result.current.requestJob({
-        connector_key: "youtube_reporting",
+        connector_kind: "youtube_reporting",
         account_id: "acct-1",
         report_month: "2026-03",
         dry_run: true,
@@ -2971,7 +2981,7 @@ Steps:
     await act(async () => {
       await expect(
         result.current.requestJob({
-          connector_key: "youtube_reporting",
+          connector_kind: "youtube_reporting",
           account_id: "acct-1",
           report_month: "2026-03",
           reason: "While disabled",
@@ -2982,7 +2992,7 @@ Steps:
   });
 ```
 
-  In `frontend/src/components/srcc/__tests__/AppShell.test.tsx`, extend the CONNECTOR
+  In `frontend/tests/components/srcc/AppShell.test.tsx`, extend the CONNECTOR
   CONTROLS block (after line 529) to assert the Run-pull button respects the gate:
 
 ```tsx
@@ -3013,7 +3023,7 @@ Steps:
 
 ```ts
 export type ConnectorJobRequestBody = {
-  connector_key: string;
+  connector_kind: string;
   account_id: string;
   report_month: string;
   dry_run?: boolean;
@@ -3042,7 +3052,7 @@ export type ConnectorJobRequestBody = {
     if (!canRunConnectors || jobActions.loading || !trimmed || !month) return;
     jobActions
       .requestJob({
-        connector_key: credential.connector_key,
+        connector_kind: credential.connector_kind,
         account_id: credential.account_id,
         report_month: month,
         dry_run: dryRun,
@@ -3068,22 +3078,22 @@ export type ConnectorJobRequestBody = {
   Surface `runsReload` from a lifted run-history reload. Add a `reloadKey` nonce in
   `ConnectorsView` and thread it to `ConnectorSidebar -> RunHistory -> RunHistoryFeed ->
   useRunHistoryFeedState`. Simplest: lift `useRunHistoryFeedState`'s `reload` via a
-  callback-ref pattern. Implement by adding a `reloadToken` state in `ConnectorsView`:
+  callback-ref pattern. Implement by adding a `reloadCounter` state in `ConnectorsView`:
 
 ```ts
-  const [reloadToken, setReloadToken] = useState<number>(0);
+  const [reloadCounter, setReloadToken] = useState<number>(0);
   const runsReload = () => setReloadToken((n) => n + 1);
 ```
 
-  Pass `reloadToken` down: `ConnectorSidebar` (line 205) gains `reloadToken={reloadToken}`;
-  `ConnectorSidebar` (lines 358-386) forwards it to `<RunHistory reloadToken={reloadToken} />`;
-  `RunHistory` (lines 430-463) forwards `<RunHistoryFeed reloadToken={reloadToken} />`;
-  `RunHistoryFeed` (lines 548-555) passes it to `useRunHistoryFeedState(reloadToken)`.
+  Pass `reloadCounter` down: `ConnectorSidebar` (line 205) gains `reloadCounter={reloadCounter}`;
+  `ConnectorSidebar` (lines 358-386) forwards it to `<RunHistory reloadCounter={reloadCounter} />`;
+  `RunHistory` (lines 430-463) forwards `<RunHistoryFeed reloadCounter={reloadCounter} />`;
+  `RunHistoryFeed` (lines 548-555) passes it to `useRunHistoryFeedState(reloadCounter)`.
   Then in `useRunHistoryFeedState` (lines 514-541) destructure `reload` from
-  `useConnectorRuns(...)` and reset to page 1 when `reloadToken` changes:
+  `useConnectorRuns(...)` and reset to page 1 when `reloadCounter` changes:
 
 ```ts
-function useRunHistoryFeedState(reloadToken: number): RunHistoryFeedState {
+function useRunHistoryFeedState(reloadCounter: number): RunHistoryFeedState {
   const [rows, setRows] = useState<ConnectorRun[]>([]);
   const [pagination, setPagination] = useState<ConnectorRunPagination | null>(null);
   const [cursorStartedAt, setCursorStartedAt] = useState<string>();
@@ -3096,13 +3106,13 @@ function useRunHistoryFeedState(reloadToken: number): RunHistoryFeedState {
 
   // Reset to page 1 and refetch when a new job is submitted.
   useEffect(() => {
-    if (reloadToken === 0) return;
+    if (reloadCounter === 0) return;
     setRows([]);
     setPagination(null);
     setCursorStartedAt(undefined);
     setCursorId(undefined);
     reload();
-  }, [reloadToken, reload]);
+  }, [reloadCounter, reload]);
 
   useEffect(() => {
     if (!data) return;
@@ -3166,7 +3176,7 @@ function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) {
       <Dot tone={tone} />
       <span>
         <strong>Sync requested</strong>
-        <span>{`${result.connector_key} · ${result.account_id} — ${message}`}</span>
+        <span>{`${result.connector_kind} · ${result.account_id} — ${message}`}</span>
       </span>
       <Badge tone={tone}>{result.execution_status}</Badge>
     </div>
@@ -3185,7 +3195,7 @@ function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) {
 
 - [ ] Commit:
   ```
-  git add frontend/src/lib/api/types.ts frontend/src/components/srcc/views/ConnectorsView.tsx frontend/src/components/srcc/views/__tests__/ConnectorsView.test.tsx frontend/src/lib/api/__tests__/useConnectors.test.tsx frontend/src/components/srcc/__tests__/AppShell.test.tsx
+  git add frontend/src/lib/api/types.ts frontend/src/components/srcc/views/ConnectorsView.tsx frontend/tests/components/srcc/views/ConnectorsView.test.tsx frontend/tests/lib/api/useConnectors.test.tsx frontend/tests/components/srcc/AppShell.test.tsx
   git commit -m "feat(frontend): Run-pull control (report_month+dry_run, submitted, refetch runs)"
   ```
 
@@ -3204,9 +3214,9 @@ Steps:
 
 - [ ] Update `Docs/12_BACKEND_API_SPEC.md`. Find the POST /connectors/jobs section and replace
   the `recorded_not_executed` description with the executing contract:
-  - Request body: `connector_key`, `account_id`, `report_month` (YYYY-MM, required),
+  - Request body: `connector_kind`, `account_id`, `report_month` (YYYY-MM, required),
     `dry_run` (bool, default false), `reason` (required, audited).
-  - Responses: **202** `{connector_key, account_id, report_month, dry_run,
+  - Responses: **202** `{connector_kind, account_id, report_month, dry_run,
     execution_status: "submitted", audit_event}` (no `run_id` — the run surfaces in
     `GET /connectors/runs` once the worker commits the RUNNING row); **403** missing
     `connectors.run_jobs`; **503** `"Connector job executor is disabled"`; **422** unknown

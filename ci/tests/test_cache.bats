@@ -2,10 +2,15 @@
 
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+  # The gate exports its own mode and push state, and these suites run
+  # under it -- so a case inherited a range belonging to another tree.
+  # shellcheck source=ci/tests/gate_env.bash
+  source "$REPO_ROOT/ci/tests/gate_env.bash"
+  ci::tests::clear_gate_env
   source "$REPO_ROOT/ci/lib/common.sh"
   source "$REPO_ROOT/ci/lib/cache.sh" 2>/dev/null || true
 
-  export CI_GATE_CACHE_DIR="$(mktemp -d)"
+  export CI_GATE_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
 }
 
 teardown() {
@@ -33,12 +38,32 @@ teardown() {
     skip "cache library not loaded"
   fi
   ci::cache::init
-  src="$(mktemp -d)"
-  echo "0" > "$src/result"
-  echo "test output" > "$src/output.log"
+  src="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  # These filenames are the cache contract, not arbitrary fixture names:
+  # ci::cache::hit requires result.txt, and ci/preflight.sh writes result.txt
+  # and output.txt. A fixture using result/output.log stores an entry that can
+  # never be a hit, which is why this test failed against a working cache.
+  echo "0" > "$src/result.txt"
+  echo "test output" > "$src/output.txt"
 
   ci::cache::put "test-key-12345" "$src"
   ci::cache::hit "test-key-12345"
+
+  rm -rf "$src"
+}
+
+@test "cache: an entry missing result.txt is not a hit" {
+  # The other half of the contract: put must not make an incomplete entry look
+  # cached, or a check would be skipped with nothing to restore.
+  if ! declare -f ci::cache::put >/dev/null 2>&1; then
+    skip "cache library not loaded"
+  fi
+  ci::cache::init
+  src="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  echo "test output" > "$src/output.txt"
+
+  ci::cache::put "test-key-incomplete" "$src"
+  ! ci::cache::hit "test-key-incomplete"
 
   rm -rf "$src"
 }

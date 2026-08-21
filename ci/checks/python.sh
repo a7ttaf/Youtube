@@ -131,7 +131,29 @@ elif [ "$has_pytest_indicators" -eq 1 ]; then
 fi
 
 echo "Running: python3 -m compileall $PYTHON_PACKAGE_DIR"
-python3 -m compileall -x '\.venv|__pycache__|\.mypy_cache|\.git|node_modules' "$PYTHON_PACKAGE_DIR" 1>/dev/null
+# The one tool in this lane whose status was not captured.
+#
+# Under `set -Eeuo pipefail` a bare failure ends the script here, before the
+# result line below and before any exit from the contract, so the lane leaves
+# with raw 1. ci/preflight.sh routes anything outside {0,10,20,30} through its
+# unrecognised arm and records FAIL_INFRA -- so a file CPython refuses to
+# compile is reported as broken infrastructure, while the same tree failing ruff
+# or pytest two screens up is reported as FAIL_NEW_ISSUE. Both are the same kind
+# of defect and only one of them is described.
+#
+# Reachable without contriving anything: ruff respects .gitignore by default, so
+# an ignored generated module with a syntax error passes `ruff check` and stops
+# here. ci/lib/common.sh has normalize_result for exactly this translation and
+# ci/checks/node.sh calls it; this lane never did.
+compileall_rc=0
+python3 -m compileall -x '\.venv|__pycache__|\.mypy_cache|\.git|node_modules' \
+  "$PYTHON_PACKAGE_DIR" 1>/dev/null || compileall_rc=$?
+if [ "$compileall_rc" -ne 0 ]; then
+  echo "compileall rejected a file in ${PYTHON_PACKAGE_DIR} (exit ${compileall_rc})."
+  echo "  A module CPython cannot compile is a defect in the code, not in this"
+  echo "  gate: it is reported as such rather than as broken infrastructure."
+  exit "$CI_RESULT_FAIL_NEW_ISSUE"
+fi
 
 echo "Python lane passed."
 exit "$CI_RESULT_PASS"

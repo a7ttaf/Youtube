@@ -1,0 +1,8474 @@
+#!/usr/bin/env bats
+#
+# The JS lanes this PR activates are reachable only through a chain of config:
+# checks.yml decides whether preflight schedules the `node` lane at all,
+# affected.yml decides whether tests.sh considers any JavaScript test affected,
+# and the result contract decides whether a failure is reported as a regression
+# or as broken infrastructure. Each link failed open before; these pin them.
+
+setup() {
+  REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+  # The gate exports its own mode and push state, and these suites run
+  # under it -- so a case inherited a range belonging to another tree.
+  # shellcheck source=ci/tests/gate_env.bash
+  source "$REPO_ROOT/ci/tests/gate_env.bash"
+  ci::tests::clear_gate_env
+  cd "$REPO_ROOT"
+}
+
+# --- checks.yml gates the whole node lane -------------------------------------
+#
+# ci/preflight.sh skips a lane when _all_related_checks_disabled reports every
+# related check disabled. With lint-js, typecheck-js, format-js and tests-js all
+# `enabled: false`, the node lane never ran — so activating the workspace
+# runners was not enough on its own.
+
+_enabled_value() {
+  # Echo the `enabled:` value of the given check id from checks.yml.
+  awk -v want="  $1:" '
+    $0 == want { found = 1; next }
+    found && $0 ~ /^[[:space:]]*enabled:/ {
+      sub(/^[[:space:]]*enabled:[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*$/, "")
+      print
+      exit
+    }
+    found && $0 ~ /^[[:space:]]*[a-z-]+:$/ { exit }
+  ' ci/config/checks.yml
+}
+
+@test "js lane: tests-js is enabled" {
+  [ "$(_enabled_value tests-js)" = "true" ]
+}
+
+@test "js lane: typecheck-js is enabled" {
+  [ "$(_enabled_value typecheck-js)" = "true" ]
+}
+
+@test "js lane: not every JS check is disabled, so preflight schedules node" {
+  local any_enabled=0 id
+  for id in lint-js typecheck-js format-js tests-js; do
+    [ "$(_enabled_value "$id")" = "true" ] && any_enabled=1
+  done
+  [ "$any_enabled" -eq 1 ]
+}
+
+# --- affected.yml maps the frontend workspace ---------------------------------
+
+@test "affected: a frontend source change maps to frontend test patterns" {
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/src/lib/api/useGroups.ts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: a frontend tsx change maps to frontend test patterns" {
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/src/components/srcc/OutcomeTable.tsx
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: frontend patterns end in .ts/.tsx so the javascript filter keeps them" {
+  # ci/checks/tests.sh classifies a pattern as JavaScript purely by suffix. A
+  # pattern the filter drops is the same as no pattern: the lane reports
+  # "skipped: no affected JavaScript tests".
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/src/lib/api/useGroups.ts
+  [ "$status" -eq 0 ]
+  local kept=0 line
+  while IFS= read -r line; do
+    case "$line" in
+      *.ts | *.tsx | *.js | *.jsx) kept=1 ;;
+    esac
+  done <<< "$output"
+  [ "$kept" -eq 1 ]
+}
+
+@test "affected: a mixed frontend+python changeset still yields javascript patterns" {
+  # The reported failure mode: python contributes a pattern, so AFFECTED_TESTS
+  # is non-empty, and an empty javascript slice reads as "nothing to run".
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests backend/app/main.py frontend/src/lib/api/useGroups.ts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+  [[ "$output" == *"test_"*".py"* ]]
+}
+
+@test "affected: a file directly under frontend/src maps to frontend test patterns" {
+  # The matcher collapses "**" to "*", so "frontend/src/**/*.ts" alone requires
+  # a subdirectory and misses frontend/src/test-setup.ts — a real file, and the
+  # one vitest loads as setupFiles.
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/src/test-setup.ts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: a root-level frontend test maps to frontend test patterns" {
+  # The declared vitest glob permits frontend/tests/App.test.tsx, but
+  # "frontend/tests/**/*.tsx" cannot match it once ** collapses to *.
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/tests/App.test.tsx
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: a root-level frontend test in a mixed changeset still yields js patterns" {
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests backend/app/main.py frontend/tests/App.test.tsx
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: a change to the vitest config runs the suite" {
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/vitest.config.ts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: a configured glob reaches pytest as files, not as a glob" {
+  # `pytest` documents its positionals as `file_or_dir` and takes neither a
+  # shell glob nor anything else it cannot open: `pytest 'tests/**/test_*.py'`
+  # exits 4 with a usage error, having collected nothing. affected.yml maps
+  # every Python source to exactly that pattern, so the narrowing had never
+  # selected a Python test -- it only ever broke the run that tried to use it.
+  local fn; fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  sed -n '/^_tests_expand_glob()/,/^}/p' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
+  [ -s "$fn" ] || { rm -f "$fn"; echo "could not lift the expander from the lane" >&2; return 1; }
+  bash -n "$fn" || { rm -f "$fn"; echo "the extraction is not valid shell" >&2; return 1; }
+  # shellcheck disable=SC1090
+  . "$fn"
+  rm -f "$fn"
+
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/tests/unit/deep" "$sb/tests/integration"
+  : > "$sb/tests/unit/test_a.py"
+  : > "$sb/tests/unit/deep/test_b.py"
+  : > "$sb/tests/integration/c_test.py"
+  : > "$sb/tests/helper.py"
+
+  local got
+  got="$(cd "$sb" && _tests_expand_glob 'tests/**/test_*.py' | sort | tr '\n' ' ')"
+  # Nested, which is the half a plain shell glob loses: `**` is only a distinct
+  # pattern under `shopt -s globstar`, a Bash 4 feature, and this gate targets
+  # the 3.2 that ships on macOS -- so `tests/**/test_*.py` would expand as
+  # `tests/*/test_*.py` and drop `tests/unit/deep/test_b.py` silently. A
+  # narrowing that runs part of the affected suite and reports on all of it is
+  # worse than one that fails.
+  [[ "$got" == *"tests/unit/test_a.py"* ]] \
+    && [[ "$got" == *"tests/unit/deep/test_b.py"* ]] \
+    || { rm -rf "$sb"; echo "the expansion missed a test: [$got]" >&2; return 1; }
+  [[ "$got" != *"helper.py"* ]] \
+    || { rm -rf "$sb"; echo "a non-test was selected: [$got]" >&2; return 1; }
+
+  got="$(cd "$sb" && _tests_expand_glob 'tests/**/*_test.py' | sort | tr '\n' ' ')"
+  [[ "$got" == *"tests/integration/c_test.py"* ]] \
+    || { rm -rf "$sb"; echo "the other configured spelling missed its test: [$got]" >&2; return 1; }
+
+  # Directories after the `**` are matched on the path, not the basename.
+  got="$(cd "$sb" && _tests_expand_glob 'tests/**/unit/test_*.py' | sort | tr '\n' ' ')"
+  [[ "$got" == *"tests/unit/test_a.py"* ]] && [[ "$got" != *"integration"* ]] \
+    || { rm -rf "$sb"; echo "a pattern naming a directory after ** was mishandled: [$got]" >&2; return 1; }
+
+  # A pattern that names nothing here yields nothing, which is what the lane
+  # reads as "do not narrow" rather than as "no tests".
+  got="$(cd "$sb" && _tests_expand_glob 'tests/**/nope_*.py' | tr -d '\n')"
+  [ -z "$got" ] || { rm -rf "$sb"; echo "a pattern matching nothing produced [$got]" >&2; return 1; }
+  rm -rf "$sb"
+
+  # And the lane does not narrow on an empty expansion. Pinned against the
+  # lane's own text: the alternative is a full pytest run in a bats case.
+  grep -qF 'Affected Python patterns match no file here; running every Python test.' \
+    "$REPO_ROOT/ci/checks/tests.sh" \
+    || { echo "the lane no longer falls back to the full suite; update this case" >&2; return 1; }
+}
+
+# --- child exit codes keep their meaning --------------------------------------
+
+@test "result contract: a package script exiting 1 is a new issue, not infra" {
+  source ci/lib/common.sh
+  [ "$(ci::common::normalize_result 1)" -eq "$CI_RESULT_FAIL_NEW_ISSUE" ]
+  # Without normalization this merge yields 1, which result_severity ranks at
+  # the FAIL_INFRA level.
+  [ "$(ci::common::merge_results "$CI_RESULT_PASS" "$(ci::common::normalize_result 1)")" -eq "$CI_RESULT_FAIL_NEW_ISSUE" ]
+}
+
+@test "result contract: contract codes pass through normalize unchanged" {
+  source ci/lib/common.sh
+  [ "$(ci::common::normalize_result "$CI_RESULT_PASS")" -eq "$CI_RESULT_PASS" ]
+  [ "$(ci::common::normalize_result "$CI_RESULT_PASS_WITH_KNOWN_DEBT")" -eq "$CI_RESULT_PASS_WITH_KNOWN_DEBT" ]
+  [ "$(ci::common::normalize_result "$CI_RESULT_FAIL_NEW_ISSUE")" -eq "$CI_RESULT_FAIL_NEW_ISSUE" ]
+  [ "$(ci::common::normalize_result "$CI_RESULT_FAIL_INFRA")" -eq "$CI_RESULT_FAIL_INFRA" ]
+}
+
+@test "result contract: an infra failure in one workspace still outranks a pass" {
+  source ci/lib/common.sh
+  [ "$(ci::common::merge_results "$CI_RESULT_FAIL_NEW_ISSUE" "$CI_RESULT_FAIL_INFRA")" -eq "$CI_RESULT_FAIL_INFRA" ]
+}
+
+@test "node lane: the workspace loop normalizes child results before merging" {
+  run grep -n "ci::common::normalize_result" ci/checks/node.sh
+  [ "$status" -eq 0 ]
+}
+
+@test "node lane: a failed dependency install stays an infra result" {
+  # normalize_result maps off-contract codes to FAIL_NEW_ISSUE, which is right
+  # for a failing package script and wrong for a registry outage. Every install
+  # pins its own exit so provisioning failures survive that mapping.
+  local mgr
+  for mgr in "pnpm install --frozen-lockfile" "npm ci --quiet" \
+             "yarn install --frozen-lockfile" "yarn install --immutable" \
+             "bun install --frozen-lockfile"; do
+    run grep -F "$mgr || exit \"\$CI_RESULT_FAIL_INFRA\"" ci/checks/node.sh
+    [ "$status" -eq 0 ] || { echo "install not pinned to FAIL_INFRA: $mgr" >&2; return 1; }
+  done
+}
+
+# --- the node lane cannot lose its own suite ----------------------------------
+#
+# These drive ci/checks/node.sh against a synthetic workspace. The install is
+# short-circuited by pre-seeding the dependency fingerprint, so the cases
+# exercise the lane's decisions rather than a package manager.
+
+ws_setup() {
+  NODE_SB="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$NODE_SB/ci/checks" "$NODE_SB/ci/lib" \
+           "$NODE_SB/ws/tests" "$NODE_SB/ws/node_modules" "$NODE_SB/.ci-gate"
+  cp "$REPO_ROOT/ci/checks/node.sh" "$NODE_SB/ci/checks/"
+  # git.sh too: node.sh sources it for the ship-mode push range, and a missing
+  # source under `set -e` aborts the script with status 1 before a single
+  # assertion runs. Every case here would then fail for a harness reason
+  # wearing the costume of the behaviour it claims to test.
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$NODE_SB/ci/lib/"
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/tests/a.test.ts"
+  printf '{}\n' > "$NODE_SB/ws/bun.lock"
+  # Real wrapper scripts for the fixtures to name.
+  #
+  # The stub was `"test": "true"`, then `"test": "bash -c true"`, then a
+  # `scripts/test.sh` containing `exit 0` — and the lane rejects all three now.
+  # Each was the previous no-op wearing one more layer: a command that runs
+  # nothing, a wrapper around a command that runs nothing, and a *file* whose
+  # contents run nothing. The gate follows delegation to its end, so the
+  # fixtures have to be wrappers that genuinely reach a runner.
+  #
+  # `scripts/vitest` stands in for the installed binary. That is the real
+  # boundary: the gate can see that a script invokes something named `vitest`
+  # and cannot see what that binary then does — so a fixture that names it is
+  # modelling a true wrapper, not evading the rule. The exit codes the cases
+  # rely on come from the wrapper, after the runner it names has been invoked.
+  mkdir -p "$NODE_SB/ws/scripts"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/vitest"
+  chmod +x "$NODE_SB/ws/scripts/vitest"
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\n' > "$NODE_SB/ws/scripts/test.sh"
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\nexit 1\n' > "$NODE_SB/ws/scripts/fail.sh"
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\nexit 10\n' > "$NODE_SB/ws/scripts/fail10.sh"
+  # The other recognised runners, as stand-ins the workspace can actually
+  # execute. A case that expects the lane to *accept* a script has to be able to
+  # run it, or "the refusal message is absent" is satisfied by the script not
+  # existing -- which asserts nothing about the rule under test.
+  mkdir -p "$NODE_SB/ws/node_modules/.bin"
+  local _wsb
+  for _wsb in vitest jest mocha playwright deno tsx ts-node node cross-env env; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/$_wsb"
+    chmod +x "$NODE_SB/ws/node_modules/.bin/$_wsb"
+  done
+}
+
+ws_manifest() {
+  printf '%s\n' "$1" > "$NODE_SB/ws/package.json"
+}
+
+ws_seed_fingerprint() {
+  # Mirrors _deps_fingerprint in node.sh: lockfile hash, then manifest hash.
+  #
+  # Hashed with the gate's own ci::common::hash_file rather than a hard-coded
+  # sha256sum. hash_file falls back through several tools, so on a machine
+  # where it picks a different backend a hand-rolled sha256sum seeds a value
+  # node.sh will never compute — the sandbox would then attempt a real install
+  # and these cases would fail for a reason that has nothing to do with what
+  # they assert. Deriving the fixture from the code under test is the same rule
+  # the extension-coverage case above follows.
+  # The manager-configuration arm is *lifted* from the lane rather than restated,
+  # for the reason the hash tool is: a fixture that computes the fingerprint
+  # differently seeds a value node.sh will never produce, every case then
+  # attempts a real install, and they all fail for a reason that has nothing to
+  # do with what they assert. That arm grows entries over time, so restating it
+  # here would only postpone that by one commit.
+  ( cd "$NODE_SB/ws" \
+    && . "$REPO_ROOT/ci/lib/common.sh" \
+    && eval "$(sed -n '/^_deps_manager_config_id()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh")" \
+    && printf '%s %s %s %s\n' \
+      "$(ci::common::hash_file bun.lock)" \
+      "$(ci::common::hash_file package.json)" \
+      "$(ci::common::node_runtime_id)" \
+      "$(_deps_manager_config_id)" \
+      > "$NODE_SB/.ci-gate/node_modules-$(ci::common::workspace_slug ws).hash" )
+}
+
+ws_run() {
+  ( cd "$NODE_SB" && CI_GATE_NODE_WORKSPACE=ws bash ci/checks/node.sh 2>&1 )
+}
+
+@test "node lane: the dependency fingerprint covers the manager's configuration" {
+  # The lockfile says which versions and the manager's configuration says what
+  # installing them *does*. `.yarnrc.yml` can turn lifecycle scripts off,
+  # `.npmrc` can point a scope at another registry or set `ignore-scripts`,
+  # `.pnpmfile.cjs` rewrites the dependency graph outright -- and none of them
+  # touch package.json or the lockfile. So changing one left the fingerprint
+  # identical, an existing node_modules looking current, and the frozen install
+  # skipped; the lane then tested and built against artifacts a clean install
+  # under the committed configuration would not have produced.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"node_modules up to date"* ]] || { echo "$output" >&2; false; }
+
+  # The seed is now stale for a tree whose configuration changed, so the lane
+  # must stop skipping. It has no package manager to run here, which is the
+  # point: reaching the install at all is the observable difference.
+  local f
+  for f in .npmrc .yarnrc .yarnrc.yml .pnpmrc .pnpmfile.cjs pnpm-workspace.yaml bunfig.toml; do
+    printf 'enableScripts: false\n' > "$NODE_SB/ws/$f"
+    run ws_run
+    [[ "$output" != *"node_modules up to date"* ]] \
+      || { echo "${f} did not invalidate the fingerprint: $output" >&2; rm -rf "$NODE_SB"; false; }
+    rm -f "$NODE_SB/ws/$f"
+  done
+
+  # And removing them all puts it back: the fingerprint is a function of the
+  # tree, not a one-way switch that stays flipped once anything has changed.
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"node_modules up to date"* ]] || { echo "$output" >&2; false; }
+
+  # Editing one, not only adding it: a configuration that already exists and is
+  # changed is the case the finding describes.
+  printf 'enableScripts: true\n' > "$NODE_SB/ws/.yarnrc.yml"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"node_modules up to date"* ]] || { echo "$output" >&2; false; }
+  printf 'enableScripts: false\n' > "$NODE_SB/ws/.yarnrc.yml"
+  run ws_run
+  [[ "$output" != *"node_modules up to date"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace shipping tests without a test script fails closed" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ships tests but defines no"* ]]
+  [[ "$output" == *"a.test.ts"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an orphaned test path with a space is reported as one file" {
+  ws_setup
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/tests/my component.test.ts"
+  rm -f "$NODE_SB/ws/tests/a.test.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"my component.test.ts"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a test script satisfies the requirement" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: test:unit also satisfies the requirement" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test:unit": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+# --- the declared toolchain gates the workspace -------------------------------
+#
+# Accepting whatever node and the package manager resolve to means a green lane
+# vouches for nothing: the same commit can pass on one machine and fail on a
+# conforming one. These pin that the manifest's own declarations are enforced
+# before anything is installed or run, and that a manifest declaring nothing is
+# left alone.
+
+@test "node lane: an unsatisfied engines.node stops the workspace" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0" }, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy the engines.node range"* ]]
+  [[ "$output" == *">=999.0.0"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a satisfied engines.node is not in the way" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1" }, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a range it cannot evaluate is reported, not assumed" {
+  # Failing open here would be the whole finding again: an exotic range read as
+  # "fine" is indistinguishable from no check at all.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": "1.2.3 - 2.3.4" }, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate the engines.node range"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: engines ranges are evaluated, not pattern-matched" {
+  # The comparator has to treat an absent component as 0. Reading "23" as
+  # "23.23.23" would make this upper bound accept the version it excludes.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=0.0.1 <${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a packageManager pin that the host misses stops the workspace" {
+  command -v bun >/dev/null 2>&1 || skip "bun is not installed on this host"
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "packageManager": "bun@0.0.1", "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"pins packageManager bun@0.0.1"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the declared packageManager must be the one the lockfile selects" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "packageManager": "pnpm@9.0.0", "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"selects bun"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a matching packageManager pin is not in the way" {
+  command -v bun >/dev/null 2>&1 || skip "bun is not installed on this host"
+  ws_setup
+  local bunv
+  bunv="$(bun --version)"
+  # The integrity suffix corepack appends must not be compared as part of the
+  # version, or every real-world manifest would fail this check.
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"packageManager\": \"bun@${bunv}+abc123\", \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a manifest declaring no toolchain is left alone" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"engines.node"* ]]
+  [[ "$output" != *"packageManager"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the version gate runs before any install or script" {
+  # "Before invoking the workspace" is the point: an install under an undeclared
+  # toolchain has already produced the tree the run would be judged on.
+  ws_setup
+  # A glob rather than the computed name: this only has to unseed whatever
+  # fingerprint is there, and the filename is the lane's business.
+  rm -f "$NODE_SB"/.ci-gate/node_modules-*.hash
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0" }, "scripts": { "test": "bash scripts/fail.sh" } }'
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" != *"Installing dependencies"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: engines X-ranges admit the versions npm admits" {
+  # "20" is >=20.0.0 <21.0.0, not 20.0.0 exactly. Defaulting an unstated
+  # component to 0 rejected a conforming runtime — a false infra failure, which
+  # is how a fail-closed check gets switched off.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an X-range still excludes the neighbouring major" {
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"$((major + 1))\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a malformed range cannot come back satisfied" {
+  # A trailing "||" leaves an empty alternative. Counting tokens across all
+  # alternatives let the empty one inherit the previous alternative's count and
+  # its untouched ok flag, so ">=999.0.0 ||" reported satisfied — the
+  # enforcement boundary switched off by a typo.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=999.0.0 ||" }, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a malformed range is rejected even when an alternative matches" {
+  # Malformed input is unverifiable however well one alternative matches. This
+  # is the case an early return on the first satisfied alternative would hide.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1 ||" }, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unsupported range form does not fail a version another alternative admits" {
+  # The converse of the case above, and the reason the two are distinguished: a
+  # range form this comparator does not implement must not reject a runtime that
+  # a sibling alternative plainly accepts.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=0.0.1 || 1.2.3 - 2.3.4" }, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a deleted manifest with workspace config left behind fails" {
+  # Discovery finds nothing, so the lane used to report PASS having run no
+  # install, typecheck, test or build — while the tracked frontend was left
+  # uninstallable and test-layout still passed on the surviving vitest config.
+  ws_setup
+  rm -f "$NODE_SB/ws/package.json"
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no package.json beside it"* ]]
+  [[ "$output" == *"bun.lock"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "tests-js: a package manager's value-taking option is not the command" {
+  # The sharpest fail-open this file has. `npx --package vitest jest --ci` is
+  # the documented way to run a tool without installing it, and the reader
+  # treated `--package` as valueless -- so it declared `vitest`, the name that
+  # is the option's *value*. In a workspace that installs both runners this lane
+  # then ran Vitest over a Jest suite: Vitest collects nothing it recognises,
+  # exits 0, and tests-js reports PASS with every Jest test uncollected.
+  #
+  # ci/checks/node.sh's _pm_advance was keyed by manager in 0105adc8 for exactly
+  # this reason; this copy kept the un-keyed list. Keyed here now, so `-p` can
+  # mean `--package` to npx and `--parseable` to pnpm without one eating the
+  # other's command.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  _tj_declared() {
+    printf '{ "name": "w", "scripts": { "test": %s } }\n' "$1" > "$sb/package.json"
+    ( cd "$sb" && bash -c '. ci/lib/log.sh 2>/dev/null
+                           . ci/lib/common.sh
+                           eval "$(sed -n "/BEGIN declared-runner reader/,/END declared-runner reader/p" ci/checks/tests.sh)"
+                           _tests_js_declared_runner || printf ""' )
+  }
+
+  [ "$(_tj_declared '"npx --package vitest jest --ci"')" = "jest" ]
+  [ "$(_tj_declared '"npx -p vitest jest --ci"')" = "jest" ]
+  [ "$(_tj_declared '"npm --package vitest jest --ci"')" = "jest" ]
+
+  # The joined spelling always worked, and is the tell that the value was being
+  # read as a word rather than as the option's.
+  [ "$(_tj_declared '"npx --package=vitest jest --ci"')" = "jest" ]
+
+  # The control that keyed lists exist for: pnpm's `-p` is `--parseable`, a
+  # boolean, so the word after it *is* the command. A shared list would have to
+  # eat one of these two to satisfy the other.
+  [ "$(_tj_declared '"pnpm -p vitest run"')" = "vitest" ]
+  [ "$(_tj_declared '"pnpm --filter web vitest run"')" = "vitest" ]
+
+  # And the plain forms are untouched.
+  [ "$(_tj_declared '"vitest run"')" = "vitest" ]
+  [ "$(_tj_declared '"jest --ci"')" = "jest" ]
+  rm -rf "$sb"
+}
+
+@test "js lane: the two runner readers agree about the same test script" {
+  # ci/checks/node.sh and ci/checks/tests.sh both answer "which runner does this
+  # test script name", for different purposes: node.sh refuses a script that
+  # runs no runner, tests.sh picks which runner to invoke when a workspace
+  # installs both. The comment above the tests.sh reader has claimed since it
+  # was written that "ci/tests/test_js_lane.bats pins the two readers against
+  # the same spellings so they cannot drift apart about a wrapper".
+  #
+  # Nothing did. They drifted on two spellings at once, both of them fixed in
+  # node.sh first and left standing in tests.sh:
+  #
+  #   true&&vitest run              node.sh: fixed here    tests.sh: read as one token
+  #   npx --package vitest jest     node.sh: fixed in 0105adc8  tests.sh: declared vitest
+  #
+  # The second is the sharper one -- tests.sh would run Vitest over a Jest suite,
+  # collect nothing, and report PASS. This case is that claim made true.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+
+  # The tests.sh reader, extracted and driven directly: it reads ./package.json
+  # through node, so the fixture is a manifest.
+  _declared() {
+    printf '{ "name": "w", "scripts": { "test": %s } }\n' "$1" > "$sb/package.json"
+    ( cd "$sb" && bash -c '. ci/lib/log.sh 2>/dev/null
+                           . ci/lib/common.sh
+                           eval "$(sed -n "/BEGIN declared-runner reader/,/END declared-runner reader/p" ci/checks/tests.sh)"
+                           _tests_js_declared_runner || printf ""' )
+  }
+  # The node.sh side is asked through the lane itself rather than through one of
+  # its helpers. The two files do not share a function, so the property worth
+  # pinning is the one a developer feels: for the same script, tests.sh names
+  # the runner the shell would run, and node.sh does not refuse it for naming
+  # none. Reaching into _command_runner asks a narrower question -- it answers
+  # with the *first* command, so `true && vitest run` is `true` there and that
+  # is correct -- and a case built on it fails for a reason no user has.
+  ws_setup
+  rm -f "$NODE_SB/ws/tsconfig.json"
+
+  # The spellings, and what the shell would actually run for each.
+  local spec truth got_t
+  for spec in \
+    'true&&vitest run|vitest' \
+    'true && vitest run|vitest' \
+    'true;vitest run|vitest' \
+    'npx --package vitest jest --ci|jest' \
+    'npx --package=vitest jest --ci|jest' \
+    'pnpm -p vitest run|vitest' \
+    'timeout 300 vitest run|vitest' \
+    'env FOO=1 jest --ci|jest' \
+    'jest --ci|jest'
+  do
+    truth="${spec##*|}"
+    spec="${spec%|*}"
+    got_t="$(_declared "\"$spec\"")"
+    [ "$got_t" = "$truth" ] \
+      || { echo "tests.sh read '$spec' as '${got_t:-<none>}', shell runs '$truth'" >&2; rm -rf "$sb"; return 1; }
+
+    # node.sh's half. `;` throws the runner's status away and is refused on
+    # those grounds, which is a different objection from "names no runner" --
+    # the point here is that neither reader may fail to *find* the runner.
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"$spec\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "node.sh could not find the runner in '$spec'" >&2; echo "$output" >&2; rm -rf "$sb"; return 1; }
+  done
+
+  # And the control that keeps this from being "both readers say vitest to
+  # everything": a script that names no runner is named by neither.
+  got_t="$(_declared '"echo nothing"')"
+  [ -z "$got_t" ]
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo nothing" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"not appear to run a test runner"* ]]
+  rm -rf "$sb"
+  rm -rf "$NODE_SB"
+}
+
+@test "js lane: an npm --call payload names the runner it runs" {
+  # `npm exec --package jest -c 'jest --ci'` runs that string with the package's
+  # binaries on PATH, so the payload is the command. tests.sh consumed it as an
+  # inert option value and declared nothing -- and nothing is what sends a
+  # workspace carrying a local Vitest to the installed-runner fallback, so
+  # Vitest ran over the Jest suite the manifest names, collected nothing it
+  # recognised, exited 0, and tests-js reported PASS.
+  #
+  # tests.sh only. ci/checks/node.sh reads `--call` as a value-taking option and
+  # refuses the script, which is fail-closed and is pinned by `node lane: a
+  # package manager's value-taking options are its own, not one list`. The two
+  # readers differ here on purpose -- opposite failure directions -- so this is
+  # deliberately not folded into the cross-reader case above.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+
+  _declared_call() {
+    printf '{ "name": "w", "scripts": { "test": %s } }\n' "$1" > "$sb/package.json"
+    ( cd "$sb" && bash -c '. ci/lib/log.sh 2>/dev/null
+                           . ci/lib/common.sh
+                           eval "$(sed -n "/BEGIN declared-runner reader/,/END declared-runner reader/p" ci/checks/tests.sh)"
+                           _tests_js_declared_runner || printf ""' )
+  }
+
+  local spec truth got
+  for spec in \
+    "npm exec -c 'jest --ci'|jest" \
+    "npm exec --call 'jest --ci'|jest" \
+    "npx -c 'jest --ci'|jest" \
+    "npx --call 'vitest run'|vitest" \
+    "npm exec --package jest -c 'jest --ci'|jest" \
+    "npm exec -c 'echo hi' && vitest run|vitest" \
+    "bash -c 'jest --ci'|jest"
+  do
+    truth="${spec##*|}"
+    spec="${spec%|*}"
+    got="$(_declared_call "\"$spec\"")"
+    [ "$got" = "$truth" ] \
+      || { echo "read '$spec' as '${got:-<none>}', shell runs '$truth'" >&2; rm -rf "$sb"; return 1; }
+  done
+
+  # The control: a payload naming no runner still declares nothing, so the
+  # `--call` arm cannot be a way to make any script look like a test script.
+  got="$(_declared_call "\"npm exec -c 'echo nothing'\"")"
+  [ -z "$got" ] || { echo "expected nothing, got '$got'" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
+
+@test "js lane: the Jest path filter is spelled the way the installed Jest spells it" {
+  # Jest 30 renamed --testPathPattern to --testPathPatterns and removed the
+  # singular form, so emitting it unconditionally makes Jest 30 reject the
+  # invocation before running a single test -- affected-test narrowing turning a
+  # working suite into a lane failure. Older majors know only the singular, so
+  # this cannot simply be switched over either.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/node_modules/jest"
+
+  _flag() {
+    printf '{"version":"%s"}' "$1" > "$sb/node_modules/jest/package.json"
+    ( cd "$sb" && bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+                          eval \"\$(sed -n '/^_tests_jest_path_flag()/,/^}\$/p' '$REPO_ROOT/ci/checks/tests.sh')\"
+                          _tests_jest_path_flag" )
+  }
+
+  [ "$(_flag 29.7.0)" = "--testPathPattern" ]
+  [ "$(_flag 28.1.0)" = "--testPathPattern" ]
+  [ "$(_flag 30.0.0)" = "--testPathPatterns" ]
+  [ "$(_flag 30.2.1)" = "--testPathPatterns" ]
+
+  # jest-cli is the package the CLI delegates to, and a workspace may carry
+  # either name.
+  rm -rf "$sb/node_modules/jest"
+  mkdir -p "$sb/node_modules/jest-cli"
+  printf '{"version":"30.1.0"}' > "$sb/node_modules/jest-cli/package.json"
+  [ "$( cd "$sb" && bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+        eval \"\$(sed -n '/^_tests_jest_path_flag()/,/^}\$/p' '$REPO_ROOT/ci/checks/tests.sh')\"
+        _tests_jest_path_flag" )" = "--testPathPatterns" ]
+
+  # Undetectable falls back to the spelling every major before 30 accepts,
+  # which is what this lane emitted before the option had two names.
+  rm -rf "$sb/node_modules"
+  [ "$( cd "$sb" && bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+        eval \"\$(sed -n '/^_tests_jest_path_flag()/,/^}\$/p' '$REPO_ROOT/ci/checks/tests.sh')\"
+        _tests_jest_path_flag" )" = "--testPathPattern" ]
+  rm -rf "$sb"
+}
+
+@test "js lane: every reader of 'is this a TypeScript project' knows the same names" {
+  # Four places ask this one question, in three syntaxes:
+  #
+  #   ci/checks/node.sh   _ts_project_files  -- does this workspace need a
+  #                                             typecheck script at all
+  #   ci/checks/node.sh   the orphan scan    -- is a lost package.json noticed
+  #   ci/checks/typecheck.sh                 -- which projects get compiled
+  #   ci/lib/changeset.sh the classifier arm -- which lanes get scheduled
+  #
+  # Each disagreement has already happened once. The first three drifted when
+  # tsconfig.app.json was added to two of them, and the orphan scan was still
+  # on the original list a commit later -- so this case is the thing that
+  # notices next time, rather than a fifth review round.
+  #
+  # Compared as sets of names with the syntax normalised away: `find -name`
+  # globs, an ERE with escaped dots and `[^/]+`, and a shell case pattern.
+  local expected
+  expected="$(printf '%s\n' jsconfig.'*'.json jsconfig.json tsconfig.'*'.json tsconfig.json | sort)"
+
+  # A guard on the extractor itself: a normaliser that matches nothing would
+  # make every comparison below a comparison of two empty strings.
+  [ -n "$expected" ]
+
+  _tsnames() {
+    # Backslashes (ERE escapes) removed, then `[^/]+` folded to `*`, so all
+    # three syntaxes spell the same four names the same way.
+    tr -d '\\' \
+      | grep -oE '(ts|js)config\.(json|\*\.json|\[\^/\]\+\.json)' \
+      | sed 's/\[\^\/\]+\.json/*.json/' \
+      | sort -u
+  }
+
+  local got
+  got="$(sed -n '/^_ts_project_files()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "node.sh _ts_project_files: $got" >&2; return 1; }
+
+  got="$(sed -n '/ORPHAN_CFG="\$(find/,/-print 2>\/dev\/null/p' "$REPO_ROOT/ci/checks/node.sh" | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "node.sh orphan find: $got" >&2; return 1; }
+
+  # The ship-mode half of the same scan, which reads HEAD through a grep rather
+  # than the filesystem through find -- two spellings of one list, and the place
+  # a fix applied to only one of them would show up.
+  got="$(grep -F 'npm-shrinkwrap' "$REPO_ROOT/ci/checks/node.sh" | grep -F 'grep -E' | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "node.sh orphan grep: $got" >&2; return 1; }
+
+  got="$(grep -n "name 'tsconfig" -A 2 "$REPO_ROOT/ci/checks/typecheck.sh" | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "typecheck.sh: $got" >&2; return 1; }
+
+  got="$(grep -F 'tsconfig.json|' "$REPO_ROOT/ci/lib/changeset.sh" | tr '|' '\n' | _tsnames)"
+  [ "$got" = "$expected" ] \
+    || { echo "changeset.sh: $got" >&2; return 1; }
+}
+
+@test "node lane: a compact && is the same composition as a spaced one" {
+  # `&&` is the one composition this reader calls safe -- either the checker
+  # runs or the thing before it failed and the script fails with it -- and the
+  # separator normalisation above spaced out `;` and left it joined. So
+  # `true&&vitest run` tokenized as `true&&vitest`, which sits in command
+  # position and is not a runner, and a legitimate script was refused as "does
+  # not appear to run a test runner".
+  #
+  # The mirror image of the `;` fix beside it: that one spaced its separator to
+  # close a bypass, this one spaces its separator to stop inventing a failure.
+  # Both are the tokenizer disagreeing with the shell.
+  #
+  # The runner is named bare here rather than as `./scripts/vitest`, which is
+  # what the other cases in this file use. A path form was never affected: the
+  # token `true&&./scripts/vitest` still ends in `/vitest`, and the basename is
+  # what gets matched, so the joined separator was invisible. Only the bare name
+  # reproduces -- my first draft of this case used the path and passed against
+  # the unfixed tree.
+  #
+  # Asserted on what the lane says rather than on its exit status, because a
+  # bare `vitest` is not installed in this sandbox: the script is reached and
+  # then fails for a reason that has nothing to do with the rule. "Running
+  # script: test" is printed before the script runs, which is exactly the
+  # boundary this case is about.
+  ws_setup
+  rm -f "$NODE_SB/ws/tsconfig.json"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true&&vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]] \
+    || { echo "a compact && was read as part of the command name" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"Running script: test"* ]]
+
+  # The spaced spelling is the same shell program and already worked; asserting
+  # it here is what makes the case about the spacing rather than about the
+  # fixture.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true && vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  [[ "$output" == *"Running script: test"* ]]
+
+  # The controls, each checking that spacing the separator did not space past a
+  # rule. A narrowing positional after a compact `&&` is still a narrowing
+  # positional -- and refused in the same words as the spaced spelling, not by
+  # the runner rule firing for the wrong reason, which is how the unfixed tree
+  # happened to reach the right verdict here.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true&&vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # A config redirect likewise.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true&&vitest --config other.ts run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # `||` is still refused, joined or not: it either never reaches the checker or
+  # throws the checker's result away.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run||true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" != *"Running script: test"* ]]
+
+  # A single `&` backgrounds the checker and is not `&&` with a character
+  # missing -- the two-character match must not fire on it.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true&vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"backgrounds"* ]]
+
+  # And a quoted `&&` is data, not a separator: the mask is what is scanned, so
+  # an argument containing it is left where it is.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --reporter=\"a&&b\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"Running script: test"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the orphan scan knows every configuration name discovery does" {
+  # The scan's list of what counts as workspace configuration was
+  # `tsconfig.json|jsconfig.json`, which was the whole list until discovery
+  # widened to tsconfig.*.json. So the `npm create vite` shape -- tsconfig.app.
+  # json and tsconfig.node.json, no plain tsconfig.json -- was a workspace whose
+  # manifest could go missing with nothing left behind that this scan recognised:
+  # "No package.json found. Skipping Node lane.", exit 0, over a directory of
+  # unchecked TypeScript.
+  #
+  # A name this scan does not know is a directory whose loss it cannot notice,
+  # which is why the two lists have to agree. Found by sweeping the other readers
+  # after the same disagreement was reported one commit over.
+  ws_setup
+  rm -rf "$NODE_SB/ws"
+  mkdir -p "$NODE_SB/app/src"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/app/tsconfig.app.json"
+  printf '{ "compilerOptions": {} }\n' > "$NODE_SB/app/tsconfig.node.json"
+  printf 'export const n: number = "no";\n' > "$NODE_SB/app/src/a.ts"
+
+  # The premise: nothing else in the directory is on the old list -- no
+  # lockfile, no vite config, no plain tsconfig.json -- so the scaffold configs
+  # are the only thing that can report this directory.
+  [ ! -f "$NODE_SB/app/tsconfig.json" ]
+  run bash -c "ls '$NODE_SB/app'"
+  [[ "$output" != *"lock"* ]]
+  [[ "$output" != *"vite"* ]]
+
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ] \
+    || { echo "a lost manifest went unnoticed beside its scaffold configs" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"no package.json beside it"* ]]
+  [[ "$output" == *"tsconfig.app.json"* ]]
+  [[ "$output" == *"tsconfig.node.json"* ]]
+  # And not by the route this case is not about.
+  [[ "$output" != *"No package.json found"* ]]
+
+  # The control that keeps the rule: a manifest beside them settles it, in
+  # exactly the shape the scan exists to distinguish.
+  printf '{ "name": "app", "private": true }\n' > "$NODE_SB/app/package.json"
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *"no package.json beside it"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an orphaned workspace beside a healthy one still fails" {
+  # The scan was nested under "the repository has no workspace at all", which
+  # made an orphan a property of the repository rather than of the directory it
+  # sits in. With two siblings, deleting b/package.json left a, discovery
+  # succeeded, and b — lockfile and all — was never looked at.
+  ws_setup
+  mkdir -p "$NODE_SB/wb"
+  printf '{ "name": "b", "private": true, "scripts": { "test": "bash scripts/test.sh" } }\n' > "$NODE_SB/wb/package.json"
+  printf '{}\n' > "$NODE_SB/wb/bun.lock"
+  printf '{}\n' > "$NODE_SB/wb/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  rm -f "$NODE_SB/wb/package.json"
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no package.json beside it"* ]]
+  [[ "$output" == *"wb/"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace added only in the index is not an orphan" {
+  # The control: a manifest that exists in the index but not yet on disk is a
+  # workspace being added, not configuration left behind by a deletion.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  rm -f ws/package.json
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  # The manifest is gone from disk, so the workspace guard fires — but not the
+  # orphan scan, which is what this case is about.
+  [[ "$output" != *"no package.json beside it"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a manifest staged for deletion but restored on disk fails" {
+  # Discovery reads the filesystem, so the restored worktree copy looked like a
+  # healthy workspace and every check below read it. Both pre-commit and
+  # pre-push passed for a commit carrying no manifest at all.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm --cached -q ws/package.json >/dev/null 2>&1
+  [ -f "$NODE_SB/ws/package.json" ]
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not in the git index"* ]]
+  [[ "$output" == *"ws/package.json"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the index check is inert where there is no index" {
+  # The lane also runs from a plain export with no .git. Failing there would be
+  # a false positive, not a finding.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  if git -C "$NODE_SB" rev-parse --git-dir >/dev/null 2>&1; then
+    rm -rf "$NODE_SB"
+    skip "the sandbox temp dir is itself inside a repository on this host"
+  fi
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a malformed comparator operand is unverifiable, not satisfied" {
+  # _semver_part strips non-numeric text and defaults to 0, so ">=banana" and a
+  # bare ">=" both became >=0.0.0 and admitted every version there is.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=banana" }, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a comparator with no operand is unverifiable" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "engines": { "node": ">=" }, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a partial tilde range covers its whole major" {
+  # "~20" is >=20.0.0 <21.0.0. Comparing the minor unconditionally read the
+  # omitted one as 0 and rejected 20.20.2 — a conforming runtime.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a tilde range that states a minor still pins it" {
+  # The converse: narrowing must survive the fix, or "~20.1" would admit 20.20.
+  ws_setup
+  local major minor
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  minor="$(node --version | sed 's/^v//' | cut -d. -f2)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.$((minor + 1))\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a partially staged manifest stops the workspace" {
+  # Existing in the index is not enough: every check below reads the worktree
+  # copy, so staging the removal of the test script and restoring the healthy
+  # manifest on disk ran the restored script and exited 0 for a commit that
+  # ships tests with no way to run them.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  # Stage a manifest with no test script, then restore the healthy one on disk.
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": {} }' > ws/package.json
+  git add ws/package.json >/dev/null 2>&1
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }' > ws/package.json
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"staged but changed again in the worktree"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a partially staged source file stops the workspace" {
+  # The manifest is not the only file the lane consumes: it installs,
+  # typechecks, tests and builds the worktree. Staging a failing source file and
+  # restoring the passing copy on disk reported "Node lane passed" for a commit
+  # whose code fails once checked out.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'throw new Error("fail");\n' > ws/app.js
+  git add ws/app.js >/dev/null 2>&1
+  printf 'export const ok = true;\n' > ws/app.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a staged deletion recreated as an untracked file is caught" {
+  # git reports `D  app.js` and `?? app.js`, but `git diff` compares tracked
+  # content only, so the intersection stayed empty and the lane tested the
+  # recreated file for a commit that deletes it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm --cached -q ws/app.js >/dev/null 2>&1
+  rm -f ws/app.js
+  printf 'export const recreated = 1;\n' > ws/app.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ordinary untracked file is not partial staging" {
+  # The rule still has to stay on files that are part of this commit. A new
+  # file nobody has staged is the normal way work starts.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'export const brand_new = 1;\n' > ws/newfile.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an invalid operand beats a satisfied alternative" {
+  # A malformed operand is a typo, not a range form this comparator lacks, and
+  # no sibling should rescue it: ">=20banana || >=<major>" came back satisfied
+  # while _semver_is_version was rejecting the first operand outright.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=20banana || >=${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Cannot evaluate"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unsupported form still loses to a satisfied alternative" {
+  # The distinction that makes the case above meaningful: a hyphen range is
+  # valid syntax this comparator does not implement, and it must not fail a
+  # runtime a sibling plainly admits.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">=${major} || 1.2.3 - 2.3.4\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ordinary dirty worktree is not partial staging" {
+  # The rule has to stay on files that are part of this commit. Running the gate
+  # by hand on an edited-but-unstaged tree is the normal case, and failing it
+  # makes the lane unusable rather than stricter. Uses the manifest on purpose:
+  # the first version of this check compared package.json against the index
+  # unconditionally, so every uncommitted manifest edit failed the lane.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "build": "true" } }' > ws/package.json
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an index that matches the worktree is not in the way" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an established workspace cannot lose its whole suite" {
+  # Deleting every test file AND both scripts leaves nothing to be orphaned,
+  # test-layout reports "0 file(s)" quite happily, and a successful build
+  # carries the gate to exit 0 after the suite has disappeared.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  rm -rf ws/tests
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "build": "true" } }' > ws/package.json
+  git add -A >/dev/null 2>&1
+  # Seeded after the mutation: the fingerprint covers the manifest, so seeding
+  # it earlier would leave the install to run against a stub lockfile.
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"lost its entire test suite"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace that never had tests is unaffected by the suite rule" {
+  # The negative control: "had tests at HEAD" is the whole trigger, so a
+  # genuinely test-free workspace must still pass.
+  ws_setup
+  rm -rf "$NODE_SB/ws/tests"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a script exiting 10 is a failure, not known debt" {
+  # 10 is the gate's PASS_WITH_KNOWN_DEBT. A package script does not implement
+  # that contract, so vitest — or any tool it wraps — exiting 10 was recorded as
+  # a passing lane, the remaining scripts were skipped, and preflight exited 0.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fail10.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"failed with status 10"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ordinary script failure is still a new issue" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fail.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a numeric-prefixed malformed operand is unverifiable" {
+  # ">=20banana" begins with a digit and carries only legal characters, so a
+  # first-character-and-charset check accepted it and _semver_part then parsed
+  # it as >=20.0.0. node-semver rejects it outright.
+  ws_setup
+  local bad
+  for bad in '>=20banana' '>=20..1' '>=20.1.2.3'; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"${bad}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 30 ] || { echo "accepted malformed range: $bad" >&2; return 1; }
+    [[ "$output" == *"Cannot evaluate"* ]] || { echo "wrong message for: $bad" >&2; return 1; }
+  done
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an equality-prefixed partial range keeps X-range semantics" {
+  # node-semver normalises "=20" to >=20.0.0 <21.0.0-0. Routing it through
+  # exact comparison defaulted the omitted components to zero and rejected a
+  # conforming runtime — the same defaulting the bare form was fixed for.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"=${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an equality range that states every component still pins it" {
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"=$((major + 1)).0.0\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a comparator on a partial range covers the whole major" {
+  # node-semver expands "<=20" to <21.0.0-0. Comparing against a zero-filled
+  # 20.0.0 rejected 20.20.2, a conforming runtime.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"<=${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a strict comparator on a partial range excludes the whole major" {
+  # The other side of the same bound: ">20" requires 21 or later, and against a
+  # zero-filled 20.0.0 it wrongly admitted 20.20.2.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a fully stated comparator is unaffected by the expansion" {
+  # ">=20.0.0" and "<20.0.0" already read correctly; the bound must only apply
+  # where the operand leaves components unstated.
+  ws_setup
+  local ver
+  ver="$(node --version | sed 's/^v//')"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">${ver}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace staged but missing from disk stops the gate" {
+  # Discovery stats the filesystem, so a workspace that exists only in the index
+  # never entered NODE_WORKSPACES: the commit adds it, with a failing test
+  # script, and the lane never looks at it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  mkdir -p added
+  printf '%s\n' '{ "name": "a", "private": true, "scripts": { "test": "bash scripts/fail.sh" } }' > added/package.json
+  printf '{}\n' > added/bun.lock
+  git add added >/dev/null 2>&1
+  rm -rf added
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"staged but missing from the worktree"* ]]
+  [[ "$output" == *"added/package.json"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace declaring TypeScript must be able to typecheck it" {
+  # vite build does not run tsc, so with the typecheck script gone run_script
+  # logs "Skipping missing script" and the lane exits 0 having checked no types.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no 'typecheck' script"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck script satisfies the TypeScript requirement" {
+  # The fixture was `"typecheck": "true"`, chosen as a convenient stub — and
+  # that stub is precisely the no-op the lane now rejects, so this case was
+  # asserting that a typecheck which runs no compiler is acceptable. A real
+  # command instead.
+  #
+  # The assertion is what this case can honestly claim: the declared-TypeScript
+  # rules do not fire. It cannot assert an exit of 0, because the sandbox has no
+  # tsc to run and the lane would then fail on a missing binary — a real result,
+  # but a different question from the one in the title.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"defines no 'typecheck' script"* ]]
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace with no TypeScript config needs no typecheck script" {
+  # The negative control: the rule is keyed on the workspace declaring
+  # TypeScript, not on every workspace everywhere.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: whitespace between a comparator and its operand is not malformed" {
+  # npm reads ">= 20" as ">=20". Splitting on whitespace alone left a bare ">=",
+  # which the grammar check correctly calls malformed — so a conforming
+  # environment was blocked by an infrastructure failure over a space.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">= ${major}\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a spaced comparator is still evaluated, not waved through" {
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \">= $((major + 1))\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a repository with no JavaScript at all still skips" {
+  # The negative control the check is keyed on: no manifest AND no workspace
+  # configuration is a repo without a Node lane, not a deleted manifest.
+  ws_setup
+  rm -f "$NODE_SB/ws/package.json" "$NODE_SB/ws/bun.lock"
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Skipping Node lane"* ]]
+  rm -rf "$NODE_SB"
+}
+
+# --- the result cache must not outlive the toolchain it vouched for -----------
+
+# --- a blocking lane that cannot finish is a lane that does not run ----------
+
+@test "tests-shell: the suites are given longer than the gate default" {
+  # Found by running the gate rather than by reading it: at the 1200s default
+  # the lane was killed and reported FAIL_INFRA, so the blocking shell suites
+  # silently stopped executing in ship mode.
+  source ci/lib/runner.sh
+  local declared default
+  declared="$(ci::runner::_declared_timeout tests-shell)"
+  default="$(awk '/^default_timeout_sec:/ { gsub(/[^0-9]/, ""); print; exit }' ci/config/gate.yml)"
+  [ -n "$declared" ]
+  [ -n "$default" ]
+  [ "$declared" -gt "$default" ]
+}
+
+@test "tests-shell: the timeout applies in sequential mode too" {
+  # CI_GATE_PARALLEL=0, or a single-worker pool, runs the check directly. With
+  # the timeout applied only on the background path, a supported mode ignored
+  # both the declared value and the global one and could hang indefinitely.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/lib" "$sb/ci/config"
+  cp "$REPO_ROOT/ci/lib/runner.sh" "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$sb/ci/lib/"
+  printf 'checks:\n  slowcheck:\n    enabled: true\n    timeout_sec: 1\n' > "$sb/ci/config/checks.yml"
+  printf '#!/usr/bin/env bash\nsleep 6\nexit 0\n' > "$sb/slow.sh"
+  chmod +x "$sb/slow.sh"
+
+  run bash -c "
+    set -Eeuo pipefail
+    cd '$sb'
+    source ci/lib/common.sh 2>/dev/null || true
+    source ci/lib/runner.sh
+    CI_GATE_PARALLEL=0
+    ci::runner::init
+    start=\$(date +%s)
+    ci::runner::submit slowcheck ./slow.sh || true
+    end=\$(date +%s)
+    echo \"elapsed=\$((end-start))\"
+    echo \"rc=\$(ci::runner::get_result slowcheck 2>/dev/null || echo unknown)\"
+  "
+  rm -rf "$sb"
+  [ "$status" -eq 0 ]
+  local elapsed
+  elapsed="$(printf '%s\n' "$output" | sed -n 's/^elapsed=//p')"
+  [ -n "$elapsed" ]
+
+  # Both branches are asserted rather than skipping either: a skip on the
+  # machine that lacks the tool is indistinguishable from a skip on the machine
+  # where the feature regressed.
+  if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    # 124 is what `timeout` returns, and what preflight maps to FAIL_INFRA, so
+    # a killed check is reported as one rather than as a mystery.
+    [[ "$output" == *"rc=124"* ]]
+    [ "$elapsed" -lt 5 ]
+  else
+    # No timeout tool. This branch used to assert the opposite -- that the check
+    # runs to completion and reports its own result -- on the grounds that
+    # running bare was documented behaviour rather than a defect. It is a defect:
+    # the cap exists because someone decided this check must not run forever, so
+    # dropping it silently is how a hung blocker stalls preflight for as long as
+    # the caller will wait, with nothing in the log saying the bound was skipped.
+    # A bound that cannot be enforced is now recorded as infrastructure and the
+    # check is not run at all, which is what `runner: a timeout this host cannot
+    # enforce is refused, not dropped` in ci/tests/test_preflight.bats pins.
+    [[ "$output" == *"rc=30"* ]]
+    [ "$elapsed" -lt 5 ]
+  fi
+}
+
+@test "tests-shell: a declared timeout is actually applied, not documentation" {
+  # checks.yml has carried timeout_sec since before this PR and nothing read it;
+  # the runner used the global value for every check.
+  run bash -c "sed -n '/# Determine timeout/,/^  fi\$/p' ci/lib/runner.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"_declared_timeout"* ]]
+  [[ "$output" == *"check_timeout"* ]]
+}
+
+@test "cache key: the node lane is excluded from the result cache" {
+  # The lane runs the workspace's complete test, typecheck and build scripts,
+  # so its result depends on every file in that workspace -- not just the ones
+  # the branch touches. A PASS cached for one frontend change, rebased onto a
+  # base carrying a regression in another frontend file, has an identical key.
+  # Keying on the package managers was the first fix and covered only the
+  # toolchain half.
+  run bash -c "sed -n '/^_check_is_cacheable()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"node) return 1"* ]]
+}
+
+@test "cache key: the shell suite is excluded from the result cache" {
+  # tests-shell asserts on the whole ci/ tree and on files a changeset need not
+  # mention. A PASS cached for a .gitignore-only branch, rebased onto a base
+  # carrying a regression in ci/checks/node.sh, has an identical key: same
+  # tools, same changed files, same checks.yml.
+  run bash -c "sed -n '/^_check_is_cacheable()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-shell) return 1"* ]]
+  [[ "$output" == *"test-layout) return 1"* ]]
+}
+
+@test "cache key: a broken package manager cannot abort the gate" {
+  # Deriving a cache key must never end the run. Under `set -Eeuo pipefail` a
+  # bare $(tool --version | head -1) aborts preflight the moment a
+  # present-but-broken executable exits non-zero — before a single check has
+  # run, with a message about nothing the commit touched.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  printf '#!/usr/bin/env bash\necho boom >&2\nexit 1\n' > "$sb/bun"
+  chmod +x "$sb/bun"
+
+  run bash -c "
+    set -Eeuo pipefail
+    cd '$REPO_ROOT'
+    source ci/lib/cache.sh
+    $(sed -n '/^_tool_fingerprint()/,/^}/p' "$REPO_ROOT/ci/preflight.sh")
+    PATH='$sb':\$PATH
+    printf 'FINGERPRINT=%s\n' \"\$(_tool_fingerprint bun)\"
+    echo REACHED_END
+  "
+  rm -rf "$sb"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REACHED_END"* ]]
+  # A tool that cannot report its version is not the same state as no tool.
+  [[ "$output" == *"bun-unknown"* ]]
+}
+
+@test "cache key: an uninstalled tool is recorded, not skipped" {
+  # Recording only the tools that happen to be installed would leave the
+  # original finding intact: uninstalling bats has to change the key.
+  run bash -c "
+    set -Eeuo pipefail
+    cd '$REPO_ROOT'
+    source ci/lib/cache.sh
+    $(sed -n '/^_tool_fingerprint()/,/^}/p' "$REPO_ROOT/ci/preflight.sh")
+    _tool_fingerprint definitely-not-a-real-tool-9de32131
+  "
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-absent"* ]]
+}
+
+@test "cache key: an uncached lane keeps no key branch to go stale" {
+  # Keying on the bats and package-manager versions was the first fix for both
+  # lanes. Excluding them from the cache supersedes it and covers inputs a key
+  # never could, so their branches must not linger: they are unreachable --
+  # _compute_cache_key is only called when _check_is_cacheable passes -- and an
+  # unreachable cache key reads like the lane is still cached.
+  # Comments are stripped first: this block explains why those lanes are not
+  # here, and the explanation must not be what satisfies the assertion.
+  run bash -c "sed -n '/^_compute_cache_key()/,/^}/p' ci/preflight.sh | grep -v '^[[:space:]]*#'"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"tests-shell)"* ]]
+  [[ "$output" != *"node)"* ]]
+}
+
+@test "node lane: a workspace with no tests at all is unaffected" {
+  ws_setup
+  rm -rf "$NODE_SB/ws/tests"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an edited manifest invalidates the install cache" {
+  # Fingerprinting the lockfile alone lets a package.json/lockfile mismatch
+  # reuse a stale node_modules, so the frozen install that would catch it never
+  # runs.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" }, "dependencies": { "x": "1.0.0" } }'
+  run ws_run
+  [[ "$output" != *"up to date"* ]]
+  [[ "$output" == *"Installing dependencies"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unchanged workspace still skips the install" {
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up to date"* ]]
+  rm -rf "$NODE_SB"
+}
+
+# --- the JS test runner must be the pinned one --------------------------------
+
+@test "tests lane: no PATH fallback to a global jest or vitest" {
+  # An unpinned runner against a different Vite produced ~160 phantom failures
+  # in this checkout. Reporting the runner unavailable is recoverable; a green
+  # run of the wrong binary is not.
+  run grep -nE '^[[:space:]]*(jest|vitest)[[:space:]]' ci/checks/tests.sh
+  [ "$status" -ne 0 ]
+  run grep -nE 'command_exists (jest|vitest)$' ci/checks/tests.sh
+  [ "$status" -ne 0 ]
+}
+
+@test "tests lane: the JS runner resolves only inside the workspace" {
+  # Every invocation must come from node_modules/.bin of the workspace.
+  run grep -c 'node_modules/.bin/' ci/checks/tests.sh
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 2 ]
+}
+
+# --- package metadata triggers the lane ---------------------------------------
+#
+# preflight filters lanes by ci/lib/changeset.sh check ids, not affected.yml. A
+# manifest classified as `json` and a lockfile as `unknown` emit no JavaScript
+# check ids, so a dependency bump or a changed script skipped the node lane
+# entirely — no install, tests, typecheck or build.
+
+@test "changeset: a package manifest classifies as javascript" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file frontend/package.json)" = "javascript" ]
+}
+
+@test "changeset: every supported lockfile classifies as javascript" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  local f
+  for f in bun.lock bun.lockb package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock; do
+    [ "$(ci::changeset::classify_file "frontend/$f")" = "javascript" ] \
+      || { echo "$f did not classify as javascript" >&2; return 1; }
+  done
+}
+
+@test "changeset: a javascript classification emits the node lane check ids" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  run ci::changeset::_checks_for_language javascript
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-js"* ]]
+  [[ "$output" == *"typecheck-js"* ]]
+}
+
+@test "changeset: frontend build inputs schedule the node lane" {
+  # These are the only lane that can validate them. Left `unknown`/`json` they
+  # schedule nothing at all — no typecheck, no tests, no vite build.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  local f
+  for f in frontend/src/styles.css frontend/index.html frontend/tsconfig.json; do
+    [ "$(ci::changeset::classify_file "$f")" = "javascript" ] \
+      || { echo "$f classified as $(ci::changeset::classify_file "$f"), not javascript" >&2; return 1; }
+  done
+}
+
+@test "affected: a lockfile change maps to the frontend suite" {
+  # A lockfile resolves different code into node_modules, so the suite has to
+  # run. Staged next to a Python change it otherwise leaves the JavaScript
+  # slice empty and tests.sh skips the lane.
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/bun.lock backend/app/main.py
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: a stylesheet change maps to the frontend suite" {
+  # Kept in step with the `javascript` classification in changeset.sh: the lane
+  # being scheduled is useless if the affected filter then finds nothing.
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/src/styles.css backend/app/main.py
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+@test "affected: classifier and mapping agree on every javascript extension" {
+  # Derived from the classifier, not a hand-kept list: adding an extension to
+  # ci/lib/changeset.sh without a matching affected.yml rule fails here rather
+  # than silently scheduling a lane that then finds nothing to run. This gap has
+  # recurred three times in review, which is why the list is computed.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  source ci/lib/affected.sh
+
+  # `tr -d $' \t'` rather than `tr -d ' \t'`: bash expands the escape itself, so
+  # the set handed to tr is a real space and a real tab and does not depend on
+  # tr interpreting `\t`. The failure mode of getting that wrong is silent —
+  # a tr that took the backslash literally would delete every `t` and turn the
+  # parsed `.ts` and `.cts` into `.s` and `.cs`, and the loop below would then
+  # report the classifier disagreeing about extensions that do not exist.
+  local exts
+  exts="$(sed -n '/^  case "\$ext" in$/,/^  esac$/p' ci/lib/changeset.sh \
+    | grep -E "printf 'javascript'" \
+    | sed 's/).*//' \
+    | tr '|' '\n' \
+    | tr -d $' \t' \
+    | grep -vE '^$|^#')"
+  [ -n "$exts" ]
+
+  local ext missing=""
+  while IFS= read -r ext; do
+    [ -z "$ext" ] && continue
+    [ "$(ci::changeset::classify_file "frontend/src/probe.$ext")" = "javascript" ] \
+      || { echo "classifier disagrees for .$ext" >&2; return 1; }
+    case "$(ci::affected::get_affected_tests "frontend/src/probe.$ext")" in
+      *frontend/tests/*) ;;
+      *) missing="${missing} .${ext}" ;;
+    esac
+  done <<< "$exts"
+
+  if [ -n "$missing" ]; then
+    echo "classified javascript but unmapped in affected.yml:${missing}" >&2
+    return 1
+  fi
+}
+
+@test "affected: classifier and mapping agree on frontend manifests and lockfiles" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  source ci/lib/affected.sh
+  local f
+  for f in frontend/package.json frontend/tsconfig.json frontend/bun.lock frontend/index.html; do
+    [ "$(ci::changeset::classify_file "$f")" = "javascript" ] \
+      || { echo "$f not classified javascript" >&2; return 1; }
+    case "$(ci::affected::get_affected_tests "$f")" in
+      *frontend/tests/*) ;;
+      *) echo "$f classified javascript but maps to no frontend tests" >&2; return 1 ;;
+    esac
+  done
+}
+
+@test "typecheck lane: no PATH fallback to a global tsc" {
+  # Same reasoning as the JS test runner: an unpinned compiler gives a
+  # non-reproducible red or green.
+  run grep -nE 'bin="tsc"' ci/checks/typecheck.sh
+  [ "$status" -ne 0 ]
+  run grep -c 'node_modules/.bin/tsc' ci/checks/typecheck.sh
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
+@test "changeset: mts and cts classify as javascript" {
+  # Module-specific TypeScript extensions are production source, and
+  # test-layout.sh only covers test files, so nothing else would catch them.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  local ext
+  for ext in mts cts mjs cjs; do
+    [ "$(ci::changeset::classify_file "frontend/src/client.$ext")" = "javascript" ] \
+      || { echo ".$ext did not classify as javascript" >&2; return 1; }
+  done
+}
+
+@test "affected: an mts source change maps to the frontend suite" {
+  source ci/lib/affected.sh
+  run ci::affected::get_affected_tests frontend/src/client.mts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]]
+}
+
+# --- the gate runs its own test suites ----------------------------------------
+#
+# The suites in this directory cover the layout guard and the node lane. Until
+# they were scheduled they ran only by hand — the same "registered but never
+# runs" failure they exist to catch.
+
+@test "tests-shell: scheduled by preflight full and ship modes" {
+  run bash -c "sed -n '/^run_full_or_ship_checks()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-shell:./ci/checks/tests-shell.sh"* ]]
+}
+
+@test "tests-shell: registered as a blocking lane" {
+  run grep -E '^tests-shell\|' ci/config/lanes.conf
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"./ci/checks/tests-shell.sh|yes|"* ]]
+}
+
+@test "tests-shell: every input these suites assert on un-filters the lane" {
+  # The suites test the gate's own inputs, and those are not all classifiable by
+  # language: ci/config/*.yml emits lint-yaml only, and .gitignore emits nothing
+  # at all. Either would filter the lane that tests it.
+  run bash -c "sed -n '/bats suites assert on the/,/^    fi\$/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-shell"* ]]
+  local dep
+  for dep in 'ci/' '.githooks/' '.gitignore' 'frontend/README'; do
+    [[ "$output" == *"$dep"* ]] || { echo "dependency path not covered: $dep" >&2; return 1; }
+  done
+}
+
+@test "tests-shell: the README the suites assert on schedules them" {
+  # test_test_layout.bats validates frontend/README.md's prose about which modes
+  # run the guard. A README-only change classifies as markdown, schedules
+  # lint-markdown and nothing else, and would let a false coverage claim through
+  # without running the case written to reject it.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  # The reason the path exception is needed: the language route schedules
+  # lint-markdown and nothing else.
+  [ "$(ci::changeset::classify_file frontend/README.md)" = "markdown" ]
+  run ci::changeset::_checks_for_language markdown
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"tests-shell"* ]]
+
+  # Feed a README-only changeset line through preflight's OWN pattern, lifted
+  # from the file rather than copied — a copy would pass whatever preflight
+  # actually contains.
+  local pattern
+  pattern="$(sed -n "/bats suites assert on the/,/^    fi\$/p" ci/preflight.sh \
+    | sed -n "s/.*grep -qE '\(.*\)'.*/\1/p")"
+  [ -n "$pattern" ]
+  run bash -c "printf 'M\tfrontend/README.md\n' | grep -qE '$pattern'"
+  [ "$status" -eq 0 ]
+}
+
+@test "tests-shell: a .gitignore-only change is not classified into any lane" {
+  # The reason the path exception exists: without it, the changeset for a
+  # .gitignore edit yields no check ids whatsoever.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file .gitignore)" = "unknown" ]
+  run ci::changeset::_checks_for_language unknown
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "layout guard: excluded from the result cache" {
+  # test-layout reads the git index and walks the whole frontend tree, but the
+  # cache key is derived from the changed-file list and worktree contents. A
+  # staged config change with an unchanged worktree copy would serve a cached
+  # PASS for a commit the guard never inspected.
+  run bash -c "sed -n '/^_check_is_cacheable()/,/^}/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test-layout"* ]]
+  # Both the read and the write side must consult it, or a stale entry is
+  # stored now and served later.
+  run grep -c '_check_is_cacheable "' ci/preflight.sh
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 2 ]
+}
+
+@test "gitignore: a nested lib directory under frontend/tests is trackable" {
+  # The tests tree mirrors src/, so a lib/ segment can appear at any depth. The
+  # guard and vitest both see such a file; only `git add` quietly omits it.
+  run git check-ignore -q frontend/tests/features/lib/widget.test.ts
+  [ "$status" -ne 0 ]
+  run git check-ignore -q frontend/tests/a/b/lib/deep.test.ts
+  [ "$status" -ne 0 ]
+}
+
+@test "gitignore: a nested lib directory under frontend/src is trackable" {
+  run git check-ignore -q frontend/src/features/lib/util.ts
+  [ "$status" -ne 0 ]
+}
+
+@test "gitignore: a new file under ci/lib is trackable" {
+  # The Python-convention `lib/` rule shadows the gate's own library directory.
+  # The files already there are tracked and so unaffected; a newly added helper
+  # would be invisible to `git add`, shipping a check with half its code.
+  run git check-ignore -q --no-index ci/lib/newthing.sh
+  [ "$status" -ne 0 ]
+}
+
+@test "gitignore: the lib negations do not re-include ignored artifacts" {
+  # A `!<dir>/**` companion re-includes every descendant outright, overriding
+  # the artifact and secret rules above it. Un-excluding the directory alone is
+  # enough, because git only skips rule evaluation *inside* an excluded
+  # directory — everything under it is then matched normally.
+  local p
+  for p in \
+    ci/lib/__pycache__/x.pyc \
+    ci/lib/x.pyc \
+    ci/lib/x.so \
+    ci/lib/.env \
+    ci/lib/.vscode/settings.json \
+    frontend/src/lib/.env \
+    frontend/src/lib/secret.pem \
+    frontend/tests/lib/x.pyc \
+    frontend/tests/features/lib/.env
+  do
+    run git check-ignore -q --no-index "$p"
+    [ "$status" -eq 0 ] || { echo "leaked back in: $p" >&2; return 1; }
+  done
+}
+
+@test "gitignore: the example env files stay trackable" {
+  # The `.env.*` rule carries `!.env.example` negations that sit *above* this
+  # block. Re-stating the artifact rules after the negations, rather than
+  # narrowing them, would have re-ignored those.
+  run git check-ignore -q --no-index .env.example
+  [ "$status" -ne 0 ]
+}
+
+@test "gitignore: vendored lib directories are still ignored" {
+  # The negations must not reach into node_modules.
+  run git check-ignore -q frontend/node_modules/pkg/lib/index.js
+  [ "$status" -eq 0 ]
+}
+
+@test "tests-shell: a shell change emits the tests-shell check id" {
+  # Without this the lane is scheduled and then filtered straight back out.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  run ci::changeset::_checks_for_language shell
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"tests-shell"* ]]
+}
+
+@test "tests-shell: the wrapper is executable in the index, not just on disk" {
+  # run_phase executes the path directly, so a wrapper committed 100644 exits
+  # 126 Permission denied and the gate reports infra failure before any test
+  # runs. core.fileMode=false means a local chmod is not what git records, so
+  # this asserts the index mode — checking [ -x ] on the worktree passes while
+  # the committed file is still non-executable.
+  run git ls-files -s ci/checks/tests-shell.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == 100755* ]]
+  bash -n ci/checks/tests-shell.sh
+}
+
+@test "tests-shell: every ci/checks script is executable in the index" {
+  run bash -c "git ls-files -s ci/checks/ | grep -v '\.yml\$' | awk '\$1 != \"100755\"'"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "tests-shell: the wrapper dispatches to tests.sh as tests-shell" {
+  run grep -c 'CI_GATE_CHECK_ID=tests-shell' ci/checks/tests-shell.sh
+  [ "$status" -eq 0 ]
+  [ "$output" -ge 1 ]
+}
+
+@test "tests-shell: a missing bats runner is infra failure, not a green skip" {
+  # tests.sh logs "skipped: bats not installed" and returns 0, which would make
+  # this enabled blocker pass having executed nothing. uv sync does not
+  # provision bats, so a fresh environment hits exactly that.
+  # A PATH that still has a shell and coreutils but no bats: emptying PATH
+  # entirely would break bash before the check under test ever runs.
+  if PATH=/usr/bin:/bin command -v bats >/dev/null 2>&1; then
+    skip "bats resolves from /usr/bin on this host; cannot simulate its absence"
+  fi
+  run bash -c 'PATH=/usr/bin:/bin bash ci/checks/tests-shell.sh'
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"bats is not installed"* ]]
+}
+
+@test "changeset: a rename classifies both of its paths" {
+  # The entry was reduced to its destination before classification, so
+  # R100 frontend/src/x.ts -> Docs/x.md yielded lint-markdown alone — and a
+  # rename that removes a module the bundle imports scheduled neither the tests,
+  # the typecheck nor the build that would surface the broken import.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  _CI_CHANGESET_FILES_RAW="$(printf 'R100\tfrontend/src/x.ts\tDocs/x.md')"
+  ci::changeset::_populate_state_from_raw
+  [[ "$_CI_CHANGESET_LANGUAGES" == *javascript* ]]
+  [[ "$_CI_CHANGESET_LANGUAGES" == *markdown* ]]
+  [[ "$_CI_CHANGESET_CHECKS" == *tests-js* ]]
+  [[ "$_CI_CHANGESET_CHECKS" == *lint-markdown* ]]
+}
+
+@test "changeset: a recognised type inside a workspace still schedules the node lane" {
+  # Workspace membership was consulted only in classify_file's unknown fallback,
+  # so a recognised type never reached it: frontend/src/data.json classifies as
+  # json and emitted no node ids, while this workspace enables resolveJsonModule.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  _CI_CHANGESET_FILES_RAW="$(printf 'M\tfrontend/src/data.json')"
+  ci::changeset::_populate_state_from_raw
+  [[ "$_CI_CHANGESET_CHECKS" == *tests-js* ]]
+  [[ "$_CI_CHANGESET_CHECKS" == *typecheck-js* ]]
+}
+
+@test "changeset: the report generator does not overwrite scheduler state" {
+  # emit_json recomputed the language and check sets from its own collapsed view
+  # of a rename and wrote them back, so classifying both rename paths in the
+  # scheduler was undone one call later — and preflight calls emit_json
+  # immediately after detect.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  local tmp
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  CI_CHANGESET_JSON="$tmp/changeset.json"
+  _CI_CHANGESET_MODE="test"
+  _CI_CHANGESET_FILES_RAW="$(printf 'R100\tfrontend/src/x.ts\tDocs/x.md')"
+  ci::changeset::_populate_state_from_raw
+  [[ "$_CI_CHANGESET_CHECKS" == *tests-js* ]]
+  ci::changeset::emit_json
+  [[ "$_CI_CHANGESET_CHECKS" == *tests-js* ]] \
+    || { echo "emit_json dropped tests-js from the scheduler" >&2; rm -rf "$tmp"; return 1; }
+  # And the report describes the same change set it is reporting on.
+  grep -q 'tests-js' "$tmp/changeset.json"
+  grep -q 'frontend/src/x.ts' "$tmp/changeset.json"
+  grep -q 'Docs/x.md' "$tmp/changeset.json"
+  rm -rf "$tmp"
+}
+
+@test "changeset: workspace membership does not reach outside a workspace" {
+  # The negative control: a json file elsewhere still schedules no node lane.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  _CI_CHANGESET_FILES_RAW="$(printf 'M\tDocs/example.json')"
+  ci::changeset::_populate_state_from_raw
+  [[ "$_CI_CHANGESET_CHECKS" != *tests-js* ]]
+}
+
+@test "changeset: the JSON report and the scheduler agree on workspace membership" {
+  # emit_json duplicates the per-file check computation. The two disagreeing is
+  # how the report starts describing a gate that is not the one being run.
+  run bash -c "sed -n '/^ci::changeset::emit_json()/,/^}/p' ci/lib/changeset.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"_workspace_checks"* ]]
+}
+
+@test "changeset: an unrelated json file is still json" {
+  # The manifest rule must key on the basename, not on the extension.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file Docs/example.json)" = "json" ]
+}
+
+# --- the fast exit must not front-run the path exception ----------------------
+#
+# _check_should_skip carries an exception so a change to ci/, .githooks/ or
+# .gitignore still runs tests-shell. That exception is dead code if preflight
+# returns before run_mode ever calls it, which is exactly what happens for those
+# paths: none of them classifies into a language.
+
+@test "preflight: a gate-input-only change does not hit the fast exit" {
+  # Read the guard rather than the whole gate: driving preflight end to end
+  # would run every scheduled check. What has to hold is that the condition
+  # names the same paths the exception does.
+  run bash -c "sed -n '/Fast-exit if no relevant files changed/,/^  fi\$/p' ci/preflight.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"_CI_CHANGESET_FILES_RAW"* ]]
+  local dep
+  for dep in 'ci/' '.githooks/' '.gitignore'; do
+    [[ "$output" == *"$dep"* ]] || { echo "fast exit still swallows: $dep" >&2; return 1; }
+  done
+}
+
+@test "preflight: the fast exit still fires for a genuinely irrelevant change" {
+  # The exception must stay narrow. A Docs-only commit carries no language and
+  # touches no gate input, so it must still skip rather than run the full gate.
+  run bash -c "
+    _CI_CHANGESET_FILES_RAW='M	Docs/15_DELIVERY_BACKLOG.md'
+    printf '%s\n' \"\$_CI_CHANGESET_FILES_RAW\" \
+      | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore\$)'
+  "
+  [ "$status" -ne 0 ]
+}
+
+@test "preflight: the gate-input pattern matches the changeset's own line format" {
+  # _CI_CHANGESET_FILES_RAW holds STATUS<TAB>PATH lines, so a pattern anchored
+  # only at ^ would never match. Feed the real shape through the real pattern.
+  local raw
+  raw="$(printf 'M\tci/preflight.sh\nA\t.gitignore\nM\t.githooks/pre-commit\n')"
+  run bash -c "printf '%s\n' \"\$1\" | grep -cE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore\$)'" _ "$raw"
+  [ "$status" -eq 0 ]
+  [ "$output" -eq 3 ]
+}
+
+# --- workspace build inputs that no extension list can enumerate --------------
+
+@test "changeset: a frontend dotfile classifies into the node lane" {
+  # frontend/.env supplies the VITE_ variables the bundle is compiled against.
+  # Left `unknown` it emits no check ids at all, so changing what ships would
+  # run no install, no typecheck, no tests and no build.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file frontend/.env)" = "javascript" ]
+}
+
+@test "changeset: a frontend static asset classifies into the node lane" {
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file frontend/public/fonts/inter.woff2)" = "javascript" ]
+  [ "$(ci::changeset::classify_file frontend/public/favicon.ico)" = "javascript" ]
+}
+
+@test "changeset: the workspace rule does not reach outside a package.json tree" {
+  # Anchoring on package.json is what keeps this from swallowing the repo: a
+  # backend asset or a root dotfile has no JavaScript to check.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file .gitignore)" = "unknown" ]
+  [ "$(ci::changeset::classify_file src/ums/static/logo.woff2)" = "unknown" ]
+}
+
+@test "changeset: an explicit language still wins inside the workspace" {
+  # The workspace rule is the last resort, after the extension table and both
+  # sniffs. A shell script or a markdown file under frontend/ keeps its own lane.
+  source ci/lib/common.sh
+  source ci/lib/changeset.sh
+  [ "$(ci::changeset::classify_file frontend/scripts/build.sh)" = "shell" ]
+  [ "$(ci::changeset::classify_file frontend/README.md)" = "markdown" ]
+}
+
+@test "affected: every path the workspace rule classifies maps to a test pattern" {
+  # Scheduling the lane without a mapping just moves the silence: tests.sh
+  # reports "no affected JavaScript tests" and the suite still does not run.
+  source ci/lib/affected.sh
+  local f
+  for f in frontend/.env frontend/public/fonts/inter.woff2 frontend/public/favicon.ico; do
+    run ci::affected::get_affected_tests "$f"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"frontend/tests/"* ]] \
+      || { echo "$f maps to no frontend test pattern" >&2; return 1; }
+  done
+}
+
+@test "node lane: a tilde range on a wildcard minor covers the whole major" {
+  # `~20.x` states a minor textually and none semantically. Testing the operand
+  # for a non-empty second component treated the `x` as a stated minor, pinned
+  # the upper bound at 20.1.0, and failed every runtime above 20.0.x — a range
+  # npm reads as the whole of major 20.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.x\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a caret range on a wildcard minor covers the whole major" {
+  # A control, not a second reproduction: the caret branch reads the same
+  # predicate but only consults the minor when the major is 0, so `^20.x` was
+  # already correct. It is here so the shared fix is pinned on both branches.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"^${major}.x\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a tilde range on a stated minor still pins that minor" {
+  # The control that keeps the case above from being a hole: with a real number
+  # in the minor position the tilde bound is still enforced.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~$((major - 1)).0\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"does not satisfy"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: in ship mode a commit repaired only on disk is caught" {
+  # The partial-staging rule is written against the index, and in ship mode the
+  # index matches HEAD: `git diff --cached` is empty and the rule never fires.
+  # So a workspace committed without a way to run its tests, then repaired in
+  # the worktree, passed the pre-push gate on the strength of the repair.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": {} }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  # Repair on disk only. HEAD still ships a workspace with no test script.
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }' > ws/package.json
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"differ between HEAD and the worktree"* ]]
+  [[ "$output" == *"ws/package.json"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: in ship mode an untracked workspace file is caught too" {
+  # A file that exists only on disk is not in the commits being pushed either,
+  # and `git diff HEAD` says nothing about it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'export const only_on_disk = 1;\n' > ws/extra.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/extra.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: in ship mode a worktree matching HEAD passes" {
+  # The control: the rule must fail a divergent tree, not every ship run.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: outside ship mode an uncommitted edit is still allowed" {
+  # The reference tree follows the gate, so the stricter HEAD rule must not leak
+  # into the pre-commit gate, where working on a dirty tree is the normal case.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "build": "true" } }' > ws/package.json
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: preflight exports the gate mode the reference tree depends on" {
+  # node.sh reads CI_GATE_MODE, and nothing else sets it. Without the export the
+  # ship rule above is dead code in the real gate — the shape of failure this PR
+  # has hit repeatedly.
+  run grep -nE '^export CI_GATE_MODE="\$MODE"$' ci/preflight.sh
+  [ "$status" -eq 0 ]
+}
+
+@test "node lane: a comparator on an unstated major follows node-semver" {
+  # node-semver resolves an X-range major before any comparator runs: ">=x" and
+  # "<=x" become "*", "^x" and "~x" become "*", and ">x" and "<x" become
+  # "<0.0.0-0". Reading the wildcard as 0 instead got four of the six backwards.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  bash -n "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+
+  local spec want rc bad=""
+  # spec:expected, where expected is 0 satisfied / 1 not satisfied.
+  for pair in '>=x:0' '<=x:0' '^x:0' '~x:0' '>x:1' '<x:1' \
+              '>=X:0' '>=*:0' '>*:1' 'x:0' '*:0' '=x:0'; do
+    spec="${pair%:*}"; want="${pair#*:}"
+    rc=0
+    _semver_token_ok 20.11.1 "$spec" || rc=$?
+    [ "$rc" -eq "$want" ] || bad="${bad} ${spec}(want=${want} got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "wildcard-major mismatches:${bad}" >&2; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a caret range below 0.1.0 pins the patch" {
+  # "^0.0.3" is ">=0.0.3 <0.0.4": below 0.1.0 the patch carries the breaking
+  # change, so constraining the minor alone admitted 0.0.9.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  bash -n "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+
+  local rc bad=""
+  # version:spec:expected
+  for triple in '0.0.9:^0.0.3:1' '0.0.3:^0.0.3:0' '0.0.2:^0.0.3:1' \
+                '0.0.9:^0.0.x:0' '0.1.0:^0.0.x:1' \
+                '0.2.9:^0.2.3:0' '0.3.0:^0.2.3:1' \
+                '1.9.9:^1.2.3:0' '2.0.0:^1.2.3:1'; do
+    local ver="${triple%%:*}" rest="${triple#*:}"
+    local spec="${rest%:*}" want="${rest#*:}"
+    rc=0
+    _semver_token_ok "$ver" "$spec" || rc=$?
+    [ "$rc" -eq "$want" ] || bad="${bad} ${spec}@${ver}(want=${want} got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "caret mismatches:${bad}" >&2; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "affected: a nested module-extension source maps to frontend tests" {
+  # Reported in review as a gap: only "frontend/src/*.mts" is declared, so
+  # frontend/src/lib/x.mts was said to match nothing. It matches — the matcher
+  # collapses "**" to "*" and compares with `case`, where "*" crosses "/", so
+  # the direct-child spelling already covers nested paths. This passes at
+  # 98e3ecc8 too; it is here to hold the behaviour the disposition rests on,
+  # because the reasoning depends on a matcher detail that could be changed by
+  # someone tightening the globs with no idea this was load-bearing.
+  source ci/lib/affected.sh
+  local ext
+  for ext in mts cts mjs cjs; do
+    run ci::affected::get_affected_tests "frontend/src/lib/nested.$ext"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"frontend/tests/"* ]] \
+      || { echo "no frontend test pattern for nested .$ext" >&2; return 1; }
+  done
+}
+
+@test "preflight: a renamed .gitignore still un-filters the shell suite" {
+  # _CI_CHANGESET_FILES_RAW holds STATUS<TAB>PATH records and a rename is
+  # R100<TAB>old<TAB>new, so an end-of-line anchor matched only the destination.
+  # Renaming .gitignore away therefore filtered out the suite that guards it.
+  #
+  # One occurrence now, not two. The second was the gate's fast exit, which used
+  # this pattern to rescue a changeset whose paths named no language -- and that
+  # exit no longer asks which paths it holds, only whether it holds any. A
+  # renamed .gitignore is a path, so the fast exit cannot fire on it at all,
+  # which is a stronger statement than the rescue was. The occurrence that
+  # remains is the changeset filter, which is what decides whether this lane
+  # runs once the gate has started.
+  run grep -nE "gitignore\(\[\[:space:\]\]\|\\$\)" ci/preflight.sh
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+  # And the exit that used to carry the other one now asks a different question.
+  run grep -n '_pf_has_paths' ci/preflight.sh
+  [ "$status" -eq 0 ]
+  # And the pattern itself matches a rename record, not just the source text.
+  run bash -c "printf 'R100\t.gitignore\t.gitignore.old\n' \
+    | grep -qE '(^|[[:space:]])(ci/|\.githooks/|\.gitignore([[:space:]]|\$))'"
+  [ "$status" -eq 0 ]
+}
+
+@test "node lane: a component stated after a wildcard is rejected, except after ^ or ~" {
+  # This one turned over twice, so the evidence matters more than the rule.
+  #
+  # First reading: "20.*.3 should be rejected as malformed" — refuted, because
+  # node-semver read any X as making everything to its right an X.
+  # Second reading: accept it everywhere and truncate at the first wildcard.
+  # Both were measured against the semver of the day, and the answer moved:
+  # invalidXRangeOrder was added in 7.8.4 (confirmed by diffing classes/range.js
+  # across 7.8.0, 7.8.3, 7.8.4 and 7.8.5 — absent in the first two, present in
+  # the last two). From 7.8.4 on, `new Range("20.x.3")` throws.
+  #
+  # But it does not throw everywhere, and that is the part a rule stated as
+  # "reject X-order" gets wrong. invalidXRangeOrder is reached from
+  # replaceXRange only. replaceTilde and replaceCaret rewrite the operand
+  # before any X-range pass sees it, and hyphenReplace never routes through it
+  # at all. Measured on 7.8.5, over every operator crossed with every X-order
+  # shape: the 30 that throw are bare and = >= > < <=, the 34 that construct
+  # include every ^ and ~ form. Applying the rule uniformly made the gate
+  # refuse "~22.x.1" — a range every published semver accepts.
+  #
+  # So: version-dependent for the comparator forms, and this gate refuses them
+  # (fail-closed: npm >=7.8.4 will not install against them either); always
+  # valid after ^ or ~, and evaluated by truncating at the first wildcard.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  bash -n "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+
+  local rc bad=""
+  # version:spec:expected — 0 satisfied, 1 unsatisfied, 3 malformed operand.
+  # The comparator forms are the ones 7.8.4+ throws on; ^ and ~ are the ones it
+  # keeps, and there the wildcard still truncates so the trailing 3 is dropped
+  # rather than compared against the runtime patch.
+  for triple in '20.0.1:>=20.*.3:3' '19.9.9:>=20.*.3:3' \
+                '20.11.1:<=20.*.3:3' '21.0.0:<=20.*.3:3' \
+                '20.11.1:>20.*.3:3'  '21.0.0:>20.*.3:3' \
+                '19.9.9:<20.*.3:3'   '20.0.0:<20.*.3:3' \
+                '20.0.1:20.*.3:3'    '21.0.0:20.*.3:3' \
+                '20.0.1:=20.*.3:3' \
+                '20.11.1:^20.*.3:0'  '20.11.1:~20.*.3:0' \
+                '21.0.0:^20.*.3:1'   '21.0.0:~20.*.3:1' \
+                '20.11.1:~22.x.1:1'  '22.12.0:~22.x.1:0' \
+                '20.11.1:20..1:3'    '20.11.1:>=20..1:3'; do
+    local ver="${triple%%:*}" rest="${triple#*:}"
+    local spec="${rest%:*}" want="${rest#*:}"
+    rc=0
+    _semver_token_ok "$ver" "$spec" || rc=$?
+    [ "$rc" -eq "$want" ] || bad="${bad} ${spec}@${ver}(want=${want} got=${rc})"
+  done
+  # The grammar check still runs first, so a genuinely malformed operand is not
+  # truncated into something legal.
+  [ -z "$bad" ] || { echo "wildcard-truncation mismatches:${bad}" >&2; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ignored recreation of a staged deletion is caught" {
+  # `git ls-files --others` adds the standard exclusions, so a file recreated
+  # after its deletion was staged shows as `!!` rather than `??` once .gitignore
+  # covers it, and dropped out of the list the intersection was built from. The
+  # rule now asks each staged path directly: whether a path is ignored has
+  # nothing to do with whether the lane is about to read it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm --cached -q ws/app.js >/dev/null 2>&1
+  rm -f ws/app.js
+  printf 'ws/app.js\n' > .gitignore
+  printf 'export const recreated = 1;\n' > ws/app.js
+  ws_seed_fingerprint
+  # The premise: git agrees the file is ignored, not merely untracked.
+  run bash -c "cd '$NODE_SB' && git status --porcelain --ignored ws/app.js"
+  [[ "$output" == *"!!"* ]]
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: losing the whole suite fails even with a test script left behind" {
+  # The suite-loss check was nested under "and no test script", which made
+  # deleting every test safe as long as the runner survived —
+  # `vitest run --passWithNoTests` exits 0 on an empty collection, so the lane
+  # reported a pass over a suite that no longer exists.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  rm -rf ws/tests
+  git add -A >/dev/null 2>&1
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"lost its entire test suite"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace that never had tests is not accused of losing them" {
+  # The control. Keyed on HEAD carrying tests, not on the tree lacking them.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  rm -rf "$NODE_SB/ws/tests"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a tilde range with a stated patch after a wildcard covers the major" {
+  # Reported after the wildcard-minor fix: `~20.x.1` is `>=20.0.0 <21.0.0-0`
+  # to npm, and mapping the `x` to zero compared the runtime patch against the
+  # trailing 1. Already cured by normalising the operand at the grammar check,
+  # which truncates at the first wildcard — pinned here so it stays cured.
+  ws_setup
+  local major
+  major="$(node --version | sed 's/^v//' | cut -d. -f1)"
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"engines\": { \"node\": \"~${major}.x.1\" }, \"scripts\": { \"test\": \"bash scripts/test.sh\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a test script carrying a persistent name filter fails" {
+  # The layout guard rejects a persistent filter written into vitest.config.ts.
+  # This is the same filter one layer out: `vitest run -t no-such-name` exits 0
+  # with every collected test skipped, and the config the guard inspects is
+  # untouched. "A test script exists" said nothing about whether it runs
+  # anything, exactly as "a typecheck script exists" said nothing about tsc.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run -t definitely-no-such-test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: every narrowing flag is rejected, not just -t" {
+  ws_setup
+  local flag
+  for flag in '-t x' '--testNamePattern=x' '--shard=1/2' '--bail=1' '--changed' '--related src/a.ts'; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run ${flag}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "flag '${flag}' passed the guard" >&2; return 1; }
+  done
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ordinary test script is not read as a filter" {
+  # The control. A path or a test name is not a flag, and matching on substrings
+  # would fail every workspace whose script mentions one.
+  #
+  # A wrapper, not a runner: for a known runner that trailing path *is* a filter
+  # and is rejected on purpose, which is the case above.
+  #
+  # The wrapper is ws_setup's, deliberately. This case used to write its own
+  # `scripts/test.sh` containing `exit 0` — re-creating, one round later and in
+  # a control, the no-op the rule above it exists to reject, and it passed
+  # because delegation was accepted without the target ever being read. What is
+  # under test here is the *argument* handling, so the wrapper only has to be
+  # one the lane accepts.
+  #
+  # The positional this case used to carry -- `tests/no-t-here.test.ts` beside
+  # the flags -- is gone from it, and that is a correction rather than a
+  # weakening. ws_setup's wrapper is `vitest run "$@"`, so that path was
+  # forwarded straight to the runner and collected one file: a filter, wearing a
+  # wrapper. It is refused now, by `node lane: arguments handed to a delegated
+  # wrapper are not ignored`. What this case still asserts is the property it
+  # was written for -- that a flag *value* which happens to look like a path or
+  # a test name is not matched by substring.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --reporter=dot --outputFile=no-t-here.test.json" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a quoted flag value with a space is not read as a filter" {
+  # `--outputFile="my dir/out.xml"` word-splits into `--outputFile="my` and
+  # `dir/out.xml"`. The rejoin that fixed the separate-word spelling only fires
+  # on a token that *starts* with a quote, so the attached `=` form fell past it
+  # and the tail word arrived with no flag in front of it -- a legitimate script
+  # refused for narrowing a suite it does not narrow.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --outputFile=\"my dir/out.xml\" --reporter=json" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The control the rejoin must not swallow: a quoted value is not a licence to
+  # narrow. A genuine positional filter beside it is still refused, by the rule,
+  # before the script is executed at all.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --outputFile=\"my dir/out.xml\" tests/only.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"only.test.ts"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # A token carrying TWO `=` is where the first version of this rejoin lost the
+  # guard. The delimiter was taken from the first `=` while the arm was entered
+  # on a quote after the second, so `_q` became `s` -- the first letter of
+  # `singleThread` -- and the loop then ran until a word ended with `s`.
+  # `tests/only.test.ts` does, so the filter was absorbed into a token starting
+  # with `-` and skipped as a flag. The lane went from refusing this to passing
+  # it. Both readers are covered: the wrapper path and the direct runner path.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --poolOptions=singleThread=\"a b\" tests/only.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "./scripts/vitest run --sequence=shuffle=\"a b\" tests/only.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"narrows its own suite"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a Cypress suite is a suite the test script may not lose" {
+  # The orphan guard keyed on `*.test.*`/`*.spec.*`, and Cypress's documented
+  # default specPattern is `cypress/e2e/**/*.cy.{js,jsx,ts,tsx}` -- so a Cypress
+  # workspace read as test-free. Dropping both `test` and `test:unit` then left
+  # the guard silent, every script skipped, and the lane exiting PASS over a
+  # suite nothing ran.
+  # The seeded .test.ts is removed so the Cypress spec is the *only* suite left:
+  # the guard firing then says the `.cy.` convention was read, rather than the
+  # ordinary suffix being found as it always was.
+  ws_setup
+  rm -f "$NODE_SB/ws/tests/a.test.ts"
+  mkdir -p "$NODE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/cypress/e2e/login.cy.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ships tests but defines no"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"login.cy.ts"* ]]
+  rm -rf "$NODE_SB"
+
+  # The control: with the Cypress spec gone too there is no suite at all, and a
+  # genuinely test-free workspace must stay unaffected -- so the widened pattern
+  # has not turned every workspace into one that ships tests.
+  ws_setup
+  rm -f "$NODE_SB/ws/tests/a.test.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"ships tests but defines no"* ]]
+  rm -rf "$NODE_SB"
+
+  # `cy` is the ISO-639-1 code for Welsh, so `messages.cy.json` is a locale file
+  # and not a suite. A bare `*.cy.*` counted it, which refused this workspace
+  # here -- and did something worse to the lost-suite scan, which is skipped
+  # entirely whenever the worktree still looks like it has tests: one such file
+  # meant every real test could be deleted and the push would pass. The
+  # predicate is bounded to Cypress's documented extensions for that reason.
+  ws_setup
+  rm -f "$NODE_SB/ws/tests/a.test.ts"
+  mkdir -p "$NODE_SB/ws/src/i18n"
+  printf '{ "hello": "helo" }\n' > "$NODE_SB/ws/src/i18n/messages.cy.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"ships tests but defines no"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"messages.cy.json"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a Cypress suite counted as present is a suite that has to run" {
+  # The case above made `.cy.` count as suite presence. This one is the other
+  # half of that: presence is not execution. `run_script` invokes `test` and
+  # `test:unit`, and Cypress is the one convention in that predicate belonging
+  # to a runner neither of them has to name -- so a workspace with vitest units
+  # and `"test:e2e": "cypress run"` had its specs counted as proof the suite is
+  # there while the lane ran the vitest half and passed with no Cypress case
+  # executed. Worse than a missed check: the specs also switch the lost-suite
+  # scan off, so their presence made the rest of the suite harder to lose
+  # noticeably.
+  ws_setup
+  ws_tools cypress
+  mkdir -p "$NODE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/cypress/e2e/login.cy.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "test:e2e": "cypress run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Cypress tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"login.cy.ts"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The remedy the message names has to be one that works, so it is exercised
+  # rather than described: `test` delegating to the e2e script is accepted, and
+  # accepted through a real run -- the reader follows `npm run` to the script it
+  # names, and the lane then executes both halves.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/cypress/e2e/login.cy.ts"
+  # A wrapper the sandbox can execute, the same stand-in `scripts/vitest` is for
+  # the unit runner and for the same reason: the .bin stubs ws_tools writes are
+  # shell scripts, which this gate can see but a package manager on Windows will
+  # not execute. Running the accepted script is the point of this half.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/cypress"
+  chmod +x "$NODE_SB/ws/scripts/cypress"
+  printf '#!/usr/bin/env bash\n./scripts/cypress run "$@"\n' > "$NODE_SB/ws/scripts/e2e.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh && npm run test:e2e", "test:e2e": "bash scripts/e2e.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"ships Cypress tests"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # Naming the runner is not running it. `echo cypress run` has the word in the
+  # right place for a grep and executes echo, which is the mistake
+  # _script_names_a_checker exists to not make -- so the delegation reader is
+  # used here rather than a search of the script's text.
+  ws_setup
+  ws_tools cypress
+  mkdir -p "$NODE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/cypress/e2e/login.cy.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh && echo cypress run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Cypress tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The control, and it is the one that keeps this guard from becoming the Welsh
+  # locale bug in a new place: a workspace with no Cypress spec at all -- only a
+  # `.cy.json` that is not one -- is untouched by any of it.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/src/i18n"
+  printf '{ "hello": "helo" }\n' > "$NODE_SB/ws/src/i18n/messages.cy.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"ships Cypress tests"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: every runner whose files are here has to be reached, not just Cypress" {
+  # The Cypress case above was one instance of a rule. `run_script` invokes
+  # `test` and `test:unit` and nothing else, so any convention in the suite
+  # predicate belonging to a runner those two never reach is counted as proof the
+  # suite is present while none of it executes -- and the same files switch the
+  # lost-suite scan off, making the rest of the suite harder to lose noticeably.
+  #
+  # Mocha, with the evidence that makes `test/login.js` a suite rather than a
+  # file: a script that actually names the runner.
+  ws_setup
+  ws_tools mocha
+  mkdir -p "$NODE_SB/ws/test"
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/test/login.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "test:legacy": "mocha" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Mocha tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"test/login.js"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # And the reason that evidence is required rather than assumed. `test/` is also
+  # `node --test`'s documented directory, so the same files with no script naming
+  # any runner for them are an ordinary helper tree -- refusing here would fail a
+  # plain Vitest workspace for shipping helpers, which is the false refusal this
+  # file has been bitten by before.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/test"
+  printf 'export const db = 1;\n' > "$NODE_SB/ws/test/helpers.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # Jasmine's `spec/**/*[sS]pec.*` is unambiguous -- no other recognised runner
+  # collects `loginSpec.js` -- so the files alone are the question, exactly as
+  # for Cypress.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/spec"
+  printf 'describe("login", () => {});\n' > "$NODE_SB/ws/spec/loginSpec.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships Jasmine tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # `node --test` needs the flag as well as the runner: bare `node` in a script
+  # is a build step, and `test-utils.ts` is an ordinary helper name.
+  ws_setup
+  printf 'export const wrap = 1;\n' > "$NODE_SB/ws/test-utils.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "prepare": "node scripts/gen.js" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  ws_setup
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/login_test.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "test:node": "node --test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"ships node --test tests that this lane never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The umbrella delegating is accepted for every family, not only for the one
+  # the message happens to name.
+  ws_setup
+  ws_tools mocha
+  mkdir -p "$NODE_SB/ws/test"
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/test/login.js"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/mocha"
+  chmod +x "$NODE_SB/ws/scripts/mocha"
+  printf '#!/usr/bin/env bash\n./scripts/mocha "$@"\n' > "$NODE_SB/ws/scripts/legacy.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh && npm run test:legacy", "test:legacy": "bash scripts/legacy.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # And a file the invoked runner does collect is not one of these: `test/a.test.js`
+  # is vitest's by name, so it must not be read as an unreached Mocha suite.
+  ws_setup
+  ws_tools mocha
+  mkdir -p "$NODE_SB/ws/test"
+  printf 'it("x", () => {});\n' > "$NODE_SB/ws/test/a.test.js"
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "bash scripts/test.sh", "test:legacy": "mocha" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"never runs"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: build mode survives the flags between -b and its project" {
+  # `tsc -b --verbose tsconfig.app.json --noEmit` is a valid build-mode
+  # typecheck: --build takes one or more projects and --verbose only logs. The
+  # scan tracked build mode in `prev`, which holds exactly one token, so
+  # --verbose overwrote it and the project behind it was refused as a source
+  # file -- a legitimate typecheck script blocked before the compiler ran.
+  ws_setup
+  printf '{ "compilerOptions": { "noEmit": true } }\n' > "$NODE_SB/ws/tsconfig.app.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc -b --verbose tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"points its 'typecheck' script at"* ]] \
+    || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The control that keeps this from being "build mode accepts anything": naming
+  # a project this workspace does not have is still refused, and as an
+  # undeclared project rather than as a stray source file. The workspace still
+  # carries a real project, or it would not be a TypeScript workspace at all and
+  # the tsc rules would never be consulted -- which would pass this case without
+  # asserting anything.
+  ws_setup
+  printf '{ "compilerOptions": { "noEmit": true } }\n' > "$NODE_SB/ws/tsconfig.app.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc -b --verbose tsconfig.absent.json" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"a project this workspace does not have"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # Making build mode outlive its token also made `-d` reach the project arm.
+  # In build mode `-d` is tsc's short `--dry`: it reports what it would build
+  # and compiles nothing, so this would pass the lane having checked nothing --
+  # the very thing the `--clean`/`--dry` arm above exists to refuse.
+  ws_setup
+  printf '{ "compilerOptions": { "noEmit": true } }\n' > "$NODE_SB/ws/tsconfig.app.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc -b -d tsconfig.app.json" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # And the control that keeps the refusal conditional: outside build mode `-d`
+  # is `--declaration`, which does type check, so it must still be accepted.
+  ws_setup
+  printf '{ "compilerOptions": { "noEmit": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "typecheck": "tsc -p tsconfig.json -d --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: in ship mode an ignored replacement of a deleted path is caught" {
+  # An outgoing commit deletes a workspace file and adds its path to .gitignore;
+  # the worktree keeps a passing copy. HEAD does not carry the path so
+  # `git diff HEAD` says nothing, and --exclude-standard is documented to drop
+  # exactly that file — so the lane ran the replacement for a commit that
+  # removes it. Same defect as the pre-commit branch had, one mode over.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm -q ws/app.js >/dev/null 2>&1
+  printf 'ws/app.js\n' > .gitignore
+  git add .gitignore >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete and ignore" >/dev/null 2>&1
+  printf 'export const recreated = 1;\n' > ws/app.js
+  ws_seed_fingerprint
+  # The premise: neither list the guard used to consult sees this file.
+  run bash -c "cd '$NODE_SB' && git diff --name-only HEAD -- ws; git ls-files --others --exclude-standard -- ws"
+  [ -z "$output" ]
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: in ship mode an ignored build directory is not drift" {
+  # The control, and the reason the ignored list is pruned rather than taken
+  # whole: node_modules and dist are ignored on purpose, and reporting them
+  # would mean the ship gate never passes for any Node workspace.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  printf 'ws/node_modules/\nws/dist/\n' > .gitignore
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  mkdir -p ws/dist
+  printf 'built\n' > ws/dist/bundle.js
+  printf 'dep\n' > ws/node_modules/dep.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a workspace nested below the first directory level is discovered" {
+  # Discovery looked one level down while ci::changeset::_in_node_workspace
+  # walked up from any depth, so packages/app/src/x.ts scheduled the node lane
+  # and node.sh then printed "No package.json found" and exited 0. Scheduling
+  # and execution have to mean the same thing by "workspace".
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/packages/app" "$sb/node_modules/dep" "$sb/packages/app/dist"
+  printf '{}\n' > "$sb/packages/app/package.json"
+  printf '{}\n' > "$sb/node_modules/dep/package.json"
+  printf '{}\n' > "$sb/packages/app/dist/package.json"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"packages/app"* ]]
+  [[ "$output" != *"node_modules"* ]]
+  [[ "$output" != *"dist"* ]]
+  rm -rf "$sb"
+}
+
+@test "node lane: a fixture package under a test tree is not a workspace" {
+  # The other half of recursive discovery. ci/tests/fixtures/node/package.json
+  # is a real manifest with no lockfile, and treating it as a workspace made the
+  # lane refuse the install and report FAIL_INFRA for a directory that exists to
+  # be a fixture. Pruned only under a test tree, so packages/fixtures/ survives.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/tests/fixtures/node" "$sb/packages/fixtures" "$sb/app/testdata/pkg"
+  printf '{}\n' > "$sb/ci/tests/fixtures/node/package.json"
+  printf '{}\n' > "$sb/packages/fixtures/package.json"
+  printf '{}\n' > "$sb/app/testdata/pkg/package.json"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"packages/fixtures"* ]]
+  [[ "$output" != *"ci/tests/fixtures"* ]]
+  [[ "$output" != *"testdata"* ]]
+  rm -rf "$sb"
+}
+
+@test "changeset: scheduling uses the same workspace definition as discovery" {
+  # One predicate, consulted by both. Two similar ones is how they disagreed.
+  run bash -c "
+    cd '$REPO_ROOT'
+    . ci/lib/common.sh
+    . ci/lib/changeset.sh
+    ci::changeset::_in_node_workspace ci/tests/fixtures/node/src/a.ts && echo SCHEDULED || echo SKIPPED
+  "
+  [[ "$output" == *"SKIPPED"* ]]
+}
+
+@test "node lane: an unstaged file the staged one depends on stops the workspace" {
+  # The rule was per-file and the lane is not: it installs, typechecks, tests
+  # and builds the workspace as a unit. Stage a file, leave the helper it needs
+  # untracked, and every staged path matched the index while the lane passed on
+  # the strength of a file the commit does not contain.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'import { helper } from "./helper";\nexport const x = helper;\n' > ws/uses-helper.ts
+  git add ws/uses-helper.ts >/dev/null 2>&1
+  printf 'export const helper = 1;\n' > ws/helper.ts   # deliberately NOT staged
+  ws_seed_fingerprint
+  # The premise: the staged path itself matches the index exactly.
+  run bash -c "cd '$NODE_SB' && git diff --name-only -- ws/uses-helper.ts"
+  [ -z "$output" ]
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/helper.ts"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a positional file filter in the test script is rejected" {
+  # `vitest run [...filters]` is documented syntax, so a bare path narrows the
+  # suite exactly as -t does while matching nothing in the flag deny-list. An
+  # enumerated list of narrowing flags loses this race by construction.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run tests/one.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a wrapper script with a positional argument is not a filter" {
+  # The control. A positional means "filter" only for a known test runner; for
+  # `bash scripts/test.sh` it is the script being run, and rejecting it would
+  # fail every workspace that wraps its suite.
+  #
+  # The fixture said `true scripts/test.sh --ci`, using `true` as a stand-in for
+  # the wrapper, and then a `scripts/test.sh` of its own containing `exit 0`.
+  # Both were the no-op this rule rejects, standing in for the wrapper it was
+  # describing — the second one surviving only because delegation was accepted
+  # without the target being read. ws_setup's wrapper is a real one, and what
+  # this case is about is the positional argument beside it.
+  #
+  # `--ci` became `--coverage` for the same reason the case above lost its
+  # positional: ws_setup's wrapper forwards `"$@"`, so `--ci` reached vitest,
+  # which has no such flag, and an unknown flag arriving at a runner stops the
+  # guard by design. `--coverage` is on the allow-list and cannot reduce the
+  # run, so there is still an argument beside the target and the property under
+  # test -- that `scripts/test.sh` is the script being run and not a filter --
+  # is unchanged.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh --coverage" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: ship mode does not report ordinary ignored build output as drift" {
+  # The prune-list attempt reported frontend/.env.local, a tsbuildinfo and
+  # Playwright output as drift, which makes the ship gate unpassable during
+  # ordinary development — and its printed remedy, "commit the rest", is the
+  # exact thing git-safety.sh blocks. An ignored file is drift only where it
+  # shadows a path the push removes.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  printf 'ws/.env.local\nws/*.tsbuildinfo\nws/test-results/\nws/src/build/\n' > .gitignore
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  printf 'VITE_API=http://localhost:8000\n' > ws/.env.local
+  printf 'x\n' > ws/tsconfig.tsbuildinfo
+  mkdir -p ws/test-results && printf 'x\n' > ws/test-results/report.xml
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: ship mode still catches an ignored file shadowing a deletion" {
+  # And the case the ignored list exists for, which the deletion key preserves.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  printf 'export const ok = true;\n' > "$NODE_SB/ws/app.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm -q ws/app.js >/dev/null 2>&1
+  printf 'ws/app.js\n' > .gitignore
+  git add .gitignore >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete and ignore" >/dev/null 2>&1
+  printf 'export const recreated = 1;\n' > ws/app.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/app.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a source file under a directory named build is not pruned away" {
+  # The prune list matched build/ dist/ coverage/ at any depth, so a genuine
+  # frontend/src/build/ was swallowed and the lane tested a replacement for a
+  # file the push deletes.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  mkdir -p "$NODE_SB/ws/src/build"
+  printf 'export const tokens = 1;\n' > "$NODE_SB/ws/src/build/tokens.js"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  git rm -q ws/src/build/tokens.js >/dev/null 2>&1
+  printf 'ws/src/build/\n' > .gitignore
+  git add .gitignore >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete and ignore" >/dev/null 2>&1
+  mkdir -p ws/src/build && printf 'export const tokens = 2;\n' > ws/src/build/tokens.js
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"ws/src/build/tokens.js"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unreadable runtime is reported against the runtime" {
+  # Nothing validated the runtime. _semver_part strips non-digits and defaults
+  # to 0, so "banana" became 0.0.0; an empty string gave awk no record at all,
+  # printed nothing, and every component compared equal — so a `>=` gate came
+  # back satisfied for a node --version that emitted a shim banner or nothing.
+  #
+  # Status 4, not the generic 2. Both stop the lane, so this is not a
+  # correctness change -- it is a message change, and the message was wrong in
+  # a way that costs an operator real time: a broken `node --version` printed
+  # "Cannot evaluate the engines.node range declared by <ws>/package.json",
+  # sending someone to stare at a perfectly good manifest. A prerelease runtime
+  # is readable but not orderable here, and gets its own status 5 for the same
+  # reason.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  bash -n "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+  local rc bad=""
+  for ver in '' 'v' 'banana' 'not-a-version' '20' '20.1'; do
+    rc=0
+    _semver_satisfies "$ver" ">=20" || rc=$?
+    [ "$rc" -eq 4 ] || bad="${bad} '${ver}'(got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "unreadable runtimes reported otherwise:${bad}" >&2; return 1; }
+  # A prerelease runtime is readable, so it is a different report -- and it
+  # must not be a pass. Measured against semver 7.8.5, ignoring the tail made
+  # `20.1.0` come back satisfied by a 20.1.0-rc.1 runtime, which npm calls
+  # false: the fail-open direction.
+  for ver in '20.1.0-rc.1' '21.0.0-nightly' '1.2.3-alpha.1'; do
+    rc=0
+    _semver_satisfies "$ver" ">=20" || rc=$?
+    [ "$rc" -eq 5 ] || bad="${bad} prerelease '${ver}'(got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "prerelease runtimes reported otherwise:${bad}" >&2; return 1; }
+  # And a real one still evaluates.
+  rc=0; _semver_satisfies 20.11.1 ">=20" || rc=$?
+  [ "$rc" -eq 0 ]
+  rc=0; _semver_satisfies 19.9.9 ">=20" || rc=$?
+  [ "$rc" -eq 1 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: comparator agreement with npm on the forms review found" {
+  # One table for the eight root causes an oracle-backed audit against
+  # node-semver 7.8.5 turned up. Statuses: 0 satisfied, 1 not, 2 unverifiable.
+  ws_setup
+  source "$REPO_ROOT/ci/lib/common.sh"
+  local fns="$NODE_SB/semver.sh"
+  sed -n '/^_semver_part()/,/^_semver_satisfies()/p' "$REPO_ROOT/ci/checks/node.sh" \
+    | sed '$d' > "$fns"
+  sed -n '/^_semver_satisfies()/,/^}/p' "$REPO_ROOT/ci/checks/node.sh" >> "$fns"
+  # shellcheck disable=SC1090
+  . "$fns"
+  local rc bad="" spec ver want
+  # A typo must not be rescued by a satisfied sibling; a merely unsupported
+  # form must be. Leading zeros, oversized numbers and a number to the right of
+  # a wildcard are all invalid operands to npm.
+  #
+  # Two rows here are deliberate divergences from npm, both fail-closed and
+  # both measured rather than assumed:
+  #   * An empty alternative from a stray "||" is ANY to node-semver -- 7.8.5
+  #     gives `new Range(">=999.0.0 ||").range` == "" and .test("20.1.0") ==
+  #     true. Copying that would let one keystroke nullify a declared
+  #     constraint, so it is classed malformed here.
+  #   * A prerelease on either side is unsupported, not guessed. Ignoring it
+  #     returned SATISFIED for "1.2.3-alpha.1" @ 1.2.3 and "<=1.2.3-alpha.1" @
+  #     1.2.3, both npm=false.
+  # Everything else on this table agrees with 7.8.5 exactly; the full 585-case
+  # sweep behind it has zero rows where this comparator says satisfied and npm
+  # does not.
+  for row in \
+    'banana || >=20:20.1.0:2' '- || >=20:20.1.0:2' '>=20banana || >=20:20.1.0:2' \
+    '1.2.3 - 2.3.4 || >=20:20.1.0:0' '1.2.3 - 2.3.4:20.1.0:2' \
+    '>=020.1.0:20.1.0:2' '>=20.08.0:20.9.0:2' '>08:9.0.0:2' \
+    '>=99999999999999999999.0.0:20.1.0:2' \
+    '20.x.3:20.0.1:2' '>=20.*.3:20.0.1:2' \
+    '>=999.0.0 ||:20.1.0:2' '|| >=20:20.1.0:2' '||:20.1.0:2'     '~22.x.1:22.12.0:0' '~22.x.1:20.1.0:1' '^20.*.3:20.11.1:0'     '>=9007199254740991:20.1.0:1' '>=20 || >=9007199254740991:20.1.0:0'     '= 20 - 22 || >=20:20.1.0:0' '20.x.3 - 22 || >=20:20.1.0:0'     '1.2.3-01 || >=20:20.1.0:2' '1.2.3-a..b || >=20:20.1.0:2'     '1.2.3+. || >=20:20.1.0:2' '>=20.1.0-rc.1 || >=20:20.1.0:0'     '1.2.3-alpha.1:1.2.3:2' '<=1.2.3-alpha.1:1.2.3:2' \
+    '^20.x-alpha:20.11.1:2' '~20.1-alpha:20.11.1:2' '>=20-alpha:20.11.1:2' \
+    '^20.x.x-alpha:20.11.1:0' '~20.x.1-rc.1:20.11.1:0' '20.x+b:20.11.1:0' \
+    'x.x:20.1.0:0' '*.*.*:20.1.0:0' 'vx:20.1.0:0' 'v*:20.1.0:0' \
+    '~>20:20.1.0:0' '~>20.1:20.1.9:0' '>==20:20.1.0:0' \
+    '>=22.12.0:22.14.0:0' '>=22.12.0:20.1.0:1' '~20.x:20.11.1:0' \
+    '^0.0.3:0.0.9:1' '^0.0.3:0.0.3:0' '20.x:21.0.0:1' '>= 20:20.1.0:0'; do
+    spec="${row%%:*}"; ver="${row#*:}"; want="${ver#*:}"; ver="${ver%%:*}"
+    rc=0
+    _semver_satisfies "$ver" "$spec" || rc=$?
+    [ "$rc" -eq "$want" ] || bad="${bad} '${spec}'@${ver}(want=${want} got=${rc})"
+  done
+  [ -z "$bad" ] || { echo "comparator disagrees with npm:${bad}" >&2; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck script that runs no compiler is rejected" {
+  # The rule above it asked only whether a `typecheck` key exists. Changing its
+  # command to a successful no-op satisfies that, exits 0, and never invokes a
+  # compiler -- and `vite build` does not typecheck either, so a workspace
+  # containing a type error passed the lane with no checker installed at all.
+  # Editing the command reaches the same place as deleting the key.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "true", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"does not"* ]]
+  [[ "$output" == *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a real typecheck command is accepted" {
+  # The control, and the shape this repository actually ships: `tsc --noEmit`.
+  # A rule that rejected it would fail the workspace it was written to protect.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck that delegates to another runner is accepted" {
+  # Delegation is not evasion, but it is not taken on trust either: the script
+  # it hands to is followed. `typecheck:all` has to exist in the manifest and
+  # has to reach a checker, which is what npm would require of it at runtime
+  # anyway — the earlier version of this case delegated to a script that was
+  # never defined and still passed.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "npm run typecheck:all", "typecheck:all": "tsc --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a root manifest beside nested ones is refused, not half-covered" {
+  # A root package.json used to end discovery, so a repo with both a root and
+  # child packages ran only the root and exited 0 while the children's failing
+  # test and build were never invoked. Emitting the children instead is not the
+  # fix: in a workspaces monorepo only the root carries a lockfile, and this
+  # lane refuses to install a workspace that has none -- so that reading turns
+  # every real monorepo red. The ambiguity is reported instead.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/packages/app"
+  printf '{}' > "$sb/package.json"
+  printf '{}' > "$sb/packages/app/package.json"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces package.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"packages/app"* ]]
+  [[ "$output" == *"coexists"* ]]
+
+  # The control: a root manifest on its own is still the single workspace ".".
+  rm -rf "$sb/packages"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "." ]
+  rm -rf "$sb"
+}
+
+@test "node lane: a directory whose name resembles the manifest is not filtered out" {
+  # The root sentinel was dropped with `grep -v "^${manifest}$"`, and
+  # `package.json` as a regex makes every `.` a wildcard -- so a workspace
+  # directory named `package-json` matched the pattern and was skipped.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/package-json" "$sb/frontend"
+  printf '{}' > "$sb/package-json/package.json"
+  printf '{}' > "$sb/frontend/package.json"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' && ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"package-json"* ]]
+  [[ "$output" == *"frontend"* ]]
+  rm -rf "$sb"
+}
+
+@test "node lane: a test script that runs no test runner is rejected" {
+  # `"test": "true"` runs, exits 0 and collects nothing -- the whole suite
+  # removed from the gate by a one-word manifest edit, with the lane still
+  # reporting PASS over a workspace that still contains tests. The presence of
+  # the key was never the property worth asserting, exactly as it was not for
+  # `typecheck`.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: vitest flags that empty the suite are rejected" {
+  # `--exclude 'tests/**' --passWithNoTests` makes vitest print "No test files
+  # found", exit 0, and satisfy every earlier rule: neither is a name filter,
+  # neither is a positional. Enumerating the narrowing flags lost this race
+  # three times, so the flags are an allow-list now.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --exclude tests/** --passWithNoTests" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: passWithNoTests alone is rejected" {
+  # On its own it is the sharpest of them: it converts "collected nothing" into
+  # success, which is the precise failure this lane exists to catch.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --passWithNoTests" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: flags that do not narrow the suite are still accepted" {
+  # The control, and the reason the allow-list needs to be generous: a rule
+  # that rejected --coverage or --reporter would fail ordinary workspaces.
+  # `vitest run` is what this repository ships.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --coverage --reporter=verbose --silent" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck that only wraps a no-op is rejected" {
+  # The first attempt at this rule accepted any token from a runner list as
+  # evidence of delegation, so `bash -c true` satisfied it -- the exact no-op
+  # the rule exists to reject, one wrapper out. Delegation counts only when it
+  # names what it delegates to; an inline `-c` command names nothing and is
+  # judged on its own contents.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bash -c true", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a typecheck delegating to a named script is accepted" {
+  # The control, and the reason delegation is allowed at all: a workspace that
+  # wraps its checks in a shell script must keep working. What changed is that
+  # the script has to actually reach a checker — the earlier version of this
+  # case wrapped `exit 0` and passed, which is the hole it was meant to guard.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\ntsc --noEmit\n' > "$NODE_SB/ws/scripts/tc.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bash scripts/tc.sh", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an inline shell command naming a checker is accepted" {
+  # `bash -c` disqualifies *delegation*, not the command: if the inline text
+  # names a checker, that is the checker being invoked.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bash -c tsc", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a test script that only wraps a no-op is rejected" {
+  # Same rule, same wrapper, the other script.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a vendored manifest in the index is not a workspace" {
+  # The two sources of workspaces have to agree in both directions. Discovery
+  # drops ci/tests/fixtures/node through ci::common::is_vendored_path; the index
+  # scan added it straight back, and being alphabetically first it was the
+  # workspace the lane entered before any real one -- with no lockfile, so
+  # `CI_GATE_MODE=full bash ci/checks/node.sh` exited FAIL_INFRA on a fixture and
+  # never reached the workspace anybody meant. The round before this taught the
+  # scan to look as deep as discovery and left it looking wider too.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  # A fixture manifest, tracked, with no lockfile beside it -- exactly the
+  # shape that made the real lane exit 30.
+  mkdir -p ci/tests/fixtures/node
+  printf '%s\n' '{ "name": "fixture", "private": true }' > ci/tests/fixtures/node/package.json
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  # The premise: it really is in the index, and filesystem discovery really
+  # does drop it -- so anything the lane does with it came from the index scan.
+  run bash -c "cd '$NODE_SB' && git ls-files -- '*/package.json' | grep -c 'fixtures/node/package.json'"
+  [ "$output" -eq 1 ]
+  run bash -c "cd '$NODE_SB' && source ci/lib/common.sh && ci::common::node_workspaces package.json"
+  [[ "$output" != *"fixtures"* ]]
+
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"fixtures/node"* ]]
+  [[ "$output" != *"No lockfile"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a real staged workspace is still found through the index" {
+  # The control. Pruning the index scan by the vendored rule must not prune the
+  # thing that scan exists for -- a workspace that is in the commit and not on
+  # disk, which is the case the scan was added for one round earlier.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  mkdir -p packages/app
+  printf '%s\n' '{ "name": "a", "private": true, "scripts": { "test": "bash scripts/fail.sh" } }' > packages/app/package.json
+  printf '{}\n' > packages/app/bun.lock
+  git add packages >/dev/null 2>&1
+  rm -rf packages
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"packages/app/package.json"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a delegated script that runs nothing is rejected" {
+  # Delegation was accepted on the strength of a target *token*, without ever
+  # reading the target -- so `bash scripts/noop.sh` passed while the script it
+  # names is `exit 0`. That is the same no-op the rule rejects, one file out
+  # rather than one wrapper out.
+  ws_setup
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/noop.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/noop.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: ship mode refuses a push whose tip is not the checkout" {
+  # The range is resolved from CI_GATE_PUSH_NEW_SHA, but everything that
+  # actually runs -- the drift comparison and every script -- reads the
+  # worktree. `git push origin other-branch` therefore gated the branch you are
+  # standing on: a passing checkout vouched for an outgoing branch whose tests
+  # fail, which is the confident-green this whole gate exists to remove.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm safe >/dev/null 2>&1
+  local here
+  here="$(git rev-parse --abbrev-ref HEAD)"
+  git checkout -q -b other
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fail.sh" } }'
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm bad >/dev/null 2>&1
+  local other
+  other="$(git rev-parse HEAD)"
+  git checkout -q "$here"
+  ws_seed_fingerprint
+
+  # The premise: the two tips really do differ, and the checkout really is the
+  # passing one -- so a PASS here is a report about the wrong tree.
+  [ "$other" != "$(git rev-parse HEAD)" ]
+
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA='$other' \
+    CI_GATE_NODE_WORKSPACE=ws bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not the commit checked out"* ]]
+  [[ "$output" == *"$other"* ]]
+  # And it stopped before running anything, so it cannot have reported on the
+  # checked-out branch's passing suite.
+  [[ "$output" != *"Running script"* ]]
+
+  # The control: pushing the branch you are standing on is the ordinary case
+  # and must still run. Without this the fix would be satisfied by a check that
+  # refuses every push.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA=\"\$(cd '$NODE_SB' && git rev-parse HEAD)\" \
+    CI_GATE_NODE_WORKSPACE=ws bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"not the commit checked out"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a config-selecting flag is rejected" {
+  # `--config` does not narrow what vitest collects; it changes which file
+  # *declares* what it collects, and test-layout.sh validates
+  # frontend/vitest.config.ts and nothing else. So `vitest run --config
+  # vitest.narrow.config.ts` had the two checks reporting on two different
+  # files: one confirming a broad include that is not in force, the other
+  # running a config nobody inspected. The allow-list was only ever for flags
+  # that cannot reduce the run.
+  # Asserted on the message, not merely on the status. There is no vitest in
+  # this sandbox, so `vitest run ...` exits 20 whatever the validator decides --
+  # a status-only assertion here would pass for the wrong reason and keep
+  # passing if the rule were deleted.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --config vitest.narrow.config.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  [[ "$output" == *"--config"* ]]
+
+  # `-c` is the same flag spelled short, and `--root` redirects resolution one
+  # level further up. Enumerating one and not the others is how this rule lost
+  # three times before.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run -c other.config.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --root packages/other" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The control: flags that cannot reduce the run are still accepted, or the
+  # allow-list would have become a ban on flags. Same shape as the assertions
+  # above -- what is under test is the validator, and the sandbox cannot run
+  # vitest either way.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --reporter=dot --coverage" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a nested config under a workspace is not an orphan" {
+  # A nested TypeScript project config is ordinary: frontend/e2e/tsconfig.json
+  # extending ../tsconfig.json shares its package manager and dependencies with
+  # frontend. Requiring a second package.json beside it made a full-mode run
+  # exit 20 before reaching the workspace at all. The rule is meant to catch a
+  # workspace that *lost* its manifest, and a config with an ancestor workspace
+  # has lost nothing.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  mkdir -p "$NODE_SB/ws/e2e"
+  printf '{ "extends": "../tsconfig.json" }\n' > "$NODE_SB/ws/e2e/tsconfig.json"
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=full bash ci/checks/node.sh 2>&1"
+  # Asserted by the absence of the orphan refusal and by what the run reaches
+  # instead, rather than by the lane's exit status. The status was a proxy for
+  # "nothing refused it", and a nested config is now a TypeScript project the
+  # workspace has to be able to check -- so this fixture is refused downstream,
+  # correctly and by a different rule. A proxy assertion that starts answering
+  # for a rule it was not written about is how a case passes for the wrong
+  # reason, which this suite has had to fix more than once.
+  [[ "$output" != *"no package.json beside it"* ]]
+  [[ "$output" == *"declares TypeScript configuration but"* ]]
+  [[ "$output" == *"e2e/tsconfig.json"* ]]
+
+  # The control, and the case the rule was written for: a config whose walk
+  # reaches the root without finding any manifest is still an orphan. Without
+  # this, walking upward would have quietly deleted the rule.
+  mkdir -p "$NODE_SB/stray"
+  printf '{}\n' > "$NODE_SB/stray/tsconfig.json"
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=full bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"stray/tsconfig.json"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a checker named as an argument does not count as running one" {
+  # The token scan accepted a tool name wherever it appeared, so `echo vitest`
+  # satisfied the rule while running echo and collecting nothing. A name is
+  # evidence that a checker runs only where a command starts.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo vitest" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # Same shape one layer out: a delegation target reached only as an argument.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a composition that cannot prove the checker runs is refused" {
+  # `true || vitest run` never reaches the runner. `vitest run || true` reaches
+  # it and throws the result away, which is worse -- the suite fails and the
+  # script still exits 0. Neither can be vouched for.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true || vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot be trusted"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run || true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"cannot be trusted"* ]]
+  # And for the right reason. This was rejected before the fix too, by the
+  # positional-filter rule, with "'true' selects a subset" -- a diagnosis that
+  # describes a filter that is not there and sends the reader looking for one.
+  [[ "$output" != *"selects a subset"* ]]
+
+  # The control: `&&` is fine. Either the checker runs, or the thing before it
+  # failed and the script fails with it -- no outcome where the suite is
+  # silently skipped. Rejecting it would fail ordinary `tsc && vitest run`.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo start && bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an unquoted checker token is not truncated by quote stripping" {
+  # The tokens are unquoted before they are compared, because `sh -c 'tsc
+  # --noEmit'` arrives with the quote clinging to the first one. Written as a
+  # bracket expression that differs by a single backslash -- `[\"\']` against
+  # `[\"']` -- the wrong form strips the first *character* of every token, so
+  # `tsc` became `sc`, matched nothing, and every TypeScript workspace was told
+  # it has no type checker. Silent, and in the direction that blocks correct
+  # work rather than admitting bad work, which is why it is pinned here rather
+  # than left to the cases that happened to catch it.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+
+  # And the case the stripping exists for: a quoted token still matches.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "'"'"'tsc'"'"' --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a clean deletion does not abort the lane" {
+  # `[ -e "$_d" ] && printf ...` leaves the test's false status as the status of
+  # the loop when the last deleted path is genuinely gone -- which is the
+  # ordinary case -- and that propagated through the command substitution, the
+  # assignment, and this script's `set -e`. The lane exited raw 1 with no
+  # diagnostic, before install, typecheck, test or build had run.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  printf 'x\n' > ws/gone.ts
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  local base
+  base="$(git rev-parse HEAD)"
+  git rm -q ws/gone.ts >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete it" >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  # The premise: the deletion is clean -- the path really is gone from the tree.
+  [ ! -e "$NODE_SB/ws/gone.ts" ]
+
+  # Deliberately without CI_GATE_NODE_WORKSPACE. The drift scan lives in the
+  # discovery pass, and setting that variable skips discovery entirely -- an
+  # earlier version of this case did exactly that and passed against the broken
+  # code, which is the whole reason a refutation is run before a case is kept.
+  #
+  # Refuting this one by swapping ci/checks/node.sh alone does not work and is
+  # worth writing down: ws_setup copies the *current* ci/lib/git.sh beside it,
+  # and the older node.sh calls a helper that has since been renamed, so the run
+  # dies on a missing function and the case passes for the wrong reason. The
+  # reproduction that stands behind it swaps both files together, and shows the
+  # pre-fix lane exiting raw 1 with 39 bytes of output -- the section header and
+  # nothing else.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' \
+    bash ci/checks/node.sh 2>&1"
+  # Whatever the verdict, it must be one of the gate's own and must have a
+  # diagnostic behind it. Raw 1 with no output is the bug.
+  [ "$status" -ne 1 ]
+  [ -n "$output" ]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a pipeline hides the checker's status and is refused" {
+  # A pipeline reports its *last* command's status, so `tsc --noEmit | cat`
+  # prints TS errors and exits 0. The checker is in command position, so the
+  # command-position rule returned success without ever looking at the pipe.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit | cat", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"pipes or branches"* ]]
+  rm -rf "$NODE_SB"
+
+  # A fresh sandbox for the test script: leaving the tsconfig behind would make
+  # the run fail on the missing typecheck script first, and this case would then
+  # be asserting on a verdict it did not cause.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run | tee out.log" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"pipes or branches"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: || without spaces is the same operator and is refused" {
+  # `case " $cmd " in *" || "*)` only recognised the spaced spelling, so the
+  # guard was two keystrokes wide.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run||true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"pipes or branches"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "true||vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a runner the delegated script never reaches does not count" {
+  # `unused() { node --test; }` followed by `exit 0` names a runner, in command
+  # position, inside a function nobody calls. The line-by-line scan accepted it.
+  ws_setup
+  printf '#!/usr/bin/env bash\nunused() { node --test; }\nexit 0\n' > "$NODE_SB/ws/scripts/dead.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/dead.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The same one line lower, inside a conditional this reader cannot evaluate.
+  printf '#!/usr/bin/env bash\nif [ -n "$NOPE" ]; then\n  vitest run\nfi\n' > "$NODE_SB/ws/scripts/cond.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/cond.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # The control: a wrapper that plainly hands over is still accepted, including
+  # via `exec`, which is how a wrapper normally does it.
+  printf '#!/usr/bin/env bash\nset -e\nexec ./scripts/vitest run "$@"\n' > "$NODE_SB/ws/scripts/live.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/live.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a checker after a terminating command does not count" {
+  # `"test": "exit 0 ; vitest run"` puts the runner in command position after a
+  # separator, so every rule was satisfied by a token the shell never reaches.
+  # A separator resets *where a command starts*, which is not the same question
+  # as whether one runs.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "exit 0 ; vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The control, and the reason this is `break` and not a ban on `exit`: a
+  # runner that has already been reached is not undone by exiting afterwards.
+  #
+  # The control used to be `bash scripts/test.sh ; exit 0`, and that was a
+  # mistake -- it is itself the shape this lane must refuse, since the script's
+  # failure is discarded by the `exit 0` after it. It passed because reaching a
+  # checker ended the scan. `exit $?` makes the same point about separators
+  # without throwing the result away.
+  # Asserted on the guard's message, not the status: what this control is about
+  # is that the scan still resolves the delegation across the separator, and
+  # the script's own exit status here depends on how bun's runner spells `$?`.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh ; exit $?" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh ; exit 0" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a checker whose status is overwritten afterwards does not count" {
+  # Reaching a checker ended the scan, so anything after it was unread. `tsc
+  # --noEmit ; true` reaches the compiler and discards its result -- the shell
+  # reports the last command's status -- and a delegated script running the
+  # suite and then `true` exits 0 however the suite went. Both passed.
+  ws_setup
+  # The typecheck guard only runs where there is a tsconfig.json. Without one
+  # the script is executed unguarded -- which is how this was confirmed
+  # end to end: `tsc` failed to load and the lane still reported "Node lane
+  # passed", because `; true` supplied the exit status.
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc --noEmit ; true", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"appear to run a type checker"* ]]
+  rm -f "$NODE_SB/ws/tsconfig.json"
+
+  # `;` binds to the token before it, so `run;` was never seen as a separator
+  # at all -- the same bypass the `||` rule had before it stopped requiring
+  # spaces around the operator.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run;true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  printf '#!/usr/bin/env bash\n./scripts/vitest run\ntrue\n' > "$NODE_SB/ws/scripts/mask.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/mask.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # The controls. `&&` short-circuits, so the checker's failure survives it;
+  # `set -e` leaves on that failure before the trailing line runs; and `exit 1`
+  # forces a failure, which cannot become a false pass. The rule is that
+  # nothing may turn a failure into a pass -- not that nothing may follow.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run && echo done" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+
+  printf '#!/usr/bin/env bash\nset -e\n./scripts/vitest run\ntrue\n' > "$NODE_SB/ws/scripts/ok1.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/ok1.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+
+  printf '#!/usr/bin/env bash\n./scripts/vitest run\nexit $?\n' > "$NODE_SB/ws/scripts/ok2.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/ok2.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a quoted brace or keyword cannot make a line read as top level" {
+  # The reachability rule counted braces and control keywords in raw line text,
+  # so both could be spelled inside a string. `echo "}"` closed a function body
+  # a line early and `echo "using profile"` closed an `if` block -- `profile`
+  # contains `fi` -- and the unreachable runner below each of them then read as
+  # top level, passing the lane on a suite that never runs.
+  ws_setup
+
+  # The premise: this exact runner line at top level is accepted, so every
+  # rejection below is about the line being unreachable and not about the line
+  # going unrecognised.
+  printf '#!/usr/bin/env bash\n./scripts/vitest run\n' > "$NODE_SB/ws/scripts/x.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/x.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+
+  # `fi` as a substring of a word inside a string, closing the block early.
+  printf '#!/usr/bin/env bash\nif [ -n "$NOPE" ]; then\n  echo "using profile"\n  ./scripts/vitest run\nfi\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # `done` as a substring, closing a loop early.
+  printf '#!/usr/bin/env bash\nfor f in a b; do\n  echo "well done"\n  ./scripts/vitest run\ndone\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # A quoted closing brace balancing a function body out early.
+  printf '#!/usr/bin/env bash\nunused() {\n  echo "}"\n  ./scripts/vitest run\n}\nexit 0\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # A here-document body is data, not code; the runner named in one is text.
+  printf '#!/usr/bin/env bash\ncat > /dev/null <<EOF\n./scripts/vitest run\nEOF\nexit 0\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # The controls, and the reason the rule is token-exact rather than a ban on
+  # quotes: ordinary scripts that merely *contain* these spellings still pass.
+  printf '#!/usr/bin/env bash\necho "modified files"\necho "abandoned"\n./scripts/vitest run\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+
+  printf '#!/usr/bin/env bash\nif [ -z "$SKIP" ]; then\n  echo "}"\nfi\ncat > /dev/null <<EOF\nnothing\nEOF\n./scripts/vitest run\n' \
+    > "$NODE_SB/ws/scripts/x.sh"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: node counts as a runner only in test mode" {
+  # `"test": "node"` was accepted. Bare node takes its program from stdin, and
+  # under the gate stdin is at EOF: it runs an empty program and exits 0, and
+  # with no further tokens every rule below the runner check was satisfied by
+  # having nothing to inspect. The whole suite left the gate on a one-word
+  # manifest edit.
+  #
+  # Asserted on the guard's own message rather than the exit status: an
+  # accepted command goes on to actually run, and the sandbox's stand-in runner
+  # is not on bun's path, so status 20 arrives either way.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "node" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The same one layer down, which is where a rule fixed only at the manifest
+  # would still be wrong.
+  printf '#!/usr/bin/env bash\nnode\n' > "$NODE_SB/ws/scripts/bare.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/bare.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The control, and the other half of the finding: `node --test` is the form
+  # that collects anything, and it was being rejected -- `--test` was not on the
+  # flag allow-list, so the gate refused the spelling that runs and accepted the
+  # one that does not.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "node --test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  printf '#!/usr/bin/env bash\nnode --test\n' > "$NODE_SB/ws/scripts/nt.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/nt.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+
+  # And node's own narrowing flags are still refused, which is what keeps the
+  # allow-list an allow-list.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "node --test --test-name-pattern=x" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: --allowOnly is narrowing and is not on the allow-list" {
+  # Vitest defaults allowOnly to off under CI, so a committed `it.only` fails
+  # the run. `--allowOnly` turns that back on, and an accidental `.only`
+  # anywhere in the tree then reduces the suite to one test while the run exits
+  # 0 -- narrowing applied to the whole suite by an edit somewhere else.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --allowOnly" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The controls: asking for the CI default is not narrowing, and the ordinary
+  # command is untouched.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --no-allowOnly" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a path deleted and re-added in one push is not drift" {
+  # The ship-mode scan asked `git log --diff-filter=D` over the whole outgoing
+  # range, so a path any commit in it deleted counted -- including one a later
+  # commit in the same push put back. A delete-then-re-add pair reported the
+  # re-added file as drift and the lane exited 20 before running a check, over a
+  # worktree matching HEAD exactly.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  printf 'export const a = 1;\n' > "$NODE_SB/ws/src.ts"
+  printf '.ci-gate/\n' > "$NODE_SB/.gitignore"
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  local base
+  base="$(git rev-parse HEAD)"
+  git rm -q ws/src.ts >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm delete >/dev/null 2>&1
+  printf 'export const a = 1;\n' > "$NODE_SB/ws/src.ts"
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm readd >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  # The premises: the worktree matches HEAD, and the range really does contain a
+  # deletion of that path -- so a commit-by-commit scan has something to find
+  # and an endpoint one does not.
+  run bash -c "cd '$NODE_SB' && git status --porcelain | wc -l"
+  [ "$(echo "$output" | tr -d ' ')" -eq 0 ]
+  run bash -c "cd '$NODE_SB' && git log --diff-filter=D --name-only --format= '$base..HEAD' | grep -c 'ws/src.ts'"
+  [ "$output" -eq 1 ]
+
+  # Not pinning CI_GATE_NODE_WORKSPACE: the drift scan lives in the discovery
+  # pass, which node.sh skips entirely when the workspace is pinned.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' \
+    bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *"src.ts"* ]]
+
+  # And with no push base at all, which is a different range shape through the
+  # same code: `push_range` returns a bare tip there, so a fix written as an
+  # endpoint diff would answer a different question -- and did, dropping this
+  # whole scan on every push without a remote base. What decides it is that the
+  # pushed tree carries the path, which does not depend on the shape.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *"src.ts"* ]]
+
+  # The control: a push that genuinely removes the file, with an ignored copy
+  # left on disk to shadow it, is still caught -- the case this scan is for.
+  git rm -q ws/src.ts >/dev/null 2>&1
+  printf '.ci-gate/\nws/src.ts\n' > "$NODE_SB/.gitignore"
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "delete and ignore" >/dev/null 2>&1
+  printf 'export const a = 999;\n' > "$NODE_SB/ws/src.ts"
+  ws_seed_fingerprint
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' \
+    bash ci/checks/node.sh 2>&1"
+  [[ "$output" == *"src.ts"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: deleting the whole suite cannot pass by becoming the new HEAD" {
+  # The lost-suite guard compared the worktree against HEAD. In ship mode the
+  # deletion is already committed, so HEAD carries no tests either, nothing
+  # looked missing, and a push that removes every test file and the test script
+  # with them exited 0 -- the suite disappearing by becoming the new HEAD.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  cd "$NODE_SB"
+  git init -q .
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  local base
+  base="$(git rev-parse HEAD)"
+  git rm -q -r ws/tests >/dev/null 2>&1
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": {} }' > ws/package.json
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm "remove the suite" >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  # The premises: the base carried tests and HEAD carries none, so a comparison
+  # against HEAD has nothing to notice.
+  run bash -c "cd '$NODE_SB' && git ls-tree -r --name-only '$base' -- ws | grep -c '\.test\.'"
+  [ "$output" -ge 1 ]
+  run bash -c "cd '$NODE_SB' && git ls-tree -r --name-only HEAD -- ws | grep -c '\.test\.' || true"
+  [ "$output" -eq 0 ]
+
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship CI_GATE_PUSH_OLD_SHA='$base' \
+    CI_GATE_NODE_WORKSPACE=ws bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"lost its entire test suite"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a negated runner cannot satisfy the gate" {
+  # `!` is a reserved word in command position and inverts the status of the
+  # command it prefixes, so `! ./scripts/vitest run` leaves a failing suite as a
+  # zero. The scan read `!` as a command separator, which made it look like an
+  # empty command followed by a runner in command position -- every rule
+  # satisfied by a token whose result the shell then reversed.
+  ws_setup
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\nexit 77\n' > "$NODE_SB/ws/scripts/f77.sh"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "! ./scripts/vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"negates a checker"* ]]
+
+  # And one layer down, where the same rule has had to be re-applied four times.
+  printf '#!/usr/bin/env bash\n! vitest run\n' > "$NODE_SB/ws/scripts/neg.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/neg.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"negates a checker"* ]]
+
+  # A negated *delegation* is the same statement with a wrapper in front of it.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "! bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"negates a checker"* ]]
+
+  # The controls. The negation binds to one command, so a negated *lookup*
+  # followed by the runner is ordinary shell and must still pass -- refusing it
+  # would be the tightening overshooting into correct work, which this lane has
+  # already done twice.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "! command -v nosuchtool && vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"negates a checker"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"negates a checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a wrapper prefix does not hide the runner's own flags" {
+  # Runner discovery and the checker resolver disagreed about `command`, `time`
+  # and `nohup`: the resolver stepped over them and accepted vitest, while
+  # discovery recorded the prefix as the runner, left is_test_runner at zero and
+  # never applied the argument rules at all. `command vitest run
+  # --exclude=tests/a.test.ts` exited 0 with the exclusion uninspected.
+  ws_setup
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "command vitest run --exclude=tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "time vitest run --exclude=tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # A positional filter behind a prefix is the same hole with the other rule.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "nohup vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The control: the prefix on its own is not a filter.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "command vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an EXIT trap that can replace the runner's status is refused" {
+  # An EXIT handler runs after the runner and leaves with its own status if it
+  # exits: `trap 'exit 0' EXIT` in front of a failing suite exits 0. The action
+  # is quoted, so the quote blanker -- which exists precisely because quoted
+  # text is data -- had already removed it, and the scan walked past to the
+  # runner and reported a hit.
+  ws_setup
+
+  printf '#!/usr/bin/env bash\ntrap %s EXIT\n./scripts/vitest run\nexit 77\n' "'exit 0'" \
+    > "$NODE_SB/ws/scripts/trap.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/trap.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"installs an EXIT trap"* ]]
+
+  # Installed inside a block the structure reader refuses to judge, and still
+  # installed at run time. Restricting the question to top-level lines would
+  # have left this accepted -- the rule right on one spelling and absent on the
+  # one beside it.
+  printf '#!/usr/bin/env bash\nif [ -n "${CI:-}" ]; then trap %s EXIT; fi\n./scripts/vitest run\n' "'exit 0'" \
+    > "$NODE_SB/ws/scripts/trapif.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/trapif.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"installs an EXIT trap"* ]]
+
+  # And in the manifest itself, which runs in a shell like any other script.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "trap \"exit 0\" EXIT ; vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"installs an EXIT trap"* ]]
+
+  # The controls. `trap - EXIT` removes a handler rather than installing one; a
+  # handler on other signals cannot replace an exit status; and a trap inside a
+  # string is text being printed, not a handler being installed -- the same
+  # distinction the blanker draws for a checker named in a string.
+  printf '#!/usr/bin/env bash\ntrap - EXIT\n./scripts/vitest run\n' > "$NODE_SB/ws/scripts/treset.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/treset.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"installs an EXIT trap"* ]]
+
+  printf '#!/usr/bin/env bash\ntrap %s INT TERM\n./scripts/vitest run\n' "'echo bye'" \
+    > "$NODE_SB/ws/scripts/tint.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/tint.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"installs an EXIT trap"* ]]
+
+  printf '#!/usr/bin/env bash\necho "trap %s EXIT"\n./scripts/vitest run\n' "'exit 0'" \
+    > "$NODE_SB/ws/scripts/techo.sh"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/techo.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"installs an EXIT trap"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a delegated typecheck is judged by the compiler's rules" {
+  # Every resolved delegation was handed to the *test-runner* validator. A
+  # typecheck script delegating to `tsc --noEmit` therefore met an allow-list
+  # that has never contained `--noEmit`, and `tsc -p tsconfig.json` was reported
+  # as pointing at "individual files" that are its project -- the gate refusing
+  # the two most ordinary spellings of a correct typecheck. Worse, that
+  # validator read `is_test_runner` out of its caller's scope, and on this path
+  # the name does not exist: `set -u` aborted the lane.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+  printf '#!/usr/bin/env bash\ntsc -p tsconfig.json --noEmit\n' > "$NODE_SB/ws/scripts/tc.sh"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "npm run tc", "tc": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" != *"unbound variable"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "bash scripts/tc.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" != *"unbound variable"* ]]
+
+  # And the compiler's own rules do reach the delegated command, which is the
+  # other half: dispatching by tool is not the same as skipping the check.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "npm run tc", "tc": "tsc --noEmit --noCheck" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: tsc modes that do not typecheck are refused whatever their case" {
+  # `--noCheck` is documented as processing the project without full type
+  # checking, so `tsc --noEmit --noCheck` walks everything, reports nothing and
+  # exits 0 over code that does not compile. The catch-all `-*` arm accepted it.
+  #
+  # And tsc matches its options case-insensitively, so every mode named by this
+  # rule could be reached by changing a letter: `--showconfig` is the same
+  # option to the compiler and was a different string to the guard.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit --noCheck" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noemit --showconfig" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # Watch mode never returns, so the lane is killed by the runner timeout and a
+  # manifest edit is reported as broken infrastructure rather than a result --
+  # the reason the same flag left the test-runner allow-list.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit --watch" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The controls: the two correct spellings still pass, which is what keeps this
+  # an enumeration of what cannot check rather than of what may run.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the build-mode operations that delete or plan are refused" {
+  # `tsc --build` takes operations of its own, and two of them never typecheck:
+  # `--clean` deletes the outputs of the referenced projects and `--dry` prints
+  # what a build would do. Either exits 0 over code that does not compile, so
+  # `tsc --build --clean` was a typecheck script that removed build output and
+  # reported success. The rule enumerated single-command modes and did not know
+  # the build operations existed.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --build --clean" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --build --dry" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The short spelling of the build flag reaches the same operations, and the
+  # compiler folds their case like every other option.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -b --clean" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --build --CLEAN" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The control: `tsc --build` on its own is an ordinary project build and does
+  # typecheck. Refusing it would be the other half of this rule going wrong.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --build" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: listing the files it compiled is not a non-compiling mode" {
+  # `--listFiles` and `--listFilesOnly` are one letter and a whole behaviour
+  # apart: the first prints the files as part of a normal compile and still
+  # reports every error, the second prints them *instead* of compiling. Naming
+  # both refused `tsc --listFiles --noEmit`, an ordinary diagnostic spelling of
+  # a real typecheck -- this rule's own false positive, and the shape that gets
+  # a gate switched off.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --listFiles --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+
+  # And the mode that really does replace the compile is still refused, which is
+  # what keeps this a correction rather than a relaxation.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --listFilesOnly --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the compiler's third spelling of help is refused, and no short flag with it" {
+  # typescript registers the option as `{ name: "help", shortName: "?" }`, so
+  # `tsc -?` prints the banner and exits 0. The list refused `--help` and `-h`
+  # and missed the one spelling that is punctuation -- a one-character manifest
+  # edit switched the typecheck lane off while it reported PASS.
+  #
+  # And the reason the pattern is quoted: an unquoted `?` in a case pattern
+  # matches any single character, so `-?` written bare would have refused `-p`,
+  # `-b`, `-w` and the rest of the short vocabulary at a stroke. The controls
+  # below are that half of the rule.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -?" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  local flag
+  for flag in "-p tsconfig.json --noEmit" "-b" "--noEmit -i" "--noEmit -f"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"tsc ${flag}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"non-compiling tsc mode"* ]] || {
+      echo "short flag swallowed by the -? pattern: ${flag}" >&2
+      return 1
+    }
+  done
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a subshell or brace group does not switch off the argument rules" {
+  # `_script_names_a_checker` steps over `(`, `)`, `{` and `}` when it looks for
+  # a runner in command position, so it said the script runs vitest. Beside it
+  # `_command_runner` had no arm for them at all: `(` became the program name,
+  # `(` is in no tool list, and `_reject_tool_args_one` -- the only route to the
+  # tsc rules, the narrowing rules and the positional-filter rule -- was never
+  # called. One character in front of a command switched off every argument rule
+  # at once, on both the test and the typecheck path.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "( vitest run --exclude=tests/x )", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # No spaces are needed for a subshell, so the word is `(vitest`.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "(vitest run --exclude=tests/x)", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # A brace group reaches the same place by the other spelling.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "{ vitest run tests/a.test.ts; }", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # And the typecheck path, whose own rule this equally bypassed.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "( tsc --noEmit src/app.ts )" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"individual files"* ]]
+
+  # The controls, and they are the reason the blanking is scoped to command
+  # position: a wrapped full-suite run is an ordinary script and must pass, and
+  # `{ts,tsx}` and `${VAR}` are arguments rather than groups.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "( vitest run )", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"does not appear to run"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "(cd . && vitest run)", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"does not appear to run"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a word spelled with a backslash escape is refused, not read past" {
+  # `\trap` is the trap command to the shell and `rap` to this gate: an escaped
+  # character is blanked, and it has to be, since keeping it would let `echo
+  # \done` close a block the reader is standing inside. So the word vanished
+  # from every rule that reads that mask at once -- the EXIT-trap rule added
+  # this round was defeated by one character.
+  ws_setup
+  cat > "$NODE_SB/ws/scripts/esc.sh" <<'SH'
+#!/usr/bin/env bash
+\trap 'exit 0' EXIT
+./scripts/vitest run
+exit 77
+SH
+
+  # The premise: the shell really does run that as `trap`, and the handler
+  # really does replace the failure.
+  run bash -c "cd '$NODE_SB/ws' && bash scripts/esc.sh >/dev/null 2>&1"
+  [ "$status" -eq 0 ]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/esc.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"backslash escape"* ]]
+
+  # And in the manifest, where the same escape hides the runner itself.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "\\vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"backslash escape"* ]]
+
+  # The controls, and they matter: a line continuation is a backslash at the end
+  # of a line with no character after it to hide, and an escaped space is not a
+  # word. Refusing either would break ordinary wrapper scripts.
+  cat > "$NODE_SB/ws/scripts/cont.sh" <<'SH'
+#!/usr/bin/env bash
+./scripts/vitest \
+  run
+SH
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/cont.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"backslash escape"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"backslash escape"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an inline -c command is judged by the same argument rules" {
+  # `bash -c 'vitest run tests/only.test.ts'` recursed into the predicate and
+  # returned its answer, so the command inside the string reached a runner and
+  # was accepted with nothing asked about its arguments. Four ways to spell one
+  # delegation -- direct, shell script, package script, inline string -- and the
+  # rule had been carried to three of them.
+  ws_setup
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c \"vitest run tests/a.test.ts\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash -c \"vitest run --exclude=tests/a.test.ts\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The compiler's rules reach into the string too, by the same dispatcher.
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "bash -c \"tsc --noEmit --noCheck\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The control: an inline command that narrows nothing is still accepted.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "bash -c \"tsc --noEmit\"" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the argument rules stop at a command boundary" {
+  # The rules were applied to the whole string, so `vitest run && echo done` had
+  # `echo` read as a vitest argument and refused as a filter -- a script that
+  # runs the full suite and whose status is the suite's, since `&&`
+  # short-circuits, which is exactly why _reject_untrustworthy_composition
+  # allows it. Two rules in one file giving contradictory answers about the same
+  # composition.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run && echo done", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit && echo ok" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+
+  # And the other half, which is what stops this being a hole rather than a fix:
+  # every command in the string is judged, not just the first. A filter before
+  # the separator is still a filter, a second runner after it is still checked,
+  # and a separator inside quotes is an argument rather than a boundary.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run --exclude=tests/a.test.ts && echo done", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run && jest --testPathPattern=x", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo hi && vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run \"a && b\"", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # An environment assignment in front of the runner is not a filter either, and
+  # it used to hide the runner from discovery exactly as `command` did.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "NODE_ENV=test vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "NODE_ENV=test vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an ignored file beside a staged one is not staging drift" {
+  # The quick-mode scan added the whole ignored list, filtered only by a prune
+  # list of directory names. So staging any workspace file at all failed the
+  # commit gate over `frontend/.env.local` -- and the remedy it printed, stage
+  # it or discard it, means committing a secrets file that git-safety.sh then
+  # blocks. Ship mode was fixed by keying on deletions and this branch was not:
+  # one rule, two trees.
+  ws_setup
+  cd "$NODE_SB"
+  printf 'ci/\n.ci-gate/\n*.local\nnode_modules/\n' > .gitignore
+  printf 'console.log(1)\n' > ws/app.js
+  printf 'console.log(9)\n' > ws/doomed.js
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  git init -q -b main . >/dev/null 2>&1
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+
+  printf 'SECRET=1\n' > ws/.env.local
+  printf 'console.log(2)\n' > ws/app.js
+  git add ws/app.js >/dev/null 2>&1
+
+  # The premises: the file really is ignored, and it really is the only thing
+  # beside the staged change.
+  run git check-ignore -q ws/.env.local
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$NODE_SB' && git diff --cached --name-only"
+  [ "$output" = "ws/app.js" ]
+
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *".env.local"* ]]
+  [[ "$output" != *"staged but changed again"* ]]
+
+  # And the case the ignored list is there for, which must still fire: a staged
+  # deletion shadowed by an ignored file of the same name. The commit removes
+  # the path, `git diff HEAD` is silent about it, --exclude-standard hides the
+  # replacement, and the lane would run it.
+  git rm -q --cached ws/doomed.js >/dev/null 2>&1
+  printf 'doomed.js\n' >> .gitignore
+  git add .gitignore >/dev/null 2>&1
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"staged but changed again"* ]]
+  [[ "$output" == *"ws/doomed.js"* ]]
+  [[ "$output" != *".env.local"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: arguments handed to a delegated wrapper are not ignored" {
+  # The wrapper reader accepts `vitest run "$@"`, and says why: what a caller
+  # forwards is not visible from inside the script. It is visible at the call,
+  # and the tokens after a delegated target were being dropped -- so
+  # `bash scripts/test.sh tests/a.test.ts` over that wrapper collected one file
+  # and the lane exited 0. Two halves of one question, one of them unasked.
+  ws_setup
+  printf '#!/usr/bin/env bash\n./scripts/vitest run "$@"\n' > "$NODE_SB/ws/scripts/fwd.sh"
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fwd.sh tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"passes an argument into the"* ]]
+  [[ "$output" == *"tests/a.test.ts"* ]]
+
+  # A narrowing flag forwarded is the same statement in flag form, and meets
+  # the allow-list the runner's own flags meet.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fwd.sh --exclude=tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The controls: forwarding nothing is the ordinary wrapper, and a flag that
+  # cannot reduce the run is not a filter.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fwd.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"passes an argument into the"* ]]
+  [[ "$output" != *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/fwd.sh --coverage" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"passes an argument into the"* ]]
+  [[ "$output" != *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an EXIT trap whose signal is quoted is still an EXIT trap" {
+  # The first version of this rule split the blanked mask on whitespace, and a
+  # quoted signal is blanked with everything else -- so `trap 'exit 0' 'EXIT'`,
+  # a valid spelling, showed the loop a `trap` and no signal at all and was
+  # accepted. The mask is length-preserving, so the arguments can be recovered
+  # whole: a position holding a space in the mask *and* in the original is a
+  # boundary, and a space inside a quoted span is marked so it is not mistaken
+  # for one.
+  ws_setup
+  _trap_verdict() {
+    printf '#!/usr/bin/env bash\n%s\n./scripts/vitest run\nexit 77\n' "$1" \
+      > "$NODE_SB/ws/scripts/t.sh"
+    ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/t.sh" } }'
+    ws_seed_fingerprint
+    case "$(ws_run)" in
+      *"installs an EXIT trap"*) printf 'refused' ;;
+      *) printf 'accepted' ;;
+    esac
+  }
+
+  # The premise: the shell really does install that handler, and it really does
+  # replace the 77 with a zero.
+  printf '#!/usr/bin/env bash\ntrap %s EXIT\nexit 77\n' "'exit 0'" > "$NODE_SB/ws/scripts/p.sh"
+  run bash -c "cd '$NODE_SB/ws' && bash scripts/p.sh"
+  [ "$status" -eq 0 ]
+
+  [ "$(_trap_verdict "trap 'exit 0' EXIT")" = refused ]
+  [ "$(_trap_verdict "trap 'exit 0' 'EXIT'")" = refused ]
+  [ "$(_trap_verdict 'trap "exit 0" "EXIT"')" = refused ]
+  [ "$(_trap_verdict "trap 'exit 0' 0")" = refused ]
+  [ "$(_trap_verdict "trap 'exit 0' EX'IT'")" = refused ]
+  # A quoted command name is still that command.
+  [ "$(_trap_verdict "'trap' 'exit 0' EXIT")" = refused ]
+
+  # The controls. `trap - EXIT` removes a handler rather than installing one,
+  # quoted or not; a handler on other signals cannot replace an exit status;
+  # and a trap named inside a string is text being printed. That last one is
+  # what the quoted-whitespace marking is for -- without it the words inside
+  # the string read as separate arguments and `EXIT` was found in the middle
+  # of one.
+  [ "$(_trap_verdict 'trap - EXIT')" = accepted ]
+  [ "$(_trap_verdict "trap - 'EXIT'")" = accepted ]
+  [ "$(_trap_verdict "trap 'echo bye' INT TERM")" = accepted ]
+  [ "$(_trap_verdict 'echo "trap fake EXIT"')" = accepted ]
+  # A separator ends the trap command, and the words after it belong to the next
+  # one. Applying that only to the piece in front of the separator, and leaving
+  # the state where it was, had `trap 'echo bye' INT; echo EXIT` refused for a
+  # signal two words past the end of the trap.
+  [ "$(_trap_verdict "trap 'echo bye' INT; echo EXIT")" = accepted ]
+  [ "$(_trap_verdict "trap 'echo bye' INT; trap 'exit 0' EXIT")" = refused ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the manifest check reads the pushed tree in ship mode" {
+  # The index is right for pre-commit, where the commit is being assembled in
+  # it, and it is not the tree a push carries: in ship mode the commit already
+  # exists and the index can hold anything staged for the next one. A staged
+  # deletion of the manifest, with the worktree copy kept and an unrelated HEAD
+  # pushed, failed the push over a tree it is not sending -- a mandatory gate
+  # blocking correct work.
+  ws_setup
+  cd "$NODE_SB"
+  printf 'ci/\n.ci-gate/\n' > .gitignore
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  git init -q -b main . >/dev/null 2>&1
+  git add -A >/dev/null 2>&1
+  git -c user.email=t@t -c user.name=t commit -qm init >/dev/null 2>&1
+  ws_seed_fingerprint
+  git rm -q --cached ws/package.json >/dev/null 2>&1
+
+  # The premises: HEAD carries the manifest, the index does not, and the
+  # worktree copy is still there for discovery to find.
+  run bash -c "cd '$NODE_SB' && git cat-file -e HEAD:ws/package.json"
+  [ "$status" -eq 0 ]
+  run bash -c "cd '$NODE_SB' && git cat-file -e :ws/package.json"
+  [ "$status" -ne 0 ]
+  [ -f "$NODE_SB/ws/package.json" ]
+
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=ship bash ci/checks/node.sh 2>&1"
+  [[ "$output" != *"exists on disk but not in"* ]]
+
+  # And the defect the check exists for is unchanged where the index *is* the
+  # commit: staging the deletion and committing nothing means the commit being
+  # made carries no manifest, while every check below reads the worktree copy.
+  run bash -c "cd '$NODE_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"exists on disk but not in the git index"* ]]
+  cd "$REPO_ROOT"
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a newline in a package script is the separator the shell reads" {
+  # A package.json script is a JSON string and may hold a real newline, which
+  # the shell reads as `;`. `vitest run` then `exit 0` runs the suite and
+  # replaces its status -- byte for byte the case the status rule refuses when
+  # it is spelled with a semicolon. Nothing saw it: `;` is matched as a token by
+  # the reader, and a newline arrives there as ordinary whitespace.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/scripts/tsc"
+  chmod +x "$NODE_SB/ws/scripts/tsc"
+
+  # Written through printf so the file carries the JSON escape, which is what a
+  # real manifest holds; node turns it into the newline.
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "vitest run\nexit 0", "typecheck": "tsc --noEmit" } }' \
+    > "$NODE_SB/ws/package.json"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"does not become the script"* ]]
+
+  # The control: an ordinary multi-line script, where the runner is the last
+  # command and nothing after it replaces its status, is still accepted -- so
+  # this is a newline read as the separator it is, not a newline refused.
+  printf '%s\n' '{ "name": "w", "private": true, "scripts": { "test": "cd .\nvitest run", "typecheck": "tsc --noEmit" } }' \
+    > "$NODE_SB/ws/package.json"
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"does not become the script"* ]]
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: --test belongs to the command that runs node" {
+  # `_nt` was computed by scanning every word of the whole script string, so the
+  # `--test` belonging to `echo` licensed the bare `node` after the separator.
+  # At runtime `echo --test` exits 0 and bare `node` reads an empty program from
+  # stdin -- already at EOF under the gate -- and exits 0, so the lane reported
+  # PASS with no suite behind it. The comment above the loop asserted the scope
+  # and the code did not implement it.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "echo --test && node" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The control: `node --test` in one command is still a runner, and so is a
+  # `--test` that follows the runner rather than preceding it.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "node --test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a runner invoked bare runs nothing" {
+  # `tsx`, `ts-node` and `deno` with no arguments drop into a REPL, which under
+  # this gate reads EOF immediately and exits 0. That is the identical failure
+  # the file documents for bare `node` -- "runs an empty program and exits 0" --
+  # fixed for one name on the recognised list and absent on the three beside it.
+  ws_setup
+  local runner
+  for runner in tsx ts-node deno; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${runner}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "bare ${runner} accepted" >&2; return 1; }
+    [[ "$output" == *"not appear to run a test runner"* ]] \
+      || { echo "bare ${runner} refused for the wrong reason" >&2; return 1; }
+  done
+
+  # The control: pointed at something, they are runners again.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "deno test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an environment wrapper is not the command it wraps" {
+  # `_command_runner` stepped over `command`, `nohup` and `time` and not over
+  # `env`, `cross-env` or `timeout`, so the scan classified the wrapper as some
+  # other command, cleared expect_cmd and dropped every token after it --
+  # `vitest` included. `cross-env NODE_ENV=test vitest run` runs the complete
+  # suite and was refused with "does not appear to run a test runner", and
+  # cross-env is the portable way to set a variable in a package script on the
+  # Windows host this gate supports.
+  ws_setup
+  local script
+  for script in "cross-env NODE_ENV=test vitest run" "env NODE_ENV=test vitest run" \
+                "timeout 300 vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${script}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as running no runner: ${script}" >&2; return 1; }
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: ${script}" >&2; return 1; }
+  done
+
+  # And the argument rules still reach through the wrapper, which is the other
+  # half: stepping over a prefix is not the same as skipping the check.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "cross-env NODE_ENV=test vitest run --exclude=tests/x" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "timeout 300 vitest run --exclude=tests/x" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a runner's own vocabulary is not vitest's" {
+  # The narrowing allow-list is vitest's and `node --test`'s, and it was applied
+  # to every runner on the recognised list: `jest --ci` and `mocha --recursive`
+  # were both refused for selecting a subset, and `--recursive` makes mocha
+  # collect more. The positional-filter exemptions had the same shape -- they
+  # carried `run`, vitest's and cypress's word, so `playwright test` and `deno
+  # test`, the only invocation either tool has, were read as filters. Every
+  # runner past vitest and `node --test` was unusable under a gate that names it
+  # as recognised.
+  ws_setup
+  local script
+  for script in "jest --ci" "mocha --recursive" "playwright test"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${script}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: ${script}" >&2; return 1; }
+  done
+
+  # The controls, and they are what keeps this an allow-list: a real filter, a
+  # flag that stops a suite early, and a flag that redirects which config
+  # declares the suite are all still refused -- and the vocabulary is per
+  # runner, so vitest does not inherit jest's.
+  for script in "jest -t somename" "mocha --bail" "jest --config other.json" \
+                "vitest run --ci"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${script}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "accepted: ${script}" >&2; return 1; }
+    [[ "$output" == *"narrows its own suite"* ]] \
+      || { echo "refused for the wrong reason: ${script}" >&2; return 1; }
+  done
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a quoted runner name is the same runner to every reader" {
+  # `'vitest' run --exclude=tests/a.test.ts` executes vitest -- the shell
+  # removes the quotes -- and _script_names_a_checker unquotes before it looks,
+  # so the predicate accepted the runner. _command_runner did not: it returned
+  # the token with its quotes still attached, matched no tool, and the whole
+  # argument family was skipped for that script. Two readers of one token, and
+  # only one of them was reading what the shell reads, so the persistent filter
+  # went through.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "'"'"'vitest'"'"' run --exclude=tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # The control: the same quoting without a filter is still an accepted runner,
+  # so this is a rule about the arguments and not about the quotes.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "'"'"'vitest'"'"' run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"narrows its own suite"* ]]
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a quoted spelling of a non-checking tsc mode is still that mode" {
+  # `tsc --no'Check'` is `tsc --noCheck` to the shell, which compiles without
+  # checking anything. This scan lowercased the raw token to `--no'check'`,
+  # matched none of the named modes, and fell through the generic `-*` arm that
+  # accepts ordinary flags: the mandatory typecheck reported PASS with the
+  # compiler told not to type-check. Quotes are removed wherever they sit in the
+  # token, because that is where a bypass would put them.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --no'"'"'Check'"'"'" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+
+  # The control: the ordinary spelling of a mode that does check is admitted and
+  # handed to the package manager.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # And the control that says where the unquoting has to happen: the compiler's
+  # own name quoted. Stripping below the runner comparison rather than above it
+  # would leave `'tsc' --noEmit` falling through to the trailing arm and being
+  # refused as a source file -- the same defect one line over from its own fix.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "'"'"'tsc'"'"' --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: an explicit boolean is the value of the switch before it" {
+  # `tsc --noEmit --pretty false` typechecks the whole project: tsc documents
+  # `--pretty` as a boolean whose default is true, and passing it `false` only
+  # changes how the diagnostics are formatted. The value-taking allow-list names
+  # no boolean switch, so `false` reached the trailing arm and was refused as a
+  # source file the compiler had been pointed at -- the gate blocking a valid
+  # full-project typecheck, which is how a gate gets switched off.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit --pretty false" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # The control that keeps it narrow: only `true` and `false`, and only directly
+  # after a flag. Any other bare word after a switch is still a source file, and
+  # naming files is still what makes tsc ignore tsconfig.json.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit src/x.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: tsc is not pointed at a project this workspace does not have" {
+  # The typecheck twin of `vitest --config`, and it sat on the value-taking
+  # list -- so the argument was consumed and nothing asked which project it
+  # selects. `-p <file>` compiles the project that file describes, and this
+  # reader cannot open the file to see what that is, so a path discovery never
+  # found is refused rather than assumed harmless.
+  #
+  # "Discovered" and not "named tsconfig.json", which is what it used to say:
+  # widening discovery to tsconfig.*.json made the old spelling a requirement
+  # with no way to satisfy it, and that half is asserted in the case below.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p ../shared/tsconfig.narrow.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"a project this workspace does not have"* ]]
+  [[ "$output" == *"tsconfig.narrow.json"* ]]
+  # And it says which projects there are, so the refusal is actionable.
+  [[ "$output" == *"tsconfig.json"* ]]
+
+  # The joined spelling selects a project the same way and arrives as one
+  # token, so it needs the rule written on it too -- otherwise the fix holds for
+  # `-p x` and the option beside it walks straight through the generic flag arm.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --project=../shared/tsconfig.narrow.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"a project this workspace does not have"* ]]
+
+  # A config that exists but sits outside the workspace is still outside it: the
+  # enumeration is rooted at the workspace, so `../` cannot be reached by it and
+  # the file being real does not make it discovered.
+  mkdir -p "$NODE_SB/shared"
+  printf '{ "compilerOptions": { "strict": true }, "files": ["src/ok.ts"] }\n' \
+    > "$NODE_SB/shared/tsconfig.narrow.json"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"a project this workspace does not have"* ]]
+  rm -rf "$NODE_SB/shared"
+
+  # The controls: naming the workspace configuration explicitly is the same
+  # compilation as omitting it, in either spelling, and stays accepted.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project this workspace does not have"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --project=tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project this workspace does not have"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the only project a workspace has can be named as its project" {
+  # A requirement with no way to satisfy it, created by the commit that widened
+  # discovery to tsconfig.*.json and reported before anyone hit it.
+  #
+  # `npm create vite` leaves a workspace whose only configuration is
+  # tsconfig.app.json. Discovery now sees it, so a `typecheck` script is
+  # *required* -- and the only script that could typecheck that project was
+  # refused by the rule above, because the rule read "the project" as the
+  # literal name tsconfig.json. `tsc --noEmit` was accepted there, but with no
+  # root configuration to read it checks nothing.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.app.json"
+
+  # The premise: this workspace has a project, and it is not named tsconfig.json.
+  [ -f "$NODE_SB/ws/tsconfig.app.json" ]
+  [ ! -f "$NODE_SB/ws/tsconfig.json" ]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project this workspace does not have"* ]] \
+    || { echo "the workspace's own project was refused" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # The `./` spelling names the same file and is what a hand-written script
+  # tends to carry; matching it as a different string would refuse the project
+  # for its punctuation.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p ./tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project this workspace does not have"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # The joined spelling has its own arm, and the comment above it has claimed
+  # since it was written that both are "judged by the same test ... rather than
+  # by a second rule that could drift away from it". They were two rules, and
+  # they drifted the moment one was corrected: this case is what stops the split
+  # spelling being fixed on its own again.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --project=tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project"* ]] \
+    || { echo "the joined spelling refused the workspace's own project" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p=tsconfig.app.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # A nested project is discovered too, and is likewise nameable.
+  mkdir -p "$NODE_SB/ws/e2e"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/e2e/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p e2e/tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"a project this workspace does not have"* ]]
+  [[ "$output" == *"Running script: typecheck"* ]]
+
+  # The control that keeps the rule from becoming "anything goes": a path that
+  # looks like a project but is not one of this workspace's is still refused,
+  # in a workspace that now has two real ones.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.node.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"a project this workspace does not have"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: trap -p inspects the handlers and installs none" {
+  # `trap -p EXIT && vitest run` prints the EXIT trap and returns; bash
+  # documents `-p` as displaying the trap commands associated with each signal.
+  # The state machine read `-p` as the handler and `EXIT` as the signal it was
+  # installed for, and refused an ordinary diagnostic script before the suite
+  # ran. It is the distinction `-` already makes in the same arm: inspection is
+  # not installation.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "trap -p EXIT && vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"installs an EXIT trap"* ]]
+  # The lane validates every script before it runs any of them, so reaching an
+  # execution line at all is the evidence this script was admitted -- the
+  # refusal below never prints one. Which script runs first is the lane's
+  # business and not this case's.
+  [[ "$output" == *"Running script:"* ]]
+
+  # The control: a handler that does replace the runner's status is still
+  # refused, which is the rule this one sits inside.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "trap true EXIT && vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"installs an EXIT trap"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "workspaces: an enumeration that could not run is not an empty repository" {
+  # The producer ran inside process substitution, so `find` failing on an
+  # unreadable subtree -- or `sort` failing to allocate -- delivered partial or
+  # empty output and the loop reported its own success. This repository has no
+  # root manifest, so an empty list reads as "no package.json found" and the
+  # node lane passes having run nothing: one unreadable directory silently
+  # removing every frontend check. "Could not look" is not "found nothing",
+  # which is the rule config_sources and the git-safety path collector already
+  # follow.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/bin" "$sb/frontend"
+  printf '{ "name": "f", "private": true }\n' > "$sb/frontend/package.json"
+  printf '#!/usr/bin/env bash\nexit 71\n' > "$sb/bin/find"
+  chmod +x "$sb/bin/find"
+
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && export PATH='$sb/bin:'\"\$PATH\" \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Cannot enumerate"* ]]
+  [[ "$output" != *"frontend"* ]]
+
+  # The control: with a working enumeration the same tree answers normally, so
+  # this is a rule about the producer's status and not about the layout.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend"* ]]
+  rm -rf "$sb"
+}
+
+# --- the `timeout` wrapper's own grammar --------------------------------------
+
+@test "node lane: a timeout wrapper's options belong to timeout" {
+  # `timeout [OPTION] DURATION COMMAND [ARG]...` is the documented grammar, and
+  # every reader here knew only the two-word shape: the token after the wrapper
+  # was taken as the duration if it looked numeric, and the state was cleared
+  # either way. So `timeout --foreground 300 vitest run` left `300` in command
+  # position, the lane reported that the script runs no test runner, and an
+  # ordinary bounded full suite was refused. `-s SIGKILL` and `-k 10` bring a
+  # value of their own, which is not the duration either.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/timeout"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/timeout"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/tsc"
+
+  local spelling
+  for spelling in \
+    "timeout 300 vitest run" \
+    "timeout --foreground 300 vitest run" \
+    "timeout -s SIGKILL 300 vitest run" \
+    "timeout --signal=SIGKILL 300 vitest run" \
+    "timeout -k 10 300 vitest run" \
+    "timeout --kill-after=10 300 vitest run" \
+    "timeout --preserve-status 5m vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\", \"typecheck\": \"tsc --noEmit\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls: the wrapper does not launder what it wraps. A filter behind it
+  # is still a filter, and a positional behind it is still a positional.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "timeout --foreground 300 vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "timeout 300 vitest run tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the typecheck scan reads the same timeout wrapper" {
+  # The test lane carried the wrapper rule in four places and the typecheck scan
+  # beside it in none, so `timeout 300 tsc --noEmit` was refused for pointing
+  # the compiler at a file named `300` -- and a `--noCheck` behind the wrapper
+  # was never reached, because the wrong refusal came first.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/timeout"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/timeout"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/tsc"
+
+  local spelling
+  for spelling in \
+    "timeout 300 tsc --noEmit" \
+    "timeout --foreground 300 tsc --noEmit" \
+    "timeout -s SIGKILL 300 tsc --noEmit"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"individual files"* ]] \
+      || { echo "refused as naming files: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls: a real source file behind the wrapper is still a source file,
+  # and a non-compiling mode behind it is now reached instead of being hidden
+  # behind the wrong refusal.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "timeout 300 tsc --noEmit src/x.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"individual files"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "timeout --foreground 300 tsc --noCheck" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
+# --- which runner owns the suite ----------------------------------------------
+#
+# These drive ci/checks/tests.sh and ci/checks/typecheck.sh against a synthetic
+# workspace, with CI_GATE_CHECK_ID scoping the run to the JS lane so the other
+# languages' tools are not required.
+
+lane_setup() {
+  LANE_SB="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$LANE_SB/ci/checks" "$LANE_SB/ci/lib" "$LANE_SB/ci/config" \
+           "$LANE_SB/ws/node_modules/.bin" "$LANE_SB/ws/tests"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$REPO_ROOT/ci/checks/typecheck.sh" "$LANE_SB/ci/checks/"
+  # git.sh among them: tests.sh sources it for ci::git::push_range, which is
+  # where the ship-mode affected-test narrowing gets the commits being pushed.
+  # A sandbox missing a lib the lane sources fails on the source line, with a
+  # message about nothing the case is asking about.
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/junit.sh" "$REPO_ROOT/ci/lib/git.sh" "$LANE_SB/ci/lib/"
+  printf 'it("x", () => {});\n' > "$LANE_SB/ws/tests/a.test.ts"
+}
+
+lane_runner() {
+  # A stand-in that says which binary was invoked, which is the whole question.
+  printf '#!/usr/bin/env bash\necho "INVOKED=%s"\nexit 0\n' "$2" \
+    > "$LANE_SB/ws/node_modules/.bin/$1"
+  chmod +x "$LANE_SB/ws/node_modules/.bin/$1"
+}
+
+lane_manifest() {
+  printf '%s\n' "$1" > "$LANE_SB/ws/package.json"
+}
+
+lane_run_tests() {
+  ( cd "$LANE_SB" && CI_GATE_CHECK_ID=tests-js bash ci/checks/tests.sh 2>&1 )
+}
+
+lane_run_typecheck() {
+  ( cd "$LANE_SB" && CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1 )
+}
+
+@test "tests lane: the runner is the one the workspace declares" {
+  # Presence and a fixed order decided this, so a workspace that declares Jest
+  # and also has Vitest installed -- a migration, or a transitive dependency --
+  # ran Vitest. Vitest collects nothing it recognises in a Jest suite, exits 0,
+  # and tests-js reports PASS while every Jest test stays uncollected.
+  lane_setup
+  lane_runner vitest VITEST
+  lane_runner jest JEST
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "jest --ci" } }'
+  run lane_run_tests
+  [[ "$output" == *"INVOKED=JEST"* ]]
+  [[ "$output" != *"INVOKED=VITEST"* ]]
+
+  # The other direction, so this is about the declaration and not about a new
+  # fixed order.
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  run lane_run_tests
+  [[ "$output" == *"INVOKED=VITEST"* ]]
+  [[ "$output" != *"INVOKED=JEST"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "tests lane: two runners and no declaration is refused, not ordered" {
+  # The question this lane cannot answer. Running either one and reporting PASS
+  # is the failure the case above describes, so it says so instead -- as
+  # infrastructure, because no test failed.
+  lane_setup
+  lane_runner vitest VITEST
+  lane_runner jest JEST
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "npm run inner" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"names neither"* ]]
+  [[ "$output" != *"INVOKED="* ]]
+
+  # The control: one runner installed needs no declaration to be unambiguous.
+  rm -f "$LANE_SB/ws/node_modules/.bin/jest"
+  run lane_run_tests
+  [[ "$output" == *"INVOKED=VITEST"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "tests lane: a declared runner that is absent is not a licence for the other" {
+  # Substituting the installed runner for the declared one is the same wrong
+  # suite by another route, so a missing declared runner is the broken install
+  # the no-runner branch already reports.
+  lane_setup
+  lane_runner vitest VITEST
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "jest --ci" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ]
+  [[ "$output" != *"INVOKED=VITEST"* ]]
+  [[ "$output" == *"No workspace-local JS test runner"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "tests lane: a workspace with no suite to run is not a broken install" {
+  # "No runner" and "nothing to run" were one branch. Discovery schedules this
+  # lane for every package.json it finds, so a build-only package -- a shared
+  # config, a generated client -- reached the missing-runner refusal and turned
+  # a blocking lane infra-red over a workspace that is not broken and has no
+  # suite to be broken. ci/checks/node.sh runs the same package's `build` and
+  # passes it.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"No JavaScript suite in ws"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"No workspace-local JS test runner"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # And the half that makes the skip safe. A workspace that still ships a file
+  # vitest or jest would collect has lost its script *and* its runner, and that
+  # is exactly the state where reporting PASS means a real suite quietly stopped
+  # running. Deleting a script is one keystroke; the files are the evidence that
+  # something was meant to run, so they keep the refusal.
+  lane_setup
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"No workspace-local JS test runner"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # A declared script is a stated contract, and a missing runner is that
+  # contract unmet whether or not any file survives to prove it.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"No workspace-local JS test runner"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # `test:unit` counts as that contract too -- the node lane accepts either, and
+  # a rule that reads only `test` would skip a workspace whose whole suite runs
+  # under the other name.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test:unit": "vitest run" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # A manifest that cannot be read has not been shown to declare nothing, and
+  # reading "could not look" as "found nothing" is what turns an unparseable
+  # package.json into a skipped workspace.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  printf '{ not json\n' > "$LANE_SB/ws/package.json"
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"No JavaScript suite in ws"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # And the sharper half of the same statement, which the row above cannot
+  # reach: with a runner *installed*, an unreadable manifest used to resolve to
+  # "declares no runner", the both-runners refusal did not apply, and the loop
+  # ran that single runner directly -- PASS for a workspace whose test contract
+  # nobody could read. The lane was inferring a contract from what happened to be
+  # installed, which is the substitution the declared-but-absent branch refuses.
+  lane_setup
+  lane_runner vitest VITEST
+  printf '{ not json\n' > "$LANE_SB/ws/package.json"
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"INVOKED=VITEST"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"Cannot read"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+}
+
+@test "tests lane: the suite scan here is vitest's and jest's, not the node lane's" {
+  # Two lanes, two questions. ci/checks/node.sh runs the workspace's own `test`
+  # script, so whichever runner owns a Cypress spec or a Mocha `test/` file is
+  # the one it invokes, and its predicate counts them. This lane runs `vitest`
+  # or `jest` itself and nothing else, so the only files that bear on whether it
+  # has something to run are the ones those two collect. Asking node.sh's wider
+  # question here would refuse a Cypress-only workspace for not having installed
+  # a runner it does not use.
+  #
+  # The refusal that case gives up is not lost: node.sh's orphan guard fails a
+  # workspace shipping Cypress specs with no test script, and
+  # `node lane: a Cypress suite is a suite the test script may not lose` is
+  # where that is asserted.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  mkdir -p "$LANE_SB/ws/cypress/e2e"
+  printf 'describe("login", () => {});\n' > "$LANE_SB/ws/cypress/e2e/login.cy.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"No JavaScript suite in ws"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # `openapi.spec.json` is an API description, not a suite: the name shape alone
+  # is a claim about any file whatsoever, so the extension has to agree.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  printf '{ "openapi": "3.0.0" }\n' > "$LANE_SB/ws/openapi.spec.json"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # Jest collects by directory at any depth, so a `__tests__` tree is a suite
+  # this lane could have run even with nothing named `.test.`.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  mkdir -p "$LANE_SB/ws/src/__tests__"
+  printf 'it("x", () => {});\n' > "$LANE_SB/ws/src/__tests__/login.tsx"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # A bare `test.ts` is what vitest's and jest's `?(*.)` allows, and reading the
+  # pattern as `*.test.*` only would skip a workspace whose entire suite is one
+  # such file.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  printf 'it("x", () => {});\n' > "$LANE_SB/ws/tests/test.ts"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 30 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # Build output is not a suite. A `dist/` copy of a compiled test would keep
+  # every workspace looking as though it still has one.
+  lane_setup
+  rm -f "$LANE_SB/ws/tests/a.test.ts"
+  mkdir -p "$LANE_SB/ws/dist"
+  printf 'it("x", () => {});\n' > "$LANE_SB/ws/dist/a.test.js"
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "build": "true" } }'
+  run lane_run_tests
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+}
+
+@test "typecheck lane: a nested tsconfig is ordinary TypeScript" {
+  # Discovery asked node_workspaces about tsconfig.json, which applies the
+  # package-manager ambiguity rule -- a statement about lockfiles. A normal
+  # `ws/e2e/tsconfig.json` extending its parent became "a workspace nested under
+  # a workspace", the helper returned 1, and under this script's `set -e` the
+  # substitution took the whole lane down: raw exit 1, outside the 0/10/20/30
+  # contract, with the Python, Go and Rust typechecks never reached.
+  lane_setup
+  mkdir -p "$LANE_SB/ws/e2e" "$LANE_SB/ws/src"
+  printf '{ "compilerOptions": { "strict": true }, "include": ["src"] }\n' > "$LANE_SB/ws/tsconfig.json"
+  printf '{ "extends": "../tsconfig.json", "include": ["."] }\n' > "$LANE_SB/ws/e2e/tsconfig.json"
+  printf 'export const ok = true;\n' > "$LANE_SB/ws/src/app.ts"
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INVOKED=TSC"* ]]
+  [[ "$output" != *"nested under"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "typecheck lane: a fixture or generated config is not a project to compile" {
+  # A config-shaped name is not by itself a first-party project.
+  # `tests/fixtures/broken/tsconfig.json` exists to hold errors on purpose and
+  # `dist/tsconfig.generated.json` is output, so `tsc -p` on either failed an
+  # otherwise valid tree over a file this repository already classifies as
+  # not-source -- and node.sh's _ts_project_files, reading the same names,
+  # demanded a `typecheck` script of a workspace on the same evidence.
+  #
+  # Filtered through ci::common::is_vendored_path in both, which is the
+  # definition ci::common::node_workspaces and ci/lib/changeset.sh's classifier
+  # already use. A fifth hand-written list is how the four drifted apart before.
+  lane_setup
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  mkdir -p "$LANE_SB/ws/tests/fixtures/broken" "$LANE_SB/ws/dist"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tests/fixtures/broken/tsconfig.json"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/dist/tsconfig.generated.json"
+  run lane_run_typecheck
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"no tsconfig.json in ws"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"INVOKED=TSC"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+
+  # The control, and it is the half that keeps this from becoming a hole: a
+  # genuine project below the root is still compiled. `e2e/tsconfig.json` is an
+  # ordinary shape and its own case above exists because it was once missed.
+  lane_setup
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  mkdir -p "$LANE_SB/ws/e2e" "$LANE_SB/ws/tests/fixtures/broken"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/e2e/tsconfig.json"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tests/fixtures/broken/tsconfig.json"
+  run lane_run_typecheck
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"INVOKED=TSC"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+}
+
+@test "node lane: a fixture config does not make a workspace owe a typecheck script" {
+  # The other reader of the same list. _ts_project_files decides whether the
+  # workspace is *required* to have a `typecheck` script, so a fixture config
+  # made a JavaScript-only package fail for not running tsc over a file
+  # ci/checks/typecheck.sh now declines to compile. The two lists have to agree
+  # or the gate demands a check nothing performs.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "build": "true" } }'
+  mkdir -p "$NODE_SB/ws/tests/fixtures/broken" "$NODE_SB/ws/dist"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tests/fixtures/broken/tsconfig.json"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/dist/tsconfig.generated.json"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" != *"declares TypeScript configuration but"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+
+  # The control: a real project still owes a typecheck script, or this would
+  # have switched the requirement off for every workspace.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh", "build": "true" } }'
+  mkdir -p "$NODE_SB/ws/e2e"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/e2e/tsconfig.json"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"declares TypeScript configuration but"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$NODE_SB"
+}
+
+@test "typecheck lane: an enumeration failure is not reported as a type error" {
+  # _tc_js_workspace returns FAIL_INFRA deliberately and in more than one place
+  # -- the project enumeration failing, `mktemp` failing, a vouched-tree listing
+  # that could not be read. The catch-all below the missing-compiler branch
+  # turned every one of them into "tsc --noEmit failed", which sends someone
+  # looking for a type error that does not exist and reports a repository or
+  # tooling fault as a defect in the tree being pushed.
+  lane_setup
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tsconfig.json"
+
+  # Driven at the branch rather than through one of the faults that reaches it.
+  # Every real route -- a failed `mktemp`, a `find` that could not run, a
+  # vouched-tree listing that failed -- is a broken tool, and stubbing the tool
+  # takes the *enumeration* down before this loop is reached, so the case would
+  # assert a different message than the one it is about. What is under test is
+  # what the loop does with a 30, so the loop is given a 30.
+  local drv; drv="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  sed -n '/^typecheck::run_js()/,/^}/p' "$REPO_ROOT/ci/checks/typecheck.sh" > "$drv"
+  bash -n "$drv" || { rm -f "$drv" "$LANE_SB"; echo "extraction is not valid shell" >&2; return 1; }
+
+  run bash -c "
+    set -Eeuo pipefail
+    . '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+    . '$REPO_ROOT/ci/lib/log.sh'    >/dev/null 2>&1
+    . '$drv'
+    ci::common::node_workspaces() { printf 'ws\n'; }
+    _tc_js_workspace() { return 30; }
+    OVERALL_RESULT=\"\$CI_RESULT_PASS\"
+    typecheck::run_js
+    echo \"RESULT=\$OVERALL_RESULT\""
+  rm -f "$drv"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"RESULT=${CI_RESULT_FAIL_INFRA}"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"could not be checked"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" != *"tsc --noEmit failed"* ]] || { echo "$output" >&2; false; }
+
+  # The control, and it is what stops the branch from swallowing real failures:
+  # a compiler that exits non-zero for any other reason is still a type error.
+  drv="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  sed -n '/^typecheck::run_js()/,/^}/p' "$REPO_ROOT/ci/checks/typecheck.sh" > "$drv"
+  run bash -c "
+    set -Eeuo pipefail
+    . '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+    . '$REPO_ROOT/ci/lib/log.sh'    >/dev/null 2>&1
+    . '$drv'
+    ci::common::node_workspaces() { printf 'ws\n'; }
+    _tc_js_workspace() { return 2; }
+    OVERALL_RESULT=\"\$CI_RESULT_PASS\"
+    typecheck::run_js
+    echo \"RESULT=\$OVERALL_RESULT\""
+  rm -f "$drv"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
+  [[ "$output" == *"RESULT=${CI_RESULT_FAIL_NEW_ISSUE}"* ]] || { echo "$output" >&2; false; }
+  [[ "$output" == *"tsc --noEmit failed"* ]] || { echo "$output" >&2; false; }
+  rm -rf "$LANE_SB"
+}
+
+@test "typecheck lane: a package root with no TypeScript project says so" {
+  # The counterpart of discovering package roots: a JavaScript-only package has
+  # no project to compile, which is a fact about the workspace rather than a
+  # compiler that could not be found -- and the two must not be reported as
+  # each other.
+  lane_setup
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true }'
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no tsconfig.json in ws"* ]]
+  [[ "$output" != *"INVOKED=TSC"* ]]
+
+  # And with a project present, the same workspace is compiled.
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tsconfig.json"
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INVOKED=TSC"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "lanes: a workspace enumeration that could not run is infrastructure" {
+  # The producer's failure reached these two lanes through a command
+  # substitution under `set -e`, which aborts the script where it stands -- raw
+  # exit 1, no result line, and every language after JavaScript unrun. The
+  # status is read and reported now, which is the same rule the enumeration
+  # itself follows: could not look is not found nothing.
+  lane_setup
+  mkdir -p "$LANE_SB/bin"
+  printf '#!/usr/bin/env bash\nexit 71\n' > "$LANE_SB/bin/find"
+  chmod +x "$LANE_SB/bin/find"
+  lane_runner vitest VITEST
+  lane_runner tsc TSC
+  lane_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tsconfig.json"
+
+  run bash -c "cd '$LANE_SB' && PATH='$LANE_SB/bin:'\"\$PATH\" CI_GATE_CHECK_ID=tests-js bash ci/checks/tests.sh 2>&1"
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Could not enumerate JavaScript workspaces"* ]]
+  [[ "$output" == *"Tests result:"* ]]
+
+  run bash -c "cd '$LANE_SB' && PATH='$LANE_SB/bin:'\"\$PATH\" CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [ "$status" -eq 30 ]
+  [[ "$output" == *"Could not enumerate JavaScript workspaces"* ]]
+  [[ "$output" == *"Typecheck result:"* ]]
+  rm -rf "$LANE_SB"
+}
+
+@test "node lane: an env prefix's options belong to env" {
+  # `env [OPTION]... [NAME=VALUE]... [COMMAND [ARG]...]`, from `env --help`, and
+  # `-u NAME` / `-C DIR` / `-S STRING` take a value as a separate word. The
+  # wrapper was skipped by name with nothing reading the grammar after it, so
+  # `env -u NODE_ENV vitest run` selected `NODE_ENV` as the program -- it is
+  # neither a flag nor an assignment -- and the lane refused a full-suite script
+  # for running no test runner. The same six readers the `timeout` wrapper
+  # needed: two that discover the checker and three that judge its arguments,
+  # plus the preamble that drops the first token before the loop sees it.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  local b
+  for b in tsc env cross-env; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/$b"
+    chmod +x "$NODE_SB/ws/node_modules/.bin/$b"
+  done
+
+  local spelling
+  for spelling in \
+    "env vitest run" \
+    "env NODE_ENV=test vitest run" \
+    "env -u NODE_ENV vitest run" \
+    "env --unset=NODE_ENV vitest run" \
+    "env -i NODE_ENV=test vitest run" \
+    "env -C . vitest run" \
+    "cross-env -u NODE_ENV vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\", \"typecheck\": \"tsc --noEmit\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls: the prefix does not launder what follows it. A filter is still
+  # a filter, and a command that is not a runner is still not one.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "env -u NODE_ENV vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "env -u NODE_ENV echo hi", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the typecheck scan reads the same env prefix" {
+  # `env` was on no list in the compiler's argument scan at all, so
+  # `env NODE_ENV=test tsc --noEmit` was refused for pointing tsc at a file
+  # named `env`, and a non-checking mode behind the prefix was never reached
+  # because the wrong refusal came first.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  local b
+  for b in tsc env; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/$b"
+    chmod +x "$NODE_SB/ws/node_modules/.bin/$b"
+  done
+
+  local spelling
+  for spelling in \
+    "env NODE_ENV=test tsc --noEmit" \
+    "env -u NODE_ENV tsc --noEmit"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"individual files"* ]] \
+      || { echo "refused as naming files: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The control: the mode behind the prefix is now reached instead of hidden.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "env -u NODE_ENV tsc --noCheck" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: the dependency fingerprint covers the runtime it installed under" {
+  # The lockfile and the manifest say what was asked for; they do not say what
+  # was built. Native addons, optional packages and install-script output are
+  # compiled against the Node ABI and for a platform and architecture, so moving
+  # between two releases that both satisfy a broad `engines.node` range left
+  # node_modules looking current -- the install was skipped and the lane
+  # validated a tree a clean install would not produce.
+  ws_setup
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  ws_seed_fingerprint
+
+  # The premise: with the runtime it was seeded under, the install is skipped.
+  run ws_run
+  [[ "$output" == *"Skipping install"* ]]
+
+  # And under a different runtime it is not. Written directly rather than by
+  # running a second Node: what the rule asserts is that the recorded runtime is
+  # part of the key, and a fixture that cannot vary it asserts nothing.
+  ( cd "$NODE_SB/ws" \
+    && . "$REPO_ROOT/ci/lib/common.sh" \
+    && printf '%s %s %s\n' \
+      "$(ci::common::hash_file bun.lock)" \
+      "$(ci::common::hash_file package.json)" \
+      "v0.0.0-otherplatform-otherarch" \
+      > "$NODE_SB/.ci-gate/node_modules-$(ci::common::workspace_slug ws).hash" )
+  run ws_run
+  [[ "$output" != *"Skipping install"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a nested TypeScript project still needs a typecheck script" {
+  # The root-file test read "does this workspace declare TypeScript" as "is
+  # there a tsconfig.json beside package.json", so a package whose only project
+  # is `e2e/tsconfig.json` -- an ordinary shape -- answered no, required no
+  # typecheck script, and reported PASS with that project's type errors never
+  # looked for.
+  ws_setup
+  mkdir -p "$NODE_SB/ws/e2e"
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/e2e/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"declares TypeScript configuration but"* ]]
+  [[ "$output" == *"e2e/tsconfig.json"* ]]
+
+  # The control: a config belonging to a dependency is not the workspace's.
+  rm -rf "$NODE_SB/ws/e2e"
+  mkdir -p "$NODE_SB/ws/node_modules/dep"
+  printf '{ }\n' > "$NODE_SB/ws/node_modules/dep/tsconfig.json"
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"declares TypeScript configuration but"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "typecheck lane: a nested project is compiled as its own project" {
+  # `tsc --noEmit` at the root compiles what the root config includes, and a
+  # config the root neither includes nor references is exactly the one whose
+  # errors nobody would see. Compiling a referenced project twice reports the
+  # same errors twice; not compiling an unreferenced one reports none at all,
+  # and only one of those is a wrong answer.
+  lane_setup
+  mkdir -p "$LANE_SB/ws/e2e"
+  lane_runner tsc TSC
+  # The stand-in echoes its arguments, which is how the case can see which
+  # projects were compiled rather than only that the compiler ran.
+  printf '#!/usr/bin/env bash\necho "INVOKED=TSC $*"\nexit 0\n' \
+    > "$LANE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$LANE_SB/ws/node_modules/.bin/tsc"
+  lane_manifest '{ "name": "w", "private": true }'
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/e2e/tsconfig.json"
+
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"-p e2e/tsconfig.json --noEmit"* ]]
+
+  # With a root project too, both are compiled and the root is not compiled
+  # twice under its own name.
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$LANE_SB/ws/tsconfig.json"
+  run lane_run_typecheck
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"INVOKED=TSC --noEmit"* ]]
+  [[ "$output" == *"-p e2e/tsconfig.json --noEmit"* ]]
+  [[ "$output" != *"-p tsconfig.json --noEmit"* ]]
+
+  # And a failing nested project fails the lane, so this is coverage and not
+  # decoration.
+  printf '#!/usr/bin/env bash\ncase "$*" in *e2e*) exit 2 ;; esac\nexit 0\n' \
+    > "$LANE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$LANE_SB/ws/node_modules/.bin/tsc"
+  run lane_run_typecheck
+  [ "$status" -eq 20 ]
+  rm -rf "$LANE_SB"
+}
+
+# --- self-found: rules that existed in one reader and not in its sibling ------
+#
+# These came out of a sweep for the shape the reported findings kept having,
+# rather than from a review thread. Each names the reader that had the rule and
+# the one that did not.
+
+ws_tools() {
+  local _t
+  for _t in "$@"; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/$_t"
+    chmod +x "$NODE_SB/ws/node_modules/.bin/$_t"
+  done
+}
+
+@test "node lane: a tool reached through npx is judged by its own rules" {
+  # _reject_tool_args_one picks the argument rules by the tool actually
+  # resolved, and its own comment says why: falling through hands a type checker
+  # the test-runner allow-list and refuses every ordinary invocation. The
+  # forwarded path -- `npx tsc --noEmit`, `pnpm dlx vitest run`, where the
+  # target IS the executable -- never reached it. _reject_forwarded_args called
+  # _reject_narrowing_flags bare, with no runner, so vitest's vocabulary was
+  # applied to everything: `npx tsc --noEmit` was refused for narrowing a suite
+  # that does not exist, `npx jest --ci` and `npx mocha --recursive` for flags
+  # the runner-keyed list names as harmless, and `npx playwright test` for the
+  # only invocation playwright has.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_tools tsc vue-tsc svelte-check npx jest mocha ava tap playwright deno
+
+  # Every one of these passes when written directly, so it must pass through
+  # npx: the spelling is not the question the rules are about.
+  local spelling
+  for spelling in \
+    "npx tsc --noEmit" \
+    "npx vue-tsc --noEmit" \
+    "npx svelte-check --threshold error"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  for spelling in \
+    "npx jest --ci" \
+    "npx mocha --recursive" \
+    "npx playwright test" \
+    "npx deno test" \
+    "npx vitest run --reporter json"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\", \"typecheck\": \"tsc --noEmit\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" != *"passes an argument into the"* ]] \
+      || { echo "refused as forwarded: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls, and the point of the whole rule: npx does not launder a
+  # filter. Both spellings of a genuine narrowing are still refused.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npx vitest run tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npx vitest run --exclude=tests/a.test.ts", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: tsc reads one dash the same way it reads two" {
+  # TypeScript's command line strips the leading dashes before it looks an
+  # option up, so `-noCheck` is `--noCheck` to the compiler. The non-compiling
+  # list enumerated the two-dash spelling only, so the one-dash spelling matched
+  # no arm and fell through the generic `-*` case that accepts ordinary flags:
+  # the typecheck lane reported PASS with the compiler told not to type check,
+  # reachable by deleting one character. A deny-list that loses to a spelling is
+  # the shape this file keeps having to invert.
+  ws_setup
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_tools tsc
+
+  local spelling
+  for spelling in "tsc --noEmit -noCheck" "tsc --noEmit -showConfig" "tsc --noEmit -watch"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "accepted: $spelling" >&2; return 1; }
+    [[ "$output" == *"non-compiling tsc mode"* ]] \
+      || { echo "refused for the wrong reason: $spelling" >&2; return 1; }
+  done
+
+  # The controls: a one-dash option that is not on the list is still an ordinary
+  # flag, and the single-character flags keep their one-dash spelling -- turning
+  # those into `--p` would take them out of the list they are already in.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" == *"Running script:"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"non-compiling tsc mode"* ]]
+  [[ "$output" != *"a project this workspace does not have"* ]]
+  [[ "$output" == *"Running script:"* ]]
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc -w" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"non-compiling tsc mode"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a runner flag's value is not a filter" {
+  # The flag allow-list is keyed by runner and says `mocha --timeout` cannot
+  # reduce a run -- by name. The positional reader beside it carried vitest's
+  # value-taking list and only that, so `5000` was refused as a test filter.
+  # `mocha --require ts-node/register` is the standard mocha TypeScript setup
+  # and went the same way. Two readers that had to agree about the same flag,
+  # and did not.
+  ws_setup
+  ws_tools mocha ava tap playwright
+
+  local spelling
+  for spelling in \
+    "mocha --timeout 5000" \
+    "mocha --require ts-node/register" \
+    "mocha --jobs 4" \
+    "ava --concurrency 4" \
+    "tap --jobs 4" \
+    "playwright --workers 2"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    # And positively: the script was reached and run. Asserting only the absence
+    # of a message is satisfied by the lane dying earlier for some unrelated
+    # reason, which asserts nothing about the rule under test.
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The control: a bare word that is NOT the value of a value-taking flag is
+  # still a filter, so this exempts values and not positionals.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "mocha --recursive tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a wrapper is the same wrapper quoted or spelled by path" {
+  # `'timeout' 300 vitest run` and `/usr/bin/env NODE_ENV=test vitest run` are
+  # ordinary scripts. Three readers unquoted before their wrapper arms and two
+  # did not, and `timeout` was matched by path in one arm while `env` beside it
+  # was not -- so the duration was read as a filter in the first case and the
+  # interpreter path as one in the second.
+  ws_setup
+  ws_tools timeout env cross-env
+
+  # The quoted spellings are written with plain single quotes: this is a bash
+  # string, so `'timeout'` reaches package.json as `'timeout'` and the shell
+  # that finally runs the script strips the quotes -- which is the whole point,
+  # since the readers under test see the quoted form and the runtime does not.
+  local spelling
+  for spelling in \
+    "'timeout' 300 vitest run" \
+    "'env' NODE_ENV=test vitest run" \
+    "/usr/bin/env NODE_ENV=test vitest run" \
+    "timeout 300 /usr/bin/env NODE_ENV=test vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The control: the wrapper does not launder what it wraps, whichever way it
+  # is spelled.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "/usr/bin/env NODE_ENV=test vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a package manager's own options are not the command" {
+  # `pnpm --filter web vitest run` and `yarn --cwd packages/web vitest run` put
+  # a bare word after a flag, and every reader took that word as the program --
+  # the third wrapper grammar with the same fault, after timeout and env. The
+  # standard monorepo invocation was refused with "does not appear to run a test
+  # runner" while the runner sat in the string.
+  ws_setup
+  ws_tools pnpm yarn npm bun npx
+
+  local spelling
+  for spelling in \
+    "pnpm -F web vitest run" \
+    "pnpm --filter web vitest run" \
+    "yarn --cwd . vitest run" \
+    "npm --prefix . vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" != *"narrows its own suite"* ]] \
+      || { echo "refused as narrowing: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls. A filter behind the prefix is still a filter -- the manager's
+  # options are stepped over, not everything after them.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "pnpm -F web vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+
+  # And delegating to another package's script is still something this gate
+  # cannot follow, which is the honest answer rather than a guess.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "pnpm --filter web test" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"not appear to run a test runner"* ]]
+
+  # The control the first draft of this fix failed. To most readers here a
+  # manager is a prefix to step over, and putting the grammar in that same arm
+  # everywhere stepped over `npm` in the one reader that treats it as the
+  # delegating runner: `npm run inner` was left with no runner, no target and no
+  # delegation to follow. The grammar belongs where that reader picks its
+  # delegation target -- which is the token it was getting wrong anyway.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npm run inner", "inner": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  [[ "$output" == *"Running script:"* ]]
+
+  # And both halves at once: the manager's option takes a word, and the script
+  # named after it is still the delegation target.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npm --prefix . run inner", "inner": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"not appear to run a test runner"* ]]
+  [[ "$output" == *"Running script:"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "workspaces: a root manifest with unreadable children is not a single-package repo" {
+  # The cure above was applied to one branch. The branch taken when a root
+  # manifest *does* exist still ran its producer inside process substitution, so
+  # a find that fails delivers nothing, child_count stays 0, the
+  # root-plus-nested ambiguity is never reported, and the function returns "."
+  # and success.
+  #
+  # That is the fail-open direction of the same defect: node.sh, tests.sh and
+  # typecheck.sh each treat a non-zero return as FAIL_INFRA on the stated
+  # grounds that a lane cannot report on workspaces it could not determine.
+  # Handed "." and a success they install, typecheck, test and build the root
+  # alone and exit 0 -- which is precisely the harm the ambiguity report exists
+  # to prevent.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/bin" "$sb/packages/app"
+  printf '{ "name": "root", "private": true }\n' > "$sb/package.json"
+  printf '{ "name": "app", "private": true }\n' > "$sb/packages/app/package.json"
+  printf '#!/usr/bin/env bash\nexit 71\n' > "$sb/bin/find"
+  chmod +x "$sb/bin/find"
+
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && export PATH='$sb/bin:'\"\$PATH\" \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Cannot enumerate"* ]]
+  # And specifically not the answer that reads as "a single-package repo".
+  [[ "$output" != "." ]]
+
+  # The control: with a working find the same tree reports the ambiguity, so
+  # this is about the producer's status and not about the layout.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"coexists with 1 nested one(s)"* ]]
+
+  # And a genuine single-package repo still answers ".", which is what the
+  # branch is for.
+  rm -rf "$sb/packages"
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+    && ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "." ]]
+  rm -rf "$sb"
+}
+
+@test "node lane: a project is a project whatever its config is called" {
+  # `tsconfig.app.json` and `tsconfig.node.json` are what `npm create vite`
+  # produces, and discovery matched `tsconfig.json` and `jsconfig.json` only. A
+  # workspace whose only project is one of those answered "no TypeScript here":
+  # no typecheck script was required of it and the standalone typecheck lane
+  # skipped it for the same reason, so a bundler build passed with nothing
+  # having type checked anything.
+  #
+  # ci/lib/changeset.sh has classified `tsconfig.*.json` as TypeScript
+  # configuration since it was written, so the scheduler already knew about a
+  # file neither of the lanes it schedules could see.
+  ws_setup
+  ws_tools tsc
+
+  local cfg
+  for cfg in tsconfig.app.json tsconfig.node.json jsconfig.app.json; do
+    rm -f "$NODE_SB/ws"/tsconfig*.json "$NODE_SB/ws"/jsconfig*.json
+    printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/$cfg"
+    ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "accepted a workspace whose only project is $cfg" >&2; return 1; }
+    [[ "$output" == *"defines no 'typecheck' script"* ]] \
+      || { echo "refused for the wrong reason: $cfg" >&2; return 1; }
+    [[ "$output" == *"$cfg"* ]] \
+      || { echo "did not name $cfg" >&2; return 1; }
+
+    # And it is satisfied the ordinary way, so this requires a check rather
+    # than making the workspace unusable. Asserted positively as well: the
+    # refusal's absence alone is satisfied by the lane stopping earlier for some
+    # unrelated reason, and the status here is not discriminating -- against the
+    # previous tree this fixture exits 20 from the test script itself.
+    ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" } }'
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"defines no 'typecheck' script"* ]] \
+      || { echo "still refused with a typecheck script: $cfg" >&2; return 1; }
+    [[ "$output" == *"Running script: typecheck"* ]] \
+      || { echo "typecheck never ran for: $cfg" >&2; return 1; }
+  done
+
+  # The control: a workspace with no TypeScript configuration at all is not
+  # asked for a typecheck script, which is the rule this widens and not one it
+  # replaces.
+  rm -f "$NODE_SB/ws"/tsconfig*.json "$NODE_SB/ws"/jsconfig*.json
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"defines no 'typecheck' script"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "js config names: the three readers of that question agree" {
+  # Discovery in node.sh, discovery in typecheck.sh and the changeset
+  # classifier all answer "is this a TypeScript project", and a spelling in one
+  # and not the others is how tsconfig.app.json came to be scheduled by the
+  # classifier and then found by neither lane. Compared by reading the three
+  # lists rather than by restating them here, so this fails when they drift.
+  local name
+  for name in 'tsconfig.json' 'tsconfig.*.json' 'jsconfig.json' 'jsconfig.*.json'; do
+    grep -qF -- "-name '${name}'" "$REPO_ROOT/ci/checks/node.sh" \
+      || { echo "node.sh discovery does not match ${name}" >&2; return 1; }
+    grep -qF -- "-name '${name}'" "$REPO_ROOT/ci/checks/typecheck.sh" \
+      || { echo "typecheck.sh discovery does not match ${name}" >&2; return 1; }
+    grep -qF -- "${name}" "$REPO_ROOT/ci/lib/changeset.sh" \
+      || { echo "changeset.sh does not classify ${name}" >&2; return 1; }
+  done
+
+  # And the classifier really returns javascript for them, rather than merely
+  # containing the text.
+  for name in tsconfig.app.json jsconfig.app.json; do
+    run bash -c ". '$REPO_ROOT/ci/lib/common.sh' && . '$REPO_ROOT/ci/lib/changeset.sh' \
+      && ci::changeset::classify_file 'frontend/${name}'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "javascript" ] || { echo "${name} classified as '${output}'" >&2; return 1; }
+  done
+}
+
+@test "node lane: a pipe inside quotes is data, not a pipeline" {
+  # The composition rule read the raw string, so `PATTERN='foo|bar' vitest run`
+  # was refused as a pipeline -- the shell treats that `|` as part of the
+  # assignment's value and then runs the whole suite. _blank_quoted is in this
+  # file for exactly this and three readers already went through it.
+  #
+  # Two readers had the fault, not one: _reject_untrustworthy_composition and
+  # the copy of the same test inside _script_names_a_checker. Fixing the first
+  # alone only changed the message -- the second returned "not a checker", and
+  # since a runner *is* named the lane then reported the runner's status lost to
+  # a `;` the script does not contain. That is how the second one was found.
+  ws_setup
+  ws_tools tee
+
+  local spelling
+  for spelling in \
+    "PATTERN='foo|bar' vitest run" \
+    "MSG='a&&b' vitest run" \
+    "MSG='a&b' vitest run" \
+    "vitest run --reporter='a|b'"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"pipes or branches"* ]] \
+      || { echo "refused as a pipeline: $spelling" >&2; return 1; }
+    [[ "$output" != *"does not become the script"* ]] \
+      || { echo "refused as status-lost: $spelling" >&2; return 1; }
+    [[ "$output" != *"backgrounds"* ]] \
+      || { echo "refused as backgrounded: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script:"* ]] \
+      || { echo "never reached execution: $spelling" >&2; return 1; }
+  done
+
+  # The controls, and the point: masking the quotes must not mask a real
+  # operator, including one that follows a quoted span.
+  for spelling in \
+    "vitest run | tee out.log" \
+    "vitest run || true" \
+    "PATTERN='x' vitest run | tee out.log"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] || { echo "accepted: $spelling" >&2; return 1; }
+    [[ "$output" == *"pipes or branches"* ]] \
+      || { echo "refused for the wrong reason: $spelling" >&2; return 1; }
+  done
+
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run &" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"backgrounds"* ]]
+
+  # And a quote that never closes is refused rather than masked past: the mask
+  # blanks to end of string once inside an unclosed quote, so an operator after
+  # it would be invisible to both tests above.
+  ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"PATTERN='foo vitest run | tee out.log\" } }"
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"leaves a quote open"* ]]
+  rm -rf "$NODE_SB"
+}
+
+# --- which runner a workspace declares ----------------------------------------
+#
+# _tests_js_declared_runner decides which of two installed runners owns a suite,
+# and arrived with no case of its own. These are it.
+
+# Print _tests_js_declared_runner's answer for a `test` script, or "<none>".
+#
+# The function is extracted and sourced rather than reached through the lane,
+# because the lane installs and runs a real suite to get there and the question
+# here is one line of parsing. `bash -n` first, so a mis-extraction fails loudly
+# instead of quietly defining nothing.
+declared_runner_for() {
+  declared_runner_for_manifest \
+    "$(printf '{ "name": "w", "private": true, "scripts": { "test": "%s" } }' "$1")"
+}
+
+# The same, for a whole manifest. A script that delegates -- `npm run test:unit`
+# -- is only answerable against the manifest that defines the delegate, so the
+# fixture has to be more than one script.
+declared_runner_for_manifest() {
+  local sb fn
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  awk '/BEGIN declared-runner reader/,/END declared-runner reader/' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
+  bash -n "$fn" || { rm -rf "$sb" "$fn"; echo "<extraction failed>"; return 1; }
+  printf '%s\n' "$1" > "$sb/package.json"
+  (
+    cd "$sb" || exit 1
+    # shellcheck disable=SC1090
+    . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1
+    # shellcheck disable=SC1090
+    . "$fn"
+    local _r
+    _r="$(_tests_js_declared_runner)"
+    printf '%s' "${_r:-<none>}"
+  )
+  rm -rf "$sb" "$fn"
+}
+
+@test "tests-js: the declared runner is the one in command position" {
+  # The scan read every word, so a runner named as an *argument* declared the
+  # suite: `echo vitest && jest` reported vitest, the lane ran Vitest over a
+  # Jest suite, Vitest collected nothing it recognised and exited 0, and
+  # tests-js reported PASS with every Jest test uncollected -- the exact failure
+  # the declared-runner rule exists to prevent, reached by a spelling it did not
+  # read.
+  run declared_runner_for "echo vitest && jest"
+  [ "$output" = "jest" ]
+
+  run declared_runner_for "echo 'runs vitest' && jest --ci"
+  [ "$output" = "jest" ]
+
+  # A runner named among another command's arguments is not what runs.
+  run declared_runner_for "bash scripts/test.sh vitest"
+  [ "$output" = "<none>" ]
+
+  # The controls: the ordinary spellings still resolve, or this would refuse
+  # every workspace that installs both runners.
+  local spelling
+  for spelling in "vitest run" "cross-env NODE_ENV=test vitest run" \
+                  "timeout 300 vitest run" "env -u NODE_ENV vitest run" \
+                  "pnpm --filter web vitest run" "npx vitest run"; do
+    run declared_runner_for "$spelling"
+    [ "$output" = "vitest" ] || { echo "'$spelling' declared '$output'" >&2; return 1; }
+  done
+  for spelling in "jest --ci" "timeout -k 10 300 jest --ci"; do
+    run declared_runner_for "$spelling"
+    [ "$output" = "jest" ] || { echo "'$spelling' declared '$output'" >&2; return 1; }
+  done
+
+  # And saying nothing is still the honest answer where it cannot tell. The
+  # caller refuses a workspace that installs both and declares neither, so
+  # silence fails closed.
+  run declared_runner_for "npm run jest:ci"
+  [ "$output" = "<none>" ]
+}
+
+# Print node.sh's _command_runner answer for a command string, or "<none>".
+#
+# The function and the five helpers it calls are extracted and sourced. That is
+# more machinery than the extraction above, and it is the point: this case is
+# the only thing that compares the two readers, so it has to ask the real one
+# rather than a restatement of what it is believed to do.
+node_lane_runner_for() {
+  local fn _f
+  fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  for _f in _blank_quoted _unquote_tok _normalize_command _timeout_advance \
+            _env_advance _pm_advance _command_runner; do
+    awk -v n="^${_f}\\\\(\\\\) \\\\{" '$0 ~ n, /^\}/' "$REPO_ROOT/ci/checks/node.sh" >> "$fn"
+  done
+  bash -n "$fn" || { rm -f "$fn"; echo "<extraction failed>"; return 1; }
+  (
+    # shellcheck disable=SC1090
+    . "$fn"
+    local _cr="" _ng_out="" _bq_state="" _bq_out="" _bq_cont=0 _bq_esc=0
+    _command_runner "$1"
+    printf '%s' "${_cr:-<none>}"
+  )
+  rm -f "$fn"
+}
+
+@test "tests-js: this reader and the node lane's agree about wrappers" {
+  # Two readers of "what does this command run", in two files, and the only
+  # reason this one was wrong is that it was written without reference to the
+  # other. Compared by running both rather than by restating what either is
+  # believed to do.
+  #
+  # Scoped to single commands, because that is the question both answer.
+  # node.sh's _command_runner is applied by its caller to one segment at a time,
+  # so asked for a whole composed script it answers about the first segment --
+  # `echo vitest && vitest run` is `echo` to it and `vitest` to this reader, and
+  # neither is wrong. The wrappers are where they have to agree, and where this
+  # one had drifted.
+  local spelling ours theirs
+  for spelling in \
+    "vitest run" \
+    "jest --ci" \
+    "cross-env NODE_ENV=test vitest run" \
+    "timeout 300 vitest run" \
+    "timeout -k 10 300 vitest run" \
+    "env -u NODE_ENV vitest run" \
+    "pnpm --filter web vitest run" \
+    "npx vitest run" \
+    "pnpm --filter jest vitest run" \
+    "bun x jest --ci" \
+    "npm x jest --ci" \
+    "bun x vitest run" \
+    "env -u vitest jest --ci"; do
+    run declared_runner_for "$spelling"
+    ours="$output"
+    run node_lane_runner_for "$spelling"
+    theirs="$output"
+    [ "$ours" = "$theirs" ] \
+      || { echo "'$spelling': tests.sh says '$ours', node.sh says '$theirs'" >&2; return 1; }
+  done
+
+  # And the difference above is asserted rather than assumed, so a change that
+  # makes node.sh scan across separators shows up here instead of quietly making
+  # the scoping comment false.
+  run node_lane_runner_for "echo vitest && vitest run"
+  [ "$output" = "echo" ]
+  run declared_runner_for "echo vitest && vitest run"
+  [ "$output" = "vitest" ]
+
+  run declared_runner_for "npm run jest:ci"
+  [ "$output" = "<none>" ]
+}
+
+@test "tests-js: a shell -c payload is the command that runs" {
+  # `"test": "bash -c 'jest --ci'"` left this reader holding `bash` -- an
+  # unknown command, nothing declared -- and nothing is what sends the caller to
+  # the installed-runner fallback. In a workspace carrying a local Vitest that
+  # ran Vitest over the Jest suite the manifest names: Vitest collects nothing
+  # it recognises, exits 0, and tests-js reports PASS with every Jest test
+  # uncollected.
+  run declared_runner_for "bash -c 'jest --ci'"
+  [ "$output" = "jest" ]
+  run declared_runner_for 'sh -c \"vitest run\"'
+  [ "$output" = "vitest" ]
+
+  # Short options bundle, and the payload is still the payload.
+  run declared_runner_for "bash -ec 'jest --ci'"
+  [ "$output" = "jest" ]
+
+  # Where the payload ends is the whole difficulty, and it is quoting that says.
+  # A separator inside the quotes belongs to the payload; the same separator
+  # outside them ends it and starts a new command. Both directions asserted,
+  # because a reader that stops at the first separator gets the first of these
+  # wrong and one that never stops gets the second wrong.
+  run declared_runner_for "bash -c 'jest --ci && echo done'"
+  [ "$output" = "jest" ]
+  run declared_runner_for "bash -c 'echo hi' && vitest run"
+  [ "$output" = "vitest" ]
+
+  # The one that actually discriminates, and it took a mutation to find: with
+  # the boundary removed the two above still answer correctly, because the
+  # payload is rescanned by this same function and a separator inside it resets
+  # command position exactly as one outside it would. What does *not* survive is
+  # the quote strip -- a payload that runs to the end of the string is no longer
+  # a matched pair, so the runner keeps its leading quote and matches no arm.
+  #
+  #   payload ends at the separator ->  'jest --ci'  -> stripped -> jest
+  #   payload runs to the end       ->  'jest --ci' && echo done -> `'jest` -> none
+  run declared_runner_for "bash -c 'jest --ci' && echo done"
+  [ "$output" = "jest" ]
+
+  # The disposition this branch already made, now pinned rather than argued:
+  # `bash -c 'true' vitest` does not run vitest. The payload is `true` and the
+  # trailing word is a positional handed to it, so the honest answer is that
+  # this script names no runner.
+  run declared_runner_for "bash -c 'true' vitest"
+  [ "$output" = "<none>" ]
+
+  # And a shell that is running a *script* is untouched: the runner named after
+  # it is an argument to that script, not the command.
+  run declared_runner_for "bash scripts/test.sh vitest"
+  [ "$output" = "<none>" ]
+}
+
+@test "js lane: bun x and npm x hand the next word to a runner" {
+  # `bun --help` lists `x` as executing a package binary "(bunx)", and npm
+  # documents `x` as the alias of `npm exec`. Both readers entered
+  # package-manager mode on the manager and then read `x` as an ordinary
+  # command, so `"test": "bun x jest --ci"` named no runner in either file.
+  local spelling
+  for spelling in "bun x jest --ci" "npm x jest --ci"; do
+    run declared_runner_for "$spelling"
+    [ "$output" = "jest" ] || { echo "tests.sh: '$spelling' -> '$output'" >&2; return 1; }
+    run node_lane_runner_for "$spelling"
+    [ "$output" = "jest" ] || { echo "node.sh: '$spelling' -> '$output'" >&2; return 1; }
+  done
+
+  # Keyed to the two managers that document it, which is the whole reason it is
+  # not in the `exec|dlx|...` lists that pass through unconditionally. A bare
+  # `x` is an ordinary name, and a project whose own script is called `x` must
+  # not have the word after it promoted to the command.
+  run declared_runner_for "x vitest"
+  [ "$output" = "<none>" ]
+  run node_lane_runner_for "x vitest"
+  [ "$output" = "x" ]
+
+  # Six readers in node.sh reach this grammar through _pm_advance, so the
+  # spelling has to arrive at all of them at once. Enumerated from the source:
+  # a reader that steps a manager's prefix without going through that function
+  # is one this fix did not reach.
+  local _hits
+  _hits="$(grep -c '_pm_advance "\$_\?tok"' "$REPO_ROOT/ci/checks/node.sh" || true)"
+  [ "$_hits" -ge 5 ] || { echo "only ${_hits} readers route through _pm_advance" >&2; return 1; }
+}
+
+@test "tests-js: a delegated npm run script is followed to the runner it names" {
+  # `npm run test:unit` does not run a command called `test:unit`; it runs the
+  # script of that name. Unfollowed, a manifest that delegates declared nothing,
+  # and a workspace with only a local Vitest ran Vitest and reported PASS over
+  # the Jest suite the delegate actually names.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "npm run test:unit",
+    "test:unit": "npx --package jest jest --ci" } }'
+  [ "$output" = "jest" ]
+
+  # Through a chain, and through the other managers' spelling of it.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "pnpm run a", "a": "yarn run b", "b": "vitest run" } }'
+  [ "$output" = "vitest" ]
+
+  # A cycle terminates and declares nothing. Nothing is the safe answer: the
+  # caller refuses a workspace that installs both runners and declares neither,
+  # so a chain this reader cannot follow is reported rather than guessed at.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "npm run a", "a": "npm run b", "b": "npm run a" } }'
+  [ "$output" = "<none>" ]
+
+  # Self-delegation is the one-script spelling of the same cycle.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": { "test": "npm run test" } }'
+  [ "$output" = "<none>" ]
+
+  # The control that keeps the old reading alive: where the manifest defines no
+  # script of that name, the word is read in command position exactly as before.
+  # `bun run vitest` is how a workspace with no `vitest` script invokes the
+  # binary, and it has to keep resolving.
+  run declared_runner_for "bun run vitest"
+  [ "$output" = "vitest" ]
+  run declared_runner_for "npm run jest:ci"
+  [ "$output" = "<none>" ]
+
+  # A delegate that names no runner does not fall back to reading its own
+  # arguments in command position. What the delegate runs is what the workspace
+  # runs, and it named nothing.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "npm run build vitest", "build": "tsc -b" } }'
+  [ "$output" = "<none>" ]
+}
+
+# Print _tests_js_declared_env's answer for a whole manifest, one assignment per
+# line joined by spaces, or "<none>". The same extraction the runner side uses,
+# because it is the same block and the same walk -- which is the property the
+# second case below is here to hold.
+declared_env_for_manifest() {
+  local sb fn
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  awk '/BEGIN declared-runner reader/,/END declared-runner reader/' "$REPO_ROOT/ci/checks/tests.sh" > "$fn"
+  bash -n "$fn" || { rm -rf "$sb" "$fn"; echo "<extraction failed>"; return 1; }
+  printf '%s\n' "$1" > "$sb/package.json"
+  (
+    cd "$sb" || exit 1
+    # shellcheck disable=SC1090
+    . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1
+    # shellcheck disable=SC1090
+    . "$fn"
+    local _e
+    _e="$(_tests_js_declared_env)"
+    _e="$(printf '%s' "$_e" | tr '\n' ' ')"
+    _e="${_e% }"
+    printf '%s' "${_e:-<none>}"
+  )
+  rm -rf "$sb" "$fn"
+}
+
+declared_env_for() {
+  declared_env_for_manifest \
+    "$(printf '{ "name": "w", "private": true, "scripts": { "test": "%s" } }' "$1")"
+}
+
+@test "tests-js: the contract this lane reads is test, or test:unit when there is no test" {
+  # Both readers looked at `scripts.test` alone, while the lane accepts either as
+  # a test contract -- the branch that decides a workspace is not test-free takes
+  # `test:unit`, and ci/checks/node.sh runs both. So a workspace whose whole
+  # suite is `"test:unit": "RUN_INTEGRATION=1 vitest run"` had its runner
+  # resolved from an empty string and its environment read as none: the pinned
+  # runner was invoked with RUN_INTEGRATION unset, every case guarded on that
+  # value skipped itself, and the lane reported PASS over the cheap half of a
+  # suite.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test:unit": "RUN_INTEGRATION=1 vitest run" } }'
+  [ "$output" = "RUN_INTEGRATION=1" ] || { echo "got [$output]" >&2; false; }
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test:unit": "RUN_INTEGRATION=1 vitest run" } }'
+  [ "$output" = "vitest" ] || { echo "got [$output]" >&2; false; }
+
+  # `test` wins when both exist: it is the script the node lane's umbrella rule
+  # treats as the entry point, and a delegation would go through it.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "MODE=umbrella vitest run", "test:unit": "MODE=unit jest --ci" } }'
+  [ "$output" = "MODE=umbrella" ] || { echo "got [$output]" >&2; false; }
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "MODE=umbrella vitest run", "test:unit": "MODE=unit jest --ci" } }'
+  [ "$output" = "vitest" ] || { echo "got [$output]" >&2; false; }
+
+  # An empty `test` is not a contract to prefer over a real `test:unit`: the
+  # fallback is keyed on there being nothing to read, not on the key's absence.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "", "test:unit": "jest --ci" } }'
+  [ "$output" = "jest" ] || { echo "got [$output]" >&2; false; }
+
+  # And a workspace with neither still declares nothing, rather than the reader
+  # inventing an answer from some third script.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test:e2e": "cypress run", "build": "vite build" } }'
+  [ "$output" = "<none>" ] || { echo "got [$output]" >&2; false; }
+}
+
+@test "tests-js: the declared script's environment reaches the runner it names" {
+  # This lane runs the pinned runner binary instead of the declared script, and
+  # what that dropped was not only the script's wording but the environment it
+  # establishes. `RUN_INTEGRATION=1 vitest run` over a suite whose integration
+  # cases are guarded on that variable ran with it unset: the unit cases were
+  # collected, the integration cases skipped themselves, and the lane reported
+  # PASS over fewer tests than the contract declares. A skipped case is not a
+  # failing one, so nothing about it was loud.
+  run declared_env_for 'RUN_INTEGRATION=1 vitest run'
+  [ "$output" = "RUN_INTEGRATION=1" ]
+
+  # Every assignment, in order, and the two portable spellings of the same
+  # prefix are transparent to it for the reason the runner reader treats them as
+  # transparent.
+  run declared_env_for 'RUN=1 DB=pg://x vitest run'
+  [ "$output" = "RUN=1 DB=pg://x" ]
+  run declared_env_for 'cross-env RUN=1 DB=pg://x vitest run'
+  [ "$output" = "RUN=1 DB=pg://x" ]
+  run declared_env_for 'env -u NODE_ENV RUN=1 jest --ci'
+  [ "$output" = "RUN=1" ]
+
+  # A quoted value spans words once the scan has split on whitespace, and half
+  # an assignment is not one. The quotes come off because the quotes are what
+  # the shell strips before the assignment happens.
+  # Through the manifest helper, not the one-line one: that interpolates the
+  # script into JSON, where a bare `"` ends the string rather than quoting a
+  # value.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "TITLE=\"a b\" vitest run" } }'
+  [ "$output" = "TITLE=a b" ]
+
+  # The prefix belongs to the one command it precedes. This is the half that
+  # makes it a rule rather than a scrape: in the first the variable goes to
+  # seed.js and the runner must not see it, in the second it goes to the runner
+  # and must.
+  run declared_env_for 'SEED=1 node seed.js && vitest run'
+  [ "$output" = "<none>" ]
+  run declared_env_for 'node seed.js && RUN=1 vitest run'
+  [ "$output" = "RUN=1" ]
+
+  # `A=b` among a command's arguments is a positional that command reads, not an
+  # assignment the shell performs.
+  run declared_env_for 'vitest run --reporter=A=B'
+  [ "$output" = "<none>" ]
+  run declared_env_for 'vitest run'
+  [ "$output" = "<none>" ]
+
+  # A delegation carries both prefixes: the outer one is exported to the
+  # manager, which passes its environment to the script it runs, so the runner
+  # sees the two and the outer comes first.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "RUN=1 npm run t", "t": "X=2 vitest run" } }'
+  [ "$output" = "RUN=1 X=2" ]
+
+  # And through the payload spellings, which is the whole reason this is a
+  # projection of the runner walk rather than a second parser: `-c`, `--call`,
+  # and a package runner's option grammar in front of them all decide where the
+  # command begins. A separate reader would have had to model them again, and a
+  # second model is a second answer.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "bash -c \"RUN=1 jest --ci\"" } }'
+  [ "$output" = "RUN=1" ]
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "npm exec --package jest -c \"RUN=1 jest --ci\"" } }'
+  [ "$output" = "RUN=1" ]
+}
+
+@test "tests-js: both projections of the reader settle on the same command" {
+  # The environment answer is only right if it is the prefix of the command the
+  # *runner* answer settled on. Asserting the two together is what stops them
+  # drifting: a change that moves where one thinks the command begins fails here
+  # rather than silently handing the runner another command's variables.
+  local script cmd rest want_runner want_env
+
+  for script in \
+    'RUN=1 vitest run|vitest|RUN=1' \
+    'echo vitest && RUN=1 jest --ci|jest|RUN=1' \
+    'SEED=1 node seed.js && vitest run|vitest|<none>' \
+    'timeout 300 RUN=1 vitest run|vitest|RUN=1' \
+    '/usr/bin/env NODE_ENV=test vitest run|vitest|NODE_ENV=test' \
+    'bash scripts/test.sh vitest|<none>|<none>' \
+    'RUN=1 bash scripts/test.sh|<none>|<none>'; do
+    cmd="${script%%|*}" ; rest="${script#*|}"
+    want_runner="${rest%%|*}" ; want_env="${rest#*|}"
+    run declared_runner_for "$cmd"
+    [ "$output" = "$want_runner" ] || { echo "runner for [$cmd]: '$output' != '$want_runner'"; return 1; }
+    run declared_env_for "$cmd"
+    [ "$output" = "$want_env" ] || { echo "env for [$cmd]: '$output' != '$want_env'"; return 1; }
+  done
+
+  # A quoted value used to end command position: `b"` is not an assignment and
+  # is not an option, so the scan read it as a command and never reached the
+  # runner behind it. Both projections were wrong together, which is how a
+  # workspace carrying both runners was refused for declaring neither.
+  run declared_runner_for_manifest '{ "name": "w", "scripts": {
+    "test": "TITLE=\"a b\" vitest run" } }'
+  [ "$output" = "vitest" ]
+
+  # The other direction of the same gathering, held because it is the direction
+  # that matters: an unbalanced quote is a script this reader cannot parse, and
+  # the gathering runs to the end of it rather than guessing where the value
+  # stops. Declaring nothing is what refuses a workspace installing both
+  # runners, so a malformed script fails closed instead of resolving to whatever
+  # word happens to follow.
+  run declared_runner_for_manifest "{ \"name\": \"w\", \"scripts\": {
+    \"test\": \"A='x vitest run\" } }"
+  [ "$output" = "<none>" ]
+}
+
+@test "tests-js: the runner is invoked with the declared environment applied" {
+  # The cases above answer what the environment is; this one asserts the lane
+  # applies it, which is a separate claim and the one that decides whether any
+  # of it reaches a test.
+  local sb drv
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  drv="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  {
+    sed -n '/BEGIN declared-runner reader/,/END declared-runner reader/p' \
+      "$REPO_ROOT/ci/checks/tests.sh"
+    for _fn in _tests_js_have_runner _tests_js_run_declared_env \
+               _tests_jest_path_flag _tests_js_workspace; do
+      sed -n "/^${_fn}()/,/^}/p" "$REPO_ROOT/ci/checks/tests.sh"
+    done
+  } > "$drv"
+  bash -n "$drv" || { rm -rf "$sb" "$drv"; echo "<extraction failed>"; return 1; }
+
+  mkdir -p "$sb/node_modules/.bin"
+  cat > "$sb/node_modules/.bin/vitest" <<'FAKE'
+#!/usr/bin/env bash
+printf 'RUN_INTEGRATION=%s\n' "${RUN_INTEGRATION:-<unset>}"
+printf 'TITLE=%s\n' "${TITLE:-<unset>}"
+printf 'ARGV=%s\n' "$*"
+FAKE
+  chmod +x "$sb/node_modules/.bin/vitest"
+  cat > "$sb/package.json" <<'MANIFEST'
+{ "name": "w", "private": true,
+  "scripts": { "test": "RUN_INTEGRATION=1 TITLE=\"a b\" vitest run" } }
+MANIFEST
+
+  run bash -c ". '$REPO_ROOT/ci/lib/common.sh' >/dev/null 2>&1
+               . '$drv'
+               _tests_js_workspace '$sb' '$sb/junit.xml' ''"
+  rm -rf "$sb" "$drv"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"RUN_INTEGRATION=1"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"TITLE=a b"* ]] || { echo "$output"; false; }
+  # What the lane invokes is unchanged by any of this: the environment is added
+  # beside the command, not folded into it.
+  [[ "$output" == *"ARGV=run --reporter=junit --outputFile="* ]] || { echo "$output"; false; }
+
+  # The exports end with the runner rather than following the next workspace in
+  # the caller's loop.
+  [ -z "${RUN_INTEGRATION:-}" ]
+  [ -z "${TITLE:-}" ]
+}
+
+
+@test "node lane: a package manager's value-taking options are its own, not one list" {
+  # The grammar that steps over a manager's options carried one list for all
+  # five of them, so `npx --package typescript tsc --noEmit` -- the documented
+  # way to run a tool without installing it -- selected `typescript` as the
+  # command and the lane refused the script before tsc could run. The joined
+  # `--package=typescript` spelling worked, which is the tell: the value was
+  # being read as a word rather than as the option's.
+  #
+  # Keyed by manager rather than widened, for the reason the flag allow-list is
+  # keyed by runner: one list cannot describe five vocabularies. `-p` is
+  # `--package` to npx and `--parseable` to pnpm, so a shared list either misses
+  # npx's value or eats pnpm's command.
+  ws_setup
+  ws_tools npx pnpm yarn npm bun tsc
+  printf '{ "compilerOptions": { "strict": true } }\n' > "$NODE_SB/ws/tsconfig.json"
+
+  local spelling
+  for spelling in \
+    "npx --package typescript tsc --noEmit" \
+    "npx -p typescript tsc --noEmit" \
+    "npx --package=typescript tsc --noEmit" \
+    "npx tsc --noEmit"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"vitest run\", \"typecheck\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" == *"Running script: typecheck"* ]] \
+      || { echo "never reached the compiler: $spelling" >&2; return 1; }
+  done
+
+  # And the other direction, which is why this is keyed and not widened: pnpm's
+  # `-p` is a boolean, so consuming a word after it would swallow the runner.
+  #
+  # The tsconfig goes first: with one present the lane requires a typecheck
+  # script and then runs it, and `tsc` in this sandbox resolves to a real shim
+  # that wants the typescript package -- so the case would fail at the compiler
+  # over a question it is not asking.
+  rm -f "$NODE_SB/ws/tsconfig.json"
+  for spelling in "pnpm -p vitest run" "pnpm --filter web vitest run"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"test\": \"${spelling}\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"not appear to run a test runner"* ]] \
+      || { echo "refused as no-runner: $spelling" >&2; return 1; }
+    [[ "$output" == *"Running script: test"* ]] \
+      || { echo "never reached the runner: $spelling" >&2; return 1; }
+  done
+
+  # The control that keeps the rule: a filter behind the option's value is
+  # still a filter, so the option is stepped over and not everything after it.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "npx -p vitest vitest run tests/a.test.ts" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"narrows its own suite"* ]]
+
+  # And `--call`, which is a value-taking option of a different shape: it takes
+  # a whole command line as one string, so `npx --call tsc --noEmit` hands `tsc`
+  # to the option and leaves `--noEmit` as the command. Refused, and correctly:
+  # the gate word-splits, so even the quoted `npx -c 'tsc --noEmit'` arrives as
+  # separate tokens and there is no command it can follow. My first draft of
+  # this case expected `--call tsc` to reach the compiler, which was a
+  # misreading of npx's grammar rather than a defect in the reader.
+  printf '{ "compilerOptions": { "strict": true } }
+' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "vitest run", "typecheck": "npx --call tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"does not"* ]]
+  [[ "$output" == *"type checker"* ]]
+  rm -rf "$NODE_SB"
+}
+
+# --- which tree this lane's discovery stands behind ---------------------------
+#
+# Three readers here answered "is there a workspace" from the worktree and the
+# index in every mode, while the manifest check a screen below them already
+# switched to `HEAD:` in ship mode. These are the three.
+
+# A sandbox laid out as a real repository, with a frontend workspace committed.
+ship_ws_setup() {
+  SHIP_SB="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$SHIP_SB/ci/checks" "$SHIP_SB/ci/lib" "$SHIP_SB/frontend/tests" "$SHIP_SB/.ci-gate"
+  cp "$REPO_ROOT/ci/checks/node.sh" "$SHIP_SB/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" "$REPO_ROOT/ci/lib/git.sh" \
+     "$SHIP_SB/ci/lib/"
+  printf 'it("x", () => {});\n' > "$SHIP_SB/frontend/tests/a.test.ts"
+  printf '{}\n' > "$SHIP_SB/frontend/bun.lock"
+  printf '{ "compilerOptions": {} }\n' > "$SHIP_SB/frontend/tsconfig.json"
+  printf '{ "name": "f", "private": true, "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" } }\n' \
+    > "$SHIP_SB/frontend/package.json"
+  ( cd "$SHIP_SB" && git init -q -b main . \
+    && printf '.ci-gate/\nci/\n' > .gitignore \
+    && git add -A && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+}
+
+ship_ws_run() {
+  ( cd "$SHIP_SB" \
+    && CI_GATE_MODE=ship CI_GATE_PUSH_NEW_SHA="$(git rev-parse HEAD)" \
+       bash ci/checks/node.sh 2>&1 )
+}
+
+@test "node lane: ship-mode workspace discovery is the pushed tree, not a union" {
+  # The first discovery in this file stats the filesystem, and in ship mode its
+  # result was unioned with HEAD's rather than replaced by it. So an untracked
+  # zz_review_pkg/package.json joined the list and the HEAD manifest check below
+  # then failed the push for a workspace the pushed commit does not contain --
+  # and git will not send that directory, so there was no remedy but deleting
+  # it.
+  #
+  # Sixth reader of "which tree" corrected across this file and
+  # ci/checks/test-layout.sh.
+  ship_ws_setup
+  mkdir -p "$SHIP_SB/zz_review_pkg"
+  printf '{ "name": "zz", "private": true }\n' > "$SHIP_SB/zz_review_pkg/package.json"
+
+  # The premise: untracked, in neither git tree.
+  run bash -c "cd '$SHIP_SB' && git ls-files -- zz_review_pkg"
+  [ -z "$output" ]
+
+  run ship_ws_run
+  [[ "$output" != *"zz_review_pkg"* ]] \
+    || { echo "ship discovered a workspace the push does not carry" >&2; echo "$output" >&2; return 1; }
+  # And positively: the workspace this push is about was still discovered.
+  [[ "$output" == *"frontend"* ]]
+
+  # The control that keeps the rule: the pre-commit gate stands behind the
+  # worktree, where the package really is, and still sees it.
+  run bash -c "cd '$SHIP_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [[ "$output" == *"zz_review_pkg"* ]]
+
+  # And a workspace the pushed tree does carry is still discovered in ship mode,
+  # which is the direction the HEAD source was added for.
+  ( cd "$SHIP_SB" && git add zz_review_pkg/package.json \
+    && git -c user.email=t@t -c user.name=t commit -qm zz ) >/dev/null 2>&1
+  rm -rf "$SHIP_SB/zz_review_pkg"
+  run ship_ws_run
+  [[ "$output" == *"zz_review_pkg"* ]]
+  rm -rf "$SHIP_SB"
+}
+
+@test "node lane: the orphan scan reads one tree, not the union of two" {
+  # The other direction of the case below, reported one round after it. Adding
+  # HEAD beside the filesystem walk fixed the miss and opened a false red: an
+  # untracked scratch/tsconfig.json -- a local experiment with no package.json
+  # beside it, which git will not send -- failed a ship run over a directory the
+  # push has nothing to do with.
+  #
+  # Which tree a run vouches for chooses the source; it does not add to it. The
+  # same correction as candidate_files in ci/checks/test-layout.sh, and the same
+  # one this scan's sibling readers took two commits ago.
+  ship_ws_setup
+  mkdir -p "$SHIP_SB/scratch"
+  printf '{ "compilerOptions": {} }\n' > "$SHIP_SB/scratch/tsconfig.json"
+
+  # The premise: untracked, and in no git tree.
+  run bash -c "cd '$SHIP_SB' && git ls-files -- scratch"
+  [ -z "$output" ]
+  run bash -c "cd '$SHIP_SB' && git ls-tree -r --name-only HEAD -- scratch"
+  [ -z "$output" ]
+
+  run ship_ws_run
+  [[ "$output" != *"no package.json beside it"* ]] \
+    || { echo "ship reported an orphan the push does not carry" >&2; echo "$output" >&2; return 1; }
+  # And positively: it reached the workspace this push is actually about.
+  [[ "$output" == *"frontend"* ]]
+
+  # The control that keeps the rule: the pre-commit gate stands behind the
+  # worktree, where the stray really is, and still reports it.
+  run bash -c "cd '$SHIP_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no package.json beside it"* ]]
+  [[ "$output" == *"scratch/tsconfig.json"* ]]
+
+  # And once it is in the pushed tree, ship is the gate that must catch it --
+  # which is what the case below covers from the other side.
+  ( cd "$SHIP_SB" && git add -f scratch/tsconfig.json \
+    && git -c user.email=t@t -c user.name=t commit -qm scratch ) >/dev/null 2>&1
+  rm -rf "$SHIP_SB/scratch"
+  run ship_ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"scratch/tsconfig.json"* ]]
+  rm -rf "$SHIP_SB"
+}
+
+@test "node lane: in ship mode the orphan scan reads the pushed tree" {
+  # This scan is what turns "no manifest" into "a workspace lost its manifest",
+  # and it walked the worktree alone -- so the repair that hides the fault hid
+  # it here too. Delete frontend/package.json in a commit, then delete the
+  # lockfile and the tsconfig on disk only, and push: discovery finds nothing,
+  # the scan finds nothing to be orphaned, and the lane prints "No package.json
+  # found" and exits 0. Install, typecheck, tests and build all skipped for a
+  # pushed tree that is broken, by the check written to notice exactly that.
+  ship_ws_setup
+  ( cd "$SHIP_SB" && git rm -q frontend/package.json \
+    && git -c user.email=t@t -c user.name=t commit -qm drop ) >/dev/null 2>&1
+  rm -f "$SHIP_SB/frontend/bun.lock" "$SHIP_SB/frontend/tsconfig.json"
+
+  # The premise: HEAD still carries the configuration, the disk does not.
+  run bash -c "cd '$SHIP_SB' && git ls-tree -r --name-only HEAD -- frontend"
+  [[ "$output" == *"bun.lock"* ]]
+  [[ "$output" == *"tsconfig.json"* ]]
+  [ ! -f "$SHIP_SB/frontend/bun.lock" ]
+
+  run ship_ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"no package.json beside it"* ]]
+  [[ "$output" != *"No package.json found"* ]]
+
+  # The control: with the configuration genuinely gone from the pushed tree too,
+  # there is no orphan and nothing to report -- this rule is about a workspace
+  # that lost its manifest, not about any repository without one.
+  ( cd "$SHIP_SB" && git rm -q -r --ignore-unmatch frontend/bun.lock frontend/tsconfig.json \
+    && git -c user.email=t@t -c user.name=t commit -qm "drop the rest" ) >/dev/null 2>&1
+  run ship_ws_run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No package.json found"* ]]
+  rm -rf "$SHIP_SB"
+}
+
+@test "node lane: in ship mode a workspace staged for a later commit is not this push's" {
+  # The index is the commit being made; HEAD is the commit being pushed. Folding
+  # the index in for every mode meant a workspace staged for next time joined
+  # the list, and the HEAD manifest check then reported the pushed commit as
+  # missing a manifest for a directory this push has nothing to do with -- a
+  # clean HEAD refused because of work staged for later.
+  ship_ws_setup
+  mkdir -p "$SHIP_SB/added"
+  printf '{ "name": "added", "private": true }\n' > "$SHIP_SB/added/package.json"
+  ( cd "$SHIP_SB" && git add added/package.json ) >/dev/null 2>&1
+  rm -rf "$SHIP_SB/added"
+
+  # The premise: staged, absent from HEAD and from disk.
+  run bash -c "cd '$SHIP_SB' && git ls-files -- added/package.json"
+  [[ "$output" == *"added/package.json"* ]]
+  run bash -c "cd '$SHIP_SB' && git ls-tree -r --name-only HEAD -- added"
+  [ -z "$output" ]
+
+  # Asserted as "this push is not about `added`" rather than as an exit status.
+  # A ship run that gets past discovery goes on to install and to run the
+  # scripts, and this sandbox has neither a real lockfile nor real binaries --
+  # so the status would answer a question about the fixture rather than about
+  # the rule, and the case would pass or fail for the wrong reason.
+  run ship_ws_run
+  [[ "$output" != *"added"* ]] \
+    || { echo "ship enumerated a workspace that only the index carries" >&2; echo "$output" >&2; return 1; }
+  # And positively: it did reach the workspace the push is actually about.
+  [[ "$output" == *"frontend"* ]]
+
+  # The control that keeps the rule: the pre-commit gate does stand behind the
+  # index, and it still objects to a staged workspace with no manifest on disk.
+  run bash -c "cd '$SHIP_SB' && CI_GATE_MODE=quick bash ci/checks/node.sh 2>&1"
+  [[ "$output" == *"added"* ]]
+  rm -rf "$SHIP_SB"
+}
+
+@test "node lane: in ship mode a workspace only the pushed tree carries is still found" {
+  # The other direction of the same line. Filesystem discovery cannot see a
+  # workspace that exists only in HEAD, the index no longer lists it once its
+  # removal is staged, and the ship drift scan iterates the workspaces this list
+  # already contains -- so it was contributed by nobody, and its test, typecheck
+  # and build scripts were never run and never reported on.
+  ship_ws_setup
+  mkdir -p "$SHIP_SB/pkg"
+  printf '{ "name": "pkg", "private": true, "scripts": { "test": "exit 1" } }\n' \
+    > "$SHIP_SB/pkg/package.json"
+  ( cd "$SHIP_SB" && git add pkg/package.json \
+    && git -c user.email=t@t -c user.name=t commit -qm "add pkg" ) >/dev/null 2>&1
+  ( cd "$SHIP_SB" && git rm -q -r --cached pkg ) >/dev/null 2>&1
+  rm -rf "$SHIP_SB/pkg"
+
+  # The premise: HEAD carries it, the index and the disk do not.
+  run bash -c "cd '$SHIP_SB' && git ls-tree -r --name-only HEAD -- pkg"
+  [[ "$output" == *"pkg/package.json"* ]]
+  run bash -c "cd '$SHIP_SB' && git ls-files -- pkg"
+  [ -z "$output" ]
+  [ ! -d "$SHIP_SB/pkg" ]
+
+  run ship_ws_run
+  [ "$status" -ne 0 ] || { echo "ship passed over a workspace only HEAD carries" >&2; return 1; }
+  [[ "$output" == *"pkg"* ]]
+  rm -rf "$SHIP_SB"
+}
+
+@test "node lane: bunx is a package runner, in every reader" {
+  # Bun's docs call `bunx` an alias for `bun x` and Bun's equivalent of npx, and
+  # a workspace whose test script is `bunx vitest run` was refused for running
+  # no test runner: `bunx` matched no name in the runner list, so the scan never
+  # advanced to the word after it.
+  #
+  # Both readers, because the runner list is written out twice -- the command
+  # reader and the tsc reader in ci/checks/node.sh, plus a third in
+  # ci/checks/tests.sh -- and a name added to one of them is the exact shape of
+  # defect this branch keeps finding.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bunx tsc --noEmit", "test": "bunx vitest run" } }'
+  ws_seed_fingerprint
+  run ws_run
+  # Matched on the wording the lane actually prints. The first draft of this
+  # case looked for "no test runner", which the lane never emits -- it wraps as
+  # `does` / `not appear to run a test runner:` -- so the accept assertion here
+  # was vacuously true and the control below failed while the code was correct.
+  # A message assertion that cannot fail is the same defect as a rule that
+  # cannot fire.
+  [[ "$output" != *"appear to run a test runner"* ]] \
+    || { echo "bunx was not read as a package runner" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  [[ "$output" != *"type checker"* ]] \
+    || { echo "bunx hid the compiler from the typecheck reader" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # The control: the prefix is transparent, not an exemption. `bunx true` still
+  # reaches no runner, and a rule that accepted anything after `bunx` would be
+  # the no-op-wrapper hole this suite already closes for npx.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "bunx tsc --noEmit", "test": "bunx true" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"appear to run a test runner"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: build mode names a project, not a source file" {
+  # `tsc -b tsconfig.app.json --noEmit` is how a workspace with project
+  # references typechecks. `-b` matched no arm, fell through to the generic
+  # flag accept, and the project after it arrived as a bare word -- which this
+  # scan calls a source file, on the correct grounds that naming files makes tsc
+  # ignore tsconfig.json. Correct rule, wrong token.
+  #
+  # Verified against tsc 6.0.3 before the rule was widened: `tsc -b <project>`
+  # reports TS2322 and exits non-zero over a project holding a type error, and
+  # reports it again after a source edit invalidates the build info -- so unlike
+  # `--clean` and `--dry` above it, build mode does check.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.app.json"
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.node.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc -b tsconfig.app.json --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]] \
+    || { echo "a build-mode project was read as a source file" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # Build mode takes one or more projects, so the option stays in force over the
+  # words after it. Spending it on the first would refuse the second -- the same
+  # defect one token later, which is how the first draft of the fix behaved.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc -b tsconfig.app.json tsconfig.node.json", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]] \
+    || { echo "the second project of a build was read as a source file" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # A folder is the option's other documented spelling -- tsc takes "the path to
+  # its configuration file, or to a folder with a tsconfig.json" -- and both
+  # readers of the option now answer that the same way.
+  mkdir -p "$NODE_SB/ws/packages/app"
+  printf '{}\n' > "$NODE_SB/ws/packages/app/tsconfig.json"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc -p packages/app --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"individual files"* ]] \
+    || { echo "a project folder was read as a source file" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # The controls. A path that is no discovered project is still refused, under
+  # either option -- that is a file neither reader can open, which is the whole
+  # reason the rule exists.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc -b tsconfig.absent.json", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "typecheck": "tsc src/one.ts --noEmit", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"individual files"* ]]
+  rm -rf "$NODE_SB"
+}
+
+@test "js lane: every reader of the runner vocabulary knows the same names" {
+  # Nine lists across ci/checks/node.sh and ci/checks/tests.sh answer "is this
+  # token a package runner", and they did not agree. `pnpx` was in exactly one
+  # of them before this case existed, and `bunx` was reported against one of the
+  # other eight -- so adding it where the report pointed left a fixture whose
+  # typecheck script was `bunx tsc --noEmit` still refused, by a list that spells
+  # its vocabulary as a space-separated string instead of a case pattern and so
+  # does not turn up in a sweep for the pattern.
+  #
+  # Enumerated from the source rather than restated here, the same way
+  # `tests: every gate variable the suites can inherit is cleared` is: a list
+  # this case names is a list that stops being checked the day a tenth appears.
+  #
+  # The selector takes `npx` only where it stands as a whole alternative or a
+  # whole word, which is what excludes _pm_advance's option table -- `npx|-p`
+  # keys a *flag* belonging to npx, and bunx and pnpx have no such flags to key.
+  local _line _n=0 _bad="" _name
+  while IFS= read -r _line; do
+    [ -n "$_line" ] || continue
+    _n=$(( _n + 1 ))
+    for _name in npx bunx pnpx; do
+      case "$_line" in
+        *"$_name"*) ;;
+        *) _bad="${_bad}
+    ${_name} missing from ${_line}" ;;
+      esac
+    done
+  done <<< "$(grep -nE '(^|[|" ])npx([|)" ]|$)' \
+               "$REPO_ROOT/ci/checks/node.sh" "$REPO_ROOT/ci/checks/tests.sh" \
+             | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')"
+
+  # The selector has to still be selecting. A regex that matches nothing makes
+  # every assertion below vacuously true, which is the failure mode of every
+  # enumerate-from-source case ever written.
+  [ "$_n" -ge 9 ] \
+    || { echo "found only $_n runner lists; the selector has drifted" >&2; return 1; }
+  [ -z "$_bad" ] \
+    || { echo "the runner lists disagree:$_bad" >&2; return 1; }
+}
+
+@test "node lane: a workspace declaring a bundler must be able to build with it" {
+  # `run_script build` logs "Skipping missing script" and returns 0, and
+  # `"build": "true"` exits 0 without the bundler starting -- so production
+  # bundling left the gate by a manifest edit, and nothing else covers it:
+  # ci/checks/build.sh validates shell syntax over the CI scripts and builds no
+  # frontend. The same two rules `typecheck` and `test` already carry, applied
+  # to the third script of the three.
+  ws_setup
+  printf 'export default {};\n' > "$NODE_SB/ws/vite.config.ts"
+
+  # Declared and missing.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"declares a bundler but defines no"* ]] \
+    || { echo "a missing build script was accepted" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # Declared, present, and a no-op -- the edit that reaches the same place.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "true", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"appear to run its bundler"* ]] \
+    || { echo "a no-op build script was accepted" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # The real thing, which is what this repository ships: `vite build`.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "vite build", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"appear to run its bundler"* ]] \
+    || { echo "the rule refused the workspace it was written to protect" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  [[ "$output" != *"declares a bundler but defines no"* ]]
+
+  # Delegation is followed, not taken on trust, exactly as it is for typecheck.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "npm run build:prod", "build:prod": "vite build", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"appear to run its bundler"* ]] \
+    || { echo "a delegated build was refused" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+
+  # And delegation to a no-op is still a no-op.
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "build": "npm run build:prod", "build:prod": "true", "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ]
+  [[ "$output" == *"appear to run its bundler"* ]]
+
+  # The control, and the reason the rule is keyed on the configuration rather
+  # than applied to every workspace: one that bundles nothing is untouched by
+  # all of this. Without it the rule would demand a bundler of every package.
+  rm -f "$NODE_SB/ws/vite.config.ts"
+  ws_manifest '{ "name": "w", "private": true, "scripts": { "test": "bash scripts/test.sh" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"declares a bundler but defines no"* ]] \
+    || { echo "a workspace with no bundler was required to have a build" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "cache key: a lane whose input the changeset does not describe is not cached" {
+  # typecheck-js arrived cacheable. ci/checks/typecheck.sh compiles every project
+  # it discovers, not the ones the branch touched, so the changed-file key does
+  # not describe what the lane read -- the same argument already written out for
+  # `node` and `python`. A PASS cached for a branch touching frontend/src/a.ts
+  # is replayed after a rebase onto a base where tsconfig.node.json now has a
+  # type error, and nothing else covers that: the `-p <project>` rule in
+  # ci/checks/node.sh accepts a typecheck script naming one project *because*
+  # this lane compiles the rest.
+  #
+  # Executed, not grepped. The two cases above match on the text of the function
+  # body, which a comment mentioning `node) return 1` satisfies just as well as
+  # the arm does. Extracting and calling it asks the question directly, and it
+  # covers the lanes those cases already claim.
+  local fn
+  fn="$(sed -n '/^_check_is_cacheable()/,/^}/p' "$REPO_ROOT/ci/preflight.sh")"
+  [ -n "$fn" ] || { echo "could not extract _check_is_cacheable" >&2; return 1; }
+  bash -n <<< "$fn" || { echo "the extraction is not valid shell" >&2; return 1; }
+  eval "$fn"
+
+  local lane
+  for lane in typecheck-js node python tests-shell test-layout git-safety branch-protection; do
+    ! _check_is_cacheable "$lane" \
+      || { echo "$lane is cacheable, and its result does not follow the changeset" >&2; return 1; }
+  done
+
+  # The premise. Without it an unconditional `return 1` passes every assertion
+  # above while turning the cache off for everything.
+  #
+  # `changed-files`, not `format`. This used to name a check id the preflight
+  # plan does not schedule, which was cacheable only because the function
+  # returned 0 for everything it had not heard of -- so the premise was
+  # satisfied by the very tail that let security, build and debt be cached.
+  # With the default closed it has to name a lane that is *deliberately*
+  # cacheable, and there is exactly one: its answer is a function of the
+  # changed-file list the key is made of.
+  _check_is_cacheable changed-files \
+    || { echo "nothing is cacheable any more; this case no longer tests the rule" >&2; return 1; }
+}
+
+@test "js lane: ship-mode workspace discovery is the tree being pushed" {
+  # ci::common::node_workspaces stats the worktree, which in ship mode is the
+  # commit being built and not the one going out. An untracked scratch package
+  # became a workspace of the push: the standalone typecheck lane entered it,
+  # found no scratch/node_modules/.bin/tsc, and returned FAIL_INFRA -- local WIP
+  # failing a valid push.
+  #
+  # Asserted on the shared reader rather than on one lane. node.sh, tests.sh and
+  # typecheck.sh all call this, so fixing it inside the lane that reported it
+  # would have made a fourth answer to a question this branch keeps finding
+  # answered three different ways.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/frontend"
+  printf '{"name":"f"}\n' > "$sb/frontend/package.json"
+  ( cd "$sb" && git init -q -b main . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  mkdir -p "$sb/scratch"
+  printf '{"name":"s"}\n' > "$sb/scratch/package.json"
+
+  # quick stands behind the index and the worktree, so the scratch package is
+  # part of what it vouches for. This is the control: the rule chooses a tree,
+  # it does not simply drop things.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=quick ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *frontend* ]]
+  [[ "$output" == *scratch* ]] \
+    || { echo "quick mode stopped seeing the tree it stands behind: $output" >&2; rm -rf "$sb"; return 1; }
+
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *frontend* ]] \
+    || { echo "ship mode lost a workspace the push carries: $output" >&2; rm -rf "$sb"; return 1; }
+  [[ "$output" != *scratch* ]] \
+    || { echo "ship mode counted a workspace the push does not send: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # And a workspace in HEAD that is gone from disk. This case used to assert
+  # only that it "stays absent", on the reasoning that a "read HEAD instead" fix
+  # would invert the narrowing and produce a workspace no lane can install.
+  # Half right: inventing it is still wrong, and stdout must stay empty. But
+  # absent is not the same as answered, and reporting no workspace is how
+  #
+  #   rm -rf frontend
+  #   CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh
+  #   -> skipped: no package.json found        exit 0
+  #
+  # passed a push whose HEAD still carries frontend/package.json. There is a
+  # third reading and it is the right one: this run cannot check the push, so it
+  # says so and the callers record FAIL_INFRA. Both halves are pinned below,
+  # because a fix satisfying either one alone is a defect.
+  ( cd "$sb" && rm -rf frontend )
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json 2>/dev/null"
+  [ "$status" -ne 0 ] \
+    || { echo "a workspace the worktree cannot supply was answered cleanly: '$output'" >&2; rm -rf "$sb"; return 1; }
+  [ -z "$output" ] \
+    || { echo "a workspace deleted from disk was invented from HEAD: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # The refusal names what is missing, or it is not actionable. stderr only,
+  # since the assertion above is about stdout carrying no workspace.
+  run bash -c "cd '$sb' && . '$REPO_ROOT/ci/lib/common.sh' \
+                 && CI_GATE_MODE=ship ci::common::node_workspaces package.json 2>&1 1>/dev/null"
+  [[ "$output" == *"frontend/package.json"* ]] \
+    || { echo "the refusal does not say which manifest is missing: $output" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
+
+@test "node lane: words after a shell -c command are its arguments, not commands" {
+  # Reported as a bypass: `bash -c 'true' tsc --noEmit` supposedly reached the
+  # trailing `tsc` and satisfied the checker rule while the script only runs
+  # `true`. It does not, and the reason is worth pinning rather than leaving to
+  # be re-derived -- the inline string is parsed as shell, and in shell a word
+  # after a command is an argument to it. Only a separator starts a new command.
+  #
+  # Which cuts both ways, so both directions are asserted here: the shape that
+  # must be refused, and the shape that must not be, since a rule that refused
+  # every `bash -c` would pass the first half by refusing everything.
+  ws_setup
+  printf '{}\n' > "$NODE_SB/ws/tsconfig.json"
+  mkdir -p "$NODE_SB/ws/node_modules/.bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$NODE_SB/ws/node_modules/.bin/tsc"
+  chmod +x "$NODE_SB/ws/node_modules/.bin/tsc"
+
+  local bad
+  for bad in "bash -c 'true' tsc --noEmit" \
+             "sh -c true tsc --noEmit" \
+             "bash -c 'true' npx tsc --noEmit" \
+             "bash -c ':' tsc --noEmit" \
+             "bash -c 'true tsc --noEmit'"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"typecheck\": \"${bad}\", \"test\": \"bash scripts/test.sh\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [ "$status" -eq 20 ] \
+      || { echo "accepted a script whose compiler is an argument: ${bad}" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+    [[ "$output" == *"type checker"* ]] \
+      || { echo "refused for the wrong reason: ${bad}" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  done
+
+  # And the two that genuinely do run a compiler. `&&` and a bare command
+  # string are how a shell reaches one, and refusing either would make the loop
+  # above pass by refusing every `bash -c`.
+  local good
+  for good in "bash -c 'tsc --noEmit'" \
+              "bash -c 'true && tsc --noEmit'"; do
+    ws_manifest "{ \"name\": \"w\", \"private\": true, \"scripts\": { \"typecheck\": \"${good}\", \"test\": \"bash scripts/test.sh\" } }"
+    ws_seed_fingerprint
+    run ws_run
+    [[ "$output" != *"type checker"* ]] \
+      || { echo "refused a script that does run a compiler: ${good}" >&2; echo "$output" >&2; rm -rf "$NODE_SB"; return 1; }
+  done
+  rm -rf "$NODE_SB"
+}
+
+@test "node lane: a build script that names its bundler but runs no build is refused" {
+  # The bundler guard asked only whether a known bundler appeared in command
+  # position. `"build": "vite --version"` satisfies that, prints a banner and
+  # exits 0, so a workspace whose production packaging had been switched off by
+  # a one-word manifest edit stayed green -- the same distinction the tsc guard
+  # draws between `--noEmit` and `--showconfig`, one tool over.
+  #
+  # Driven through the predicate rather than the lane: reaching it through the
+  # lane needs a real install, and the question here is one pass of parsing.
+  local fn="$BATS_TEST_TMPDIR/rnb.sh"
+  awk '/^_reject_non_building_mode\(\) \{/,/^\}/' "$REPO_ROOT/ci/checks/node.sh" > "$fn"
+  bash -n "$fn" || { echo "extraction is not valid shell" >&2; return 1; }
+  [ -s "$fn" ] || { echo "extracted nothing" >&2; return 1; }
+
+  _rnb() {
+    bash -c '. "$1"; CI_RESULT_FAIL_NEW_ISSUE=20; CI_GATE_NODE_WORKSPACE=ws
+             _reject_non_building_mode build "$2"; echo ACCEPTED' _ "$fn" "$1" 2>&1
+  }
+
+  local bad
+  for bad in "vite --version" "webpack --help" "next dev" "parcel watch" \
+             "react-scripts start" "vite build --watch" "vite serve" "next start"; do
+    run _rnb "$bad"
+    [[ "$output" != *ACCEPTED* ]] \
+      || { echo "accepted a script that builds nothing: ${bad}" >&2; return 1; }
+    [[ "$output" == *"non-building bundler mode"* ]] \
+      || { echo "refused '${bad}' with the wrong message: $output" >&2; return 1; }
+  done
+
+  # The controls, and they are the point: a rule that refused every build
+  # script would satisfy the loop above by refusing everything.
+  local good
+  for good in "vite build" "webpack" "next build" "vite build --mode production" \
+              "parcel build src/index.html" "react-scripts build" "rollup -c" \
+              "tsup src/index.ts" "ng build --configuration production"; do
+    run _rnb "$good"
+    [[ "$output" == *ACCEPTED* ]] \
+      || { echo "refused a real build: ${good}" >&2; echo "$output" >&2; return 1; }
+  done
+
+  # A non-building word that belongs to another command is not this bundler's.
+  run _rnb "echo --version && vite build"
+  [[ "$output" == *ACCEPTED* ]] \
+    || { echo "read a word belonging to echo as the bundler's mode" >&2; return 1; }
+}
+
+@test "js lane: a ship run refuses a worktree that differs from the push" {
+  # Narrowing the project and test lists to HEAD chose *which* files these
+  # lanes read and said nothing about their *contents*: both run the
+  # workspace's own tooling over the worktree. A type error committed in HEAD
+  # and fixed only on disk compiled clean, and a test failing in HEAD and
+  # repaired only on disk passed, each reporting PASS for a push that still
+  # carries the problem.
+  #
+  # ci/checks/node.sh has refused this since "Workspace files differ between
+  # HEAD and the worktree". typecheck-js and tests-js are scheduled as their
+  # own blocker lanes and never go through node.sh, so neither asked.
+  local sb
+  sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/frontend"
+  (
+    cd "$sb"
+    git init -q -b main .
+    git config user.email t@t && git config user.name t
+    printf 'ci/\n' > .gitignore
+    printf '{"name":"f","private":true,"scripts":{"test":"vitest run"}}\n' > frontend/package.json
+    printf '{}\n' > frontend/tsconfig.json
+    printf 'let x: number = 1\n' > frontend/app.ts
+    git add -A && git commit -qm c1
+  ) >/dev/null 2>&1
+  cp -r "$REPO_ROOT/ci" "$sb/ci"
+
+  # The control first: a worktree that matches HEAD is not refused, or the
+  # assertions below pass by refusing everything.
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [[ "$output" != *"differ between HEAD and the worktree"* ]] \
+    || { echo "refused a clean worktree: $output" >&2; rm -rf "$sb"; return 1; }
+
+  # Now a committed file changed only on disk. Both lanes have to refuse.
+  printf 'let x: number = 2\n' > "$sb/frontend/app.ts"
+  local lane
+  for lane in "typecheck-js:ci/checks/typecheck.sh" "tests-js:ci/checks/tests.sh"; do
+    run bash -c "cd '$sb' && CI_GATE_MODE=ship CI_GATE_CHECK_ID=${lane%%:*} bash ${lane#*:} 2>&1"
+    [[ "$output" == *"differ between HEAD and the worktree"* ]] \
+      || { echo "${lane%%:*} reported on a worktree that is not the push: $output" >&2; rm -rf "$sb"; return 1; }
+    [[ "$output" == *"frontend/app.ts"* ]] \
+      || { echo "${lane%%:*} did not name the drifted file: $output" >&2; rm -rf "$sb"; return 1; }
+  done
+
+  # And quick mode is untouched: it stands behind the worktree, so the worktree
+  # differing from HEAD is exactly what it is there to check.
+  run bash -c "cd '$sb' && CI_GATE_MODE=quick CI_GATE_CHECK_ID=typecheck-js bash ci/checks/typecheck.sh 2>&1"
+  [[ "$output" != *"differ between HEAD and the worktree"* ]] \
+    || { echo "quick mode refused its own tree: $output" >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
+
+@test "js lane: a package runner's subcommand does not end its option grammar" {
+  # `--package` is an option of `npm exec`, not of `npm`, so the documented
+  # spelling of "fetch this tool and run this command" is
+  # `npm exec --package <pkg> <cmd>`. Both readers ended package-manager mode
+  # at `exec` -- it reached their unconditional `exec|dlx|...` lists, and the
+  # arm that sends a bare word there is the arm that clears the state -- so
+  # `--package` was skipped as a boolean and the *package* was read as the
+  # command. `npm exec --package vitest jest --ci` therefore declared vitest:
+  # tests.sh ran Vitest over the Jest suite the manifest names, collected
+  # nothing it recognised, exited 0 and the lane reported PASS.
+  #
+  # The `x` alias was right only because it was listed by name. This is the
+  # same rule reaching the other spellings of the same subcommand.
+  local spelling
+  for spelling in "npm exec --package vitest jest --ci" \
+                  "pnpm dlx --package vitest jest --ci" \
+                  "yarn dlx --package vitest jest --ci" \
+                  "npm exec --package vitest -c 'jest --ci'" \
+                  "npm x --package vitest jest --ci"; do
+    run declared_runner_for "$spelling"
+    [ "$output" = "jest" ] \
+      || { echo "tests.sh: '$spelling' -> '$output' (wanted jest)" >&2; return 1; }
+  done
+
+  # node.sh answers the same question for its own rules and had the same hole:
+  # it returned the package name, so every argument rule downstream judged
+  # jest's invocation against vitest's vocabulary. The `-c` payload is left out
+  # of this loop on purpose -- the two readers differ about `--call` by design,
+  # which `node lane: a package manager's value-taking options are its own, not
+  # one list` records and pins.
+  for spelling in "npm exec --package vitest jest --ci" \
+                  "pnpm dlx --package vitest jest --ci" \
+                  "yarn dlx --package vitest jest --ci"; do
+    run node_lane_runner_for "$spelling"
+    [ "$output" = "jest" ] \
+      || { echo "node.sh: '$spelling' -> '$output' (wanted jest)" >&2; return 1; }
+  done
+
+  # The controls, and they carry the fix: `exec` only continues a *manager's*
+  # prefix, so a bare `exec` is still the shell builtin and the word after it is
+  # still the command. Without this the loops above would be satisfied by a
+  # reader that treated every `exec` as transparent-and-stateful.
+  run declared_runner_for "exec vitest run"
+  [ "$output" = "vitest" ]
+  run node_lane_runner_for "exec vitest run"
+  [ "$output" = "vitest" ]
+
+  # And a subcommand followed by the command directly is unchanged: nothing
+  # here promotes an option's value when there is no option.
+  run declared_runner_for "npm exec vitest run"
+  [ "$output" = "vitest" ]
+  run declared_runner_for "pnpm dlx jest --ci"
+  [ "$output" = "jest" ]
+
+  # A manager's own value-taking option survives its subcommand too, which is
+  # the same defect seen from the other side: `pnpm exec --filter web vitest
+  # run` is the standard monorepo invocation and it declared nothing at all.
+  run declared_runner_for "pnpm exec --filter web vitest run"
+  [ "$output" = "vitest" ]
+}
+
+@test "node lane: a bundler flag split across quotes is still that flag" {
+  # The shell concatenates the quoted and unquoted runs of one word, so
+  # `vite --ver'sion'` reaches vite as `--version`: it prints a banner, exits 0
+  # and packages nothing. The scan stripped one leading and one trailing quote,
+  # which leaves `--ver'sion` -- a token matching nothing in either list -- so
+  # the guard against exactly this false PASS was bypassed by a quoting.
+  local fn="$BATS_TEST_TMPDIR/rnb_q.sh"
+  awk '/^_reject_non_building_mode\(\) \{/,/^\}/' "$REPO_ROOT/ci/checks/node.sh" > "$fn"
+  bash -n "$fn" || { echo "extraction is not valid shell" >&2; return 1; }
+  [ -s "$fn" ] || { echo "extracted nothing" >&2; return 1; }
+
+  _rnbq() {
+    bash -c '. "$1"; CI_RESULT_FAIL_NEW_ISSUE=20; CI_GATE_NODE_WORKSPACE=ws
+             _reject_non_building_mode build "$2"; echo ACCEPTED' _ "$fn" "$1" 2>&1
+  }
+
+  local bad
+  for bad in "vite --ver'sion'" "vite --version''" "vite ''--version" \
+             'webpack "--he"lp' "next de'v'"; do
+    run _rnbq "$bad"
+    [[ "$output" != *ACCEPTED* ]] \
+      || { echo "a quoting bypassed the bundler-mode guard: ${bad}" >&2; return 1; }
+  done
+
+  # The opposite error, and it is the one that gets a guard switched off: the
+  # subcommand words were matched wherever they appeared, so `--mode dev` and
+  # `--configuration dev` -- a mode name and a configuration name, both handed
+  # to the option in front of them -- refused two ordinary production builds.
+  # A subcommand is only a subcommand in positional position.
+  local good
+  for good in "vite build --mode dev" "ng build --configuration dev" \
+              "next build --experimental-build-mode start" \
+              "astro build --site preview" "vite build --mode staging" \
+              "vite build --outDir preview"; do
+    run _rnbq "$good"
+    [[ "$output" == *ACCEPTED* ]] \
+      || { echo "refused a real build script: ${good} -> $output" >&2; return 1; }
+  done
+
+  # The controls that keep the narrowing honest: a flag means the same wherever
+  # it sits, a subcommand in positional position is still refused, and
+  # `vite --mode dev` -- which carries no subcommand for `dev` to be the value
+  # of -- is still the dev server. That last one is the one the option test
+  # alone got wrong, and the before/after matrix is what surfaced it.
+  local still_bad
+  for still_bad in "vite build --watch" "next dev" "parcel watch" "vite serve" \
+                   "vite --mode dev"; do
+    run _rnbq "$still_bad"
+    [[ "$output" != *ACCEPTED* ]] \
+      || { echo "stopped refusing a non-building mode: ${still_bad}" >&2; return 1; }
+  done
+}
+
+@test "tests-shell: the drift scan reads every input these suites read" {
+  # The ignored-file half of the scan was filtered to shell and bats, and these
+  # suites are mostly *about* the configuration beside them: test_js_lane reads
+  # ci/config/checks.yml and affected.yml, test_preflight reads lanes.conf, the
+  # layout suite reads ci/checks/manifest.yml. A commit that deleted one of
+  # those and added its path to .gitignore left a worktree copy no scan could
+  # see -- the tracked diff because the path is untracked now, the untracked
+  # scan because --exclude-standard drops it, and this one because of its
+  # suffix. The suites then validated a configuration the pushed tree does not
+  # contain, and the lane reported PASS.
+  #
+  # The filter is lifted out of the lane and run verbatim, so this asserts on
+  # the shipped expression rather than on a restatement of it.
+  local frag
+  frag="$(awk '/^ *printf .*_ts_ig/ { f = 1 }
+               f { print }
+               f && /\|\| true$/ { exit }' "$REPO_ROOT/ci/checks/tests-shell.sh")"
+  [ -n "$frag" ] || { echo "could not lift the scan filter from the lane" >&2; return 1; }
+
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  (
+    cd "$sb" || exit 1
+    git init -q . && git config user.email t@t && git config user.name t
+    mkdir -p ci/config ci/tests
+    echo x > ci/config/affected.yml
+    echo '#!/bin/sh' > ci/gate.sh
+    printf 'node_modules/\n.pytest_cache/\n__pycache__/\n.ruff_cache/\n' > .gitignore
+    git add -A && git commit -qm base
+    git rm -q ci/config/affected.yml
+    printf 'node_modules/\n.pytest_cache/\n__pycache__/\n.ruff_cache/\nci/config/affected.yml\n' > .gitignore
+    git add -A && git commit -qm 'delete the config and ignore its path'
+    # Recreated: `git rm` took the directory with the last file in it, and the
+    # worktree replacement is the whole point of the fixture.
+    mkdir -p ci/config
+    echo TAMPERED > ci/config/affected.yml
+  ) >/dev/null 2>&1 || { rm -rf "$sb"; echo "fixture failed" >&2; return 1; }
+
+  local out
+  out="$(cd "$sb" \
+    && _ts_ig="$(git ls-files --others --ignored --exclude-standard -- ci .githooks .gitignore)" \
+    && eval "$frag")"
+  [[ "$out" == *"ci/config/affected.yml"* ]] \
+    || { rm -rf "$sb"; echo "a deleted-and-ignored config is invisible to the scan: [$out]" >&2; return 1; }
+
+  # The control, and it is the reason the filter is not simply "everything":
+  # this repository's tooling writes caches under ci/ on every run, and
+  # reporting those as drift is the gate blocking its own push -- which is how
+  # the filter came to be narrow in the first place. The prune is written by
+  # shape now, so the cache a tool adds next week is covered by the same rule
+  # rather than by a name nobody has added yet.
+  ( cd "$sb" && mkdir -p ci/lib/__pycache__ ci/.ruff_cache ci/tests/.pytest_cache \
+      && echo p > ci/lib/__pycache__/m.pyc \
+      && echo j > ci/.ruff_cache/0.6.9.json \
+      && printf '' > ci/tests/.pytest_cache/.gitignore ) >/dev/null 2>&1
+  local scratch
+  scratch="$(cd "$sb" \
+    && _ts_ig="$(git ls-files --others --ignored --exclude-standard -- ci \
+                 | grep -E '__pycache__|ruff_cache|pytest_cache')" \
+    && eval "$frag")"
+  [ -z "$scratch" ] \
+    || { rm -rf "$sb"; echo "the lane would block its own push on: [$scratch]" >&2; return 1; }
+  rm -rf "$sb"
+}
+
+@test "node lane: a workspace whose path git quotes is still a workspace" {
+  # `git ls-tree --name-only` does not print a path, it prints git's C-string
+  # quoting of one whenever the name carries a non-ASCII byte -- so
+  # `cafe/package.json` with an accent arrives as `"caf\303\251/package.json"`,
+  # trailing quote included, and the anchored `(^|/)package\.json$` every reader
+  # here applies matched nothing. In ship mode that workspace simply was not in
+  # the listing: the lane installed nothing, ran no test, no typecheck and no
+  # build, and exited PASS. The three scans that exist to notice a workspace
+  # going missing read the same listing and missed it identically.
+  local acc; acc="$(printf 'caf\303\251')"
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  (
+    cd "$sb" || exit 1
+    git init -q . && git config user.email t@t && git config user.name t
+    mkdir -p "$acc/src" apps/plain
+    echo '{}' > "$acc/package.json"
+    echo '{}' > "$acc/tsconfig.json"
+    echo 'test' > "$acc/src/a.test.ts"
+    echo '{}' > apps/plain/package.json
+    git add -A && git commit -qm base
+  ) >/dev/null 2>&1 || { rm -rf "$sb"; echo "fixture failed" >&2; return 1; }
+
+  # Ship-mode workspace discovery, through the filter the lane applies.
+  local seen
+  seen="$(cd "$sb" \
+    && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+    && ci::common::ls_tree_paths -r --name-only HEAD | grep -cE '(^|/)package\.json$')"
+  [ "$seen" = "2" ] \
+    || { rm -rf "$sb"; echo "ship-mode discovery found ${seen} of 2 workspaces" >&2; return 1; }
+
+  # And the lost-suite scan, which reads the same tree and whose empty answer
+  # means "this workspace never had tests" -- the reading that lets a deleted
+  # suite through.
+  local tests
+  tests="$(cd "$sb" \
+    && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+    && ci::common::ls_tree_paths -r --name-only HEAD -- . \
+       | grep -cE '\.(test|spec|cy)\.[cm]?[jt]sx?$')"
+  [ "$tests" = "1" ] \
+    || { rm -rf "$sb"; echo "the suite under an accented path was invisible" >&2; return 1; }
+  rm -rf "$sb"
+
+  # A listing that could not be produced is not a tree with nothing in it. The
+  # status has to come from git and not from the `tr` that follows it, which is
+  # what every caller's FAIL_INFRA branch hangs on.
+  local rc=0
+  ( cd "$BATS_TEST_TMPDIR" \
+    && . "$REPO_ROOT/ci/lib/common.sh" >/dev/null 2>&1 \
+    && ci::common::ls_tree_paths -r --name-only definitely-not-a-ref >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -ne 0 ] || { echo "an unreadable ref produced a clean empty listing" >&2; return 1; }
+
+  # The one name this newline-joined shape cannot carry. A path with a newline
+  # in it would arrive as two entries, each matching nothing, and a listing
+  # silently short by an entry is the failure above in another spelling -- so it
+  # is refused rather than shortened. Driven with a synthetic listing because
+  # the host filesystem need not allow such a name.
+  local nl_rc=0
+  ( _lt_out="$(printf 'a/package.json\000b\nc/package.json\000' | tr '\000\012' '\012\001'
+               exit "${PIPESTATUS[0]}")" || exit 1
+    case "$_lt_out" in *$'\001'*) exit 2 ;; esac
+    printf '%s' "$_lt_out" ) >/dev/null 2>&1 || nl_rc=$?
+  [ "$nl_rc" -eq 2 ] \
+    || { echo "a path containing a newline was folded into the list (rc=$nl_rc)" >&2; return 1; }
+}
+
+@test "node lane: what each recognised runner collects is what counts as a suite" {
+  # Two conventions, and they had been read as one loose rule.
+  #
+  # By suffix: `*.test.*` and `*.spec.*` on their own are a claim about any file
+  # whatsoever, so `openapi.spec.json` -- an API description -- failed a
+  # workspace for "shipping tests" while it shipped none. By position: Mocha
+  # collects `./test/*.{js,cjs,mjs}` and `node --test` collects `test/**`
+  # recursively, both naming nothing, so `test/login.js` and
+  # `test/integration/login.js` were invisible to both scans and the orphan
+  # guard let `test` and `test:unit` be deleted from a workspace that ships one.
+  #
+  # And the prune in front of them was unanchored: `tests/build/checkout.test.ts`
+  # is first-party, and every directory called `build` at any depth was being
+  # dropped with the workspace's own output directory.
+  # Both sides lifted as one block and evaluated, rather than the regex being
+  # cut out of its own assignment: it is composed from the shape and directory
+  # halves now, so a `cut` on the quoting would lift the composition rather than
+  # its value and silently test a different expression than the lane runs.
+  local pred
+  pred="$(sed -n '/^_NODE_TEST_STEM_PRED=(/,/^_NODE_TEST_PATH_RE=/p' "$REPO_ROOT/ci/checks/node.sh")"
+  [ -n "$pred" ]     || { echo "could not lift the suite predicates from the lane" >&2; return 1; }
+  bash -n <<< "$pred" || { echo "the extraction is not valid shell" >&2; return 1; }
+  eval "$pred"
+  local re="$_NODE_TEST_PATH_RE" ext_re="$_NODE_TEST_EXT_RE"
+  [ -n "$re" ] && [ -n "$ext_re" ]     || { echo "the lane's path expressions came back empty" >&2; return 1; }
+
+  # The prune is pinned to the lane rather than lifted from it -- the same shape
+  # `tests-shell: a local cache under ci/ is not shell-suite drift` uses: state
+  # it here and require the lane to still carry it, so a change there fails this
+  # case loudly instead of leaving it testing a copy.
+  local prune
+  prune="find . \( -name 'node_modules' -o -path './dist' -o -path './build' -o -path './out' -o -path './coverage' -o -path './htmlcov' -o -path './.next' -o -path './.nuxt' -o -path './.turbo' -o -path './.vite' -o -path './.cache' \) -prune"
+  grep -qF -- "$prune" "$REPO_ROOT/ci/checks/node.sh"     || { echo "the lane no longer uses this prune; update this case" >&2; return 1; }
+
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  local f
+  for f in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js            test/README.md test/fixtures/data.json src/app.js src/a.test.ts            __tests__/login.js src/__tests__/deep/a.tsx            e2e/x.cy.ts messages.cy.json openapi.spec.json            test-login.js login-test.js login_test.js test.js            src/test/util.js test-fixtures.json            spec/loginSpec.js spec/nested/authSpec.mjs spec/helpers/setup.js            spec/support/jasmine.json            tests/build/checkout.test.ts build/out.test.js node_modules/x/test/a.js            coverage/old.test.js .next/x.test.js; do
+    mkdir -p "$sb/$(dirname "$f")" && : > "$sb/$f"
+  done
+
+  local from_find
+  from_find="$( cd "$sb" && eval "$prune" -o -type f '"${_NODE_TEST_NAME_PRED[@]}"' -print 2>/dev/null     | sed 's|^\./||' | sort | tr '
+' ' ' )"
+
+  # Collected, and nothing else.
+  local want
+  for want in test/login.js test/api.mjs test/integration/login.js test/helpers/db.js               __tests__/login.js src/__tests__/deep/a.tsx               test-login.js login-test.js login_test.js test.js               spec/loginSpec.js spec/nested/authSpec.mjs               src/a.test.ts e2e/x.cy.ts tests/build/checkout.test.ts; do
+    [[ "$from_find" == *"$want"* ]]       || { rm -rf "$sb"; echo "a suite was not collected: ${want} (got [$from_find])" >&2; return 1; }
+  done
+  # `test/helpers/db.js` is in that list on purpose: it is a helper to a reader,
+  # and `node --test` runs it. What keeps the directory rule honest below the
+  # root is the extension list, not a depth limit.
+  #
+  # `src/test/util.js` is in the list below for the opposite reason, and it is
+  # the sharper half. `node --test` documents its directory rule as
+  # `**/test/**`, so matching a `test/` at any depth would be the faithful
+  # reading -- and it was measured to take this gate from REJECT to ACCEPT: a
+  # Vitest or Jest workspace with any helper tree named `test/` then always
+  # looks like it still has tests, the lost-suite comparison is skipped for it
+  # permanently, and deleting every real suite passes. The anchor stays, and
+  # this case is what says so.
+  local unwanted
+  for unwanted in openapi.spec.json messages.cy.json test/README.md                   test/fixtures/data.json src/app.js build/out.test.js test-fixtures.json                   src/test/util.js spec/helpers/setup.js spec/support/jasmine.json                   node_modules/x/test/a.js coverage/old.test.js .next/x.test.js; do
+    [[ "$from_find" != *"$unwanted"* ]]       || { rm -rf "$sb"; echo "not a suite, but collected: ${unwanted} (got [$from_find])" >&2; return 1; }
+  done
+
+  # The two halves have to agree about what a test file is, and an asymmetry
+  # here is not a missed case but an inverted one: the worktree side deciding a
+  # workspace still has tests is what makes the lost-suite scan skip entirely.
+  # So they are compared to each other, not each to a list written twice.
+  local from_re
+  from_re="$( printf '%s
+' test/login.js test/api.mjs test/integration/login.js     test/helpers/db.js test/README.md test/fixtures/data.json src/app.js     __tests__/login.js src/__tests__/deep/a.tsx     test-login.js login-test.js login_test.js test.js src/test/util.js     test-fixtures.json     spec/loginSpec.js spec/nested/authSpec.mjs spec/helpers/setup.js     spec/support/jasmine.json     src/a.test.ts e2e/x.cy.ts messages.cy.json openapi.spec.json     tests/build/checkout.test.ts     | grep -E "$re" | grep -E "$ext_re" | sort | tr '
+' ' ' )"
+  [ "$from_find" = "$from_re" ]     || { rm -rf "$sb"; echo "the two suite scans disagree: find=[$from_find] head=[$from_re]" >&2; return 1; }
+  rm -rf "$sb"
+}
+
+@test "tests-js: an environment this lane cannot reproduce is refused, not approximated" {
+  # The environment fix one round ago unquoted the value and exported the text.
+  # `RUN_INTEGRATION="$ENABLE_INTEGRATION"` is `1` to the shell that runs the
+  # script and the literal 20 characters `$ENABLE_INTEGRATION` to a reader that
+  # only unquotes -- so the runner got a *different* environment than the
+  # manifest declares, a test guarded on `=== "1"` skipped itself, and the lane
+  # reported PASS. Worse than not setting it, because it looks set.
+  #
+  # Expanding it here is not the alternative: a value is arbitrary shell, and
+  # `RUN=$(rm -rf build)` is as valid a manifest as any.
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "RUN_INTEGRATION=\"$ENABLE_INTEGRATION\" vitest run" } }'
+  [ "$output" = "!expansion RUN_INTEGRATION" ] \
+    || { echo "a substitution was not marked unreproducible: [$output]" >&2; return 1; }
+
+  # Unquoted and command-substituted spellings of the same thing.
+  run declared_env_for 'RUN=$ENABLE vitest run'
+  [ "$output" = "!expansion RUN" ]
+  run declared_env_for_manifest '{ "name": "w", "scripts": {
+    "test": "REV=\"$(git rev-parse HEAD)\" vitest run" } }'
+  [ "$output" = "!expansion REV" ]
+
+  # Single quotes are exempt because the shell exempts them: in `RUN='"'"'$LITERAL'"'"'`
+  # the dollar sign *is* the value, and re-exporting it verbatim is exact.
+  run declared_env_for_manifest "{ \"name\": \"w\", \"scripts\": {
+    \"test\": \"RUN='\$LITERAL' vitest run\" } }"
+  [ "$output" = "RUN=\$LITERAL" ] \
+    || { echo "a single-quoted literal was refused: [$output]" >&2; return 1; }
+
+  # And an ordinary value is still an ordinary value.
+  run declared_env_for 'RUN_INTEGRATION=1 vitest run'
+  [ "$output" = "RUN_INTEGRATION=1" ]
+
+  # The lane refuses on the marker rather than exporting it. Pinned against the
+  # lane's own text: reaching this through _tests_js_workspace needs an
+  # installed runner, and the verdict is what is under test, not the plumbing.
+  grep -qF "declares a test environment this lane cannot reproduce" \
+    "$REPO_ROOT/ci/checks/tests.sh" \
+    || { echo "the lane no longer refuses an unreproducible environment" >&2; return 1; }
+  grep -qF "'!expansion '*)" "$REPO_ROOT/ci/checks/tests.sh" \
+    || { echo "the lane no longer reads the marker this reader emits" >&2; return 1; }
+}
+
+@test "affected: a changed path git has to quote still narrows the right suite" {
+  # `git diff --name-only` renders a path carrying a non-ASCII byte as a
+  # C-quoted string -- `frontend/src/café.ts` arrives as
+  # `"frontend/src/caf\303\251.ts"` -- and that string matches no rule in
+  # ci/config/affected.yml. On its own that is one file contributing no pattern;
+  # with any mapped Python file in the same range it is a *skip*, because
+  # AFFECTED_TESTS is then non-empty, the JavaScript slice is empty, and a
+  # non-empty list narrows: `skipped: no affected JavaScript tests` over a push
+  # that changed the frontend.
+  local fn; fn="$(mktemp "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  sed -n '/_tests_diff_paths() {/,/^  }/p' "$REPO_ROOT/ci/checks/tests.sh" | sed 's/^  //' > "$fn"
+  [ -s "$fn" ] || { rm -f "$fn"; echo "could not lift the path reader from the lane" >&2; return 1; }
+  bash -n "$fn" || { rm -f "$fn"; echo "the extraction is not valid shell" >&2; return 1; }
+
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  (
+    cd "$sb"
+    git init -q -b main .
+    mkdir -p frontend/src
+    printf 'x\n' > frontend/src/a.ts
+    git add -A
+    git -c user.email=t@t -c user.name=t commit -qm base
+    printf 'y\n' > "frontend/src/caf$(printf '\303\251').ts"
+    git add -A
+  ) >/dev/null 2>&1
+
+  # The premise: git really does quote it.
+  local quoted
+  quoted="$(cd "$sb" && git diff --cached --name-only)"
+  [[ "$quoted" == *'\303\251'* ]] \
+    || { rm -rf "$sb" ; rm -f "$fn"; echo "the premise failed: git did not quote [$quoted]" >&2; return 1; }
+
+  local got
+  got="$(cd "$sb" && . "$fn" && _tests_diff_paths --cached | tr '\n' ' ')"
+  rm -rf "$sb"; rm -f "$fn"
+  [[ "$got" != *'\303\251'* ]] \
+    || { echo "the reader still returned the quoted form: [$got]" >&2; return 1; }
+  [[ "$got" == *"frontend/src/caf"* ]] \
+    || { echo "the changed frontend file did not survive the read: [$got]" >&2; return 1; }
+
+  # And the affected rules match what comes back, which is the half that decides
+  # whether the suite runs.
+  source ci/lib/affected.sh
+  local one
+  one="$(printf '%s' "$got" | tr ' ' '\n' | grep 'caf' | head -1)"
+  run ci::affected::get_affected_tests "$one"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"frontend/tests/"* ]] \
+    || { echo "the unquoted path mapped to no frontend suite: [$output]" >&2; return 1; }
+}
+
+@test "node lane: a configless bundler workspace cannot drop its build script" {
+  # A bundler run with its defaults writes no configuration file, so the guard
+  # that asks about config presence switched itself off for exactly the
+  # workspaces whose build contract is least visible. A configless `vite build`
+  # deleted from the manifest left the config list empty, `run_script build`
+  # logging "Skipping missing script", and the lane reporting PASS having
+  # produced no production bundle at all.
+  ws_setup
+  (
+    cd "$NODE_SB"
+    git init -q -b work .
+    git config user.email t@t
+    git config user.name t
+  ) >/dev/null 2>&1
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "./scripts/vitest run", "typecheck": "tsc --noEmit",
+    "build": "vite build" } }'
+  ( cd "$NODE_SB" && git add -A && git commit -qm base ) >/dev/null 2>&1
+
+  # The premise: this workspace really does carry no bundler configuration, so
+  # the config-based half of the guard cannot see it.
+  run bash -c "cd '$NODE_SB/ws' && ls vite.config.* webpack.config.* rollup.config.* 2>/dev/null | wc -l"
+  [ "$(printf '%s' "$output" | tr -d '[:space:]')" = "0" ] \
+    || { rm -rf "$NODE_SB"; echo "the fixture grew a bundler config: $output" >&2; return 1; }
+
+  # The control first: with the script still there, this branch says nothing.
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"no longer defines one"* ]] \
+    || { rm -rf "$NODE_SB"; echo "a workspace that still builds was refused: $output" >&2; return 1; }
+
+  # Now the removal.
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "./scripts/vitest run", "typecheck": "tsc --noEmit" } }'
+  ws_seed_fingerprint
+  run ws_run
+  [ "$status" -eq 20 ] \
+    || { rm -rf "$NODE_SB"; echo "dropping a configless build script was not refused (status=$status)" >&2; echo "$output" >&2; return 1; }
+  [[ "$output" == *"had a 'build' script"* ]] \
+    || { rm -rf "$NODE_SB"; echo "refused, but not for this reason: $output" >&2; return 1; }
+  rm -rf "$NODE_SB"
+
+  # And the control that keeps the rule from becoming "every workspace must
+  # build": one that never declared a build script is not refused for lacking
+  # one. Removal is the signal, not absence.
+  ws_setup
+  (
+    cd "$NODE_SB"
+    git init -q -b work .
+    git config user.email t@t
+    git config user.name t
+  ) >/dev/null 2>&1
+  ws_manifest '{ "name": "w", "private": true, "scripts": {
+    "test": "./scripts/vitest run", "typecheck": "tsc --noEmit" } }'
+  ( cd "$NODE_SB" && git add -A && git commit -qm base ) >/dev/null 2>&1
+  ws_seed_fingerprint
+  run ws_run
+  [[ "$output" != *"no longer defines one"* ]] \
+    || { rm -rf "$NODE_SB"; echo "a workspace that never built was refused: $output" >&2; return 1; }
+  rm -rf "$NODE_SB"
+}
+
+@test "affected: a Python test maps to both naming conventions, wherever it sits" {
+  # pytest collects `test_*.py` and `*_test.py` alike, and since the narrowing
+  # started expanding its patterns to concrete files, a rule that emits only one
+  # convention produces a non-empty list that omits the changed file -- and
+  # non-empty is what narrows. `tests/payments_test.py` edited, pytest run over
+  # somebody else's tests, the change passing unexecuted.
+  source ci/lib/affected.sh
+  local p
+  for p in tests/payments_test.py tests/unit/test_payments.py backend/ums/x_test.py; do
+    run ci::affected::get_affected_tests "$p"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tests/**/test_*.py"* ]] && [[ "$output" == *"tests/**/*_test.py"* ]] \
+      || { echo "one convention missing for ${p}: $output" >&2; return 1; }
+  done
+
+  # A Python file at the repository root. `**/*.py` requires at least one
+  # directory separator -- the same "**" collapse the frontend rules carry a note
+  # about -- so `conftest.py` and a root-level `payments_test.py` matched no rule
+  # at all and contributed nothing. Alone that does not narrow; in a changeset
+  # with any other mapped file it is a silent omission.
+  for p in conftest.py payments_test.py setup.py; do
+    run ci::affected::get_affected_tests "$p"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"tests/**/test_*.py"* ]] \
+      || { echo "a root-level Python file mapped to nothing: ${p} -> [$output]" >&2; return 1; }
+  done
+
+  # The control: a Python rule must not start claiming the frontend suite, or
+  # "narrowing" means "run everything" and the lane has no budget left.
+  run ci::affected::get_affected_tests backend/ums/main.py
+  [[ "$output" != *"frontend/tests/"* ]] \
+    || { echo "a Python source mapped to the frontend suite: $output" >&2; return 1; }
+}
+
+@test "tests-js: two workspaces cannot share one JUnit report path" {
+  # The report name came from `tr '/' '-'`, which is not injective: `a/b-c` and
+  # `a-b/c` are independent workspaces and both rendered `js-a-b-c.xml`. The
+  # loop runs them in sequence, so the second suite silently overwrote the
+  # first's results and diagnostics -- both contributed to the gate's verdict,
+  # and only one could be read afterwards to find out why it failed.
+  #
+  # The same transliteration was already fixed once for the dependency-cache
+  # key by ci::common::workspace_slug, which appends a digest of the original
+  # path; this call site was the copy that had not been moved over.
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib"
+  cp "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/junit.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+
+  # The two spellings that collide, each a real workspace with a real suite.
+  local w
+  for w in 'a/b-c' 'a-b/c'; do
+    mkdir -p "$sb/$w/node_modules/.bin" "$sb/$w/tests"
+    printf '{ "name": "x", "private": true, "scripts": { "test": "vitest run" } }\n' \
+      > "$sb/$w/package.json"
+    printf '{}\n' > "$sb/$w/package-lock.json"
+    printf 'it("x", () => {});\n' > "$sb/$w/tests/a.test.ts"
+    # A stand-in vitest that writes the JUnit file it was told to write, naming
+    # the workspace inside it -- which is how an overwrite becomes visible.
+    cat > "$sb/$w/node_modules/.bin/vitest" <<STUB
+#!/usr/bin/env bash
+for _a in "\$@"; do
+  case "\$_a" in --outputFile=*) printf '<testsuites name="%s"/>' "$w" > "\${_a#--outputFile=}" ;; esac
+done
+exit 0
+STUB
+    chmod +x "$sb/$w/node_modules/.bin/vitest"
+  done
+
+  ( cd "$sb" && CI_GATE_CHECK_ID=tests-js bash ci/checks/tests.sh ) >/dev/null 2>&1 || true
+
+  local n
+  n="$(find "$sb/ci/reports/junit" -name 'js-*.xml' 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$n" -eq 2 ] \
+    || { echo "expected one report per workspace, found ${n}:" >&2
+         find "$sb/ci/reports/junit" -name '*.xml' >&2
+         rm -rf "$sb"; return 1; }
+
+  # Both workspaces must be represented; two files with the same content would
+  # mean the collision merely moved.
+  grep -qs 'name="a/b-c"'  "$sb"/ci/reports/junit/js-*.xml \
+    || { echo "a/b-c's results are not in any report" >&2; rm -rf "$sb"; return 1; }
+  grep -qs 'name="a-b/c"'  "$sb"/ci/reports/junit/js-*.xml \
+    || { echo "a-b/c's results are not in any report" >&2; rm -rf "$sb"; return 1; }
+
+  # The control: the readable part of the name is still the workspace path, so
+  # the digest did not make the reports unidentifiable.
+  find "$sb/ci/reports/junit" -name 'js-a-b-c-*.xml' | grep -q . \
+    || { echo "the report names are no longer readable:" >&2
+         find "$sb/ci/reports/junit" -name '*.xml' >&2; rm -rf "$sb"; return 1; }
+  rm -rf "$sb"
+}
+
+@test "node: a non-ASCII workspace is read from the index, not its quoted spelling" {
+  # The ship branch of this scan already went through ci::common::ls_tree_paths;
+  # the non-ship branch still read `git ls-files` line-oriented, and git renders
+  # a non-ASCII path in its quoted form. A committed `café/package.json` arrived
+  # as `"caf\303\251/package.json"` -- with the quotes and the octal escapes --
+  # the awk derived the workspace `"caf\303\251`, and the orphan scan then
+  # refused the lane: "A workspace manifest exists on disk but not in the git
+  # index", naming a path that is in the index and that git can see. Quick and
+  # full validation blocked on a valid workspace name.
+  #
+  # Driven through the real node.sh rather than by lifting its reader out. An
+  # extraction anchored on the fixed spelling cannot run against the broken one
+  # -- it fails with "could not lift", which shows the code changed rather than
+  # that the old code was wrong -- and the surrounding branch turned out not to
+  # be liftable by indentation either.
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/café/tests" 2>/dev/null \
+    || { rm -rf "$sb"; skip "this filesystem cannot hold a non-ASCII path"; }
+  mkdir -p "$sb/ci/checks" "$sb/ci/lib" "$sb/café/node_modules/.bin" "$sb/bin"
+  cp "$REPO_ROOT/ci/checks/node.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  printf '{ "name": "c", "private": true, "scripts": { "test": "vitest run" } }\n' \
+    > "$sb/café/package.json"
+  printf '{}\n' > "$sb/café/package-lock.json"
+  printf 'it("x", () => {});\n' > "$sb/café/tests/a.test.ts"
+  # A stand-in npm so the case does not perform a real install. What is under
+  # test is which workspace name discovery produces, which is decided before
+  # anything is installed.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/bin/npm"
+  chmod +x "$sb/bin/npm"
+  ( cd "$sb" && git init -q -b main . && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm base ) >/dev/null 2>&1
+
+  local out
+  out="$( cd "$sb" && PATH="$sb/bin:$PATH" bash ci/checks/node.sh 2>&1 )" || true
+
+  # The quoted spelling must not appear anywhere: that string is the fictitious
+  # workspace, and it is what the refusal named.
+  [[ "$out" != *'caf\303\251'* ]] \
+    || { rm -rf "$sb"
+         echo "the lane read git's quoted spelling as a workspace:" >&2
+         printf '%s\n' "$out" | head -8 >&2; return 1; }
+  [[ "$out" == *"Node lane workspace: café"* ]] \
+    || { rm -rf "$sb"
+         echo "the real workspace name was not the one discovered:" >&2
+         printf '%s\n' "$out" | head -8 >&2; return 1; }
+  [[ "$out" != *"exists on disk but not in the git index"* ]] \
+    || { rm -rf "$sb"
+         echo "a committed manifest was reported as missing from the index:" >&2
+         printf '%s\n' "$out" | head -8 >&2; return 1; }
+
+  # The control: the orphan scan still fires for a manifest that genuinely is
+  # not in the index, so this did not simply switch that guard off.
+  mkdir -p "$sb/plain"
+  printf '{ "name": "p", "private": true }\n' > "$sb/plain/package.json"
+  printf '{}\n' > "$sb/plain/package-lock.json"
+  out="$( cd "$sb" && PATH="$sb/bin:$PATH" bash ci/checks/node.sh 2>&1 )" || true
+  [[ "$out" == *"exists on disk but not in the git index"* ]] \
+    || { rm -rf "$sb"
+         echo "an uncommitted manifest was no longer reported:" >&2
+         printf '%s\n' "$out" | head -8 >&2; return 1; }
+  rm -rf "$sb"
+}
+
+@test "tests-shell: an ignored replacement for a deleted gate input is drift" {
+  # Three scans cover this question and each is blind to a different case: the
+  # tracked diff cannot see a path that is no longer tracked, --exclude-standard
+  # drops an ignored one, and the ignored scan filters by suffix. `Makefile` has
+  # no suffix, so adding it to SHELL_INPUTS -- which closed the *tracked* half of
+  # this a round ago -- left the ignored half exactly as open.
+  #
+  # A commit that deletes Makefile and ignores the path, with a worktree copy
+  # left behind, therefore passed: the bats suite opens the worktree file, so it
+  # validated a `bats-install` target the push does not carry.
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/junit.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  printf 'bats-install:\n\t@bash ci/scripts/install-bats.sh\n' > "$sb/Makefile"
+  printf 'nothing\n' > "$sb/.gitignore"
+  ( cd "$sb" && git init -q -b feature/x . && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  ( cd "$sb" && git rm -q --cached Makefile \
+      && printf 'nothing\nMakefile\n' > .gitignore && git add .gitignore \
+      && git -c user.email=t@t -c user.name=t commit -qm "drop Makefile" ) >/dev/null 2>&1
+  printf 'bats-install:\n\t@echo broken\n' > "$sb/Makefile"
+
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 20 ] \
+    || { rm -rf "$sb"; echo "an ignored replacement was not reported (status=$status):" >&2
+         echo "$output" >&2; return 1; }
+  [[ "$output" == *"Makefile"* ]] \
+    || { rm -rf "$sb"; echo "the refusal did not name the file: $output" >&2; return 1; }
+  rm -rf "$sb"
+
+  # The control, and the reason this filter is an allow-list rather than a
+  # deny-list: the gate's own ignored scratch output must not be reported as
+  # drift. Widening the basename arm is exactly the change that could bring that
+  # failure back.
+  local sb2; sb2="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb2/ci/lib" "$sb2/ci/checks" "$sb2/ci/tests" \
+           "$sb2/ci/__pycache__" "$sb2/ci/.ruff_cache" "$sb2/ci/tests/.pytest_cache"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$REPO_ROOT/ci/checks/tests.sh" "$sb2/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/junit.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb2/ci/lib/"
+  printf '@test "x" { true; }\n' > "$sb2/ci/tests/t.bats"
+  printf 'bats-install:\n\t@echo hi\n' > "$sb2/Makefile"
+  printf 'nothing\n__pycache__/\n.ruff_cache/\n.pytest_cache/\n' > "$sb2/.gitignore"
+  ( cd "$sb2" && git init -q -b feature/x . && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  printf 'x\n' > "$sb2/ci/__pycache__/x.pyc"
+  printf 'x\n' > "$sb2/ci/.ruff_cache/z"
+  printf 'x\n' > "$sb2/ci/tests/.pytest_cache/w"
+  run bash -c "cd '$sb2' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -ne 20 ] \
+    || { rm -rf "$sb2"; echo "the gate reported its own ignored scratch as drift:" >&2
+         echo "$output" >&2; return 1; }
+  rm -rf "$sb2"
+}
+
+@test "manifest: typecheck-js is registered as what preflight actually runs" {
+  # ci/checks/manifest.yml is the source ci/scripts/gen-checks-doc.sh reads to
+  # generate the published check catalog, so a stale field there is the
+  # repository answering "what runs before a commit" incorrectly.
+  #
+  # Two were stale at once. run_common_checks -- the pre-commit path -- schedules
+  # this lane, while the manifest said `pre_commit: false`; and the manifest
+  # named `typecheck.sh`, the dispatcher, rather than the `typecheck-js.sh`
+  # wrapper preflight executes. The dispatcher without CI_GATE_CHECK_ID falls
+  # through to `all` and runs the Python, Go and Rust typecheckers too.
+  local block
+  block="$(awk '/^  - id: typecheck-js$/{f=1;next} f&&/^  - id: /{exit} f{print}' \
+             "$REPO_ROOT/ci/checks/manifest.yml")"
+  [ -n "$block" ] || { echo "typecheck-js is not registered in the manifest" >&2; return 1; }
+
+  printf '%s\n' "$block" | grep -qE '^    script: ci/checks/typecheck-js\.sh$' \
+    || { echo "the manifest does not name the wrapper preflight runs:" >&2
+         printf '%s\n' "$block" >&2; return 1; }
+  printf '%s\n' "$block" | grep -qE '^    pre_commit: true$' \
+    || { echo "the manifest still says typecheck-js is not a pre-commit check" >&2
+         printf '%s\n' "$block" >&2; return 1; }
+
+  # Derived from preflight rather than restated: what has to hold is that the
+  # manifest agrees with the code, so the code is the thing consulted.
+  grep -qE 'run_phase +"typecheck-js:\./ci/checks/typecheck-js\.sh"' "$REPO_ROOT/ci/preflight.sh" \
+    || { echo "preflight no longer schedules typecheck-js this way" >&2; return 1; }
+  awk '/^run_common_checks\(\)/{f=1} f&&/typecheck-js/{found=1} f&&/^}/{exit} END{exit !found}' \
+      "$REPO_ROOT/ci/preflight.sh" \
+    || { echo "typecheck-js is no longer scheduled by run_common_checks" >&2; return 1; }
+
+  # The control: tests-js runs through the node lane, not standalone in quick
+  # mode, so its `pre_commit: false` is correct and must not be swept along.
+  awk '/^  - id: tests-js$/{f=1} f&&/^    pre_commit:/{print; exit}' \
+      "$REPO_ROOT/ci/checks/manifest.yml" | grep -qE 'pre_commit: false' \
+    || { echo "tests-js's pre_commit was changed; it is node-lane only" >&2; return 1; }
+}

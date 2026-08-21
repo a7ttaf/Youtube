@@ -679,6 +679,1022 @@ single P-tier above.
   surviving automation:** the vendored `ci/` gate, Dependabot, and a single
   Claude Code (`@claude`) GitHub Action workflow (PR #107) — the only file in
   `.github/workflows/` today.
+- ✅ Frontend test layout unified + the JS gate lanes switched on (2026-08-09,
+  branch `opus/peaceful-gauss-2bf1e6`) — the suite had been split between 38
+  co-located `src/**/__tests__/` files and 3 already under `frontend/tests/`, and
+  Qodo compliance rule 1052070 ("place all automated test files under the
+  top-level `tests/` directory") fired on every PR touching a co-located one.
+  **All 38 moved into `frontend/tests/`**, leaving **41** collected there,
+  mirroring `src/` minus the `__tests__`
+  segment. Pure `git mv`: every test imports through the `@/` alias, so there
+  were **zero** relative-import fixes and zero content edits — 477 tests passed
+  identically before and after. `test.include` in `vitest.config.ts` now
+  *declares* the layout. **But `include` alone makes things worse, not better**:
+  a test file outside the glob stops being collected and passes by never
+  running. Verified, not assumed — a `tests/lib/silentSkip.spec.tsx` asserting
+  `1 === 2` was added and the suite still reported 477 passed. So the layout is
+  enforced by a new **`ci/checks/test-layout.sh`** (manifest `test-layout`,
+  blocker/hygiene/pre-commit, `languages: []` so it cannot be skipped by
+  language detection) which fails on four conditions: a test anywhere under
+  `frontend/` outside `frontend/tests/`, a lingering `__tests__/` dir, a file in
+  the right tree with a suffix the glob misses (`*.spec.tsx`), and the `include`
+  no longer being *live* config. Each of the four was exercised and observed to
+  exit 20. Two review findings hardened it before merge: the outside-tree scan
+  originally walked only `frontend/src`, so a `frontend/e2e/x.test.ts` was
+  excluded by `include` yet passed the guard; and the drift check was an
+  unanchored `grep -F`, which a commented-out `include:` satisfied while vitest
+  had already fallen back to its default glob. The manifest entry is
+  documentation — `ci/scripts/gen-checks-doc.sh` is its only consumer — so the
+  check is also scheduled in `ci/preflight.sh` (`run_common_checks` for
+  pre-commit `quick`, `run_full_or_ship_checks` for `full`/`ship`) and in
+  `ci/config/lanes.conf`; registered-but-never-run is the exact failure mode
+  this guard exists to prevent. `ci/tests/test_test_layout.bats` pins all of
+  it, including that the pre-fix script exits 0 on both evasions.
+  **Rode along — the JS lanes were dead.** `ci/checks/tests.sh`,
+  `ci/checks/typecheck.sh` and `ci/checks/node.sh` all `cd` to the repo root and
+  bail on a missing root `package.json`/`tsconfig.json`; this repo keeps both in
+  `frontend/`, so **no frontend test or type-check had ever run in the gate** —
+  `tests-js` and `typecheck-js` are manifest blockers that were silently passing
+  by skipping. New `ci::common::node_workspaces <manifest>` resolves workspaces
+  (root-manifest repos still resolve to `.` and behave exactly as before); all
+  three lanes iterate it. The lanes invoke `node_modules/.bin/` **directly**
+  rather than via `npx`, because npx walks up out of the workspace when bun's
+  Windows shims (`vitest.exe`/`.bunx`) don't match the names it expects — in
+  this checkout it found a different Vitest major against a different Vite and
+  produced ~160 phantom failures indistinguishable from real breakage. Lanes now
+  green: 41 files / 477 tests via JUnit, `tsc --noEmit` clean, `vite build` ok.
+  Review caught that *making the lanes work* and *making them run* are two
+  different things, in three places. (1) `ci/config/checks.yml` had all four JS
+  checks `enabled: false`, and preflight drops a lane when every related check
+  is disabled — so the whole `node` lane was still skipped. `tests-js` and
+  `typecheck-js` are now `true`; `lint-js`/`format-js` stay off because the
+  workspace has neither eslint nor prettier configured, and their stale "no JS
+  in v1.0" comments now say so. (2) `ci/config/affected.yml` mapped only
+  root-relative `src/**`, so a frontend change produced no JavaScript patterns;
+  when a Python file changed alongside it, `AFFECTED_TESTS` was non-empty and
+  `tests.sh` logged "skipped: no affected JavaScript tests" while frontend code
+  had in fact changed. Frontend-prefixed rules added. (3) A failing package
+  script exits 1, which is not a gate result code — `result_severity` ranks it
+  with `FAIL_INFRA`, so a real regression was reported as broken infrastructure.
+  New `ci::common::normalize_result` maps off-contract codes onto
+  `FAIL_NEW_ISSUE`; `node.sh` normalizes each workspace result before merging.
+  `ci/tests/test_js_lane.bats` pins all three, and the pre-fix config was re-run
+  to confirm each assertion actually failed before.
+  A second review round found three more layers of the same "wired but never
+  runs" problem, plus three narrower defects. (4) Scheduling `test-layout` in
+  `preflight.sh` was still not enough: `_check_should_skip` filters any lane
+  absent from both the changeset reverse-mapping and the always-run list, and
+  the changeset only ever emits *language-derived* check ids — never
+  `test-layout` — so the guard was discarded whenever the diff did not look
+  like JavaScript, which is exactly when a misplaced test goes unnoticed. It is
+  now an always-run check alongside `git-safety` and `changed-files`. (5)
+  `ci/lib/changeset.sh` classified `package.json` as `json` and `bun.lock` as
+  `unknown`, neither of which emits JS check ids, so a dependency bump or a
+  changed script skipped the whole node lane — no install, tests, typecheck or
+  build. Manifests and lockfiles now classify as `javascript`. (6) Pinning
+  every off-contract exit to `FAIL_NEW_ISSUE` was too broad: `bun install
+  --frozen-lockfile` failing on a registry outage is provisioning, not code, so
+  each install now pins its own `FAIL_INFRA` exit and keeps that meaning
+  through `normalize_result`. (7) The guard's scans missed the `.mts`/`.cts`/
+  `.mjs`/`.cjs` suffixes that vitest's *default* glob collects, so a
+  `tests/foo.test.mts` read as a real test to every tool except the include
+  that would run it — verified: the pre-fix guard exits 0 on exactly that tree.
+  (8) `frontend/src/**/*.ts` does not match `frontend/src/test-setup.ts`,
+  because the matcher collapses `**` to `*` and then requires a path segment;
+  that file was covered only incidentally by the `frontend/*.ts` rule, so the
+  direct children are now spelled out. (9) `ci/UMS_INTEGRATION.md` still
+  advertised all four JS checks as disabled.
+  A third round found three more. (10) The prune list used unanchored
+  `-name 'build'`/`'dist'`/`'coverage'`, which prunes a *first-party*
+  `frontend/e2e/build/` at any depth — a test under it is neither collected by
+  vitest nor reported by the guard. Build-output prunes are now exact paths at
+  the workspace root; `node_modules` stays unanchored because nested copies are
+  real and never first-party. (11) The install cache was fingerprinted on the
+  lockfile alone, so a `package.json` edited without a matching lockfile update
+  looked cached and the frozen install that would have caught the mismatch was
+  skipped; the fingerprint now covers both. (12) Deleting the `test` script
+  removed the entire frontend suite while the lane still exited 0 —
+  `run_script` only logs `Skipping missing script`. The lane now fails closed
+  when a workspace ships test files but defines neither `test` nor
+  `test:unit`, keyed on the files rather than on `checks.yml` so the rule
+  travels with the workspace.
+  A fourth and fifth round closed the last of it. The drift guard was bound to
+  any active `include:` anywhere in the config, so an `optimizeDeps.include`
+  carrying the glob satisfied it while `test.include` ran one file; and once
+  that was fixed by brace-matching a `test: { }` block, the *first* such token
+  in the file still won, so a helper object declared above `defineConfig` could
+  shadow the exported config. The extractor now anchors on `export default`,
+  brace-matches the exported object, and takes the `test` key at that object's
+  own level. `ci/checks/tests.sh` and `ci/checks/typecheck.sh` both fell back to
+  a `jest`/`vitest`/`tsc` found on `PATH` — not the pinned version, and the
+  cause of the ~160 phantom failures recorded above; both fallbacks are gone.
+  `affected.yml` gained root-level `frontend/tests/*` rules and lockfile
+  mappings, and `changeset.sh` now classifies web build inputs (`html`, `css`,
+  `tsconfig.json`) as `javascript` so a change to the entry document or the
+  stylesheet still schedules the lane.
+  A seventh round closed the last four. The guard scanned the **worktree** while
+  git commits the **index**: a partially staged move left
+  `frontend/src/probe.test.ts` staged and moved on disk, and the guard passed a
+  commit whose test is never collected. Candidates are now the union of the
+  filesystem walk and `git ls-files`, so a stray file that is only staged, or
+  only on disk, fails either way. `test.exclude` was unchecked, so a correct
+  include could still collect nothing — `exclude: ["tests/lib/**"]` drops 23 of
+  41 files while every include assertion passes; the guard now refuses an
+  exclude it cannot evaluate. `.mts`/`.cts` were missing from the changeset
+  classifier, so module-suffixed **source** scheduled no lane at all. And the
+  bats suites themselves were never scheduled: a change to `ci/checks/*.sh`
+  emitted only `lint-shell` and `format-shell`, so the tests guarding this gate
+  ran only by hand. New `ci/checks/tests-shell.sh` wrapper (preflight executes a
+  script path directly and cannot carry `CI_GATE_CHECK_ID`), scheduled in
+  `run_full_or_ship_checks` and `lanes.conf`, with `tests-shell` added to the
+  shell language mapping so the lane is not filtered straight back out.
+  An eighth round found four more, two of them P1. The drift check still read
+  only the **worktree** `vitest.config.ts` after the candidate list moved to the
+  index: staging a narrowed `test.include` and restoring the good config on disk
+  passed the guard. Both copies are now checked and the failure names which one.
+  The new `tests-shell.sh` was committed **100644** — `core.fileMode=false`
+  means a local `chmod` is not what git records, and `run_phase` executes the
+  path directly, so the lane would have exited 126 before any test ran; the bats
+  case asserting `[ -x ]` passed because it tested the worktree, the same
+  index-vs-worktree blindness the P1 above describes. It now asserts
+  `git ls-files -s` mode. A missing `bats` made the enabled blocker log
+  `skipped: bats not installed` and report PASS having executed nothing —
+  `uv sync` does not provision bats — so the wrapper now exits `FAIL_INFRA`.
+  And `htm`/`sass`/`less`/`vue`/`svelte`/`astro` were classified as javascript
+  but unmapped in `affected.yml`; since that classifier/mapping gap had recurred
+  three times, the bats case now **derives** its extension list from
+  `changeset.sh` rather than hand-listing files.
+  A ninth round found three more, one P1. `test-layout`'s result was **cached**:
+  `_changeset_content_hash` hashes worktree copies of the changed paths, so
+  staging a narrowed `vitest.config.ts` while keeping the passing worktree copy
+  leaves both the path list and the content hash identical, and the guard would
+  serve a cached PASS for a commit it never inspected — defeating the
+  index-awareness added the round before. A `_check_is_cacheable` predicate now
+  excludes it on both the read and the write side; the check costs under a
+  second, so caching it bought nothing. A `ci/config/*.yml`-only change emitted
+  `lint-yaml` and nothing else, filtering the `tests-shell` lane even though
+  `test_js_lane.bats` asserts on `affected.yml` and `checks.yml` directly — the
+  lane now also runs when any `ci/` path changes, keyed on path rather than
+  language so unrelated yaml does not pull in a four-minute suite. And the
+  `.gitignore` negations added earlier covered only `frontend/tests/lib/` at the
+  tree root, so a mirrored `frontend/tests/features/lib/widget.test.ts` was
+  still silently untracked — the same defect this PR already fixed, one level
+  deeper. Negations now apply at any depth under both `tests/` and `src/`, with
+  a case asserting `node_modules` is still ignored.
+  A twelfth round found three more, one P1. `config_sources` reads the staged
+  copy of `vitest.config.ts` only when one exists in the index, so staging the
+  file's **deletion** while leaving a valid copy in the worktree validated the
+  worktree alone: the guard exited 0 for a commit that would carry no vitest
+  config at all, leaving vitest to fall back to its default glob — precisely the
+  layout this check rejects. `config_missing_from_index` now fails that case
+  with the staging command in the message, and stays inert where there is no
+  index (a tarball or plain export). The `tests-shell` path exception added in
+  round nine was **unreachable**: `ci/`, `.githooks/` and `.gitignore` classify
+  into no language, so `preflight.sh` hit its "no relevant changes" fast exit
+  before `run_mode` ever called `_check_should_skip` — a regression in the
+  `.gitignore` negations could ship with its own test never running. The fast
+  exit now also consults the raw changed-path list for the gate's own inputs,
+  and still fires for a genuinely irrelevant commit. Finally, `classify_file`
+  returned `unknown` for `frontend/.env` and anything under `frontend/public/`,
+  so a change to what actually ships scheduled no install, typecheck, tests or
+  build. Rather than extend the extension table a fourth time, the fallback now
+  anchors on `package.json`: a file inside a Node workspace tree is a build
+  input for that workspace. It is the last resort — after the extension table
+  and both sniffs — so `frontend/scripts/build.sh` stays `shell` and
+  `frontend/README.md` stays `markdown`, and it does not reach a repo-root
+  dotfile or a backend asset. `affected.yml` gained the matching `frontend/*`
+  catch-all so the lane it schedules finds tests instead of reporting none; the
+  per-extension rules stay, because the bats case that derives its list from the
+  classifier is what keeps the two files from drifting.
+  The last finding held open for the owner is now fixed too: the node lane
+  accepted whatever `node` and the package manager resolved to, so a green run
+  vouched for nothing — the same commit could pass here and fail on a machine
+  matching `frontend/package.json`. The lane now evaluates `engines.node` and
+  the `packageManager` pin **before** installing or running anything, and exits
+  `FAIL_INFRA` (a non-conforming toolchain is a broken environment, not a code
+  regression). The comparator handles `>=`/`>`/`<=`/`<`/`=`/bare/`^`/`~`,
+  wildcard components, space-conjunction and `||` alternation; a range it does
+  not recognise is reported as unverifiable rather than assumed to hold, since
+  failing open there would reinstate the finding. `packageManager` is compared
+  as the exact pin corepack means, with the `+integrity` suffix stripped, and
+  its name must be the manager the lockfile selects. A manifest that declares
+  neither is untouched. This was previously deferred because it would have
+  blocked local commits on the owner's Node 20.20.2 / bun 1.2.14; the machine
+  now reports **v22.14.0** and **bun 1.3.14**, and the full lane (install,
+  `tsc --noEmit`, 477 tests, `vite build`) passes under enforcement.
+  A thirteenth round found six more, two P1 — five of them regressions in the
+  round-twelve code, which is the cost of adding enforcement. The node lane
+  returned PASS when **workspace discovery found nothing**: deleting
+  `frontend/package.json` leaves the lockfile, tsconfig and vitest config
+  behind, so the lane ran no install, typecheck, test or build while
+  `test-layout` still passed on the surviving config. That branch now fails
+  when workspace *configuration* remains without a manifest — keyed on config
+  rather than on source files, because this branch is also where a repo with no
+  JavaScript at all lands. The **result cache** outlived the toolchain it
+  vouched for: `_compute_cache_key` fingerprinted only `node` for the node lane
+  and only `bash` for `tests-shell`, so moving bun off the `packageManager` pin
+  or uninstalling bats replayed the old PASS and the new fail-closed checks
+  never executed. Both keys now include every tool their lane consults, absent
+  ones recorded as `absent`. The comparator read `"node": "20"` as `20.0.0` and
+  rejected Node 20.20.2 — npm's X-range semantics say an unstated component is
+  unconstrained, and a false infra failure is how a fail-closed check gets
+  switched off; a `cut` left in the wildcard path was the cause. It also
+  accepted `">=999.0.0 ||"`: the token counter was cumulative across
+  alternatives, so an empty alternative from a trailing `||` inherited the
+  previous one's count and its untouched `ok` flag. Malformed input is now
+  unverifiable however well another alternative matches, while an
+  *unrecognised* range form still loses to a satisfied sibling — the two are
+  deliberately different. In `test-layout.sh`, a **quoted** `"exclude"` was
+  invisible to the identifier-only pattern, so an exclusion dropping whole test
+  directories read as clean; quoted `"include"` and `"test"` failed the other
+  way, reporting valid config as broken. And the `lib/` negations used
+  `!<dir>/**`, which re-includes every descendant outright and overrode the
+  artifact and secret rules above them — `ci/lib/__pycache__/x.pyc`,
+  `ci/lib/x.pyc` and `ci/lib/.env` had all become trackable. Un-excluding the
+  directory alone is sufficient and is what the file now does: git skips rule
+  evaluation only *inside* an excluded directory, so its contents are matched
+  normally once it is back. Re-stating the artifact rules after the negations
+  would have re-ignored `.env.example`, which has its own negation further up.
+  A fourteenth round found six more, three P1, all in the round-thirteen code.
+  Node workspace discovery read the **filesystem**, so staging the deletion of
+  `frontend/package.json` and restoring it in the worktree passed both
+  pre-commit and pre-push for a commit carrying no manifest — the same
+  index-vs-worktree divergence already fixed in `test-layout.sh`, one file over.
+  The comparator accepted **malformed operands**: `">=banana"` and a bare `">="`
+  both parsed to `>=0.0.0` and admitted everything, so a typo in a manifest
+  switched the toolchain boundary off; operands are now validated before they
+  reach the comparator and report unverifiable otherwise. `"~20"` was rejected
+  because the tilde branch compared the minor unconditionally — `~20` is the
+  whole of major 20, and only `~20.1` pins the minor (the same fix applies to
+  bare `^0`). `extract_test_block` read **through string literals**, so a decoy
+  resembling `test: { include: [...] }` in a string at the exported object's own
+  level was taken for the config and the real, narrowed include was never
+  checked; the scanner now treats strings as opaque, inspects them only for a
+  quoted key, and copies them verbatim into the captured block — which also
+  fixes the latent case of an unbalanced brace in any string, the declared glob
+  itself being full of braces. `tests-shell` was still **cacheable** although
+  its result depends on the whole `ci/` tree and on files a changeset need not
+  mention, so a PASS cached for a `.gitignore`-only branch survived a rebase
+  onto a base carrying a regression in a gate script; it joins `test-layout` as
+  non-cacheable, which covers inputs a key never could, and the now-unreachable
+  `tests-shell` key branch was removed with it. Finally, deriving a cache key
+  could **end the run**: under `set -Eeuo pipefail` a bare
+  `$(tool --version | head -1)` aborts preflight the moment a present-but-broken
+  package manager exits non-zero, before any check has run; probes go through
+  `_tool_fingerprint`, which cannot.
+  A fifteenth round found eight more, four P1. The staged-manifest check
+  verified only that `package.json` **existed** in the index, while every
+  decision below it — engines, `packageManager`, the dependency fingerprint,
+  whether a `test` script exists — still read the worktree copy; index/worktree
+  divergence is now rejected outright, because a rule applied at each of a dozen
+  reading sites is a rule that gets forgotten at one of them. A workspace could
+  **lose its entire suite**: delete every file under `tests/` and both scripts
+  and nothing is orphaned, `test-layout` reports "0 file(s)", and a successful
+  build carries the gate to exit 0 — a workspace whose HEAD carries tests must
+  still have them. A package script exiting **10** propagated through as
+  `PASS_WITH_KNOWN_DEBT`, so a failing lane was recorded as passed and the
+  remaining scripts skipped; every nonzero script status is now
+  `FAIL_NEW_ISSUE`, decided in the workspace child rather than relying on the
+  parent's normalisation. The operand grammar check was **first-character and
+  charset only**, so `>=20banana`, `>=20..1` and `>=20.1.2.3` all parsed as
+  `>=20.0.0`; the whole shape is now matched, for bare operands as well as
+  operator ones. `"=20"` was routed through exact comparison and rejected a
+  conforming runtime — node-semver normalises it to `>=20.0.0 <21.0.0-0`, so it
+  takes the X-range path like every other partial. A **spread** in the test
+  object (`test: { ...hidden, include: [...] }`) carried in an exclude the guard
+  never saw; a spread it cannot evaluate is now a failure. The **node** lane was
+  still cacheable although it runs the workspace's complete test, typecheck and
+  build scripts, so a PASS cached for one frontend change survived a rebase onto
+  a base with a regression in another; it joins `test-layout` and `tests-shell`
+  as non-cacheable, and the unreachable key branches went with them. And
+  `frontend/README.md` was missing from the `tests-shell` dependency paths even
+  though the suites assert on its prose — a README-only change classifies as
+  markdown, scheduling `lint-markdown` and nothing else.
+  A sixteenth round found three, one P1 — the first round to shrink. The
+  manifest-divergence rule from round fifteen was both **too narrow and too
+  wide**: it compared only `package.json`, while the lane installs, typechecks,
+  tests and builds every file in the workspace (staging a failing source file
+  and restoring the passing copy on disk reported "Node lane passed"), and it
+  rejected *any* divergence, so an ordinary edited-but-unstaged manifest failed
+  the lane — a false positive that would have made the gate unusable by hand.
+  The rule is now **partial staging**, across the whole workspace: a file whose
+  index copy differs from HEAD *and* whose worktree copy differs from the index.
+  Comparator-prefixed partials still used zero-filled comparison, so `<=20`
+  rejected 20.20.2 and `>20` admitted it; node-semver reads a partial as an
+  X-range, and both comparators now use the same upper bound (`20` → `21.0.0`).
+  And the exclude/spread greps were **line-anchored**, so the compact
+  `test: { include: [...], exclude: [...] }` slipped past: properties are now
+  split on commas at the object's own depth with strings opaque, which makes
+  the check independent of formatting and of quoting in one move.
+  A seventeenth round found seven, three P1, and two of the fixes invert a rule
+  rather than extend it. Workspace discovery still stated the **filesystem**, so
+  a workspace staged into the commit and then removed from disk was never
+  visited at all; the index is now a second source of workspaces, and one
+  staged-but-absent is a failure rather than a skip. A workspace could declare
+  TypeScript and define **no `typecheck` script**: `run_script` logged "Skipping
+  missing script" and the lane exited 0 after tests and a `vite build` that,
+  as `frontend/README.md` says, never runs `tsc`. `">= 20"` — valid npm, with a
+  space — was split into a bare `>=` and rejected as malformed, blocking a
+  conforming environment; operator and operand are rejoined before evaluation.
+  `testNamePattern` made vitest exit 0 with **every test reported skipped**
+  while the guard called all 41 files runnable; that is the third route to a
+  silent drop after `exclude` and the spread, so the rule is now an **allow-list**
+  — a property that cannot reduce what is collected is named in the script, and
+  anything else stops the guard until someone decides which it is. An `include`
+  computed by an expression hid the declared glob in the branch vitest does not
+  take, so the value must be a literal array. A **rename** was reduced to its
+  destination before classification, so `R100 frontend/src/x.ts Docs/x.md`
+  yielded `lint-markdown` alone; both sides are classified now. And workspace
+  membership was consulted only in `classify_file`'s unknown fallback, so a
+  *recognised* type never reached it — `frontend/src/data.json` scheduled
+  nothing — which makes membership a second signal alongside the language
+  rather than a last resort.
+  The ship gate itself then turned up an eighth, which no reviewer had raised:
+  `tests-shell` came back **FAIL_INFRA at exactly 1200s** -- the gate's default
+  per-check timeout. The suites had grown past it, so the blocking lane was
+  being killed rather than run, announced in one word at the end of a two-hour
+  gate. `checks.yml` has carried a per-check `timeout_sec` since before this PR
+  and **nothing read it**; the runner applied the global value to everything.
+  The runner now honours the declared value, and `tests-shell` declares 3600.
+  An eighteenth round found five, two P1, one of which undid a round-seventeen
+  fix a line after it landed: `emit_json` **recomputed and wrote back**
+  `_CI_CHANGESET_LANGUAGES` and `_CI_CHANGESET_CHECKS` from its own view, which
+  still collapsed a rename to its destination — and `preflight.sh` calls it
+  immediately after `detect`, so the scheduler's correct classification was
+  replaced by the report's wrong one. The report generator no longer assigns
+  scheduler state at all; it serialises it, so the two cannot disagree by
+  construction. The partial-staging rule missed a **staged deletion recreated as
+  an untracked file** (`D  app.js` plus `?? app.js`): `git diff` compares
+  tracked content, so the intersection stayed empty and the lane tested a file
+  the commit deletes. A **malformed operand was outvoted by a satisfied
+  alternative** — `">=20banana || >=20"` came back satisfied — because invalid
+  operands shared a status with merely-unsupported range forms; they are now
+  distinct, and only the unsupported one can lose to a sibling. `include` was
+  checked for *starting* with `[`, so `[...].slice(1)` passed while vitest
+  received one element; the bracket's match must now be the value's last
+  character. And the per-check timeout added the round before applied only on
+  the parallel path, so `CI_GATE_PARALLEL=0` ignored both it and the global
+  timeout and could hang indefinitely.
+  A nineteenth round found four, one P1, and it is the clearest instance yet of
+  a rule being right about the wrong tree. The partial-staging guard added in
+  round fifteen compares the index against the worktree, which is the correct
+  reference for exactly one gate: `quick`, the pre-commit hook. In `ship` — the
+  **pre-push** gate — the commit already exists, the index matches `HEAD`, and
+  `git diff --cached` is empty, so the guard never fires. A workspace committed
+  broken and repaired only on disk therefore passed the gate on the strength of
+  the repair, and the push carried the broken commit. The reference tree now
+  follows `CI_GATE_MODE`, which `preflight.sh` exports: `ship` stands behind
+  `HEAD`, every other mode behind the index. Note what the changeset mode could
+  not have supplied here — `--all` rewrites it to `all` without changing what
+  the run is vouching for. Three P2s: `~20.x` **states a minor textually and
+  none semantically**, and testing the operand for a non-empty second component
+  pinned the upper bound at `20.1.0`, rejecting a runtime npm reads as in range;
+  the array-literal check accepted `[...(cond ? [glob] : [])]` because it only
+  constrained the **brackets**, so every element must now be a plain quoted
+  string; and the `export default` anchor was still a raw substring search while
+  everything read after it had already been made string-aware, so a quoted
+  `export default` anywhere earlier re-pointed the whole extraction at prose.
+  A twentieth round came from a surface the review-thread audits had been
+  missing entirely: Qodo files its findings in a **pinned issue comment**, not
+  as review threads, so "every thread resolved" was a true statement about the
+  wrong list. Nine findings were open there. Six were real. The comparator had
+  three, all in operand handling rather than in the comparisons themselves:
+  node-semver resolves an X-range **major** before any comparator runs — `>=x`
+  and `<=x` become `*`, `^x` and `~x` become `*`, `>x` and `<x` become nothing —
+  and reading the wildcard as `0` got four of those six backwards; `^0.0.3` is
+  `>=0.0.3 <0.0.4`, so pinning only the minor admitted `0.0.9`; and any `x` in
+  an operand makes everything to its right an `x`, so `>=20.*.3` is `>=20.0.0`
+  and was instead compared against `20.0.3`. `_semver_upper_bound` had always
+  truncated at the first wildcard, which is why `<=20.*.3` was right while
+  `>=20.*.3` was wrong — the operand is now normalised once, after the grammar
+  check, so every comparator reads the same range. In `preflight.sh`,
+  `\.gitignore$` and `frontend/README\.md$` were anchored on end of line, but
+  `_CI_CHANGESET_FILES_RAW` holds `STATUS<TAB>PATH` records and a rename is
+  `R100<TAB>old<TAB>new`: renaming `.gitignore` away filtered out the very suite
+  that guards it. Three were test-side: the sequential-timeout case asserted
+  `rc=124` unconditionally, which fails on a machine with neither `timeout` nor
+  `gtimeout` for the one reason the runner is entitled to (both branches are
+  asserted now, rather than skipping either); the fingerprint fixture hashed
+  with `sha256sum` while production uses `ci::common::hash_file` and its
+  fallbacks; and two cases extracted shell functions with `sed` ranges anchored
+  at column zero, so re-indenting a file would have failed the test rather than
+  the code.
+  Three of the nine did not survive checking, and each disposition is pinned by
+  a test rather than by an argument: `20.*.3` is **not** malformed — npm accepts
+  it, and rejecting it would fail a manifest that installs; `frontend/src/*.mts`
+  **does** match `frontend/src/lib/x.mts`, because the matcher collapses `**` to
+  `*` and compares with `case`, where `*` crosses `/`; and `tr -d ' \t'` is
+  POSIX, though it is now written `tr -d $' \t'` so the tab cannot depend on
+  `tr` interpreting the escape.
+  A twenty-first round was self-found, by going looking for the round-nineteen
+  P1's *shape* rather than for more instances of it: a check that is correct
+  about a tree the gate is not standing behind. `git-safety.sh` was the same
+  defect on the security path. Every content scan it runs — sensitive files,
+  `node_modules`, virtualenvs, build output, blobs over 5MB, conflict markers
+  and the secret-pattern diff — read the index, so in `ship` mode, where the
+  index matches `HEAD`, all seven inspected an empty diff and the pre-push gate
+  passed. Demonstrated rather than reasoned: the identical `secrets.env` exits
+  20 staged and exited 0 once committed. The reference now follows
+  `CI_GATE_MODE`, and the push range is computed once in
+  `ci::git::push_range` — `branch-protection.sh` had its own copy, and a second
+  copy of a computation is exactly how the changeset scheduler and its report
+  drifted apart in round eighteen. Fixing it surfaced a second, older defect in
+  the same loop: the file list included **deletions**, so committing
+  `git rm secrets.env` was blocked for the file it removes. The list is now
+  additions, copies, renames and modifications, which cures the index form too.
+  A twenty-second round found eight, four P1, and every one of them is a
+  **guard that fires only in the arrangement its author happened to picture**.
+  The suite-loss check sat under "and no test script", so deleting all 41 test
+  files was safe as long as `vitest run --passWithNoTests` stayed behind — the
+  one script somebody actually leaves. The orphan-configuration scan sat under
+  "the repository has no workspace at all", which made an orphan a property of
+  the repository rather than of the directory it sits in: with two siblings,
+  deleting `b/package.json` left `a`, and `b` was never looked at. The
+  partial-staging rule used `git ls-files --others --exclude-standard`, so a
+  file recreated after its deletion was staged became `!!` rather than `??` the
+  moment `.gitignore` covered it and dropped out of the intersection — it now
+  asks each staged path directly, because whether a path is ignored has nothing
+  to do with whether the lane is about to read it. `_in_node_workspace` walked
+  up to `.` and stopped without examining the only directory it had not looked
+  at, so in a root-manifest repository nothing was inside a workspace. The
+  literal-array rule accepted any backtick value, and `` `${cond ? glob : one}` ``
+  is quoted by every test it applied. The `export default` anchor was made
+  string-aware two rounds ago and was still blind to the other delimiter a JS
+  file can hide text behind, so `/export default/` re-anchored it; both scans
+  are now regex-aware, with the division case pinned from the other side. And
+  `tests-shell` had no HEAD/worktree guard at all — Codex found the twin of the
+  defect I had just reported finding myself, in the lane next door.
+  One report did not reproduce: `~20.x.1` was already cured by the operand
+  normalisation in round twenty, which truncates at the first wildcard before
+  any comparator runs. Pinned rather than argued.
+  A twenty-third round found three, and two of them were **defects in the
+  round-twenty-one fix itself** — filed independently by both reviewers, which
+  is the clearest signal in the whole sequence that the fix had been reasoned
+  about rather than attacked. `git diff base..HEAD` collapses the endpoints, so
+  a token added by one outgoing commit and removed by a later one vanished from
+  the diff while both commits were pushed and the blob stayed in the history
+  forever; the scan now walks `git rev-list` and reads what each commit added,
+  and the blob-size check takes the maximum across the range rather than
+  whatever survives at `HEAD`. And `HEAD~1` sat in `ci::git::push_range` as a
+  "last resort" when it is nothing of the kind: on the first push of a
+  three-commit branch with no upstream it silently reduced the range to the
+  final commit, so a secret in the first sailed through a gate reporting on the
+  third. A wrong base is worse than no base, because it produces a confident
+  green — the order is now the hook's own SHAs, `@{push}`, `@{upstream}`, the
+  merge base with the remote default branch, and only then the whole of `HEAD`.
+  The third: `"test": "vitest run -t no-such-name"` exits 0 with every collected
+  test skipped, and the layout guard sees an untouched config. That is the
+  config-level filter it already rejects, one layer out, and it is the same
+  sentence as the typecheck rule — that a script *exists* says nothing about
+  whether it runs anything.
+  A twenty-fourth round found three, all of them **the previous round's fix,
+  applied one step short of where the same argument leads**. `.gitignore` had
+  already defeated the pre-commit drift rule once; the ship-mode branch and the
+  new `tests-shell` guard both used `--exclude-standard` and fell to the
+  identical trick — an outgoing commit that deletes a path and ignores it makes
+  the worktree replacement invisible to `git diff HEAD` (HEAD has no such path)
+  and to the untracked list (documented to drop it) at the same time. Both now
+  consult the ignored list as well, pruned to the directories a workspace is
+  *expected* to ignore, because taking it whole means `node_modules` is drift
+  and the ship gate never passes. And the regex-aware anchor read `return /x/`
+  as division, because the character before the slash is the `n` of a keyword:
+  an identifier character does not settle the question, so the whole preceding
+  word is read and checked against the keywords a value may follow.
+  A twenty-fifth round, from the pinned Qodo review, found the **fail-open under
+  the fail-closed rule**: every ship-mode scan reached its commit list through
+  `git rev-list … || true`, so a range that could not be walked produced no
+  commits, no scanning, and a confident PASS on the security path. "Nothing to
+  push" and "the walk failed" are indistinguishable in the output and must not
+  be indistinguishable in the result. The commits are enumerated once now, and
+  a failed enumeration is `FAIL_INFRA`. The same masking sat in
+  `branch-protection.sh`, where it decided whether every pushed commit is
+  signed. And `push_range`'s no-base case emitted `<empty-tree>..HEAD` — a tree
+  object on the left of a revision walk, which is exactly the input that makes
+  the walk fail; a first push is every commit reachable from `HEAD`, and it now
+  says so.
+  A twenty-sixth round was self-found, by building the oracle the earlier
+  comparator rounds had been reasoning without: node-semver 7.8.5 itself, driven
+  over a 585-case table. It found five defects in the comparator, and the
+  headline one is that **prerelease precedence was never implemented and was
+  answered anyway**. Prerelease ordering is a different ordering — `1.2.3-alpha.1`
+  is *below* `1.2.3`, and `alpha.7` above `alpha.3` by identifier rules, not by
+  any comparison of three numbers — so ignoring the tail did not make those
+  cases unsupported, it made them wrong in the fail-open direction: measured,
+  `1.2.3-alpha.1` came back satisfied by `1.2.3`, `<=1.2.3-alpha.1` by `1.2.3`,
+  and a plain `20.1.0` by a `20.1.0-rc.1` runtime, all npm=false. It is declared
+  unsupported now, on both sides, and an unsupported form stops the lane.
+  The prerelease/build **grammar** was the loose charset rather than
+  node-semver's identifier rules, so `1.2.3-01`, `1.2.3-a..b` and `1.2.3+.` — every
+  one of which npm refuses to parse — were accepted, and `1.2.3-01 || >=20` came
+  back SATISFIED for a range that cannot be constructed at all. `_semver_num_ok`'s
+  15-digit cap was neither node-semver's boundary (`MAX_SAFE_INTEGER`, sixteen
+  digits) nor bash's (nineteen), so it rejected the exact value npm documents,
+  fail-closed across all of `[1e15, 2^53-1]`, and because an oversized operand
+  is classed *malformed* it poisoned siblings that plainly admitted the runtime.
+  Two findings were the previous round's own fix over-applied. `invalidXRangeOrder`
+  was put inside the operand predicate and therefore reached every operand — but
+  node-semver calls it from `replaceXRange` alone, so `~22.x.1` and `^20.*.3`
+  are valid in every published version and the gate refused them; `hyphenReplace`
+  never routes through it either, and hyphen endpoints also absorb a leading `=`
+  and admit 16-digit numbers, so `= 20 - 22`, `20.x.3 - 22` and
+  `1000000000000000 - 2000000000000000` were all read as typos rather than as the
+  hyphen ranges npm builds — and a missed hyphen range is malformed, which
+  poisons the sibling the hyphen handling exists to let win. The rule itself was
+  also dated: diffing `classes/range.js` across 7.8.0, 7.8.3, 7.8.4 and 7.8.5
+  shows `invalidXRangeOrder` arrives in **7.8.4**, so `20.x.3` is valid before it
+  and invalid after; the gate refuses it, which is the fail-closed reading.
+  One divergence from npm is deliberate and is documented as such at the code:
+  an empty alternative from a stray `||` is ANY to node-semver (7.8.5 gives
+  `new Range(">=999.0.0 ||").range == ""`, `.test("20.1.0") == true`), and
+  copying that would let one keystroke nullify a declared constraint, so it is
+  classed malformed. Finally the unreadable-runtime message was pointing at the
+  wrong thing — a broken `node --version` printed "Cannot evaluate the
+  engines.node range declared by …/package.json", sending an operator to stare
+  at a healthy manifest; unreadable and prerelease runtimes now each report
+  against the runtime. The comparator is re-measured at 585 cases with **zero
+  rows where it says satisfied and npm does not**, and zero shell errors; the
+  48 remaining disagreements are all `unverifiable`, which stops the lane.
+  A separate sweep for the same shape one layer up — a guard that cannot tell
+  "I found nothing" from "I could not look" — found four more, all fail-open and
+  all reproduced. `branch-protection` **could never be scheduled**: nothing
+  anywhere emits it as a changeset check id, so the only arm that could keep it
+  was unreachable and the filter dropped the lane on every run in every mode,
+  including a direct commit on `main` (the check alone exits 20 there; through
+  the gate it printed "Skipping [branch-protection] (filtered)" and exited 0).
+  Which branch you are on is not a function of the changed-file list, so it
+  joins the always-run set. `ci::changeset::detect` wrapped every git call in
+  `|| true`, making "git is broken" and "nothing is staged" the same empty
+  result — and the caller reads an empty result as "no relevant changes" and
+  exits 0 before a single check runs: with only `git diff` failing, a tree
+  carrying two staged secrets passed the gate while `git-safety.sh` run directly
+  against it exited 20. Detection failure is now reported, and the caller
+  answers it by running everything rather than nothing. Its pre-push branch also
+  resolved the push base a **second** way, contradicting the comment in `git.sh`
+  claiming otherwise: `push_range` falls back to the whole of `HEAD`, this fell
+  back to nothing. It calls `push_range` now. And `push_range` itself accepted a
+  *local* default-branch guess equal to the tip — on a branch named `main` with
+  no remote, `merge-base HEAD main` is `HEAD`, the range is empty, and every
+  ship-mode check reports "nothing changed" over a push carrying the whole
+  branch; a guess that resolves to ourselves is discarded, while a
+  remote-tracking ref equal to the tip still means what it says. `python` was
+  cacheable although it runs `ruff`, `pytest` and `compileall` over the whole
+  package: a syntax error in an unstaged file is invisible to a key built from
+  the changed-file list, and a cached run returned PASS where `CI_GATE_NO_CACHE=1`
+  returned `FAIL_INFRA` on the identical tree.
+  One more came out of fixing a test rather than reading the code.
+  `_check_disabled_in_config` was a `while read` loop piping every line of
+  `checks.yml` into six separate greps and seds, and on this repository's
+  213-line file **a single call took 34 seconds** — measured, after a new case
+  appeared to hang and turned out merely to be waiting. `_check_should_skip`
+  makes one call per lane plus one per related check, so `quick` mode spent
+  minutes deciding what to run before it ran anything, against a mode that
+  declares a pre-commit budget. It is one awk pass now: all 32 ids resolve in
+  **1 second**, the parse is unchanged line for line, and the two
+  implementations were run against each other over a fixture covering every
+  branch — nested and list forms, comments on the id line and on the value, a
+  check with no `enabled:`, and a top-level key that ends the block mid-file —
+  agreeing on all of them.
+  Two of the new cases were weak on their first draft and were fixed before
+  landing, which is the same discipline applied inward: the `git diff` shim test
+  passed on exit **127** — the shim could not find git, so it never exercised
+  the path it named — and now resolves the real binary and asserts the premise
+  both ways; and the preflight helper extractor silently produced a file whose
+  callees were missing, where "command not found" is non-zero and reads as a
+  decision. Separately, `ws_setup` never copied `ci/lib/git.sh` into its
+  sandbox, so every case in that file aborted on the missing source before its
+  first assertion.
+  A twenty-seventh round, from the pinned Qodo review and from DeepSource, found
+  three — and two of them are the reason a threads-only audit is not an audit.
+  Qodo files its findings in a **pinned issue comment**, not in review threads,
+  so the GraphQL `reviewThreads` sweep that showed zero unresolved was reporting
+  on a surface those two findings do not live on. One was a **weak test of
+  mine**: the case asserting that an unwalkable push range fails closed stubbed
+  `ci::git::push_range` with `export -f`, and two separate things defeated that
+  — bash will not carry a function whose name contains `::` into a child, and
+  `git-safety.sh` sources `ci/lib/git.sh` itself, redefining the function over
+  whatever the environment supplied. What the case actually measured was the
+  ordinary secret scan, exit 20, and `[ "$status" -ne 0 ]` accepted it; the
+  assertion named the fail-closed path while exercising the path beside it. The
+  stub is written into the sandbox's own `git.sh` now, the premise is asserted
+  (`git rev-list` on that range really does fail), and the expectation is **30**
+  rather than merely non-zero — 20 being precisely the answer it used to get.
+  The second was live code: `branch-protection.sh` captured `2>&1` into the
+  string it then parses as `%G? %H` records, so a git *warning* — dubious
+  ownership, a replace-ref advisory, anything git chooses to mention while
+  succeeding — arrived as a record whose first word is not `G/U/X/Y`. Measured
+  against the pre-fix script, verbatim: `Unsigned or unverified commit detected
+  dubious ownership in repository (status: warning:)`. A false failure on the
+  check that decides whether a push may proceed, and the merge count had the
+  sharper form of it, comparing prose to an integer. stderr goes to its own file
+  now — still reported, since it is the useful part of an infra message, just
+  not parsed — and a non-numeric count is `FAIL_INFRA` rather than an arithmetic
+  abort. DeepSource supplied the third: `local dir` in
+  `ci::common::node_workspaces` survived the rewrite from a one-level scan to a
+  recursive find, naming nothing.
+  A fourth arrived from Qodo on the next push, in the stdin reader added two
+  rounds earlier: the pre-push **tip was chosen by arrival order**.
+  `_push_new="$_lsha"` ran on every record, so the tip was whichever ref git
+  happened to list last — while the base beside it was already being widened by
+  ancestry. The two halves of one range therefore described different pushes,
+  and the answer changed when git reordered its input. The tip is chosen by
+  ancestry now, keeping the descendant. Reading the code for that turned up a
+  second order dependency in the same loop: a zero remote sha (a new branch)
+  did `break`, which stopped reading stdin altogether, so any ref listed after
+  it was never seen — it is recorded and the loop continues instead. And where
+  two pushed refs have no ancestry in common, one `A..B` range cannot describe
+  both and picking either leaves the other unscanned; that is refused with a
+  message naming the refs rather than silently gated on half the push. All
+  three cases fail against the previous dispatcher.
+  A twenty-eighth round found five, two P1, and three of them are a rule that
+  asked whether a thing *exists* rather than whether it *works*. The `typecheck`
+  guard added in round seventeen tested for the presence of the script key, so
+  changing its command to `"typecheck": "true"` satisfied it, exited 0 and never
+  invoked a compiler — a workspace containing `const n: number = "not a number"`
+  passed the lane with no checker installed, since `vite build` does not
+  typecheck either. Editing the command reaches exactly where deleting the key
+  reached. It is an allow-list now, like the test-script filter: `tsc`, `tsgo`,
+  `vue-tsc`, `svelte-check`, `astro`, `tsd`, `attw`, or a runner that delegates
+  to one, and anything else stops the lane until someone says which it is.
+  `extract_test_block` returned on the **first** top-level `test:` key while
+  JavaScript keeps the later one, so a broad `include` followed by
+  `test: { include: ["tests/only.test.ts"] }` reported every file runnable while
+  vitest collected one; duplicates are refused rather than resolved, because a
+  config with two of them is a mistake whichever wins. And changeset detection
+  still consumed non-NUL `--name-status`, so git quoted `frontend/src/café.ts`
+  into `"frontend/src/caf\303\251.ts"` — a string ending in a quote character
+  rather than in `.ts`. Its language became `unknown`, the emitted checks were
+  the always-list alone, and the Node tests, typecheck and build were filtered
+  out of a commit that changes TypeScript: the same defect the git-safety scan
+  had, on the scheduler instead of the scanner. All four modes read `-z` now,
+  through one reader that keeps both sides of a rename.
+  The last two were in workspace discovery, and they pull in opposite
+  directions. A root `package.json` ended discovery, so a repository with both a
+  root and child packages ran only the root and exited 0 while the children's
+  failing scripts were never invoked — but emitting the children instead is not
+  the fix, because in a workspaces monorepo only the root carries a lockfile and
+  this lane refuses to install a workspace that has none, which would turn every
+  real monorepo red. Neither reading is safe to guess, so the ambiguity is
+  reported and the lane stops. Separately, the root sentinel was dropped with
+  `grep -v "^${manifest}$"`, and `package.json` as a regex makes every `.` a
+  wildcard — so a workspace directory named `package-json` matched the pattern
+  and was skipped. Path surgery is literal parameter expansion now, and the
+  index-side scan beside it, which had the same one-level-deep `NF == 2` limit
+  discovery had already outgrown, walks to any depth.
+  The typecheck fix broke an existing case, and the way it broke is the point:
+  `node lane: a typecheck script satisfies the TypeScript requirement` used
+  `"typecheck": "true"` as a convenient stub — so the suite had been asserting
+  that a typecheck running no compiler is acceptable, which is the defect
+  itself, written down as an expectation. The fixture is a real command now,
+  and the case asserts what it can honestly claim (neither declared-TypeScript
+  rule fires) rather than an exit of 0, since the sandbox has no tsc to run.
+  A twenty-ninth round found five, two P1, and three of them are the previous
+  round's reasoning applied where it had not been carried. The `test` script had
+  the defect the `typecheck` script had just been fixed for: `"test": "true"`
+  runs, exits 0 and collects nothing, so a one-word manifest edit removed the
+  whole suite from the gate while the lane reported PASS over a workspace that
+  still contained tests. Same allow-list, one script over. The vitest **flag**
+  rule was still a deny-list, and it was missing `--exclude` and
+  `--passWithNoTests`, which together make `vitest run` print "No test files
+  found" and exit 0 while being neither a name filter nor a positional — the
+  fourth time enumerating the dangerous options lost this race, so the flags are
+  now inverted the way the config properties already were: a flag that cannot
+  reduce what is collected is named, and anything else stops the guard.
+  `--passWithNoTests` would be excluded by name regardless, since it converts
+  "collected nothing" into success.
+  The other two were defects in the round-twenty-seven fix itself. The pre-push
+  **base** was still chosen by "the older, else whichever arrived first", so two
+  remote tips that are not each other's ancestors made the range order-dependent
+  again — `A0..tip` re-walks everything reachable from the discarded `B0`, and
+  the gate can then block a push over a secret, an unsigned commit or a merge
+  the remote already has. Refused now, like the tip. And the refusal message
+  said "unrelated histories / no ancestry in common" while the test performed is
+  containment: two branches forked from a shared base fail it and have a
+  perfectly good merge base, so the diagnostic sent people looking for a
+  rootless history that is not there. Refusing is still right; the words now
+  describe the condition. Qodo also caught a predictable `/tmp/bp-err.$$`
+  fallback opened for writing — a symlink target waiting to happen — introduced
+  in the same round; there were three of them once the changeset temp files were
+  counted, and a gate that cannot obtain a private temp file now stops rather
+  than falling back to something worse.
+  The fixtures followed the typecheck one, and at a scale worth recording: **51
+  cases** used `"test": "true"` as their stub, because the sandbox has no real
+  runner and `true` was the shortest thing that exits 0. The suite had therefore
+  been writing down the exact defect codex reported, 51 times, as the normal way
+  to declare a test script. They are `bash -c true` now — a wrapper, which is
+  what they always meant — and the three `exit 1`/`exit 10` variants with them.
+  Two controls needed more than a rename: `an ordinary test script is not read
+  as a filter` and `a wrapper script with a positional argument is not a filter`
+  both now create a real `scripts/test.sh` in the sandbox, so the lane can
+  actually run what the manifest names rather than relying on a command that
+  ignores its arguments. Cases that assert the *rejection* keep the bare stub,
+  since that is the thing under test.
+  A thirtieth round found four, one P1, and the sharpest is a hole opened by the
+  round-twenty-nine fix rather than closed by it. That fix accepted any token
+  from a runner list as evidence of delegation, so `"typecheck": "bash -c true"`
+  satisfied the guard — the exact no-op the rule was written to reject, one
+  wrapper out, and the same for `"test"`. Delegation counts only when it *names*
+  what it delegates to: `bash scripts/check.sh` and `npm run check:all` name a
+  target, `bash -c true` names nothing, and an inline `-c` command is judged on
+  its own contents (so `bash -c tsc` is still accepted, because that is a
+  checker being invoked). Both scripts share one predicate now.
+  That in turn condemned the fixtures a second time. `bash -c true`, adopted one
+  round earlier to replace `true`, is itself a wrapped no-op — so `ws_setup`
+  creates real `scripts/test.sh`, `scripts/fail.sh` and `scripts/fail10.sh`, and
+  the 74 fixtures name one of those. A workspace wrapping its suite has a script
+  on disk; the fixtures say that now rather than standing in for it twice over
+  with a command that ignores its arguments.
+  The P1 was a security gap: the sensitive-filename list was written in
+  repository-root spellings, and a case pattern like `.npmrc` matches that
+  string and nothing else — so `frontend/.npmrc` and `packages/app/.pypirc`
+  passed. The content scan is no backstop, since
+  `//registry.npmjs.org/:_authToken=` matches none of the canonical token
+  prefixes; `.env` survived only because `*.env` happens to match a nested path,
+  and the entries without a leading-wildcard twin did not. Names are matched on
+  the basename at any depth now, with `.netrc`, `.pgpass` and `credentials`
+  added, and a control asserting that an ordinary `frontend/src/lib/env.ts` is
+  still allowed. Nested workspaces are the layout this PR spent rounds teaching
+  the rest of the gate to expect, and this list had not been told.
+  `["test"]: { ... }` was the third: a computed key JavaScript applies exactly
+  like `test:`, and later if it comes later, but the quoted token is consumed by
+  the scanner's string handling — so a broad plain block followed by a narrow
+  computed one was counted once and reported as fully covered. A computed
+  property at the exported object's own level now stops the guard, with a
+  control asserting that ordinary array *values* are not mistaken for one.
+  The fourth was the predictable temp path in `all` mode, already removed with
+  the other two the round before it was reported.
+  A thirty-first round found five, two P1, and three are the same mistake in
+  different files: a rule fixed in one direction and left wrong in the other.
+  (1) The round-thirty fix taught the index-side workspace scan to walk to any
+  depth, so it would agree with filesystem discovery about *depth* — and left it
+  disagreeing about *vendoring*. Discovery drops `ci/tests/fixtures/node`
+  through `ci::common::is_vendored_path`; the index scan added it straight back,
+  and alphabetically first it was the workspace the lane entered before any real
+  one. With no lockfile beside it, `CI_GATE_MODE=full bash ci/checks/node.sh`
+  exited **30** on a fixture and never reached `frontend` — every scheduled
+  full-mode Node lane was failing. Indexed candidates go through the same
+  predicate now: the predicate itself, not a second copy of its rules, since a
+  second copy is how the two drifted apart to begin with.
+  (2) The pre-push hook read the destination ref off stdin and exported only the
+  SHAs, so `branch-protection.sh` kept asking `git rev-parse --abbrev-ref HEAD`
+  and approved `git push origin feature:main` as an ordinary feature-branch
+  push. Destinations are exported and enforced now, collected *above* the
+  zero-sha skip so `git push origin :main` — deleting a protected branch,
+  carrying no content — is not waved through for being empty. Set-and-empty is
+  kept distinct from unset: empty means the push names no branch (a tag), and
+  falling back to the checkout there would refuse `git push origin v1.2` for the
+  branch you happened to be standing on.
+  (3) `test.include` could subtract. `['tests/**/*.test.{ts,tsx}',
+  '!tests/lib/**']` is a literal array containing the declared glob, so every
+  check passed while vitest collected no `tests/lib/` file — the silent drop the
+  `exclude` rule exists to prevent, written one property over and out of its
+  reach. Any `!` in an include entry stops the guard, not a leading one only,
+  since picomatch's `!(...)` subtracts from the middle of a pattern just as well.
+  The fourth was a performance failure severe enough to be a correctness one.
+  `git-safety.sh` sized blobs per *emitted* path, and `_gs_content_files` emits
+  one record per commit per modification — so a file touched by forty pushed
+  commits was sized forty times, each sizing walking every commit again.
+  Invisible on an ordinary push, quadratic on one with no resolvable base, where
+  the commit list is the whole history. Measured on a clone of this tree with
+  its remote removed: 419 commits, **19s to size one path**, 15 paths costing
+  **371s**, extrapolating to **6,711s** for the 271 unique paths — against a 120s
+  pre-push budget. Paths are deduplicated, and the per-pair `git cat-file -s` is
+  replaced by one `git cat-file --batch-check`: **113,549 pairs in 3.2s**. The
+  question asked is deliberately unchanged — the max of `<commit>:<path>` over
+  the enumerated commits — and that was checked rather than assumed: old and new
+  return byte-identical sizes. `diff-tree`'s post-image blobs would have been
+  cheaper still and *not* equivalent, since a path that was 40MB before the
+  range and is modified down inside it is still 40MB in the pushed trees.
+  The symptom was checked end to end, not just the term that caused it: on a
+  synthetic 419-commit first push the fixed check completes in **82s**, and the
+  previous one was still running when a 300s cap killed it. The five remaining
+  per-commit `git show` loops are linear and untouched — 18.7s each here, ~96s
+  in total — so the budget is met with room, and reducing it further would mean
+  restructuring the read helpers earlier rounds hardened for fail-closed
+  semantics.
+  The fifth came from the pinned comment: `merge-base --is-ancestor` exits 128
+  for an object the repository does not have and 1 for "genuinely not
+  contained", and the hook read both as the second — so a remote base that had
+  merely never been fetched hard-refused the push. A missing remote object is
+  now the same statement as a new branch: no base, so nothing narrows the range
+  and ship mode walks all of HEAD. Scanning more, never less.
+  A thirty-second round found two, both P1, and both are the gate reporting
+  confidently on something it had not actually looked at.
+  (1) Ship mode resolves its *ranges* from the hook's SHAs, so the history
+  checks read the right commits — while every check that runs content reads the
+  worktree, of which there is one. `git push origin other-branch` therefore had
+  the two halves of a single run describing different branches, and the half
+  that executes things was describing the wrong one: a passing checkout vouched
+  for an outgoing branch whose tests fail. Reproduced before fixing — the lane
+  exited 0 on a branch whose test script exits 1. Refused rather than worked
+  around: running the outgoing tip means checking it out or building a second
+  worktree inside a pre-push hook, which is a far larger change than this is a
+  bug and fails badly on a dirty tree, and the developer's remedy is one
+  command. The comparison lives in `ci::git::push_tip_is_checkout` and is called
+  from `preflight.sh` and `node.sh` — the node lane is not the only check that
+  reads the worktree, so fixing it only where it was reported would have left
+  the identical hole in test-layout, the suites and the build.
+  (2) Delegation was accepted on the strength of a target *token*: any
+  recognised wrapper followed by any non-flag token passed, without ever reading
+  the target. `"test": "bash scripts/test.sh"` therefore passed while that
+  script was `exit 0`. The suite proved it — `ws_setup` wrote exactly that
+  script and **90 fixtures** named it, so the fixtures had been asserting that a
+  workspace running no tests is in good standing. That is the third fix to this
+  rule and the fourth time the fixtures encoded the defect under test: `"test":
+  "true"`, then `bash -c true`, and now a file whose contents run nothing —
+  each the previous no-op wearing one more layer. The stated reason for
+  allowing delegation ("a script the gate cannot read either way") was false: a
+  package script is in the manifest and a shell script is a file in the
+  workspace. Both are read now and judged by the same predicate, line by line
+  with comments stripped, depth-capped at 8. What genuinely cannot be resolved —
+  `make test`, or a target that is neither a manifest script nor a readable
+  file — is refused, which is a real behaviour change and the honest one.
+  Fixtures are wrappers that reach a runner now, via a `scripts/vitest` stand-in
+  that marks the true boundary: the gate can see a script invoke something named
+  `vitest` and cannot see what that binary does.
+  A thirty-third round found six, three P1, and the sharpest lesson is that one
+  rule had now been fixed five times while asking the wrong question every time.
+  `_script_names_a_checker` asked whether a command *contains* a checker; codex
+  supplied a third way for a string to contain one that never runs -- `"test":
+  "echo vitest"`, where the name is an argument -- after `bash -c true` and a
+  `scripts/test.sh` that does nothing. Presence is not execution, and widening
+  the token scan was never going to reach that. The predicate is rebuilt around
+  **command position**: a token counts only where a command starts, at the
+  beginning or after a separator. `echo bash scripts/test.sh` closes with it, a
+  hole one layer out that was not in the report. Compositions that cannot prove
+  the checker runs are refused: `true || vitest run` never reaches it, and
+  `vitest run || true` is worse -- the suite runs in full and its result is
+  discarded. `&&` stays accepted, because either the checker runs or the script
+  fails with what preceded it. And the composition case had been *rejected for
+  the wrong reason* before this, by the positional-filter rule, with "'true'
+  selects a subset" -- a diagnosis describing a filter that is not there; it has
+  its own check and its own message now, with a test asserting the old wording
+  is absent.
+  Two more were the guard failing correct work, which is the expensive kind
+  because a gate that blocks good commits gets switched off. Qodo caught the
+  round-30 computed-key rule marking *any* `[` at the exported object own level
+  as a computed key -- and `[` does not change brace depth, so an ordinary
+  `plugins: [react()]` sat at that level too. Adding a bare `plugins: []` to
+  this repository's vitest config made the check exit 20. It is a computed key
+  only where a *key* would be, after the brace or a comma. The nested-config
+  case was the same shape: `frontend/e2e/tsconfig.json` extending
+  `../tsconfig.json` was reported as an orphan because no `package.json` sat
+  beside it, and a full-mode run exited 20 before reaching the workspace. The
+  walk goes upward now and stops at the first manifest; a config that reaches
+  the root without finding one is still reported.
+  The rest: `--config`/`-c`/`--root` are out of the runner flag allow-list --
+  they do not narrow what vitest collects, they change which file *declares*
+  what it collects, while `test-layout.sh` validates one fixed path, so the two
+  checks were reporting on two different files. `defineConfig(Object.assign({
+  test: {broad} }, { test: {narrow} }))` validated the object composition had
+  already replaced, so what sits between `export default` and the brace is an
+  allow-list now -- nothing, or `defineConfig(` -- and a spread at that same
+  level went in beside it rather than waiting to be reported. And a
+  deletion-only push (`git push --delete`) set no tip, which
+  `ci::git::push_range` resolved to `HEAD`, so the content and history checks
+  audited the checked-out branch; `CI_GATE_PUSH_DELETIONS_ONLY` states that
+  case explicitly and those checks skip, while destination protection still
+  runs -- deleting `main` is the push that must still be refused.
+  The rewrite introduced two defects of its own before the suite caught them,
+  both worth recording because both are the direction that blocks correct work.
+  The token unquoting is a bracket expression matching a leading or trailing
+  quote; rewriting it dropped one backslash before the single-quote, and that
+  form matches any first character, so it strips one from every token. `tsc`
+  became `sc` and every TypeScript workspace was told it has no type checker.
+  Five acceptance cases failed at once; the quotes are matched one at a time
+  now, and pinned by a case of their own. The new depth-1 spread rule flagged
+  `{ ...shared, test: {...} }`, which is correct: the explicit `test:` comes
+  later and wins, so only a spread *after* the test key can override it.
+  `make` also left the runner list -- its argument is a Makefile target, not a
+  package script or a file, so `make test` had been resolving a `test` script
+  from the manifest and accepting whatever that ran.
+  A thirty-fourth round found one, and it was a regression from the round
+  before it. The ship-mode guard asked "is the pushed tip the checkout" and
+  refused otherwise -- correct for `git push origin other-branch`, wrong for
+  `git tag v1.0 <older commit>; git push origin v1.0`, where the tip is the
+  tagged commit and the whole ship gate failed on an ordinary release workflow.
+  Qodo caught it. The question being asked is whether the worktree can stand in
+  for what is going out, and "is it the checkout" is the common answer rather
+  than the whole of it: a tag on an ancestor of HEAD is content the worktree
+  already contains. Renamed `ci::git::worktree_covers_push`, since the old name
+  described one way of answering rather than the question. The relaxation is
+  narrow -- only when the push names no branch destination at all, so `git push
+  origin other-branch` walks straight back into the refusal, and a tag pointing
+  somewhere HEAD does not contain is still refused.
+  A thirty-fifth round found five, three P1, and one of them broke the lane
+  outright. `[ -e "$_d" ] && printf ...` left the test's false status as the
+  status of the deletion loop whenever the last deleted path was genuinely
+  gone -- the ordinary case for a clean deletion commit -- and that propagated
+  through the command substitution, the assignment and `set -e`. Reproduced:
+  the pre-fix lane exits **raw 1 with 39 bytes of output**, the section header
+  and nothing else, before install, typecheck, test or build. An `if` makes the
+  loop end successfully.
+  Two more were the checker rule again, now five and six. A pipeline reports its
+  *last* command's status, so `tsc --noEmit | cat` prints errors and exits 0
+  while the command-position rule returned success without looking past the
+  checker; and `unused() { node --test; }` followed by `exit 0` named a runner,
+  in command position, inside a function nobody calls. Pipelines join `||` and
+  `&` as compositions whose result cannot be attributed to the checker, and a
+  delegated script now counts a line only at its top level, outside every brace
+  group and block. Qodo added the third: `a||b` is the same operator as `a || b`,
+  and matching only the spaced spelling was a bypass two keystrokes wide.
+  The fifth was a fail-open on the layout guard. Its candidate list was
+  line-oriented, so a path containing a newline arrived as two and the tail could
+  be spelled to sit under `frontend/tests/`. Reproduced: **exit 0, "Test layout
+  OK: 1 file(s)"** on a stray test vitest will never collect. find, ls-files and
+  ls-tree are NUL-delimited now and the candidates are held in arrays, because a
+  command substitution cannot carry NUL bytes.
+  Three defects of my own turned up while fixing these, all caught before they
+  landed: `exec vitest run` was rejected by the new control-flow rule (that is
+  how a wrapper normally hands over); a multi-line function body was accepted
+  because the definition line was skipped before its braces were counted; and
+  the typecheck path rejected the pipeline as "does not appear to run a type
+  checker", which is false -- it names tsc and runs it, then discards the
+  answer. The composition check is one shared function now, so both paths give
+  the same reason.
+  Worth recording about the refutations rather than the fixes: the deletion case
+  passed twice against the broken code before it reproduced. First because
+  setting `CI_GATE_NODE_WORKSPACE` skips the discovery pass the drift scan lives
+  in; then because `ws_setup` copies the current `ci/lib/git.sh` beside an older
+  `node.sh`, whose renamed helper no longer exists, so the run died on a missing
+  function instead. A refutation that passes is not the same as code that works.
+  A thirty-sixth round found seven, three P1, and one was two reviewers
+  disagreeing about the same rule. codex and Qodo pulled the tag exception in
+  opposite directions and both were right about their own failure: refusing
+  every tag push failed the ship gate on an ordinary release workflow, while
+  allowing any tag on an *ancestor* of HEAD let a failing commit be tagged,
+  repaired in a descendant, and pushed while the lanes validated the repaired
+  tree. Ancestry says the worktree contains that history; it says nothing about
+  the tagged tree having been checked. **Publication** settles it — a commit a
+  remote branch already contains was gated when its branch went out, so the tag
+  adds a label and no content; one no remote branch contains is carried out by
+  the tag itself. Stale remote-tracking refs make that stricter, not looser.
+  The lost-suite guard compared against HEAD, and in ship mode the deletion is
+  already committed — so HEAD carried no tests either, nothing looked missing,
+  and a push removing every test file and the test script exited **0** with
+  "Node lane passed". It compares against the push base now. `"test": "exit 0 ;
+  vitest run"` was the checker rule again: a separator resets where a command
+  *starts*, which is not whether one runs. Fixing that broke a control —
+  `bash scripts/test.sh ; exit 0` was rejected because the separator cleared the
+  pending delegation before anything resolved it — so resolution moved into its
+  own function that runs wherever a command ends.
+  Three more: a shorthand, method or getter `test` overrides the colon-form
+  block and only the colon form was recognised (41 files reported runnable while
+  vitest listed four); an index entry whose blob git cannot produce was dropped
+  silently, leaving the worktree copy validated alone, now FAIL_INFRA; and
+  `timeout_sec` was filtered rather than validated, so `1e3` became 13 and `-1`
+  became 1 and the runner killed a blocking check seconds in. Qodo's portability
+  finding went with them — `sort -z -u` is a GNU extension against a stated Bash
+  3.2 floor, so the dedupe is done in the shell, quadratic over 219 candidates
+  and cheaper than the subprocess it replaces.
+  Two findings were put to the owner rather than changed inside a review round,
+  and both were decided on 2026-08-17 as **keep as it is**, with the reasoning
+  written at the code rather than only on the thread. `is_vendored_path` treats
+  any `build`, `dist`, `coverage` or `htmlcov` segment as output, so a
+  first-party `packages/build/` is skipped — but `ci/checks/git-safety.sh`
+  refuses to push those same paths with no override, so the skip is not a route
+  to a branch, and narrowing would have had to widen the push gate in the same
+  change. The JS test lane invokes the pinned runner rather than the declared
+  `test` script; the silent half of that is fixed (the script's own environment
+  now reaches the runner), and the residual is a setup *command* not running,
+  which surfaces as the runner failing rather than as fewer tests passing
+  quietly. Both comments name the condition that would reopen them.
+  A thirty-eighth round found five, and the sharpest is a list that had drifted
+  five times. The generated-directory names lived in three copies inside
+  `ci/checks/test-layout.sh` — the legacy-directory find prune, the candidate
+  find prune, and `path_is_pruned` — and the round that added `.cache` reached
+  one of them. `path_is_pruned` is the copy that answers for the **index** side
+  of both scans, because `find` applies its own prune and `git ls-files` does
+  not, so it was simultaneously the most load-bearing and the one nobody looked
+  at: a generator writing `frontend/.cache/__tests__/` was reported as a retired
+  directory to delete, and driving the new case against the parent showed
+  `.cache`, `.nuxt` and `htmlcov` mis-flagged by the *candidate* scan as well —
+  wider than the finding said. Fixing the fifth instance of that is not a fix,
+  so the names have one definition and the three readers are built from it.
+  `.cache` was missing from `ci::common::is_vendored_path` too, from the
+  direction "check the siblings" does not cover: it was added to a prune list
+  and not to the predicate documented as the single definition, so a bundler
+  cache made discovery report a nested workspace and exit 1.
+  Three more: `tr '/' '-'` is not injective, so the independent workspaces
+  `a/b-c` and `a-b/c` both wrote `js-a-b-c.xml` and the second silently
+  overwrote the first's JUnit results; the non-ship half of the indexed-manifest
+  scan still read `git ls-files` line-oriented, so a committed `café/package.json`
+  arrived quoted and the lane refused a workspace that is in the index; and the
+  active plans still directed operators to `frontend/src/**/__tests__/`, which
+  this PR's guard now rejects — 38 references rewritten, each checked against
+  the working tree first, which caught five pointing at a `.ts` file that was
+  written as `.tsx`.
+  Combined suite: `bats ci/tests/` = 565 cases, 0 failures.
+  The node lane was run end
+  to end against `frontend/`: install, `tsc --noEmit`, 477 tests, `vite build`.
+  Counts here are the ones the files actually contain at this commit; an
+  earlier revision of this paragraph quoted stale ones.
+  Also fixed: the Python-convention `lib/` rule in `.gitignore` was swallowing
+  **new** files under `frontend/tests/lib/` (17 of the moved tests live there;
+  the moved ones survived only because `git mv` tracks explicitly), so a
+  newly-authored test there would have been invisible to git — never committed,
+  never run, nothing on screen to say so. Negations added to match the existing
+  `frontend/src/lib/` ones, plus `.ci-gate/` (generated dep-cache fingerprints,
+  now written root-anchored per workspace instead of scattered).
 - ✅ Dependency supply-chain hardening (PR #155, merged 2026-08-03) — `main`'s
   `uv.lock` had drifted from `pyproject.toml` (still resolving `fastapi==0.136.3`
   and `pytest==9.0.3` against declared `0.137.1`/`9.1.0`), and the Dockerfile ran

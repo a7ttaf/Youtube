@@ -695,7 +695,7 @@ afterEach(() => cleanup());
 
 ### 9.3 Frontend tests
 
-**`frontend/src/contexts/__tests__/TenantContext.test.tsx`**
+**`frontend/tests/contexts/TenantContext.test.tsx`**
 
 - Default provider state has `{ tenantSlug: "ums", id: null, displayName: null }`.
 - `hydrate({ id, slug, display_name })` merges `id` and `displayName` into
@@ -703,7 +703,7 @@ afterEach(() => cleanup());
 - `useTenant()` called outside `<TenantProvider>` throws a clearly-worded
   error.
 
-**`frontend/src/lib/api/__tests__/client.test.ts`** (mocks `globalThis.fetch`)
+**`frontend/tests/lib/api/client.test.tsx`** (mocks `globalThis.fetch`)
 
 - Caller passes no headers → request ships `X-UMS-Tenant: ums`.
 - Caller passes `{ headers: { "X-UMS-Tenant": "evil" } }` → request still
@@ -727,7 +727,7 @@ afterEach(() => cleanup());
 - `fetch` rejects with `TypeError("Failed to fetch")` → propagates as
   `TypeError`, **not** wrapped as `ApiError`.
 
-**`frontend/src/components/srcc/__tests__/AppShell.test.tsx`** (smoke)
+**`frontend/tests/components/srcc/AppShell.test.tsx`** (smoke)
 
 - **Happy path (no `<StrictMode>`):** render
   `<TenantProvider><AppShell /></TenantProvider>`. Mock `fetch` →

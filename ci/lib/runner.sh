@@ -19,6 +19,7 @@ _CI_RUNNER_JOBS_DIR=""   # temp dir for PID files and result files
 #   <job_id>.end     – epoch seconds at job end
 
 _CI_RUNNER_JOBS_DIR_CLEANUP=""  # set to jobs dir path; cleaned on EXIT
+_CI_RUNNER_PREV_EXIT_TRAP=""    # the caller's EXIT handler, run after cleanup
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -28,6 +29,21 @@ ci::runner::_cleanup() {
   if [ -n "$_CI_RUNNER_JOBS_DIR_CLEANUP" ] && [ -d "$_CI_RUNNER_JOBS_DIR_CLEANUP" ]; then
     rm -rf "$_CI_RUNNER_JOBS_DIR_CLEANUP"
   fi
+  # Then whatever EXIT handler this library displaced; see ci::runner::init for
+  # why it has one to run and how it got hold of it.
+  #
+  # Run from inside the handler rather than spliced into the `trap` argument,
+  # which is not a style choice: a `trap "... ${var}" EXIT` expands `var` at
+  # declaration time, so the command has to be built from something that is
+  # still in scope then -- and building it that way is also what makes the trap
+  # string differ per call, which is the shape a reader cannot check. Here the
+  # trap argument is a fixed, single-quoted function name and the variable part
+  # is read when the signal arrives, which is when it means something.
+  #
+  # After the runner's own state, so a caller's handler never looks at a jobs
+  # directory this library was about to remove. Neither can change the script's
+  # exit status: bash takes that from the moment the trap fired.
+  [ -z "${_CI_RUNNER_PREV_EXIT_TRAP:-}" ] || eval "$_CI_RUNNER_PREV_EXIT_TRAP"
 }
 
 ci::runner::_epoch() {
@@ -130,12 +146,123 @@ ci::runner::init() {
   mkdir -p "$_CI_RUNNER_JOBS_DIR"
   _CI_RUNNER_JOBS_DIR_CLEANUP="$_CI_RUNNER_JOBS_DIR"
 
-  # Register cleanup trap (merge with any existing EXIT trap)
+  # Register cleanup, chained onto any EXIT trap already installed.
+  #
+  # `trap ... EXIT` replaces rather than adds, and this line has claimed to
+  # merge since it was written without doing it. ci/preflight.sh installs an
+  # EXIT trap of its own before the first run_phase -- the one that removes the
+  # HEAD copy of ci/config/checks.yml materialized for a ship run -- so the
+  # replacement here leaked one temporary file per ship validation, silently and
+  # forever. A library that takes a process-wide resource away from its caller
+  # has to give it back.
+  #
+  # `trap -p EXIT` prints a re-executable `trap -- '<cmd>' EXIT`, so the command
+  # comes back carrying bash's own quoting and is unwrapped by assigning through
+  # `eval` rather than by unquoting it here by hand -- the same idiom
+  # ci::runner::_running_count already uses to restore the ERR trap, and for the
+  # same reason: a handler containing a quote does not survive being re-quoted.
+  #
+  # Recorded in a variable and run from inside ci::runner::_cleanup rather than
+  # spliced into the `trap` argument. Splicing means `trap "... ${cmd}" EXIT`,
+  # which expands at *declaration* time -- the opposite of what a trap argument
+  # normally wants, and a shape a reader has to stop and verify every time. With
+  # the command in a variable the trap argument is a fixed, single-quoted
+  # function name and the part that varies is read when the signal arrives.
+  local _re_prev _re_cmd=""
+  _re_prev="$(trap -p EXIT 2>/dev/null || true)"
+  if [ -n "$_re_prev" ]; then
+    _re_prev="${_re_prev#trap -- }"
+    _re_prev="${_re_prev% EXIT}"
+    eval "_re_cmd=${_re_prev}" 2>/dev/null || _re_cmd=""
+  fi
+  # This library's own handler read back on a second init is not a caller's
+  # handler, and recording it would chain the cleanup onto itself.
+  #
+  # Assigned only when there is something to assign, which is what makes a
+  # repeat call safe: init #2 reads back this function's name, discards it here,
+  # and leaves the handler init #1 recorded in place. Clearing the variable
+  # unconditionally instead would drop the caller's handler on the second call
+  # while preserving it on the first -- the leak this block exists to close,
+  # reintroduced one call later.
+  case "$_re_cmd" in
+    'ci::runner::_cleanup') _re_cmd="" ;;
+  esac
+  [ -z "$_re_cmd" ] || _CI_RUNNER_PREV_EXIT_TRAP="$_re_cmd"
   trap 'ci::runner::_cleanup' EXIT
 }
 
 # ci::runner::submit <job_id> <check_script> [args...]
 # Submits a job to the parallel pool. Blocks if pool is full.
+# ci::runner::_declared_timeout <check-id> – echo the check's own timeout_sec
+# from checks.yml, or nothing when it declares none.
+ci::runner::_declared_timeout() {
+  local want="$1"
+  local file="${CI_CHECKS_CONFIG:-ci/config/checks.yml}"
+  [ -f "$file" ] || return 0
+  awk -v want="${want}" -v wantkey="  ${want}:" '
+    $0 == wantkey { found = 1; next }
+    found && $0 ~ /^[[:space:]]*timeout_sec:/ {
+      sub(/^[[:space:]]*timeout_sec:[[:space:]]*/, "")
+      sub(/[[:space:]]*#.*$/, "")
+      sub(/[[:space:]]+$/, "")
+      # Validated, not filtered. `gsub(/[^0-9]/, "")` deleted the non-digits and
+      # joined what was left, so `1e3` became 13 and `-1` became 1: the runner
+      # then killed a blocking check seconds in and reported an infrastructure
+      # timeout that the configuration never asked for. A value that is not a
+      # whole number of seconds is a configuration error, and silently turning
+      # it into a different number is the worst of the available answers.
+      if ($0 ~ /^[0-9]+$/ && $0 + 0 > 0) {
+        print
+        exit 0
+      }
+      # A diagnostic is not a result. This printed and exited 0 with no value,
+      # so submit could not tell "no timeout declared" from "the declared one is
+      # unusable" and silently fell back to the global timeout, or to none at
+      # all. A typo on the long `tests-shell` blocker therefore removed its
+      # bound and left full and ship validation to hang, which is the same
+      # "silently turning it into a different number" the comment above refuses
+      # -- reached by discarding the number instead of rewriting it.
+      print "timeout_sec for " want " is not a positive whole number: " $0 > "/dev/stderr"
+      exit 3
+    }
+    found && $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { exit }
+  ' "$file"
+}
+
+# How long a timed-out check is given between TERM and KILL. Named rather than
+# inlined because both arms below have to use the same number, and the one that
+# is reached depends on which utility the host has.
+: "${_CI_RUNNER_KILL_AFTER:=10s}"
+
+# ci::runner::_timeout_cmd <seconds> – echo the command prefix that enforces
+# <seconds>, or return 1 when this host has nothing that can enforce it.
+#
+# Split out of submit so the "no utility available" answer is a value the
+# caller has to handle rather than an empty string it can fall through on --
+# which is exactly how the bound used to get dropped in silence.
+ci::runner::_timeout_cmd() {
+  local secs="$1"
+  # `--kill-after`, because `timeout N` alone is not a deadline. It sends TERM,
+  # and TERM only ends a process that does not catch it -- so a check that traps
+  # it to clean up, or a runner whose child ignores it, outlives the timeout and
+  # `timeout` waits on it forever. The lane then never reports at all, which is
+  # worse than the FAIL_INFRA the deadline exists to produce: a gate that hangs
+  # gets killed by hand and the push goes out unjudged.
+  #
+  # The grace period is fixed rather than proportional. It is time for a trap to
+  # finish writing what it was writing, not a second deadline, and 10s is long
+  # enough for that and short enough that a hung blocker is over in seconds.
+  if command -v timeout >/dev/null 2>&1; then
+    printf 'timeout --kill-after=%s %s' "$_CI_RUNNER_KILL_AFTER" "$secs"
+    return 0
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    printf 'gtimeout --kill-after=%s %s' "$_CI_RUNNER_KILL_AFTER" "$secs"
+    return 0
+  fi
+  return 1
+}
+
 ci::runner::submit() {
   local job_id="$1"
   shift
@@ -147,12 +274,95 @@ ci::runner::submit() {
   local pid_file="${_CI_RUNNER_JOBS_DIR}/${job_id}.pid"
   local start_file="${_CI_RUNNER_JOBS_DIR}/${job_id}.start"
 
+  # Determine timeout. checks.yml may declare timeout_sec per check; gate.yml's
+  # default_timeout_sec applies otherwise.
+  #
+  # The per-check value used to be documentation -- nothing read it -- and the
+  # shell suites have since grown past the 20-minute default, so `tests-shell`
+  # was killed at the cap and reported FAIL_INFRA. A blocking lane that cannot
+  # finish is a lane that does not run, which is the failure this gate exists to
+  # catch, announced in a single word at the end of a two-hour run.
+  #
+  # Computed before the sequential branch on purpose: with CI_GATE_PARALLEL=0,
+  # or a single-worker pool, that branch executes the check directly, so a
+  # timeout applied only to the background path meant a supported mode ignored
+  # both the declared value and the global one -- and could hang indefinitely.
+  local check_timeout="${CI_GATE_TIMEOUT:-}"
+  local declared_timeout declared_rc=0
+  declared_timeout="$(ci::runner::_declared_timeout "$job_id")" || declared_rc=$?
+  if [ "$declared_rc" -ne 0 ]; then
+    # Configuration this runner cannot act on, recorded as infrastructure
+    # instead of run without the bound it asked for. Running the check anyway
+    # is the answer that looks harmless and is not: the value exists precisely
+    # because the global default is wrong for that check, so ignoring it is how
+    # a blocking lane runs unbounded and the gate reports a timeout nobody
+    # configured -- or never reports at all.
+    #
+    # Written the way the sequential branch below records a finished job, so the
+    # pool's bookkeeping sees an ordinary completed job rather than a launch
+    # that never happened.
+    {
+      echo "Check '${job_id}' declares a timeout_sec this runner cannot use."
+      echo "  ${CI_CHECKS_CONFIG:-ci/config/checks.yml} has to carry a positive"
+      echo "  whole number of seconds, or nothing at all. Refusing to run the"
+      echo "  check unbounded under a configuration that asked for a bound."
+    } > "$log_file" 2>&1
+    printf '%d' "$CI_RESULT_FAIL_INFRA" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.rc"
+    printf '%s' "$(ci::runner::_epoch)" > "$start_file"
+    printf '%s' "$(ci::runner::_epoch)" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.end"
+    printf '%d' "$$" > "$pid_file"
+    return 0
+  fi
+  [ -n "$declared_timeout" ] && check_timeout="$declared_timeout"
+
+  local timeout_cmd="" timeout_rc=0
+  if [ -n "$check_timeout" ] && [ "$check_timeout" != "0" ]; then
+    # Assigned separately from `local` on purpose: `local x="$(cmd)"` reports the
+    # status of `local`, not of cmd, so the refusal below would never be seen.
+    timeout_cmd="$(ci::runner::_timeout_cmd "$check_timeout")" || timeout_rc=$?
+    if [ "$timeout_rc" -ne 0 ]; then
+      # FIX: a bound was asked for and this host has no utility that can keep
+      # it. Falling through to the unbounded branch below is the same mistake
+      # the declared-timeout arm above refuses: the cap exists because someone
+      # decided this check must not run forever, so dropping it silently is how
+      # a hung blocker like `tests-shell` stalls preflight for as long as the
+      # caller will wait, with nothing in the log saying the bound was skipped.
+      #
+      # Not a hypothetical host, either -- a stock macOS box has neither
+      # `timeout` nor `gtimeout` until coreutils is installed, so this is a
+      # configuration the runner has to refuse rather than assume away. Nor is
+      # it opt-in: ci/config/gate.yml carries default_timeout_sec, so on such a
+      # host this arm answers for every scheduled check and the whole run stops
+      # on infrastructure. That is the intended reading -- a gate that cannot
+      # bound its checks has not validated anything -- and it is why the message
+      # names the install that fixes it rather than only the condition.
+      # Recorded exactly like that arm, so the pool's bookkeeping sees an
+      # ordinary completed job rather than a launch that never happened.
+      {
+        echo "Check '${job_id}' asks for a ${check_timeout}s timeout this host cannot enforce."
+        echo "  Neither 'timeout' nor 'gtimeout' is on PATH, so the bound cannot be"
+        echo "  applied. Install GNU coreutils (on macOS 'brew install coreutils'"
+        echo "  provides gtimeout), or clear the timeout rather than have the check"
+        echo "  run unbounded under a configuration that asked for a bound."
+      } > "$log_file" 2>&1
+      printf '%d' "$CI_RESULT_FAIL_INFRA" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.rc"
+      printf '%s' "$(ci::runner::_epoch)" > "$start_file"
+      printf '%s' "$(ci::runner::_epoch)" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.end"
+      printf '%d' "$$" > "$pid_file"
+      return 0
+    fi
+  fi
+
   # If sequential mode (max_jobs=1 or CI_GATE_PARALLEL=0)
   if [ "${CI_GATE_PARALLEL:-}" = "0" ] || [ "$_CI_RUNNER_MAX_JOBS" -eq 1 ]; then
     local exit_code=0
     printf '%s' "$(ci::runner::_epoch)" > "$start_file"
     set +e
-    "$check_script" ${args[@]+"${args[@]}"} > "$log_file" 2>&1
+    if [ -n "$timeout_cmd" ]; then
+      $timeout_cmd "$check_script" ${args[@]+"${args[@]}"} > "$log_file" 2>&1
+    else
+      "$check_script" ${args[@]+"${args[@]}"} > "$log_file" 2>&1
+    fi
     exit_code=$?
     set -e
     printf '%d' "$exit_code" > "${_CI_RUNNER_JOBS_DIR}/${job_id}.rc"
@@ -172,16 +382,6 @@ ci::runner::submit() {
     fi
     sleep 0.2 2>/dev/null || sleep 1
   done
-
-  # Determine timeout
-  local timeout_cmd=""
-  if [ -n "${CI_GATE_TIMEOUT:-}" ] && [ "${CI_GATE_TIMEOUT}" != "0" ]; then
-    if command -v timeout >/dev/null 2>&1; then
-      timeout_cmd="timeout ${CI_GATE_TIMEOUT}"
-    elif command -v gtimeout >/dev/null 2>&1; then
-      timeout_cmd="gtimeout ${CI_GATE_TIMEOUT}"
-    fi
-  fi
 
   # Launch background job
   printf '%s' "$(ci::runner::_epoch)" > "$start_file"
