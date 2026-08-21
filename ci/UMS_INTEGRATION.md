@@ -23,13 +23,23 @@ Edited in [`ci/config/checks.yml`](config/checks.yml):
 | **tests-python** | enabled | `pytest` via the project's pyproject `[tool.pytest.ini_options]` |
 | **sast** / **secrets** / **supply-chain** / **license** | enabled | bandit / gitleaks / pip-audit / license-checker |
 | **commit-hygiene** / **branch-protection** | enabled | conventional commits, no direct main pushes |
-| **lint-js / typecheck-js / format-js / tests-js** | **disabled** | No JS in v1.0 (frontend lands in Phase 5) |
+| **typecheck-js** | enabled | `tsc --noEmit` in `frontend/`, via the `node` lane |
+| **tests-js** | enabled | `vitest run` in `frontend/`, via the `node` lane |
+| **lint-js / format-js** | **disabled** | `frontend/` has no eslint or prettier config, and no `lint` / `format:check` script |
 | **lint-go / typecheck-go / format-go / tests-go** | **disabled** | No Go in the project |
 | **lint-rust / typecheck-rust / format-rust / tests-rust** | **disabled** | No Rust in the project |
 | **container** | **disabled** | Re-enable once Dockerfile lint (`hadolint`) is wanted in the gate |
 | **iac** | **disabled** | Re-enable once Helm/Terraform land in Phase S2 |
 
 Re-enable any of the disabled lanes by flipping `enabled: true` in `ci/config/checks.yml`.
+
+These toggles are coarser than one row per check suggests. `ci/preflight.sh`
+schedules the coarse `node` and `python` lanes, and skips a lane only when
+*every* related check is disabled — so `tests-js: true` alone is enough to make
+the whole `node` lane run, and `lint-js: false` does not stop it. Within the
+lane, `ci/checks/node.sh` runs whichever of `format:check`, `lint`, `typecheck`,
+`test`, `test:unit` and `build` the workspace's `package.json` defines, and
+prints `Skipping missing script:` for the rest.
 
 ## How tools resolve
 
@@ -45,10 +55,43 @@ uv sync --extra test --extra dev --extra lint   # provision the venv
 make install-hooks                              # wire git hooks
 
 # Before each push:
-make verify                                     # full gate, < 2 min on this codebase
+make verify                                     # full gate — runtime depends on what you changed
 ```
 
 Pre-push hook runs `make ci-full` automatically. If anything fails, the push is refused before it leaves your machine.
+
+### How long `make verify` takes
+
+Under two minutes for an ordinary Python or frontend changeset, and that is what
+it was measured at.
+
+It is much longer when your changeset includes a shell script, because that
+schedules `tests-shell` — the bats suites under `ci/tests/`, which drive
+preflight, the node lane and the layout guard against synthetic trees and spawn
+a package manager or init a repository in many of them. That is roughly 540
+cases and around half an hour; `ci/config/checks.yml` gives the lane a
+3600-second timeout for exactly that reason, because at the 20-minute gate
+default it was being killed and reported as broken infrastructure. A run that
+has been sitting in `tests-shell` for twenty minutes is not hung.
+
+The gate's own scripts are all shell, so "I edited something under `ci/`" and
+"this run will take half an hour" are the same statement. `make ci-quick` is the
+fast pre-commit pass; the long lane belongs to the pre-push gate.
+
+That lane needs **bats**, and it is the one prerequisite `uv sync` does not
+install. It is a blocker on purpose — a lane that reports PASS without running
+those suites leaves the layout, node and changeset gates unguarded — so on a
+machine without bats every push touching `ci/` is refused with `FAIL_INFRA`
+rather than passing quietly. Provision a pinned copy into the worktree:
+
+```
+make bats-install
+```
+
+It installs under `.ci-gate/bats/` (already git-ignored): no sudo, nothing
+outside the repository, and `rm -rf .ci-gate/bats` undoes it. A `bats` already on
+`PATH` — from a platform package, or `npm i -g bats` — is used in preference.
+`ci/install-hooks.sh` says the same thing at the moment it makes the hook live.
 
 ## When the gate fails
 

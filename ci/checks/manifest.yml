@@ -41,6 +41,19 @@ checks:
     pre_commit: false
     timeout_sec: 30
 
+  # languages: [] on purpose. A test file in the wrong place is silently
+  # skipped by vitest's include rather than failing, so this must not be
+  # gated behind language detection. The scan is a filesystem walk of two
+  # directories and costs milliseconds.
+  - id: test-layout
+    script: ci/checks/test-layout.sh
+    description: "Frontend test files live under frontend/tests/ and match the declared vitest include"
+    languages: []
+    severity: blocker
+    phase: hygiene
+    pre_commit: true
+    timeout_sec: 30
+
   - id: secrets
     script: ci/checks/secrets.sh
     description: "Secret/credential scanning with gitleaks + regex fallback"
@@ -151,13 +164,24 @@ checks:
     timeout_sec: 30
 
   - id: typecheck-js
-    script: ci/checks/typecheck.sh
+    # The wrapper, not typecheck.sh. run_phase executes a script path directly,
+    # so a lane cannot carry CI_GATE_CHECK_ID of its own; typecheck-js.sh is
+    # that variable. Naming the dispatcher here described a lane that would run
+    # the Python, Go and Rust typecheckers too.
+    script: ci/checks/typecheck-js.sh
     description: "TypeScript type checking with tsc"
     languages: [javascript]
     requires_tool: tsc
     severity: blocker
     phase: typecheck
-    pre_commit: false
+    # run_common_checks schedules this lane, and run_common_checks is the
+    # pre-commit path -- so `false` published the opposite of what quick mode
+    # does. This field is read by ci/scripts/gen-checks-doc.sh to generate
+    # docs/CHECKS.md, which is the repository's answer to "what runs before a
+    # commit", so a stale value here is a wrong answer everywhere that is read.
+    # `tests-js` below stays false deliberately: it runs through the node lane,
+    # not as a standalone pre-commit blocker.
+    pre_commit: true
     timeout_sec: 120
 
   - id: typecheck-python

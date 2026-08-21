@@ -298,7 +298,23 @@ for i in "${!ENTRY_IDS[@]}"; do
   # must_not_increase=true so ratchet comparisons remain deterministic.
   while IFS= read -r signature; do
     [ -z "$signature" ] && continue
-    count="$(printf '%s\n' "$command_output" | grep -F -o -- "$signature" | wc -l | tr -d '[:space:]')"
+    # `|| true` on the grep, because a signature that is absent is the answer
+    # this loop exists to compute and not an error.
+    #
+    # This file sets `set -Eeuo pipefail` at line 2 and knows it -- the debt
+    # command's own status is taken with set +e a few lines up, and both ruff
+    # greps below carry `|| true`. This one did not: with pipefail on, a
+    # signature that matches nothing makes grep exit 1, the pipeline exit 1, the
+    # assignment fail and errexit end the lane on the spot. `count="${count:-0}"`
+    # on the next line never ran.
+    #
+    # So the lane died the moment a registered debt entry stopped matching --
+    # which is what fixing the debt looks like -- and the branch below that
+    # exists to say "debt may be reduced or changed" was unreachable. Exit 1 is
+    # outside {0,10,20,30}, so preflight recorded it through its unrecognised
+    # arm as FAIL_INFRA, and the answer the contract asks for is
+    # PASS_WITH_KNOWN_DEBT or FAIL_NEW_ISSUE.
+    count="$(printf '%s\n' "$command_output" | { grep -F -o -- "$signature" || true; } | wc -l | tr -d '[:space:]')"
     count="${count:-0}"
     echo "Signature '$signature' count=$count" | tee -a "$DEBT_LOG"
     entry_total_count=$((entry_total_count + count))
