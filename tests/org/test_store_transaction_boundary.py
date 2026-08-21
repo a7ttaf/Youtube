@@ -6,14 +6,17 @@ in-memory adapters, independent of the import: own writes are undone on raise,
 a FOREIGN write interleaved mid-boundary survives (a committed SQL row
 survives our rollback, and the in-memory idiom for "another transaction" is a
 direct dict mutation), success keeps everything, and the boundary refuses to
-nest. The SQL adapters delegate to the request's session transaction, whose
-end-to-end proof lives in tests/api/test_channels_import_postgres.py.
+nest. The SQL adapters open a SAVEPOINT on the request's session transaction —
+their direct-caller pin lives in tests/org/test_sql_channel_registry.py and the
+end-to-end request-path proof in tests/api/test_channels_import_postgres.py.
 """
 
 import dataclasses
+import threading
 
 import pytest
 
+from ums_smart_revenue.auth.audit_service import AuditRecord, InMemoryAuditSink
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistry
 from ums_smart_revenue.org.channel_registry import ChannelRegistry, ChannelRegistryEntry
 
@@ -190,3 +193,79 @@ def test_groups_boundary_does_not_nest() -> None:
         groups.transaction(),
     ):
         pass
+
+
+def test_registry_boundary_is_thread_local() -> None:
+    """Another thread is a FOREIGN transaction to this boundary (round 2).
+
+    The no-database tier serves the in-memory registry as a long-lived
+    singleton, so two requests can run through it on different threads
+    (PR #196, codex P2). Three properties in one staging: the worker's own
+    boundary is NOT refused as "nested" by ours, its committed write is NOT
+    captured into our journal, and our rollback does NOT revert it — while
+    our own write still undoes.
+    """
+    registry = ChannelRegistry([])
+    worker_errors: list[BaseException] = []
+
+    def worker() -> None:
+        try:
+            with registry.transaction():
+                registry.create_channel(
+                    youtube_channel_id=SECOND_CHANNEL_ID,
+                    channel_name="Other Thread's Channel",
+                    primary_company_id=None,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                )
+        except BaseException as exc:  # noqa: BLE001 — the test must SEE any failure
+            worker_errors.append(exc)
+
+    with pytest.raises(_BoomError), registry.transaction():
+        registry.create_channel(
+            youtube_channel_id=CHANNEL_ID,
+            channel_name="This Thread's Channel",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+        raise _BoomError()
+
+    assert worker_errors == []
+    assert registry.get_channel(CHANNEL_ID) is None
+    survivor = registry.get_channel(SECOND_CHANNEL_ID)
+    assert survivor is not None and survivor.channel_name == "Other Thread's Channel"
+
+
+def _audit_record(event_type: str) -> AuditRecord:
+    """A minimal record; only identity matters to the boundary tests."""
+    return AuditRecord(
+        user_id="user-1",
+        event_type=event_type,
+        entity_type=None,
+        entity_id=None,
+        scope_type=None,
+        scope_id=None,
+        request_id=None,
+        reason=None,
+        details={},
+        sensitive=False,
+        permission=None,
+    )
+
+
+def test_in_memory_sink_boundary_truncates_only_its_own_appends() -> None:
+    """The sink's transaction removes exactly the records appended inside it."""
+    sink = InMemoryAuditSink()
+    before = _audit_record("BEFORE_BOUNDARY")
+    sink.append(before)
+
+    with pytest.raises(_BoomError), sink.transaction():
+        sink.append(_audit_record("INSIDE_BOUNDARY"))
+        sink.append(_audit_record("ALSO_INSIDE"))
+        raise _BoomError()
+
+    assert sink.records == [before]

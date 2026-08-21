@@ -60,22 +60,65 @@ class SqlAlchemyChannelRegistry:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
         self._guard_held = False
+        # A plain bool, not thread-local like the in-memory store's journal:
+        # this registry is request-scoped, never a shared singleton.
+        self._txn_active = False
 
+    # ========================================================================
+    # Purpose: SQL implementation of the store's transaction boundary — a
+    #   real SAVEPOINT on the request session, so the protocol's promise
+    #   ("on exception every write inside the boundary is undone") holds even
+    #   for a direct caller that CATCHES the exception and later commits the
+    #   session. The request path is unchanged in outcome: the savepoint
+    #   rolls back first, then the route's converted HTTPException reaches
+    #   the dependency, whose rollback was already the end state.
+    # Database/ORM: SAVEPOINT via Session.begin_nested() — no table, column,
+    #   or query-shape change; begin/release/rollback-to only. Commit of the
+    #   OUTER transaction stays with the request dependency, never here.
+    # Standards: Locks are unaffected by design: row locks and the advisory
+    #   close guard (pg_advisory_xact_lock) are TRANSACTION-scoped, so a
+    #   savepoint rollback releases neither — the _guard_held memo stays
+    #   valid, and the guard-before-row-lock total order is untouched. The
+    #   platform-lane audit elevation is orthogonal: elevation changes the
+    #   ROLE a statement runs under, never which transaction (or savepoint)
+    #   it belongs to. Exceptions always propagate. SQLite emits the same
+    #   SAVEPOINT statements, so both SQL tiers behave identically.
+    # Blast Radius: Which writes survive a caught apply failure for direct
+    #   service/bootstrap callers — previously the accepted prefix could be
+    #   committed by such a caller (PR #196 round 2, codex). Request-path
+    #   behaviour and end state unchanged.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+    #     protocol contract this implements.
+    #   - File: backend/ums_smart_revenue/api/dependencies.py ->
+    #     authenticated_session_dependency, the outer transaction's owner.
+    #   - File: backend/ums_smart_revenue/finance/month_close_locks.py ->
+    #     the transaction-scoped advisory guard a savepoint rollback keeps.
+    # ========================================================================
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """Delegate atomicity to the request's enclosing Session transaction.
+        """Wrap the writes in a SAVEPOINT; roll back to it on exception.
 
-        Deliberately opens NOTHING and commits NOTHING: this registry is
-        request-scoped, the request dependency owns the one transaction
-        (commit on success, rollback on exception), and every row lock and the
-        advisory close guard are already scoped to it. A raise propagates to
-        that boundary, whose rollback is the real undo — so entering here
-        asserts what is already true, which is exactly the protocol's SQL
-        mapping (review #184, C2). No SAVEPOINT either: partial undo inside a
-        request is a different contract, and nesting one under the platform-
-        lane audit elevation would change semantics this module must not own.
+        ``begin_nested()`` releases the savepoint on clean exit and rolls
+        back to it on exception before re-raising — undoing exactly the
+        writes made inside the boundary while the outer request transaction,
+        its locks, and any earlier writes stand. SAVEPOINTs would stack, but
+        the protocol says one enter per logical operation, so same-store
+        nesting is refused here exactly as the in-memory adapter refuses it —
+        the two tiers must not drift on the contract (PR #196 round 2, qodo).
+
+        Raises:
+            RuntimeError: when entered while this store already holds an
+                open boundary.
         """
-        yield
+        if self._txn_active:
+            raise RuntimeError("SqlAlchemyChannelRegistry.transaction does not nest")
+        self._txn_active = True
+        try:
+            with self._session.begin_nested():
+                yield
+        finally:
+            self._txn_active = False
 
     # ========================================================================
     # Purpose: Take the tenant-wide REVENUE_REQUIREMENT_GUARD_MONTH advisory

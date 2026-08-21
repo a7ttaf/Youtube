@@ -16,6 +16,7 @@
 # ============================================================================
 """Channel registry domain contract, errors, and in-memory implementation."""
 
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
@@ -198,12 +199,13 @@ class ChannelRegistryStore(Protocol):
     # Purpose: The store's ATOMICITY contract, made explicit: a caller wraps
     #   one logical multi-write operation (the bulk import's two passes) so a
     #   raise anywhere inside undoes every write THIS store performed for it.
-    # Database/ORM: The SQL adapter delegates to the REQUEST's enclosing
-    #   Session transaction — entering opens nothing and exiting commits
-    #   nothing; a raise propagates to the request boundary, whose rollback is
-    #   the real undo. The in-memory adapter has no such machinery, which is
-    #   the reason this method exists: it journals its own writes and replays
-    #   them backwards on raise (review #184, C2).
+    # Database/ORM: The SQL adapter opens a SAVEPOINT on the REQUEST's
+    #   Session transaction — rolled back to on exception, released on
+    #   success, never a commit — so the promise below holds even for a
+    #   direct caller that catches the exception and later commits the
+    #   session. The in-memory adapter has no database, which is the reason
+    #   this method exists at the protocol: it journals its own writes and
+    #   replays them backwards on raise (review #184, C2).
     # Standards: The undo scope is THIS STORE'S OWN WRITES, not "the world at
     #   enter" — SQL rollback cannot and must not revert another transaction's
     #   committed rows, and the import's race tests assert exactly that (a
@@ -240,8 +242,14 @@ class ChannelRegistryStore(Protocol):
 class ChannelRegistry:
     def __init__(self, channels: list[ChannelRegistryEntry] | None = None):
         self._channels: dict[str, ChannelRegistryEntry] = {}
-        # Active only inside transaction(): (key, pre-image-or-None) per write.
-        self._txn_undo: list[tuple[str, ChannelRegistryEntry | None]] | None = None
+        # Boundary state is PER-THREAD (threading.local): the no-database tier
+        # serves this store as a long-lived singleton, so a threaded server
+        # can run two requests through it at once — one request's journal
+        # must neither capture nor revert another thread's writes, and a
+        # second thread's own boundary must not be refused as "nested"
+        # (PR #196 round 2, codex). The `undo` attribute holds the active
+        # journal — (key, pre-image-or-None) per write — or None.
+        self._txn = threading.local()
         for channel in channels or []:
             if channel.youtube_channel_id in self._channels:
                 raise ChannelRegistryConflictError(
@@ -249,42 +257,70 @@ class ChannelRegistry:
                 )
             self._channels[channel.youtube_channel_id] = channel
 
+    # ========================================================================
+    # Purpose: The in-memory implementation of the store's transaction
+    #   boundary — journal this store's own writes on this thread, undo
+    #   exactly those on raise.
+    # Database/ORM: None (in-memory dict store); the SQL implementation in
+    #   sql_channel_registry.py maps the same protocol method to a SAVEPOINT
+    #   on the request session.
+    # Standards: An UNDO JOURNAL, deliberately not a whole-dict snapshot —
+    #   the two differ on exactly the case the import's race tests pin: a
+    #   concurrent writer's change landing mid-apply. SQL rollback discards
+    #   only the failing transaction's writes, so parity demands undoing only
+    #   what THIS store's write methods performed inside the boundary.
+    #   Journal state is PER-THREAD (threading.local), because this store is
+    #   a long-lived singleton on the no-database tier: another thread's
+    #   writes must be neither captured nor reverted, and its own boundary
+    #   must not be refused as nested. Fails loud on same-thread nesting.
+    # Blast Radius: Whether a refused import leaves partial channel writes on
+    #   direct/test/bootstrap callers. No finance math, no audit of its own.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     apply_channel_import, the boundary's consumer.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+    #     SAVEPOINT implementation of the same protocol method.
+    # ========================================================================
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """Journal this store's own writes; undo exactly those on raise.
+        """Journal this store's own writes on this thread; undo them on raise.
 
-        An UNDO JOURNAL, deliberately not a whole-dict snapshot, because the
-        two differ on exactly the case the import's race tests pin: a
-        concurrent writer's change landing mid-apply. SQL rollback discards
-        only the failing transaction's writes — the other writer committed and
-        its rows survive — so parity demands undoing only what THIS store's
-        write methods performed inside the boundary. Each write method records
-        its key's pre-image just before mutating; on raise the entries replay
-        in reverse (a key's oldest pre-image wins), so the store ends as if
-        this operation never wrote while everything else that happened to the
-        dict stands. Test-staged "concurrent writers" mutate ``_channels``
-        directly for this reason — a foreign transaction's committed write is
-        not this store's write, and the journal must not see it.
+        Each write method records its key's pre-image just before mutating;
+        on raise the entries replay in reverse (a key's oldest pre-image
+        wins), so the store ends as if this operation never wrote while
+        everything else that happened to the dict stands. Test-staged
+        "concurrent writers" mutate ``_channels`` directly for this reason —
+        a foreign transaction's committed write is not this store's write,
+        and the journal must not see it.
+
+        Raises:
+            RuntimeError: when entered while this THREAD already holds an
+                open boundary — one enter per logical operation; nesting is
+                a different contract.
         """
-        if self._txn_undo is not None:
+        if getattr(self._txn, "undo", None) is not None:
             raise RuntimeError("ChannelRegistry.transaction does not nest")
-        self._txn_undo = []
+        undo: list[tuple[str, ChannelRegistryEntry | None]] = []
+        self._txn.undo = undo
         try:
             yield
         except BaseException:
-            for key, previous in reversed(self._txn_undo):
+            for key, previous in reversed(undo):
                 if previous is None:
                     self._channels.pop(key, None)
                 else:
                     self._channels[key] = previous
             raise
         finally:
-            self._txn_undo = None
+            self._txn.undo = None
 
     def _journal(self, youtube_channel_id: str) -> None:
         """Record a key's pre-image before mutating it; no-op outside a boundary."""
-        if self._txn_undo is not None:
-            self._txn_undo.append((youtube_channel_id, self._channels.get(youtube_channel_id)))
+        undo: list[tuple[str, ChannelRegistryEntry | None]] | None = getattr(
+            self._txn, "undo", None
+        )
+        if undo is not None:
+            undo.append((youtube_channel_id, self._channels.get(youtube_channel_id)))
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
         return sorted(

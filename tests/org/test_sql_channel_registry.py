@@ -1187,3 +1187,62 @@ def test_update_mapping_no_op_skips_locked_month_query():
     )
 
     assert updated.primary_company_id == str(COMPANY_TV_ID)
+
+
+def test_transaction_savepoint_protects_a_direct_caller_that_catches():
+    """The boundary's promise must not depend on the request wrapper (PR #196).
+
+    The FastAPI dependency rolls back propagated exceptions, but the protocol
+    and the public apply function never required that wrapper: a direct
+    service/bootstrap caller that CATCHES an apply failure and later commits
+    the same session would have committed the writes flushed before the
+    exception. The SAVEPOINT makes the store's all-or-nothing promise hold
+    unconditionally: the boundary's writes are rolled back to the savepoint,
+    while pre-boundary work — and the caller's right to commit it — stands.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+    registry.create_channel(
+        youtube_channel_id="channel-savepoint",
+        channel_name="Before Boundary",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+
+    with pytest.raises(RuntimeError, match="staged failure"), registry.transaction():
+        registry.update_inventory(
+            youtube_channel_id="channel-savepoint",
+            channel_name="Inside Boundary",
+            cms_status="INSIDE_CMS",
+            content_owner_id=None,
+            revenue_required=True,
+        )
+        raise RuntimeError("staged failure")
+
+    # The catching caller commits anyway — exactly the hazard scenario.
+    session.commit()
+
+    stored = registry.get_channel("channel-savepoint")
+    assert stored is not None
+    assert stored.channel_name == "Before Boundary"
+
+
+def test_transaction_refuses_same_store_nesting():
+    """The SQL tier honours the one-enter contract exactly as the in-memory tier.
+
+    SAVEPOINTs would happily stack, so without an explicit guard the two
+    adapters drift: in-memory refuses a nested boundary, SQL silently
+    accepts one (PR #196 round 2, qodo).
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with (
+        registry.transaction(),
+        pytest.raises(RuntimeError, match="does not nest"),
+        registry.transaction(),
+    ):
+        pass

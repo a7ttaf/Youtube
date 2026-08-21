@@ -73,17 +73,45 @@ class SqlAlchemyChannelGroupRegistry:
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
+        # Request-scoped store, plain bool — see SqlAlchemyChannelRegistry.
+        self._txn_active = False
 
+    # ========================================================================
+    # Purpose: SQL implementation of the group store's transaction boundary —
+    #   a SAVEPOINT on the request session, mirroring
+    #   SqlAlchemyChannelRegistry.transaction, whose block carries the full
+    #   rationale (direct-caller protection, lock and lane orthogonality,
+    #   unchanged request-path end state). The two must not drift.
+    # Database/ORM: SAVEPOINT via Session.begin_nested(); no schema or query
+    #   change. The import enters the registry's boundary first, so this one
+    #   nests as an inner savepoint on the same session — SAVEPOINT stacks
+    #   are exactly what the mechanism is for.
+    # Standards: Never commits; exceptions propagate; group row locks are
+    #   transaction-scoped and survive a savepoint rollback.
+    # Blast Radius: Which group writes survive a caught apply failure for
+    #   direct callers. Request-path end state unchanged.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+    #     mirrored implementation and full rationale.
+    #   - File: backend/ums_smart_revenue/org/channel_groups.py -> the
+    #     protocol contract this implements.
+    # ========================================================================
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """Delegate atomicity to the request's enclosing Session transaction.
+        """Wrap the writes in a SAVEPOINT; roll back to it on exception.
 
-        Opens nothing, commits nothing, adds no SAVEPOINT — the full rationale
-        lives on ``SqlAlchemyChannelRegistry.transaction``, and both routes'
-        group writes share the registry's session, so the two delegations are
-        one and the same transaction (review #184, C2).
+        Raises:
+            RuntimeError: on same-store nesting, mirroring every other
+                adapter — one enter per logical operation.
         """
-        yield
+        if self._txn_active:
+            raise RuntimeError("SqlAlchemyChannelGroupRegistry.transaction does not nest")
+        self._txn_active = True
+        try:
+            with self._session.begin_nested():
+                yield
+        finally:
+            self._txn_active = False
 
     def list_groups(self) -> list[ChannelGroupEntry]:
         """Return active channel groups with their member channel ids.

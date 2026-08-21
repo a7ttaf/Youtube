@@ -26,6 +26,7 @@
 # ============================================================================
 """Channel-group domain contract, typed errors, and in-memory registry."""
 
+import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
@@ -285,19 +286,34 @@ class ChannelGroupRegistryStore(Protocol):
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
         pass
 
+    # ========================================================================
+    # Purpose: The group half of the import's atomicity boundary — same
+    #   contract as ChannelRegistryStore.transaction, whose block carries the
+    #   full rationale; the two must not drift, because the bulk import
+    #   enters BOTH around its two passes and a group-store boundary that
+    #   behaved differently would undo one half of a refused import and keep
+    #   the other (review #184, C2).
+    # Database/ORM: ChannelGroupORM + membership rows in the SQL adapter's
+    #   SAVEPOINT; a dict journal in the in-memory adapter.
+    # Standards: SQL maps to a SAVEPOINT on the request session and never
+    #   commits; the in-memory adapter journals its own writes per thread and
+    #   replays them backwards on raise, so a foreign write interleaved
+    #   mid-boundary survives. Exceptions always propagate.
+    # Blast Radius: Whether a refused import leaves partial group writes on
+    #   adapters without a database underneath. Production SQL end-state
+    #   unchanged.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+    #     registry protocol method carrying the full contract.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SAVEPOINT implementation.
+    # ========================================================================
     def transaction(self) -> AbstractContextManager[None]:
         """Return a context manager making the wrapped writes all-or-nothing.
 
-        The group half of the import's atomicity boundary — the full contract
-        (SQL delegates to the enclosing Session transaction and never commits;
-        adapters without one journal their own writes and replay them
-        backwards on raise, so a foreign write interleaved mid-boundary
-        survives; not nestable, never a savepoint, exceptions propagate) is
-        documented on
-        ``ChannelRegistryStore.transaction``, and the two must not drift: the
-        bulk import enters BOTH around its two passes, so a group-store
-        boundary that behaved differently would undo one half of a refused
-        import and keep the other (review #184, C2).
+        See ``ChannelRegistryStore.transaction`` for the full contract this
+        mirrors. In-memory implementations raise ``RuntimeError`` on
+        same-thread nesting.
         """
         ...
 
@@ -305,39 +321,62 @@ class ChannelGroupRegistryStore(Protocol):
 class ChannelGroupRegistry:
     def __init__(self, groups: list[ChannelGroupEntry] | None = None):
         self._groups = {group.id: group for group in groups or []}
-        # Active only inside transaction(): (key, pre-image-or-None) per write.
-        self._txn_undo: list[tuple[str, ChannelGroupEntry | None]] | None = None
+        # PER-THREAD boundary state, mirroring ChannelRegistry: this store is
+        # a long-lived singleton on the no-database tier, and one thread's
+        # journal must neither capture nor revert another's writes
+        # (PR #196 round 2, codex). `undo` holds the active journal or None.
+        self._txn = threading.local()
 
+    # ========================================================================
+    # Purpose: In-memory implementation of the group store's transaction
+    #   boundary — journal this store's own writes on this thread, undo
+    #   exactly those on raise. Mirror of ChannelRegistry.transaction, whose
+    #   block carries the full journal-vs-snapshot rationale; the two must
+    #   not drift.
+    # Database/ORM: None (in-memory dict); sql_channel_groups.py maps the
+    #   same protocol method to a SAVEPOINT.
+    # Standards: Undo journal per thread; a foreign write staged by direct
+    #   dict mutation survives, as a committed SQL row survives rollback.
+    #   Fails loud on same-thread nesting.
+    # Blast Radius: Whether a refused import leaves partial group writes on
+    #   direct/test/bootstrap callers.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+    #     mirrored implementation and full rationale.
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     apply_channel_import, the boundary's consumer.
+    # ========================================================================
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """Journal this store's own writes; undo exactly those on raise.
+        """Journal this store's own writes on this thread; undo them on raise.
 
-        Mirror of ``ChannelRegistry.transaction``, and the same deliberate
-        choice of an undo journal over a dict snapshot: only THIS store's
-        write-method mutations are undone, so a group a concurrent writer
-        minted mid-apply survives the refusal exactly as its committed row
-        would survive a SQL rollback. The full rationale lives on the
-        registry's method; the two must not drift.
+        Raises:
+            RuntimeError: when entered while this THREAD already holds an
+                open boundary.
         """
-        if self._txn_undo is not None:
+        if getattr(self._txn, "undo", None) is not None:
             raise RuntimeError("ChannelGroupRegistry.transaction does not nest")
-        self._txn_undo = []
+        undo: list[tuple[str, ChannelGroupEntry | None]] = []
+        self._txn.undo = undo
         try:
             yield
         except BaseException:
-            for key, previous in reversed(self._txn_undo):
+            for key, previous in reversed(undo):
                 if previous is None:
                     self._groups.pop(key, None)
                 else:
                     self._groups[key] = previous
             raise
         finally:
-            self._txn_undo = None
+            self._txn.undo = None
 
     def _journal(self, group_id: str) -> None:
         """Record a key's pre-image before mutating it; no-op outside a boundary."""
-        if self._txn_undo is not None:
-            self._txn_undo.append((group_id, self._groups.get(group_id)))
+        undo: list[tuple[str, ChannelGroupEntry | None]] | None = getattr(
+            self._txn, "undo", None
+        )
+        if undo is not None:
+            undo.append((group_id, self._groups.get(group_id)))
 
     def list_groups(self) -> list[ChannelGroupEntry]:
         # In-memory registry: every member is treated as active. The full

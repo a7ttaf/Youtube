@@ -6,6 +6,7 @@ registry write ACTUALLY replaced, and a group archived after planning fails
 the apply closed instead of silently mutating a retired group.
 """
 
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 
 import pytest
@@ -412,6 +413,11 @@ class _UnavailableSink:
         """Refuse every record; static because the outage needs no state."""
         raise RuntimeError("sink unavailable")
 
+    @staticmethod
+    def transaction() -> AbstractContextManager[None]:
+        """No record ever lands, so there is nothing for a boundary to undo."""
+        return nullcontext()
+
 
 def test_a_sink_failure_during_flush_undoes_the_stores() -> None:
     """The audit flush sits INSIDE the boundary, and this is why (C2).
@@ -435,6 +441,61 @@ def test_a_sink_failure_during_flush_undoes_the_stores() -> None:
         _apply(_plan(entry), registry, ChannelGroupRegistry(), _UnavailableSink())
 
     assert registry.get_channel(CHANNEL_ID) is None
+
+
+class _FailsMidFlushSink(InMemoryAuditSink):
+    """Real in-memory sink that accepts two records, then refuses the third."""
+
+    def append(self, record: AuditRecord) -> None:
+        if len(self.records) >= 2:
+            raise RuntimeError("sink full")
+        super().append(record)
+
+
+def test_a_mid_flush_failure_leaves_no_partial_audit_trail() -> None:
+    """A raise on the Nth append takes the accepted prefix with it (round 2).
+
+    Sequential appends alone are not atomic: without the sink's own boundary
+    around the flush, records 1..N-1 stayed in the real sink while the stores
+    rolled back — audit rows describing an import that did not happen, the
+    exact lie the buffer exists to prevent (PR #196, codex P2 + qodo High,
+    found independently). Two CREATE rows produce three records (two
+    CHANNEL_CREATED, one CHANNEL_IMPORTED); the sink accepts the first two
+    and refuses the third.
+    """
+    registry = ChannelRegistry([])
+    sink = _FailsMidFlushSink()
+    first = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=SECOND_CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Beta News",
+        group_id=None,
+        revenue_required=True,
+    )
+    second = ChannelImportPlanEntry(
+        row_number=2,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id=None,
+        revenue_required=True,
+    )
+    counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
+    counts[ChannelImportOutcome.CREATE.value] = 2
+
+    with pytest.raises(RuntimeError, match="sink full"):
+        _apply(
+            ChannelImportPlan(entries=(first, second), counts=counts),
+            registry,
+            ChannelGroupRegistry(),
+            sink,
+        )
+
+    # The two ACCEPTED records are gone too, and every store write with them.
+    assert sink.records == []
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert registry.get_channel(SECOND_CHANNEL_ID) is None
 
 
 def test_flushed_audit_trail_keeps_event_order_and_ends_with_the_summary() -> None:

@@ -1,4 +1,5 @@
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -29,6 +30,40 @@ class AuditRecord:
 class AuditSink(Protocol):
     def append(self, record: AuditRecord) -> None: ...
 
+    # ========================================================================
+    # Purpose: The sink's ATOMICITY contract for a BATCH of appends — a caller
+    #   wraps a multi-record delivery so a raise mid-batch leaves the sink
+    #   without the accepted prefix, never with audit rows describing an
+    #   operation that then failed.
+    # Database/ORM: The SQL sinks delegate to the caller's enclosing Session
+    #   transaction (their appends already live inside it, and the bulk
+    #   import's flush additionally sits inside the store adapters'
+    #   SAVEPOINTs), so entering opens nothing and exiting commits nothing.
+    #   The in-memory sink is the reason the method exists: it records its
+    #   length on enter and truncates back on raise.
+    # Standards: Mirrors the store protocols' transaction() (review #184, C2):
+    #   never a commit, exceptions always propagate, undo of state not
+    #   outcomes. Unlike the stores it NESTS harmlessly — length marks
+    #   compose — so no nesting guard is declared.
+    # Blast Radius: Whether a failed bulk import can leave a PARTIAL audit
+    #   trail in a sink without a database transaction (direct/test/bootstrap
+    #   callers). SQL behaviour unchanged by design.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     wraps the buffered flush in this boundary.
+    #   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> the
+    #     delegating SQL implementations.
+    # ========================================================================
+    def transaction(self) -> AbstractContextManager[None]:
+        """Return a context manager making the wrapped appends all-or-nothing.
+
+        On a clean exit the appended records stand (durability still governed
+        by whoever owns the session/request lifecycle). On an exception every
+        record appended inside the boundary is removed from this sink, and
+        the exception propagates unchanged.
+        """
+        ...
+
 
 @dataclass
 class InMemoryAuditSink:
@@ -36,6 +71,25 @@ class InMemoryAuditSink:
 
     def append(self, record: AuditRecord) -> None:
         self.records.append(record)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Mark the length on enter; truncate back on raise.
+
+        ``records`` is append-only through this class, so truncating to the
+        enter-length removes exactly the records appended inside the boundary.
+        Positional, not ownership-tracked like the stores' journals: no test
+        stages a FOREIGN append into a sink mid-boundary (the in-memory sink
+        is single-writer by construction), so the simpler undo is the honest
+        one — documented here so a future concurrent-append test knows this
+        is the assumption it would be breaking.
+        """
+        marked = len(self.records)
+        try:
+            yield
+        except BaseException:
+            del self.records[marked:]
+            raise
 
 
 def _normalize_audit_reason(

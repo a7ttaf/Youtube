@@ -8,9 +8,9 @@
 #   ChannelGroupRegistryStore, audit rows via the supplied AuditSink.
 # Standards: All-or-nothing is enforced HERE, not merely relied upon: the
 #   apply enters both stores' explicit transaction boundary around its two
-#   passes (SQL adapters delegate to the request's one transaction; in-memory
-#   adapters journal their own writes and replay them backwards on raise —
-#   review #184, C2) and buffers every audit
+#   passes (SQL adapters open a SAVEPOINT on the request's one transaction;
+#   in-memory adapters journal their own writes and replay them backwards on
+#   raise — review #184, C2) and buffers every audit
 #   record until the passes succeed, so no tier can end with audit rows
 #   describing writes that were undone. The import route additionally binds
 #   the audit sink to the request's tenant session (platform-lane elevated per
@@ -32,7 +32,8 @@
 # ============================================================================
 """Execute a bulk channel import plan with registry writes and audit trail."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, record_audit_event
@@ -78,13 +79,15 @@ AUDIT_SOURCE_BULK_IMPORT = "bulk_import"
 # Standards: Records are BUILT at their original moments — record_audit_event
 #   constructs each AuditRecord (created_at included) before append — so
 #   buffering changes when records reach the sink, never their content or
-#   order. The flush happens INSIDE the stores' transaction boundary: a sink
-#   failure mid-flush must restore the in-memory stores exactly as a write
-#   failure would, and on SQL it aborts the same request transaction it
-#   always did. Without this buffer, restoring the stores on a group-pass
-#   failure would produce the WORSE state: registries rolled back while the
-#   in-memory sink keeps per-row events for the undone writes (review #184,
-#   C2).
+#   order. The flush happens INSIDE the stores' transaction boundary AND
+#   inside the sink's own (`audit_sink.transaction()`): a failure on the Nth
+#   append must not leave records 1..N-1 in the real sink while the stores
+#   roll back — the accepted prefix is removed by the sink's boundary
+#   (truncate-restore in memory; the enclosing transaction on SQL, where the
+#   flush also sits inside the store adapters' savepoints). Without the
+#   buffer, restoring the stores on a group-pass failure would produce the
+#   WORSE state: registries rolled back while the in-memory sink keeps
+#   per-row events for the undone writes (review #184, C2).
 # Blast Radius: Audit truthfulness on failed imports for callers without a
 #   database transaction. On the SQL tier the visible behaviour is unchanged
 #   — the request transaction already discarded those rows on rollback.
@@ -103,8 +106,29 @@ class _BufferedAuditSink:
     def append(self, record: AuditRecord) -> None:
         self._pending.append(record)
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Truncate-restore over the buffer, mirroring InMemoryAuditSink.
+
+        Nothing appends through a boundary into the buffer today — the apply
+        holds exactly one and flushes it inside the REAL sink's boundary —
+        but a sink that satisfies AuditSink must be able to make a batch of
+        its own appends all-or-nothing, or it is not one.
+        """
+        marked = len(self._pending)
+        try:
+            yield
+        except BaseException:
+            del self._pending[marked:]
+            raise
+
     def flush_to(self, sink: AuditSink) -> None:
-        """Replay every buffered record, in order, into the real sink."""
+        """Replay every buffered record, in order, into the real sink.
+
+        The caller wraps this in ``sink.transaction()`` — sequential appends
+        alone are not atomic, and a raise on the Nth record must take the
+        accepted prefix with it (review #196 round 2, codex/qodo).
+        """
         for record in self._pending:
             sink.append(record)
         self._pending.clear()
@@ -364,8 +388,10 @@ def apply_channel_import(
     a drifted pre-state, a locked-month refusal, a group archived in the
     pass-1-to-pass-2 window, the final append itself — leaves every store as
     it was at entry and the real sink without a single record. On SQL the
-    boundary delegates to the request's own transaction (nothing new opens,
-    nothing commits here); the adapters it exists for are the in-memory ones,
+    boundary is a SAVEPOINT on the request's own transaction (nothing commits
+    here, and the request path's end state is unchanged — the savepoint
+    protects direct callers that catch); the in-memory adapters are the ones
+    that needed inventing:
     which journal their own writes and replay them backwards on raise — an
     undo of THIS operation's writes, never a whole-store snapshot, so a
     concurrent writer's interleaved change survives the refusal exactly as a
@@ -443,7 +469,10 @@ def apply_channel_import(
                 "counts": applied_counts,
             },
         )
-        buffered.flush_to(audit_sink)
+        # The sink's own boundary, so a raise on the Nth append removes the
+        # accepted prefix instead of stranding it while the stores roll back.
+        with audit_sink.transaction():
+            buffered.flush_to(audit_sink)
 
 
 # ============================================================================

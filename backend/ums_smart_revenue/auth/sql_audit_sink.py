@@ -16,6 +16,8 @@
 # ============================================================================
 """SQL audit sinks: platform-session default and same-transaction platform-lane."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -90,6 +92,29 @@ class SqlAlchemyAuditSink:
         self._session.rollback()
         self._session.expunge_all()
 
+    # ========================================================================
+    # Purpose: The AuditSink.transaction() boundary, delegated to the caller's
+    #   enclosing Session transaction — this sink's appends already live
+    #   inside it, so a raise reaching the session owner discards them there.
+    # Database/ORM: None of its own; opens nothing, commits nothing, adds no
+    #   SAVEPOINT. When the bulk import flushes through this sink the flush
+    #   additionally sits INSIDE the store adapters' savepoints, which is
+    #   what makes a mid-flush failure discard the accepted prefix even for a
+    #   caller that catches the exception (review #184, C2).
+    # Standards: Mirrors the SQL store adapters' delegation; exceptions
+    #   propagate untouched.
+    # Blast Radius: None — a documented no-op on this tier.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/audit_service.py -> the
+    #     protocol contract and the in-memory truncating implementation.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+    #     SAVEPOINT that actually contains the import's flush.
+    # ========================================================================
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Delegate batch atomicity to the enclosing Session transaction."""
+        yield
+
 
 # ============================================================================
 # Purpose: Audit sink that writes audit_logs through the CALLER'S tenant-lane
@@ -140,6 +165,18 @@ class PlatformLaneAuditSink:
     def rollback(self) -> None:
         """Rollback and detach pending objects after fail-closed audit errors."""
         self._inner.rollback()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Delegate batch atomicity to the caller's transaction, like the inner sink.
+
+        Same delegation as ``SqlAlchemyAuditSink.transaction`` (see its block):
+        the per-append platform-lane elevation is orthogonal — elevation
+        changes the ROLE a statement runs under, never which transaction it
+        belongs to, so the appended rows discard with the caller's rollback
+        exactly as before.
+        """
+        yield
 
 
 def _parse_uuid_or_none(value: str) -> UUID | None:

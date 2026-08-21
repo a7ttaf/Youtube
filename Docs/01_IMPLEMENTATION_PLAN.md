@@ -493,7 +493,16 @@ on real ingestion (Phase 2) and the inventory load workflow.
   and the audit flush in one boundary, with audit records buffered until the
   passes succeed so no tier can end with audit rows describing writes that
   were undone. Closes the review-#184 window where a group-pass failure left
-  pass-1 inventory writes installed on the non-transactional adapters.
+  pass-1 inventory writes installed on the non-transactional adapters. The
+  SQL adapters implement the boundary as a SAVEPOINT (`Session.begin_nested`)
+  so the promise also holds for a direct caller that catches the failure and
+  commits the session; row locks and the advisory close guard are
+  transaction-scoped and unaffected by a savepoint rollback.
+  `No migration/backfill required.` — no table, column, constraint, index, or
+  query-shape change anywhere in the diff (`backend/ums_smart_revenue/db/`
+  and `alembic/` untouched; verified by the PR's file list); the only new SQL
+  statements are SAVEPOINT begin/release/rollback-to emitted by SQLAlchemy on
+  the existing session.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to
   `GET /channels/outside-cms` + `GET /channels/issues` (PR #98,
