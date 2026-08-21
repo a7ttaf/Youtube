@@ -480,6 +480,19 @@ on real ingestion (Phase 2) and the inventory load workflow.
   the restated row inflated. No new endpoint and
   no migration; #159's unbound "the file wins" rule is untouched. The
   import/sync UI arc is complete.
+  **Display digest shipped 2026-08-22** (`feat/import-display-digest`,
+  PR #195 — #184's deferred C1 question, ruled "display digest" 2026-08-21):
+  every import plan response now carries `display_digest`, a SHA-256 over
+  canonical JSON of exactly the DISCLOSED reviewed set (counts, rows,
+  content_owner_id, cms_status — tenant-free so a client can recompute it
+  from what it renders; cross-tenant binding stays `plan_fingerprint`'s job),
+  the apply accepts an optional `expected_display_digest` checked
+  independently (409 + refreshed plan on mismatch), EITHER binding token now
+  opts into strict pre-state enforcement, and the SPA requires the field on
+  every accepted plan and echoes both tokens. Recipe + contract in Docs/12;
+  phase 2 (TypeScript-side recomputation) is a recorded follow-up. C2
+  (transaction boundary on the store protocol, ruled 2026-08-21) is the next
+  PR.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to

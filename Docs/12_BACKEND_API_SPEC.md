@@ -129,9 +129,13 @@ tenancy boundary, and the same input is why a client cannot check the token
 against the plan it rendered — a response showing one plan while carrying
 another plan's fingerprint would be echoed back unnoticed. `display_digest`
 covers exactly the DISCLOSED reviewed set and nothing more: SHA-256 over
-canonical JSON (keys sorted, separators `,`/`:` with no spaces, non-ASCII
-escaped as `\uXXXX` — Python `json.dumps(..., sort_keys=True)` defaults) of
-`{"content_owner_id", "cms_status", "counts", "rows"}`, UTF-8 encoded. A
+canonical JSON of `{"content_owner_id", "cms_status", "counts", "rows"}`,
+UTF-8 encoded. Canonical means exactly `json.dumps(payload, sort_keys=True,
+separators=(",", ":"), ensure_ascii=True)` — every knob named because one is
+NOT a Python default: keys sorted, `separators` explicitly tightened to
+`,`/`:` with no spaces (the default inserts a space after `:`), and non-ASCII
+escaped as `\uXXXX` (`ensure_ascii=True` is the default, restated so an
+implementer in another language does not skip it). A
 client SHOULD recompute it from the plan it displays rather than trusting the
 token in the body, and may send it back as the optional
 `expected_display_digest` form field on the apply; the route recomputes over
