@@ -25,7 +25,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
-import httpx
+# httpx2 is the successor package (starlette's own testclient prefers it via the
+# same alias); the module-local `httpx` name keeps every call site and test
+# double stable across the migration.
+import httpx2 as httpx
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
 

@@ -18,7 +18,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "google_cloud_secret_manager": "2.30.0",
         "google_cloud_storage": "3.13.1",
         "pytest": "9.1.1",
-        "httpx": "0.28.1",
+        "httpx2": "2.12.0",
         "pypdf": "6.16.1",
     },
     "datastores": {

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 
-import httpx
+import httpx2 as httpx
 import pytest  # noqa: F401 — kept for T24/T25 (pytest.raises / pytest.mark.parametrize)
 
 from ums_smart_revenue.connectors.google.errors import GoogleApiResponseError

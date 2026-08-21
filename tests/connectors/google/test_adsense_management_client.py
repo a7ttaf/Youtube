@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from ums_smart_revenue.connectors.google.adsense_management_client import (

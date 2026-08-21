@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 
-import httpx
+import httpx2 as httpx
 import pytest
 from google.auth.exceptions import GoogleAuthError, RefreshError
 

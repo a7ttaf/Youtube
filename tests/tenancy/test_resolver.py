@@ -13,7 +13,7 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
+from httpx2 import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError

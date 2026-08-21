@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from uuid import UUID, uuid4
 
-import httpx
+import httpx2 as httpx
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
