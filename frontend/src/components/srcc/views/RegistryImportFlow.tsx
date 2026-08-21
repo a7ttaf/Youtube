@@ -1691,10 +1691,12 @@ export const RegistryImportFlow = ({
    *   dispatch, so a second tab cannot slip a concurrent apply through the gap
    *   between reading the guard and recording the claim. A refusal writes
    *   nothing and sends nothing.
-   *   `expected_plan_fingerprint` binds the write to the plan on screen. It is
-   *   always sent, which also opts this caller into the backend's strict
-   *   pre-state guard — the flow is asking for "the diff I reviewed, or none
-   *   of it", not the unbound file-wins path.
+   *   `expected_plan_fingerprint` binds the write to the plan on screen, and
+   *   `expected_display_digest` — the recomputable disclosed-plan companion
+   *   (review #184, C1) — binds it again over exactly the fields the operator
+   *   saw. Both are always sent, which also opts this caller into the
+   *   backend's strict pre-state guard — the flow is asking for "the diff I
+   *   reviewed, or none of it", not the unbound file-wins path.
    *   Failure classification is fail-CLOSED: only an ESTABLISHED rejection
    *   retires the apply's record. Anything else — a lost response, a gateway
    *   5xx, an unreadable body — stays INDETERMINATE, because the write may
@@ -1759,6 +1761,11 @@ export const RegistryImportFlow = ({
         // from current state, so without it a row reviewed as CREATE could
         // commit as an UPDATE over a channel created since the preview.
         expectedPlanFingerprint: approved.plan.plan_fingerprint,
+        // The disclosed-plan half of the same binding (review #184, C1): the
+        // digest a client can recompute from the rendered plan, checked
+        // independently by the route. Both tokens come from the SAME approved
+        // plan object, so they can never bind to two different previews.
+        expectedDisplayDigest: approved.plan.display_digest,
       });
       // A 2xx settles THIS apply: the write committed and the flow can say so.
       settleThisApply();

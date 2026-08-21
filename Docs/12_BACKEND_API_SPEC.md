@@ -123,6 +123,25 @@ never previewed is not re-approving anything — but the SPA always sends it and
 re-binds to the refreshed plan on a 409. Sending it also OPTS IN to strict
 pre-state enforcement at the write boundary (see "the file wins" below): it is
 the request's declaration that only the reviewed diff may be applied.
+`display_digest` (added 2026-08-21, review #184 C1) is the fingerprint's
+RECOMPUTABLE companion. The fingerprint's tenant input is what makes it a
+tenancy boundary, and the same input is why a client cannot check the token
+against the plan it rendered — a response showing one plan while carrying
+another plan's fingerprint would be echoed back unnoticed. `display_digest`
+covers exactly the DISCLOSED reviewed set and nothing more: SHA-256 over
+canonical JSON (keys sorted, separators `,`/`:` with no spaces, non-ASCII
+escaped as `\uXXXX` — Python `json.dumps(..., sort_keys=True)` defaults) of
+`{"content_owner_id", "cms_status", "counts", "rows"}`, UTF-8 encoded. A
+client SHOULD recompute it from the plan it displays rather than trusting the
+token in the body, and may send it back as the optional
+`expected_display_digest` form field on the apply; the route recomputes over
+the CURRENT plan and returns **409** with the refreshed plan on mismatch,
+independently of the fingerprint check. Either token's presence opts in to
+strict pre-state enforcement; the SPA sends both, taken from the same approved
+plan object. `display_digest` is NOT a tenancy boundary — two tenants
+previewing identical rosters digest identically on purpose, and cross-tenant
+binding stays the fingerprint's job. `dry_run` is outside both digests for the
+same definitional reason.
 The fingerprint closes the preview→re-plan window; a second, narrower window
 runs from the re-plan to the group row lock, and `group_action` is re-checked
 under that lock. If this owner's CMS sync creates (or removes) the row's group
@@ -205,9 +224,9 @@ diff, so nothing is hidden from the trail — but the operator's screen showed
 `A -> B`. Drift landing BEFORE the apply re-plans is already refused by
 `plan_fingerprint` (409), so only that narrow window remains.
 **A plan-bound apply now closes that window too** (review #184): when the
-request carries `expected_plan_fingerprint`, the caller has declared "the
-diff I reviewed, or none of it", so a row whose row-locked pre-state no
-longer matches its reviewed `changes` returns **409**
+request carries `expected_plan_fingerprint` or `expected_display_digest`,
+the caller has declared "the diff I reviewed, or none of it", so a row whose
+row-locked pre-state no longer matches its reviewed `changes` returns **409**
 (`channel … changed during the import`) and rolls the whole import back.
 The two behaviours are not in conflict, because they answer to different
 callers: an apply that bound no plan is re-approving nothing, so the roster

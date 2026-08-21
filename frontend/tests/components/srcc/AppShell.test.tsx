@@ -768,6 +768,7 @@ const IMPORT_PLAN = {
   cms_status: "INSIDE_CMS",
   counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
   plan_fingerprint: "plan-appshell-v1",
+  display_digest: "digest-appshell-v1",
   rows: [
     {
       row_number: 1,

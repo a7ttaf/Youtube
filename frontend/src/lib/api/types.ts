@@ -1338,6 +1338,17 @@ export type ChannelImportResult = {
   // version of the same request — it is an UNBOUND apply under which the
   // roster overwrites concurrent drift ("the file wins").
   plan_fingerprint: string;
+  // The fingerprint's RECOMPUTABLE companion (review #184, C1): SHA-256 over
+  // canonical JSON (sorted keys, tight separators, ASCII-escaped) of exactly
+  // the DISCLOSED reviewed set — `counts`, `rows`, `content_owner_id`,
+  // `cms_status` — and nothing this type does not show. The tenant is
+  // deliberately outside it, which is what makes it recomputable from a
+  // rendered plan; cross-tenant binding stays `plan_fingerprint`'s job, and
+  // this flow sends BOTH tokens on the apply. Echoed back as
+  // `expected_display_digest`; either token's presence opts the apply into
+  // strict write-boundary pre-state enforcement, and a mismatch against the
+  // current plan is a 409 carrying the refreshed plan.
+  display_digest: string;
 };
 
 // ============================================================================

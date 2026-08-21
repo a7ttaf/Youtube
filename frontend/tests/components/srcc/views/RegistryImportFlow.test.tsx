@@ -77,6 +77,7 @@ const DRY_RUN_PLAN: ChannelImportResult = {
   // that is a render decision, not a payload one (review #184).
   counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
   plan_fingerprint: "plan-clean-v1",
+  display_digest: "digest-clean-v1",
   rows: [
     {
       row_number: 1,
@@ -124,6 +125,7 @@ const DRY_RUN_ERRORS: ChannelImportResult = {
   cms_status: "INSIDE_CMS",
   counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 1 },
   plan_fingerprint: "plan-errors-v1",
+  display_digest: "digest-errors-v1",
   rows: [
     DRY_RUN_PLAN.rows[0],
     {
@@ -592,6 +594,10 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     const refreshed: ChannelImportResult = {
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-refreshed-v2",
+      // A different plan digests differently on BOTH tokens; inheriting the
+      // clean plan's digest through the spread would be a shape the backend
+      // cannot produce.
+      display_digest: "digest-refreshed-v2",
       counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
       rows: [
         {
@@ -624,10 +630,13 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       expect(screen.getByText(/no longer does what you approved/i)).toBeInTheDocument(),
     );
 
-    // The first apply carried the plan the operator had on screen.
+    // The first apply carried the plan the operator had on screen — BOTH
+    // tokens, from the same approved plan object (review #184, C1).
     expect(importPosts()[1].get("expected_plan_fingerprint")).toBe("plan-clean-v1");
+    expect(importPosts()[1].get("expected_display_digest")).toBe("digest-clean-v1");
     // The dry run itself binds to nothing — there is no prior plan to honour.
     expect(importPosts()[0].get("expected_plan_fingerprint")).toBeNull();
+    expect(importPosts()[0].get("expected_display_digest")).toBeNull();
 
     // The refreshed plan REPLACED the stale one: the row now reads UPDATE and
     // its real diff is on screen, so the operator re-approves reality.
@@ -637,12 +646,13 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
 
-    // Re-approving now sends the REFRESHED fingerprint, not the stale one.
+    // Re-approving now sends the REFRESHED tokens, not the stale ones.
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
     await waitFor(() =>
       expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
     );
     expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-refreshed-v2");
+    expect(importPosts()[2].get("expected_display_digest")).toBe("digest-refreshed-v2");
   });
 
   it("refuses a refreshed plan describing a DIFFERENT owner", async () => {
@@ -655,6 +665,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       ...DRY_RUN_PLAN,
       content_owner_id: "OWNERzzz",
       plan_fingerprint: "plan-foreign-v2",
+      // The owner is a digest input, so a foreign-owner plan cannot share the
+      // clean plan's display digest either.
+      display_digest: "digest-foreign-v2",
     };
     await runDryRunToPreview((form) => {
       if (form.get("dry_run") === "true") return jsonResponse(DRY_RUN_PLAN);
@@ -1405,6 +1418,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     const settled: ChannelImportResult = {
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-settled",
+      display_digest: "digest-settled",
       counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
       rows: DRY_RUN_PLAN.rows.map((row) => ({
         ...row,
@@ -1446,6 +1460,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     const channelsMatch: ChannelImportResult = {
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-groups-pending",
+      display_digest: "digest-groups-pending",
       counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
       // row[1] keeps its group_id "g1" — the effect that cannot be verified.
       rows: DRY_RUN_PLAN.rows.map((row) => ({
@@ -1517,6 +1532,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
                 rows: [{}],
                 counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
                 plan_fingerprint: "x",
+                display_digest: "x-digest",
               },
             },
             409,
@@ -1552,10 +1568,38 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
     expect(screen.getByText("CREATE: 1 · UPDATE: 1")).toBeInTheDocument();
 
-    // The decisive assertion: a retry is still BOUND to the plan on screen.
+    // The decisive assertion: a retry is still BOUND to the plan on screen —
+    // by both tokens.
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
     await waitFor(() => expect(importPosts()).toHaveLength(3));
     expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-clean-v1");
+    expect(importPosts()[2].get("expected_display_digest")).toBe("digest-clean-v1");
+  });
+
+  it("refuses a refreshed plan with no display digest rather than unbinding the apply", async () => {
+    // The digest's own copy of the no-fingerprint hazard (review #184, C1):
+    // rows, counts and the fingerprint all present, only display_digest
+    // missing. Accepting it would replace the preview with a plan whose next
+    // Apply sends no expected_display_digest — silently dropping the
+    // disclosed-plan half of the binding. Fail closed instead.
+    const noDigest = { ...DRY_RUN_PLAN } as Record<string, unknown>;
+    delete noDigest.display_digest;
+    await runDryRunToPreview((form) =>
+      form.get("dry_run") === "true"
+        ? jsonResponse(DRY_RUN_PLAN)
+        : jsonResponse({ detail: noDigest }, 409),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(screen.getByText("Apply failed")).toBeInTheDocument());
+
+    // The approved preview — and its tokens — survive untouched.
+    expect(screen.getByRole("group", { name: "Import preview" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
+    await waitFor(() => expect(importPosts()).toHaveLength(3));
+    expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-clean-v1");
+    expect(importPosts()[2].get("expected_display_digest")).toBe("digest-clean-v1");
   });
 
   it("discloses the revenue source status the write derives", async () => {

@@ -13,7 +13,9 @@ import type { ChannelImportResult, ChannelImportRowResult } from "@/lib/api/type
 // Database/ORM: None (frontend) — calls the backend import endpoint.
 // Standards: The FormData carries `file`, `content_owner_id`, `cms_status`,
 //   `dry_run` ("true"/"false"), and `reason` — plus `expected_plan_fingerprint`
-//   when the caller is binding to a reviewed plan. `cms_status` is sent
+//   and `expected_display_digest` when the caller is binding to a reviewed
+//   plan (the opaque token and its recomputable disclosed-plan companion; the
+//   backend checks the two independently). `cms_status` is sent
 //   EXPLICITLY, with the same value the route defaults to: the response echoes
 //   it, and a value the client never sent is one it cannot check the echo
 //   against (review #184). useApiClient passes FormData through
@@ -1021,6 +1023,11 @@ const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => b
   ["rows", isPlanRows],
   ["counts", isCountMap],
   ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
+  // The fingerprint's recomputable companion (review #184, C1). Required for
+  // the same reason the fingerprint is: a plan accepted without it reaches
+  // the next Apply as `undefined`, silently dropping `expected_display_digest`
+  // from the form and with it the disclosed-plan half of the binding.
+  ["display_digest", (value) => typeof value === "string" && value !== ""],
   [OWNER_FIELD, (value) => typeof value === "string"],
   [CMS_STATUS_FIELD, (value) => typeof value === "string"],
   [DRY_RUN_FIELD, (value) => typeof value === "boolean"],
@@ -1219,6 +1226,7 @@ type ImportRequestTarget = {
   dryRun: boolean;
   contentOwnerId: string;
   expectedPlanFingerprint?: string;
+  expectedDisplayDigest?: string;
 };
 
 /**
@@ -1259,6 +1267,14 @@ const RESULT_CHECKS: ReadonlyArray<
   (result, request) =>
     request.expectedPlanFingerprint === undefined ||
     result.plan_fingerprint === request.expectedPlanFingerprint,
+  // The disclosed-digest half of the same binding (review #184, C1). The route
+  // 409s a mismatched `expected_display_digest`, so a 2xx whose digest differs
+  // from the one this request bound is a response the route cannot produce —
+  // same shape of impossibility as the fingerprint check above, over the token
+  // a client could have recomputed from the rendered plan.
+  (result, request) =>
+    request.expectedDisplayDigest === undefined ||
+    result.display_digest === request.expectedDisplayDigest,
   // And it must describe the TARGET this request named. Unlike the fingerprint
   // check this one applies to the dry run too, which is the important half: the
   // preview is what the operator approves, so an altered target has to be
@@ -1301,7 +1317,9 @@ const assertUsableResult = (result: ChannelImportResult, request: ImportRequestT
 //   `expected_plan_fingerprint` is appended ONLY when the caller supplies it:
 //   sending an empty or stale value would either 409 a legitimate apply or, if
 //   omitted by accident, silently downgrade the write to the backend's
-//   unbound file-wins path (review #184). `cms_status` is sent explicitly so
+//   unbound file-wins path (review #184). `expected_display_digest` follows
+//   the same rule for the same reasons — the disclosed-plan half of the
+//   binding (review #184, C1). `cms_status` is sent explicitly so
 //   the echoed target can be checked against a value this request named.
 //   Adds NO error handling of its own — the calling view owns busy/error
 //   presentation — and nothing here retries: a retry of an audited bulk write
@@ -1331,11 +1349,19 @@ export const useChannelImport = (): ((
      * the refreshed plan. Omitted on the dry run itself (nothing to bind to).
      */
     expectedPlanFingerprint?: string;
+    /**
+     * The `display_digest` of the same approved dry run — the fingerprint's
+     * recomputable companion, covering exactly the disclosed plan (review
+     * #184, C1). Sent alongside the fingerprint on every bound apply; the
+     * backend checks the two independently and 409s on either mismatch.
+     * Omitted on the dry run itself, like the fingerprint.
+     */
+    expectedDisplayDigest?: string;
   },
 ) => Promise<ChannelImportResult>) => {
   const client = useApiClient();
   return useCallback(
-    ({ file, contentOwnerId, dryRun, reason, expectedPlanFingerprint }) => {
+    ({ file, contentOwnerId, dryRun, reason, expectedPlanFingerprint, expectedDisplayDigest }) => {
       const form = new FormData();
       form.append("file", file);
       form.append(OWNER_FIELD, contentOwnerId);
@@ -1345,10 +1371,18 @@ export const useChannelImport = (): ((
       if (expectedPlanFingerprint !== undefined) {
         form.append("expected_plan_fingerprint", expectedPlanFingerprint);
       }
+      if (expectedDisplayDigest !== undefined) {
+        form.append("expected_display_digest", expectedDisplayDigest);
+      }
       return client
         .post<ChannelImportResult>("/channels/import", form)
         .then((result) => {
-          assertUsableResult(result, { dryRun, contentOwnerId, expectedPlanFingerprint });
+          assertUsableResult(result, {
+            dryRun,
+            contentOwnerId,
+            expectedPlanFingerprint,
+            expectedDisplayDigest,
+          });
           return result;
         });
     },
