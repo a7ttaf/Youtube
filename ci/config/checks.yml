@@ -71,7 +71,7 @@ checks:
 
   # --- Typecheck ---
   typecheck-js:
-    enabled: true  # UMS: frontend/ tsc --noEmit, run via the node lane
+    enabled: true  # UMS: frontend/ tsc --noEmit, standalone lane + via node
     severity: blocker
     required: false
     tool: tsc

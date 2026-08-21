@@ -404,6 +404,170 @@ ci::changeset::classify_file() {
   return 0
 }
 
+# The .ci-gateignore rules this run classifies against, resolved once and taken
+# from the tree the run stands behind.
+#
+# `[ -f "$CI_GATEIGNORE" ]` read the worktree copy unconditionally, while in ship
+# mode the paths being classified come from the outgoing commit range -- so an
+# unstaged local rule decided what a *push* was allowed to skip. `frontend/`
+# written into the worktree file and never committed removed every outgoing
+# frontend path before the checks were generated; preflight kept only its
+# always-on checks, filtered out the node and standalone typecheck lanes, and
+# let through a push whose tests, build and types were never run. Measured
+# before the fix: `should_ignore frontend/a.ts` -> IGNORED, against a commit
+# whose own .ci-gateignore does not mention frontend at all.
+#
+# Read once rather than per path as well: the old form re-opened the file for
+# every entry in the changeset.
+_CI_CHANGESET_GATEIGNORE=""
+_CI_CHANGESET_GATEIGNORE_LOADED=0
+
+ci::changeset::_load_gateignore() {
+  [ "$_CI_CHANGESET_GATEIGNORE_LOADED" -eq 0 ] || return 0
+  _CI_CHANGESET_GATEIGNORE_LOADED=1
+  _CI_CHANGESET_GATEIGNORE=""
+
+  # Only a plain repository-relative name can be asked of a tree. An absolute or
+  # parent-relative CI_GATEIGNORE is an explicit override by whoever set it, and
+  # is read as given.
+  local _gi_from_head=0
+  case "$CI_GATEIGNORE" in
+    /*|../*|*/../*) ;;
+    *)
+      if [ "${CI_GATE_MODE:-}" = "ship" ] \
+        && command -v git >/dev/null 2>&1 \
+        && git rev-parse --git-dir >/dev/null 2>&1 \
+        && git rev-parse --verify HEAD >/dev/null 2>&1; then
+        _gi_from_head=1
+      fi
+      ;;
+  esac
+
+  # `printf 'X%s' "$?"` and then stripping the sentinel back off, because `$( )`
+  # removes trailing newlines -- and whether the final rule carries one decides
+  # whether that rule has ever applied. Capturing the status the same way keeps
+  # "the read failed" distinguishable from "the file is empty".
+  local _gi_raw="" _gi_cr=""
+  if [ "$_gi_from_head" -eq 1 ]; then
+    # Absent from HEAD is an answer -- that push carries no rules -- and is not
+    # the same as a tree that could not be read.
+    git cat-file -e "HEAD:${CI_GATEIGNORE}" 2>/dev/null || return 0
+    _gi_raw="$(git show "HEAD:${CI_GATEIGNORE}" 2>/dev/null; printf 'X%s' "$?")"
+    case "$_gi_raw" in
+      *X0) _gi_raw="${_gi_raw%X0}" ;;
+      *)
+        # Could not produce a blob git says is there. Classifying everything is
+        # the safe direction -- it schedules more checks, never fewer -- but it
+        # is said out loud, because silently ignoring nothing looks identical to
+        # a file that ignores nothing.
+        echo "Cannot read HEAD:${CI_GATEIGNORE}; classifying every path in the range." >&2
+        echo "  No path will be skipped on the strength of rules that could not be read." >&2
+        return 0
+        ;;
+    esac
+    # The blob is normalised; this checkout may not be. Where the working copy
+    # of this file is CRLF, every rule in it is inert -- a CR is part of the
+    # pattern and matches no path -- and it has been inert for the commit gate
+    # just as long. Reading the LF blob here would make all of them live on a
+    # push and nowhere else, with `git status` clean because .gitattributes
+    # normalises on comparison, so no drift scan in this gate could see it: the
+    # push gate would end up strictly weaker than the commit gate for one
+    # identical file. Refused, which is the answer this machine already gives.
+    #
+    # This is not the worktree deciding what a push skips -- the defect above --
+    # it is the worktree reporting that its own copy is unreadable as rules.
+    # Counted with `tr`, not matched with `grep`. On the Git Bash this repository
+    # is developed on, grep opens the file in text mode and strips CR before the
+    # pattern ever sees it -- `grep -q $'\r'` reports no match on a file `od -c`
+    # shows carrying two. `tr -cd` reads bytes, so it gives the real answer.
+    _gi_cr="$(LC_ALL=C tr -cd '\r' < "$CI_GATEIGNORE" 2>/dev/null | wc -c | tr -d '[:space:]')"
+    if [ -f "$CI_GATEIGNORE" ] && [ "${_gi_cr:-0}" -gt 0 ]; then
+      echo "${CI_GATEIGNORE}: the working copy has CRLF line endings, so none of its rules apply." >&2
+      echo "  HEAD stores the normalised LF copy, and honouring that only on a push would let" >&2
+      echo "  the push gate skip paths the commit gate checks. Rewrite the file with LF endings." >&2
+      _CI_CHANGESET_GATEIGNORE=""
+      return 0
+    fi
+  else
+    [ -f "$CI_GATEIGNORE" ] || return 0
+    _gi_raw="$(cat "$CI_GATEIGNORE" 2>/dev/null; printf 'X%s' "$?")"
+    case "$_gi_raw" in
+      *X0) _gi_raw="${_gi_raw%X0}" ;;
+      *)
+        echo "Cannot read ${CI_GATEIGNORE}; classifying every path." >&2
+        return 0
+        ;;
+    esac
+  fi
+
+  ci::changeset::_sift_gateignore "$_gi_raw"
+  return 0
+}
+
+# Drop the two rule shapes that have never applied, rather than let a change of
+# *where the bytes come from* quietly make them apply.
+#
+# Both were found auditing the ship-mode fix above, and both move the gate the
+# wrong way: an ignore rule that becomes live skips more paths, so fewer checks
+# run on a push. Neither was the subject of that fix, which makes them exactly
+# the kind of unintended widening this PR exists to catch.
+#
+#   a final rule with no newline after it
+#     `while IFS= read -r` returns non-zero on an unterminated last line, so with
+#     the old `done < "$CI_GATEIGNORE"` the loop body never ran for it. Reading
+#     the file into a variable and feeding it back with a here-string appends the
+#     missing newline, so `...\nfrontend/` with no trailing newline went from
+#     inert to live -- measured as a JS-only push losing lint-js, typecheck-js,
+#     format-js and tests-js, leaving only the always-on pair.
+#
+#   a rule carrying a carriage return
+#     A CR is part of the pattern and matches no path, so a CRLF .ci-gateignore
+#     is wholly inert in the worktree. `git show HEAD:` returns the normalised LF
+#     blob, so in ship mode every one of those rules would have become live --
+#     with `git status` clean, because .gitattributes normalises on comparison,
+#     so no drift scan can see it. That would leave the push gate strictly weaker
+#     than the commit gate for one identical file.
+#
+# Refused in both modes, so the answer does not depend on which tree the bytes
+# came from, and reported rather than dropped in silence -- a rule someone wrote
+# and that never applies is worth one line on stderr.
+ci::changeset::_sift_gateignore() {
+  local _raw="$1"
+  local _kept="" _dropped_cr="" _dropped_tail=""
+
+  case "$_raw" in
+    ''|*$'\n') ;;
+    *)
+      _dropped_tail="${_raw##*$'\n'}"
+      _raw="${_raw%"$_dropped_tail"}"
+      ;;
+  esac
+
+  local _line
+  while IFS= read -r _line; do
+    case "$_line" in
+      *$'\r'*)
+        _dropped_cr="${_dropped_cr} ${_line%%$'\r'*}"
+        continue
+        ;;
+    esac
+    _kept="${_kept}${_line}"$'\n'
+  done <<< "$_raw"
+
+  if [ -n "$_dropped_tail" ]; then
+    echo "${CI_GATEIGNORE}: the final rule has no newline after it and is not applied: ${_dropped_tail}" >&2
+    echo "  That is how this file has always behaved. Add a trailing newline to make it live." >&2
+  fi
+  if [ -n "$_dropped_cr" ]; then
+    echo "${CI_GATEIGNORE}: rules carrying a carriage return are not applied:${_dropped_cr}" >&2
+    echo "  A CR is part of the pattern and matches no path, so a CRLF file is inert in the" >&2
+    echo "  worktree. Refused on a push too, rather than becoming live only there because" >&2
+    echo "  HEAD stores the normalised LF copy. Rewrite the file with LF endings." >&2
+  fi
+
+  _CI_CHANGESET_GATEIGNORE="$_kept"
+}
+
 # ci::changeset::should_ignore <path> – returns 0 to ignore, 1 to include
 ci::changeset::should_ignore() {
   local path="$1"
@@ -416,8 +580,9 @@ ci::changeset::should_ignore() {
     esac
   done
 
-  # .ci-gateignore patterns
-  if [ -f "$CI_GATEIGNORE" ]; then
+  # .ci-gateignore patterns, from the tree this run stands behind.
+  ci::changeset::_load_gateignore
+  if [ -n "$_CI_CHANGESET_GATEIGNORE" ]; then
     local pattern
     while IFS= read -r pattern; do
       # Skip blank lines and comments
@@ -437,7 +602,7 @@ ci::changeset::should_ignore() {
       case "$pattern" in
         */) case "$path" in "$pattern"*) return 0 ;; esac ;;
       esac
-    done < "$CI_GATEIGNORE"
+    done <<< "$_CI_CHANGESET_GATEIGNORE"
   fi
 
   return 1

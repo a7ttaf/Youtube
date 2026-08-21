@@ -399,3 +399,106 @@ PY
   [ "$status" -eq 0 ] \
     || { echo "quick mode stopped seeing the tree it stands behind" >&2; return 1; }
 }
+
+@test "changeset: ship mode reads the ignore rules from the pushed tree" {
+  # `[ -f "$CI_GATEIGNORE" ]` read the worktree copy unconditionally, while in
+  # ship mode the paths being classified come from the outgoing commit range.
+  # An unstaged local rule therefore decided what a *push* was allowed to skip:
+  # `frontend/` written to the worktree file and never committed removed every
+  # outgoing frontend path before the checks were generated, preflight kept only
+  # its always-on checks, and a push whose tests, build and types were never run
+  # was allowed through.
+  mkdir -p frontend
+  printf 'export const a = 1;\n' > frontend/a.ts
+  printf 'committed\n' > .ci-gateignore
+  git add -A
+  git commit -qm base
+
+  # Never staged. The outgoing commit does not carry this rule.
+  printf 'committed\nfrontend/\n' > .ci-gateignore
+
+  CI_GATE_MODE=ship
+  export CI_GATE_MODE
+  run ci::changeset::should_ignore "frontend/a.ts"
+  [ "$status" -ne 0 ] \
+    || { echo "an unstaged rule removed an outgoing path from the changeset" >&2; return 1; }
+
+  # Control one: a rule the push actually carries must still be honoured, or
+  # this turned the feature off rather than scoping it.
+  printf 'committed\nfrontend/\n' > .ci-gateignore
+  git add -A
+  git commit -qm "ignore frontend"
+  _CI_CHANGESET_GATEIGNORE_LOADED=0
+  run ci::changeset::should_ignore "frontend/a.ts"
+  [ "$status" -eq 0 ] \
+    || { echo "a committed ignore rule was not applied" >&2; return 1; }
+
+  # Control two: outside ship mode the worktree copy is the right answer --
+  # pre-commit is deciding about the tree in front of the developer.
+  printf 'committed\n' > .ci-gateignore
+  CI_GATE_MODE=quick
+  export CI_GATE_MODE
+  _CI_CHANGESET_GATEIGNORE_LOADED=0
+  run ci::changeset::should_ignore "frontend/a.ts"
+  [ "$status" -ne 0 ] \
+    || { echo "quick mode stopped reading the worktree rules" >&2; return 1; }
+}
+
+@test "changeset: a rule that never applied does not become live by being re-read" {
+  # Both halves are the same defect, found auditing the ship-mode fix above: the
+  # fix changed WHERE the rules come from, and in doing so silently changed WHICH
+  # rules are live. An ignore rule that becomes live skips more paths, so fewer
+  # checks run -- the wrong direction, and nothing in the fix's own case could
+  # see it, because that case writes ordinary LF fixtures with a trailing newline.
+  mkdir -p frontend
+  printf 'export const a = 1;\n' > frontend/app.ts
+  printf '* text=auto eol=lf\n' > .gitattributes
+
+  # (a) A final rule with no newline after it. `while IFS= read -r` returns
+  # non-zero on an unterminated last line, so `done < file` never ran the body
+  # for it. Reading the file into a variable and feeding it back through a
+  # here-string appends the missing newline and would make it live.
+  printf 'docs/\nfrontend/' > .ci-gateignore
+  git add -A
+  git commit -qm base
+  local m
+  for m in ship quick; do
+    _CI_CHANGESET_GATEIGNORE_LOADED=0
+    CI_GATE_MODE="$m" run ci::changeset::should_ignore "frontend/app.ts"
+    [ "$status" -ne 0 ] \
+      || { echo "an unterminated final rule became live in ${m} mode" >&2; return 1; }
+  done
+
+  # (b) A CRLF file. A CR is part of the pattern and matches no path, so every
+  # rule is inert in the worktree -- and `git status` stays clean, because
+  # .gitattributes normalises on comparison, so no drift scan can see it. Reading
+  # HEAD's normalised LF blob would make all of them live on a push and nowhere
+  # else, leaving the push gate weaker than the commit gate for one file.
+  printf 'frontend/\r\ndocs/\r\n' > .ci-gateignore
+  git add -A
+  git commit -qm crlf
+  # The premise, asserted rather than assumed: worktree carries CR, HEAD does not.
+  [ "$(LC_ALL=C tr -cd '\r' < .ci-gateignore | wc -c | tr -d '[:space:]')" -gt 0 ] \
+    || skip "this checkout normalised the fixture on write; the CRLF case cannot be built here"
+  [ "$(git show HEAD:.ci-gateignore | LC_ALL=C tr -cd '\r' | wc -c | tr -d '[:space:]')" -eq 0 ] \
+    || skip "this repository does not normalise on commit; the divergence cannot be built here"
+  for m in ship quick; do
+    _CI_CHANGESET_GATEIGNORE_LOADED=0
+    CI_GATE_MODE="$m" run ci::changeset::should_ignore "frontend/app.ts"
+    [ "$status" -ne 0 ] \
+      || { echo "a CRLF rule became live in ${m} mode" >&2; return 1; }
+  done
+
+  # The control, and without it this case is satisfied by a gate that ignores
+  # nothing at all: the same rule, written the ordinary way, must still apply in
+  # both modes.
+  printf 'docs/\nfrontend/\n' > .ci-gateignore
+  git add -A
+  git commit -qm lf
+  for m in ship quick; do
+    _CI_CHANGESET_GATEIGNORE_LOADED=0
+    CI_GATE_MODE="$m" run ci::changeset::should_ignore "frontend/app.ts"
+    [ "$status" -eq 0 ] \
+      || { echo "an ordinary LF rule stopped applying in ${m} mode" >&2; return 1; }
+  done
+}

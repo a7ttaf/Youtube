@@ -8377,3 +8377,98 @@ STUB
          printf '%s\n' "$out" | head -8 >&2; return 1; }
   rm -rf "$sb"
 }
+
+@test "tests-shell: an ignored replacement for a deleted gate input is drift" {
+  # Three scans cover this question and each is blind to a different case: the
+  # tracked diff cannot see a path that is no longer tracked, --exclude-standard
+  # drops an ignored one, and the ignored scan filters by suffix. `Makefile` has
+  # no suffix, so adding it to SHELL_INPUTS -- which closed the *tracked* half of
+  # this a round ago -- left the ignored half exactly as open.
+  #
+  # A commit that deletes Makefile and ignores the path, with a worktree copy
+  # left behind, therefore passed: the bats suite opens the worktree file, so it
+  # validated a `bats-install` target the push does not carry.
+  local sb; sb="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb/ci/lib" "$sb/ci/checks" "$sb/ci/tests"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$REPO_ROOT/ci/checks/tests.sh" "$sb/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/junit.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb/ci/lib/"
+  printf '@test "x" { true; }\n' > "$sb/ci/tests/t.bats"
+  printf 'bats-install:\n\t@bash ci/scripts/install-bats.sh\n' > "$sb/Makefile"
+  printf 'nothing\n' > "$sb/.gitignore"
+  ( cd "$sb" && git init -q -b feature/x . && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  ( cd "$sb" && git rm -q --cached Makefile \
+      && printf 'nothing\nMakefile\n' > .gitignore && git add .gitignore \
+      && git -c user.email=t@t -c user.name=t commit -qm "drop Makefile" ) >/dev/null 2>&1
+  printf 'bats-install:\n\t@echo broken\n' > "$sb/Makefile"
+
+  run bash -c "cd '$sb' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -eq 20 ] \
+    || { rm -rf "$sb"; echo "an ignored replacement was not reported (status=$status):" >&2
+         echo "$output" >&2; return 1; }
+  [[ "$output" == *"Makefile"* ]] \
+    || { rm -rf "$sb"; echo "the refusal did not name the file: $output" >&2; return 1; }
+  rm -rf "$sb"
+
+  # The control, and the reason this filter is an allow-list rather than a
+  # deny-list: the gate's own ignored scratch output must not be reported as
+  # drift. Widening the basename arm is exactly the change that could bring that
+  # failure back.
+  local sb2; sb2="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
+  mkdir -p "$sb2/ci/lib" "$sb2/ci/checks" "$sb2/ci/tests" \
+           "$sb2/ci/__pycache__" "$sb2/ci/.ruff_cache" "$sb2/ci/tests/.pytest_cache"
+  cp "$REPO_ROOT/ci/checks/tests-shell.sh" "$REPO_ROOT/ci/checks/tests.sh" "$sb2/ci/checks/"
+  cp "$REPO_ROOT/ci/lib/common.sh" "$REPO_ROOT/ci/lib/log.sh" \
+     "$REPO_ROOT/ci/lib/junit.sh" "$REPO_ROOT/ci/lib/git.sh" "$sb2/ci/lib/"
+  printf '@test "x" { true; }\n' > "$sb2/ci/tests/t.bats"
+  printf 'bats-install:\n\t@echo hi\n' > "$sb2/Makefile"
+  printf 'nothing\n__pycache__/\n.ruff_cache/\n.pytest_cache/\n' > "$sb2/.gitignore"
+  ( cd "$sb2" && git init -q -b feature/x . && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  printf 'x\n' > "$sb2/ci/__pycache__/x.pyc"
+  printf 'x\n' > "$sb2/ci/.ruff_cache/z"
+  printf 'x\n' > "$sb2/ci/tests/.pytest_cache/w"
+  run bash -c "cd '$sb2' && CI_GATE_MODE=ship bash ci/checks/tests-shell.sh 2>&1"
+  [ "$status" -ne 20 ] \
+    || { rm -rf "$sb2"; echo "the gate reported its own ignored scratch as drift:" >&2
+         echo "$output" >&2; return 1; }
+  rm -rf "$sb2"
+}
+
+@test "manifest: typecheck-js is registered as what preflight actually runs" {
+  # ci/checks/manifest.yml is the source ci/scripts/gen-checks-doc.sh reads to
+  # generate the published check catalog, so a stale field there is the
+  # repository answering "what runs before a commit" incorrectly.
+  #
+  # Two were stale at once. run_common_checks -- the pre-commit path -- schedules
+  # this lane, while the manifest said `pre_commit: false`; and the manifest
+  # named `typecheck.sh`, the dispatcher, rather than the `typecheck-js.sh`
+  # wrapper preflight executes. The dispatcher without CI_GATE_CHECK_ID falls
+  # through to `all` and runs the Python, Go and Rust typecheckers too.
+  local block
+  block="$(awk '/^  - id: typecheck-js$/{f=1;next} f&&/^  - id: /{exit} f{print}' \
+             "$REPO_ROOT/ci/checks/manifest.yml")"
+  [ -n "$block" ] || { echo "typecheck-js is not registered in the manifest" >&2; return 1; }
+
+  printf '%s\n' "$block" | grep -qE '^    script: ci/checks/typecheck-js\.sh$' \
+    || { echo "the manifest does not name the wrapper preflight runs:" >&2
+         printf '%s\n' "$block" >&2; return 1; }
+  printf '%s\n' "$block" | grep -qE '^    pre_commit: true$' \
+    || { echo "the manifest still says typecheck-js is not a pre-commit check" >&2
+         printf '%s\n' "$block" >&2; return 1; }
+
+  # Derived from preflight rather than restated: what has to hold is that the
+  # manifest agrees with the code, so the code is the thing consulted.
+  grep -qE 'run_phase +"typecheck-js:\./ci/checks/typecheck-js\.sh"' "$REPO_ROOT/ci/preflight.sh" \
+    || { echo "preflight no longer schedules typecheck-js this way" >&2; return 1; }
+  awk '/^run_common_checks\(\)/{f=1} f&&/typecheck-js/{found=1} f&&/^}/{exit} END{exit !found}' \
+      "$REPO_ROOT/ci/preflight.sh" \
+    || { echo "typecheck-js is no longer scheduled by run_common_checks" >&2; return 1; }
+
+  # The control: tests-js runs through the node lane, not standalone in quick
+  # mode, so its `pre_commit: false` is correct and must not be swept along.
+  awk '/^  - id: tests-js$/{f=1} f&&/^    pre_commit:/{print; exit}' \
+      "$REPO_ROOT/ci/checks/manifest.yml" | grep -qE 'pre_commit: false' \
+    || { echo "tests-js's pre_commit was changed; it is node-lane only" >&2; return 1; }
+}

@@ -3146,12 +3146,39 @@ YML
   # that deleted ci/config/affected.yml and ignored the path left a worktree
   # copy no scan could see.
   local flt='(^|/)(\.ci-gate|node_modules|__pycache__|\.venv|\.[^/]*cache[^/]*)/|^ci/(reports|artifacts)/'
-  local keep='\.(sh|bats|bash|yml|yaml|conf|toml|json|py|js|cjs|mjs|ts|go|mod|md)$|(^|/)(\.gitignore|VERSION)$|(^|/)\.githooks/'
+  local suffixes='\.(sh|bats|bash|yml|yaml|conf|toml|json|py|js|cjs|mjs|ts|go|mod|md)$'
 
-  # Both halves are taken from the lane rather than restated, or this case pins
-  # a copy of the rule and not the rule.
-  grep -qF -- "$keep" "$REPO_ROOT/ci/checks/tests-shell.sh" \
-    || { echo "the lane no longer uses this keep-list; update this case" >&2; return 1; }
+  # The extensionless half is lifted from the lane, not restated here. It used to
+  # be a literal `(\.gitignore|VERSION)` in both places, and pinning the spelling
+  # meant that naming those basenames once -- which is what stopped SHELL_INPUTS
+  # and this filter from drifting apart, after `Makefile` reached one and not the
+  # other -- read as the rule changing. What has to hold is that this case tests
+  # the lane's rule, not that the lane spells it a particular way.
+  local basenames
+  basenames="$(grep -m1 '^  SHELL_INPUT_BASENAMES=' "$REPO_ROOT/ci/checks/tests-shell.sh" | cut -d"'" -f2)"
+  [ -n "$basenames" ] \
+    || { echo "the lane no longer names its extensionless inputs; update this case" >&2; return 1; }
+
+  # Every extensionless entry in SHELL_INPUTS has to appear in it, and that is the
+  # coupling that was missing: the scope named `Makefile` and the filter did not,
+  # so an ignored replacement for a deleted Makefile was invisible to all three
+  # scans at once.
+  local want
+  for want in '\.gitignore' 'Makefile' 'VERSION'; do
+    case "|$basenames|" in
+      *"|$want|"*) ;;
+      *) echo "an extensionless gate input is missing from the filter: $want" >&2; return 1 ;;
+    esac
+  done
+
+  local keep="${suffixes}|(^|/)(${basenames})\$|(^|/)\.githooks/"
+
+  # Both halves are still taken from the lane rather than restated, or this case
+  # pins a copy of the rule and not the rule.
+  grep -qF -- "$suffixes" "$REPO_ROOT/ci/checks/tests-shell.sh" \
+    || { echo "the lane no longer uses this suffix set; update this case" >&2; return 1; }
+  grep -qF -- 'SHELL_INPUT_BASENAMES' "$REPO_ROOT/ci/checks/tests-shell.sh" \
+    || { echo "the lane no longer interpolates its basename list; update this case" >&2; return 1; }
   grep -qF -- "$flt" "$REPO_ROOT/ci/checks/tests-shell.sh" \
     || { echo "the lane no longer uses this prune; update this case" >&2; return 1; }
 

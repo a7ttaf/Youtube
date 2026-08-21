@@ -72,6 +72,19 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
   # comparison scope and what the suites actually read have to be the same set,
   # which is the lesson the three-scopes-for-one-question note above records.
   SHELL_INPUTS=(ci .githooks .gitignore Makefile frontend/README.md)
+  # The entries above that carry no file extension, named once because the
+  # ignored-file scan below filters by suffix and cannot see them otherwise.
+  #
+  # Adding `Makefile` to SHELL_INPUTS without adding it here left exactly the
+  # fail-open that addition was meant to close, one scan over: a commit that
+  # deletes `Makefile` and ignores the path leaves a worktree replacement that
+  # the tracked scan cannot see (the path is untracked now), that
+  # --exclude-standard drops (it is ignored), and that this filter discarded
+  # for having no recognised suffix. Measured before the fix: exit 0, "Shell
+  # suites passed", with the bats run reading a `bats-install` target the push
+  # does not carry. Two lists for one question is what round after round here
+  # has been about, so the scope and the filter now share this definition.
+  SHELL_INPUT_BASENAMES='\.gitignore|Makefile|VERSION'
   SHELL_DRIFT="$( {
     git diff --name-only HEAD -- "${SHELL_INPUTS[@]}" 2>/dev/null || printf '%s\n' "$SCAN_UNREADABLE"
     git ls-files --others --exclude-standard -- "${SHELL_INPUTS[@]}" 2>/dev/null || printf '%s\n' "$SCAN_UNREADABLE"
@@ -156,7 +169,7 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
       # allow-list would otherwise have brought straight back.
       printf '%s\n' "$_ts_ig" \
         | grep -Ev '(^|/)(\.ci-gate|node_modules|__pycache__|\.venv|\.[^/]*cache[^/]*)/|^ci/(reports|artifacts)/' \
-        | grep -E '\.(sh|bats|bash|yml|yaml|conf|toml|json|py|js|cjs|mjs|ts|go|mod|md)$|(^|/)(\.gitignore|VERSION)$|(^|/)\.githooks/' || true
+        | grep -E '\.(sh|bats|bash|yml|yaml|conf|toml|json|py|js|cjs|mjs|ts|go|mod|md)$|(^|/)('"$SHELL_INPUT_BASENAMES"')$|(^|/)\.githooks/' || true
     fi
   } | sort -u | sed '/^$/d')"
   case "$SHELL_DRIFT" in
