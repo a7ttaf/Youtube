@@ -16,7 +16,8 @@
 # ============================================================================
 """Channel registry domain contract, errors, and in-memory implementation."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
@@ -193,16 +194,97 @@ class ChannelRegistryStore(Protocol):
         the ordering.
         """
 
+    # ========================================================================
+    # Purpose: The store's ATOMICITY contract, made explicit: a caller wraps
+    #   one logical multi-write operation (the bulk import's two passes) so a
+    #   raise anywhere inside undoes every write THIS store performed for it.
+    # Database/ORM: The SQL adapter delegates to the REQUEST's enclosing
+    #   Session transaction — entering opens nothing and exiting commits
+    #   nothing; a raise propagates to the request boundary, whose rollback is
+    #   the real undo. The in-memory adapter has no such machinery, which is
+    #   the reason this method exists: it journals its own writes and replays
+    #   them backwards on raise (review #184, C2).
+    # Standards: The undo scope is THIS STORE'S OWN WRITES, not "the world at
+    #   enter" — SQL rollback cannot and must not revert another transaction's
+    #   committed rows, and the import's race tests assert exactly that (a
+    #   channel renamed or a group minted by a concurrent writer mid-apply
+    #   survives the refusal). Adapters must NOT commit here — commit stays
+    #   with whoever owns the session/request lifecycle. The boundary is not
+    #   nestable and not a savepoint: one enter per logical operation, and a
+    #   caller needing partial undo is asking for a different contract.
+    #   Exceptions always propagate; the boundary undoes state, never
+    #   outcomes.
+    # Blast Radius: Whether a refused import can leave PARTIAL channel writes
+    #   behind on adapters without a database underneath (direct/test/
+    #   bootstrap callers). Production SQL behaviour is unchanged by design.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     apply_channel_import, the one boundary consumer, which wraps BOTH
+    #     passes and the audit flush in this plus the group store's boundary.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+    #     delegating SQL implementation.
+    # ========================================================================
+    def transaction(self) -> AbstractContextManager[None]:
+        """Return a context manager making the wrapped writes all-or-nothing.
+
+        On a clean exit the writes stand (their durability still governed by
+        whoever owns the session/request lifecycle — this is never a commit).
+        On an exception every write this store performed inside the boundary
+        is undone — writes by OTHER actors interleaved during it stand, as a
+        foreign transaction's committed rows survive a SQL rollback — and the
+        exception propagates unchanged.
+        """
+        ...
+
 
 class ChannelRegistry:
     def __init__(self, channels: list[ChannelRegistryEntry] | None = None):
         self._channels: dict[str, ChannelRegistryEntry] = {}
+        # Active only inside transaction(): (key, pre-image-or-None) per write.
+        self._txn_undo: list[tuple[str, ChannelRegistryEntry | None]] | None = None
         for channel in channels or []:
             if channel.youtube_channel_id in self._channels:
                 raise ChannelRegistryConflictError(
                     f"Duplicate channel id: {channel.youtube_channel_id}"
                 )
             self._channels[channel.youtube_channel_id] = channel
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Journal this store's own writes; undo exactly those on raise.
+
+        An UNDO JOURNAL, deliberately not a whole-dict snapshot, because the
+        two differ on exactly the case the import's race tests pin: a
+        concurrent writer's change landing mid-apply. SQL rollback discards
+        only the failing transaction's writes — the other writer committed and
+        its rows survive — so parity demands undoing only what THIS store's
+        write methods performed inside the boundary. Each write method records
+        its key's pre-image just before mutating; on raise the entries replay
+        in reverse (a key's oldest pre-image wins), so the store ends as if
+        this operation never wrote while everything else that happened to the
+        dict stands. Test-staged "concurrent writers" mutate ``_channels``
+        directly for this reason — a foreign transaction's committed write is
+        not this store's write, and the journal must not see it.
+        """
+        if self._txn_undo is not None:
+            raise RuntimeError("ChannelRegistry.transaction does not nest")
+        self._txn_undo = []
+        try:
+            yield
+        except BaseException:
+            for key, previous in reversed(self._txn_undo):
+                if previous is None:
+                    self._channels.pop(key, None)
+                else:
+                    self._channels[key] = previous
+            raise
+        finally:
+            self._txn_undo = None
+
+    def _journal(self, youtube_channel_id: str) -> None:
+        """Record a key's pre-image before mutating it; no-op outside a boundary."""
+        if self._txn_undo is not None:
+            self._txn_undo.append((youtube_channel_id, self._channels.get(youtube_channel_id)))
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
         return sorted(
@@ -250,6 +332,7 @@ class ChannelRegistry:
             content_owner_id=normalize_optional_content_owner(content_owner_id),
             revenue_source_status=initial_revenue_source_status,
         )
+        self._journal(youtube_channel_id)
         self._channels[youtube_channel_id] = channel
         return channel
 
@@ -270,6 +353,7 @@ class ChannelRegistry:
             revenue_source_status=existing.revenue_source_status,
             active=existing.active,
         )
+        self._journal(youtube_channel_id)
         self._channels[youtube_channel_id] = updated
         return updated
 
@@ -289,6 +373,7 @@ class ChannelRegistry:
             revenue_source_status=existing.revenue_source_status,
             active=existing.active,
         )
+        self._journal(youtube_channel_id)
         self._channels[youtube_channel_id] = updated
         return updated
 
@@ -353,6 +438,10 @@ class ChannelRegistry:
                 revenue_required=revenue_required,
             ),
         )
+        # AFTER require_pre_state: a refused write must leave no journal entry,
+        # and the pre-image recorded is the write-boundary state the undo must
+        # reinstate.
+        self._journal(youtube_channel_id)
         self._channels[youtube_channel_id] = updated
         return current, updated
 

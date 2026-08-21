@@ -24,6 +24,7 @@ is unset, preserving the repository's no-skip policy.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import Annotated
 from unittest.mock import patch
@@ -272,6 +273,16 @@ class _FailingGroupStore:
         self._fail_on_call = fail_on_call
         self.calls = 0
 
+    def transaction(self) -> AbstractContextManager[None]:
+        """Delegate the boundary to the real store — this wrapper adds no writes.
+
+        The apply enters ``groups.transaction()`` before anything else runs
+        (review #184, C2), so a wrapper without this method would fail at the
+        boundary's entry and this test's armed MID-apply failure would never
+        be reached at all.
+        """
+        return self._inner.transaction()
+
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
     ) -> ChannelGroupEntry | None:
@@ -416,18 +427,24 @@ def test_failed_apply_leaves_no_audit_rows_on_postgres(
 def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
     pg_url: str, owner_engine: sa.Engine
 ) -> None:
-    """A failure after the first row rolls back channels AND audit rows.
+    """A failure after the first row rolls back channels — and audit never lands.
 
     The armed store raises on the SECOND group lookup, so by the time the
     request fails the tenant session already holds two channel INSERTs and
-    two platform-lane-elevated CHANNEL_CREATED audit INSERTs. The shared
-    transaction must roll back: no channel row, and no audit row.
+    row 1's group writes. The shared transaction must roll back: no channel
+    row afterwards. ``stores[0].calls == 2`` is the mid-apply proof — the
+    failure came after real writes, not before them.
 
-    ``audit_counts_in_flight`` is the anti-vacuity guard. It records what the
-    session itself sees right after each flushed audit INSERT (a transaction
-    always sees its own uncommitted rows), so the test proves the audit rows
-    physically existed before the failure — otherwise "no audit rows
-    afterwards" would be trivially true.
+    The AUDIT half changed shape with the C2 boundary (review #184): the
+    apply now buffers audit records and flushes them only after both passes
+    succeed, so a mid-apply failure no longer even transiently INSERTs audit
+    rows — ``audit_counts_in_flight == []`` is the new contract, strictly
+    stronger than "inserted then rolled back". The anti-vacuity guard moves
+    to the SUCCESS run at the end: the same roster through the same patched
+    append, unarmed, must record one in-transaction count per audit row and
+    commit exactly those rows — proving the probe was live all along and the
+    flush really writes the platform-lane audit trail inside the same
+    request transaction.
     """
     app = create_app(database_url=pg_url, authz_source="headers")
     stores: list[_FailingGroupStore] = []
@@ -473,21 +490,38 @@ def test_mid_apply_failure_rolls_back_channels_and_audit_on_postgres(
             ),
         )
 
-    assert response.status_code == 500, response.text
-    assert stores and stores[0].calls == 2, "the store must have failed mid-apply, not before it"
-    # Three audit rows were really INSERTed (platform-lane elevated, same
-    # transaction) before the failure: row 1's CHANNEL_CREATED, row 1's
-    # GROUP_UPDATED (its group was created before the armed second lookup),
-    # and row 2's CHANNEL_CREATED. The request did not fail ahead of the
-    # audit writes.
-    assert audit_counts_in_flight == [
-        before_tenant + 1,
-        before_tenant + 2,
-        before_tenant + 3,
-    ]
-    assert _channel_row(owner_engine, CHANNEL_ID) is None
-    assert _channel_row(owner_engine, SECOND_ID) is None
-    assert _audit_log_count(owner_engine) == before
+        assert response.status_code == 500, response.text
+        assert stores and stores[0].calls == 2, (
+            "the store must have failed mid-apply, not before it"
+        )
+        # The C2 buffer: NOT ONE audit INSERT ran before the failure. The
+        # records existed only in the apply's buffer, which the raise
+        # discarded — audit rows can no longer even transiently describe an
+        # import that did not happen.
+        assert audit_counts_in_flight == []
+        assert _channel_row(owner_engine, CHANNEL_ID) is None
+        assert _channel_row(owner_engine, SECOND_ID) is None
+        assert _audit_log_count(owner_engine) == before
+
+        # Anti-vacuity, still under the patch: disarm the failure and run a
+        # one-row import through the SAME app. Every flushed audit row must
+        # pass through the probe (counts ascend one per append, in the same
+        # transaction the channel write holds) and then commit — the []
+        # above was the buffer's doing, not a dead instrument.
+        del failing_client.app.dependency_overrides[sql_group_registry_from_session]
+        success = post_import(
+            failing_client,
+            import_csv(f"{CHANNEL_ID},Alpha News,{GROUP_ID},Yes", header=GROUP_HEADER),
+        )
+        assert success.status_code == 200, success.text
+        assert audit_counts_in_flight == [
+            before_tenant + offset
+            for offset in range(1, len(audit_counts_in_flight) + 1)
+        ]
+        # At least the row's CHANNEL_CREATED, one GROUP_UPDATED, and the
+        # CHANNEL_IMPORTED summary.
+        assert len(audit_counts_in_flight) >= 3
+    assert _audit_log_count(owner_engine) == before + len(audit_counts_in_flight)
 
 
 def test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres(

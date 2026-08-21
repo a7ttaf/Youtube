@@ -662,13 +662,23 @@ class _GroupAppearsAtWriteBoundary(ChannelGroupRegistry):
         """Race the group into existence once, just before the locked read."""
         if for_update and not self._raced and cms_group_id == self._race_key:
             self._raced = True
-            super().create_group(
+            # DIRECT insertion, not create_group: this simulates ANOTHER
+            # writer's COMMITTED create, and the apply's transaction boundary
+            # journals only the store's own write methods — so the raced group
+            # must stay invisible to the undo and survive the refusal, exactly
+            # as a committed SQL row survives our rollback (review #184, C2).
+            # The staging idiom matches the channel racers above, which mutate
+            # _channels directly for the same reason.
+            raced = ChannelGroupEntry(
+                id=f"raced-{self._race_key}",
                 name=self._race_key,
                 group_type="SECTOR",
-                channel_ids=[],
+                active=True,
+                channel_ids=(),
                 cms_group_id=self._race_key,
                 content_owner_id=self._race_owner,
             )
+            self._groups[raced.id] = raced
         return super().get_group_by_cms_id(cms_group_id, for_update=for_update)
 
 
@@ -732,14 +742,14 @@ class _ChannelDriftsAtWriteBoundary(ChannelRegistry):
         """Land a concurrent rename once, just before the locked write."""
         if not self._drifted:
             self._drifted = True
-            current = super().get_channel(youtube_channel_id)
-            assert current is not None
-            super().update_inventory(
-                youtube_channel_id=current.youtube_channel_id,
-                channel_name=self._drift_to,
-                cms_status=current.cms_status,
-                content_owner_id=current.content_owner_id,
-                revenue_required=current.revenue_required,
+            # DIRECT mutation, not a nested update_inventory: this simulates
+            # ANOTHER writer's COMMITTED rename, which the apply's undo
+            # journal must not see — it survives the refusal exactly as a
+            # committed SQL row survives our rollback (review #184, C2). Same
+            # staging idiom as _ChannelArchivedAtWriteBoundary above.
+            current = self._channels[youtube_channel_id]
+            self._channels[youtube_channel_id] = dataclasses.replace(
+                current, channel_name=self._drift_to
             )
         return super().update_inventory(
             youtube_channel_id=youtube_channel_id,
@@ -979,14 +989,12 @@ class _RevenueFlagDriftsAtWriteBoundary(ChannelRegistry):
         """Turn revenue_required off once, just before the locked write."""
         if not self._drifted:
             self._drifted = True
-            current = super().get_channel(youtube_channel_id)
-            assert current is not None
-            super().update_inventory(
-                youtube_channel_id=current.youtube_channel_id,
-                channel_name=current.channel_name,
-                cms_status=current.cms_status,
-                content_owner_id=current.content_owner_id,
-                revenue_required=False,
+            # DIRECT mutation for the same reason as _ChannelDriftsAtWriteBoundary:
+            # a concurrent writer's committed flip must stay invisible to the
+            # apply's undo journal (review #184, C2).
+            current = self._channels[youtube_channel_id]
+            self._channels[youtube_channel_id] = dataclasses.replace(
+                current, revenue_required=False
             )
         return super().update_inventory(
             youtube_channel_id=youtube_channel_id,

@@ -481,6 +481,19 @@ on real ingestion (Phase 2) and the inventory load workflow.
   no migration; #159's unbound "the file wins" rule is untouched. The
   import/sync UI arc is complete.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.
+  **Store transaction boundary shipped 2026-08-22**
+  (`feat/import-store-transaction` — #184's deferred C2 question, ruled
+  "transaction boundary" 2026-08-21): both channel-store protocols now
+  declare an explicit `transaction()` boundary — the SQL adapters delegate to
+  the request's own session transaction (nothing opens, nothing commits, no
+  savepoint), the in-memory adapters keep an undo JOURNAL of their own write
+  methods and replay it backwards on raise (own writes undone; a concurrent
+  writer's interleaved change survives, as a committed SQL row survives a
+  rollback) — and `apply_channel_import` wraps its pre-flight, BOTH passes,
+  and the audit flush in one boundary, with audit records buffered until the
+  passes succeed so no tier can end with audit rows describing writes that
+  were undone. Closes the review-#184 window where a group-pass failure left
+  pass-1 inventory writes installed on the non-transactional adapters.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to
   `GET /channels/outside-cms` + `GET /channels/issues` (PR #98,

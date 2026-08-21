@@ -34,6 +34,8 @@
 # ============================================================================
 """SQL-backed tenant-scoped channel group registry and membership writes."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select
@@ -71,6 +73,17 @@ class SqlAlchemyChannelGroupRegistry:
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Delegate atomicity to the request's enclosing Session transaction.
+
+        Opens nothing, commits nothing, adds no SAVEPOINT — the full rationale
+        lives on ``SqlAlchemyChannelRegistry.transaction``, and both routes'
+        group writes share the registry's session, so the two delegations are
+        one and the same transaction (review #184, C2).
+        """
+        yield
 
     def list_groups(self) -> list[ChannelGroupEntry]:
         """Return active channel groups with their member channel ids.

@@ -16,7 +16,8 @@
 # ============================================================================
 """SQL-backed tenant-scoped channel registry."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -59,6 +60,22 @@ class SqlAlchemyChannelRegistry:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
         self._guard_held = False
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Delegate atomicity to the request's enclosing Session transaction.
+
+        Deliberately opens NOTHING and commits NOTHING: this registry is
+        request-scoped, the request dependency owns the one transaction
+        (commit on success, rollback on exception), and every row lock and the
+        advisory close guard are already scoped to it. A raise propagates to
+        that boundary, whose rollback is the real undo — so entering here
+        asserts what is already true, which is exactly the protocol's SQL
+        mapping (review #184, C2). No SAVEPOINT either: partial undo inside a
+        request is a different contract, and nesting one under the platform-
+        lane audit elevation would change semantics this module must not own.
+        """
+        yield
 
     # ========================================================================
     # Purpose: Take the tenant-wide REVENUE_REQUIREMENT_GUARD_MONTH advisory

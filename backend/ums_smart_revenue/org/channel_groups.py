@@ -26,6 +26,8 @@
 # ============================================================================
 """Channel-group domain contract, typed errors, and in-memory registry."""
 
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import uuid4
@@ -283,10 +285,59 @@ class ChannelGroupRegistryStore(Protocol):
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
         pass
 
+    def transaction(self) -> AbstractContextManager[None]:
+        """Return a context manager making the wrapped writes all-or-nothing.
+
+        The group half of the import's atomicity boundary — the full contract
+        (SQL delegates to the enclosing Session transaction and never commits;
+        adapters without one journal their own writes and replay them
+        backwards on raise, so a foreign write interleaved mid-boundary
+        survives; not nestable, never a savepoint, exceptions propagate) is
+        documented on
+        ``ChannelRegistryStore.transaction``, and the two must not drift: the
+        bulk import enters BOTH around its two passes, so a group-store
+        boundary that behaved differently would undo one half of a refused
+        import and keep the other (review #184, C2).
+        """
+        ...
+
 
 class ChannelGroupRegistry:
     def __init__(self, groups: list[ChannelGroupEntry] | None = None):
         self._groups = {group.id: group for group in groups or []}
+        # Active only inside transaction(): (key, pre-image-or-None) per write.
+        self._txn_undo: list[tuple[str, ChannelGroupEntry | None]] | None = None
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Journal this store's own writes; undo exactly those on raise.
+
+        Mirror of ``ChannelRegistry.transaction``, and the same deliberate
+        choice of an undo journal over a dict snapshot: only THIS store's
+        write-method mutations are undone, so a group a concurrent writer
+        minted mid-apply survives the refusal exactly as its committed row
+        would survive a SQL rollback. The full rationale lives on the
+        registry's method; the two must not drift.
+        """
+        if self._txn_undo is not None:
+            raise RuntimeError("ChannelGroupRegistry.transaction does not nest")
+        self._txn_undo = []
+        try:
+            yield
+        except BaseException:
+            for key, previous in reversed(self._txn_undo):
+                if previous is None:
+                    self._groups.pop(key, None)
+                else:
+                    self._groups[key] = previous
+            raise
+        finally:
+            self._txn_undo = None
+
+    def _journal(self, group_id: str) -> None:
+        """Record a key's pre-image before mutating it; no-op outside a boundary."""
+        if self._txn_undo is not None:
+            self._txn_undo.append((group_id, self._groups.get(group_id)))
 
     def list_groups(self) -> list[ChannelGroupEntry]:
         # In-memory registry: every member is treated as active. The full
@@ -435,6 +486,7 @@ class ChannelGroupRegistry:
             cms_group_id=cms_group_id,
             content_owner_id=content_owner_id,
         )
+        self._journal(group.id)
         self._groups[group.id] = group
         return group
 
@@ -458,6 +510,7 @@ class ChannelGroupRegistry:
                 content_owner_id if content_owner_id is not None else group.content_owner_id
             ),
         )
+        self._journal(group_id)
         self._groups[group_id] = updated
         return updated
 
@@ -475,6 +528,7 @@ class ChannelGroupRegistry:
                 f"channel group {group_id} has no content-owner stamp to clear"
             )
         updated = replace(group, content_owner_id=None)
+        self._journal(group_id)
         self._groups[group_id] = updated
         return ClearedContentOwner(
             group=updated, previous_content_owner_id=previous_content_owner_id
@@ -485,6 +539,7 @@ class ChannelGroupRegistry:
         updated = replace(
             group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids]))
         )
+        self._journal(group_id)
         self._groups[group_id] = updated
         return updated
 
@@ -494,6 +549,7 @@ class ChannelGroupRegistry:
             group,
             channel_ids=tuple(channel for channel in group.channel_ids if channel != channel_id),
         )
+        self._journal(group_id)
         self._groups[group_id] = updated
         return updated
 

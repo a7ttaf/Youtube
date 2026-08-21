@@ -10,7 +10,7 @@ from dataclasses import replace
 
 import pytest
 
-from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
+from ums_smart_revenue.auth.audit_service import AuditRecord, InMemoryAuditSink
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistry
@@ -33,6 +33,8 @@ from ums_smart_revenue.org.channel_import_apply import (
 from ums_smart_revenue.org.channel_registry import ChannelRegistry, ChannelRegistryEntry
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
+# A second valid channel id, for plans that must write more than one row.
+SECOND_CHANNEL_ID = "UC3Dci3BzZXDo4jw4dU8KqWg"
 CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 ACTOR = UserPrincipal(user_id="user-1", email="user@example.com")
 
@@ -341,6 +343,122 @@ class _ArchivedAtApplyGroups(ChannelGroupRegistry):
         if group is not None and for_update:
             return replace(group, active=False)
         return group
+
+
+def test_group_pass_failure_undoes_the_inventory_writes() -> None:
+    """A pass-2 refusal takes pass 1's channel writes back — on THIS tier (C2).
+
+    The window review #184 named: by the time the group pass raises, every
+    channel row has been written, and before the store transaction boundary
+    the in-memory registry had no way to take those back — a 409 answered
+    while the CREATEs stayed installed. Two rows on purpose: the first carries
+    no group at all, so its write is undone purely by the boundary, not by
+    anything group-shaped. The sink stays EMPTY because the audit buffer only
+    flushes after both passes succeed — without that, restoring the stores
+    would have produced the worse state, an audit trail describing writes
+    that were undone.
+    """
+    registry = ChannelRegistry([])
+    groups = _ArchivedAtApplyGroups()
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    sink = InMemoryAuditSink()
+    plain_row = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=SECOND_CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Beta News",
+        group_id=None,
+        revenue_required=True,
+    )
+    group_row = ChannelImportPlanEntry(
+        row_number=2,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id="cms-tv",
+        revenue_required=True,
+    )
+    counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
+    counts[ChannelImportOutcome.CREATE.value] = 2
+
+    with pytest.raises(ChannelImportArchivedGroupError, match="cms-tv"):
+        _apply(
+            ChannelImportPlan(entries=(plain_row, group_row), counts=counts),
+            registry,
+            groups,
+            sink,
+        )
+
+    # BOTH pass-1 writes are gone, the group is untouched, and not a single
+    # audit record reached the sink.
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert registry.get_channel(SECOND_CHANNEL_ID) is None
+    stored = groups.get_group_by_cms_id("cms-tv")
+    assert stored is not None and stored.channel_ids == ()
+    assert sink.records == []
+
+
+class _UnavailableSink:
+    """AuditSink double whose very first append raises — a sink outage."""
+
+    def append(self, record: AuditRecord) -> None:
+        raise RuntimeError("sink unavailable")
+
+
+def test_a_sink_failure_during_flush_undoes_the_stores() -> None:
+    """The audit flush sits INSIDE the boundary, and this is why (C2).
+
+    Both passes succeed here; the REAL sink then refuses its first record.
+    A flush outside the boundary would leave the channel installed with no
+    audit trail at all — the exact shape the atomic-audit wiring exists to
+    prevent on SQL — so the raise must take the write back with it.
+    """
+    registry = ChannelRegistry([])
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id=None,
+        revenue_required=True,
+    )
+
+    with pytest.raises(RuntimeError, match="sink unavailable"):
+        _apply(_plan(entry), registry, ChannelGroupRegistry(), _UnavailableSink())
+
+    assert registry.get_channel(CHANNEL_ID) is None
+
+
+def test_flushed_audit_trail_keeps_event_order_and_ends_with_the_summary() -> None:
+    """Buffering must change WHEN records reach the sink, never their order.
+
+    The per-row CHANNEL_CREATED comes first and the one CHANNEL_IMPORTED
+    summary stays last — the order consumers of the trail already rely on.
+    """
+    registry = ChannelRegistry([])
+    groups = ChannelGroupRegistry()
+    sink = InMemoryAuditSink()
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id=None,
+        revenue_required=True,
+    )
+
+    _apply(_plan(entry), registry, groups, sink)
+
+    event_types = [record.event_type for record in sink.records]
+    assert event_types[0] == "CHANNEL_CREATED"
+    assert event_types[-1] == "CHANNEL_IMPORTED"
+    assert event_types.count("CHANNEL_IMPORTED") == 1
 
 
 def test_group_archived_between_plan_and_apply_fails_closed() -> None:
