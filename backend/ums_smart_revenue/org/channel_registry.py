@@ -250,6 +250,16 @@ class ChannelRegistry:
         # (PR #196 round 2, codex). The `undo` attribute holds the active
         # journal — (key, pre-image-or-None) per write — or None.
         self._txn = threading.local()
+        # The store-wide WRITE lock — the coarse in-memory analogue of the
+        # SQL tier's row locks. A transaction() boundary holds it for its
+        # whole duration and every write method takes it, so another
+        # thread's API write serializes BEHIND an open boundary and lands
+        # AFTER its rollback: it can neither read nor build upon state the
+        # rollback is about to retract (PR #196 round 3, codex). Re-entrant,
+        # so the boundary-holding thread's own writes pass through. Reads
+        # stay lock-free — dict access is atomic under the GIL, and SQL
+        # readers do not block under MVCC either.
+        self._write_lock = threading.RLock()
         for channel in channels or []:
             if channel.youtube_channel_id in self._channels:
                 raise ChannelRegistryConflictError(
@@ -307,21 +317,22 @@ class ChannelRegistry:
         """
         if getattr(self._txn, "undo", None) is not None:
             raise RuntimeError("ChannelRegistry.transaction does not nest")
-        undo: list[tuple[str, ChannelRegistryEntry | None, ChannelRegistryEntry]] = []
-        self._txn.undo = undo
-        try:
-            yield
-        except BaseException:
-            for key, previous, written in reversed(undo):
-                if self._channels.get(key) is not written:
-                    continue
-                if previous is None:
-                    self._channels.pop(key, None)
-                else:
-                    self._channels[key] = previous
-            raise
-        finally:
-            self._txn.undo = None
+        with self._write_lock:
+            undo: list[tuple[str, ChannelRegistryEntry | None, ChannelRegistryEntry]] = []
+            self._txn.undo = undo
+            try:
+                yield
+            except BaseException:
+                for key, previous, written in reversed(undo):
+                    if self._channels.get(key) is not written:
+                        continue
+                    if previous is None:
+                        self._channels.pop(key, None)
+                    else:
+                        self._channels[key] = previous
+                raise
+            finally:
+                self._txn.undo = None
 
     def _journal(self, youtube_channel_id: str, written: ChannelRegistryEntry) -> None:
         """Record (key, pre-image, written-entry) for the active boundary, if any."""
@@ -365,64 +376,69 @@ class ChannelRegistry:
         content_owner_id: str | None = None,
     ) -> ChannelRegistryEntry:
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
-        if youtube_channel_id in self._channels:
-            raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
-        initial_revenue_source_status = (
-            "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
-        )
-        channel = ChannelRegistryEntry(
-            youtube_channel_id=youtube_channel_id,
-            channel_name=channel_name,
-            primary_company_id=normalized_company_id,
-            cms_status=cms_status,
-            revenue_required=revenue_required,
-            content_owner_id=normalize_optional_content_owner(content_owner_id),
-            revenue_source_status=initial_revenue_source_status,
-        )
-        self._journal(youtube_channel_id, channel)
-        self._channels[youtube_channel_id] = channel
-        return channel
+        with self._write_lock:
+            if youtube_channel_id in self._channels:
+                raise ChannelRegistryConflictError(
+                    f"Channel already exists: {youtube_channel_id}"
+                )
+            initial_revenue_source_status = (
+                "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
+            )
+            channel = ChannelRegistryEntry(
+                youtube_channel_id=youtube_channel_id,
+                channel_name=channel_name,
+                primary_company_id=normalized_company_id,
+                cms_status=cms_status,
+                revenue_required=revenue_required,
+                content_owner_id=normalize_optional_content_owner(content_owner_id),
+                revenue_source_status=initial_revenue_source_status,
+            )
+            self._journal(youtube_channel_id, channel)
+            self._channels[youtube_channel_id] = channel
+            return channel
 
     def update_mapping(
         self, *, youtube_channel_id: str, primary_company_id: str | None
     ) -> ChannelRegistryEntry:
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
-        existing = self._channels.get(youtube_channel_id)
-        if existing is None:
-            raise KeyError(youtube_channel_id)
-        updated = ChannelRegistryEntry(
-            youtube_channel_id=existing.youtube_channel_id,
-            channel_name=existing.channel_name,
-            primary_company_id=normalized_company_id,
-            cms_status=existing.cms_status,
-            revenue_required=existing.revenue_required,
-            content_owner_id=existing.content_owner_id,
-            revenue_source_status=existing.revenue_source_status,
-            active=existing.active,
-        )
-        self._journal(youtube_channel_id, updated)
-        self._channels[youtube_channel_id] = updated
-        return updated
+        with self._write_lock:
+            existing = self._channels.get(youtube_channel_id)
+            if existing is None:
+                raise KeyError(youtube_channel_id)
+            updated = ChannelRegistryEntry(
+                youtube_channel_id=existing.youtube_channel_id,
+                channel_name=existing.channel_name,
+                primary_company_id=normalized_company_id,
+                cms_status=existing.cms_status,
+                revenue_required=existing.revenue_required,
+                content_owner_id=existing.content_owner_id,
+                revenue_source_status=existing.revenue_source_status,
+                active=existing.active,
+            )
+            self._journal(youtube_channel_id, updated)
+            self._channels[youtube_channel_id] = updated
+            return updated
 
     def update_content_owner(
         self, *, youtube_channel_id: str, content_owner_id: str | None
     ) -> ChannelRegistryEntry:
-        existing = self._channels.get(youtube_channel_id)
-        if existing is None:
-            raise KeyError(youtube_channel_id)
-        updated = ChannelRegistryEntry(
-            youtube_channel_id=existing.youtube_channel_id,
-            channel_name=existing.channel_name,
-            primary_company_id=existing.primary_company_id,
-            cms_status=existing.cms_status,
-            revenue_required=existing.revenue_required,
-            content_owner_id=normalize_optional_content_owner(content_owner_id),
-            revenue_source_status=existing.revenue_source_status,
-            active=existing.active,
-        )
-        self._journal(youtube_channel_id, updated)
-        self._channels[youtube_channel_id] = updated
-        return updated
+        with self._write_lock:
+            existing = self._channels.get(youtube_channel_id)
+            if existing is None:
+                raise KeyError(youtube_channel_id)
+            updated = ChannelRegistryEntry(
+                youtube_channel_id=existing.youtube_channel_id,
+                channel_name=existing.channel_name,
+                primary_company_id=existing.primary_company_id,
+                cms_status=existing.cms_status,
+                revenue_required=existing.revenue_required,
+                content_owner_id=normalize_optional_content_owner(content_owner_id),
+                revenue_source_status=existing.revenue_source_status,
+                active=existing.active,
+            )
+            self._journal(youtube_channel_id, updated)
+            self._channels[youtube_channel_id] = updated
+            return updated
 
     # ========================================================================
     # Purpose: In-memory twin of the SQL registry's bulk-import inventory
@@ -460,37 +476,39 @@ class ChannelRegistry:
         write actually replaced (mirrors the SQL registry's write-boundary
         re-read; in memory the current entry IS the write-boundary state).
         """
-        current = self._channels.get(youtube_channel_id)
-        if current is None:
-            raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
-        # BEFORE the mutation, and for this store that ordering is the only
-        # protection there is: a dict has no transaction to roll back, so a
-        # caller that validated `previous` after the fact would answer 409 with
-        # the roster values already installed (review #184).
-        if require_pre_state is not None:
-            require_pre_state(current)
-        updated = replace(
-            current,
-            channel_name=channel_name,
-            cms_status=cms_status,
-            content_owner_id=content_owner_id,
-            revenue_required=revenue_required,
-            # Re-derive the source status only when revenue_required actually
-            # flips; an unrelated inventory refresh must not clobber a proven
-            # OFFICIAL_CMS_REVENUE / OFFICIAL_MANUAL_IMPORT classification back
-            # to MISSING_REVENUE_SOURCE.
-            revenue_source_status=derive_revenue_source_status(
-                current_status=current.revenue_source_status,
-                current_revenue_required=current.revenue_required,
+        with self._write_lock:
+            current = self._channels.get(youtube_channel_id)
+            if current is None:
+                raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
+            # BEFORE the mutation, and for this store that ordering is the only
+            # protection there is: a dict has no transaction to roll back, so a
+            # caller that validated `previous` after the fact would answer 409
+            # with the roster values already installed (review #184).
+            if require_pre_state is not None:
+                require_pre_state(current)
+            updated = replace(
+                current,
+                channel_name=channel_name,
+                cms_status=cms_status,
+                content_owner_id=content_owner_id,
                 revenue_required=revenue_required,
-            ),
-        )
-        # AFTER require_pre_state: a refused write must leave no journal entry,
-        # and the pre-image recorded is the write-boundary state the undo must
-        # reinstate.
-        self._journal(youtube_channel_id, updated)
-        self._channels[youtube_channel_id] = updated
-        return current, updated
+                # Re-derive the source status only when revenue_required
+                # actually flips; an unrelated inventory refresh must not
+                # clobber a proven OFFICIAL_CMS_REVENUE /
+                # OFFICIAL_MANUAL_IMPORT classification back to
+                # MISSING_REVENUE_SOURCE.
+                revenue_source_status=derive_revenue_source_status(
+                    current_status=current.revenue_source_status,
+                    current_revenue_required=current.revenue_required,
+                    revenue_required=revenue_required,
+                ),
+            )
+            # AFTER require_pre_state: a refused write must leave no journal
+            # entry, and the pre-image recorded is the write-boundary state
+            # the undo must reinstate.
+            self._journal(youtube_channel_id, updated)
+            self._channels[youtube_channel_id] = updated
+            return current, updated
 
 
 def bootstrap_channel_registry() -> ChannelRegistry:

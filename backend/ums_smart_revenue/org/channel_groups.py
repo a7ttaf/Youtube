@@ -326,6 +326,11 @@ class ChannelGroupRegistry:
         # journal must neither capture nor revert another's writes
         # (PR #196 round 2, codex). `undo` holds the active journal or None.
         self._txn = threading.local()
+        # The store-wide write lock — see ChannelRegistry.__init__ for the
+        # full rationale (PR #196 round 3): boundaries hold it, write methods
+        # take it, another thread's API write serializes behind an open
+        # boundary. Re-entrant; reads stay lock-free.
+        self._write_lock = threading.RLock()
 
     # ========================================================================
     # Purpose: In-memory implementation of the group store's transaction
@@ -362,21 +367,22 @@ class ChannelGroupRegistry:
         """
         if getattr(self._txn, "undo", None) is not None:
             raise RuntimeError("ChannelGroupRegistry.transaction does not nest")
-        undo: list[tuple[str, ChannelGroupEntry | None, ChannelGroupEntry]] = []
-        self._txn.undo = undo
-        try:
-            yield
-        except BaseException:
-            for key, previous, written in reversed(undo):
-                if self._groups.get(key) is not written:
-                    continue
-                if previous is None:
-                    self._groups.pop(key, None)
-                else:
-                    self._groups[key] = previous
-            raise
-        finally:
-            self._txn.undo = None
+        with self._write_lock:
+            undo: list[tuple[str, ChannelGroupEntry | None, ChannelGroupEntry]] = []
+            self._txn.undo = undo
+            try:
+                yield
+            except BaseException:
+                for key, previous, written in reversed(undo):
+                    if self._groups.get(key) is not written:
+                        continue
+                    if previous is None:
+                        self._groups.pop(key, None)
+                    else:
+                        self._groups[key] = previous
+                raise
+            finally:
+                self._txn.undo = None
 
     def _journal(self, group_id: str, written: ChannelGroupEntry) -> None:
         """Record (key, pre-image, written-entry) for the active boundary, if any."""
@@ -518,24 +524,26 @@ class ChannelGroupRegistry:
         cms_group_id: str | None = None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        # Parity with the SQL store's per-tenant unique key: a duplicate CMS
-        # key must fail typed here too, not silently create a second group.
-        if cms_group_id is not None and self.get_group_by_cms_id(cms_group_id) is not None:
-            raise ChannelGroupConflictError(
-                f"channel group already exists for cms_group_id: {cms_group_id}"
+        with self._write_lock:
+            # Parity with the SQL store's per-tenant unique key: a duplicate
+            # CMS key must fail typed here too, not silently create a second
+            # group. Checked INSIDE the lock — check-then-write races too.
+            if cms_group_id is not None and self.get_group_by_cms_id(cms_group_id) is not None:
+                raise ChannelGroupConflictError(
+                    f"channel group already exists for cms_group_id: {cms_group_id}"
+                )
+            group = ChannelGroupEntry(
+                id=str(uuid4()),
+                name=name,
+                group_type=group_type,
+                active=True,
+                channel_ids=tuple(dict.fromkeys(channel_ids)),
+                cms_group_id=cms_group_id,
+                content_owner_id=content_owner_id,
             )
-        group = ChannelGroupEntry(
-            id=str(uuid4()),
-            name=name,
-            group_type=group_type,
-            active=True,
-            channel_ids=tuple(dict.fromkeys(channel_ids)),
-            cms_group_id=cms_group_id,
-            content_owner_id=content_owner_id,
-        )
-        self._journal(group.id, group)
-        self._groups[group.id] = group
-        return group
+            self._journal(group.id, group)
+            self._groups[group.id] = group
+            return group
 
     def update_group(
         self,
@@ -545,21 +553,24 @@ class ChannelGroupRegistry:
         active: bool | None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        group = self._require_group(group_id)
-        # Parity with the SQL store: adopt-only, reassignment raises.
-        if content_owner_id is not None:
-            require_adoptable_owner(group.content_owner_id, content_owner_id, group_id=group_id)
-        updated = replace(
-            group,
-            name=name if name is not None else group.name,
-            active=active if active is not None else group.active,
-            content_owner_id=(
-                content_owner_id if content_owner_id is not None else group.content_owner_id
-            ),
-        )
-        self._journal(group_id, updated)
-        self._groups[group_id] = updated
-        return updated
+        with self._write_lock:
+            group = self._require_group(group_id)
+            # Parity with the SQL store: adopt-only, reassignment raises.
+            if content_owner_id is not None:
+                require_adoptable_owner(
+                    group.content_owner_id, content_owner_id, group_id=group_id
+                )
+            updated = replace(
+                group,
+                name=name if name is not None else group.name,
+                active=active if active is not None else group.active,
+                content_owner_id=(
+                    content_owner_id if content_owner_id is not None else group.content_owner_id
+                ),
+            )
+            self._journal(group_id, updated)
+            self._groups[group_id] = updated
+            return updated
 
     def clear_content_owner(self, *, group_id: str) -> ClearedContentOwner:
         """Erase a group's owner stamp, returning it to the adoptable pool.
@@ -568,37 +579,42 @@ class ChannelGroupRegistry:
         SETTING an owner, not erasing one. Reports the erased owner id
         alongside the cleared group, matching the SQL store's contract.
         """
-        group = self._require_group(group_id)
-        previous_content_owner_id = group.content_owner_id
-        if previous_content_owner_id is None:
-            raise ChannelGroupNoOwnerStampError(
-                f"channel group {group_id} has no content-owner stamp to clear"
+        with self._write_lock:
+            group = self._require_group(group_id)
+            previous_content_owner_id = group.content_owner_id
+            if previous_content_owner_id is None:
+                raise ChannelGroupNoOwnerStampError(
+                    f"channel group {group_id} has no content-owner stamp to clear"
+                )
+            updated = replace(group, content_owner_id=None)
+            self._journal(group_id, updated)
+            self._groups[group_id] = updated
+            return ClearedContentOwner(
+                group=updated, previous_content_owner_id=previous_content_owner_id
             )
-        updated = replace(group, content_owner_id=None)
-        self._journal(group_id, updated)
-        self._groups[group_id] = updated
-        return ClearedContentOwner(
-            group=updated, previous_content_owner_id=previous_content_owner_id
-        )
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
-        group = self._require_group(group_id)
-        updated = replace(
-            group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids]))
-        )
-        self._journal(group_id, updated)
-        self._groups[group_id] = updated
-        return updated
+        with self._write_lock:
+            group = self._require_group(group_id)
+            updated = replace(
+                group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids]))
+            )
+            self._journal(group_id, updated)
+            self._groups[group_id] = updated
+            return updated
 
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
-        group = self._require_group(group_id)
-        updated = replace(
-            group,
-            channel_ids=tuple(channel for channel in group.channel_ids if channel != channel_id),
-        )
-        self._journal(group_id, updated)
-        self._groups[group_id] = updated
-        return updated
+        with self._write_lock:
+            group = self._require_group(group_id)
+            updated = replace(
+                group,
+                channel_ids=tuple(
+                    channel for channel in group.channel_ids if channel != channel_id
+                ),
+            )
+            self._journal(group_id, updated)
+            self._groups[group_id] = updated
+            return updated
 
     def _require_group(self, group_id: str) -> ChannelGroupEntry:
         group = self.get_group(group_id)

@@ -93,27 +93,33 @@ class SqlAlchemyAuditSink:
         self._session.expunge_all()
 
     # ========================================================================
-    # Purpose: The AuditSink.transaction() boundary, delegated to the caller's
-    #   enclosing Session transaction — this sink's appends already live
-    #   inside it, so a raise reaching the session owner discards them there.
-    # Database/ORM: None of its own; opens nothing, commits nothing, adds no
-    #   SAVEPOINT. When the bulk import flushes through this sink the flush
-    #   additionally sits INSIDE the store adapters' savepoints, which is
-    #   what makes a mid-flush failure discard the accepted prefix even for a
-    #   caller that catches the exception (review #184, C2).
-    # Standards: Mirrors the SQL store adapters' delegation; exceptions
-    #   propagate untouched.
-    # Blast Radius: None — a documented no-op on this tier.
+    # Purpose: The AuditSink.transaction() boundary — a SAVEPOINT on THIS
+    #   sink's own session, so a failed batch discards its accepted prefix
+    #   without any assumption about who else shares the session.
+    # Database/ORM: SAVEPOINT via Session.begin_nested(); never commits the
+    #   outer transaction. A pure delegation was almost enough — the import's
+    #   flush also sits inside the store adapters' savepoints — but that
+    #   protection holds only while every object shares ONE session, which
+    #   neither AuditSink.transaction() nor apply_channel_import requires: a
+    #   direct caller wiring a sink on a DIFFERENT session, catching the
+    #   failure, and committing would persist the prefix (PR #196 round 3,
+    #   codex). The savepoint makes the sink's own promise unconditional.
+    # Standards: Exceptions propagate; nests harmlessly under the store
+    #   savepoints when sessions are shared (savepoint stacks).
+    # Blast Radius: Whether a failed multi-record audit batch can persist a
+    #   prefix for a catching caller on a separate session. Request-path end
+    #   state unchanged.
     # Connections:
     #   - File: backend/ums_smart_revenue/auth/audit_service.py -> the
     #     protocol contract and the in-memory truncating implementation.
-    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
-    #     SAVEPOINT that actually contains the import's flush.
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     wraps the buffered flush in this boundary.
     # ========================================================================
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """Delegate batch atomicity to the enclosing Session transaction."""
-        yield
+        """Wrap the appends in a SAVEPOINT on this sink's session."""
+        with self._session.begin_nested():
+            yield
 
 
 # ============================================================================
@@ -168,15 +174,16 @@ class PlatformLaneAuditSink:
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """Delegate batch atomicity to the caller's transaction, like the inner sink.
+        """Wrap the appends in a SAVEPOINT, like the inner sink's boundary.
 
-        Same delegation as ``SqlAlchemyAuditSink.transaction`` (see its block):
-        the per-append platform-lane elevation is orthogonal — elevation
-        changes the ROLE a statement runs under, never which transaction it
-        belongs to, so the appended rows discard with the caller's rollback
-        exactly as before.
+        Same rationale as ``SqlAlchemyAuditSink.transaction`` (see its
+        block). The per-append platform-lane elevation is orthogonal:
+        elevation changes the ROLE a statement runs under, never which
+        transaction or savepoint it belongs to, so a rollback to this
+        savepoint discards the elevated INSERTs exactly as any others.
         """
-        yield
+        with self._session.begin_nested():
+            yield
 
 
 def _parse_uuid_or_none(value: str) -> UUID | None:

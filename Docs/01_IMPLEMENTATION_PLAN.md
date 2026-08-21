@@ -484,20 +484,29 @@ on real ingestion (Phase 2) and the inventory load workflow.
   **Store transaction boundary shipped 2026-08-22**
   (`feat/import-store-transaction` — #184's deferred C2 question, ruled
   "transaction boundary" 2026-08-21): both channel-store protocols now
-  declare an explicit `transaction()` boundary — the SQL adapters delegate to
-  the request's own session transaction (nothing opens, nothing commits, no
-  savepoint), the in-memory adapters keep an undo JOURNAL of their own write
-  methods and replay it backwards on raise (own writes undone; a concurrent
-  writer's interleaved change survives, as a committed SQL row survives a
-  rollback) — and `apply_channel_import` wraps its pre-flight, BOTH passes,
-  and the audit flush in one boundary, with audit records buffered until the
-  passes succeed so no tier can end with audit rows describing writes that
-  were undone. Closes the review-#184 window where a group-pass failure left
-  pass-1 inventory writes installed on the non-transactional adapters. The
-  SQL adapters implement the boundary as a SAVEPOINT (`Session.begin_nested`)
-  so the promise also holds for a direct caller that catches the failure and
-  commits the session; row locks and the advisory close guard are
-  transaction-scoped and unaffected by a savepoint rollback.
+  declare an explicit `transaction()` boundary. The SQL adapters implement it
+  as a real SAVEPOINT (`Session.begin_nested`) on the request's session —
+  rolled back to on exception, released on success, never a commit of the
+  outer transaction — so the all-or-nothing promise holds even for a direct
+  caller that catches the failure and commits the session; row locks and the
+  advisory close guard are transaction-scoped and unaffected by a savepoint
+  rollback, the guard's held-memo resets when a boundary that acquired it
+  rolls back, and the stores' flush-conflict handlers recover via their own
+  savepoints instead of rolling back the root transaction. The in-memory
+  adapters keep a PER-THREAD undo JOURNAL of their own write methods with
+  compare-and-restore replay (own writes undone only while the key still
+  holds the object the boundary wrote; a foreign overwrite or delete stands,
+  as a committed SQL row survives a rollback), and serialize writers behind
+  a store-wide re-entrant lock — the coarse analogue of PG row locks — so a
+  concurrent thread's write can neither read nor build on state a rollback
+  retracts. `apply_channel_import` wraps its pre-flight, BOTH passes, and
+  the audit flush in one boundary, with audit records buffered until the
+  passes succeed and the flush inside the sink's own boundary (SAVEPOINT on
+  the SQL sinks, lock-serialized truncate-restore on the in-memory sink) so
+  no tier can end with audit rows describing writes that were undone — not
+  even a partial prefix. Closes the review-#184 window where a group-pass
+  failure left pass-1 inventory writes installed on the non-transactional
+  adapters.
   `No migration/backfill required.` — no table, column, constraint, index, or
   query-shape change anywhere in the diff (`backend/ums_smart_revenue/db/`
   and `alembic/` untouched; verified by the PR's file list); the only new SQL

@@ -223,14 +223,18 @@ def test_groups_boundary_does_not_nest() -> None:
         pass
 
 
-def test_registry_boundary_is_thread_local() -> None:
-    """Another thread is a FOREIGN transaction to this boundary (round 2).
+def test_registry_boundary_is_thread_local_and_serializes_writers() -> None:
+    """Another thread is a FOREIGN transaction: serialized, not entangled.
 
     The no-database tier serves the in-memory registry as a long-lived
     singleton, so two requests can run through it on different threads
-    (PR #196, codex P2). Three properties in one staging: the worker's own
-    boundary is NOT refused as "nested" by ours, its committed write is NOT
-    captured into our journal, and our rollback does NOT revert it — while
+    (PR #196, codex rounds 2-3). The worker STARTS while our boundary is
+    open, so its write serializes BEHIND the store-wide write lock and lands
+    only after our rollback — the coarse analogue of a PG row-lock wait. It
+    must therefore be joined AFTER the boundary exits (joining inside would
+    deadlock on the very lock this test exists to prove). Pinned properties:
+    the worker's own boundary is not refused as "nested" by ours, its write
+    is neither captured into our journal nor reverted by our rollback, and
     our own write still undoes.
     """
     registry = ChannelRegistry([])
@@ -249,6 +253,7 @@ def test_registry_boundary_is_thread_local() -> None:
         except BaseException as exc:  # noqa: BLE001 — the test must SEE any failure
             worker_errors.append(exc)
 
+    thread = threading.Thread(target=worker)
     with pytest.raises(_BoomError), registry.transaction():
         registry.create_channel(
             youtube_channel_id=CHANNEL_ID,
@@ -257,11 +262,11 @@ def test_registry_boundary_is_thread_local() -> None:
             cms_status="INSIDE_CMS",
             revenue_required=True,
         )
-        thread = threading.Thread(target=worker)
         thread.start()
-        thread.join()
         raise _BoomError()
+    thread.join(timeout=10)
 
+    assert not thread.is_alive()
     assert worker_errors == []
     assert registry.get_channel(CHANNEL_ID) is None
     survivor = registry.get_channel(SECOND_CHANNEL_ID)

@@ -1246,3 +1246,75 @@ def test_transaction_refuses_same_store_nesting():
         registry.transaction(),
     ):
         pass
+
+
+def test_create_conflict_no_longer_discards_a_direct_callers_earlier_work():
+    """A lost check-to-insert race recovers via its OWN savepoint (PR #196).
+
+    `create_channel` handled the IntegrityError with `Session.rollback()`,
+    which rolls back the TOPMOST transaction: a direct caller that seeded a
+    channel, hit a duplicate on a second create, caught the typed conflict,
+    and committed found its first channel silently gone. The insert now
+    flushes inside its own SAVEPOINT, so the conflict discards only itself.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+    registry.create_channel(
+        youtube_channel_id="channel-kept",
+        channel_name="Earlier Uncommitted Work",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+    registry.create_channel(
+        youtube_channel_id="channel-dup",
+        channel_name="First Copy",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+
+    with pytest.raises(ChannelRegistryConflictError):
+        registry.create_channel(
+            youtube_channel_id="channel-dup",
+            channel_name="Second Copy",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+
+    # The catching caller commits; every pre-conflict write survives.
+    session.commit()
+    kept = registry.get_channel("channel-kept")
+    assert kept is not None and kept.channel_name == "Earlier Uncommitted Work"
+    dup = registry.get_channel("channel-dup")
+    assert dup is not None and dup.channel_name == "First Copy"
+
+
+def test_transaction_rollback_resets_the_close_guard_memo():
+    """A savepoint rollback releases locks taken inside it; the memo must follow.
+
+    `pg_advisory_xact_lock` acquired after a savepoint is released by the
+    rollback to it, but `_guard_held` stayed True — a direct caller catching
+    the failure and writing again in the same outer transaction would have
+    skipped re-acquiring the finance-close guard (PR #196 round 3, codex).
+    White-box on the memo: the sqlite acquire is a no-op, but the memo logic
+    is backend-independent and this is exactly the state the hole lived in.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(RuntimeError, match="staged failure"), registry.transaction():
+        registry.create_channel(
+            youtube_channel_id="channel-guard-memo",
+            channel_name="Inside Boundary",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+        assert registry._guard_held is True
+        raise RuntimeError("staged failure")
+
+    assert registry._guard_held is False

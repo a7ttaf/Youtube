@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
@@ -65,31 +66,39 @@ class AuditSink(Protocol):
         ...
 
 
-@dataclass
 class InMemoryAuditSink:
-    records: list[AuditRecord] = field(default_factory=list)
+    """List-backed sink for tests, bootstrap, and the no-database tier."""
+
+    def __init__(self) -> None:
+        self.records: list[AuditRecord] = []
+        # Appends and batch boundaries serialize on one re-entrant lock: the
+        # no-database tier can share this sink across threads, and without
+        # the lock a failed batch's truncation would delete an unrelated
+        # request's records appended past the mark (PR #196 round 3, codex).
+        # Re-entrant so the boundary-holding thread's own appends pass.
+        self._lock = threading.RLock()
 
     def append(self, record: AuditRecord) -> None:
-        self.records.append(record)
+        with self._lock:
+            self.records.append(record)
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
         """Mark the length on enter; truncate back on raise.
 
-        ``records`` is append-only through this class, so truncating to the
-        enter-length removes exactly the records appended inside the boundary.
-        Positional, not ownership-tracked like the stores' journals: no test
-        stages a FOREIGN append into a sink mid-boundary (the in-memory sink
-        is single-writer by construction), so the simpler undo is the honest
-        one — documented here so a future concurrent-append test knows this
-        is the assumption it would be breaking.
+        The boundary HOLDS the sink's lock for its whole duration, so no
+        foreign append can land past the mark while a batch is open — a
+        concurrent writer serializes behind the batch and appends after it
+        resolves, which is what makes the positional truncation remove
+        exactly the batch's own records.
         """
-        marked = len(self.records)
-        try:
-            yield
-        except BaseException:
-            del self.records[marked:]
-            raise
+        with self._lock:
+            marked = len(self.records)
+            try:
+                yield
+            except BaseException:
+                del self.records[marked:]
+                raise
 
 
 def _normalize_audit_reason(

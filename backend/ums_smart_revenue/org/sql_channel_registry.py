@@ -117,6 +117,17 @@ class SqlAlchemyChannelRegistry:
         try:
             with self._session.begin_nested():
                 yield
+        except BaseException:
+            # Advisory locks acquired AFTER a savepoint are released by the
+            # rollback to it (PostgreSQL explicit-locking rules), so a guard
+            # first taken inside this boundary is GONE while the memo said
+            # otherwise — a direct caller catching the failure and writing
+            # again in the same outer transaction would skip re-acquiring
+            # the finance-close guard (PR #196 round 3, codex). Reset
+            # unconditionally: re-acquiring a still-held lock is a cheap
+            # re-entrant no-op, while trusting a stale memo is a lock hole.
+            self._guard_held = False
+            raise
         finally:
             self._txn_active = False
 
@@ -295,11 +306,18 @@ class SqlAlchemyChannelRegistry:
         # predates its own creation is an impossible lifecycle for any
         # consumer that orders by it.
         row.updated_at = created_at
-        self._session.add(row)
         try:
-            self._session.flush()
+            # The INSERT gets its OWN savepoint so a lost check-to-insert race
+            # discards only this row: `Session.rollback()` here rolled back
+            # the TOPMOST transaction, so a direct caller that caught the
+            # typed conflict and committed lost every earlier write in the
+            # transaction — including work flushed before entering the store's
+            # transaction() boundary, which a root rollback discards along
+            # with the savepoints protecting it (PR #196 round 3, codex).
+            with self._session.begin_nested():
+                self._session.add(row)
+                self._session.flush()
         except IntegrityError as exc:
-            self._session.rollback()
             if (
                 _is_duplicate_channel_integrity_error(exc)
                 or self._get_row(youtube_channel_id) is not None
@@ -357,11 +375,16 @@ class SqlAlchemyChannelRegistry:
                 f"finance month(s): {', '.join(locked_months)}"
             )
 
-        row.primary_org_unit_id = parsed_primary_company_id
         try:
-            self._session.flush()
+            # Savepoint-local recovery, mirroring create_channel: a refused
+            # flush must not root-rollback a direct caller's earlier work.
+            # The MUTATION sits inside the savepoint too, so its rollback
+            # restores the object snapshot — a dirty attribute surviving the
+            # typed raise would re-flush on the outer transaction later.
+            with self._session.begin_nested():
+                row.primary_org_unit_id = parsed_primary_company_id
+                self._session.flush()
         except IntegrityError as exc:
-            self._session.rollback()
             raise _channel_registry_validation_error_from_integrity_error(exc) from exc
         return self._to_entry(row)
 
@@ -400,11 +423,13 @@ class SqlAlchemyChannelRegistry:
         row = self._get_row(youtube_channel_id)
         if row is None:
             raise KeyError(f"Channel not found: {youtube_channel_id}")
-        row.content_owner_id = normalize_optional_content_owner(content_owner_id)
         try:
-            self._session.flush()
+            # Savepoint-local recovery with the mutation inside the savepoint,
+            # mirroring update_mapping — see its comment.
+            with self._session.begin_nested():
+                row.content_owner_id = normalize_optional_content_owner(content_owner_id)
+                self._session.flush()
         except IntegrityError as exc:
-            self._session.rollback()
             raise _channel_registry_validation_error_from_integrity_error(exc) from exc
         return self._to_entry(row)
 
