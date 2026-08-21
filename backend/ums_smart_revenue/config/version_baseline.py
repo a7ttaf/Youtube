@@ -8,7 +8,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "pydantic": "2.13.4",
         "uvicorn": "0.52.3",
         "sqlalchemy": "2.0.52",
-        "alembic": "1.18.5",
+        "alembic": "1.19.1",
         "psycopg": "3.3.4",
         "celery": "5.6.3",
         "redis": "8.1.0",
@@ -19,7 +19,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "google_cloud_storage": "3.13.1",
         "pytest": "9.1.1",
         "httpx": "0.28.1",
-        "pypdf": "6.15.0",
+        "pypdf": "6.16.1",
     },
     "datastores": {
         "postgresql": "18.3",
