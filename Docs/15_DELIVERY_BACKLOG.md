@@ -1434,7 +1434,7 @@ change with a real failure mode, not a nit.
    Docs/12. One flagged residual on the PR: digest-ONLY applies are tenant-free
    by that same design — cross-tenant binding stays the fingerprint's job.
 
-2. ⏳ **Roll back inventory when group-action validation fails**
+2. ✅ **Roll back inventory when group-action validation fails**
    (`PRRT_kwDOSZIgN86YGxak`). `_require_planned_group_actions` is a lock-free
    pre-flight that already runs BEFORE the first inventory write
    (`channel_import_apply.py:331`), which closed the direct-caller case. The
@@ -1443,11 +1443,18 @@ change with a real failure mode, not a nit.
    every channel, and a store without a transaction cannot take those back when
    the group pass raises. Production SQL is transactional; the exposure is the
    in-memory adapters used by direct/test/bootstrap callers. **Ruled:
-   transaction boundary** (not a compensating restore) — an explicit boundary
-   on the store protocol: the SQL adapter maps it to its real database
-   transaction, the in-memory adapters implement snapshot-on-enter /
-   restore-on-raise, and the apply wraps BOTH passes in one boundary. Queued as
-   the next PR (3b) once #195 is dry.
+   transaction boundary** (not a compensating restore) — and **shipped as
+   PR #196** (2026-08-22): an explicit `transaction()` boundary on both store
+   protocols. The SQL adapters delegate to the request's own session
+   transaction (nothing opens, nothing commits, no savepoint); the in-memory
+   adapters keep an undo JOURNAL of their own write methods and replay it
+   backwards on raise — own writes undone, a concurrent writer's interleaved
+   change survives, matching SQL rollback semantics, which the existing race
+   tests pin. `apply_channel_import` wraps the pre-flight, both passes, and a
+   buffered audit flush (`_BufferedAuditSink`) in one boundary, so a mid-apply
+   failure no longer even transiently writes audit rows on any tier. Noted
+   follow-up on the PR: `channel_group_sync_apply.py` has the analogous
+   in-memory exposure and can now adopt the same boundary.
 
 ### D. Analyzer dispositions carried forward — NOT defects
 
@@ -1473,7 +1480,7 @@ from the two that need design.
 | --- | --- | --- |
 | 1 | A1 (`path_separator = os`) + B (`candidates: list[Path]`) | two lines, plus a re-run of `tests/db/` and `tests/tenancy/` |
 | 2 | A2 — `httpx2` migration | dependency-wide; re-exercise the connector HTTP paths |
-| 3 | C1 and/or C2 — the two #184 design questions | one each; both RULED 2026-08-21 — C1 shipped as PR #195 (3a), C2 queued (3b) |
+| 3 | C1 and/or C2 — the two #184 design questions | one each; both RULED 2026-08-21 and both SHIPPED — C1 = PR #195 (3a), C2 = PR #196 (3b) |
 
 ## Hard problems to solve early
 
