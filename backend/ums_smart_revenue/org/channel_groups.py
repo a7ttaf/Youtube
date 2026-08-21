@@ -329,7 +329,8 @@ class ChannelGroupRegistry:
         # The store-wide write lock — see ChannelRegistry.__init__ for the
         # full rationale (PR #196 round 3): boundaries hold it, write methods
         # take it, another thread's API write serializes behind an open
-        # boundary. Re-entrant; reads stay lock-free.
+        # boundary. Re-entrant; reads stay lock-free (iterating readers
+        # take list(...) snapshots — PR #196 round 4, see ChannelRegistry).
         self._write_lock = threading.RLock()
 
     # ========================================================================
@@ -396,10 +397,10 @@ class ChannelGroupRegistry:
         # In-memory registry: every member is treated as active. The full
         # member set is the same as the active member set, so list_groups
         # and list_groups_full return the same payload.
-        return sorted(self._groups.values(), key=lambda group: group.name)
+        return sorted(list(self._groups.values()), key=lambda group: group.name)
 
     def list_groups_full(self) -> list[ChannelGroupEntry]:
-        return sorted(self._groups.values(), key=lambda group: group.name)
+        return sorted(list(self._groups.values()), key=lambda group: group.name)
 
     def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
         """Return every CMS-keyed group, active or not, for sync planning.
@@ -410,7 +411,7 @@ class ChannelGroupRegistry:
         """
         return [
             group
-            for group in self._groups.values()
+            for group in list(self._groups.values())
             if group.cms_group_id is not None
             and (
                 content_owner_id is None
@@ -437,7 +438,7 @@ class ChannelGroupRegistry:
         the SQL implementation row-locks the group so an archived-state check
         at the write boundary cannot race a concurrent archive.
         """
-        for group in self._groups.values():
+        for group in list(self._groups.values()):
             if group.cms_group_id == cms_group_id:
                 return group
         return None
@@ -446,7 +447,7 @@ class ChannelGroupRegistry:
         """Return the subset of CMS keys whose existing group is archived."""
         return {
             group.cms_group_id
-            for group in self._groups.values()
+            for group in list(self._groups.values())
             if group.cms_group_id in cms_group_ids and not group.active
         }
 
@@ -456,7 +457,7 @@ class ChannelGroupRegistry:
         """Return the subset of CMS keys stamped to a different content owner."""
         return {
             group.cms_group_id
-            for group in self._groups.values()
+            for group in list(self._groups.values())
             if group.cms_group_id in cms_group_ids
             and group.content_owner_id is not None
             and group.content_owner_id != content_owner_id
@@ -466,7 +467,7 @@ class ChannelGroupRegistry:
         """Return the subset of CMS keys whose existing group is owner-NULL."""
         return {
             group.cms_group_id
-            for group in self._groups.values()
+            for group in list(self._groups.values())
             if group.cms_group_id in cms_group_ids and group.content_owner_id is None
         }
 
@@ -500,7 +501,7 @@ class ChannelGroupRegistry:
         """Return the subset of CMS keys already stamped to this content owner."""
         return {
             group.cms_group_id
-            for group in self._groups.values()
+            for group in list(self._groups.values())
             if group.cms_group_id in cms_group_ids and group.content_owner_id == content_owner_id
         }
 

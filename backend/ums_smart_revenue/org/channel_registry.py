@@ -257,8 +257,12 @@ class ChannelRegistry:
         # AFTER its rollback: it can neither read nor build upon state the
         # rollback is about to retract (PR #196 round 3, codex). Re-entrant,
         # so the boundary-holding thread's own writes pass through. Reads
-        # stay lock-free — dict access is atomic under the GIL, and SQL
-        # readers do not block under MVCC either.
+        # stay lock-free — single-key dict access is atomic under the GIL,
+        # and ITERATING readers first take a list(...) snapshot of the dict
+        # view (one C-level copy, no bytecode runs mid-copy), so a
+        # concurrent write can never resize the dict under a live iterator
+        # (PR #196 round 4, qodo). SQL readers do not block under MVCC
+        # either.
         self._write_lock = threading.RLock()
         for channel in channels or []:
             if channel.youtube_channel_id in self._channels:
@@ -346,7 +350,7 @@ class ChannelRegistry:
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
         return sorted(
-            [channel for channel in self._channels.values() if channel.active],
+            [channel for channel in list(self._channels.values()) if channel.active],
             key=lambda channel: channel.youtube_channel_id,
         )
 
@@ -356,7 +360,7 @@ class ChannelRegistry:
         return sorted(
             [
                 channel
-                for channel_id, channel in self._channels.items()
+                for channel_id, channel in list(self._channels.items())
                 if channel_id in youtube_channel_ids and (channel.active or include_inactive)
             ],
             key=lambda channel: channel.youtube_channel_id,
