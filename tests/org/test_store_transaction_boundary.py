@@ -40,23 +40,22 @@ def test_registry_boundary_undoes_creates_and_restores_updates_on_raise() -> Non
     """Every write THIS store performed inside the boundary is taken back."""
     registry = ChannelRegistry([_seeded_channel()])
 
-    with pytest.raises(_BoomError):
-        with registry.transaction():
-            registry.create_channel(
-                youtube_channel_id=SECOND_CHANNEL_ID,
-                channel_name="Minted Inside",
-                primary_company_id=None,
-                cms_status="INSIDE_CMS",
-                revenue_required=True,
-            )
-            registry.update_inventory(
-                youtube_channel_id=CHANNEL_ID,
-                channel_name="Renamed Inside",
-                cms_status="INSIDE_CMS",
-                content_owner_id="TestOwnerAAAAAAAAAAAAA",
-                revenue_required=True,
-            )
-            raise _BoomError()
+    with pytest.raises(_BoomError), registry.transaction():
+        registry.create_channel(
+            youtube_channel_id=SECOND_CHANNEL_ID,
+            channel_name="Minted Inside",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+        registry.update_inventory(
+            youtube_channel_id=CHANNEL_ID,
+            channel_name="Renamed Inside",
+            cms_status="INSIDE_CMS",
+            content_owner_id="TestOwnerAAAAAAAAAAAAA",
+            revenue_required=True,
+        )
+        raise _BoomError()
 
     assert registry.get_channel(SECOND_CHANNEL_ID) is None
     stored = registry.get_channel(CHANNEL_ID)
@@ -73,22 +72,21 @@ def test_registry_boundary_leaves_a_foreign_write_standing() -> None:
     """
     registry = ChannelRegistry([_seeded_channel()])
 
-    with pytest.raises(_BoomError):
-        with registry.transaction():
-            registry.update_inventory(
-                youtube_channel_id=CHANNEL_ID,
-                channel_name="Renamed Inside",
-                cms_status="INSIDE_CMS",
-                content_owner_id="TestOwnerAAAAAAAAAAAAA",
-                revenue_required=True,
-            )
-            # The foreign writer lands AFTER our journaled write; its value is
-            # what the store holds when the boundary unwinds.
-            current = registry._channels[CHANNEL_ID]
-            registry._channels[CHANNEL_ID] = dataclasses.replace(
-                current, content_owner_id=None
-            )
-            raise _BoomError()
+    with pytest.raises(_BoomError), registry.transaction():
+        registry.update_inventory(
+            youtube_channel_id=CHANNEL_ID,
+            channel_name="Renamed Inside",
+            cms_status="INSIDE_CMS",
+            content_owner_id="TestOwnerAAAAAAAAAAAAA",
+            revenue_required=True,
+        )
+        # The foreign writer lands AFTER our journaled write; its value is
+        # what the store holds when the boundary unwinds.
+        current = registry._channels[CHANNEL_ID]
+        registry._channels[CHANNEL_ID] = dataclasses.replace(
+            current, content_owner_id=None
+        )
+        raise _BoomError()
 
     stored = registry.get_channel(CHANNEL_ID)
     assert stored is not None
@@ -123,21 +121,28 @@ def test_registry_boundary_keeps_writes_on_success_and_journals_nothing_outside(
     stored = registry.get_channel(CHANNEL_ID)
     assert stored is not None and stored.channel_name == "Committed Inside"
     # A later failing boundary must not resurrect anything from before it.
-    with pytest.raises(_BoomError):
-        with registry.transaction():
-            raise _BoomError()
+    with pytest.raises(_BoomError), registry.transaction():
+        raise _BoomError()
     stored = registry.get_channel(CHANNEL_ID)
     assert stored is not None and stored.channel_name == "Committed Inside"
 
 
 def test_registry_boundary_does_not_nest() -> None:
-    """One enter per logical operation; nesting is a different contract."""
+    """One enter per logical operation; nesting is a different contract.
+
+    One compound ``with`` on purpose: contexts enter left to right, so the
+    second ``transaction()`` raises INSIDE the first's scope and
+    ``pytest.raises`` absorbs it — the same shape as the nested spelling,
+    conformed to the analyzer's collapsible-with rule (PTC-W0062).
+    """
     registry = ChannelRegistry([])
 
-    with registry.transaction():
-        with pytest.raises(RuntimeError, match="does not nest"):
-            with registry.transaction():
-                pass
+    with (
+        registry.transaction(),
+        pytest.raises(RuntimeError, match="does not nest"),
+        registry.transaction(),
+    ):
+        pass
 
 
 def test_groups_boundary_undoes_own_writes_and_keeps_a_foreign_group() -> None:
@@ -147,27 +152,26 @@ def test_groups_boundary_undoes_own_writes_and_keeps_a_foreign_group() -> None:
         name="seeded", group_type="SECTOR", channel_ids=[], cms_group_id="cms-seeded"
     )
 
-    with pytest.raises(_BoomError):
-        with groups.transaction():
-            minted = groups.create_group(
-                name="minted", group_type="SECTOR", channel_ids=[], cms_group_id="cms-minted"
-            )
-            seeded = groups.get_group_by_cms_id("cms-seeded")
-            assert seeded is not None
-            groups.add_members(group_id=seeded.id, channel_ids=[CHANNEL_ID])
-            # A concurrent writer's committed group, staged as the race tests
-            # stage theirs: directly, invisible to the journal.
-            foreign = ChannelGroupEntry(
-                id="foreign-group",
-                name="foreign",
-                group_type="SECTOR",
-                active=True,
-                channel_ids=(),
-                cms_group_id="cms-foreign",
-            )
-            groups._groups[foreign.id] = foreign
-            assert minted.cms_group_id == "cms-minted"
-            raise _BoomError()
+    with pytest.raises(_BoomError), groups.transaction():
+        minted = groups.create_group(
+            name="minted", group_type="SECTOR", channel_ids=[], cms_group_id="cms-minted"
+        )
+        seeded = groups.get_group_by_cms_id("cms-seeded")
+        assert seeded is not None
+        groups.add_members(group_id=seeded.id, channel_ids=[CHANNEL_ID])
+        # A concurrent writer's committed group, staged as the race tests
+        # stage theirs: directly, invisible to the journal.
+        foreign = ChannelGroupEntry(
+            id="foreign-group",
+            name="foreign",
+            group_type="SECTOR",
+            active=True,
+            channel_ids=(),
+            cms_group_id="cms-foreign",
+        )
+        groups._groups[foreign.id] = foreign
+        assert minted.cms_group_id == "cms-minted"
+        raise _BoomError()
 
     assert groups.get_group_by_cms_id("cms-minted") is None
     seeded = groups.get_group_by_cms_id("cms-seeded")
@@ -177,9 +181,12 @@ def test_groups_boundary_undoes_own_writes_and_keeps_a_foreign_group() -> None:
 
 
 def test_groups_boundary_does_not_nest() -> None:
+    """Same compound-with shape as the registry's nest test, same reason."""
     groups = ChannelGroupRegistry()
 
-    with groups.transaction():
-        with pytest.raises(RuntimeError, match="does not nest"):
-            with groups.transaction():
-                pass
+    with (
+        groups.transaction(),
+        pytest.raises(RuntimeError, match="does not nest"),
+        groups.transaction(),
+    ):
+        pass

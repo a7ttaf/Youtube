@@ -407,7 +407,9 @@ def test_group_pass_failure_undoes_the_inventory_writes() -> None:
 class _UnavailableSink:
     """AuditSink double whose very first append raises — a sink outage."""
 
-    def append(self, record: AuditRecord) -> None:
+    @staticmethod
+    def append(record: AuditRecord) -> None:
+        """Refuse every record; static because the outage needs no state."""
         raise RuntimeError("sink unavailable")
 
 
