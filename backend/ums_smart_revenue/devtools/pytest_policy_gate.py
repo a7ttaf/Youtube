@@ -594,7 +594,7 @@ def _resolve_pytest_plugin_path(project_root: Path, module: str) -> Path | None:
     if not module or module.startswith("."):
         return None
     module_parts = module.split(".")
-    candidates = []
+    candidates: list[Path] = []
     for root in (project_root, project_root / "backend"):
         module_path = root.joinpath(*module_parts)
         candidates.extend((module_path.with_suffix(".py"), module_path / "__init__.py"))
