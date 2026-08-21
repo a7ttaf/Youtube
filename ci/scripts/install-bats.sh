@@ -22,6 +22,12 @@ set -Eeuo pipefail
 
 BATS_VERSION="${BATS_VERSION:-v1.11.1}"
 BATS_REPO="${BATS_REPO:-https://github.com/bats-core/bats-core.git}"
+# Immutable commit the v1.11.1 tag dereferences to. The tag is mutable -- a moved
+# or compromised upstream tag would otherwise be cloned and its install.sh
+# executed with this machine's privileges. BATS_COMMIT is what is actually
+# fetched and verified; BATS_VERSION remains the human-facing pin and the
+# already-provisioned comparison. Keep the two in sync when bumping.
+BATS_COMMIT="${BATS_COMMIT:-b640ec3cf2c7c9cfc9e6351479261186f76eeec8}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -89,8 +95,24 @@ echo "Installing bats ${BATS_VERSION} into ${DEST} ..."
 # platform whose Bash 3.2 the gate is written for.
 SRC="$(mktemp -d "${TMPDIR:-/tmp}/ums-bats.XXXXXX")"
 trap 'rm -rf "$SRC"' EXIT
-# --depth 1 against the tag: this is a tool checkout, not history anyone reads.
-git clone --quiet --depth 1 --branch "$BATS_VERSION" "$BATS_REPO" "$SRC/bats-core"
+# Fetch the immutable commit into a detached checkout. A --branch <tag> clone
+# resolves the tag on the far side and trusts whatever it points at; fetching the
+# commit object directly and checking out the recorded hash means a moved tag
+# cannot change what runs. --depth 1 against the commit: a tool checkout, not
+# history anyone reads.
+git clone --quiet --depth 1 "$BATS_REPO" "$SRC/bats-core" 2>/dev/null || \
+  git clone --quiet "$BATS_REPO" "$SRC/bats-core"
+git -C "$SRC/bats-core" fetch --quiet --depth 1 origin "$BATS_COMMIT" 2>/dev/null || \
+  git -C "$SRC/bats-core" fetch --quiet origin "$BATS_COMMIT"
+git -C "$SRC/bats-core" checkout --quiet --detach "$BATS_COMMIT"
+# Verify before executing: the checked-out HEAD must be exactly the pinned
+# commit, or the checkout's install.sh is not the code this repository vouched
+# for. Refuse rather than run a different object.
+ACTUAL="$(git -C "$SRC/bats-core" rev-parse HEAD)"
+if [ "$ACTUAL" != "$BATS_COMMIT" ]; then
+  echo "bats checkout is ${ACTUAL}, expected pinned ${BATS_COMMIT}; refusing to run it." >&2
+  exit 1
+fi
 rm -rf "$DEST"
 mkdir -p "$(dirname "$DEST")"
 # bats-core's own installer lays out bin/, libexec/ and lib/ under a prefix.

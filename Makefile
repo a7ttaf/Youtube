@@ -89,8 +89,21 @@ docs:
 		printf "# Checks\n\nSee ci/checks/manifest.yml\n" > docs/CHECKS.md
 	@echo "Generated docs/CHECKS.md"
 
+# Prefer the worktree-local runner that `make bats-install` provisions under
+# .ci-gate/bats/bin; `bats-install` cannot edit the caller's PATH, so a bare
+# `bats` here fails on the very fresh clone the install target exists for.
+# Fall back to PATH for a machine that already has bats. Same precedence as
+# ci/checks/tests-shell.sh (system bats first there, worktree as fallback) is
+# inverted here only because the direct target should *use* what the repo
+# installed when nothing else provides it.
+BATS := $(shell if [ -x "$(CURDIR)/.ci-gate/bats/bin/bats" ]; then \
+		echo "$(CURDIR)/.ci-gate/bats/bin/bats"; \
+		elif command -v bats >/dev/null 2>&1; then \
+		command -v bats; \
+		else echo "bats"; fi)
+
 bats:
-	bats ci/tests/
+	$(BATS) ci/tests/
 
 # The tests-shell lane is a blocker and refuses when bats is missing, so a
 # fresh clone needs a way to get it that does not depend on the machine.

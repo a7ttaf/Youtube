@@ -687,12 +687,12 @@ single P-tier above.
   **All 38 moved into `frontend/tests/`**, leaving **41** collected there,
   mirroring `src/` minus the `__tests__`
   segment. Pure `git mv`: every test imports through the `@/` alias, so there
-  were **zero** relative-import fixes and zero content edits — 314 tests passed
+  were **zero** relative-import fixes and zero content edits — 477 tests passed
   identically before and after. `test.include` in `vitest.config.ts` now
   *declares* the layout. **But `include` alone makes things worse, not better**:
   a test file outside the glob stops being collected and passes by never
   running. Verified, not assumed — a `tests/lib/silentSkip.spec.tsx` asserting
-  `1 === 2` was added and the suite still reported 314 passed. So the layout is
+  `1 === 2` was added and the suite still reported 477 passed. So the layout is
   enforced by a new **`ci/checks/test-layout.sh`** (manifest `test-layout`,
   blocker/hygiene/pre-commit, `languages: []` so it cannot be skipped by
   language detection) which fails on four conditions: a test anywhere under
@@ -722,7 +722,7 @@ single P-tier above.
   Windows shims (`vitest.exe`/`.bunx`) don't match the names it expects — in
   this checkout it found a different Vitest major against a different Vite and
   produced ~160 phantom failures indistinguishable from real breakage. Lanes now
-  green: 41 files / 314 tests via JUnit, `tsc --noEmit` clean, `vite build` ok.
+  green: 41 files / 477 tests via JUnit, `tsc --noEmit` clean, `vite build` ok.
   Review caught that *making the lanes work* and *making them run* are two
   different things, in three places. (1) `ci/config/checks.yml` had all four JS
   checks `enabled: false`, and preflight drops a lane when every related check
@@ -881,7 +881,7 @@ single P-tier above.
   neither is untouched. This was previously deferred because it would have
   blocked local commits on the owner's Node 20.20.2 / bun 1.2.14; the machine
   now reports **v22.14.0** and **bun 1.3.14**, and the full lane (install,
-  `tsc --noEmit`, 314 tests, `vite build`) passes under enforcement.
+  `tsc --noEmit`, 477 tests, `vite build`) passes under enforcement.
   A thirteenth round found six more, two P1 — five of them regressions in the
   round-twelve code, which is the cost of adding enforcement. The node lane
   returned PASS when **workspace discovery found nothing**: deleting
@@ -1683,9 +1683,9 @@ single P-tier above.
   this PR's guard now rejects — 38 references rewritten, each checked against
   the working tree first, which caught five pointing at a `.ts` file that was
   written as `.tsx`.
-  Combined suite: `bats ci/tests/` = 561 cases, 0 failures.
+  Combined suite: `bats ci/tests/` = 565 cases, 0 failures.
   The node lane was run end
-  to end against `frontend/`: install, `tsc --noEmit`, 314 tests, `vite build`.
+  to end against `frontend/`: install, `tsc --noEmit`, 477 tests, `vite build`.
   Counts here are the ones the files actually contain at this commit; an
   earlier revision of this paragraph quoted stale ones.
   Also fixed: the Python-convention `lib/` rule in `.gitignore` was swallowing

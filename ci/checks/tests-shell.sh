@@ -93,12 +93,16 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
     # above — HEAD does not carry the path, and --exclude-standard drops
     # exactly this file — so the suites ran the replacement for a commit that
     # removes their own coverage. Nothing under ci/ or .githooks/ is
-    # legitimately ignored except the gate's own generated state.
+    # FIX: macOS /bin/bash 3.2 misparses a possessive apostrophe inside any
+    # comment that sits in a double-quoted command substitution block. The
+    # same file is accepted by bash 5. Possessives in comments below use
+    # hyphenation so the system Bash the gate targets can parse this scan.
+    # legitimately ignored except the gate-owned generated state.
     #
     # Which is more than `.ci-gate`. `ci/.gitignore` also declares `reports/*`
     # and `artifacts/*`, and the parallel runner writes its job state and
     # per-check logs into `ci/reports/` *before* this lane runs -- so on every
-    # ship run this scan reported the gate's own output as drift and exited 20
+    # ship run this scan reported the gate-owned output as drift and exited 20
     # before a single suite executed. The pre-push gate blocking itself, and
     # the remedy it printed -- "commit the rest" -- is one git-safety.sh
     # forbids. Anchored at `ci/`, so only these two directories are pruned and
@@ -149,7 +153,7 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
       #
       # Pruning by name did not scale. `.ci-gate`, `ci/reports/` and
       # `ci/artifacts/` were each added after the gate blocked itself on its own
-      # output, and the list was still short by every cache this repository's
+      # output, and the list was still short by every cache this repository
       # own tooling writes under ci/ -- all of these are ignored, all were
       # reported as drift, and each one exits 20 before a single suite runs:
       #
@@ -162,9 +166,9 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
       #
       # The prune stays, and it is now written by shape rather than by name:
       # every one of those four is `__pycache__` or a dot-directory with
-      # `cache` in its name, and so is the next tool's. Naming the shape is
+      # `cache` in its name, and so is the next tool. Naming the shape is
       # what stops the widened suffix set below from reporting a cached `.json`
-      # or `.py` as drift and blocking the push on the gate's own scratch
+      # or `.py` as drift and blocking the push on the gate-owned scratch
       # output -- the failure this prune was added for, and one a wider
       # allow-list would otherwise have brought straight back.
       printf '%s\n' "$_ts_ig" \
@@ -182,10 +186,14 @@ if [ "${CI_GATE_MODE:-}" = "ship" ] \
   esac
   if [ -n "$SHELL_DRIFT" ]; then
     echo "Gate inputs differ between HEAD and the worktree:"
+    # FIX: bash 3.2 has no <<< here-string; pipe the list instead so the
+    # drift report path works on the same Bash the gate targets.
     while IFS= read -r _p; do
       [ -n "$_p" ] || continue
       echo "    $_p"
-    done <<< "$SHELL_DRIFT"
+    done <<EOF
+$SHELL_DRIFT
+EOF
     echo "  These suites read the worktree, so the run would report on files the"
     echo "  pushed commits do not contain. Commit the rest, stash it, or discard it."
     exit "$CI_RESULT_FAIL_NEW_ISSUE"
