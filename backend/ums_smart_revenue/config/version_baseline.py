@@ -1,3 +1,12 @@
+# ============================================================================
+# Purpose: Machine-readable stack version baseline for drift checks in tests.
+# Database/ORM: None.
+# Standards: Must stay aligned with TECH_VERSION_BASELINE.md and pyproject pins.
+# Blast Radius: Version validation tests only.
+# Connections:
+#   - File: Docs/implementation/TECH_VERSION_BASELINE.md -> Human baseline doc.
+#   - File: tests/test_version_baseline.py -> Lockfile parity assertions.
+# ============================================================================
 STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
     "runtime": {
         "python": "3.14.5",

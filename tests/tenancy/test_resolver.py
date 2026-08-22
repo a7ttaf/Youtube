@@ -1,3 +1,11 @@
+# ============================================================================
+# Purpose: Integration tests for TenantResolverMiddleware tenant routing.
+# Database/ORM: SQLite/Postgres fixtures per test case.
+# Standards: httpx2 AsyncClient/ASGITransport for ASGI probes.
+# Blast Radius: Test coverage for tenancy middleware only.
+# Connections:
+#   - File: backend/ums_smart_revenue/tenancy/resolver.py -> SUT.
+# ============================================================================
 """Integration tests for :class:`TenantResolverMiddleware`."""
 
 import asyncio

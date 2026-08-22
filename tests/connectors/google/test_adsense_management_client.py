@@ -1,3 +1,12 @@
+# ============================================================================
+# Purpose: AdSense management client and adapter tests (spec §5.6).
+# Database/ORM: None.
+# Standards: httpx2 imported as httpx for mock transports.
+# Blast Radius: Test coverage for AdSense connector client only.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/adsense_management_client.py
+#     -> SUT.
+# ============================================================================
 """AdSense client + adapter tests (spec §5.6)."""
 
 from __future__ import annotations

@@ -1,3 +1,11 @@
+# ============================================================================
+# Purpose: GoogleHttpClient request/retry/auth behavior tests.
+# Database/ORM: None.
+# Standards: httpx2 imported as httpx for transport doubles.
+# Blast Radius: Test coverage for connector HTTP transport only.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/http_client.py -> SUT.
+# ============================================================================
 """GoogleHttpClient happy-path tests.
 
 The client invokes credentials.before_request(...) on every request so

@@ -1,7 +1,9 @@
 # UMS Latest Stable Version Baseline
 
 ## Policy
-Baseline verified: `2026-05-10T20:34:52Z` by Codex review agent.
+Baseline verified: `2026-05-10T20:34:52Z` by Codex review agent for the original
+full sweep. Later package-row updates are recorded in dated addenda below (for
+example the httpx→httpx2 migration in PR #194).
 
 Use latest stable/LTS runtime versions and current stable package releases at the time this baseline was checked. Do not use preview, alpha, beta, release-candidate, canary, or experimental releases for production foundations.
 
@@ -52,7 +54,8 @@ For this project:
 | Playwright | `1.59.1` |
 
 ## Checked Sources
-Checked on: `2026-05-10T20:34:52Z` (UTC)
+Checked on: `2026-05-10T20:34:52Z` (UTC) — original full-baseline sweep only.
+Rows added or refreshed after that date cite a separate addendum (see httpx2 below).
 
 - Python downloads page: `https://www.python.org/downloads/`
 - Node.js releases page: `https://nodejs.org/en/about/releases/`
@@ -81,8 +84,9 @@ Backend package addendum checked on: `2026-05-13` (Africa/Cairo local date)
 httpx2 migration addendum checked on: `2026-08-22` (UTC)
 
 - PyPI httpx2 release metadata: `https://pypi.org/pypi/httpx2/json` — latest stable
-  `2.12.0` (uploaded 2026-08-18); pinned in `pyproject.toml` / `uv.lock` on branch
-  `chore/httpx2-migration` (PR #194). Replaces the prior `httpx` `0.28.1` baseline row.
+  `2.12.0` (uploaded 2026-08-18); pinned in `pyproject.toml` / `uv.lock` by
+  [PR #194](https://github.com/a7ttaf/Youtube/pull/194). Replaces the prior `httpx`
+  `0.28.1` baseline row.
 
 ## Local Environment Note
 The current workstation Python is `3.12`, so tests are still run against the available local interpreter. The production runtime target is `3.14.5`, and the project metadata now expresses `>=3.14,<3.15`.

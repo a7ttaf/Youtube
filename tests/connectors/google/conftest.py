@@ -1,3 +1,11 @@
+# ============================================================================
+# Purpose: Shared httpx2 MockTransport helpers for Google connector client tests.
+# Database/ORM: None.
+# Standards: httpx2 imported as httpx; pytest fixtures only.
+# Blast Radius: Test harness for B2.4+ connector client suites.
+# Connections:
+#   - File: tests/connectors/google/test_http_client.py -> Primary consumer.
+# ============================================================================
 """Shared httpx.MockTransport helpers for B2.4+ client tests."""
 
 from __future__ import annotations
