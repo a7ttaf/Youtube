@@ -1,7 +1,9 @@
 # UMS Latest Stable Version Baseline
 
 ## Policy
-Baseline verified: `2026-05-10T20:34:52Z` by Codex review agent.
+Baseline verified: `2026-05-10T20:34:52Z` by Codex review agent for the original
+full sweep. Later package-row updates are recorded in dated addenda below (for
+example the httpx→httpx2 migration addendum below).
 
 Use latest stable/LTS runtime versions and current stable package releases at the time this baseline was checked. Do not use preview, alpha, beta, release-candidate, canary, or experimental releases for production foundations.
 
@@ -36,7 +38,7 @@ For this project:
 | ReportLab | `4.5.1` |
 | python-pptx | `1.0.2` |
 | pytest | `9.0.3` |
-| httpx | `0.28.1` |
+| httpx2 | `2.12.0` |
 | pypdf | `6.11.0` |
 
 ## Frontend Target Baseline
@@ -52,7 +54,8 @@ For this project:
 | Playwright | `1.59.1` |
 
 ## Checked Sources
-Checked on: `2026-05-10T20:34:52Z` (UTC)
+Checked on: `2026-05-10T20:34:52Z` (UTC) — original full-baseline sweep only.
+Rows added or refreshed after that date cite a separate addendum (see httpx2 below).
 
 - Python downloads page: `https://www.python.org/downloads/`
 - Node.js releases page: `https://nodejs.org/en/about/releases/`
@@ -77,6 +80,15 @@ Backend package addendum checked on: `2026-05-13` (Africa/Cairo local date)
 - PyPI ReportLab release metadata: `https://pypi.org/pypi/reportlab`
 - PyPI pypdf release metadata: `https://pypi.org/pypi/pypdf`
 - PyPI python-pptx release metadata: `https://pypi.org/pypi/python-pptx`
+
+httpx2 migration addendum checked on: `2026-08-22` (UTC)
+
+- PyPI httpx2 release metadata: `https://pypi.org/pypi/httpx2/json` — latest stable
+  `2.12.0` (uploaded 2026-08-18); pinned in `pyproject.toml` / `uv.lock`.
+  Replaces the prior `httpx` `0.28.1` baseline row. The migration itself
+  landed on `2026-08-21` (commit `ec867a1`, Africa/Cairo local date); the
+  addendum date above is when the PyPI metadata was checked, not when the
+  migration was made.
 
 ## Local Environment Note
 The current workstation Python is `3.12`, so tests are still run against the available local interpreter. The production runtime target is `3.14.5`, and the project metadata now expresses `>=3.14,<3.15`.

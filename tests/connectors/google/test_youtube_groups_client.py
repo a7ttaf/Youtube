@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 
-import httpx
+import httpx2 as httpx
 import pytest
 
 from ums_smart_revenue.connectors.google import youtube_groups_client as groups_module

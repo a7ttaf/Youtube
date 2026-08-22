@@ -1,3 +1,11 @@
+# ============================================================================
+# Purpose: Integration tests for TenantResolverMiddleware tenant routing.
+# Database/ORM: SQLite/Postgres fixtures per test case.
+# Standards: httpx2 AsyncClient/ASGITransport for ASGI probes.
+# Blast Radius: Test coverage for tenancy middleware only.
+# Connections:
+#   - File: backend/ums_smart_revenue/tenancy/resolver.py -> SUT.
+# ============================================================================
 """Integration tests for :class:`TenantResolverMiddleware`."""
 
 import asyncio
@@ -13,7 +21,7 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
+from httpx2 import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
