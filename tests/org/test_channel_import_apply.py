@@ -975,8 +975,30 @@ def test_apply_refuses_sql_adapters_wired_over_distinct_sessions() -> None:
     sink = InMemoryAuditSink()
     registry.sql_unit_of_work = object()
     groups.sql_unit_of_work = object()
+    sink.sql_unit_of_work = object()
 
     with pytest.raises(RuntimeError, match="share ONE session"):
+        _apply(_empty_plan(), registry, groups, sink)
+
+    assert registry.list_channels() == []
+    assert sink.records == []
+
+
+def test_apply_refuses_a_mixed_sql_and_in_memory_wiring() -> None:
+    """SQL-backed and in-memory adapters must not compose (round 12).
+
+    In-memory writes commit the instant the boundary exits while SQL
+    writes still await the caller's commit — a failed or rolled-back
+    commit would split the import across resources despite the
+    all-or-nothing contract, so the validation refuses the wiring before
+    anything is written or locked.
+    """
+    registry = ChannelRegistry()
+    groups = ChannelGroupRegistry()
+    sink = InMemoryAuditSink()
+    registry.sql_unit_of_work = object()
+
+    with pytest.raises(RuntimeError, match="MIXED wiring"):
         _apply(_empty_plan(), registry, groups, sink)
 
     assert registry.list_channels() == []

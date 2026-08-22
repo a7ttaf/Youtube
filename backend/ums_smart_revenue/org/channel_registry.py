@@ -108,10 +108,10 @@ class ChannelRegistryStore(Protocol):
     # session object for SQL adapters, None for self-contained in-memory
     # ones (their journal is their own unit of work). A wrapper must
     # delegate its inner store's declaration — apply_channel_import refuses
-    # both a missing declaration and adapters whose declared sessions
-    # differ, because an optional attribute would let a conforming wrapper
-    # silently hide its inner session from that check (PR #196 rounds 6+8,
-    # codex).
+    # a missing declaration, a MIXED SQL/in-memory wiring, and SQL
+    # declarations naming different sessions, because an optional attribute
+    # would let a conforming wrapper silently hide its inner session from
+    # that check (PR #196 rounds 6, 8, and 12, codex).
     sql_unit_of_work: object | None
 
     def list_channels(self) -> list[ChannelRegistryEntry]:

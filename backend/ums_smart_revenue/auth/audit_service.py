@@ -32,9 +32,10 @@ class AuditSink(Protocol):
     # The sink's transactional backing, REQUIRED by the protocol: the session
     # object for SQL sinks, None for self-contained in-memory ones. A wrapper
     # must delegate its inner sink's declaration — apply_channel_import
-    # refuses both a missing declaration and adapters whose declared sessions
-    # differ, and an optional attribute would let a conforming wrapper hide
-    # its inner session from that check (PR #196 rounds 6+8, codex).
+    # refuses a missing declaration, a mixed SQL/in-memory wiring, and SQL
+    # declarations naming different sessions; an optional attribute would let
+    # a conforming wrapper hide its inner session from that check
+    # (PR #196 rounds 6, 8, and 12, codex).
     sql_unit_of_work: object | None
 
     def append(self, record: AuditRecord) -> None: ...
@@ -89,7 +90,22 @@ class InMemoryAuditSink:
         # Re-entrant so the boundary-holding thread's own appends pass.
         self._lock = threading.RLock()
 
+    # ========================================================================
+    # Purpose: The in-memory audit WRITE — append one record to the shared
+    #   list.
+    # Database/ORM: None (list append; the SQL sinks own the INSERT path).
+    # Standards: Takes the sink's re-entrant lock: this sink is shared
+    #   across threads on the no-database tier, and an unlocked append
+    #   could land past an open batch boundary's mark and be deleted by
+    #   its failure truncation — serialized behind the batch instead, it
+    #   lands only after the boundary resolves (PR #196 round 3, codex).
+    # Blast Radius: Audit-trail integrity on the no-database tier.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> the SQL
+    #     implementations of the same protocol method.
+    # ========================================================================
     def append(self, record: AuditRecord) -> None:
+        """Append one record under the sink's lock."""
         with self._lock:
             self.records.append(record)
 

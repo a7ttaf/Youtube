@@ -342,13 +342,17 @@ def plan_channel_import_with_stores(
 #   store's transaction while silently hiding its inner session from this
 #   check (PR #196 round 8, codex) — fail-open where the whole point is to
 #   fail closed. ``None`` means self-contained (the in-memory tier, whose
-#   journals are their own unit of work) and is exempt from the identity
-#   comparison; a mixed SQL/in-memory wiring is a test composition with no
-#   cross-session commit to protect.
+#   journal is its own unit of work) — but only an ALL-in-memory wiring is
+#   coherent: a MIXED wiring is refused too, because in-memory writes
+#   commit the instant the boundary exits while SQL writes still await the
+#   caller's commit, so a failed or rolled-back commit would split the
+#   import across resources despite the all-or-nothing contract
+#   (PR #196 round 12, codex).
 # Standards: Fail-loud wiring validation, RuntimeError like the boundary's
 #   nesting guard — a wiring bug is a programming error, never a domain 409.
 # Blast Radius: Direct callers only; the FastAPI route wires every adapter
-#   from one request session and never trips this.
+#   from one request session (or all in-memory on the no-database tier) and
+#   never trips this.
 # Connections:
 #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
 #     protocol attribute contract (mirrored by channel_groups.py and
@@ -364,8 +368,10 @@ def _require_shared_sql_unit_of_work(
     groups: ChannelGroupRegistryStore,
     audit_sink: AuditSink,
 ) -> None:
-    """Refuse a missing unit-of-work declaration or distinct SQL sessions."""
+    """Refuse missing declarations, mixed tiers, and distinct SQL sessions."""
     identities: set[int] = set()
+    in_memory: list[str] = []
+    sql_backed: list[str] = []
     for adapter in (registry, groups, audit_sink):
         declared = getattr(adapter, "sql_unit_of_work", _UNDECLARED)
         if declared is _UNDECLARED:
@@ -377,8 +383,20 @@ def _require_shared_sql_unit_of_work(
                 "delegate its inner adapter's declaration — otherwise the "
                 "import cannot verify that its savepoints share one session"
             )
-        if declared is not None:
+        if declared is None:
+            in_memory.append(type(adapter).__name__)
+        else:
+            sql_backed.append(type(adapter).__name__)
             identities.add(id(declared))
+    if sql_backed and in_memory:
+        raise RuntimeError(
+            "apply_channel_import refuses a MIXED wiring — SQL-backed "
+            f"{', '.join(sql_backed)} composed with in-memory "
+            f"{', '.join(in_memory)}: in-memory writes commit the instant "
+            "the boundary exits while SQL writes await the caller's commit, "
+            "so a failed or rolled-back commit would split the import "
+            "across resources despite the all-or-nothing contract"
+        )
     if len(identities) > 1:
         raise RuntimeError(
             "apply_channel_import requires its SQL-backed registry, group "
@@ -398,8 +416,9 @@ def _require_shared_sql_unit_of_work(
 #   AuditLogORM rows via the supplied AuditSink.
 # Standards: All-or-nothing — the caller wires every store and the sink to
 #   ONE transaction, so any raised error rolls the whole import back with its
-#   audit rows; SQL adapters declare that unit of work via sql_unit_of_work,
-#   and the entry validation above refuses a wiring that splits it.
+#   audit rows; every adapter declares its unit of work via
+#   sql_unit_of_work, and the entry validation above refuses a wiring that
+#   splits, mixes, or hides it.
 #   Write-boundary rechecks over plan trust: audit diffs are
 #   rebuilt from what update_inventory actually replaced, group state is
 #   re-read under a row lock, and the CHANNEL_IMPORTED summary counts what was
