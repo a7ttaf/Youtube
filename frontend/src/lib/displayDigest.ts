@@ -52,9 +52,11 @@ const handleDigestWorkerFailure = (message: string): void => {
 // Purpose: Register Worker message/error listeners for digest request correlation.
 // Database/ORM: None (frontend) — wires onmessage / onerror / onmessageerror only.
 // Standards: Correlate responses by request id; on worker/messageerror reject all
-//   pending waiters, terminate the worker, and clear the cache so the next call
-//   falls back to sync computeDisplayDigestFromFields (via getDigestWorker null
-//   path or recreate). Unknown response ids are ignored (no throw).
+//   pending waiters, terminate the worker, and set digestWorker = null (not
+//   undefined). getDigestWorker treats null as a memoized miss — it returns
+//   early and does NOT recreate a Worker for the rest of this module load —
+//   so subsequent calls fall through computeDisplayDigestInWorker to sync
+//   computeDisplayDigestFromFields only. Unknown response ids are ignored.
 // Blast Radius: Import preview/apply binding — a hung or crashed worker without
 //   these handlers would strand displayDigestMatchesDisclosedAsync and leak
 //   workerWaiters (review #184, C1; Qodo worker-hang finding).
