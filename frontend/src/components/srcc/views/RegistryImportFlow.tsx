@@ -13,6 +13,7 @@ import {
   isChannelImportResult,
   useChannelImport,
 } from "@/lib/api/useChannelImport";
+import { displayDigestMatchesDisclosedAsync } from "@/lib/displayDigest";
 import { useContentOwners } from "@/lib/api/useContentOwners";
 import type { Severity } from "@/lib/mock/data";
 import { ActionStepper } from "../ActionStepper";
@@ -139,59 +140,66 @@ const describeImportError = (err: unknown): string => {
  */
 const PLAN_BEARING_STATUSES = new Set([409, 422]);
 
+const planBearingDetail = (err: unknown): unknown | null => {
+  if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
+    return null;
+  }
+  const body = err.body as { detail?: unknown } | null;
+  return body?.detail ?? null;
+};
+
 // ============================================================================
 // Purpose: Decide whether an apply REJECTION carries a plan worth putting in
 //   front of the operator, and hand it back only if it does. This is the one
 //   path where a payload from a FAILED request replaces the preview the
 //   operator already approved and becomes what the next fingerprint-bound
-//   apply is reviewed against.
-// Database/ORM: None (frontend) — a pure predicate over a decoded error body.
+//   apply is reviewed against. Execution is async: the digest gate awaits
+//   displayDigestMatchesDisclosedAsync (worker-backed with sync fallback).
+// Database/ORM: None (frontend) — an async gate over a decoded error body.
 //   It dispatches nothing and mutates no state; the caller decides what to do
 //   with the plan it returns.
-// Standards: Two gates, both required. The status must be plan-bearing (409 or
-//   422, the two that mean "the plan you saw is not the plan we would
-//   execute"), and the body must pass isChannelImportResult AND
-//   echoesRequestedTarget — the same target rule the 2xx path applies, which
-//   matters MORE here because this payload becomes the reviewed plan while the
-//   next Apply still sends the CAPTURED owner. Fails CLOSED in both
-//   directions: anything unrecognised returns null, the error falls through to
-//   the ordinary banner, and the operator keeps the plan they actually
-//   reviewed. Not every 409 carries a plan — this flow always sends
-//   expected_plan_fingerprint, so it opts into the backend's strict pre-state
-//   check, whose 409 detail is a STRING naming the row that moved; that lands
-//   in the banner verbatim, which already says to re-run the preview.
+// Standards: Three gates, all required, checked in order after the status is
+//   plan-bearing (409 or 422): (1) isChannelImportResult on the detail body,
+//   (2) awaited displayDigestMatchesDisclosedAsync (worker-backed; on worker
+//   failure the verify path yields and falls back to sync SHA-256 — worker
+//   failure alone does not reject), (3) echoesRequestedTarget against the
+//   CAPTURED owner. Returns null (fails closed) when the body is unrecognised,
+//   the digest does not match disclosed rows, or digest recomputation itself
+//   fails; otherwise the error falls through to the ordinary banner and the
+//   operator keeps the plan they actually reviewed. Not every 409 carries a
+//   plan — this flow always sends expected_plan_fingerprint, so it opts into
+//   the backend's strict pre-state check, whose 409 detail is a STRING naming
+//   the row that moved; that lands in the banner verbatim, which already says
+//   to re-run the preview.
 // Blast Radius: FINANCE + group membership, at one remove. A wrongly accepted
 //   payload does not itself write; it changes what the operator APPROVES, and
 //   the apply that follows is bound to a fingerprint for a plan they never
 //   saw — a different group action or revenue-source classification reviewed
 //   under the banner of the one they did.
-// Connections:
+// Connections: the three gates applied here and the wire contract behind them.
 //   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult
-//       and echoesRequestedTarget, the two gates applied here.
+//       and echoesRequestedTarget (gates 1 and 3).
+//   - File: frontend/src/lib/displayDigest.ts -> displayDigestMatchesDisclosedAsync
+//       (gate 2) and its worker-failure → sync-fallback contract (review #184, C1).
 //   - File: backend/ums_smart_revenue/api/channels.py -> the route that emits
 //       the 409/422 whose `detail` is a full ChannelImportResult.
 //   - File: Docs/12_BACKEND_API_SPEC.md -> the documented rejection contract.
 // ============================================================================
-const applyRaceDetail = (
+const applyRaceDetail = async (
   err: unknown,
   contentOwnerId: string,
-): ChannelImportResult | null => {
-  if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
-    return null;
-  }
-  const body = err.body as { detail?: unknown } | null;
-  const detail = body?.detail;
+): Promise<ChannelImportResult | null> => {
+  const detail = planBearingDetail(err);
   if (!isChannelImportResult(detail)) {
     return null;
   }
-  // The refreshed plan must describe the TARGET this request named, the same
-  // rule the 2xx path applies. It matters MORE here: this payload REPLACES the
-  // preview and becomes what the operator re-approves, and the next Apply
-  // sends the captured owner — so a plan for a different owner would be
-  // reviewed against one target and applied against another. Falling through
-  // to the ordinary banner is the fail-closed direction: the operator is told
-  // the apply was refused and keeps the plan they actually reviewed.
-  return echoesRequestedTarget(detail, contentOwnerId) ? detail : null;
+  if (!(await displayDigestMatchesDisclosedAsync(detail))) {
+    return null;
+  }
+  if (!echoesRequestedTarget(detail, contentOwnerId)) {
+    return null;
+  }
+  return detail;
 };
 
 /** The banner for a refreshed plan, worded for which rejection produced it. */
@@ -1544,8 +1552,8 @@ export const RegistryImportFlow = ({
   //   - File: backend/ums_smart_revenue/api/channels.py -> the route emitting
   //       the 409/422 whose `detail` carries the refreshed plan.
   // ==========================================================================
-  const handleApplyFailure = (caught: unknown) => {
-    const race = applyRaceDetail(caught, ownerId);
+  const handleApplyFailure = async (caught: unknown) => {
+    const race = await applyRaceDetail(caught, ownerId);
     if (race) {
       // Replacing the preview also re-binds the fingerprint: the next Apply
       // sends the refreshed plan's digest, so approval always tracks what the
@@ -1691,10 +1699,12 @@ export const RegistryImportFlow = ({
    *   dispatch, so a second tab cannot slip a concurrent apply through the gap
    *   between reading the guard and recording the claim. A refusal writes
    *   nothing and sends nothing.
-   *   `expected_plan_fingerprint` binds the write to the plan on screen. It is
-   *   always sent, which also opts this caller into the backend's strict
-   *   pre-state guard — the flow is asking for "the diff I reviewed, or none
-   *   of it", not the unbound file-wins path.
+   *   `expected_plan_fingerprint` binds the write to the plan on screen, and
+   *   `expected_display_digest` — the recomputable disclosed-plan companion
+   *   (review #184, C1) — binds it again over exactly the fields the operator
+   *   saw. Both are always sent, which also opts this caller into the
+   *   backend's strict pre-state guard — the flow is asking for "the diff I
+   *   reviewed, or none of it", not the unbound file-wins path.
    *   Failure classification is fail-CLOSED: only an ESTABLISHED rejection
    *   retires the apply's record. Anything else — a lost response, a gateway
    *   5xx, an unreadable body — stays INDETERMINATE, because the write may
@@ -1759,6 +1769,11 @@ export const RegistryImportFlow = ({
         // from current state, so without it a row reviewed as CREATE could
         // commit as an UPDATE over a channel created since the preview.
         expectedPlanFingerprint: approved.plan.plan_fingerprint,
+        // The disclosed-plan half of the same binding (review #184, C1): the
+        // digest a client can recompute from the rendered plan, checked
+        // independently by the route. Both tokens come from the SAME approved
+        // plan object, so they can never bind to two different previews.
+        expectedDisplayDigest: approved.plan.display_digest,
       });
       // A 2xx settles THIS apply: the write committed and the flow can say so.
       settleThisApply();
@@ -1766,7 +1781,7 @@ export const RegistryImportFlow = ({
       setStep("applied");
     } catch (caught) {
       // Stay on Preview; the Apply button re-enables in finally for a retry.
-      handleApplyFailure(caught);
+      await handleApplyFailure(caught);
     } finally {
       setBusy(false);
       setApplying(false);

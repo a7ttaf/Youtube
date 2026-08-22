@@ -480,6 +480,26 @@ on real ingestion (Phase 2) and the inventory load workflow.
   the restated row inflated. No new endpoint and
   no migration; #159's unbound "the file wins" rule is untouched. The
   import/sync UI arc is complete.
+  **Display digest shipped 2026-08-22** (`feat/import-display-digest`,
+  PR #195 — #184's deferred C1 question, ruled "display digest" 2026-08-21):
+  every import plan response now carries `display_digest`, a SHA-256 over
+  canonical JSON of exactly the DISCLOSED reviewed set (counts, rows,
+  content_owner_id, cms_status — tenant-free so a client can recompute it
+  from what it renders; cross-tenant binding stays `plan_fingerprint`'s job),
+  the apply accepts an optional `expected_display_digest` checked
+  independently (409 + refreshed plan on mismatch), EITHER binding token now
+  opts into strict pre-state enforcement, and the SPA requires the field on
+  every accepted plan and echoes both tokens. Recipe + contract in Docs/12;
+  TypeScript-side recomputation shipped in the same PR (`frontend/src/lib/displayDigest.ts`,
+  verified against the backend recipe in `frontend/tests/lib/displayDigest.test.ts`).
+  **Migration / backfill:** `No migration/backfill required.` Evidence: the PR
+  changes no file under `backend/ums_smart_revenue/db/alembic/versions/`;
+  `display_digest` is computed in-process on import preview/apply responses
+  and optional request fields — no column, constraint, index, enum, or
+  persisted row is added or altered.
+  C2
+  (transaction boundary on the store protocol, ruled 2026-08-21) is the next
+  PR.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to

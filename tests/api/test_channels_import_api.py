@@ -1,6 +1,8 @@
 """API tests for the bulk channel inventory import (POST /channels/import)."""
 
 import dataclasses
+import hashlib
+import json
 from collections.abc import Callable
 
 from fastapi.testclient import TestClient
@@ -609,6 +611,167 @@ def test_apply_under_a_swapped_content_owner_is_rejected():
     assert audit_sink.records == []
 
 
+def test_display_digest_is_recomputable_from_the_disclosed_payload():
+    """The companion digest can be rebuilt from nothing but the response body.
+
+    This is `display_digest`'s entire reason to exist (review #184, C1): the
+    fingerprint folds in the server-resolved tenant, so a client cannot check
+    that token against the plan it rendered — a response showing one plan
+    while carrying another plan's token would be echoed back unnoticed. The
+    disclosed digest closes that from the other side, and THIS test is the
+    recipe's pin: sorted-key, tight-separator JSON of exactly the four
+    disclosed fields, SHA-256 of the UTF-8 bytes, using only hashlib+json on
+    the parsed body — never the server's own helper, which would prove
+    nothing. The non-ASCII channel name is deliberate: it pins the
+    `ensure_ascii` escaping into the recipe, where a fixture of plain ASCII
+    would leave it unexercised. And because no tenant goes in, recomputability
+    doubles as the proof that the tenant is outside the digest.
+    """
+    client, _registry, _groups, _sink = create_import_app()
+
+    roster = import_csv(f"{CHANNEL_ID},Alpha Nëws ünd Sport,Yes")
+    preview = post_import(client, roster, dry_run="true")
+
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["rows"][0]["channel_name"] == "Alpha Nëws ünd Sport"
+    canonical = json.dumps(
+        {
+            "content_owner_id": body["content_owner_id"],
+            "cms_status": body["cms_status"],
+            "counts": body["counts"],
+            "rows": body["rows"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert hashlib.sha256(canonical.encode("utf-8")).hexdigest() == body["display_digest"]
+    # And it is a DIFFERENT token from the fingerprint, not an alias of it.
+    assert body["display_digest"] != body["plan_fingerprint"]
+
+
+def test_display_digest_ignores_dry_run():
+    """`dry_run` is outside the disclosed digest for the fingerprint's reason.
+
+    A preview and its apply differ in it by definition, so folding it in would
+    make every digest-bound apply 409 — a guard that always fires protects
+    nothing.
+    """
+    client, _registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true")
+    applied = post_import(client, body, dry_run="false")
+
+    assert preview.json()["display_digest"] == applied.json()["display_digest"]
+
+
+def test_display_digest_covers_the_content_owner_and_cms_status():
+    """The disclosed digest binds the TARGET the preview names on screen.
+
+    Same rationale as the fingerprint's target fields: an all-CREATE roster's
+    rows carry no owner, so without these two inputs owner A's and owner B's
+    previews digest identically and a digest-bound apply could land under a
+    target the operator never reviewed.
+    """
+    client, _registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    for_owner_a = post_import(client, body, dry_run="true").json()
+    for_owner_b = post_import(
+        client, body, dry_run="true", content_owner_id="OtherOwnerBBBBBBBBBBB"
+    ).json()
+    for_outside_cms = post_import(client, body, dry_run="true", cms_status="OUTSIDE_CMS").json()
+
+    assert for_owner_a["display_digest"] != for_owner_b["display_digest"]
+    assert for_owner_a["display_digest"] != for_outside_cms["display_digest"]
+
+
+def test_apply_rejects_a_stale_display_digest():
+    """A digest-only binding is a real binding, not decoration.
+
+    No fingerprint is sent at all: an API client that recomputed the digest
+    from the plan it reviewed must get the same protection the SPA gets from
+    the token pair, and the 409 must carry the refreshed plan so approval is
+    re-sought against reality.
+    """
+    client, registry, _groups, audit_sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true")
+    stale_digest = preview.json()["display_digest"]
+
+    # A concurrent writer creates the very channel the roster planned to add.
+    registry.create_channel(
+        youtube_channel_id=CHANNEL_ID,
+        channel_name="Someone Else's Name",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+        content_owner_id=CONTENT_OWNER,
+    )
+
+    conflict = post_import(client, body, expected_display_digest=stale_digest)
+
+    assert conflict.status_code == 409, conflict.text
+    refreshed = conflict.json()["detail"]
+    assert refreshed["rows"][0]["outcome"] == "UPDATE"
+    assert refreshed["display_digest"] != stale_digest
+    assert registry.get_channel(CHANNEL_ID).channel_name == "Someone Else's Name"
+    assert audit_sink.records == []
+
+
+def test_stale_display_digest_returns_409_even_when_replan_has_errors():
+    """A digest mismatch is plan drift (409), not a roster error (422).
+
+    When state changes between preview and apply such that the re-plan now
+    holds ERROR rows, a client that bound `expected_display_digest` must still
+    get the refreshed plan in a 409 — not a 422 that misclassifies drift as
+    validation failure.
+    """
+    client, registry, groups, audit_sink = create_import_app()
+    header = "youtube_channel_id,channel_name,group_id,view_revenue"
+    body = import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header)
+
+    preview = post_import(client, body, dry_run="true")
+    assert preview.status_code == 200, preview.text
+    stale_digest = preview.json()["display_digest"]
+
+    first = post_import(client, import_csv(f"{CHANNEL_ID},Alpha News,cms-tv,Yes", header=header))
+    assert first.status_code == 200
+    group = groups.get_group_by_cms_id("cms-tv")
+    assert group is not None
+    groups.update_group(group_id=group.id, name=None, active=False)
+    audit_sink.records.clear()
+
+    second_channel = "UC3Dci3BzZXDo4jw4dU8KqWg"
+    conflict = post_import(
+        client,
+        import_csv(f"{second_channel},Beta News,cms-tv,Yes", header=header),
+        expected_display_digest=stale_digest,
+    )
+
+    assert conflict.status_code == 409, conflict.text
+    refreshed = conflict.json()["detail"]
+    assert refreshed["counts"]["ERROR"] == 1
+    assert "archived" in refreshed["rows"][0]["reason"]
+    assert refreshed["display_digest"] != stale_digest
+    assert registry.get_channel(second_channel) is None
+    assert audit_sink.records == []
+
+
+def test_apply_proceeds_when_the_display_digest_matches():
+    """A matching disclosed digest admits the apply — with no fingerprint sent."""
+    client, registry, _groups, _sink = create_import_app()
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true")
+    applied = post_import(client, body, expected_display_digest=preview.json()["display_digest"])
+
+    assert applied.status_code == 200, applied.text
+    assert registry.get_channel(CHANNEL_ID) is not None
+
+
 def test_group_created_before_the_apply_replans_is_caught_by_the_fingerprint():
     """The FIRST of the two windows: preview -> the apply's own re-plan.
 
@@ -927,6 +1090,31 @@ def test_plan_bound_apply_refuses_a_row_whose_pre_state_drifted():
     # test_drifted_pre_state_rolls_the_bound_apply_back_on_postgres.
     assert audit_sink.records == []
     assert registry is drifting
+
+
+def test_display_digest_bound_apply_refuses_a_row_whose_pre_state_drifted():
+    """EITHER token opts in to the strict pre-state guard, not just the pair.
+
+    A digest-only caller reviewed a plan exactly as a fingerprint-bound one
+    did, so "the diff I reviewed, or none of it" applies to it identically.
+    Pinned digest-only because the SPA always sends both tokens: without this
+    test the opt-in could quietly regress to fingerprint-only and no SPA-path
+    test would notice.
+    """
+    drifting = _ChannelDriftsAtWriteBoundary(
+        list(_seeded_registry("Old Name").list_channels_by_ids({CHANNEL_ID})),
+        drift_to="Someone Else",
+    )
+    client, _registry, _groups, audit_sink = create_import_app(drifting)
+    body = import_csv(f"{CHANNEL_ID},Alpha News,Yes")
+
+    preview = post_import(client, body, dry_run="true").json()
+
+    response = post_import(client, body, expected_display_digest=preview["display_digest"])
+
+    assert response.status_code == 409, response.text
+    assert "changed during the import" in response.json()["detail"]
+    assert audit_sink.records == []
 
 
 def test_unbound_apply_still_lets_the_file_win_over_drift():
