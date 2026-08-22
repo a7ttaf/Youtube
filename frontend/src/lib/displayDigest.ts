@@ -175,6 +175,20 @@ export const computeDisplayDigest = (plan: Pick<
   return sha256Hex(canonical);
 };
 
+// ============================================================================
+// Purpose: Verify a plan's display_digest matches a client-side recomputation
+//   from its disclosed fields before the import flow trusts preview/apply state.
+// Database/ORM: None (frontend) — boolean gate over canonical JSON + SHA-256.
+// Standards: Fail closed — empty/missing digest returns false; recomputation
+//   exceptions return false instead of throwing through isChannelImportResult.
+// Blast Radius: Import preview/apply binding — blocks malformed 2xx payloads
+//   that echo an unverified digest while substituting disclosed rows (review
+//   #184, C1).
+// Connections:
+// - File: frontend/src/lib/displayDigest.ts -> computeDisplayDigest recipe.
+// - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult.
+// - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
+// ============================================================================
 /** True when the body carries a digest matching its disclosed plan contents. */
 export const displayDigestMatchesDisclosed = (plan: ChannelImportResult): boolean => {
   if (typeof plan.display_digest !== "string" || plan.display_digest === "") {
