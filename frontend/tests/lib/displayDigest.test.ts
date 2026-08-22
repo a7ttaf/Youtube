@@ -120,11 +120,27 @@ describe("displayDigest", () => {
     // avoids analyzer complaints about unused `this`/empty methods while
     // satisfying the same structural interface the module reads.
     const previousWorker = (globalThis as { Worker?: unknown }).Worker;
-    const brokenWorkerFactory = function WorkerStub(this: unknown): void {};
+    const brokenWorkerFactory = function WorkerStub(
+      this: {
+        onmessage: ((event: MessageEvent) => void) | null;
+        onerror: ((event: ErrorEvent) => void) | null;
+        onmessageerror: ((event: MessageEvent) => void) | null;
+        terminated: boolean;
+      },
+    ): void {
+      this.onmessage = null;
+      this.onerror = null;
+      this.onmessageerror = null;
+      this.terminated = false;
+    };
     brokenWorkerFactory.prototype.postMessage = function postMessage(): void {
       throw new Error("detached or broken data channel");
     };
-    brokenWorkerFactory.prototype.terminate = function terminate(): void {};
+    brokenWorkerFactory.prototype.terminate = function terminate(
+      this: { terminated: boolean },
+    ): void {
+      this.terminated = true;
+    };
     (globalThis as { Worker?: unknown }).Worker = brokenWorkerFactory as unknown;
     try {
       const plan: Pick<
