@@ -784,6 +784,23 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   allocation state shipped (PR-5 write path + PR-6 lock-aware read-switch);
   remaining is PAYMENT-grain allocation (BLOCKED — pending remittance/bank evidence + the
   operator receipt→account assertion model) plus other allocation methods.
+  **Gap narrative shipped 2026-08-23** (`feat/month-gap-explanation`, Hard
+  Problem #3's named remainder): the composed
+  `GET /revenue/months/{month}/gap-explanation` read decomposes both chain
+  legs (`youtube_facts -> adsense_paid -> bank_received`) as
+  gap = evidence-backed components + unexplained residual — non-PAID USD
+  AdSense rows on the payment leg; operator-entered transfer fees and signed
+  FX differences on the bank leg — with per-leg/worst-of statuses,
+  explain-shape confidence, full dotted-key `money_provenance`, warnings, and
+  deterministic prose. Gated on the UNION of both source reads (global
+  `finance.view_revenue` + month-scoped `finance.view_finalized_payments` +
+  `finance.view_bank_reconciliation`) with the triple view audit; the
+  Command Center "Gap narrative" panel renders it beside the PR #127 bank
+  cards (first UI surface for `fx_difference_usd`), no-fetch-when-restricted.
+  Month-grain only; no FX conversion anywhere on the path.
+  `No migration/backfill required.` — compute-on-read composition of the two
+  existing summaries plus the month-close status; no file under
+  `backend/ums_smart_revenue/db/` changes.
 
 ### Acceptance gate
 

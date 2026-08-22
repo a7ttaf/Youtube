@@ -6,7 +6,9 @@ import type {
   ChannelIssue,
   ChannelIssuesResponse,
   ChannelNetRevenue,
+  GapExplanationComponent,
   MonthBankReconciliationSummary,
+  MonthGapExplanation,
   MonthRankingsResponse,
   NetRevenueResponse,
   OutsideCmsItem,
@@ -20,6 +22,7 @@ import type {
 } from "@/lib/api/types";
 import { useBankReconciliation } from "@/lib/api/useBankReconciliation";
 import { useChannelIssues } from "@/lib/api/useChannelIssues";
+import { useGapExplanation } from "@/lib/api/useGapExplanation";
 import { useNetRevenue } from "@/lib/api/useNetRevenue";
 import { useOutsideCmsChannels } from "@/lib/api/useOutsideCmsChannels";
 import { useRankings } from "@/lib/api/useRankings";
@@ -1026,6 +1029,310 @@ const BankReconciliationStatusStrip = ({
   }
 
   return <BankReconciliationDataStrip month={month} />;
+};
+
+// Leg/month gap-explanation status codes -> badge tones. INCOMPLETE is the
+// worst status (finance cannot see the whole chain), so it reads red like
+// UNEXPLAINED; unknown codes stay neutral.
+const GAP_STATUS_TONES: Record<string, Severity> = {
+  MATCHED: "green",
+  FULLY_EXPLAINED: "green",
+  PARTIALLY_EXPLAINED: "amber",
+  UNEXPLAINED: "red",
+  INCOMPLETE: "red",
+};
+
+/** Tone for a gap-explanation status code; unknown codes stay neutral. */
+const gapStatusTone = (status: string): Severity => GAP_STATUS_TONES[status] ?? "blue";
+
+/** Pluralized evidence-count sub-line for a gap component row. */
+const gapEvidenceSub = (count: number): string =>
+  count === 1 ? "1 source row" : `${count} source rows`;
+
+// Display descriptor for one chain leg: every money value is pre-formatted in
+// buildGapLegDescriptors so the row components stay pure presentation.
+type GapComponentRow = {
+  key: string;
+  label: string;
+  evidenceSub: string;
+  amountDisplay: string;
+  confidenceLabel: string;
+};
+
+type GapLegDescriptor = {
+  id: string;
+  label: string;
+  operands: string;
+  status: string;
+  components: GapComponentRow[];
+  residualDisplay: string;
+};
+
+/** Pre-format one leg's component rows (display strings only). */
+const buildGapComponentRows = (
+  components: GapExplanationComponent[],
+  money: (value: string | null) => string,
+): GapComponentRow[] =>
+  // Read defensively (the safeAlerts precedent): a missing/non-array field
+  // renders as no components rather than throwing inside the panel.
+  (Array.isArray(components) ? components : []).map((component) => ({
+    key: component.key,
+    label: component.label,
+    evidenceSub: gapEvidenceSub(component.evidence_count),
+    amountDisplay: money(component.amount_usd),
+    confidenceLabel: component.confidence?.label ?? "—",
+  }));
+
+// Read the payload defensively before rendering legs: a malformed body (e.g.
+// a contract drift serving {} with HTTP 200) must degrade to the empty state,
+// never crash CommandView — the safeAlerts precedent.
+const isRenderableGapExplanation = (
+  data: MonthGapExplanation | null,
+): data is MonthGapExplanation => Boolean(data?.payment_leg && data?.bank_leg);
+
+// ============================================================================
+// Purpose: Convert the composed gap explanation into the two display-ready leg
+//   descriptors (operand chain, component rows, residual). Pure formatting of
+//   backend decimal strings — every gap, component sum, and residual is
+//   backend-computed; the browser never derives a finance number.
+// Connections:
+//   - File: backend/ums_smart_revenue/finance/gap_explanation.py -> the money
+//     and status semantics rendered here.
+// ============================================================================
+const buildGapLegDescriptors = (
+  data: MonthGapExplanation,
+  canViewFinance: boolean,
+  currency: string,
+): GapLegDescriptor[] => {
+  const money = (value: string | null) => financeDisplay(value, canViewFinance, { currency });
+  const payment = data.payment_leg;
+  const bank = data.bank_leg;
+  return [
+    {
+      id: "payment-leg",
+      label: "Payment leg · YouTube revenue → AdSense paid",
+      operands:
+        `${money(payment.youtube_revenue_total_usd)} → ` +
+        `${money(payment.adsense_paid_amount_usd)} · gap ${money(payment.payment_gap_usd)}`,
+      status: payment.status,
+      components: buildGapComponentRows(payment.components, money),
+      residualDisplay: money(payment.unexplained_residual_usd),
+    },
+    {
+      id: "bank-leg",
+      label: "Bank leg · AdSense paid → bank received",
+      operands:
+        `${money(bank.adsense_paid_amount_usd)} → ` +
+        `${money(bank.bank_received_amount_usd)} · gap ${money(bank.bank_gap_usd)}`,
+      status: bank.status,
+      components: buildGapComponentRows(bank.components, money),
+      residualDisplay: money(bank.unexplained_residual_usd),
+    },
+  ];
+};
+
+/** One leg: header row (operands → gap), component rows, and the residual row. */
+const GapLegRows = ({ leg }: { leg: GapLegDescriptor }) => (
+  <>
+    <ItemRow
+      tone={gapStatusTone(leg.status)}
+      title={leg.label}
+      sub={leg.operands}
+      trailing={<Badge tone={gapStatusTone(leg.status)}>{leg.status}</Badge>}
+    />
+    {leg.components.map((component) => (
+      <ItemRow
+        key={`${leg.id}-${component.key}`}
+        tone="blue"
+        title={component.label}
+        sub={component.evidenceSub}
+        trailing={
+          <>
+            <span className="money finance-data">{component.amountDisplay}</span>
+            <Badge tone={confidenceDisplay("", component.confidenceLabel).tone}>
+              {component.confidenceLabel}
+            </Badge>
+          </>
+        }
+      />
+    ))}
+    <ItemRow
+      tone={gapStatusTone(leg.status)}
+      title="Unexplained residual"
+      sub="Gap remaining after the evidence components"
+      trailing={<span className="money finance-data">{leg.residualDisplay}</span>}
+    />
+  </>
+);
+
+/** Header badge for the gap-narrative panel: error / loading / empty / status. */
+const GapNarrativeHeaderBadge = ({
+  data,
+  loading,
+  error,
+}: {
+  data: MonthGapExplanation | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) => {
+  if (error) return <Badge tone="blue">—</Badge>;
+  if (loading && !data) return <Badge tone="blue">Loading</Badge>;
+  if (!isRenderableGapExplanation(data)) return <Badge tone="amber">Empty</Badge>;
+  return <Badge tone={gapStatusTone(data.status)}>{data.status}</Badge>;
+};
+
+/** Body of the gap-narrative panel: error, loading, empty, and data states. */
+const GapNarrativeBody = ({
+  data,
+  loading,
+  error,
+}: {
+  data: MonthGapExplanation | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) => {
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="issue-list" role="alert">
+        <ItemRow tone="blue" title={title} sub={detail} trailing={<Badge tone="blue">—</Badge>} />
+      </div>
+    );
+  }
+
+  if (!isRenderableGapExplanation(data))
+    return loading && !data ? (
+      <div className="issue-list" role="list" aria-busy="true">
+        <ItemRow
+          tone="blue"
+          title="Loading gap narrative…"
+          sub="Decomposing the payment and bank gaps"
+          trailing={<Badge tone="blue">Loading</Badge>}
+        />
+      </div>
+    ) : (
+      <div className="issue-list" role="list">
+        <ItemRow
+          tone="amber"
+          title="No gap explanation returned"
+          sub="The month may not have finance data yet."
+          trailing={<Badge tone="amber">Empty</Badge>}
+        />
+      </div>
+    );
+
+  // The mount condition (three-way grant) already embeds finance visibility,
+  // so money renders unrestricted here — the bank strip's pattern.
+  const legs = buildGapLegDescriptors(data, true, data.currency);
+  const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+  return (
+    <div className="issue-list" role="list">
+      {legs.map((leg) => (
+        <GapLegRows key={leg.id} leg={leg} />
+      ))}
+      <ItemRow
+        tone={gapStatusTone(data.status)}
+        title="Month narrative"
+        sub={data.narrative}
+        trailing={
+          <Badge tone={data.close_status === "LOCKED" ? "amber" : "green"}>
+            {data.close_status}
+          </Badge>
+        }
+      />
+      {warnings.map((warning) => (
+        <ItemRow
+          key={warning.code}
+          tone="amber"
+          title={warning.message}
+          sub={warning.code}
+          trailing={<Badge tone="amber">Warning</Badge>}
+        />
+      ))}
+    </div>
+  );
+};
+
+/** Restricted variant: no fetch, no money — permission copy only. */
+const RestrictedGapNarrativePanel = () => (
+  <section className="panel" aria-labelledby="gapNarrativeTitle" style={{ marginBottom: 16 }}>
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id="gapNarrativeTitle">Gap narrative</strong>
+        <span>Payment and bank gap decomposition</span>
+      </div>
+      <Badge tone="red">Restricted</Badge>
+    </div>
+    <div className="permission-band" role="note">
+      <ItemRow
+        tone="red"
+        title="Gap narrative restricted"
+        sub={`Revenue, payment, and bank permissions are required. ${RESTRICTED_FINANCE_VALUE}.`}
+        trailing={<Badge tone="red">Restricted</Badge>}
+      />
+    </div>
+  </section>
+);
+
+/** Data variant: owns the gap-explanation fetch and fails independently. */
+const GapNarrativeDataPanel = ({ month }: { month: string }) => {
+  const { data, loading, error, reload } = useGapExplanation({ month });
+
+  return (
+    <section className="panel" aria-labelledby="gapNarrativeTitle" style={{ marginBottom: 16 }}>
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="gapNarrativeTitle">Gap narrative</strong>
+          <span>Payment and bank gap decomposition for {month}</span>
+        </div>
+        <GapNarrativeHeaderBadge data={data} loading={loading} error={error} />
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Refresh gap narrative"
+          title="Refresh gap narrative"
+          onClick={reload}
+        >
+          ↻
+        </button>
+      </div>
+      <GapNarrativeBody data={data} loading={loading} error={error} />
+    </section>
+  );
+};
+
+// ============================================================================
+// Purpose: Gap narrative panel for the Command Center (Hard Problem #3).
+//   Renders the composed month gap explanation — both chain legs as compact
+//   rows (operands → gap), the evidence components with confidence badges
+//   (this is where fx_difference_usd finally reaches the UI), each leg's
+//   unexplained residual, the month narrative line, and any data warnings.
+// Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/gap-explanation.
+// Standards: Mounts its data variant ONLY behind the same three-way grant the
+//   backend enforces (VIEW_REVENUE + VIEW_FINALIZED_PAYMENTS +
+//   VIEW_BANK_RECONCILIATION); a missing grant renders the restricted band
+//   and fires NO request. Money values are backend strings formatted for
+//   display; the browser derives no finance number. Fails independently of
+//   the surrounding view (SmartAlertsPanel template).
+// Blast Radius: Finance display only. Read-only — the backend endpoint's
+//   read audit events are its only side effect.
+// Connections:
+//   - File: frontend/src/lib/api/useGapExplanation.ts -> the fetch hook.
+//   - File: frontend/src/lib/api/types.ts -> MonthGapExplanation contract.
+//   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_gap_explanation.
+// ============================================================================
+const GapNarrativePanel = ({
+  month,
+  canViewGapNarrative,
+}: {
+  month: string;
+  canViewGapNarrative: boolean;
+}) => {
+  if (!canViewGapNarrative) {
+    return <RestrictedGapNarrativePanel />;
+  }
+
+  return <GapNarrativeDataPanel month={month} />;
 };
 
 /** Static header row for the channel revenue table. */
@@ -2084,6 +2391,11 @@ const CommandView = ({
     [selectedChannel],
   );
   const canViewBankReconciliationSummary = canViewPayments && canViewBankReconciliation;
+  // The composed gap-explanation endpoint enforces the UNION of the revenue,
+  // finalized-payment, and bank-reconciliation reads — mirror it client-side
+  // so a partially-granted session renders the restricted band, not a 403.
+  const canViewGapNarrative =
+    canViewFinance && canViewPayments && canViewBankReconciliation;
 
   return (
     <>
@@ -2157,6 +2469,10 @@ const CommandView = ({
         month={month}
         canViewBankReconciliationSummary={canViewBankReconciliationSummary}
       />
+
+      {/* gap narrative — REAL data, composed payment+bank gap decomposition,
+          fails independently, no-fetch-when-restricted (three-way grant) */}
+      <GapNarrativePanel month={month} canViewGapNarrative={canViewGapNarrative} />
 
       {/* smart-alerts / problem panel — REAL data, fails independently */}
       <SmartAlertsPanel month={month} />

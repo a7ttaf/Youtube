@@ -267,6 +267,84 @@ export type MonthBankReconciliationSummary = {
 };
 
 // ============================================================================
+// Purpose: TypeScript mirror of the composed month gap-explanation contract
+//   (Hard Problem #3): each chain leg decomposed as gap = evidence-backed
+//   components + unexplained residual, with per-component explain-shape
+//   confidence, warnings, full money provenance, and deterministic prose.
+// Database/ORM: None (frontend) — mirrors backend gap-explanation DTOs only.
+// Standards: Read-only typed boundary; money values stay STRINGS
+//   (decimal_to_api) and are never computed browser-side. gap/residual are
+//   null on an INCOMPLETE leg (an operand source is missing); operands are
+//   always present. close_status is read-only display context.
+// Blast Radius: Finance display contract only. No mutation.
+// Connections:
+//   - File: backend/ums_smart_revenue/finance/gap_explanation.py
+//       GapExplanationComponent.to_api() -> GapExplanationComponent
+//       GapExplanationLeg.to_api()       -> PaymentGapLeg / BankGapLeg
+//       MonthGapExplanation.to_api()     -> MonthGapExplanation
+//   - File: backend/ums_smart_revenue/api/revenue.py
+//       get_month_gap_explanation()      -> adds audit_events.
+// ============================================================================
+
+// One evidence-backed slice of a leg's gap (e.g. non-PAID AdSense payments,
+// bank transfer fees, signed bank-side FX difference).
+export type GapExplanationComponent = {
+  key: string;
+  label: string;
+  amount_usd: MoneyString;
+  evidence_count: number;
+  confidence: ExplanationConfidence;
+};
+
+// Non-blocking data caveat (e.g. CANCELLED/non-USD payment rows present).
+export type GapExplanationWarning = {
+  code: string;
+  message: string;
+};
+
+// Shared leg tail; each leg adds its own operand and status field names so the
+// wire shape matches the backend exactly (no generic renaming layer).
+type GapExplanationLegBase = {
+  status: string;
+  components: GapExplanationComponent[];
+  unexplained_residual_usd: MoneyString | null;
+  narrative: string;
+};
+
+// youtube_facts -> adsense_paid: payment_gap_usd = youtube - paid.
+export type PaymentGapLeg = GapExplanationLegBase & {
+  youtube_revenue_total_usd: MoneyString;
+  adsense_paid_amount_usd: MoneyString;
+  payment_gap_usd: MoneyString | null;
+  payment_match_status: string;
+};
+
+// adsense_paid -> bank_received: bank_gap_usd = paid - received.
+export type BankGapLeg = GapExplanationLegBase & {
+  adsense_paid_amount_usd: MoneyString;
+  bank_received_amount_usd: MoneyString;
+  bank_gap_usd: MoneyString | null;
+  bank_reconciliation_status: string;
+};
+
+// GET /revenue/months/{month}/gap-explanation
+export type MonthGapExplanation = {
+  month: string;
+  currency: string;
+  close_status: string; // "OPEN" | "LOCKED", read-only context
+  status: string;
+  tolerance_usd: MoneyString;
+  payment_leg: PaymentGapLeg;
+  bank_leg: BankGapLeg;
+  warnings: GapExplanationWarning[];
+  // Dotted keys ("payment_leg.payment_gap_usd", "bank_leg.components.
+  // transfer_fee.amount_usd", "tolerance_usd") covering every numeric field.
+  money_provenance: Record<string, MoneyProvenance>;
+  narrative: string;
+  audit_events: NetRevenueAuditEvent[];
+};
+
+// ============================================================================
 // Purpose: TypeScript mirror of the backend finance month-close JSON contract
 //   consumed by the Month-Close screen. Fields are matched 1:1 against the
 //   backend serializers (not guessed); nullable fields serialize as null.

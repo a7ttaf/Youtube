@@ -5,6 +5,8 @@ Calculate gross, deductions, net revenue, and payment gaps by channel, company, 
 
 ## Core formula
 
+Target-state formula (full allocation engine):
+
 ```text
 channel_net_revenue =
     channel_gross_revenue
@@ -15,6 +17,16 @@ channel_net_revenue =
   - allocated_unresolved_payment_gap
   + manual_adjustments
 ```
+
+Shipped behavior (code is authoritative, 2026-08-23): net revenue comes from
+the official source `net_revenue_usd` (plus approved manual overrides), or —
+only when the source net is missing — from same-month, same-source
+NET-APPLICABLE deduction components. `TRANSFER_FEE`, `FX_VARIANCE`, and
+`UNRESOLVED_PAYMENT_GAP` components are evidence-only
+(`deduction_policy.py`): they are ingested, surfaced, and explained (the
+month gap-explanation bank leg reads them as evidence) but never reduce any
+shipped net figure. The three `allocated_*` terms above therefore describe
+unbuilt PAYMENT-grain allocation, not current arithmetic.
 
 ## Deduction formula
 
@@ -28,16 +40,24 @@ When `gross_revenue` is `0`, `deduction_amount` is still `gross_revenue - net_re
 
 ## Monthly reconciliation formula
 
+Shipped formulas (code is authoritative, 2026-08-23 — no adjustment or
+withholding term exists on this path):
+
 ```text
-expected_payment =
-    total_gross_revenue
-  + total_adjustments
-  - total_tax_withholding
+payment_gap_usd = youtube_revenue_total_usd - adsense_paid_amount
 
-payment_gap = expected_payment - adsense_payment_amount
-
-bank_gap = adsense_payment_amount - bank_received_amount_normalized
+bank_gap_usd = adsense_paid_amount_usd - bank_received_amount_usd
 ```
+
+`youtube_revenue_total_usd` sums one YouTube-sourced gross fact per channel
+(CMS preferred over Analytics); `adsense_paid_amount` sums the month's USD
+AdSense rows with `payment_status = PAID`. The composed
+`GET /revenue/months/{month}/gap-explanation` read decomposes both gaps as
+evidence-backed components (non-PAID USD AdSense rows; operator-entered
+transfer fees and signed FX differences) plus an unexplained residual — it
+explains gaps, it does not adjust them. An `expected_payment` with
+`total_adjustments`/`total_tax_withholding` terms remains target-state for
+the unbuilt allocation depth.
 
 ## Allocation methods
 
@@ -66,15 +86,20 @@ Deduction remains at holding level.
 
 ## Monthly close states
 
+Shipped close states (code is authoritative, 2026-08-23 —
+`finance_month_close.status`):
+
 ```text
 OPEN
-ESTIMATED
-FINALIZED
-PAYMENT_MATCHED
-BANK_CONFIRMED
-RECONCILED
 LOCKED
 ```
+
+The intermediate workflow labels once listed here (`ESTIMATED`, `FINALIZED`,
+`PAYMENT_MATCHED`, `BANK_CONFIRMED`, `RECONCILED`) are NOT close states in
+the shipped system; where they exist at all they are endpoint statuses on
+the reconciliation reads (`PAYMENT_MATCHED` on payment-match,
+`BANK_CONFIRMED` on bank-reconciliation), reported next to — not gating —
+the OPEN/LOCKED close state.
 
 ## Manual override rules
 

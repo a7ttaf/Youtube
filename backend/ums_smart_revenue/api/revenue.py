@@ -112,6 +112,7 @@ from ums_smart_revenue.finance.explanations import (
     SqlAlchemyNumberExplanationRepository,
     build_channel_month_revenue_explanation,
 )
+from ums_smart_revenue.finance.gap_explanation import build_month_gap_explanation
 from ums_smart_revenue.finance.manual_overrides import (
     ManualOverrideConflictError,
     ManualOverrideLockedMonthError,
@@ -2083,6 +2084,140 @@ def get_month_bank_reconciliation(
         audit_record_to_api(payment_record),
     ]
     return summary_api
+
+
+# ============================================================================
+# Purpose: Serve the composed month gap explanation (Hard Problem #3) — both
+#   legs of youtube_facts -> adsense_paid -> bank_received decomposed as
+#   gap = evidence-backed components + unexplained residual, with provenance,
+#   explain-shape confidence, and deterministic prose.
+# Database/ORM: Read-only over the same repositories the payment-match and
+#   bank-reconciliation endpoints already use, plus the month-close read the
+#   smart-alerts endpoint models; one fetch feeds every builder. No writes.
+# Standards: Permissions are the UNION of both source reads (VIEW_REVENUE @
+#   global, VIEW_FINALIZED_PAYMENTS + VIEW_BANK_RECONCILIATION @
+#   finance_month) — this response discloses every number both sources
+#   disclose, so it must not be readable with less than both gates. USD-only
+#   via the shared normalizer; month-grain only; no FX conversion. Triple
+#   audit (REVENUE_VIEWED + PAYMENT_VIEWED + BANK_RECONCILIATION_VIEWED),
+#   the smart-alerts precedent, because all three surfaces' numbers appear.
+# Blast Radius: New read-only finance surface; payment-match and
+#   bank-reconciliation payloads unchanged. No allocation, no net math,
+#   no month-close writes.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/gap_explanation.py -> the
+#     builder and the ruled design pointer.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> the endpoint contract.
+#   - File: frontend/src/lib/api/useGapExplanation.ts -> the Command Center
+#     consumer.
+# ============================================================================
+@router.get("/months/{month}/gap-explanation")
+def get_month_gap_explanation(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    payment_repository: Annotated[
+        SqlAlchemyAdSensePaymentRepository,
+        Depends(current_adsense_payment_repository),
+    ],
+    bank_repository: Annotated[
+        SqlAlchemyBankReconciliationRepository,
+        Depends(current_bank_reconciliation_repository),
+    ],
+    close_repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository,
+        Depends(current_finance_month_close_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    currency: Annotated[str, Query(min_length=1)] = "USD",
+) -> dict[str, object]:
+    """Explain the month's payment and bank gaps as one composed narrative."""
+    global_scope = AccessScope.global_scope()
+    month_scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    try:
+        normalized_currency = normalize_payment_match_currency(currency)
+        facts = revenue_repository.list_month_facts(month=month)
+        payments = payment_repository.list_month_payments(month=month)
+        bank_entries = bank_repository.list_month_entries(month=month)
+        close = close_repository.get(month)
+        payment_summary = build_monthly_payment_match_summary(
+            month=month,
+            facts=facts,
+            payments=payments,
+            currency=normalized_currency,
+        )
+        bank_summary = build_month_bank_reconciliation_summary(
+            month=month,
+            payments=payments,
+            bank_entries=bank_entries,
+        )
+        explanation = build_month_gap_explanation(
+            month=month,
+            payment_summary=payment_summary,
+            bank_summary=bank_summary,
+            payments=payments,
+            close_status=close.status if close else "OPEN",
+        )
+    except (
+        AdSensePaymentValidationError,
+        BankReconciliationValidationError,
+        PaymentMatchValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    explanation_api = explanation.to_api()
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="month_gap_explanation",
+        entity_id=month,
+        scope=global_scope,
+        details={
+            "status": explanation.status,
+            "payment_leg_status": explanation.payment_leg.status,
+        },
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="month_gap_explanation",
+        entity_id=month,
+        scope=month_scope,
+        details={
+            "status": explanation.status,
+            "payment_match_status": explanation.payment_leg.source_status,
+        },
+    )
+    bank_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+        entity_type="month_gap_explanation",
+        entity_id=month,
+        scope=month_scope,
+        details={
+            "status": explanation.status,
+            "bank_reconciliation_status": explanation.bank_leg.source_status,
+        },
+    )
+    explanation_api["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+        audit_record_to_api(bank_record),
+    ]
+    return explanation_api
 
 
 @router.post("/channels/{channel_id}/months/{month}/explain")
