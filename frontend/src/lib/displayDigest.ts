@@ -205,7 +205,7 @@ export const computeDisplayDigestAsync = async (
     counts: plan.counts,
     rows: plan.rows,
   });
-  return sha256HexAsync(canonical);
+  return await sha256HexAsync(canonical);
 };
 
 // ============================================================================

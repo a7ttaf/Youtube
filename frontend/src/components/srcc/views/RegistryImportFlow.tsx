@@ -140,6 +140,14 @@ const describeImportError = (err: unknown): string => {
  */
 const PLAN_BEARING_STATUSES = new Set([409, 422]);
 
+const planBearingDetail = (err: unknown): unknown | null => {
+  if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
+    return null;
+  }
+  const body = err.body as { detail?: unknown } | null;
+  return body?.detail ?? null;
+};
+
 // ============================================================================
 // Purpose: Decide whether an apply REJECTION carries a plan worth putting in
 //   front of the operator, and hand it back only if it does. This is the one
@@ -177,25 +185,17 @@ const applyRaceDetail = async (
   err: unknown,
   contentOwnerId: string,
 ): Promise<ChannelImportResult | null> => {
-  if (!(err instanceof ApiError) || !PLAN_BEARING_STATUSES.has(err.status)) {
-    return null;
-  }
-  const body = err.body as { detail?: unknown } | null;
-  const detail = body?.detail;
+  const detail = planBearingDetail(err);
   if (!isChannelImportResult(detail)) {
     return null;
   }
   if (!(await displayDigestMatchesDisclosedAsync(detail))) {
     return null;
   }
-  // The refreshed plan must describe the TARGET this request named, the same
-  // rule the 2xx path applies. It matters MORE here: this payload REPLACES the
-  // preview and becomes what the operator re-approves, and the next Apply
-  // sends the captured owner — so a plan for a different owner would be
-  // reviewed against one target and applied against another. Falling through
-  // to the ordinary banner is the fail-closed direction: the operator is told
-  // the apply was refused and keeps the plan they actually reviewed.
-  return echoesRequestedTarget(detail, contentOwnerId) ? detail : null;
+  if (!echoesRequestedTarget(detail, contentOwnerId)) {
+    return null;
+  }
+  return detail;
 };
 
 /** The banner for a refreshed plan, worded for which rejection produced it. */
