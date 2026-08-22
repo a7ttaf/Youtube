@@ -117,9 +117,9 @@ const computeDisplayDigestInWorker = async (plan: DisplayDigestPlanFields): Prom
 // Blast Radius: Import preview/apply binding — rejects substituted rows while
 //   echoing an unverified digest token (review #184, C1).
 // Connections:
-// - File: backend/ums_smart_revenue/api/channels.py -> _display_digest recipe.
-// - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult.
-// - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
+//   - File: backend/ums_smart_revenue/api/channels.py -> _display_digest recipe.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
 // ============================================================================
 /** Recompute the server ``display_digest`` from exactly the disclosed plan fields. */
 export const computeDisplayDigest = (plan: DisplayDigestPlanFields): string =>
@@ -154,9 +154,9 @@ export const computeDisplayDigestAsync = async (
 //   that echo an unverified digest while substituting disclosed rows (review
 //   #184, C1).
 // Connections:
-// - File: frontend/src/lib/displayDigest.ts -> computeDisplayDigest recipe.
-// - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult.
-// - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
+//   - File: frontend/src/lib/displayDigest.ts -> computeDisplayDigest recipe.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
 // ============================================================================
 /** True when the body carries a digest matching its disclosed plan contents. */
 export const displayDigestMatchesDisclosed = (plan: ChannelImportResult): boolean => {
@@ -180,10 +180,10 @@ export const displayDigestMatchesDisclosed = (plan: ChannelImportResult): boolea
 // Blast Radius: Import preview/apply binding — blocks malformed 2xx payloads
 //   and unverified 409/422 refresh plans from replacing operator-approved state.
 // Connections:
-// - File: frontend/src/lib/displayDigest.worker.ts -> off-thread canonicalize+hash.
-// - File: frontend/src/lib/api/useChannelImport.ts -> assertUsableResult.
-// - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> applyRaceDetail.
-// - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
+//   - File: frontend/src/lib/displayDigest.worker.ts -> off-thread canonicalize+hash.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> assertUsableResult.
+//   - File: frontend/src/components/srcc/views/RegistryImportFlow.tsx -> applyRaceDetail.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
 // ============================================================================
 /** Async verify path for response validation before trusted UI state updates. */
 export const displayDigestMatchesDisclosedAsync = async (

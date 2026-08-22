@@ -83,10 +83,10 @@ const pythonCanonicalJson = (value: unknown): string => {
 // Blast Radius: Import preview/apply binding — a wrong digest rejects a
 //   plan the operator would otherwise trust (review #184, C1).
 // Connections:
-// - File: frontend/src/lib/displayDigest.ts -> worker orchestration + async verify.
-// - File: frontend/src/lib/displayDigest.worker.ts -> off-thread digest compute.
-// - File: backend/ums_smart_revenue/api/channels.py -> _display_digest recipe.
-// - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
+//   - File: frontend/src/lib/displayDigest.ts -> worker orchestration + async verify.
+//   - File: frontend/src/lib/displayDigest.worker.ts -> off-thread digest compute.
+//   - File: backend/ums_smart_revenue/api/channels.py -> _display_digest recipe.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
 // ============================================================================
 export const sha256Hex = (message: string): string => {
   const msg = new TextEncoder().encode(message);
@@ -169,9 +169,9 @@ export type DisplayDigestPlanFields = Pick<
 // Blast Radius: Import preview/apply trust boundary — drift from the backend
 //   recipe causes false 409s or accepts mismatched plans (review #184, C1).
 // Connections:
-// - File: frontend/src/lib/displayDigest.ts -> async verify orchestration.
-// - File: backend/ums_smart_revenue/api/channels.py -> server-side digest.
-// - File: Docs/12_BACKEND_API_SPEC.md -> canonical JSON + SHA-256 contract.
+//   - File: frontend/src/lib/displayDigest.ts -> async verify orchestration.
+//   - File: backend/ums_smart_revenue/api/channels.py -> server-side digest.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> canonical JSON + SHA-256 contract.
 // ============================================================================
 export const computeDisplayDigestFromFields = (plan: DisplayDigestPlanFields): string => {
   const canonical = pythonCanonicalJson({
