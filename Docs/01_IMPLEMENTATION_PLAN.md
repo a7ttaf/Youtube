@@ -492,6 +492,12 @@ on real ingestion (Phase 2) and the inventory load workflow.
   every accepted plan and echoes both tokens. Recipe + contract in Docs/12;
   TypeScript-side recomputation shipped in the same PR (`frontend/src/lib/displayDigest.ts`,
   verified against the backend recipe in `frontend/tests/lib/displayDigest.test.ts`).
+  **Migration / backfill:** `No migration/backfill required.` Evidence: no file
+  under `backend/ums_smart_revenue/db/alembic/versions/` in this PR; `display_digest`
+  is computed in-process on import preview/apply responses and optional request
+  fields — no column, constraint, index, enum, or persisted row is added or altered
+  (`git diff --name-only $(git merge-base main HEAD)..HEAD` on branch
+  `feat/import-display-digest`).
   C2
   (transaction boundary on the store protocol, ruled 2026-08-21) is the next
   PR.

@@ -160,6 +160,19 @@ export type DisplayDigestPlanFields = Pick<
   "content_owner_id" | "cms_status" | "counts" | "rows"
 >;
 
+// ============================================================================
+// Purpose: Canonical display_digest entry point — selects the tenant-free
+//   reviewed field set, serializes with the Python recipe, and SHA-256 hashes.
+// Database/ORM: None (frontend) — mirrors backend in-process digest only.
+// Standards: Field list must stay aligned with backend canonical JSON inputs;
+//   sync path for worker, tests, and plain-HTTP fallback.
+// Blast Radius: Import preview/apply trust boundary — drift from the backend
+//   recipe causes false 409s or accepts mismatched plans (review #184, C1).
+// Connections:
+// - File: frontend/src/lib/displayDigest.ts -> async verify orchestration.
+// - File: backend/ums_smart_revenue/api/channels.py -> server-side digest.
+// - File: Docs/12_BACKEND_API_SPEC.md -> canonical JSON + SHA-256 contract.
+// ============================================================================
 export const computeDisplayDigestFromFields = (plan: DisplayDigestPlanFields): string => {
   const canonical = pythonCanonicalJson({
     content_owner_id: plan.content_owner_id,
