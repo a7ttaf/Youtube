@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 
 import { useApiClient } from "@/lib/api/client";
+import { displayDigestMatchesDisclosed } from "@/lib/displayDigest";
 import type { ChannelImportResult, ChannelImportRowResult } from "@/lib/api/types";
 
 // ============================================================================
@@ -1023,10 +1024,10 @@ const PLAN_PAYLOAD_FIELDS: ReadonlyArray<readonly [string, (value: unknown) => b
   ["rows", isPlanRows],
   ["counts", isCountMap],
   ["plan_fingerprint", (value) => typeof value === "string" && value !== ""],
-  // The fingerprint's recomputable companion (review #184, C1). Required for
-  // the same reason the fingerprint is: a plan accepted without it reaches
-  // the next Apply as `undefined`, silently dropping `expected_display_digest`
-  // from the form and with it the disclosed-plan half of the binding.
+  // The fingerprint's recomputable companion (review #184, C1). Required, and
+  // must match a client-side recomputation from the disclosed fields — not
+  // merely be nonempty — so a malformed 2xx cannot substitute rows while
+  // echoing an unverified digest token.
   ["display_digest", (value) => typeof value === "string" && value !== ""],
   [OWNER_FIELD, (value) => typeof value === "string"],
   [CMS_STATUS_FIELD, (value) => typeof value === "string"],
@@ -1150,7 +1151,8 @@ export const isChannelImportResult = (payload: unknown): payload is ChannelImpor
   return (
     PLAN_PAYLOAD_FIELDS.every(([field, isValid]) => isValid(payload[field])) &&
     countsMatchRows(payload) &&
-    diffsMatchTheirFields(payload)
+    diffsMatchTheirFields(payload) &&
+    displayDigestMatchesDisclosed(payload as ChannelImportResult)
   );
 };
 

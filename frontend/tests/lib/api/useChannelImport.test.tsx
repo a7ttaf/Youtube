@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelImportResult } from "@/lib/api/types";
 import { useChannelImport } from "@/lib/api/useChannelImport";
 import { TenantProvider } from "@/contexts/TenantContext";
+import { withDisplayDigest } from "../../helpers/displayDigestFixtures";
 
 const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
@@ -20,8 +21,32 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const jsonResponse = (body: unknown, status = 200) => {
-  return new Response(JSON.stringify(body), {
+const isImportPlanPayload = (body: unknown): body is ChannelImportResult => {
+  if (!body || typeof body !== "object" || "detail" in body) {
+    return false;
+  }
+  const candidate = body as ChannelImportResult;
+  return (
+    Array.isArray(candidate.rows) &&
+    candidate.counts !== undefined &&
+    typeof candidate.content_owner_id === "string" &&
+    typeof candidate.cms_status === "string"
+  );
+};
+
+const jsonResponse = (body: unknown, status = 200, options?: { trustDigest?: boolean }) => {
+  let payload = body;
+  if (isImportPlanPayload(body) && !options?.trustDigest) {
+    const plan = body as ChannelImportResult;
+    if (typeof plan.display_digest === "string" && plan.display_digest !== "") {
+      try {
+        payload = withDisplayDigest(plan);
+      } catch {
+        payload = body;
+      }
+    }
+  }
+  return new Response(JSON.stringify(payload), {
     status,
     headers: { "Content-Type": "application/json" },
   });
@@ -67,13 +92,12 @@ const REQUIRED_STATUS = "MISSING_REVENUE_SOURCE";
 const OPTIONAL_STATUS = "PERFORMANCE_ONLY";
 const OFFICIAL_STATUS = "OFFICIAL_CMS_REVENUE";
 
-const DRY_RUN_RESULT: ChannelImportResult = {
+const DRY_RUN_RESULT: ChannelImportResult = withDisplayDigest({
   dry_run: true,
   content_owner_id: "COabc",
   cms_status: "INSIDE_CMS",
   counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
   plan_fingerprint: "plan-abc",
-  display_digest: "digest-abc",
   rows: [
     {
       row_number: 1,
@@ -103,20 +127,19 @@ const DRY_RUN_RESULT: ChannelImportResult = {
       reason: null,
     },
   ],
-};
+});
 
 const APPLY_RESULT: ChannelImportResult = { ...DRY_RUN_RESULT, dry_run: false };
 
 // The all-or-nothing apply rejection: a 422 whose `detail` is the full
 // ChannelImportResult payload (channels.py:688-689), here with the ERROR row
 // that blocked the apply.
-const BLOCKED_APPLY_DETAIL: ChannelImportResult = {
+const BLOCKED_APPLY_DETAIL: ChannelImportResult = withDisplayDigest({
   dry_run: false,
   content_owner_id: "COabc",
   cms_status: "INSIDE_CMS",
   counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 0, ERROR: 1 },
   plan_fingerprint: "plan-blocked",
-  display_digest: "digest-blocked",
   rows: [
     {
       row_number: 1,
@@ -131,7 +154,7 @@ const BLOCKED_APPLY_DETAIL: ChannelImportResult = {
       reason: "missing youtube_channel_id",
     },
   ],
-};
+});
 
 describe("useChannelImport", () => {
   it("POSTs /channels/import as multipart FormData with the mapped fields", async () => {
@@ -221,7 +244,7 @@ describe("useChannelImport", () => {
       "reason",
     ]);
     expect(form.get("expected_plan_fingerprint")).toBe("plan-abc");
-    expect(form.get("expected_display_digest")).toBe("digest-abc");
+    expect(form.get("expected_display_digest")).toBe(APPLY_RESULT.display_digest);
   });
 
   it("propagates the 422 blocked-apply ApiError carrying the full plan payload", async () => {
@@ -1809,7 +1832,9 @@ describe("useChannelImport", () => {
     // token differs, so this passing proves the second comparison exists
     // rather than riding along on the first.
     fetchMock().mockResolvedValue(
-      jsonResponse({ ...APPLY_RESULT, display_digest: "someone-elses-digest" }),
+      jsonResponse({ ...APPLY_RESULT, display_digest: "someone-elses-digest" }, 200, {
+        trustDigest: true,
+      }),
     );
     const { result } = renderHook(() => useChannelImport(), { wrapper });
 
@@ -1843,10 +1868,14 @@ describe("useChannelImport", () => {
     ).resolves.toMatchObject({ display_digest: APPLY_RESULT.display_digest });
   });
 
-  it("does not police the display digest on an UNBOUND request", async () => {
-    // Same rule as the fingerprint: no expectation sent, nothing to compare.
+  it("rejects an unbound 2xx whose display digest does not recompute from the disclosed plan", async () => {
+    // Even without expectedDisplayDigest, the SPA must refuse a preview/apply
+    // body whose digest token does not match a client-side recomputation
+    // (review #184, C1; PR #195).
     fetchMock().mockResolvedValue(
-      jsonResponse({ ...APPLY_RESULT, display_digest: "whatever-the-server-says" }),
+      jsonResponse({ ...APPLY_RESULT, display_digest: "whatever-the-server-says" }, 200, {
+        trustDigest: true,
+      }),
     );
     const { result } = renderHook(() => useChannelImport(), { wrapper });
 
@@ -1857,7 +1886,7 @@ describe("useChannelImport", () => {
         dryRun: false,
         reason: "monthly roster import",
       }),
-    ).resolves.toMatchObject({ display_digest: "whatever-the-server-says" });
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
 
   it("rejects an apply answered with a PREVIEW payload", async () => {

@@ -13,6 +13,7 @@ import {
   UNSCOPED_IMPORT_SCOPE,
   importScopeFor,
 } from "@/contexts/UnsettledImportContext";
+import { withDisplayDigest } from "../../../helpers/displayDigestFixtures";
 
 // RegistryImportFlow is exercised THROUGH RegistryView (the GroupsView.test.tsx
 // idiom for GroupsSyncFlow): the capability gate, the table swap, and the
@@ -67,17 +68,12 @@ const rosterFile = () => {
 
 // Clean dry-run plan: a CREATE (empty diff by design) + an UPDATE carrying a
 // field-level diff and a group effect. UNCHANGED:0 proves zero counts hide.
-const DRY_RUN_PLAN: ChannelImportResult = {
+const DRY_RUN_PLAN: ChannelImportResult = withDisplayDigest({
   dry_run: true,
   content_owner_id: "OWNERaaa",
   cms_status: "INSIDE_CMS",
-  // All four declared outcomes, always: the planner seeds every one at 0
-  // (`{outcome.value: 0 for outcome in ChannelImportOutcome}`), so a partial
-  // map is a shape the backend cannot emit. The preview HIDES zero counts;
-  // that is a render decision, not a payload one (review #184).
   counts: { CREATE: 1, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
   plan_fingerprint: "plan-clean-v1",
-  display_digest: "digest-clean-v1",
   rows: [
     {
       row_number: 1,
@@ -112,20 +108,19 @@ const DRY_RUN_PLAN: ChannelImportResult = {
       reason: null,
     },
   ],
-};
+});
 
 // The applied echo of the same plan (identical shape, dry_run:false).
 const APPLY_RESULT: ChannelImportResult = { ...DRY_RUN_PLAN, dry_run: false };
 
 // A plan holding an ERROR row: Apply must be blocked client-side because the
 // API would 422 the whole file (all-or-nothing).
-const DRY_RUN_ERRORS: ChannelImportResult = {
+const DRY_RUN_ERRORS: ChannelImportResult = withDisplayDigest({
   dry_run: true,
   content_owner_id: "OWNERaaa",
   cms_status: "INSIDE_CMS",
   counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 1 },
   plan_fingerprint: "plan-errors-v1",
-  display_digest: "digest-errors-v1",
   rows: [
     DRY_RUN_PLAN.rows[0],
     {
@@ -141,10 +136,55 @@ const DRY_RUN_ERRORS: ChannelImportResult = {
       reason: "missing youtube_channel_id",
     },
   ],
+});
+
+const isImportPlanPayload = (body: unknown): body is ChannelImportResult => {
+  if (!body || typeof body !== "object" || "detail" in body) {
+    return false;
+  }
+  const candidate = body as ChannelImportResult;
+  return (
+    Array.isArray(candidate.rows) &&
+    candidate.counts !== undefined &&
+    typeof candidate.content_owner_id === "string" &&
+    typeof candidate.cms_status === "string"
+  );
 };
 
-const jsonResponse = (body: unknown, status = 200) => {
-  return new Response(JSON.stringify(body), {
+const normalizePlanBody = (body: unknown, trustDigest?: boolean): unknown => {
+  if (trustDigest) {
+    return body;
+  }
+  if (isImportPlanPayload(body)) {
+    const plan = body as ChannelImportResult;
+    if (typeof plan.display_digest === "string" && plan.display_digest !== "") {
+      try {
+        return withDisplayDigest(plan);
+      } catch {
+        return body;
+      }
+    }
+    return body;
+  }
+  if (body && typeof body === "object" && "detail" in body) {
+    const wrapper = body as { detail?: unknown };
+    if (isImportPlanPayload(wrapper.detail)) {
+      const detail = wrapper.detail as ChannelImportResult;
+      if (typeof detail.display_digest === "string" && detail.display_digest !== "") {
+        try {
+          return { ...wrapper, detail: withDisplayDigest(detail) };
+        } catch {
+          return body;
+        }
+      }
+    }
+  }
+  return body;
+};
+
+const jsonResponse = (body: unknown, status = 200, options?: { trustDigest?: boolean }) => {
+  const payload = normalizePlanBody(body, options?.trustDigest);
+  return new Response(JSON.stringify(payload), {
     status,
     headers: { "Content-Type": "application/json" },
   });
@@ -591,13 +631,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // The apply therefore carries the approved plan's fingerprint, and a
     // backend 409 replaces the preview so approval is re-sought against what
     // would actually be written (review #184).
-    const refreshed: ChannelImportResult = {
+    const refreshed: ChannelImportResult = withDisplayDigest({
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-refreshed-v2",
-      // A different plan digests differently on BOTH tokens; inheriting the
-      // clean plan's digest through the spread would be a shape the backend
-      // cannot produce.
-      display_digest: "digest-refreshed-v2",
       counts: { CREATE: 0, UPDATE: 1, UNCHANGED: 0, ERROR: 0 },
       rows: [
         {
@@ -609,7 +645,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
           changes: { channel_name: { from: "Someone Else", to: "Alpha Channel" } },
         },
       ],
-    };
+    });
     let applyCount = 0;
     await runDryRunToPreview((form) => {
       if (form.get("dry_run") === "true") return jsonResponse(DRY_RUN_PLAN);
@@ -633,7 +669,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // The first apply carried the plan the operator had on screen — BOTH
     // tokens, from the same approved plan object (review #184, C1).
     expect(importPosts()[1].get("expected_plan_fingerprint")).toBe("plan-clean-v1");
-    expect(importPosts()[1].get("expected_display_digest")).toBe("digest-clean-v1");
+    expect(importPosts()[1].get("expected_display_digest")).toBe(DRY_RUN_PLAN.display_digest);
     // The dry run itself binds to nothing — there is no prior plan to honour.
     expect(importPosts()[0].get("expected_plan_fingerprint")).toBeNull();
     expect(importPosts()[0].get("expected_display_digest")).toBeNull();
@@ -652,7 +688,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
       expect(screen.getByRole("group", { name: "Import applied" })).toBeInTheDocument(),
     );
     expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-refreshed-v2");
-    expect(importPosts()[2].get("expected_display_digest")).toBe("digest-refreshed-v2");
+    expect(importPosts()[2].get("expected_display_digest")).toBe(refreshed.display_digest);
   });
 
   it("refuses a refreshed plan describing a DIFFERENT owner", async () => {
@@ -661,14 +697,11 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // refreshed plan for another owner would be reviewed against one target
     // and applied against another. The 2xx path already refused that; this
     // path is where it matters more (review #184, self-review).
-    const foreign: ChannelImportResult = {
+    const foreign: ChannelImportResult = withDisplayDigest({
       ...DRY_RUN_PLAN,
       content_owner_id: "OWNERzzz",
       plan_fingerprint: "plan-foreign-v2",
-      // The owner is a digest input, so a foreign-owner plan cannot share the
-      // clean plan's display digest either.
-      display_digest: "digest-foreign-v2",
-    };
+    });
     await runDryRunToPreview((form) => {
       if (form.get("dry_run") === "true") return jsonResponse(DRY_RUN_PLAN);
       return jsonResponse({ detail: foreign }, 409);
@@ -1415,10 +1448,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // decisive: the roster IS the registry, therefore the write committed.
     // NO group keys: `outcome` is computed from channel inventory alone, so
     // all-UNCHANGED is only proof for a roster that owes no group effects.
-    const settled: ChannelImportResult = {
+    const settled: ChannelImportResult = withDisplayDigest({
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-settled",
-      display_digest: "digest-settled",
       counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
       rows: DRY_RUN_PLAN.rows.map((row) => ({
         ...row,
@@ -1430,7 +1462,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
         group_id: null,
         group_action: null,
       })),
-    };
+    });
     await reachIndeterminate(() => jsonResponse(settled));
 
     fireEvent.click(screen.getByRole("button", { name: /check whether it landed/iu }));
@@ -1457,10 +1489,9 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     // memberships, so a roster whose channels already match can still owe the
     // group attachments the lost apply was supposed to make. Declaring that
     // "applied" would report a half-written import as done.
-    const channelsMatch: ChannelImportResult = {
+    const channelsMatch: ChannelImportResult = withDisplayDigest({
       ...DRY_RUN_PLAN,
       plan_fingerprint: "plan-groups-pending",
-      display_digest: "digest-groups-pending",
       counts: { CREATE: 0, UPDATE: 0, UNCHANGED: 2, ERROR: 0 },
       // row[1] keeps its group_id "g1" — the effect that cannot be verified.
       rows: DRY_RUN_PLAN.rows.map((row) => ({
@@ -1469,7 +1500,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
         changes: {},
         revenue_source_status: null,
       })),
-    };
+    });
     await reachIndeterminate(() => jsonResponse(channelsMatch));
 
     fireEvent.click(screen.getByRole("button", { name: /check whether it landed/iu }));
@@ -1573,7 +1604,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
     await waitFor(() => expect(importPosts()).toHaveLength(3));
     expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-clean-v1");
-    expect(importPosts()[2].get("expected_display_digest")).toBe("digest-clean-v1");
+    expect(importPosts()[2].get("expected_display_digest")).toBe(DRY_RUN_PLAN.display_digest);
   });
 
   it("refuses a refreshed plan with no display digest rather than unbinding the apply", async () => {
@@ -1599,7 +1630,7 @@ describe("RegistryImportFlow stepper (through RegistryView)", () => {
     fireEvent.click(screen.getByRole("button", { name: /^apply$/i }));
     await waitFor(() => expect(importPosts()).toHaveLength(3));
     expect(importPosts()[2].get("expected_plan_fingerprint")).toBe("plan-clean-v1");
-    expect(importPosts()[2].get("expected_display_digest")).toBe("digest-clean-v1");
+    expect(importPosts()[2].get("expected_display_digest")).toBe(DRY_RUN_PLAN.display_digest);
   });
 
   it("discloses the revenue source status the write derives", async () => {
