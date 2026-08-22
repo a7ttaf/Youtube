@@ -48,6 +48,22 @@ const handleDigestWorkerFailure = (message: string): void => {
   disableDigestWorker();
 };
 
+// ============================================================================
+// Purpose: Register Worker message/error listeners for digest request correlation.
+// Database/ORM: None (frontend) — wires onmessage / onerror / onmessageerror only.
+// Standards: Correlate responses by request id; on worker/messageerror reject all
+//   pending waiters, terminate the worker, and clear the cache so the next call
+//   falls back to sync computeDisplayDigestFromFields (via getDigestWorker null
+//   path or recreate). Unknown response ids are ignored (no throw).
+// Blast Radius: Import preview/apply binding — a hung or crashed worker without
+//   these handlers would strand displayDigestMatchesDisclosedAsync and leak
+//   workerWaiters (review #184, C1; Qodo worker-hang finding).
+// Connections:
+//   - File: frontend/src/lib/displayDigest.worker.ts -> posts {id,digest|error}.
+//   - File: frontend/src/lib/displayDigest.ts -> computeDisplayDigestInWorker
+//     and handleDigestWorkerFailure / disableDigestWorker.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> assertUsableResult.
+// ============================================================================
 const ensureDigestWorkerListener = (worker: Worker): void => {
   worker.onmessage = (event: MessageEvent<DigestWorkerResponse>) => {
     const waiter = workerWaiters.get(event.data.id);
