@@ -221,11 +221,14 @@ class ChannelRegistryStore(Protocol):
     #   committed rows, and the import's race tests assert exactly that (a
     #   channel renamed or a group minted by a concurrent writer mid-apply
     #   survives the refusal). Adapters must NOT commit here — commit stays
-    #   with whoever owns the session/request lifecycle. The boundary is not
-    #   nestable and not a savepoint: one enter per logical operation, and a
-    #   caller needing partial undo is asking for a different contract.
-    #   Exceptions always propagate; the boundary undoes state, never
-    #   outcomes.
+    #   with whoever owns the session/request lifecycle. At the PROTOCOL the
+    #   boundary is non-nestable and exposes no partial-rollback semantics:
+    #   one enter per logical operation, all-or-nothing, and a caller
+    #   needing partial undo is asking for a different contract — the SQL
+    #   adapter's internal SAVEPOINT (above) is its implementation
+    #   mechanism, not a nesting or partial-undo surface offered to
+    #   callers. Exceptions always propagate; the boundary undoes state,
+    #   never outcomes.
     # Blast Radius: Whether a refused import can leave PARTIAL channel writes
     #   behind on adapters without a database underneath (direct/test/
     #   bootstrap callers). Production SQL behaviour is unchanged by design.
