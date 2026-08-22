@@ -149,6 +149,38 @@ class SqlAlchemyChannelRegistry:
             self._txn_active = False
 
     # ========================================================================
+    # Purpose: Savepoint policy for the per-row flush-conflict handlers — a
+    #   local SAVEPOINT for STANDALONE writes, a plain passthrough inside
+    #   the store's transaction() boundary.
+    # Database/ORM: SAVEPOINT via Session.begin_nested(), or nothing.
+    # Standards: Standalone writes keep the local savepoint so a caught
+    #   typed conflict cannot leave the session aborted (the FIX notes at
+    #   the call sites). Inside the boundary it is pure overhead: nothing
+    #   in the import catches-and-continues a typed conflict, the
+    #   boundary's own savepoint is the recovery, and a per-row savepoint
+    #   would put SAVEPOINT+RELEASE around every INSERT/UPDATE — up to
+    #   10,000 extra transaction-control statements on a 5,000-row bulk
+    #   apply (PR #196 round 13, codex). After a flush failure on the
+    #   passthrough path the session stays aborted until the boundary's
+    #   rollback-to, which is the next thing that happens as the typed
+    #   error propagates — so handlers on this path must not issue queries
+    #   (create_channel's existence probe is gated accordingly).
+    # Blast Radius: Transaction-control statement volume on the bulk path;
+    #   end state unchanged on both paths.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     the boundary-wrapped bulk caller this optimizes.
+    # ========================================================================
+    @contextmanager
+    def _flush_recovery(self) -> Iterator[None]:
+        """SAVEPOINT standalone writes; pass through under the boundary."""
+        if self._txn_active:
+            yield
+        else:
+            with self._session.begin_nested():
+                yield
+
+    # ========================================================================
     # Purpose: Take the tenant-wide REVENUE_REQUIREMENT_GUARD_MONTH advisory
     #   lock that serializes registry writes against the finance month-close
     #   protocol, at most once per request transaction.
@@ -324,21 +356,28 @@ class SqlAlchemyChannelRegistry:
         # consumer that orders by it.
         row.updated_at = created_at
         try:
-            # FIX: The INSERT gets its OWN savepoint so a lost check-to-insert
-            # race discards only this row; the previous handler called
-            # `Session.rollback()`, which rolled back the TOPMOST transaction,
-            # so a direct caller that caught the typed conflict and committed
-            # lost every earlier write in the transaction — including work
-            # flushed before entering the store's transaction() boundary,
-            # which a root rollback discards along with the savepoints
-            # protecting it (PR #196 round 3, codex).
-            with self._session.begin_nested():
+            # FIX: A STANDALONE insert gets its OWN savepoint so a lost
+            # check-to-insert race discards only this row; the previous
+            # handler called `Session.rollback()`, which rolled back the
+            # TOPMOST transaction, so a direct caller that caught the typed
+            # conflict and committed lost every earlier write in the
+            # transaction — including work flushed before entering the
+            # store's transaction() boundary, which a root rollback discards
+            # along with the savepoints protecting it (PR #196 round 3,
+            # codex). Under the boundary this is a passthrough — see
+            # _flush_recovery (round 13).
+            with self._flush_recovery():
                 self._session.add(row)
                 self._session.flush()
         except IntegrityError as exc:
-            if (
-                _is_duplicate_channel_integrity_error(exc)
-                or self._get_row(youtube_channel_id) is not None
+            if _is_duplicate_channel_integrity_error(exc) or (
+                # The existence probe needs a LIVE session. On the boundary
+                # passthrough a failed flush leaves the session aborted
+                # until the boundary's rollback-to, so classification there
+                # rests on the dialect string matcher above alone and an
+                # unmatched error re-raises into the boundary rollback.
+                not self._txn_active
+                and self._get_row(youtube_channel_id) is not None
             ):
                 raise ChannelRegistryConflictError(
                     f"Channel already exists: {youtube_channel_id}"
@@ -394,13 +433,14 @@ class SqlAlchemyChannelRegistry:
             )
 
         try:
-            # FIX: Savepoint-local recovery, mirroring create_channel — the
-            # previous handler root-rolled-back a direct caller's earlier
-            # work on a refused flush. The MUTATION sits inside the savepoint
-            # too, so its rollback restores the object snapshot — a dirty
-            # attribute surviving the typed raise would re-flush on the outer
-            # transaction later.
-            with self._session.begin_nested():
+            # FIX: Savepoint-local recovery for STANDALONE calls, mirroring
+            # create_channel — the previous handler root-rolled-back a direct
+            # caller's earlier work on a refused flush. The MUTATION sits
+            # inside the savepoint too, so its rollback restores the object
+            # snapshot — a dirty attribute surviving the typed raise would
+            # re-flush on the outer transaction later. Under the boundary
+            # this is a passthrough — see _flush_recovery (round 13).
+            with self._flush_recovery():
                 row.primary_org_unit_id = parsed_primary_company_id
                 self._session.flush()
         except IntegrityError as exc:
@@ -444,8 +484,9 @@ class SqlAlchemyChannelRegistry:
             raise KeyError(f"Channel not found: {youtube_channel_id}")
         try:
             # FIX: Savepoint-local recovery with the mutation inside the
-            # savepoint, mirroring update_mapping — see its FIX note.
-            with self._session.begin_nested():
+            # savepoint, mirroring update_mapping — see its FIX note (and
+            # _flush_recovery for the boundary passthrough).
+            with self._flush_recovery():
                 row.content_owner_id = normalize_optional_content_owner(content_owner_id)
                 self._session.flush()
         except IntegrityError as exc:

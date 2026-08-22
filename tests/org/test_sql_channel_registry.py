@@ -1340,3 +1340,75 @@ def test_sql_adapters_declare_their_session_as_the_unit_of_work():
         PlatformLaneAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work
         is session
     )
+
+
+def test_boundary_covered_create_conflict_still_recovers_via_the_boundary():
+    """Under the boundary the per-row savepoint is skipped; the boundary heals.
+
+    Round 13: inside transaction() the flush-conflict handlers no longer
+    open their own savepoint (up to 10,000 extra transaction-control
+    statements on a 5,000-row apply). The load-bearing property is that a
+    conflict mid-boundary still surfaces as the typed error, the boundary's
+    own rollback recovers the session, and a catching direct caller can
+    keep using it — pre-boundary state intact, boundary writes gone.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+    registry.create_channel(
+        youtube_channel_id="channel-pre-existing",
+        channel_name="Original",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+    session.commit()
+
+    with pytest.raises(ChannelRegistryConflictError), registry.transaction():
+        registry.create_channel(
+            youtube_channel_id="channel-boundary-mint",
+            channel_name="Minted Inside",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+        registry.create_channel(
+            youtube_channel_id="channel-pre-existing",
+            channel_name="Duplicate",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+
+    session.commit()
+    assert registry.get_channel("channel-boundary-mint") is None
+    survivor = registry.get_channel("channel-pre-existing")
+    assert survivor is not None and survivor.channel_name == "Original"
+
+
+def test_boundary_writes_do_not_open_per_row_savepoints():
+    """Exactly ONE savepoint per boundary — the boundary's own (round 13)."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(session.bind, "before_cursor_execute", _capture)
+    try:
+        with registry.transaction():
+            for suffix in ("a", "b", "c"):
+                registry.create_channel(
+                    youtube_channel_id=f"channel-savepoint-{suffix}",
+                    channel_name=f"Savepoint {suffix}",
+                    primary_company_id=None,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                )
+    finally:
+        event.remove(session.bind, "before_cursor_execute", _capture)
+
+    savepoints = [s for s in statements if s.upper().startswith("SAVEPOINT")]
+    assert len(savepoints) == 1
