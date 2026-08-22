@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelImportResult } from "@/lib/api/types";
 import { useChannelImport } from "@/lib/api/useChannelImport";
 import { TenantProvider } from "@/contexts/TenantContext";
+import { importPlanJsonResponse as jsonResponse, withDisplayDigest } from "../../helpers/displayDigestFixtures";
 
 const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
@@ -19,13 +20,6 @@ afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
   vi.restoreAllMocks();
 });
-
-const jsonResponse = (body: unknown, status = 200) => {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-};
 
 const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
@@ -67,7 +61,7 @@ const REQUIRED_STATUS = "MISSING_REVENUE_SOURCE";
 const OPTIONAL_STATUS = "PERFORMANCE_ONLY";
 const OFFICIAL_STATUS = "OFFICIAL_CMS_REVENUE";
 
-const DRY_RUN_RESULT: ChannelImportResult = {
+const DRY_RUN_RESULT: ChannelImportResult = withDisplayDigest({
   dry_run: true,
   content_owner_id: "COabc",
   cms_status: "INSIDE_CMS",
@@ -102,14 +96,14 @@ const DRY_RUN_RESULT: ChannelImportResult = {
       reason: null,
     },
   ],
-};
+});
 
 const APPLY_RESULT: ChannelImportResult = { ...DRY_RUN_RESULT, dry_run: false };
 
 // The all-or-nothing apply rejection: a 422 whose `detail` is the full
 // ChannelImportResult payload (channels.py:688-689), here with the ERROR row
 // that blocked the apply.
-const BLOCKED_APPLY_DETAIL: ChannelImportResult = {
+const BLOCKED_APPLY_DETAIL: ChannelImportResult = withDisplayDigest({
   dry_run: false,
   content_owner_id: "COabc",
   cms_status: "INSIDE_CMS",
@@ -129,7 +123,7 @@ const BLOCKED_APPLY_DETAIL: ChannelImportResult = {
       reason: "missing youtube_channel_id",
     },
   ],
-};
+});
 
 describe("useChannelImport", () => {
   it("POSTs /channels/import as multipart FormData with the mapped fields", async () => {
@@ -191,6 +185,37 @@ describe("useChannelImport", () => {
     expect(response).toEqual(APPLY_RESULT);
   });
 
+  it("appends both binding tokens to the form when the caller supplies them", async () => {
+    // The bound apply carries the opaque fingerprint AND its recomputable
+    // disclosed-plan companion (review #184, C1) under their exact wire
+    // names. The key set is pinned exactly: a misspelled field would not
+    // fail, it would silently unbind one half of the guard.
+    fetchMock().mockResolvedValue(jsonResponse(APPLY_RESULT));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await result.current({
+      file: rosterFile(),
+      contentOwnerId: "COabc",
+      dryRun: false,
+      reason: "monthly roster import",
+      expectedPlanFingerprint: APPLY_RESULT.plan_fingerprint,
+      expectedDisplayDigest: APPLY_RESULT.display_digest,
+    });
+
+    const form = requireFormDataBody(requireFetchArgs()[1]);
+    expect([...form.keys()].sort()).toEqual([
+      "cms_status",
+      "content_owner_id",
+      "dry_run",
+      "expected_display_digest",
+      "expected_plan_fingerprint",
+      "file",
+      "reason",
+    ]);
+    expect(form.get("expected_plan_fingerprint")).toBe("plan-abc");
+    expect(form.get("expected_display_digest")).toBe(APPLY_RESULT.display_digest);
+  });
+
   it("propagates the 422 blocked-apply ApiError carrying the full plan payload", async () => {
     fetchMock().mockResolvedValue(
       jsonResponse({ detail: BLOCKED_APPLY_DETAIL }, 422),
@@ -219,6 +244,26 @@ describe("useChannelImport", () => {
     const noFingerprint = { ...DRY_RUN_RESULT } as Record<string, unknown>;
     delete noFingerprint.plan_fingerprint;
     fetchMock().mockResolvedValue(jsonResponse(noFingerprint));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: true,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("rejects a 2xx missing the display digest", async () => {
+    // The digest's absence has the fingerprint's failure mode (review #184,
+    // C1): the plan reaches the next Apply with `display_digest: undefined`,
+    // which silently drops `expected_display_digest` from the form and with it
+    // the disclosed-plan half of the binding.
+    const noDigest = { ...DRY_RUN_RESULT } as Record<string, unknown>;
+    delete noDigest.display_digest;
+    fetchMock().mockResolvedValue(jsonResponse(noDigest));
     const { result } = renderHook(() => useChannelImport(), { wrapper });
 
     await expect(
@@ -1748,6 +1793,69 @@ describe("useChannelImport", () => {
         reason: "monthly roster import",
       }),
     ).resolves.toMatchObject({ plan_fingerprint: "whatever-the-server-says" });
+  });
+
+  it("rejects a 2xx whose display digest is not the one bound", async () => {
+    // The digest check is INDEPENDENT of the fingerprint check (review #184,
+    // C1): here the fingerprint echoes correctly and only the disclosed-plan
+    // token differs, so this passing proves the second comparison exists
+    // rather than riding along on the first.
+    fetchMock().mockResolvedValue(
+      jsonResponse({ ...APPLY_RESULT, display_digest: "someone-elses-digest" }, 200, {
+        trustDigest: true,
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+        expectedPlanFingerprint: APPLY_RESULT.plan_fingerprint,
+        expectedDisplayDigest: APPLY_RESULT.display_digest,
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
+  });
+
+  it("accepts a 2xx echoing the bound display digest", async () => {
+    // The complement: the digest check must not reject the legitimate case,
+    // or every bound apply would land in the indeterminate path.
+    fetchMock().mockResolvedValue(jsonResponse(APPLY_RESULT));
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+        expectedPlanFingerprint: APPLY_RESULT.plan_fingerprint,
+        expectedDisplayDigest: APPLY_RESULT.display_digest,
+      }),
+    ).resolves.toMatchObject({ display_digest: APPLY_RESULT.display_digest });
+  });
+
+  it("rejects an unbound 2xx whose display digest does not recompute from the disclosed plan", async () => {
+    // Even without expectedDisplayDigest, the SPA must refuse a preview/apply
+    // body whose digest token does not match a client-side recomputation
+    // (review #184, C1; PR #195).
+    fetchMock().mockResolvedValue(
+      jsonResponse({ ...APPLY_RESULT, display_digest: "whatever-the-server-says" }, 200, {
+        trustDigest: true,
+      }),
+    );
+    const { result } = renderHook(() => useChannelImport(), { wrapper });
+
+    await expect(
+      result.current({
+        file: rosterFile(),
+        contentOwnerId: "COabc",
+        dryRun: false,
+        reason: "monthly roster import",
+      }),
+    ).rejects.toMatchObject({ name: "ChannelImportShapeError" });
   });
 
   it("rejects an apply answered with a PREVIEW payload", async () => {

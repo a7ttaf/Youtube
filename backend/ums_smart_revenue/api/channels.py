@@ -249,6 +249,18 @@ class ChannelImportResult(BaseModel):
     # back, not a checksum to recompute. Only `dry_run` is outside it, because
     # a preview and its apply differ in it by definition.
     plan_fingerprint: str
+    # The COMPANION digest, covering exactly the DISCLOSED reviewed set —
+    # `counts`, `rows`, `content_owner_id`, `cms_status` — and nothing the
+    # response does not show. That scope is the point: a client can recompute
+    # it from the fields it renders (canonical JSON, sorted keys, tight
+    # separators, SHA-256) and so verify that the token it binds with describes
+    # the plan it actually displayed, which the opaque fingerprint above cannot
+    # offer by design. Echoed back as `expected_display_digest` on the apply; a
+    # mismatch against the CURRENT plan's digest is a 409 carrying the
+    # refreshed plan. NOT a tenancy boundary — the tenant is deliberately
+    # outside it (that exclusion is what makes it recomputable), and
+    # cross-tenant binding stays `plan_fingerprint`'s job (review #184, C1).
+    display_digest: str
 
 
 class GroupSyncGroupResult(BaseModel):
@@ -703,6 +715,7 @@ def import_channels(
     reason: Annotated[str, Form()],
     cms_status: Annotated[str, Form()] = "INSIDE_CMS",
     expected_plan_fingerprint: Annotated[str | None, Form()] = None,
+    expected_display_digest: Annotated[str | None, Form()] = None,
 ) -> ChannelImportResult:
     """Import a CMS channel roster CSV, previewing or applying every row."""
     target_scope = AccessScope.global_scope()
@@ -746,8 +759,6 @@ def import_channels(
         tenant_id=str(_resolve_tenant_uuid(user)),
     )
 
-    if plan.has_errors and not dry_run:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=payload)
     if dry_run:
         return ChannelImportResult.model_validate(payload)
 
@@ -759,11 +770,28 @@ def import_channels(
     # plan, so approval is re-sought against reality instead of a stale
     # preview (review #184). Optional for API clients that never previewed —
     # they are not re-approving anything — but the SPA always sends it.
+    # FIX: Binding-token mismatches run BEFORE the ERROR-row 422 branch so a
+    # stale digest/fingerprint is classified as plan drift (409 + refreshed
+    # plan), not as a roster-validation failure (422).
     if (
         expected_plan_fingerprint is not None
         and expected_plan_fingerprint != payload["plan_fingerprint"]
     ):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=payload)
+    # The same guard over the DISCLOSED digest. A client that recomputed the
+    # digest from the plan it rendered — rather than trusting the token the
+    # response carried — binds here, so a response that showed one plan while
+    # carrying another plan's tokens no longer has a token the client will
+    # echo. The two checks are deliberately independent: either token alone
+    # binds the apply, and the SPA sends both (review #184, C1).
+    if (
+        expected_display_digest is not None
+        and expected_display_digest != payload["display_digest"]
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=payload)
+
+    if plan.has_errors:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=payload)
 
     try:
         apply_channel_import(
@@ -782,8 +810,12 @@ def import_channels(
             # pre-state moved in the re-plan-to-row-lock window fails closed
             # rather than overwriting a value the operator never saw. Off for
             # unbound callers, who are re-approving nothing and keep the
-            # documented default (the file wins).
-            enforce_reviewed_pre_state=expected_plan_fingerprint is not None,
+            # documented default (the file wins). EITHER token opts in: a
+            # digest-bound caller reviewed a plan exactly as a
+            # fingerprint-bound one did.
+            enforce_reviewed_pre_state=(
+                expected_plan_fingerprint is not None or expected_display_digest is not None
+            ),
         )
     # A group whose owner stamp was cleared between the plan and the write is
     # the one plan-to-apply race the operator's preview cannot have shown: the
@@ -1030,6 +1062,12 @@ def _import_plan_to_api(
             cms_status=cms_status,
             tenant_id=tenant_id,
         ),
+        "display_digest": _display_digest(
+            counts,
+            rows,
+            content_owner_id=content_owner_id,
+            cms_status=cms_status,
+        ),
     }
 
 
@@ -1101,6 +1139,81 @@ def _plan_fingerprint(
     canonical = json.dumps(
         {
             "tenant_id": tenant_id,
+            "content_owner_id": content_owner_id,
+            "cms_status": cms_status,
+            "counts": counts,
+            "rows": rows,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# ============================================================================
+# Purpose: Digest the DISCLOSED half of one import plan — exactly the fields
+#   the response shows — so a client can verify that the plan it rendered is
+#   the plan its binding token describes, by recomputing rather than trusting.
+# Database/ORM: None — pure function over an already-rendered plan payload.
+# Standards: The input set is exactly `plan_fingerprint`'s MINUS the resolved
+#   tenant, and that subtraction is the whole design: the tenant is the one
+#   digest input the response does not disclose, so it is the one input that
+#   made the fingerprint unrecomputable. Everything here is on screen —
+#   counts, rows, content owner, CMS status — which makes this digest
+#   recomputable BY CONSTRUCTION (canonical JSON: sorted keys, tight
+#   separators, ensure_ascii default; SHA-256 of the UTF-8 bytes). The
+#   recomputability is pinned by a test that rebuilds it from a response body
+#   with nothing but hashlib+json. `dry_run` stays out for the fingerprint's
+#   reason: a preview and its apply differ in it by definition. An equality
+#   token, never a secret and never an authorization input — no constant-time
+#   compare applies.
+# Blast Radius: Which applies are accepted vs rejected 409 for callers binding
+#   via `expected_display_digest`, and (with the fingerprint) whether the
+#   write-boundary pre-state guard is on. NOT a tenancy boundary: two tenants
+#   previewing identical rosters get EQUAL display digests on purpose —
+#   cross-tenant binding is `plan_fingerprint`'s job, and both checks run.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/channels.py -> import_channels
+#     compares it against expected_display_digest before the apply, and
+#     _plan_fingerprint above is the opaque companion whose input set this
+#     mirrors minus the tenant.
+#   - File: frontend/src/lib/api/useChannelImport.ts -> requires the field on
+#     every accepted plan and echoes it on the bound apply.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> documents the recomputation recipe
+#     as part of the import contract.
+# ============================================================================
+def _display_digest(
+    counts: dict[str, int],
+    rows: list[dict[str, object]],
+    *,
+    content_owner_id: str,
+    cms_status: str,
+) -> str:
+    """Digest exactly what the response DISCLOSES, so a client can recompute it.
+
+    ``plan_fingerprint`` is deliberately opaque: the resolved tenant inside it
+    is a boundary precisely because clients cannot supply or reproduce it. The
+    cost of that opacity is that a client cannot check the token against the
+    plan it is looking at — a response that rendered one plan while carrying
+    another plan's fingerprint would be echoed back without complaint. This
+    digest closes that gap from the other side: every input is a field the
+    response body shows, so a client that recomputes it from what it rendered
+    — instead of echoing the token it received — binds the apply to the plan
+    it actually displayed (review #184, C1).
+
+    The tenant's exclusion is therefore load-bearing, and it is NOT a leak of
+    tenancy protection: ``expected_display_digest`` and
+    ``expected_plan_fingerprint`` are independent checks, so a cross-tenant
+    replay still fails the fingerprint compare whenever the SPA (which always
+    sends both) is the caller — and a digest-only caller is bound to the
+    disclosed plan, which is all that token ever claimed to cover.
+
+    Same canonical form as the fingerprint — ``sort_keys`` plus tight
+    separators over the UTF-8 bytes, plain SHA-256 — so the recomputation
+    recipe is one sentence: sorted-key JSON of the four disclosed fields.
+    """
+    canonical = json.dumps(
+        {
             "content_owner_id": content_owner_id,
             "cms_status": cms_status,
             "counts": counts,

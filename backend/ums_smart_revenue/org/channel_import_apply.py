@@ -198,7 +198,9 @@ class ChannelImportRowStateDivergedError(ChannelImportError):
     (review #184).
 
     Raised ONLY for a caller that bound its apply to a reviewed plan by
-    sending ``expected_plan_fingerprint``. That opt-in is the whole point:
+    sending ``expected_plan_fingerprint`` or ``expected_display_digest`` —
+    either binding token is the opt-in (review #184, C1). That opt-in is the
+    whole point:
     "the file wins" — an import overwriting concurrent drift, audited
     truthfully — is a deliberate decision (review #159, r3713841231 /
     r3713966806) and remains the behaviour for callers that never previewed
@@ -456,8 +458,10 @@ def apply_channel_import(
     matches the one the preview showed fails the whole import closed instead of
     overwriting a value the operator never saw — across ALL FOUR inventory
     fields, including the ones the preview showed as unchanged. The route sets
-    it exactly when the client bound its apply with
-    ``expected_plan_fingerprint``. Left off, the documented default stands —
+    it exactly when the client bound its apply with either token —
+    ``expected_plan_fingerprint`` or ``expected_display_digest`` (review #184,
+    C1): a digest-bound caller reviewed a plan exactly as a fingerprint-bound
+    one did. Left off, the documented default stands —
     the file wins, and the audit records the real diff — so a caller that never
     previewed is unaffected (review #184 for the opt-in; review #159 for the
     default).
@@ -899,7 +903,8 @@ def _write_inventory_row(
     #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
     #     same contract inside the row lock.
     #   - File: backend/ums_smart_revenue/api/channels.py -> the route whose
-    #     expected_plan_fingerprint sets enforce_reviewed_pre_state.
+    #     binding tokens (expected_plan_fingerprint / expected_display_digest)
+    #     set enforce_reviewed_pre_state.
     # ========================================================================
     def require_pre_state(previous: ChannelRegistryEntry) -> None:
         """Judge the locked pre-state before a single field is assigned.
@@ -1217,8 +1222,9 @@ def _channel_audit_details(
 #   just the reviewed diff, because the write sets all four: "no change to X"
 #   is a reviewed claim as strong as "X: A -> B". Runs ONLY when the caller
 #   passed enforce_reviewed_pre_state (the route sets it exactly for a request
-#   carrying expected_plan_fingerprint); the unbound default remains "the file
-#   wins" per review #159. An unlisted field's expected value is taken from
+#   carrying either binding token — expected_plan_fingerprint or
+#   expected_display_digest, review #184 C1); the unbound default remains "the
+#   file wins" per review #159. An unlisted field's expected value is taken from
 #   ``updated`` rather than the plan, which is what keeps a channel repeated
 #   across groups from tripping on its own first write.
 # Blast Radius: Turns an accepted import into a 409 for the whole file. No
