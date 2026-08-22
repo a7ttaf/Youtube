@@ -2311,7 +2311,7 @@ show.
 | `uv run ruff check backend tests scripts` | All checks passed | `line-length = 100` (`pyproject.toml:47`) — matches DeepSource FLK-E501 |
 | `uv run mypy backend` | **1 error** | NOT one of the four AGENTS.md gates — see B below |
 | `bun run test` (frontend) | 477 passed, 41 files | run from `frontend/` — `(cd frontend && bun run test)`; `bun`, never `npx` |
-| `(cd frontend && bunx tsc --noEmit)` / `(cd frontend && bun run build)` | clean | scripts live in `frontend/package.json`, not repo root |
+| `(cd frontend && bun run typecheck)` / `(cd frontend && bun run build)` | clean | scripts live in `frontend/package.json`, not repo root |
 | `git diff --check` | clean | |
 | DeepSource (6 analyzers) | all SUCCESS | |
 
@@ -2332,7 +2332,19 @@ docker run -d --name ums-verify \
   -e POSTGRES_DB=test_ums \
   -p 127.0.0.1:55505:5432 \
   postgres:18-alpine
-until docker exec ums-verify pg_isready -U postgres -d test_ums >/dev/null 2>&1; do sleep 1; done
+ready=0
+for _ in $(seq 1 60); do
+  if docker exec ums-verify pg_isready -U postgres -d test_ums >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+if [ "$ready" -ne 1 ]; then
+  echo "Postgres did not become ready within 60s; try: docker logs ums-verify" >&2
+  docker rm -f ums-verify
+  exit 1
+fi
 UMS_TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@127.0.0.1:55505/test_ums" uv run pytest -q -rw
 pytest_exit=$?
 docker rm -f ums-verify
@@ -2348,10 +2360,17 @@ docker run -d --name ums-verify `
   -e POSTGRES_DB=test_ums `
   -p 127.0.0.1:55505:5432 `
   postgres:18-alpine
-do {
+$ready = $false
+for ($i = 0; $i -lt 60; $i++) {
   Start-Sleep -Seconds 1
   docker exec ums-verify pg_isready -U postgres -d test_ums *> $null
-} until ($LASTEXITCODE -eq 0)
+  if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+}
+if (-not $ready) {
+  Write-Error "Postgres did not become ready within 60s; try: docker logs ums-verify"
+  docker rm -f ums-verify
+  exit 1
+}
 $env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:55505/test_ums"
 uv run pytest -q -rw
 $pytestExit = $LASTEXITCODE
