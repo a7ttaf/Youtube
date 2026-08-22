@@ -1,3 +1,25 @@
+# ============================================================================
+# Purpose: SQLite-tier unit tests for SqlAlchemyChannelRegistry — reads,
+#   writes, typed conflicts, tenant scoping, the locked-month guards, the
+#   transaction() SAVEPOINT boundary (direct-caller protection, nesting
+#   refusal, guard-memo reset, per-row savepoint elision under the
+#   boundary), and the sql_unit_of_work declarations the import's wiring
+#   validation reads.
+# Database/ORM: In-memory SQLite engines per test (OrgBase, plus
+#   FinanceBase where the month-lock guards are exercised); PostgreSQL-only
+#   behaviors (row locks, advisory locks, RLS) are pinned in
+#   tests/api/test_channels_import_postgres.py instead.
+# Standards: Every test builds its own session and seeds explicitly; no
+#   shared fixtures, no cross-test state.
+# Blast Radius: Test-only.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+#     adapter under test.
+#   - File: tests/org/test_store_transaction_boundary.py -> the in-memory
+#     adapters' boundary pins these SQL pins mirror.
+# ============================================================================
+"""SQLite-tier tests for the SQL channel registry adapter."""
+
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
