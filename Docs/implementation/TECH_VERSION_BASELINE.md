@@ -36,7 +36,7 @@ For this project:
 | ReportLab | `4.5.1` |
 | python-pptx | `1.0.2` |
 | pytest | `9.0.3` |
-| httpx | `0.28.1` |
+| httpx2 | `2.12.0` |
 | pypdf | `6.11.0` |
 
 ## Frontend Target Baseline
