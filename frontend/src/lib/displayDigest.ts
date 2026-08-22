@@ -18,7 +18,7 @@ const escapeJsonCodePoint = (code: number): string | null => {
   if (known !== undefined) {
     return known;
   }
-  if (code < 0x20 || code > 0x7f) {
+  if (code < 0x20 || code >= 0x7f) {
     return `\\u${code.toString(16).padStart(4, "0")}`;
   }
   return null;
