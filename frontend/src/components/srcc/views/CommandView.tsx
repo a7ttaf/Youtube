@@ -1181,6 +1181,44 @@ const GapNarrativeHeaderBadge = ({
   return <Badge tone={gapStatusTone(data.status)}>{data.status}</Badge>;
 };
 
+// Read warnings defensively (the safeAlerts precedent): a missing/non-array
+// field renders as no warning rows rather than throwing inside the panel.
+const safeGapWarnings = (data: MonthGapExplanation) =>
+  Array.isArray(data.warnings) ? data.warnings : [];
+
+/** Loading/empty fallback rows shown before a renderable payload exists. */
+const GapNarrativePendingRows = ({
+  loading,
+  data,
+}: {
+  loading: boolean;
+  data: MonthGapExplanation | null;
+}) =>
+  loading && !data ? (
+    <div className="issue-list" role="list" aria-busy="true">
+      <ItemRow
+        tone="blue"
+        title="Loading gap narrative…"
+        sub="Decomposing the payment and bank gaps"
+        trailing={<Badge tone="blue">Loading</Badge>}
+      />
+    </div>
+  ) : (
+    <div className="issue-list" role="list">
+      <ItemRow
+        tone="amber"
+        title="No gap explanation returned"
+        sub="The month may not have finance data yet."
+        trailing={<Badge tone="amber">Empty</Badge>}
+      />
+    </div>
+  );
+
+/** Read-only close-state badge for the month narrative row. */
+const GapCloseBadge = ({ closeStatus }: { closeStatus: string }) => (
+  <Badge tone={closeStatus === "LOCKED" ? "amber" : "green"}>{closeStatus}</Badge>
+);
+
 /** Body of the gap-narrative panel: error, loading, empty, and data states. */
 const GapNarrativeBody = ({
   data,
@@ -1200,31 +1238,13 @@ const GapNarrativeBody = ({
     );
   }
 
-  if (!isRenderableGapExplanation(data))
-    return loading && !data ? (
-      <div className="issue-list" role="list" aria-busy="true">
-        <ItemRow
-          tone="blue"
-          title="Loading gap narrative…"
-          sub="Decomposing the payment and bank gaps"
-          trailing={<Badge tone="blue">Loading</Badge>}
-        />
-      </div>
-    ) : (
-      <div className="issue-list" role="list">
-        <ItemRow
-          tone="amber"
-          title="No gap explanation returned"
-          sub="The month may not have finance data yet."
-          trailing={<Badge tone="amber">Empty</Badge>}
-        />
-      </div>
-    );
+  if (!isRenderableGapExplanation(data)) {
+    return <GapNarrativePendingRows loading={loading} data={data} />;
+  }
 
   // The mount condition (three-way grant) already embeds finance visibility,
   // so money renders unrestricted here — the bank strip's pattern.
   const legs = buildGapLegDescriptors(data, true, data.currency);
-  const warnings = Array.isArray(data.warnings) ? data.warnings : [];
   return (
     <div className="issue-list" role="list">
       {legs.map((leg) => (
@@ -1234,13 +1254,9 @@ const GapNarrativeBody = ({
         tone={gapStatusTone(data.status)}
         title="Month narrative"
         sub={data.narrative}
-        trailing={
-          <Badge tone={data.close_status === "LOCKED" ? "amber" : "green"}>
-            {data.close_status}
-          </Badge>
-        }
+        trailing={<GapCloseBadge closeStatus={data.close_status} />}
       />
-      {warnings.map((warning) => (
+      {safeGapWarnings(data).map((warning) => (
         <ItemRow
           key={warning.code}
           tone="amber"
