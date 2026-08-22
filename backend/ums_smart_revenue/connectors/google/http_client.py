@@ -1,4 +1,16 @@
-"""httpx-based Google HTTP client used by B2.4 / B2.5 / B2.6 API clients.
+# ============================================================================
+# Purpose: Google connector HTTP transport with retry, auth refresh, and typed
+#   error mapping for JSON and raw-byte requests.
+# Database/ORM: None.
+# Standards: httpx2 imported as `httpx` for stable call sites; shared retry
+#   policy per B2 connector design spec §7.
+# Blast Radius: All Google API clients using GoogleHttpClient.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/errors.py -> Typed errors.
+#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+#     -> Retry policy contract.
+# ============================================================================
+"""httpx2-based Google HTTP client (imported as httpx) for B2.4 / B2.5 / B2.6 API clients.
 
 Pre-request: credentials.before_request(...) is invoked once per request so
 google-auth handles access-token refresh via its own state machine; the
@@ -25,7 +37,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
-import httpx
+# httpx2 is the successor package (starlette's own testclient prefers it via the
+# same alias); the module-local `httpx` name keeps every call site and test
+# double stable across the migration.
+import httpx2 as httpx
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
 

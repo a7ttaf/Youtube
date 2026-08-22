@@ -1,3 +1,12 @@
+# ============================================================================
+# Purpose: YouTube Reporting client tests (spec §5.4).
+# Database/ORM: None.
+# Standards: httpx2 imported as httpx for mock transports.
+# Blast Radius: Test coverage for YouTube Reporting client only.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_reporting_client.py
+#     -> SUT.
+# ============================================================================
 """YouTube Reporting client tests (spec §5.4)."""
 
 from __future__ import annotations
@@ -5,7 +14,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 
-import httpx
+import httpx2 as httpx
 import pytest  # noqa: F401 — kept for T24/T25 (pytest.raises / pytest.mark.parametrize)
 
 from ums_smart_revenue.connectors.google.errors import GoogleApiResponseError
