@@ -501,6 +501,43 @@ on real ingestion (Phase 2) and the inventory load workflow.
   (transaction boundary on the store protocol, ruled 2026-08-21) is the next
   PR.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.
+  **Store transaction boundary shipped 2026-08-22**
+  (`feat/import-store-transaction` — #184's deferred C2 question, ruled
+  "transaction boundary" 2026-08-21): both channel-store protocols now
+  declare an explicit `transaction()` boundary. The SQL adapters implement it
+  as a real SAVEPOINT (`Session.begin_nested`) on the request's session —
+  rolled back to on exception, released on success, never a commit of the
+  outer transaction — so the all-or-nothing promise holds even for a direct
+  caller that catches the failure and commits the session; locks taken
+  before the savepoint survive its rollback, while row locks and the
+  advisory close guard first acquired inside the boundary are released by
+  the rollback-to (PostgreSQL's savepoint rules) — which is why the guard's
+  held-memo resets UNCONDITIONALLY on any boundary rollback (whether or not
+  that boundary acquired the guard: re-acquiring a still-held lock is a
+  re-entrant no-op, trusting a stale memo is a lock hole), and why a
+  catching direct caller must not rely on post-savepoint locks remaining
+  held — and the stores' flush-conflict handlers recover via their own
+  savepoints instead of rolling back the root transaction. The in-memory
+  adapters keep a PER-THREAD undo JOURNAL of their own write methods with
+  compare-and-restore replay (own writes undone only while the key still
+  holds the object the boundary wrote; a foreign overwrite or delete stands,
+  as a committed SQL row survives a rollback), and serialize writers AND
+  readers behind a store-wide re-entrant lock — the coarse analogue of PG
+  row locks plus MVCC's no-dirty-reads — so a concurrent thread can neither
+  build on nor observe state a rollback retracts, while the boundary thread
+  reads its own writes. `apply_channel_import` wraps its pre-flight, BOTH passes, and
+  the audit flush in one boundary, with audit records buffered until the
+  passes succeed and the flush inside the sink's own boundary (SAVEPOINT on
+  the SQL sinks, lock-serialized truncate-restore on the in-memory sink) so
+  no tier can end with audit rows describing writes that were undone — not
+  even a partial prefix. Closes the review-#184 window where a group-pass
+  failure left pass-1 inventory writes installed on the non-transactional
+  adapters.
+  `No migration/backfill required.` — no table, column, constraint, index, or
+  query-shape change anywhere in the diff (`backend/ums_smart_revenue/db/`
+  and `alembic/` untouched; verified by the PR's file list); the only new SQL
+  statements are SAVEPOINT begin/release/rollback-to emitted by SQLAlchemy on
+  the existing session.
 - ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
   outside-CMS / channel-issues monitor panel is wired to
   `GET /channels/outside-cms` + `GET /channels/issues` (PR #98,

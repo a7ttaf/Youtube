@@ -1,3 +1,23 @@
+# ============================================================================
+# Purpose: Domain-side apply execution tests — the write-boundary audit
+#   diffs computed from what the registry write ACTUALLY replaced, the
+#   archived-group race guards (PR #159 rounds), and the transaction()
+#   boundary's all-or-nothing behavior over the in-memory stores (review
+#   #184, C2).
+# Database/ORM: None (in-memory ChannelRegistry/ChannelGroupRegistry and
+#   InMemoryAuditSink); the SQL boundary's direct-caller pins live in
+#   tests/org/test_sql_channel_registry.py.
+# Standards: Every test builds its own stores and seeds explicitly; no
+#   shared fixtures, no cross-test state.
+# Blast Radius: Test-only.
+# Connections: the apply under test and its sibling tiers.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> the
+#     apply orchestration under test.
+#   - File: tests/org/test_store_transaction_boundary.py -> the boundary's
+#     own contract pins, independent of the import.
+#   - File: tests/org/test_sql_channel_registry.py -> the SQL adapters'
+#     SAVEPOINT pins.
+# ============================================================================
 """Domain-side apply execution: write-boundary diffs and archived-group races.
 
 Covers the two plan-to-apply race guards from PR #159 review rounds
@@ -6,11 +26,12 @@ registry write ACTUALLY replaced, and a group archived after planning fails
 the apply closed instead of silently mutating a retired group.
 """
 
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 
 import pytest
 
-from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
+from ums_smart_revenue.auth.audit_service import AuditRecord, InMemoryAuditSink
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistry
@@ -33,6 +54,8 @@ from ums_smart_revenue.org.channel_import_apply import (
 from ums_smart_revenue.org.channel_registry import ChannelRegistry, ChannelRegistryEntry
 
 CHANNEL_ID = "UCB6sc84dcg6VQGB_d89sx2g"
+# A second valid channel id, for plans that must write more than one row.
+SECOND_CHANNEL_ID = "UC3Dci3BzZXDo4jw4dU8KqWg"
 CONTENT_OWNER = "TestOwnerAAAAAAAAAAAAA"
 ACTOR = UserPrincipal(user_id="user-1", email="user@example.com")
 
@@ -341,6 +364,188 @@ class _ArchivedAtApplyGroups(ChannelGroupRegistry):
         if group is not None and for_update:
             return replace(group, active=False)
         return group
+
+
+def test_group_pass_failure_undoes_the_inventory_writes() -> None:
+    """A pass-2 refusal takes pass 1's channel writes back — on THIS tier (C2).
+
+    The window review #184 named: by the time the group pass raises, every
+    channel row has been written, and before the store transaction boundary
+    the in-memory registry had no way to take those back — a 409 answered
+    while the CREATEs stayed installed. Two rows on purpose: the first carries
+    no group at all, so its write is undone purely by the boundary, not by
+    anything group-shaped. The sink stays EMPTY because the audit buffer only
+    flushes after both passes succeed — without that, restoring the stores
+    would have produced the worse state, an audit trail describing writes
+    that were undone.
+    """
+    registry = ChannelRegistry([])
+    groups = _ArchivedAtApplyGroups()
+    groups.create_group(
+        name="cms-tv",
+        group_type="SECTOR",
+        channel_ids=[],
+        cms_group_id="cms-tv",
+        content_owner_id=CONTENT_OWNER,
+    )
+    sink = InMemoryAuditSink()
+    plain_row = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=SECOND_CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Beta News",
+        group_id=None,
+        revenue_required=True,
+    )
+    group_row = ChannelImportPlanEntry(
+        row_number=2,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id="cms-tv",
+        revenue_required=True,
+    )
+    counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
+    counts[ChannelImportOutcome.CREATE.value] = 2
+
+    with pytest.raises(ChannelImportArchivedGroupError, match="cms-tv"):
+        _apply(
+            ChannelImportPlan(entries=(plain_row, group_row), counts=counts),
+            registry,
+            groups,
+            sink,
+        )
+
+    # BOTH pass-1 writes are gone, the group is untouched, and not a single
+    # audit record reached the sink.
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert registry.get_channel(SECOND_CHANNEL_ID) is None
+    stored = groups.get_group_by_cms_id("cms-tv")
+    assert stored is not None and stored.channel_ids == ()
+    assert sink.records == []
+
+
+class _UnavailableSink:
+    """AuditSink double whose very first append raises — a sink outage."""
+
+    # Self-contained double, no SQL backing (the protocol requires the
+    # declaration; the apply refuses an adapter without one).
+    sql_unit_of_work = None
+
+    @staticmethod
+    def append(record: AuditRecord) -> None:
+        """Refuse every record; static because the outage needs no state."""
+        raise RuntimeError("sink unavailable")
+
+    @staticmethod
+    def transaction() -> AbstractContextManager[None]:
+        """No record ever lands, so there is nothing for a boundary to undo."""
+        return nullcontext()
+
+
+def test_a_sink_failure_during_flush_undoes_the_stores() -> None:
+    """The audit flush sits INSIDE the boundary, and this is why (C2).
+
+    Both passes succeed here; the REAL sink then refuses its first record.
+    A flush outside the boundary would leave the channel installed with no
+    audit trail at all — the exact shape the atomic-audit wiring exists to
+    prevent on SQL — so the raise must take the write back with it.
+    """
+    registry = ChannelRegistry([])
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id=None,
+        revenue_required=True,
+    )
+
+    with pytest.raises(RuntimeError, match="sink unavailable"):
+        _apply(_plan(entry), registry, ChannelGroupRegistry(), _UnavailableSink())
+
+    assert registry.get_channel(CHANNEL_ID) is None
+
+
+class _FailsMidFlushSink(InMemoryAuditSink):
+    """Real in-memory sink that accepts two records, then refuses the third."""
+
+    def append(self, record: AuditRecord) -> None:
+        if len(self.records) >= 2:
+            raise RuntimeError("sink full")
+        super().append(record)
+
+
+def test_a_mid_flush_failure_leaves_no_partial_audit_trail() -> None:
+    """A raise on the Nth append takes the accepted prefix with it (round 2).
+
+    Sequential appends alone are not atomic: without the sink's own boundary
+    around the flush, records 1..N-1 stayed in the real sink while the stores
+    rolled back — audit rows describing an import that did not happen, the
+    exact lie the buffer exists to prevent (PR #196, codex P2 + qodo High,
+    found independently). Two CREATE rows produce three records (two
+    CHANNEL_CREATED, one CHANNEL_IMPORTED); the sink accepts the first two
+    and refuses the third.
+    """
+    registry = ChannelRegistry([])
+    sink = _FailsMidFlushSink()
+    first = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=SECOND_CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Beta News",
+        group_id=None,
+        revenue_required=True,
+    )
+    second = ChannelImportPlanEntry(
+        row_number=2,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id=None,
+        revenue_required=True,
+    )
+    counts = {outcome.value: 0 for outcome in ChannelImportOutcome}
+    counts[ChannelImportOutcome.CREATE.value] = 2
+
+    with pytest.raises(RuntimeError, match="sink full"):
+        _apply(
+            ChannelImportPlan(entries=(first, second), counts=counts),
+            registry,
+            ChannelGroupRegistry(),
+            sink,
+        )
+
+    # The two ACCEPTED records are gone too, and every store write with them.
+    assert sink.records == []
+    assert registry.get_channel(CHANNEL_ID) is None
+    assert registry.get_channel(SECOND_CHANNEL_ID) is None
+
+
+def test_flushed_audit_trail_keeps_event_order_and_ends_with_the_summary() -> None:
+    """Buffering must change WHEN records reach the sink, never their order.
+
+    The per-row CHANNEL_CREATED comes first and the one CHANNEL_IMPORTED
+    summary stays last — the order consumers of the trail already rely on.
+    """
+    registry = ChannelRegistry([])
+    groups = ChannelGroupRegistry()
+    sink = InMemoryAuditSink()
+    entry = ChannelImportPlanEntry(
+        row_number=1,
+        youtube_channel_id=CHANNEL_ID,
+        outcome=ChannelImportOutcome.CREATE,
+        channel_name="Alpha News",
+        group_id=None,
+        revenue_required=True,
+    )
+
+    _apply(_plan(entry), registry, groups, sink)
+
+    event_types = [record.event_type for record in sink.records]
+    assert event_types[0] == "CHANNEL_CREATED"
+    assert event_types[-1] == "CHANNEL_IMPORTED"
+    assert event_types.count("CHANNEL_IMPORTED") == 1
 
 
 def test_group_archived_between_plan_and_apply_fails_closed() -> None:
@@ -766,3 +971,101 @@ def test_no_plan_promises_a_group_effect_the_write_pass_will_not_perform() -> No
         entry for entry in plan.entries if entry.outcome is not ChannelImportOutcome.ERROR
     ]
     assert [entry.group_id for entry in surviving] == ["cms-radio"]
+
+
+def _empty_plan() -> ChannelImportPlan:
+    return ChannelImportPlan(
+        entries=(), counts={outcome.value: 0 for outcome in ChannelImportOutcome}
+    )
+
+
+def test_apply_refuses_sql_adapters_wired_over_distinct_sessions() -> None:
+    """The shared-unit-of-work validation fails loud BEFORE any write.
+
+    The savepoint boundaries are per session: wired over distinct sessions
+    they are independent transactions, and a caller committing them
+    separately could persist group and audit writes for channel writes that
+    never landed (PR #196 round 6, codex). The in-memory stores stand in for
+    the SQL adapters here by declaring the same public ``sql_unit_of_work``
+    attribute the validation duck-types; the declaration on the REAL adapters
+    is pinned in tests/org/test_sql_channel_registry.py.
+    """
+    registry = ChannelRegistry()
+    groups = ChannelGroupRegistry()
+    sink = InMemoryAuditSink()
+    registry.sql_unit_of_work = object()
+    groups.sql_unit_of_work = object()
+    sink.sql_unit_of_work = object()
+
+    with pytest.raises(RuntimeError, match="share ONE session"):
+        _apply(_empty_plan(), registry, groups, sink)
+
+    assert registry.list_channels() == []
+    assert sink.records == []
+
+
+def test_apply_refuses_a_mixed_sql_and_in_memory_wiring() -> None:
+    """SQL-backed and in-memory adapters must not compose (round 12).
+
+    In-memory writes commit the instant the boundary exits while SQL
+    writes still await the caller's commit — a failed or rolled-back
+    commit would split the import across resources despite the
+    all-or-nothing contract, so the validation refuses the wiring before
+    anything is written or locked.
+    """
+    registry = ChannelRegistry()
+    groups = ChannelGroupRegistry()
+    sink = InMemoryAuditSink()
+    registry.sql_unit_of_work = object()
+
+    with pytest.raises(RuntimeError, match="MIXED wiring"):
+        _apply(_empty_plan(), registry, groups, sink)
+
+    assert registry.list_channels() == []
+    assert sink.records == []
+
+
+class _UndeclaredGroupStore:
+    """A wrapper that hides its transactional backing — the round-8 shape.
+
+    Deliberately declares no ``sql_unit_of_work`` even though it wraps a
+    real store: with an OPTIONAL declaration the shared-session validation
+    would silently skip it, and a wrapper around a SQL store on a different
+    session would slip through. The apply must refuse it at entry, so this
+    double needs no working protocol methods at all.
+    """
+
+    def __init__(self, inner: ChannelGroupRegistry) -> None:
+        self._inner = inner
+
+
+def test_apply_refuses_an_adapter_that_hides_its_unit_of_work() -> None:
+    """A missing declaration is refused outright, never silently exempted.
+
+    Exemption is only for a declared ``None`` (self-contained in-memory
+    adapters); an adapter that says nothing cannot be verified and fails
+    closed before anything is written or locked (PR #196 round 8, codex).
+    """
+    registry = ChannelRegistry()
+    sink = InMemoryAuditSink()
+
+    with pytest.raises(RuntimeError, match="does not declare sql_unit_of_work"):
+        _apply(_empty_plan(), registry, _UndeclaredGroupStore(ChannelGroupRegistry()), sink)
+
+    assert registry.list_channels() == []
+    assert sink.records == []
+
+
+def test_apply_accepts_sql_adapters_sharing_one_session() -> None:
+    """One shared unit of work passes the validation and applies normally."""
+    registry = ChannelRegistry()
+    groups = ChannelGroupRegistry()
+    sink = InMemoryAuditSink()
+    shared = object()
+    registry.sql_unit_of_work = shared
+    groups.sql_unit_of_work = shared
+    sink.sql_unit_of_work = shared
+
+    _apply(_empty_plan(), registry, groups, sink)
+
+    assert [record.event_type for record in sink.records] == ["CHANNEL_IMPORTED"]

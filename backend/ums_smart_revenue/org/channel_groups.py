@@ -26,6 +26,9 @@
 # ============================================================================
 """Channel-group domain contract, typed errors, and in-memory registry."""
 
+import threading
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import uuid4
@@ -134,6 +137,11 @@ class ClearedContentOwner:
 
 
 class ChannelGroupRegistryStore(Protocol):
+    # The store's transactional backing, REQUIRED by the protocol — see
+    # ChannelRegistryStore.sql_unit_of_work for the full contract
+    # (PR #196 rounds 6+8, codex).
+    sql_unit_of_work: object | None
+
     def list_groups(self) -> list[ChannelGroupEntry]:
         pass
 
@@ -283,20 +291,198 @@ class ChannelGroupRegistryStore(Protocol):
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
         pass
 
+    # ========================================================================
+    # Purpose: The group half of the import's atomicity boundary — same
+    #   contract as ChannelRegistryStore.transaction, whose block carries the
+    #   full rationale; the two must not drift, because the bulk import
+    #   enters BOTH around its two passes and a group-store boundary that
+    #   behaved differently would undo one half of a refused import and keep
+    #   the other (review #184, C2).
+    # Database/ORM: ChannelGroupORM + membership rows in the SQL adapter's
+    #   SAVEPOINT; a dict journal in the in-memory adapter.
+    # Standards: SQL maps to a SAVEPOINT on the request session and never
+    #   commits; the in-memory adapter journals its own writes per thread and
+    #   replays them backwards on raise, so a foreign write interleaved
+    #   mid-boundary survives. Exceptions always propagate.
+    # Blast Radius: Whether a refused import leaves partial group writes on
+    #   adapters without a database underneath. Production SQL end-state
+    #   unchanged.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+    #     registry protocol method carrying the full contract.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SAVEPOINT implementation.
+    # ========================================================================
+    def transaction(self) -> AbstractContextManager[None]:
+        """Return a context manager making the wrapped writes all-or-nothing.
+
+        See ``ChannelRegistryStore.transaction`` for the full contract this
+        mirrors.
+
+        Raises:
+            RuntimeError: on same-store nesting — every implementation
+                refuses it (the in-memory adapter per thread, the SQL
+                adapter per store instance), exactly as the registry
+                protocol documents.
+        """
+        ...
+
 
 class ChannelGroupRegistry:
+    # No SQL backing — see ChannelRegistry.sql_unit_of_work.
+    sql_unit_of_work: object | None = None
+
     def __init__(self, groups: list[ChannelGroupEntry] | None = None):
         self._groups = {group.id: group for group in groups or []}
+        # PER-THREAD boundary state, mirroring ChannelRegistry: this store is
+        # a long-lived singleton on the no-database tier, and one thread's
+        # journal must neither capture nor revert another's writes
+        # (PR #196 round 2, codex). `undo` holds the active journal or None.
+        self._txn = threading.local()
+        # The store-wide lock — see ChannelRegistry.__init__ for the full
+        # rationale (PR #196 rounds 3-5): a boundary holds it for its whole
+        # duration and every public method, write AND read, takes it
+        # (re-entrant), so another thread neither builds on nor OBSERVES an
+        # open boundary's uncommitted state. Iterating readers also take
+        # list(...) snapshots (round 4) as lock-independent iteration safety.
+        self._lock = threading.RLock()
 
+    # ========================================================================
+    # Purpose: In-memory implementation of the group store's transaction
+    #   boundary — journal this store's own writes on this thread, undo
+    #   exactly those on raise. Mirror of ChannelRegistry.transaction, whose
+    #   block carries the full journal-vs-snapshot rationale; the two must
+    #   not drift.
+    # Database/ORM: None (in-memory dict); sql_channel_groups.py maps the
+    #   same protocol method to a SAVEPOINT.
+    # Standards: Undo journal per thread; a foreign write staged by direct
+    #   dict mutation survives, as a committed SQL row survives rollback.
+    #   Fails loud on same-thread nesting.
+    # Blast Radius: Whether a refused import leaves partial group writes on
+    #   direct/test/bootstrap callers.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+    #     mirrored implementation and full rationale.
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     apply_channel_import, the boundary's consumer.
+    # ========================================================================
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Journal this store's own writes on this thread; undo them on raise.
+
+        Compare-and-restore, mirroring ``ChannelRegistry.transaction`` (see
+        its docstring for the full semantics): an entry restores its
+        pre-image only while the key still holds the exact object this
+        boundary wrote, so a foreign writer landing after us keeps its value
+        — the SQL row-lock outcome (PR #196 round 2, qodo). The boundary
+        holds the store lock, which all reads and writes take, so
+        uncommitted boundary state is never observable off-thread.
+
+        Raises:
+            RuntimeError: when entered while this THREAD already holds an
+                open boundary.
+        """
+        if getattr(self._txn, "undo", None) is not None:
+            raise RuntimeError("ChannelGroupRegistry.transaction does not nest")
+        with self._lock:
+            undo: list[tuple[str, ChannelGroupEntry | None, ChannelGroupEntry]] = []
+            self._txn.undo = undo
+            try:
+                yield
+            except BaseException:
+                for key, previous, written in reversed(undo):
+                    if self._groups.get(key) is not written:
+                        continue
+                    if previous is None:
+                        self._groups.pop(key, None)
+                    else:
+                        self._groups[key] = previous
+                raise
+            finally:
+                self._txn.undo = None
+
+    # ========================================================================
+    # Purpose: Transaction bookkeeping — record one write's (key, pre-image,
+    #   written-entry) triple into this thread's active undo journal, or do
+    #   nothing when no boundary is open. Mirror of ChannelRegistry._journal,
+    #   whose block carries the full calling contract.
+    # Database/ORM: None (per-thread in-memory list).
+    # Standards: Called by every write method just before mutating, under
+    #   the store lock, with the exact object being installed.
+    # Blast Radius: Whether a boundary rollback restores exactly this
+    #   store's own writes.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+    #     mirrored journal helper and full rationale.
+    # ========================================================================
+    def _journal(self, group_id: str, written: ChannelGroupEntry) -> None:
+        """Record (key, pre-image, written-entry) for the active boundary, if any."""
+        undo: list[tuple[str, ChannelGroupEntry | None, ChannelGroupEntry]] | None = getattr(
+            self._txn, "undo", None
+        )
+        if undo is not None:
+            undo.append((group_id, self._groups.get(group_id), written))
+
+    # ========================================================================
+    # Purpose: In-memory read — every group, ACTIVE OR NOT, sorted by name.
+    # Database/ORM: None (dict scan; the SQL adapter issues the SELECT).
+    # Standards: Committed read under the store lock — an open boundary's
+    #   uncommitted writes are never observed off-thread; the list()
+    #   snapshot keeps iteration safe independent of the lock discipline.
+    #   DOCUMENTED DIVERGENCE: the SQL twin filters to ACTIVE groups; this
+    #   tier keeps no group-activity filter, so a test asserting
+    #   active-only listing must run the SQL tier.
+    # Blast Radius: Read-only; groups API listing and scope selection.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation (active-only), which this deliberately does
+    #     not mirror on group activity.
+    # ========================================================================
     def list_groups(self) -> list[ChannelGroupEntry]:
-        # In-memory registry: every member is treated as active. The full
-        # member set is the same as the active member set, so list_groups
-        # and list_groups_full return the same payload.
-        return sorted(self._groups.values(), key=lambda group: group.name)
+        """Return every group, active or not, sorted by name.
 
+        In-memory registry: every member is treated as active, so the full
+        member set equals the active member set and this returns the same
+        payload as ``list_groups_full``. Committed reads: takes the store
+        lock, so an open boundary's uncommitted writes are never observed
+        off-thread (see the lock note in ``__init__``).
+        """
+        with self._lock:
+            return sorted(list(self._groups.values()), key=lambda group: group.name)
+
+    # ========================================================================
+    # Purpose: In-memory read — every group with FULL membership; equals
+    #   list_groups here because every in-memory member counts as active.
+    # Database/ORM: None (dict scan).
+    # Standards: Committed read under the store lock — see list_groups,
+    #   including its DOCUMENTED DIVERGENCE: inactive groups are returned
+    #   here while the SQL twin lists active groups only (their difference
+    #   on this tier is nil; on SQL it is full-vs-active MEMBER sets).
+    # Blast Radius: Read-only; groups management authorization.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation (active groups, full members).
+    # ========================================================================
     def list_groups_full(self) -> list[ChannelGroupEntry]:
-        return sorted(self._groups.values(), key=lambda group: group.name)
+        """Return every group with full membership, sorted by name.
 
+        Identical to ``list_groups`` in memory (every member counts as
+        active — see its docstring, including the committed-read note).
+        """
+        with self._lock:
+            return sorted(list(self._groups.values()), key=lambda group: group.name)
+
+    # ========================================================================
+    # Purpose: In-memory read — every CMS-keyed group for sync planning,
+    #   optionally scoped to one owner (owner-NULL rows included, so
+    #   unstamped legacy groups stay reconcilable).
+    # Database/ORM: None (dict scan).
+    # Standards: Committed read under the store lock — see list_groups.
+    # Blast Radius: Read-only; CMS group sync's planning input.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
         """Return every CMS-keyed group, active or not, for sync planning.
 
@@ -304,67 +490,129 @@ class ChannelGroupRegistry:
         so legacy/unstamped groups stay reconcilable instead of colliding on
         the tenant-wide unique cms_group_id.
         """
-        return [
-            group
-            for group in self._groups.values()
-            if group.cms_group_id is not None
-            and (
-                content_owner_id is None
-                or group.content_owner_id is None
-                or group.content_owner_id == content_owner_id
-            )
-        ]
+        with self._lock:
+            return [
+                group
+                for group in list(self._groups.values())
+                if group.cms_group_id is not None
+                and (
+                    content_owner_id is None
+                    or group.content_owner_id is None
+                    or group.content_owner_id == content_owner_id
+                )
+            ]
 
+    # ========================================================================
+    # Purpose: In-memory read — one group by id.
+    # Database/ORM: None (single-key dict get).
+    # Standards: Committed read under the store lock. ``for_update`` is a
+    #   documented no-op divergence: the store lock already serializes this
+    #   read against writers, while the SQL implementation takes the real
+    #   FOR NO KEY UPDATE row lock (the membership serialization point).
+    # Blast Radius: Read-only; route 404 decisions and membership diffs.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
         """Return the group by id, or None.
 
-        ``for_update`` is a no-op in memory (single-threaded test registry),
-        matching get_group_by_cms_id's documented divergence; the SQL
-        implementation takes the real FOR NO KEY UPDATE row lock.
+        ``for_update`` is a no-op in memory: the store lock every method
+        takes already serializes this read against writers, matching
+        get_group_by_cms_id's documented divergence; the SQL implementation
+        takes the real FOR NO KEY UPDATE row lock.
         """
-        return self._groups.get(group_id)
+        with self._lock:
+            return self._groups.get(group_id)
 
+    # ========================================================================
+    # Purpose: In-memory read — the group carrying one CMS key, if any.
+    # Database/ORM: None (dict scan under the store lock).
+    # Standards: Committed read; ``for_update`` is the same documented
+    #   no-op divergence as get_group. The list() snapshot keeps the scan
+    #   safe independent of the lock discipline.
+    # Blast Radius: Read-only; the import's group-effect checks and
+    #   create_group's in-lock duplicate-CMS-key check both ride on it.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
     ) -> ChannelGroupEntry | None:
         """Return the group carrying this CMS key, or None.
 
-        ``for_update`` is a no-op in memory (single-threaded test registry);
-        the SQL implementation row-locks the group so an archived-state check
-        at the write boundary cannot race a concurrent archive.
+        ``for_update`` is a no-op in memory (the store lock already
+        serializes this read against writers); the SQL implementation
+        row-locks the group so an archived-state check at the write
+        boundary cannot race a concurrent archive.
         """
-        for group in self._groups.values():
-            if group.cms_group_id == cms_group_id:
-                return group
-        return None
+        with self._lock:
+            for group in list(self._groups.values()):
+                if group.cms_group_id == cms_group_id:
+                    return group
+            return None
 
+    # ========================================================================
+    # Purpose: In-memory read — which of the requested CMS keys belong to
+    #   an ARCHIVED group (import planning fails those rows closed).
+    # Database/ORM: None (dict scan under the store lock).
+    # Standards: Committed read; list() snapshot — see list_groups.
+    # Blast Radius: Read-only; import preview/plan refusal input.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def list_archived_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
         """Return the subset of CMS keys whose existing group is archived."""
-        return {
-            group.cms_group_id
-            for group in self._groups.values()
-            if group.cms_group_id in cms_group_ids and not group.active
-        }
+        with self._lock:
+            return {
+                group.cms_group_id
+                for group in list(self._groups.values())
+                if group.cms_group_id in cms_group_ids and not group.active
+            }
 
+    # ========================================================================
+    # Purpose: In-memory read — which of the requested CMS keys are stamped
+    #   to a DIFFERENT content owner (the import refuses to touch them).
+    # Database/ORM: None (dict scan under the store lock).
+    # Standards: Committed read; list() snapshot — see list_groups.
+    # Blast Radius: Read-only; cross-owner refusal input for the import.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def list_foreign_owner_cms_group_ids(
         self, cms_group_ids: set[str], *, content_owner_id: str
     ) -> set[str]:
         """Return the subset of CMS keys stamped to a different content owner."""
-        return {
-            group.cms_group_id
-            for group in self._groups.values()
-            if group.cms_group_id in cms_group_ids
-            and group.content_owner_id is not None
-            and group.content_owner_id != content_owner_id
-        }
+        with self._lock:
+            return {
+                group.cms_group_id
+                for group in list(self._groups.values())
+                if group.cms_group_id in cms_group_ids
+                and group.content_owner_id is not None
+                and group.content_owner_id != content_owner_id
+            }
 
+    # ========================================================================
+    # Purpose: In-memory read — which of the requested CMS keys belong to
+    #   an owner-NULL group (adoptable: the import may stamp, never move).
+    # Database/ORM: None (dict scan under the store lock).
+    # Standards: Committed read; list() snapshot — see list_groups.
+    # Blast Radius: Read-only; the import's JOIN-vs-adopt labeling.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
         """Return the subset of CMS keys whose existing group is owner-NULL."""
-        return {
-            group.cms_group_id
-            for group in self._groups.values()
-            if group.cms_group_id in cms_group_ids and group.content_owner_id is None
-        }
+        with self._lock:
+            return {
+                group.cms_group_id
+                for group in list(self._groups.values())
+                if group.cms_group_id in cms_group_ids and group.content_owner_id is None
+            }
 
     # ========================================================================
     # Purpose: In-memory implementation of the "this owner already holds it"
@@ -394,23 +642,54 @@ class ChannelGroupRegistry:
         self, cms_group_ids: set[str], *, content_owner_id: str
     ) -> set[str]:
         """Return the subset of CMS keys already stamped to this content owner."""
-        return {
-            group.cms_group_id
-            for group in self._groups.values()
-            if group.cms_group_id in cms_group_ids and group.content_owner_id == content_owner_id
-        }
+        with self._lock:
+            return {
+                group.cms_group_id
+                for group in list(self._groups.values())
+                if group.cms_group_id in cms_group_ids
+                and group.content_owner_id == content_owner_id
+            }
 
+    # ========================================================================
+    # Purpose: In-memory read — a group's member channel ids, or None for a
+    #   missing group.
+    # Database/ORM: None (single-key dict get under the store lock).
+    # Standards: Committed read — see list_groups. DOCUMENTED DIVERGENCE:
+    #   returns the stored member ids UNFILTERED — this tier has no channel
+    #   registry join, so every member counts as active — while the SQL
+    #   counterpart filters members by YouTubeChannelORM.active. A test
+    #   asserting active-member filtering must run the SQL tier.
+    # Blast Radius: Read-only; the revenue scope selector's member source.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation (active members only).
+    # ========================================================================
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.
 
         In-memory implementation: every member is treated as active. The
         SQL counterpart filters by YouTubeChannelORM.active.
         """
-        group = self._groups.get(group_id)
-        if group is None:
-            return None
-        return group.channel_ids
+        with self._lock:
+            group = self._groups.get(group_id)
+            if group is None:
+                return None
+            return group.channel_ids
 
+    # ========================================================================
+    # Purpose: In-memory write — mint one group with de-duplicated,
+    #   insertion-ordered members.
+    # Database/ORM: None (dict insert; the SQL adapter owns the INSERT and
+    #   the per-tenant unique cms_group_id constraint).
+    # Standards: A duplicate CMS key raises the same typed conflict the SQL
+    #   unique key produces, checked INSIDE the store lock because
+    #   check-then-write races too. Journals the write so an open boundary
+    #   can undo it.
+    # Blast Radius: Group inventory; the import's CREATE group actions.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def create_group(
         self,
         *,
@@ -420,24 +699,40 @@ class ChannelGroupRegistry:
         cms_group_id: str | None = None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        # Parity with the SQL store's per-tenant unique key: a duplicate CMS
-        # key must fail typed here too, not silently create a second group.
-        if cms_group_id is not None and self.get_group_by_cms_id(cms_group_id) is not None:
-            raise ChannelGroupConflictError(
-                f"channel group already exists for cms_group_id: {cms_group_id}"
+        with self._lock:
+            # Parity with the SQL store's per-tenant unique key: a duplicate
+            # CMS key must fail typed here too, not silently create a second
+            # group. Checked INSIDE the lock — check-then-write races too.
+            if cms_group_id is not None and self.get_group_by_cms_id(cms_group_id) is not None:
+                raise ChannelGroupConflictError(
+                    f"channel group already exists for cms_group_id: {cms_group_id}"
+                )
+            group = ChannelGroupEntry(
+                id=str(uuid4()),
+                name=name,
+                group_type=group_type,
+                active=True,
+                channel_ids=tuple(dict.fromkeys(channel_ids)),
+                cms_group_id=cms_group_id,
+                content_owner_id=content_owner_id,
             )
-        group = ChannelGroupEntry(
-            id=str(uuid4()),
-            name=name,
-            group_type=group_type,
-            active=True,
-            channel_ids=tuple(dict.fromkeys(channel_ids)),
-            cms_group_id=cms_group_id,
-            content_owner_id=content_owner_id,
-        )
-        self._groups[group.id] = group
-        return group
+            self._journal(group.id, group)
+            self._groups[group.id] = group
+            return group
 
+    # ========================================================================
+    # Purpose: In-memory write — rename, (de)activate, or owner-stamp one
+    #   group; None leaves a field untouched.
+    # Database/ORM: None (dict replace).
+    # Standards: Owner changes are ADOPT-ONLY via require_adoptable_owner —
+    #   filling an owner-NULL row is allowed, moving a stamped one raises,
+    #   exactly as the SQL store enforces. Store lock + journal — see
+    #   create_group.
+    # Blast Radius: Group identity/lifecycle and owner scoping for sync.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def update_group(
         self,
         *,
@@ -446,21 +741,38 @@ class ChannelGroupRegistry:
         active: bool | None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        group = self._require_group(group_id)
-        # Parity with the SQL store: adopt-only, reassignment raises.
-        if content_owner_id is not None:
-            require_adoptable_owner(group.content_owner_id, content_owner_id, group_id=group_id)
-        updated = replace(
-            group,
-            name=name if name is not None else group.name,
-            active=active if active is not None else group.active,
-            content_owner_id=(
-                content_owner_id if content_owner_id is not None else group.content_owner_id
-            ),
-        )
-        self._groups[group_id] = updated
-        return updated
+        with self._lock:
+            group = self._require_group(group_id)
+            # Parity with the SQL store: adopt-only, reassignment raises.
+            if content_owner_id is not None:
+                require_adoptable_owner(
+                    group.content_owner_id, content_owner_id, group_id=group_id
+                )
+            updated = replace(
+                group,
+                name=name if name is not None else group.name,
+                active=active if active is not None else group.active,
+                content_owner_id=(
+                    content_owner_id if content_owner_id is not None else group.content_owner_id
+                ),
+            )
+            self._journal(group_id, updated)
+            self._groups[group_id] = updated
+            return updated
 
+    # ========================================================================
+    # Purpose: In-memory write — the one sanctioned eraser for a wrong
+    #   owner stamp, returning the group to the adoptable pool.
+    # Database/ORM: None (dict replace).
+    # Standards: Clearing an owner-NULL group raises the typed no-stamp
+    #   error (a caller must not mistake "nothing to clear" for "cleared");
+    #   the erased owner id is returned from UNDER the lock so audit cannot
+    #   understate it. Store lock + journal — see create_group.
+    # Blast Radius: Owner scoping for sync; admin recovery path.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def clear_content_owner(self, *, group_id: str) -> ClearedContentOwner:
         """Erase a group's owner stamp, returning it to the adoptable pool.
 
@@ -468,34 +780,65 @@ class ChannelGroupRegistry:
         SETTING an owner, not erasing one. Reports the erased owner id
         alongside the cleared group, matching the SQL store's contract.
         """
-        group = self._require_group(group_id)
-        previous_content_owner_id = group.content_owner_id
-        if previous_content_owner_id is None:
-            raise ChannelGroupNoOwnerStampError(
-                f"channel group {group_id} has no content-owner stamp to clear"
+        with self._lock:
+            group = self._require_group(group_id)
+            previous_content_owner_id = group.content_owner_id
+            if previous_content_owner_id is None:
+                raise ChannelGroupNoOwnerStampError(
+                    f"channel group {group_id} has no content-owner stamp to clear"
+                )
+            updated = replace(group, content_owner_id=None)
+            self._journal(group_id, updated)
+            self._groups[group_id] = updated
+            return ClearedContentOwner(
+                group=updated, previous_content_owner_id=previous_content_owner_id
             )
-        updated = replace(group, content_owner_id=None)
-        self._groups[group_id] = updated
-        return ClearedContentOwner(
-            group=updated, previous_content_owner_id=previous_content_owner_id
-        )
 
+    # ========================================================================
+    # Purpose: In-memory write — append members to one group, de-duplicated
+    #   against the existing set, insertion order preserved.
+    # Database/ORM: None (dict replace; the SQL adapter owns the member
+    #   INSERTs and their primary-key de-duplication).
+    # Standards: Missing group raises the typed not-found via
+    #   _require_group. Store lock + journal — see create_group.
+    # Blast Radius: Group membership; the import's JOIN group actions.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
-        group = self._require_group(group_id)
-        updated = replace(
-            group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids]))
-        )
-        self._groups[group_id] = updated
-        return updated
+        with self._lock:
+            group = self._require_group(group_id)
+            updated = replace(
+                group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids]))
+            )
+            self._journal(group_id, updated)
+            self._groups[group_id] = updated
+            return updated
 
+    # ========================================================================
+    # Purpose: In-memory write — drop one member from one group; removing
+    #   an absent member is a no-op write of the same membership.
+    # Database/ORM: None (dict replace; the SQL adapter owns the DELETE).
+    # Standards: Missing group raises the typed not-found via
+    #   _require_group. Store lock + journal — see create_group.
+    # Blast Radius: Group membership; groups management API.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
+    #     SQL implementation this must answer identically to.
+    # ========================================================================
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
-        group = self._require_group(group_id)
-        updated = replace(
-            group,
-            channel_ids=tuple(channel for channel in group.channel_ids if channel != channel_id),
-        )
-        self._groups[group_id] = updated
-        return updated
+        with self._lock:
+            group = self._require_group(group_id)
+            updated = replace(
+                group,
+                channel_ids=tuple(
+                    channel for channel in group.channel_ids if channel != channel_id
+                ),
+            )
+            self._journal(group_id, updated)
+            self._groups[group_id] = updated
+            return updated
 
     def _require_group(self, group_id: str) -> ChannelGroupEntry:
         group = self.get_group(group_id)

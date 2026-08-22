@@ -1,3 +1,25 @@
+# ============================================================================
+# Purpose: SQLite-tier unit tests for SqlAlchemyChannelRegistry — reads,
+#   writes, typed conflicts, tenant scoping, the locked-month guards, the
+#   transaction() SAVEPOINT boundary (direct-caller protection, nesting
+#   refusal, guard-memo reset, per-row savepoint elision under the
+#   boundary), and the sql_unit_of_work declarations the import's wiring
+#   validation reads.
+# Database/ORM: In-memory SQLite engines per test (OrgBase, plus
+#   FinanceBase where the month-lock guards are exercised); PostgreSQL-only
+#   behaviors (row locks, advisory locks, RLS) are pinned in
+#   tests/api/test_channels_import_postgres.py instead.
+# Standards: Every test builds its own session and seeds explicitly; no
+#   shared fixtures, no cross-test state.
+# Blast Radius: Test-only.
+# Connections: the adapter under test and the sibling tier pins.
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+#     adapter under test.
+#   - File: tests/org/test_store_transaction_boundary.py -> the in-memory
+#     adapters' boundary pins these SQL pins mirror.
+# ============================================================================
+"""SQLite-tier tests for the SQL channel registry adapter."""
+
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -6,6 +28,7 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink, SqlAlchemyAuditSink
 from ums_smart_revenue.connectors.google.youtube_analytics_client import list_target_channels
 from ums_smart_revenue.db.finance_models import (
     FinanceBase,
@@ -1187,3 +1210,227 @@ def test_update_mapping_no_op_skips_locked_month_query():
     )
 
     assert updated.primary_company_id == str(COMPANY_TV_ID)
+
+
+def test_transaction_savepoint_protects_a_direct_caller_that_catches():
+    """The boundary's promise must not depend on the request wrapper (PR #196).
+
+    The FastAPI dependency rolls back propagated exceptions, but the protocol
+    and the public apply function never required that wrapper: a direct
+    service/bootstrap caller that CATCHES an apply failure and later commits
+    the same session would have committed the writes flushed before the
+    exception. The SAVEPOINT makes the store's all-or-nothing promise hold
+    unconditionally: the boundary's writes are rolled back to the savepoint,
+    while pre-boundary work — and the caller's right to commit it — stands.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+    registry.create_channel(
+        youtube_channel_id="channel-savepoint",
+        channel_name="Before Boundary",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+
+    with pytest.raises(RuntimeError, match="staged failure"), registry.transaction():
+        registry.update_inventory(
+            youtube_channel_id="channel-savepoint",
+            channel_name="Inside Boundary",
+            cms_status="INSIDE_CMS",
+            content_owner_id=None,
+            revenue_required=True,
+        )
+        raise RuntimeError("staged failure")
+
+    # The catching caller commits anyway — exactly the hazard scenario.
+    session.commit()
+
+    stored = registry.get_channel("channel-savepoint")
+    assert stored is not None
+    assert stored.channel_name == "Before Boundary"
+
+
+def test_transaction_refuses_same_store_nesting():
+    """The SQL tier honours the one-enter contract exactly as the in-memory tier.
+
+    SAVEPOINTs would happily stack, so without an explicit guard the two
+    adapters drift: in-memory refuses a nested boundary, SQL silently
+    accepts one (PR #196 round 2, qodo).
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with (
+        registry.transaction(),
+        pytest.raises(RuntimeError, match="does not nest"),
+        registry.transaction(),
+    ):
+        pass
+
+
+def test_create_conflict_no_longer_discards_a_direct_callers_earlier_work():
+    """A lost check-to-insert race recovers via its OWN savepoint (PR #196).
+
+    `create_channel` handled the IntegrityError with `Session.rollback()`,
+    which rolls back the TOPMOST transaction: a direct caller that seeded a
+    channel, hit a duplicate on a second create, caught the typed conflict,
+    and committed found its first channel silently gone. The insert now
+    flushes inside its own SAVEPOINT, so the conflict discards only itself.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+    registry.create_channel(
+        youtube_channel_id="channel-kept",
+        channel_name="Earlier Uncommitted Work",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+    registry.create_channel(
+        youtube_channel_id="channel-dup",
+        channel_name="First Copy",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+
+    with pytest.raises(ChannelRegistryConflictError):
+        registry.create_channel(
+            youtube_channel_id="channel-dup",
+            channel_name="Second Copy",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+
+    # The catching caller commits; every pre-conflict write survives.
+    session.commit()
+    kept = registry.get_channel("channel-kept")
+    assert kept is not None and kept.channel_name == "Earlier Uncommitted Work"
+    dup = registry.get_channel("channel-dup")
+    assert dup is not None and dup.channel_name == "First Copy"
+
+
+def test_transaction_rollback_resets_the_close_guard_memo():
+    """A savepoint rollback releases locks taken inside it; the memo must follow.
+
+    `pg_advisory_xact_lock` acquired after a savepoint is released by the
+    rollback to it, but `_guard_held` stayed True — a direct caller catching
+    the failure and writing again in the same outer transaction would have
+    skipped re-acquiring the finance-close guard (PR #196 round 3, codex).
+    White-box on the memo: the sqlite acquire is a no-op, but the memo logic
+    is backend-independent and this is exactly the state the hole lived in.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(RuntimeError, match="staged failure"), registry.transaction():
+        registry.create_channel(
+            youtube_channel_id="channel-guard-memo",
+            channel_name="Inside Boundary",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+        assert registry._guard_held is True
+        raise RuntimeError("staged failure")
+
+    assert registry._guard_held is False
+
+
+def test_sql_adapters_declare_their_session_as_the_unit_of_work():
+    """apply_channel_import's shared-session validation reads this attribute.
+
+    Pins the DECLARATION on every SQL adapter the import composes (PR #196
+    round 6, codex): the guard duck-types ``sql_unit_of_work``, so an adapter
+    silently renaming or dropping the attribute would disarm the validation
+    without failing any of its behavior tests.
+    """
+    session = build_session()
+    assert SqlAlchemyChannelRegistry(session).sql_unit_of_work is session
+    assert SqlAlchemyChannelGroupRegistry(session).sql_unit_of_work is session
+    assert (
+        SqlAlchemyAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work
+        is session
+    )
+    assert (
+        PlatformLaneAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work
+        is session
+    )
+
+
+def test_boundary_covered_create_conflict_still_recovers_via_the_boundary():
+    """Under the boundary the per-row savepoint is skipped; the boundary heals.
+
+    Round 13: inside transaction() the flush-conflict handlers no longer
+    open their own savepoint (up to 10,000 extra transaction-control
+    statements on a 5,000-row apply). The load-bearing property is that a
+    conflict mid-boundary still surfaces as the typed error, the boundary's
+    own rollback recovers the session, and a catching direct caller can
+    keep using it — pre-boundary state intact, boundary writes gone.
+    """
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+    registry.create_channel(
+        youtube_channel_id="channel-pre-existing",
+        channel_name="Original",
+        primary_company_id=None,
+        cms_status="INSIDE_CMS",
+        revenue_required=True,
+    )
+    session.commit()
+
+    with pytest.raises(ChannelRegistryConflictError), registry.transaction():
+        registry.create_channel(
+            youtube_channel_id="channel-boundary-mint",
+            channel_name="Minted Inside",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+        registry.create_channel(
+            youtube_channel_id="channel-pre-existing",
+            channel_name="Duplicate",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+
+    session.commit()
+    assert registry.get_channel("channel-boundary-mint") is None
+    survivor = registry.get_channel("channel-pre-existing")
+    assert survivor is not None and survivor.channel_name == "Original"
+
+
+def test_boundary_writes_do_not_open_per_row_savepoints():
+    """Exactly ONE savepoint per boundary — the boundary's own (round 13)."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, *_args):
+        statements.append(statement)
+
+    event.listen(session.bind, "before_cursor_execute", _capture)
+    try:
+        with registry.transaction():
+            for suffix in ("a", "b", "c"):
+                registry.create_channel(
+                    youtube_channel_id=f"channel-savepoint-{suffix}",
+                    channel_name=f"Savepoint {suffix}",
+                    primary_company_id=None,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                )
+    finally:
+        event.remove(session.bind, "before_cursor_execute", _capture)
+
+    savepoints = [s for s in statements if s.upper().startswith("SAVEPOINT")]
+    assert len(savepoints) == 1

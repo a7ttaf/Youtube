@@ -16,7 +16,9 @@
 # ============================================================================
 """Channel registry domain contract, errors, and in-memory implementation."""
 
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import UUID
@@ -102,6 +104,16 @@ class ChannelRevenueRequirementLockedMonthError(ChannelRegistryError):
 
 
 class ChannelRegistryStore(Protocol):
+    # The store's transactional backing, REQUIRED by the protocol: the
+    # session object for SQL adapters, None for self-contained in-memory
+    # ones (their journal is their own unit of work). A wrapper must
+    # delegate its inner store's declaration — apply_channel_import refuses
+    # a missing declaration, a MIXED SQL/in-memory wiring, and SQL
+    # declarations naming different sessions, because an optional attribute
+    # would let a conforming wrapper silently hide its inner session from
+    # that check (PR #196 rounds 6, 8, and 12, codex).
+    sql_unit_of_work: object | None
+
     def list_channels(self) -> list[ChannelRegistryEntry]:
         pass
 
@@ -193,10 +205,91 @@ class ChannelRegistryStore(Protocol):
         the ordering.
         """
 
+    # ========================================================================
+    # Purpose: The store's ATOMICITY contract, made explicit: a caller wraps
+    #   one logical multi-write operation (the bulk import's two passes) so a
+    #   raise anywhere inside undoes every write THIS store performed for it.
+    # Database/ORM: The SQL adapter opens a SAVEPOINT on the REQUEST's
+    #   Session transaction — rolled back to on exception, released on
+    #   success, never a commit — so the promise below holds even for a
+    #   direct caller that catches the exception and later commits the
+    #   session. The in-memory adapter has no database, which is the reason
+    #   this method exists at the protocol: it journals its own writes and
+    #   replays them backwards on raise (review #184, C2).
+    # Standards: The undo scope is THIS STORE'S OWN WRITES, not "the world at
+    #   enter" — SQL rollback cannot and must not revert another transaction's
+    #   committed rows, and the import's race tests assert exactly that (a
+    #   channel renamed or a group minted by a concurrent writer mid-apply
+    #   survives the refusal). Adapters must NOT commit here — commit stays
+    #   with whoever owns the session/request lifecycle. At the PROTOCOL the
+    #   boundary is non-nestable and exposes no partial-rollback semantics:
+    #   one enter per logical operation, all-or-nothing, and a caller
+    #   needing partial undo is asking for a different contract — the SQL
+    #   adapter's internal SAVEPOINT (above) is its implementation
+    #   mechanism, not a nesting or partial-undo surface offered to
+    #   callers. Exceptions always propagate; the boundary undoes state,
+    #   never outcomes.
+    # Blast Radius: Whether a refused import can leave PARTIAL channel writes
+    #   behind on adapters without a database underneath (direct/test/
+    #   bootstrap callers). Production SQL behaviour is unchanged by design.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     apply_channel_import, the one boundary consumer, which wraps BOTH
+    #     passes and the audit flush in this plus the group store's boundary.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+    #     SAVEPOINT implementation.
+    # ========================================================================
+    def transaction(self) -> AbstractContextManager[None]:
+        """Return a context manager making the wrapped writes all-or-nothing.
+
+        On a clean exit the writes stand (their durability still governed by
+        whoever owns the session/request lifecycle — this is never a commit).
+        On an exception every write this store performed inside the boundary
+        is undone — writes by OTHER actors interleaved during it stand, as a
+        foreign transaction's committed rows survive a SQL rollback — and the
+        exception propagates unchanged.
+
+        Raises:
+            RuntimeError: when entered while this store already holds an
+                open boundary — every implementation refuses nesting (the
+                in-memory adapter per thread, the SQL adapter per store
+                instance).
+        """
+        ...
+
 
 class ChannelRegistry:
+    # No SQL backing: the per-thread journal is this store's own unit of
+    # work, so the import's shared-session validation has nothing to check.
+    sql_unit_of_work: object | None = None
+
     def __init__(self, channels: list[ChannelRegistryEntry] | None = None):
         self._channels: dict[str, ChannelRegistryEntry] = {}
+        # Boundary state is PER-THREAD (threading.local): the no-database tier
+        # serves this store as a long-lived singleton, so a threaded server
+        # can run two requests through it at once — one request's journal
+        # must neither capture nor revert another thread's writes, and a
+        # second thread's own boundary must not be refused as "nested"
+        # (PR #196 round 2, codex). The `undo` attribute holds the active
+        # journal — (key, pre-image-or-None) per write — or None.
+        self._txn = threading.local()
+        # The store-wide lock — the coarse in-memory analogue of the SQL
+        # tier's transaction isolation. A transaction() boundary holds it
+        # for its whole duration, and every public method — writes AND
+        # reads — takes it (re-entrant, so the boundary-holding thread
+        # passes through):
+        #   - another thread's write serializes BEHIND an open boundary
+        #     and lands after its rollback, never building on state the
+        #     rollback is about to retract (PR #196 round 3, codex);
+        #   - another thread's READ serializes the same way, so an open
+        #     boundary's uncommitted writes are never observable off-thread
+        #     — the GIL gives memory safety, not isolation, and SQL's MVCC
+        #     never shows uncommitted rows (PR #196 round 5, codex). The
+        #     boundary thread reads its own writes, matching SQL.
+        # Iterating readers also take list(...) snapshots of the dict views
+        # (PR #196 round 4, qodo) — redundant under the lock, kept as
+        # iteration safety independent of the lock discipline.
+        self._lock = threading.RLock()
         for channel in channels or []:
             if channel.youtube_channel_id in self._channels:
                 raise ChannelRegistryConflictError(
@@ -204,27 +297,186 @@ class ChannelRegistry:
                 )
             self._channels[channel.youtube_channel_id] = channel
 
-    def list_channels(self) -> list[ChannelRegistryEntry]:
-        return sorted(
-            [channel for channel in self._channels.values() if channel.active],
-            key=lambda channel: channel.youtube_channel_id,
-        )
+    # ========================================================================
+    # Purpose: The in-memory implementation of the store's transaction
+    #   boundary — journal this store's own writes on this thread, undo
+    #   exactly those on raise.
+    # Database/ORM: None (in-memory dict store); the SQL implementation in
+    #   sql_channel_registry.py maps the same protocol method to a SAVEPOINT
+    #   on the request session.
+    # Standards: An UNDO JOURNAL, deliberately not a whole-dict snapshot —
+    #   the two differ on exactly the case the import's race tests pin: a
+    #   concurrent writer's change landing mid-apply. SQL rollback discards
+    #   only the failing transaction's writes, so parity demands undoing only
+    #   what THIS store's write methods performed inside the boundary.
+    #   Journal state is PER-THREAD (threading.local), because this store is
+    #   a long-lived singleton on the no-database tier: another thread's
+    #   writes must be neither captured nor reverted, and its own boundary
+    #   must not be refused as nested. Fails loud on same-thread nesting.
+    # Blast Radius: Whether a refused import leaves partial channel writes on
+    #   direct/test/bootstrap callers. No finance math, no audit of its own.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     apply_channel_import, the boundary's consumer.
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
+    #     SAVEPOINT implementation of the same protocol method.
+    # ========================================================================
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Journal this store's own writes on this thread; undo them on raise.
 
+        Each write method records ``(key, pre-image, written)`` just before
+        mutating; on raise the entries replay in reverse, and each one
+        restores its pre-image ONLY while the key still holds the exact entry
+        this boundary wrote (identity compare — entries are frozen and every
+        write installs a fresh object). A key holding anything else was
+        overwritten or deleted by a FOREIGN writer after us; SQL's row lock
+        would have serialized that writer BEHIND our rollback, ending on
+        their value, so the journal leaves it standing rather than clobbering
+        it with a stale pre-image (PR #196 round 2, qodo). Same-key writes
+        within one boundary chain naturally: each entry's ``written`` is the
+        next entry's pre-image, so the reversed replay walks back to the
+        oldest pre-image. Test-staged "concurrent writers" mutate
+        ``_channels`` directly — a foreign transaction's committed write is
+        not this store's write, and the journal must not see it.
+
+        The boundary holds the store lock for its whole duration, and every
+        public read and write takes that lock, so other threads neither
+        build on nor observe uncommitted boundary state; the boundary
+        thread itself reads its own writes (re-entrant lock), matching SQL.
+
+        Raises:
+            RuntimeError: when entered while this THREAD already holds an
+                open boundary — one enter per logical operation; nesting is
+                a different contract.
+        """
+        if getattr(self._txn, "undo", None) is not None:
+            raise RuntimeError("ChannelRegistry.transaction does not nest")
+        with self._lock:
+            undo: list[tuple[str, ChannelRegistryEntry | None, ChannelRegistryEntry]] = []
+            self._txn.undo = undo
+            try:
+                yield
+            except BaseException:
+                for key, previous, written in reversed(undo):
+                    if self._channels.get(key) is not written:
+                        continue
+                    if previous is None:
+                        self._channels.pop(key, None)
+                    else:
+                        self._channels[key] = previous
+                raise
+            finally:
+                self._txn.undo = None
+
+    # ========================================================================
+    # Purpose: Transaction bookkeeping — record one write's (key, pre-image,
+    #   written-entry) triple into this thread's active undo journal, or do
+    #   nothing when no boundary is open.
+    # Database/ORM: None (the journal is a per-thread in-memory list).
+    # Standards: MUST be called by every write method just before mutating,
+    #   under the store lock, with the exact object being installed — the
+    #   rollback's identity compare depends on ``written`` being the very
+    #   entry stored. Reads the pre-image itself so callers cannot pass a
+    #   stale one.
+    # Blast Radius: Whether a boundary rollback restores exactly this
+    #   store's own writes. No audit, no SQL.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_groups.py -> the
+    #     mirrored journal helper; the two must not drift.
+    # ========================================================================
+    def _journal(self, youtube_channel_id: str, written: ChannelRegistryEntry) -> None:
+        """Record (key, pre-image, written-entry) for the active boundary, if any."""
+        undo: list[tuple[str, ChannelRegistryEntry | None, ChannelRegistryEntry]] | None = getattr(
+            self._txn, "undo", None
+        )
+        if undo is not None:
+            undo.append(
+                (youtube_channel_id, self._channels.get(youtube_channel_id), written)
+            )
+
+    # ========================================================================
+    # Purpose: In-memory read — every ACTIVE channel, sorted by id.
+    # Database/ORM: None (dict scan; the SQL adapter issues the SELECT).
+    # Standards: Committed read under the store lock — an open boundary's
+    #   uncommitted writes are never observed off-thread; the list()
+    #   snapshot keeps iteration safe independent of the lock discipline.
+    # Blast Radius: Read-only; channel API listings and import planning.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
+    def list_channels(self) -> list[ChannelRegistryEntry]:
+        """Return every ACTIVE channel, sorted by youtube_channel_id.
+
+        Committed reads: takes the store lock, so an open transaction()
+        boundary's uncommitted writes are never observed off-thread (see
+        the lock note in ``__init__``).
+        """
+        with self._lock:
+            return sorted(
+                [channel for channel in list(self._channels.values()) if channel.active],
+                key=lambda channel: channel.youtube_channel_id,
+            )
+
+    # ========================================================================
+    # Purpose: In-memory read — the requested channels by id set, active
+    #   only unless include_inactive; unknown ids silently absent.
+    # Database/ORM: None (dict scan; the SQL adapter issues the SELECT).
+    # Standards: Committed read under the store lock; list() snapshot for
+    #   iteration safety — see list_channels.
+    # Blast Radius: Read-only; import planning's existing-channel lookup.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def list_channels_by_ids(
         self, youtube_channel_ids: set[str], *, include_inactive: bool = False
     ) -> list[ChannelRegistryEntry]:
-        return sorted(
-            [
-                channel
-                for channel_id, channel in self._channels.items()
-                if channel_id in youtube_channel_ids and (channel.active or include_inactive)
-            ],
-            key=lambda channel: channel.youtube_channel_id,
-        )
+        """Return the requested channels sorted by youtube_channel_id.
 
+        Inactive channels are omitted unless ``include_inactive`` is set;
+        unknown ids are silently absent (the caller diffs). Committed reads
+        — see the store lock note in ``__init__``.
+        """
+        with self._lock:
+            return sorted(
+                [
+                    channel
+                    for channel_id, channel in list(self._channels.items())
+                    if channel_id in youtube_channel_ids
+                    and (channel.active or include_inactive)
+                ],
+                key=lambda channel: channel.youtube_channel_id,
+            )
+
+    # ========================================================================
+    # Purpose: In-memory read — one channel by id, active or not.
+    # Database/ORM: None (single-key dict get).
+    # Standards: Committed read under the store lock — see list_channels.
+    # Blast Radius: Read-only; route 404 decisions and import per-row reads.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
-        return self._channels.get(youtube_channel_id)
+        """Return the channel (active or not) by id, or None. Committed read."""
+        with self._lock:
+            return self._channels.get(youtube_channel_id)
 
+    # ========================================================================
+    # Purpose: In-memory write — mint one channel entry, deriving its
+    #   initial revenue_source_status from the revenue_required flag.
+    # Database/ORM: None (dict insert; the SQL adapter owns the INSERT and
+    #   its uniqueness constraint).
+    # Standards: Duplicate id raises the same typed conflict the SQL unique
+    #   key produces — parity a test could assert. Runs under the store
+    #   lock and journals the write so an open boundary can undo it.
+    # Blast Radius: Channel inventory; the bulk import's CREATE rows.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def create_channel(
         self,
         *,
@@ -236,61 +488,96 @@ class ChannelRegistry:
         content_owner_id: str | None = None,
     ) -> ChannelRegistryEntry:
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
-        if youtube_channel_id in self._channels:
-            raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
-        initial_revenue_source_status = (
-            "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
-        )
-        channel = ChannelRegistryEntry(
-            youtube_channel_id=youtube_channel_id,
-            channel_name=channel_name,
-            primary_company_id=normalized_company_id,
-            cms_status=cms_status,
-            revenue_required=revenue_required,
-            content_owner_id=normalize_optional_content_owner(content_owner_id),
-            revenue_source_status=initial_revenue_source_status,
-        )
-        self._channels[youtube_channel_id] = channel
-        return channel
+        with self._lock:
+            if youtube_channel_id in self._channels:
+                raise ChannelRegistryConflictError(
+                    f"Channel already exists: {youtube_channel_id}"
+                )
+            initial_revenue_source_status = (
+                "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
+            )
+            channel = ChannelRegistryEntry(
+                youtube_channel_id=youtube_channel_id,
+                channel_name=channel_name,
+                primary_company_id=normalized_company_id,
+                cms_status=cms_status,
+                revenue_required=revenue_required,
+                content_owner_id=normalize_optional_content_owner(content_owner_id),
+                revenue_source_status=initial_revenue_source_status,
+            )
+            self._journal(youtube_channel_id, channel)
+            self._channels[youtube_channel_id] = channel
+            return channel
 
+    # ========================================================================
+    # Purpose: In-memory write — re-parent one channel's primary company
+    #   mapping, leaving every other field untouched.
+    # Database/ORM: None (dict replace; the SQL adapter adds the row lock
+    #   and the locked-month re-parenting guard, which have no in-memory
+    #   analogue and are pinned in its own tests).
+    # Standards: Missing channel raises KeyError for the route to map.
+    #   Runs under the store lock and journals the write — see
+    #   create_channel.
+    # Blast Radius: Company/sector attribution for the mapped channel.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def update_mapping(
         self, *, youtube_channel_id: str, primary_company_id: str | None
     ) -> ChannelRegistryEntry:
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
-        existing = self._channels.get(youtube_channel_id)
-        if existing is None:
-            raise KeyError(youtube_channel_id)
-        updated = ChannelRegistryEntry(
-            youtube_channel_id=existing.youtube_channel_id,
-            channel_name=existing.channel_name,
-            primary_company_id=normalized_company_id,
-            cms_status=existing.cms_status,
-            revenue_required=existing.revenue_required,
-            content_owner_id=existing.content_owner_id,
-            revenue_source_status=existing.revenue_source_status,
-            active=existing.active,
-        )
-        self._channels[youtube_channel_id] = updated
-        return updated
+        with self._lock:
+            existing = self._channels.get(youtube_channel_id)
+            if existing is None:
+                raise KeyError(youtube_channel_id)
+            updated = ChannelRegistryEntry(
+                youtube_channel_id=existing.youtube_channel_id,
+                channel_name=existing.channel_name,
+                primary_company_id=normalized_company_id,
+                cms_status=existing.cms_status,
+                revenue_required=existing.revenue_required,
+                content_owner_id=existing.content_owner_id,
+                revenue_source_status=existing.revenue_source_status,
+                active=existing.active,
+            )
+            self._journal(youtube_channel_id, updated)
+            self._channels[youtube_channel_id] = updated
+            return updated
 
+    # ========================================================================
+    # Purpose: In-memory write — stamp or clear one channel's CMS content
+    #   owner, leaving every other field untouched.
+    # Database/ORM: None (dict replace; the SQL adapter owns the row lock).
+    # Standards: Missing channel raises KeyError; the owner id is
+    #   normalized by the shared helper so both tiers store the same form.
+    #   Runs under the store lock and journals the write — see
+    #   create_channel.
+    # Blast Radius: Connector ingest targeting via content_owner_id.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def update_content_owner(
         self, *, youtube_channel_id: str, content_owner_id: str | None
     ) -> ChannelRegistryEntry:
-        existing = self._channels.get(youtube_channel_id)
-        if existing is None:
-            raise KeyError(youtube_channel_id)
-        updated = ChannelRegistryEntry(
-            youtube_channel_id=existing.youtube_channel_id,
-            channel_name=existing.channel_name,
-            primary_company_id=existing.primary_company_id,
-            cms_status=existing.cms_status,
-            revenue_required=existing.revenue_required,
-            content_owner_id=normalize_optional_content_owner(content_owner_id),
-            revenue_source_status=existing.revenue_source_status,
-            active=existing.active,
-        )
-        self._channels[youtube_channel_id] = updated
-        return updated
+        with self._lock:
+            existing = self._channels.get(youtube_channel_id)
+            if existing is None:
+                raise KeyError(youtube_channel_id)
+            updated = ChannelRegistryEntry(
+                youtube_channel_id=existing.youtube_channel_id,
+                channel_name=existing.channel_name,
+                primary_company_id=existing.primary_company_id,
+                cms_status=existing.cms_status,
+                revenue_required=existing.revenue_required,
+                content_owner_id=normalize_optional_content_owner(content_owner_id),
+                revenue_source_status=existing.revenue_source_status,
+                active=existing.active,
+            )
+            self._journal(youtube_channel_id, updated)
+            self._channels[youtube_channel_id] = updated
+            return updated
 
     # ========================================================================
     # Purpose: In-memory twin of the SQL registry's bulk-import inventory
@@ -328,33 +615,39 @@ class ChannelRegistry:
         write actually replaced (mirrors the SQL registry's write-boundary
         re-read; in memory the current entry IS the write-boundary state).
         """
-        current = self._channels.get(youtube_channel_id)
-        if current is None:
-            raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
-        # BEFORE the mutation, and for this store that ordering is the only
-        # protection there is: a dict has no transaction to roll back, so a
-        # caller that validated `previous` after the fact would answer 409 with
-        # the roster values already installed (review #184).
-        if require_pre_state is not None:
-            require_pre_state(current)
-        updated = replace(
-            current,
-            channel_name=channel_name,
-            cms_status=cms_status,
-            content_owner_id=content_owner_id,
-            revenue_required=revenue_required,
-            # Re-derive the source status only when revenue_required actually
-            # flips; an unrelated inventory refresh must not clobber a proven
-            # OFFICIAL_CMS_REVENUE / OFFICIAL_MANUAL_IMPORT classification back
-            # to MISSING_REVENUE_SOURCE.
-            revenue_source_status=derive_revenue_source_status(
-                current_status=current.revenue_source_status,
-                current_revenue_required=current.revenue_required,
+        with self._lock:
+            current = self._channels.get(youtube_channel_id)
+            if current is None:
+                raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
+            # BEFORE the mutation, and for this store that ordering is the only
+            # protection there is: a dict has no transaction to roll back, so a
+            # caller that validated `previous` after the fact would answer 409
+            # with the roster values already installed (review #184).
+            if require_pre_state is not None:
+                require_pre_state(current)
+            updated = replace(
+                current,
+                channel_name=channel_name,
+                cms_status=cms_status,
+                content_owner_id=content_owner_id,
                 revenue_required=revenue_required,
-            ),
-        )
-        self._channels[youtube_channel_id] = updated
-        return current, updated
+                # Re-derive the source status only when revenue_required
+                # actually flips; an unrelated inventory refresh must not
+                # clobber a proven OFFICIAL_CMS_REVENUE /
+                # OFFICIAL_MANUAL_IMPORT classification back to
+                # MISSING_REVENUE_SOURCE.
+                revenue_source_status=derive_revenue_source_status(
+                    current_status=current.revenue_source_status,
+                    current_revenue_required=current.revenue_required,
+                    revenue_required=revenue_required,
+                ),
+            )
+            # AFTER require_pre_state: a refused write must leave no journal
+            # entry, and the pre-image recorded is the write-boundary state
+            # the undo must reinstate.
+            self._journal(youtube_channel_id, updated)
+            self._channels[youtube_channel_id] = updated
+            return current, updated
 
 
 def bootstrap_channel_registry() -> ChannelRegistry:

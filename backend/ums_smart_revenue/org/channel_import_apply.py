@@ -6,9 +6,16 @@
 # Database/ORM: YouTubeChannelORM via ChannelRegistryStore (create_channel /
 #   update_inventory), ChannelGroupORM + membership via
 #   ChannelGroupRegistryStore, audit rows via the supplied AuditSink.
-# Standards: All-or-nothing relies on the caller wiring every store and the
-#   sink to ONE transaction (the import route binds the audit sink to the
-#   request's tenant session, platform-lane elevated per append). Every write
+# Standards: All-or-nothing is enforced HERE, not merely relied upon: the
+#   apply enters both stores' explicit transaction boundary around its two
+#   passes (SQL adapters open a SAVEPOINT on the request's one transaction;
+#   in-memory adapters journal their own writes and replay them backwards on
+#   raise — review #184, C2) and buffers every audit
+#   record until the passes succeed, so no tier can end with audit rows
+#   describing writes that were undone. The import route additionally binds
+#   the audit sink to the request's tenant session (platform-lane elevated per
+#   append), which is what makes the flushed records durable-atomic with the
+#   SQL writes. Every write
 #   is audited with the permission that authorized it (MANAGE_CHANNELS via
 #   permission_override) and with field-level provenance: the plan's diff,
 #   the operator's raw view_revenue token, and group/channel identifiers for
@@ -25,10 +32,11 @@
 # ============================================================================
 """Execute a bulk channel import plan with registry writes and audit trail."""
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
+from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
@@ -58,6 +66,99 @@ _INVENTORY_FIELDS = ("channel_name", "cms_status", "content_owner_id", _REVENUE_
 # auditor separates bulk-import changes from single-channel API edits, so both
 # call sites must emit the identical value.
 AUDIT_SOURCE_BULK_IMPORT = "bulk_import"
+
+
+# ============================================================================
+# Purpose: Hold the import's audit records until its writes have actually
+#   succeeded, so a failed apply leaves NO audit rows describing an import
+#   that did not happen — on every tier, not only the transactional one.
+# Database/ORM: None of its own. Satisfies the AuditSink protocol (append) so
+#   the two passes write to it unchanged; flush_to replays into the real sink
+#   (PlatformLaneAuditSink on the route: same request transaction, elevated
+#   per append; InMemoryAuditSink for direct/test/bootstrap callers).
+# Standards: Records are BUILT at their original moments — record_audit_event
+#   constructs each AuditRecord (created_at included) before append — so
+#   buffering changes when records reach the sink, never their content or
+#   order. The flush happens INSIDE the stores' transaction boundary AND
+#   inside the sink's own (`audit_sink.transaction()`): a failure on the Nth
+#   append must not leave records 1..N-1 in the real sink while the stores
+#   roll back — the accepted prefix is removed by the sink's boundary
+#   (truncate-restore in memory; the enclosing transaction on SQL, where the
+#   flush also sits inside the store adapters' savepoints). Without the
+#   buffer, restoring the stores on a group-pass failure would produce the
+#   WORSE state: registries rolled back while the in-memory sink keeps
+#   per-row events for the undone writes (review #184, C2).
+# Blast Radius: Audit truthfulness on failed imports for callers without a
+#   database transaction. On the SQL tier the visible behaviour is unchanged
+#   — the request transaction already discarded those rows on rollback.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/audit_service.py -> the AuditSink
+#     protocol this satisfies and the record_audit_event builder.
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py ->
+#     PlatformLaneAuditSink, the production sink flushed into.
+# ============================================================================
+class _BufferedAuditSink:
+    """Append-only buffer that replays into the real sink only on success."""
+
+    # No SQL backing of its own: the buffer flushes into the REAL sink,
+    # whose declaration is what the shared-session validation checks.
+    sql_unit_of_work: object | None = None
+
+    def __init__(self) -> None:
+        self._pending: list[AuditRecord] = []
+
+    def append(self, record: AuditRecord) -> None:
+        self._pending.append(record)
+
+    # ========================================================================
+    # Purpose: The AuditSink.transaction() boundary over the BUFFER — mark
+    #   and truncate on raise, mirroring InMemoryAuditSink, so a batch of
+    #   buffered appends is all-or-nothing too.
+    # Database/ORM: None (list buffer, single-request lifetime).
+    # Standards: Nothing routes a boundary through the buffer today — the
+    #   apply holds exactly one and flushes it inside the REAL sink's
+    #   boundary — but AuditSink demands the capability: a sink that cannot
+    #   make a batch of its own appends atomic does not satisfy the
+    #   protocol. No lock, unlike InMemoryAuditSink: the buffer never
+    #   outlives its single apply call, so it is never shared.
+    # Blast Radius: None today; protocol completeness for future callers.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/audit_service.py -> the
+    #     AuditSink protocol requiring this method.
+    # ========================================================================
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Truncate-restore over the buffer, mirroring InMemoryAuditSink."""
+        marked = len(self._pending)
+        try:
+            yield
+        except BaseException:
+            del self._pending[marked:]
+            raise
+
+    # ========================================================================
+    # Purpose: The audit BATCH-DELIVERY point — replay every buffered record
+    #   into the real sink, in the exact order the apply built them, only
+    #   after both passes succeeded.
+    # Database/ORM: None here; the real sink owns the INSERTs (inside the
+    #   caller's transaction and, for the import, the store savepoints).
+    # Standards: The caller MUST wrap this in ``sink.transaction()`` —
+    #   sequential appends alone are not atomic, and a raise on the Nth
+    #   record must take the accepted 1..N-1 prefix with it (PR #196 round
+    #   2, codex/qodo). Record content and timestamps are untouched: only
+    #   delivery timing moves. The buffer clears afterwards so a reused
+    #   sink cannot double-deliver.
+    # Blast Radius: Audit-trail atomicity for the bulk import on every
+    #   tier; the flush-order pin rides on the preserved ordering.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/audit_service.py -> the
+    #     AuditSink protocol and its transaction() boundary contract.
+    # ========================================================================
+    def flush_to(self, sink: AuditSink) -> None:
+        """Replay every buffered record, in order, into the real sink."""
+        for record in self._pending:
+            sink.append(record)
+        self._pending.clear()
 # The `action` value _attach_group_memberships reports for a group it minted,
 # as opposed to a membership it added to an existing one. Recorded on the
 # GROUP_UPDATED audit event, where an auditor uses it to tell a new
@@ -228,6 +329,87 @@ def plan_channel_import_with_stores(
 
 
 # ============================================================================
+# Purpose: Refuse an apply whose SQL-backed stores/sink span DIFFERENT
+#   sessions, before anything is written or locked. The boundary below is a
+#   SAVEPOINT per session: with one shared session (the request wiring) the
+#   savepoints commit or roll back together, but across sessions they are
+#   independent transactions — a caller committing them separately could
+#   persist group and audit writes for channel writes that never landed,
+#   cross-resource atomicity this module promises and cannot provide without
+#   a distributed coordinator (PR #196 round 6, codex).
+# Database/ORM: None — identity comparison over the adapters' declared
+#   ``sql_unit_of_work``. The declaration is REQUIRED (part of the store and
+#   sink protocols): a MISSING attribute is refused outright, because an
+#   optional one would let a protocol-conforming wrapper delegate a SQL
+#   store's transaction while silently hiding its inner session from this
+#   check (PR #196 round 8, codex) — fail-open where the whole point is to
+#   fail closed. ``None`` means self-contained (the in-memory tier, whose
+#   journal is its own unit of work) — but only an ALL-in-memory wiring is
+#   coherent: a MIXED wiring is refused too, because in-memory writes
+#   commit the instant the boundary exits while SQL writes still await the
+#   caller's commit, so a failed or rolled-back commit would split the
+#   import across resources despite the all-or-nothing contract
+#   (PR #196 round 12, codex).
+# Standards: Fail-loud wiring validation, RuntimeError like the boundary's
+#   nesting guard — a wiring bug is a programming error, never a domain 409.
+# Blast Radius: Direct callers only; the FastAPI route wires every adapter
+#   from one request session (or all in-memory on the no-database tier) and
+#   never trips this.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/channel_registry.py -> the
+#     protocol attribute contract (mirrored by channel_groups.py and
+#     audit_service.py).
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> declares it
+#     on both SQL sinks (as do both SQL stores).
+# ============================================================================
+_UNDECLARED = object()
+
+
+def _require_shared_sql_unit_of_work(
+    registry: ChannelRegistryStore,
+    groups: ChannelGroupRegistryStore,
+    audit_sink: AuditSink,
+) -> None:
+    """Refuse missing declarations, mixed tiers, and distinct SQL sessions."""
+    identities: set[int] = set()
+    in_memory: list[str] = []
+    sql_backed: list[str] = []
+    for adapter in (registry, groups, audit_sink):
+        declared = getattr(adapter, "sql_unit_of_work", _UNDECLARED)
+        if declared is _UNDECLARED:
+            raise RuntimeError(
+                f"{type(adapter).__name__} does not declare sql_unit_of_work: "
+                "the store/sink protocols require every adapter to expose its "
+                "transactional backing (the session for SQL adapters, None "
+                "for self-contained in-memory ones), and a wrapper must "
+                "delegate its inner adapter's declaration — otherwise the "
+                "import cannot verify that its savepoints share one session"
+            )
+        if declared is None:
+            in_memory.append(type(adapter).__name__)
+        else:
+            sql_backed.append(type(adapter).__name__)
+            identities.add(id(declared))
+    if sql_backed and in_memory:
+        raise RuntimeError(
+            "apply_channel_import refuses a MIXED wiring — SQL-backed "
+            f"{', '.join(sql_backed)} composed with in-memory "
+            f"{', '.join(in_memory)}: in-memory writes commit the instant "
+            "the boundary exits while SQL writes await the caller's commit, "
+            "so a failed or rolled-back commit would split the import "
+            "across resources despite the all-or-nothing contract"
+        )
+    if len(identities) > 1:
+        raise RuntimeError(
+            "apply_channel_import requires its SQL-backed registry, group "
+            "store, and audit sink to share ONE session: their savepoints "
+            "are otherwise independent transactions, and the import's "
+            "all-or-nothing promise cannot hold across separately committed "
+            "sessions"
+        )
+
+
+# ============================================================================
 # Purpose: Execute a bulk channel import plan — per-row registry writes
 #   (create_channel / update_inventory), group-membership reconciliation, and
 #   the full audit trail (per-channel, per-group-mutation, one summary).
@@ -236,7 +418,10 @@ def plan_channel_import_with_stores(
 #   AuditLogORM rows via the supplied AuditSink.
 # Standards: All-or-nothing — the caller wires every store and the sink to
 #   ONE transaction, so any raised error rolls the whole import back with its
-#   audit rows. Write-boundary rechecks over plan trust: audit diffs are
+#   audit rows; every adapter declares its unit of work via
+#   sql_unit_of_work, and the entry validation above refuses a wiring that
+#   splits, mixes, or hides it.
+#   Write-boundary rechecks over plan trust: audit diffs are
 #   rebuilt from what update_inventory actually replaced, group state is
 #   re-read under a row lock, and the CHANNEL_IMPORTED summary counts what was
 #   APPLIED, not what was planned — a planning tally would let the summary
@@ -312,6 +497,24 @@ def apply_channel_import(
     described above — ALL channel locks are taken before ANY group lock — so
     the passes must stay separate and in this sequence, not be interleaved
     back into one loop over the plan.
+
+    BOTH passes, the summary event, and the audit flush run inside one
+    explicit store transaction boundary (review #184, C2): a raise anywhere —
+    a drifted pre-state, a locked-month refusal, a group archived in the
+    pass-1-to-pass-2 window, the final append itself — leaves every store as
+    it was at entry and the real sink without a single record. On SQL the
+    boundary is a SAVEPOINT on the request's own transaction (nothing commits
+    here, and the request path's end state is unchanged — the savepoint
+    protects direct callers that catch); the in-memory adapters are the ones
+    that needed inventing:
+    which journal their own writes and replay them backwards on raise — an
+    undo of THIS operation's writes, never a whole-store snapshot, so a
+    concurrent writer's interleaved change survives the refusal exactly as a
+    committed SQL row survives a rollback. Audit records are buffered and
+    flushed only
+    after the passes succeed, because restoring the stores while the sink
+    keeps per-row events would trade a consistent partial write for an audit
+    trail describing writes that were undone.
     """
     # Counted at the WRITE BOUNDARY, never from plan.counts. The plan's
     # outcome came from a possibly-stale snapshot: a row planned UPDATE whose
@@ -322,56 +525,70 @@ def apply_channel_import(
     # per-row CHANNEL_UPDATED events would disagree in the same trail (review
     # #159 r3715617737). Same rule the per-row audit already follows.
     # BEFORE the first inventory write. The authoritative group-effect check
-    # runs under each group's row lock in the second pass, and it must — but by
-    # then every channel row has been written, and a store without a
-    # transaction has no way to take those back when the group pass raises
-    # (review #184, codex P2). One bulk, LOCK-FREE read here refuses the whole
-    # import while nothing has been written yet.
+    # runs under each group's row lock in the second pass, and it must. The
+    # boundary below can now take pass-1 writes back on those adapters
+    # (review #184, C2), but this pre-flight stays: it refuses a knowably
+    # doomed import while nothing has been written OR locked yet — no channel
+    # row locks held across a refusal, no 5000 writes performed only to be
+    # restored. One bulk, LOCK-FREE read here keeps the cheap path cheap.
     #
     # Lock-free deliberately: taking group locks in this position would put
     # them BEFORE the channel locks, inverting the order the two passes exist
     # to establish and re-opening the deadlock against a concurrent
     # POST /groups/{id}/members that review #159 r3714644431 closed.
-    _require_planned_group_actions(plan, groups=groups, content_owner_id=content_owner_id)
-    applied_counts = _apply_inventory_writes(
-        plan,
-        registry=registry,
-        audit_sink=audit_sink,
-        actor=actor,
-        scope=scope,
-        content_owner_id=content_owner_id,
-        cms_status=cms_status,
-        reason=reason,
-        enforce_reviewed_pre_state=enforce_reviewed_pre_state,
-    )
-    _apply_group_memberships(
-        plan,
-        groups=groups,
-        audit_sink=audit_sink,
-        actor=actor,
-        scope=scope,
-        content_owner_id=content_owner_id,
-        reason=reason,
-    )
-    record_audit_event(
-        sink=audit_sink,
-        actor=actor,
-        event_type=AuditEventType.CHANNEL_IMPORTED,
-        entity_type="youtube_channel_import",
-        entity_id=content_owner_id,
-        scope=scope,
-        reason=reason,
-        details={
-            # The multipart filename is attacker-controlled and lands in
-            # audit_logs.details (JSONB); PostgreSQL rejects U+0000 inside a
-            # JSON string, so an unsanitized name would roll an otherwise
-            # valid import back as an unhandled 500 on this final append.
-            "filename": _safe_audit_filename(filename),
-            "content_owner_id": content_owner_id,
-            "cms_status": cms_status,
-            "counts": applied_counts,
-        },
-    )
+    #
+    # The buffered sink + boundary together are the C2 contract: audit records
+    # reach the REAL sink only after both passes succeed, and the flush sits
+    # INSIDE the boundary so a sink failure restores the stores exactly as a
+    # write failure would.
+    _require_shared_sql_unit_of_work(registry, groups, audit_sink)
+    buffered = _BufferedAuditSink()
+    with registry.transaction(), groups.transaction():
+        _require_planned_group_actions(plan, groups=groups, content_owner_id=content_owner_id)
+        applied_counts = _apply_inventory_writes(
+            plan,
+            registry=registry,
+            audit_sink=buffered,
+            actor=actor,
+            scope=scope,
+            content_owner_id=content_owner_id,
+            cms_status=cms_status,
+            reason=reason,
+            enforce_reviewed_pre_state=enforce_reviewed_pre_state,
+        )
+        _apply_group_memberships(
+            plan,
+            groups=groups,
+            audit_sink=buffered,
+            actor=actor,
+            scope=scope,
+            content_owner_id=content_owner_id,
+            reason=reason,
+        )
+        record_audit_event(
+            sink=buffered,
+            actor=actor,
+            event_type=AuditEventType.CHANNEL_IMPORTED,
+            entity_type="youtube_channel_import",
+            entity_id=content_owner_id,
+            scope=scope,
+            reason=reason,
+            details={
+                # The multipart filename is attacker-controlled and lands in
+                # audit_logs.details (JSONB); PostgreSQL rejects U+0000 inside
+                # a JSON string, so an unsanitized name would roll an
+                # otherwise valid import back as an unhandled 500 on this
+                # final append.
+                "filename": _safe_audit_filename(filename),
+                "content_owner_id": content_owner_id,
+                "cms_status": cms_status,
+                "counts": applied_counts,
+            },
+        )
+        # The sink's own boundary, so a raise on the Nth append removes the
+        # accepted prefix instead of stranding it while the stores roll back.
+        with audit_sink.transaction():
+            buffered.flush_to(audit_sink)
 
 
 # ============================================================================

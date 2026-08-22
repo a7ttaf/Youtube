@@ -16,6 +16,8 @@
 # ============================================================================
 """SQL audit sinks: platform-session default and same-transaction platform-lane."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -37,6 +39,10 @@ class SqlAlchemyAuditSink:
         """Bind audit writes to an explicit or current request tenant."""
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
+        # PUBLIC unit-of-work identity — apply_channel_import validates that
+        # every SQL adapter it composes shares ONE session through this
+        # attribute (see SqlAlchemyChannelRegistry; PR #196 round 6, codex).
+        self.sql_unit_of_work: object | None = session
 
     def append(self, record: AuditRecord) -> None:
         """Append one audit log row and flush so failures happen before commit."""
@@ -90,6 +96,35 @@ class SqlAlchemyAuditSink:
         self._session.rollback()
         self._session.expunge_all()
 
+    # ========================================================================
+    # Purpose: The AuditSink.transaction() boundary — a SAVEPOINT on THIS
+    #   sink's own session, so a failed batch discards its accepted prefix
+    #   without any assumption about who else shares the session.
+    # Database/ORM: SAVEPOINT via Session.begin_nested(); never commits the
+    #   outer transaction. A pure delegation was almost enough — the import's
+    #   flush also sits inside the store adapters' savepoints — but that
+    #   protection holds only while every object shares ONE session, which
+    #   neither AuditSink.transaction() nor apply_channel_import requires: a
+    #   direct caller wiring a sink on a DIFFERENT session, catching the
+    #   failure, and committing would persist the prefix (PR #196 round 3,
+    #   codex). The savepoint makes the sink's own promise unconditional.
+    # Standards: Exceptions propagate; nests harmlessly under the store
+    #   savepoints when sessions are shared (savepoint stacks).
+    # Blast Radius: Whether a failed multi-record audit batch can persist a
+    #   prefix for a catching caller on a separate session. Request-path end
+    #   state unchanged.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/audit_service.py -> the
+    #     protocol contract and the in-memory truncating implementation.
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     wraps the buffered flush in this boundary.
+    # ========================================================================
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Wrap the appends in a SAVEPOINT on this sink's session."""
+        with self._session.begin_nested():
+            yield
+
 
 # ============================================================================
 # Purpose: Audit sink that writes audit_logs through the CALLER'S tenant-lane
@@ -121,6 +156,9 @@ class PlatformLaneAuditSink:
         """Bind audit writes to the caller's (tenant-lane) session."""
         self._session = session
         self._inner = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+        # PUBLIC unit-of-work identity — same contract as the inner sink's;
+        # the wrapper is what callers hand to apply_channel_import.
+        self.sql_unit_of_work: object | None = session
 
     def append(self, record: AuditRecord) -> None:
         """Append one audit row inside the caller's transaction, elevated.
@@ -140,6 +178,35 @@ class PlatformLaneAuditSink:
     def rollback(self) -> None:
         """Rollback and detach pending objects after fail-closed audit errors."""
         self._inner.rollback()
+
+    # ========================================================================
+    # Purpose: The AuditSink.transaction() boundary on the platform-lane sink
+    #   — a SAVEPOINT on the CALLER'S tenant-lane session, so a failed batch
+    #   discards its accepted prefix without any assumption about who else
+    #   shares the session (same promise as SqlAlchemyAuditSink.transaction,
+    #   whose block carries the full rationale).
+    # Database/ORM: SAVEPOINT via Session.begin_nested() on the same session
+    #   the elevated appends join; never commits the outer transaction.
+    # Standards: The per-append platform-lane elevation is ORTHOGONAL:
+    #   elevation changes the ROLE a statement runs under, never which
+    #   transaction or savepoint it belongs to, so a rollback to this
+    #   savepoint discards the elevated INSERTs exactly as any others.
+    #   Exceptions propagate; nests harmlessly under the store savepoints
+    #   when sessions are shared.
+    # Blast Radius: Whether a failed multi-record batch through the atomic
+    #   route sink can persist a prefix for a catching caller. Request-path
+    #   end state unchanged.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     wraps the buffered flush in this boundary.
+    #   - File: backend/ums_smart_revenue/db/lane.py -> the elevation this
+    #     boundary is orthogonal to.
+    # ========================================================================
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Wrap the appends in a SAVEPOINT, like the inner sink's boundary."""
+        with self._session.begin_nested():
+            yield
 
 
 def _parse_uuid_or_none(value: str) -> UUID | None:

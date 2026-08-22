@@ -1,4 +1,32 @@
-from collections.abc import Mapping
+# ============================================================================
+# Purpose: Audit event recording service — builds AuditRecord instances from
+#   the audit event definitions, resolves permission/sensitivity stamps, and
+#   defines the AuditSink protocol (append + the transaction() batch
+#   atomicity boundary + the sql_unit_of_work declaration the import's
+#   wiring validation reads) together with its thread-safe in-memory
+#   implementation.
+# Database/ORM: None directly — the SQL implementations of the sink protocol
+#   live in sql_audit_sink.py (audit_logs INSERT + Session.begin_nested
+#   SAVEPOINT); this module defines the contract they satisfy.
+# Standards: Fail-closed audit — a raise inside a transaction() boundary
+#   must leave NO accepted prefix behind; the in-memory sink serializes
+#   appends and boundaries on one re-entrant lock because the no-database
+#   tier shares it across threads (PR #196).
+# Blast Radius: Audit-trail integrity on every tier — a partial audit batch
+#   would claim an operation that then failed; the import's audit flush
+#   (channel_import_apply.py) runs inside this boundary.
+# Connections: the protocol's SQL implementations and the import that
+#   depends on it.
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> SQL sinks
+#     implementing append/transaction with SAVEPOINTs.
+#   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> the
+#     buffered audit flush wrapped in transaction().
+#   - File: backend/ums_smart_revenue/api/channels.py -> record_audit_event
+#     callers on the channel routes.
+# ============================================================================
+import threading
+from collections.abc import Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,15 +55,116 @@ class AuditRecord:
 
 
 class AuditSink(Protocol):
+    # The sink's transactional backing, REQUIRED by the protocol: the session
+    # object for SQL sinks, None for self-contained in-memory ones. A wrapper
+    # must delegate its inner sink's declaration — apply_channel_import
+    # refuses a missing declaration, a mixed SQL/in-memory wiring, and SQL
+    # declarations naming different sessions; an optional attribute would let
+    # a conforming wrapper hide its inner session from that check
+    # (PR #196 rounds 6, 8, and 12, codex).
+    sql_unit_of_work: object | None
+
     def append(self, record: AuditRecord) -> None: ...
 
+    # ========================================================================
+    # Purpose: The sink's ATOMICITY contract for a BATCH of appends — a caller
+    #   wraps a multi-record delivery so a raise mid-batch leaves the sink
+    #   without the accepted prefix, never with audit rows describing an
+    #   operation that then failed.
+    # Database/ORM: The SQL sinks open a SAVEPOINT on their own session
+    #   (Session.begin_nested — PR #196 round 3, codex; a pure delegation to
+    #   the enclosing transaction held only while every object shared one
+    #   session, which nothing enforced then), never a commit of the outer
+    #   transaction. The in-memory sink records its length on enter and
+    #   truncates back on raise, under its lock.
+    # Standards: Mirrors the store protocols' transaction() (review #184, C2):
+    #   never a commit, exceptions always propagate, undo of state not
+    #   outcomes. Unlike the stores it NESTS harmlessly — length marks and
+    #   savepoint stacks compose — so no nesting guard is declared.
+    # Blast Radius: Whether a failed bulk import can leave a PARTIAL audit
+    #   trail in a sink without a database transaction (direct/test/bootstrap
+    #   callers), or a prefix a catching direct caller could commit on SQL.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py ->
+    #     wraps the buffered flush in this boundary.
+    #   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> the
+    #     SAVEPOINT implementations.
+    # ========================================================================
+    def transaction(self) -> AbstractContextManager[None]:
+        """Return a context manager making the wrapped appends all-or-nothing.
 
-@dataclass
+        On a clean exit the appended records stand (durability still governed
+        by whoever owns the session/request lifecycle). On an exception every
+        record appended inside the boundary is removed from this sink, and
+        the exception propagates unchanged.
+        """
+        ...
+
+
 class InMemoryAuditSink:
-    records: list[AuditRecord] = field(default_factory=list)
+    """List-backed sink for tests, bootstrap, and the no-database tier."""
 
+    # No SQL backing: the truncate boundary is this sink's own unit of work.
+    sql_unit_of_work: object | None = None
+
+    def __init__(self) -> None:
+        self.records: list[AuditRecord] = []
+        # Appends and batch boundaries serialize on one re-entrant lock: the
+        # no-database tier can share this sink across threads, and without
+        # the lock a failed batch's truncation would delete an unrelated
+        # request's records appended past the mark (PR #196 round 3, codex).
+        # Re-entrant so the boundary-holding thread's own appends pass.
+        self._lock = threading.RLock()
+
+    # ========================================================================
+    # Purpose: The in-memory audit WRITE — append one record to the shared
+    #   list.
+    # Database/ORM: None (list append; the SQL sinks own the INSERT path).
+    # Standards: Takes the sink's re-entrant lock: this sink is shared
+    #   across threads on the no-database tier, and an unlocked append
+    #   could land past an open batch boundary's mark and be deleted by
+    #   its failure truncation — serialized behind the batch instead, it
+    #   lands only after the boundary resolves (PR #196 round 3, codex).
+    # Blast Radius: Audit-trail integrity on the no-database tier.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> the SQL
+    #     implementations of the same protocol method.
+    # ========================================================================
     def append(self, record: AuditRecord) -> None:
-        self.records.append(record)
+        """Append one record under the sink's lock."""
+        with self._lock:
+            self.records.append(record)
+
+    # ========================================================================
+    # Purpose: The AuditSink.transaction() boundary in memory — mark the
+    #   record count on enter, truncate back to the mark on raise, so a
+    #   failed batch leaves no accepted prefix behind.
+    # Database/ORM: None (list-backed sink).
+    # Standards: HOLDS the sink's re-entrant lock for the boundary's whole
+    #   duration: the no-database tier shares this sink across threads, and
+    #   a foreign append landing past the mark would be deleted by the
+    #   positional truncation — serialized behind the batch instead, it
+    #   lands only after the boundary resolves, which is what makes the
+    #   truncation remove exactly the batch's own records (PR #196 round 3,
+    #   codex). Exceptions propagate unchanged.
+    # Blast Radius: Whether a failed multi-record batch leaves partial audit
+    #   records on the no-database tier. No SQL, no RLS.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> the
+    #     import's buffered flush runs inside this boundary.
+    #   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> the
+    #     SAVEPOINT implementations of the same protocol method.
+    # ========================================================================
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Mark the length on enter; truncate back to the mark on raise."""
+        with self._lock:
+            marked = len(self.records)
+            try:
+                yield
+            except BaseException:
+                del self.records[marked:]
+                raise
 
 
 def _normalize_audit_reason(
