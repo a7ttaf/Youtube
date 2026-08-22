@@ -13,7 +13,10 @@ import {
   UNSCOPED_IMPORT_SCOPE,
   importScopeFor,
 } from "@/contexts/UnsettledImportContext";
-import { withDisplayDigest } from "../../../helpers/displayDigestFixtures";
+import {
+  importPlanJsonResponse as jsonResponse,
+  withDisplayDigest,
+} from "../../../helpers/displayDigestFixtures";
 
 // RegistryImportFlow is exercised THROUGH RegistryView (the GroupsView.test.tsx
 // idiom for GroupsSyncFlow): the capability gate, the table swap, and the
@@ -137,58 +140,6 @@ const DRY_RUN_ERRORS: ChannelImportResult = withDisplayDigest({
     },
   ],
 });
-
-const isImportPlanPayload = (body: unknown): body is ChannelImportResult => {
-  if (!body || typeof body !== "object" || "detail" in body) {
-    return false;
-  }
-  const candidate = body as ChannelImportResult;
-  return (
-    Array.isArray(candidate.rows) &&
-    candidate.counts !== undefined &&
-    typeof candidate.content_owner_id === "string" &&
-    typeof candidate.cms_status === "string"
-  );
-};
-
-const normalizePlanBody = (body: unknown, trustDigest?: boolean): unknown => {
-  if (trustDigest) {
-    return body;
-  }
-  if (isImportPlanPayload(body)) {
-    const plan = body as ChannelImportResult;
-    if (typeof plan.display_digest === "string" && plan.display_digest !== "") {
-      try {
-        return withDisplayDigest(plan);
-      } catch {
-        return body;
-      }
-    }
-    return body;
-  }
-  if (body && typeof body === "object" && "detail" in body) {
-    const wrapper = body as { detail?: unknown };
-    if (isImportPlanPayload(wrapper.detail)) {
-      const detail = wrapper.detail as ChannelImportResult;
-      if (typeof detail.display_digest === "string" && detail.display_digest !== "") {
-        try {
-          return { ...wrapper, detail: withDisplayDigest(detail) };
-        } catch {
-          return body;
-        }
-      }
-    }
-  }
-  return body;
-};
-
-const jsonResponse = (body: unknown, status = 200, options?: { trustDigest?: boolean }) => {
-  const payload = normalizePlanBody(body, options?.trustDigest);
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-};
 
 const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;

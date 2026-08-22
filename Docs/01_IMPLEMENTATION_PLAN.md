@@ -490,7 +490,9 @@ on real ingestion (Phase 2) and the inventory load workflow.
   independently (409 + refreshed plan on mismatch), EITHER binding token now
   opts into strict pre-state enforcement, and the SPA requires the field on
   every accepted plan and echoes both tokens. Recipe + contract in Docs/12;
-  phase 2 (TypeScript-side recomputation) is a recorded follow-up. C2
+  TypeScript-side recomputation shipped in the same PR (`frontend/src/lib/displayDigest.ts`,
+  verified against the backend recipe in `tests/lib/displayDigest.test.ts`).
+  C2
   (transaction boundary on the store protocol, ruled 2026-08-21) is the next
   PR.
   Company/sector (org-unit) mapping remains the Registry Map UI's job.

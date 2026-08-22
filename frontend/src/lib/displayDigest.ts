@@ -1,9 +1,11 @@
 import type { ChannelImportResult } from "@/lib/api/types";
 
+const rightRotate = (value: number, amount: number): number =>
+  (value >>> amount) | (value << (32 - amount));
+
 /**
- * Serialize a value to Python ``json.dumps(..., sort_keys=True, separators=(',', ':'),
- * ensure_ascii=True)`` form so the SPA can recompute ``display_digest`` from the
- * disclosed preview fields (review #184, C1).
+ * Serialize a string to Python ``json.dumps(..., ensure_ascii=True)`` form.
+ * Control characters use JSON short escapes; other non-ASCII uses ``\uXXXX``.
  */
 const pythonJsonString = (value: string): string => {
   let out = '"';
@@ -13,7 +15,19 @@ const pythonJsonString = (value: string): string => {
       out += '\\"';
     } else if (code === 0x5c) {
       out += "\\\\";
-    } else if (code < 0x20 || code > 0x7f) {
+    } else if (code === 0x08) {
+      out += "\\b";
+    } else if (code === 0x09) {
+      out += "\\t";
+    } else if (code === 0x0a) {
+      out += "\\n";
+    } else if (code === 0x0c) {
+      out += "\\f";
+    } else if (code === 0x0d) {
+      out += "\\r";
+    } else if (code < 0x20) {
+      out += `\\u${code.toString(16).padStart(4, "0")}`;
+    } else if (code > 0x7f) {
       out += `\\u${code.toString(16).padStart(4, "0")}`;
     } else {
       out += value[index] ?? "";
@@ -23,7 +37,7 @@ const pythonJsonString = (value: string): string => {
   return out;
 };
 
-const pythonCanonicalJson = (value: unknown): string => {
+const canonicalizeScalar = (value: unknown): string | null => {
   if (value === null) {
     return "null";
   }
@@ -39,6 +53,14 @@ const pythonCanonicalJson = (value: unknown): string => {
   if (typeof value === "string") {
     return pythonJsonString(value);
   }
+  return null;
+};
+
+const pythonCanonicalJson = (value: unknown): string => {
+  const scalar = canonicalizeScalar(value);
+  if (scalar !== null) {
+    return scalar;
+  }
   if (Array.isArray(value)) {
     return `[${value.map((entry) => pythonCanonicalJson(entry)).join(",")}]`;
   }
@@ -53,7 +75,7 @@ const pythonCanonicalJson = (value: unknown): string => {
 // Minimal SHA-256 (RFC 6234) for sync digest verification in the browser bundle.
 const sha256Hex = (message: string): string => {
   const msg = new TextEncoder().encode(message);
-  const K = new Uint32Array([
+  const roundConstants = new Uint32Array([
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -63,7 +85,7 @@ const sha256Hex = (message: string): string => {
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
   ]);
-  const H = new Uint32Array([
+  const state = new Uint32Array([
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
   ]);
   const bitLen = msg.length * 8;
@@ -73,21 +95,27 @@ const sha256Hex = (message: string): string => {
   const view = new DataView(withLen.buffer);
   view.setUint32(withLen.length - 4, bitLen, false);
 
-  const W = new Uint32Array(64);
+  const schedule = new Uint32Array(64);
   for (let offset = 0; offset < withLen.length; offset += 64) {
     for (let index = 0; index < 16; index += 1) {
-      W[index] = view.getUint32(offset + index * 4, false);
+      schedule[index] = view.getUint32(offset + index * 4, false);
     }
     for (let index = 16; index < 64; index += 1) {
-      const s0 = rightRotate(W[index - 15], 7) ^ rightRotate(W[index - 15], 18) ^ (W[index - 15] >>> 3);
-      const s1 = rightRotate(W[index - 2], 17) ^ rightRotate(W[index - 2], 19) ^ (W[index - 2] >>> 10);
-      W[index] = (W[index - 16] + s0 + W[index - 7] + s1) >>> 0;
+      const s0 =
+        rightRotate(schedule[index - 15], 7) ^
+        rightRotate(schedule[index - 15], 18) ^
+        (schedule[index - 15] >>> 3);
+      const s1 =
+        rightRotate(schedule[index - 2], 17) ^
+        rightRotate(schedule[index - 2], 19) ^
+        (schedule[index - 2] >>> 10);
+      schedule[index] = (schedule[index - 16] + s0 + schedule[index - 7] + s1) >>> 0;
     }
-    let [a, b, c, d, e, f, g, h] = H;
+    let [a, b, c, d, e, f, g, h] = state;
     for (let index = 0; index < 64; index += 1) {
       const S1 = rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25);
       const ch = (e & f) ^ (~e & g);
-      const temp1 = (h + S1 + ch + K[index] + W[index]) >>> 0;
+      const temp1 = (h + S1 + ch + roundConstants[index] + schedule[index]) >>> 0;
       const S0 = rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22);
       const maj = (a & b) ^ (a & c) ^ (b & c);
       const temp2 = (S0 + maj) >>> 0;
@@ -100,21 +128,32 @@ const sha256Hex = (message: string): string => {
       b = a;
       a = (temp1 + temp2) >>> 0;
     }
-    H[0] = (H[0] + a) >>> 0;
-    H[1] = (H[1] + b) >>> 0;
-    H[2] = (H[2] + c) >>> 0;
-    H[3] = (H[3] + d) >>> 0;
-    H[4] = (H[4] + e) >>> 0;
-    H[5] = (H[5] + f) >>> 0;
-    H[6] = (H[6] + g) >>> 0;
-    H[7] = (H[7] + h) >>> 0;
+    state[0] = (state[0] + a) >>> 0;
+    state[1] = (state[1] + b) >>> 0;
+    state[2] = (state[2] + c) >>> 0;
+    state[3] = (state[3] + d) >>> 0;
+    state[4] = (state[4] + e) >>> 0;
+    state[5] = (state[5] + f) >>> 0;
+    state[6] = (state[6] + g) >>> 0;
+    state[7] = (state[7] + h) >>> 0;
   }
-  return Array.from(H, (word) => word.toString(16).padStart(8, "0")).join("");
+  return Array.from(state, (word) => word.toString(16).padStart(8, "0")).join("");
 };
 
-const rightRotate = (value: number, amount: number): number =>
-  (value >>> amount) | (value << (32 - amount));
-
+// ============================================================================
+// Purpose: Recompute the server display_digest from exactly the disclosed plan
+//   fields so the SPA can verify a 2xx body before trusting preview state.
+// Database/ORM: None (frontend) — pure canonical JSON + SHA-256 over the four
+//   disclosed import-plan fields mirrored in Docs/12.
+// Standards: Python json.dumps(sort_keys=True, separators=(',', ':'),
+//   ensure_ascii=True) byte match; sync SHA-256 in-browser.
+// Blast Radius: Import preview/apply binding — rejects substituted rows while
+//   echoing an unverified digest token (review #184, C1).
+// Connections:
+// - File: backend/ums_smart_revenue/api/channels.py -> _display_digest recipe.
+// - File: frontend/src/lib/api/useChannelImport.ts -> isChannelImportResult.
+// - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
+// ============================================================================
 /** Recompute the server ``display_digest`` from exactly the disclosed plan fields. */
 export const computeDisplayDigest = (plan: Pick<
   ChannelImportResult,

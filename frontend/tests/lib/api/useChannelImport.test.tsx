@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelImportResult } from "@/lib/api/types";
 import { useChannelImport } from "@/lib/api/useChannelImport";
 import { TenantProvider } from "@/contexts/TenantContext";
-import { withDisplayDigest } from "../../helpers/displayDigestFixtures";
+import { importPlanJsonResponse as jsonResponse, withDisplayDigest } from "../../helpers/displayDigestFixtures";
 
 const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
@@ -20,37 +20,6 @@ afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
   vi.restoreAllMocks();
 });
-
-const isImportPlanPayload = (body: unknown): body is ChannelImportResult => {
-  if (!body || typeof body !== "object" || "detail" in body) {
-    return false;
-  }
-  const candidate = body as ChannelImportResult;
-  return (
-    Array.isArray(candidate.rows) &&
-    candidate.counts !== undefined &&
-    typeof candidate.content_owner_id === "string" &&
-    typeof candidate.cms_status === "string"
-  );
-};
-
-const jsonResponse = (body: unknown, status = 200, options?: { trustDigest?: boolean }) => {
-  let payload = body;
-  if (isImportPlanPayload(body) && !options?.trustDigest) {
-    const plan = body as ChannelImportResult;
-    if (typeof plan.display_digest === "string" && plan.display_digest !== "") {
-      try {
-        payload = withDisplayDigest(plan);
-      } catch {
-        payload = body;
-      }
-    }
-  }
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-};
 
 const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;

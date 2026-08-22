@@ -8,3 +8,64 @@ export const withDisplayDigest = (
   ...plan,
   display_digest: computeDisplayDigest(plan),
 });
+
+const hasPlanShape = (body: Record<string, unknown>): boolean =>
+  Array.isArray(body.rows) &&
+  body.counts !== undefined &&
+  typeof body.content_owner_id === "string" &&
+  typeof body.cms_status === "string";
+
+export const isImportPlanPayload = (body: unknown): body is ChannelImportResult => {
+  if (!body || typeof body !== "object") {
+    return false;
+  }
+  if ("detail" in body) {
+    return false;
+  }
+  return hasPlanShape(body as Record<string, unknown>);
+};
+
+const attachMatchingDigest = (plan: ChannelImportResult): ChannelImportResult => {
+  if (typeof plan.display_digest !== "string" || plan.display_digest === "") {
+    return plan;
+  }
+  try {
+    return withDisplayDigest(plan);
+  } catch {
+    return plan;
+  }
+};
+
+const normalizeDetailWrapper = (body: Record<string, unknown>): unknown => {
+  const detail = body.detail;
+  if (!isImportPlanPayload(detail)) {
+    return body;
+  }
+  return { ...body, detail: attachMatchingDigest(detail) };
+};
+
+/** Normalize mock import-plan bodies so display_digest matches disclosed fields. */
+export const normalizePlanBody = (body: unknown, trustDigest?: boolean): unknown => {
+  if (trustDigest || !body || typeof body !== "object") {
+    return body;
+  }
+  if (isImportPlanPayload(body)) {
+    return attachMatchingDigest(body);
+  }
+  if ("detail" in body) {
+    return normalizeDetailWrapper(body as Record<string, unknown>);
+  }
+  return body;
+};
+
+export const importPlanJsonResponse = (
+  body: unknown,
+  status = 200,
+  options?: { trustDigest?: boolean },
+): Response => {
+  const payload = normalizePlanBody(body, options?.trustDigest);
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+};

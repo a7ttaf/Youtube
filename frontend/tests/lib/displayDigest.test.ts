@@ -25,6 +25,7 @@ describe("displayDigest", () => {
       ],
     };
     const digest = computeDisplayDigest(plan);
+    expect(digest).toBe("b84ea3d6d06c0fca721a49d4c994765aed33ef494ab493248542df51c06f15d1");
     expect(displayDigestMatchesDisclosed({ ...plan, display_digest: digest, dry_run: true, plan_fingerprint: "fp" })).toBe(true);
     expect(displayDigestMatchesDisclosed({ ...plan, display_digest: "deadbeef", dry_run: true, plan_fingerprint: "fp" })).toBe(false);
   });
