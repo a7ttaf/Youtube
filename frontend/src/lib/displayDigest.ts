@@ -3,6 +3,31 @@ import type { ChannelImportResult } from "@/lib/api/types";
 const rightRotate = (value: number, amount: number): number =>
   (value >>> amount) | (value << (32 - amount));
 
+const CHAR_ESCAPES: Readonly<Record<number, string>> = {
+  0x08: "\\b",
+  0x09: "\\t",
+  0x0a: "\\n",
+  0x0c: "\\f",
+  0x0d: "\\r",
+};
+
+const escapeJsonCodePoint = (code: number): string | null => {
+  if (code === 0x22) {
+    return '\\"';
+  }
+  if (code === 0x5c) {
+    return "\\\\";
+  }
+  const short = CHAR_ESCAPES[code];
+  if (short !== undefined) {
+    return short;
+  }
+  if (code < 0x20 || code > 0x7f) {
+    return `\\u${code.toString(16).padStart(4, "0")}`;
+  }
+  return null;
+};
+
 /**
  * Serialize a string to Python ``json.dumps(..., ensure_ascii=True)`` form.
  * Control characters use JSON short escapes; other non-ASCII uses ``\uXXXX``.
@@ -11,27 +36,8 @@ const pythonJsonString = (value: string): string => {
   let out = '"';
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
-    if (code === 0x22) {
-      out += '\\"';
-    } else if (code === 0x5c) {
-      out += "\\\\";
-    } else if (code === 0x08) {
-      out += "\\b";
-    } else if (code === 0x09) {
-      out += "\\t";
-    } else if (code === 0x0a) {
-      out += "\\n";
-    } else if (code === 0x0c) {
-      out += "\\f";
-    } else if (code === 0x0d) {
-      out += "\\r";
-    } else if (code < 0x20) {
-      out += `\\u${code.toString(16).padStart(4, "0")}`;
-    } else if (code > 0x7f) {
-      out += `\\u${code.toString(16).padStart(4, "0")}`;
-    } else {
-      out += value[index] ?? "";
-    }
+    const escaped = escapeJsonCodePoint(code);
+    out += escaped ?? value[index] ?? "";
   }
   out += '"';
   return out;
@@ -173,5 +179,9 @@ export const displayDigestMatchesDisclosed = (plan: ChannelImportResult): boolea
   if (typeof plan.display_digest !== "string" || plan.display_digest === "") {
     return false;
   }
-  return computeDisplayDigest(plan) === plan.display_digest;
+  try {
+    return computeDisplayDigest(plan) === plan.display_digest;
+  } catch {
+    return false;
+  }
 };

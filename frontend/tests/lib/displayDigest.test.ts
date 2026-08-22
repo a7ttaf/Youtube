@@ -29,4 +29,17 @@ describe("displayDigest", () => {
     expect(displayDigestMatchesDisclosed({ ...plan, display_digest: digest, dry_run: true, plan_fingerprint: "fp" })).toBe(true);
     expect(displayDigestMatchesDisclosed({ ...plan, display_digest: "deadbeef", dry_run: true, plan_fingerprint: "fp" })).toBe(false);
   });
+
+  it("returns false instead of throwing when canonical JSON cannot be built", () => {
+    const plan = {
+      content_owner_id: "COabc",
+      cms_status: "INSIDE_CMS",
+      counts: { CREATE: 1, UPDATE: 0, UNCHANGED: 0, ERROR: 0 },
+      rows: [{ channel_name: Symbol("bad") }],
+      display_digest: "abc123",
+      dry_run: true,
+      plan_fingerprint: "fp",
+    } as unknown as ChannelImportResult;
+    expect(displayDigestMatchesDisclosed(plan)).toBe(false);
+  });
 });
