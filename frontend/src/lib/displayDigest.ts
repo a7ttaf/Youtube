@@ -125,6 +125,18 @@ const computeDisplayDigestInWorker = async (plan: DisplayDigestPlanFields): Prom
 export const computeDisplayDigest = (plan: DisplayDigestPlanFields): string =>
   computeDisplayDigestFromFields(plan);
 
+// ============================================================================
+// Purpose: Off-main-thread display_digest compute with sync fallback on failure.
+// Database/ORM: None (frontend) — worker orchestration over displayDigestCore.
+// Standards: Dedicated worker when available; on worker/postMessage failure yields
+//   to main thread and falls back to sync computeDisplayDigestFromFields.
+// Blast Radius: Import preview/apply binding — digest drift rejects trusted plans
+//   (review #184, C1).
+// Connections:
+//   - File: frontend/src/lib/displayDigest.worker.ts -> Worker entry point.
+//   - File: frontend/src/lib/displayDigestCore.ts -> Canonical JSON + SHA-256.
+//   - File: frontend/src/lib/api/useChannelImport.ts -> assertUsableResult verify.
+// ============================================================================
 /** Off-main-thread variant: canonicalization + hashing run in a dedicated worker. */
 export const computeDisplayDigestAsync = async (
   plan: DisplayDigestPlanFields,

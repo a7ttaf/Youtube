@@ -1291,11 +1291,18 @@ const RESULT_CHECKS: ReadonlyArray<
   (result, request) => request.dryRun || result.counts.ERROR === 0,
 ];
 
-/**
- * Throw unless the body is usable. Throws rather than returning a verdict
- * because every failure above is the same outcome for the caller — on an apply
- * the write may well have committed and only the body was unreadable.
- */
+// ============================================================================
+// Purpose: Fail-closed admission gate for import preview/apply JSON bodies.
+// Database/ORM: None (frontend) — validates ChannelImportResult before UI state.
+// Standards: Structural RESULT_CHECKS first, then async display_digest recompute;
+//   throws ChannelImportShapeError (never silently accepts indeterminate bodies).
+// Blast Radius: Import preview/apply trust boundary — blocks malformed 2xx that
+//   substitute rows or digest tokens (review #184, C1).
+// Connections:
+//   - File: frontend/src/lib/displayDigest.ts -> displayDigestMatchesDisclosedAsync.
+//   - File: backend/ums_smart_revenue/api/channels.py -> import route contract.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> display_digest + fingerprint rules.
+// ============================================================================
 const assertUsableResult = async (
   result: ChannelImportResult,
   request: ImportRequestTarget,
