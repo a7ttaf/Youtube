@@ -178,7 +178,8 @@ describe("displayDigest", () => {
       // Leak proof: both throwing requests removed their own waiter entries,
       // so the fresh module's waiter map is empty. Without the fix, the map
       // holds exactly the two stale entries (observable via the count probe).
-      expect(freshModule.__workerWaiterCount()).toBe(0);
+      expect(freshModule.__workerWaiterCount).toBeTypeOf("function");
+      expect(freshModule.__workerWaiterCount?.()).toBe(0);
     } finally {
       (globalThis as { Worker?: unknown }).Worker = previousWorker;
       vi.resetModules();

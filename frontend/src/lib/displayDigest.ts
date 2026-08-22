@@ -144,12 +144,16 @@ const computeDisplayDigestInWorker = async (plan: DisplayDigestPlanFields): Prom
 };
 
 /**
- * Test-only introspection: the number of unresolved worker waiters. The
- * waiter map is closure-private by design; tests import a fresh module copy
- * (vi.resetModules) and read this after a failed postMessage to prove no
- * stale waiter entry leaks (PR #195 review). Undefined outside tests.
+ * Test-only introspection: pending worker waiter count.
+ *
+ * Defined only when `import.meta.env.MODE === "test"` (Vitest). In production
+ * and ordinary `vite`/`vite build` bundles this binding is `undefined`, so the
+ * production public API does not expose the private `workerWaiters` map.
+ * Tests import a fresh module copy (`vi.resetModules`) and call this after a
+ * failed `postMessage` to prove no stale waiter entry leaks (PR #195 review).
  */
-export const __workerWaiterCount = (): number => workerWaiters.size;
+export const __workerWaiterCount: (() => number) | undefined =
+  import.meta.env.MODE === "test" ? () => workerWaiters.size : undefined;
 
 // ============================================================================
 // Purpose: Recompute the server display_digest from exactly the disclosed plan
