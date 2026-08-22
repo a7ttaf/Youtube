@@ -113,22 +113,19 @@ describe("displayDigest", () => {
     // closure-private with no externally observable symptom, so this test pins
     // the observable contract: both calls still return the sync-recipe digest
     // and a broken worker never poisons later calls.
-    class ThrowingPostMessageWorker {
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      onerror: ((event: ErrorEvent) => void) | null = null;
-      onmessageerror: ((event: MessageEvent) => void) | null = null;
-      postMessage(): void {
-        throw new Error("detached or broken data channel");
-      }
-      terminate(): void {}
-      addEventListener(): void {}
-      removeEventListener(): void {}
-      dispatchEvent(): boolean {
-        return false;
-      }
-    }
+    // A structural Worker stand-in whose postMessage always throws: the
+    // module-level `digestWorker` latch is shared across tests in this file,
+    // so this test may run against an already-cached broken instance — which
+    // is exactly the leak scenario under test. Object shape, not a class,
+    // avoids analyzer complaints about unused `this`/empty methods while
+    // satisfying the same structural interface the module reads.
     const previousWorker = (globalThis as { Worker?: unknown }).Worker;
-    (globalThis as { Worker?: unknown }).Worker = ThrowingPostMessageWorker;
+    const brokenWorkerFactory = function WorkerStub(this: unknown): void {};
+    brokenWorkerFactory.prototype.postMessage = function postMessage(): void {
+      throw new Error("detached or broken data channel");
+    };
+    brokenWorkerFactory.prototype.terminate = function terminate(): void {};
+    (globalThis as { Worker?: unknown }).Worker = brokenWorkerFactory as unknown;
     try {
       const plan: Pick<
         ChannelImportResult,
