@@ -2311,7 +2311,7 @@ show.
 | `uv run ruff check backend tests scripts` | All checks passed | `line-length = 100` (`pyproject.toml:47`) — matches DeepSource FLK-E501 |
 | `uv run mypy backend` | **1 error** | NOT one of the four AGENTS.md gates — see B below |
 | `bun run test` (frontend) | 477 passed, 41 files | run from `frontend/` — `(cd frontend && bun run test)`; `bun`, never `npx` |
-| `(cd frontend && bun run typecheck)` / `(cd frontend && bun run build)` | clean | scripts live in `frontend/package.json`, not repo root |
+| `(cd frontend && bunx tsc --noEmit)` / `(cd frontend && bun run build)` | clean | at `9435af29` there was no `typecheck` script in `frontend/package.json` — the compiler was invoked directly; current main adds `bun run typecheck` as the canonical wrapper |
 | `git diff --check` | clean | |
 | DeepSource (6 analyzers) | all SUCCESS | |
 
@@ -2329,6 +2329,7 @@ db `postgres`, password `ums`, container `ums-mig-pg`).
 **POSIX shell** (inline env assignment is POSIX-only):
 
 ```bash
+set -e
 uv sync --extra dev --extra test --extra lint
 command -v docker >/dev/null 2>&1 || {
   echo "docker is required for this recipe" >&2
@@ -2339,11 +2340,10 @@ docker run -d --name ums-verify \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=test_ums \
   -p 127.0.0.1:55505:5432 \
-  postgres:18-alpine
-if [ $? -ne 0 ]; then
+  postgres:18-alpine || {
   echo "Failed to create ums-verify container; remove stale instance and retry" >&2
   exit 1
-fi
+}
 ready=0
 i=0
 while [ "$i" -lt 60 ]; do
@@ -2359,9 +2359,11 @@ if [ "$ready" -ne 1 ]; then
   docker rm -f ums-verify
   exit 1
 fi
+set +e
 UMS_TEST_DATABASE_URL="postgresql+psycopg://postgres:postgres@127.0.0.1:55505/test_ums" uv run pytest -q -rw
 pytest_exit=$?
-docker rm -f ums-verify
+set -e
+docker rm -f ums-verify || true
 exit $pytest_exit
 ```
 
@@ -2369,6 +2371,10 @@ exit $pytest_exit
 
 ```powershell
 uv sync --extra dev --extra test --extra lint
+if (-not $? -or $LASTEXITCODE -ne 0) {
+  Write-Error "uv sync failed"
+  exit 1
+}
 $null = Get-Command docker -ErrorAction Stop
 docker rm -f ums-verify 2>$null
 docker run -d --name ums-verify `
