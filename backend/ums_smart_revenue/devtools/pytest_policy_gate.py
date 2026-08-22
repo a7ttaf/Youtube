@@ -5,9 +5,9 @@
 # Standards: Static AST analysis, import alias resolution, deterministic paths.
 # Blast Radius: Test validation gate only — blocks CI/local runs on violations.
 # Connections:
-# - File: AGENTS.md -> "Never skip, xfail, delete, or loosen tests".
-# - File: backend/ums_smart_revenue/devtools/quality_gate.py -> Invokes this
-#   policy before the full pytest suite.
+#   - File: AGENTS.md -> "Never skip, xfail, delete, or loosen tests".
+#   - File: backend/ums_smart_revenue/devtools/quality_gate.py -> Invokes this
+#     policy before the full pytest suite.
 # ============================================================================
 """Fail-closed policy checks for the pytest suite."""
 
