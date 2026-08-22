@@ -63,6 +63,12 @@ class SqlAlchemyChannelRegistry:
         # A plain bool, not thread-local like the in-memory store's journal:
         # this registry is request-scoped, never a shared singleton.
         self._txn_active = False
+        # PUBLIC unit-of-work identity: the transaction boundary below is a
+        # SAVEPOINT on this session, so composed operations (the bulk
+        # import) are atomic only when every SQL adapter shares it —
+        # apply_channel_import validates that at entry via this attribute
+        # (PR #196 round 6, codex).
+        self.sql_unit_of_work: Session = session
 
     # ========================================================================
     # Purpose: SQL implementation of the store's transaction boundary — a

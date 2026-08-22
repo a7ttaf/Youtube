@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.sql_audit_sink import PlatformLaneAuditSink, SqlAlchemyAuditSink
 from ums_smart_revenue.connectors.google.youtube_analytics_client import list_target_channels
 from ums_smart_revenue.db.finance_models import (
     FinanceBase,
@@ -1318,3 +1319,24 @@ def test_transaction_rollback_resets_the_close_guard_memo():
         raise RuntimeError("staged failure")
 
     assert registry._guard_held is False
+
+
+def test_sql_adapters_declare_their_session_as_the_unit_of_work():
+    """apply_channel_import's shared-session validation reads this attribute.
+
+    Pins the DECLARATION on every SQL adapter the import composes (PR #196
+    round 6, codex): the guard duck-types ``sql_unit_of_work``, so an adapter
+    silently renaming or dropping the attribute would disarm the validation
+    without failing any of its behavior tests.
+    """
+    session = build_session()
+    assert SqlAlchemyChannelRegistry(session).sql_unit_of_work is session
+    assert SqlAlchemyChannelGroupRegistry(session).sql_unit_of_work is session
+    assert (
+        SqlAlchemyAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work
+        is session
+    )
+    assert (
+        PlatformLaneAuditSink(session, tenant_id=DEFAULT_TENANT_ID).sql_unit_of_work
+        is session
+    )

@@ -75,6 +75,9 @@ class SqlAlchemyChannelGroupRegistry:
         self._tenant_id = _resolve_tenant_id(tenant_id)
         # Request-scoped store, plain bool — see SqlAlchemyChannelRegistry.
         self._txn_active = False
+        # PUBLIC unit-of-work identity — see SqlAlchemyChannelRegistry:
+        # apply_channel_import validates shared-session wiring through it.
+        self.sql_unit_of_work: Session = session
 
     # ========================================================================
     # Purpose: SQL implementation of the group store's transaction boundary —

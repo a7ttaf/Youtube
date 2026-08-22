@@ -82,16 +82,29 @@ class InMemoryAuditSink:
         with self._lock:
             self.records.append(record)
 
+    # ========================================================================
+    # Purpose: The AuditSink.transaction() boundary in memory — mark the
+    #   record count on enter, truncate back to the mark on raise, so a
+    #   failed batch leaves no accepted prefix behind.
+    # Database/ORM: None (list-backed sink).
+    # Standards: HOLDS the sink's re-entrant lock for the boundary's whole
+    #   duration: the no-database tier shares this sink across threads, and
+    #   a foreign append landing past the mark would be deleted by the
+    #   positional truncation — serialized behind the batch instead, it
+    #   lands only after the boundary resolves, which is what makes the
+    #   truncation remove exactly the batch's own records (PR #196 round 3,
+    #   codex). Exceptions propagate unchanged.
+    # Blast Radius: Whether a failed multi-record batch leaves partial audit
+    #   records on the no-database tier. No SQL, no RLS.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/channel_import_apply.py -> the
+    #     import's buffered flush runs inside this boundary.
+    #   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> the
+    #     SAVEPOINT implementations of the same protocol method.
+    # ========================================================================
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """Mark the length on enter; truncate back on raise.
-
-        The boundary HOLDS the sink's lock for its whole duration, so no
-        foreign append can land past the mark while a batch is open — a
-        concurrent writer serializes behind the batch and appends after it
-        resolves, which is what makes the positional truncation remove
-        exactly the batch's own records.
-        """
+        """Mark the length on enter; truncate back to the mark on raise."""
         with self._lock:
             marked = len(self.records)
             try:

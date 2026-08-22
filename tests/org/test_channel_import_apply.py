@@ -947,3 +947,48 @@ def test_no_plan_promises_a_group_effect_the_write_pass_will_not_perform() -> No
         entry for entry in plan.entries if entry.outcome is not ChannelImportOutcome.ERROR
     ]
     assert [entry.group_id for entry in surviving] == ["cms-radio"]
+
+
+def _empty_plan() -> ChannelImportPlan:
+    return ChannelImportPlan(
+        entries=(), counts={outcome.value: 0 for outcome in ChannelImportOutcome}
+    )
+
+
+def test_apply_refuses_sql_adapters_wired_over_distinct_sessions() -> None:
+    """The shared-unit-of-work validation fails loud BEFORE any write.
+
+    The savepoint boundaries are per session: wired over distinct sessions
+    they are independent transactions, and a caller committing them
+    separately could persist group and audit writes for channel writes that
+    never landed (PR #196 round 6, codex). The in-memory stores stand in for
+    the SQL adapters here by declaring the same public ``sql_unit_of_work``
+    attribute the validation duck-types; the declaration on the REAL adapters
+    is pinned in tests/org/test_sql_channel_registry.py.
+    """
+    registry = ChannelRegistry()
+    groups = ChannelGroupRegistry()
+    sink = InMemoryAuditSink()
+    registry.sql_unit_of_work = object()
+    groups.sql_unit_of_work = object()
+
+    with pytest.raises(RuntimeError, match="share ONE session"):
+        _apply(_empty_plan(), registry, groups, sink)
+
+    assert registry.list_channels() == []
+    assert sink.records == []
+
+
+def test_apply_accepts_sql_adapters_sharing_one_session() -> None:
+    """One shared unit of work passes the validation and applies normally."""
+    registry = ChannelRegistry()
+    groups = ChannelGroupRegistry()
+    sink = InMemoryAuditSink()
+    shared = object()
+    registry.sql_unit_of_work = shared
+    groups.sql_unit_of_work = shared
+    sink.sql_unit_of_work = shared
+
+    _apply(_empty_plan(), registry, groups, sink)
+
+    assert [record.event_type for record in sink.records] == ["CHANNEL_IMPORTED"]

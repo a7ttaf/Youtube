@@ -106,15 +106,25 @@ class _BufferedAuditSink:
     def append(self, record: AuditRecord) -> None:
         self._pending.append(record)
 
+    # ========================================================================
+    # Purpose: The AuditSink.transaction() boundary over the BUFFER — mark
+    #   and truncate on raise, mirroring InMemoryAuditSink, so a batch of
+    #   buffered appends is all-or-nothing too.
+    # Database/ORM: None (list buffer, single-request lifetime).
+    # Standards: Nothing routes a boundary through the buffer today — the
+    #   apply holds exactly one and flushes it inside the REAL sink's
+    #   boundary — but AuditSink demands the capability: a sink that cannot
+    #   make a batch of its own appends atomic does not satisfy the
+    #   protocol. No lock, unlike InMemoryAuditSink: the buffer never
+    #   outlives its single apply call, so it is never shared.
+    # Blast Radius: None today; protocol completeness for future callers.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/audit_service.py -> the
+    #     AuditSink protocol requiring this method.
+    # ========================================================================
     @contextmanager
     def transaction(self) -> Iterator[None]:
-        """Truncate-restore over the buffer, mirroring InMemoryAuditSink.
-
-        Nothing appends through a boundary into the buffer today — the apply
-        holds exactly one and flushes it inside the REAL sink's boundary —
-        but a sink that satisfies AuditSink must be able to make a batch of
-        its own appends all-or-nothing, or it is not one.
-        """
+        """Truncate-restore over the buffer, mirroring InMemoryAuditSink."""
         marked = len(self._pending)
         try:
             yield
@@ -300,6 +310,53 @@ def plan_channel_import_with_stores(
 
 
 # ============================================================================
+# Purpose: Refuse an apply whose SQL-backed stores/sink span DIFFERENT
+#   sessions, before anything is written or locked. The boundary below is a
+#   SAVEPOINT per session: with one shared session (the request wiring) the
+#   savepoints commit or roll back together, but across sessions they are
+#   independent transactions — a caller committing them separately could
+#   persist group and audit writes for channel writes that never landed,
+#   cross-resource atomicity this module promises and cannot provide without
+#   a distributed coordinator (PR #196 round 6, codex).
+# Database/ORM: None — identity comparison over the adapters' declared
+#   ``sql_unit_of_work`` sessions. Adapters that declare none (the in-memory
+#   tier) are exempt: their journals are their own unit of work, and a mixed
+#   wiring is a test composition with no cross-session commit to protect.
+# Standards: Fail-loud wiring validation, RuntimeError like the boundary's
+#   nesting guard — a wiring bug is a programming error, never a domain 409.
+# Blast Radius: Direct callers only; the FastAPI route wires every adapter
+#   from one request session and never trips this.
+# Connections:
+#   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+#     declares sql_unit_of_work (as does sql_channel_groups.py).
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> declares it
+#     on both SQL sinks.
+# ============================================================================
+def _require_shared_sql_unit_of_work(
+    registry: ChannelRegistryStore,
+    groups: ChannelGroupRegistryStore,
+    audit_sink: AuditSink,
+) -> None:
+    """Raise RuntimeError when SQL adapters are wired over distinct sessions."""
+    sessions = [
+        session
+        for session in (
+            getattr(adapter, "sql_unit_of_work", None)
+            for adapter in (registry, groups, audit_sink)
+        )
+        if session is not None
+    ]
+    if len({id(session) for session in sessions}) > 1:
+        raise RuntimeError(
+            "apply_channel_import requires its SQL-backed registry, group "
+            "store, and audit sink to share ONE session: their savepoints "
+            "are otherwise independent transactions, and the import's "
+            "all-or-nothing promise cannot hold across separately committed "
+            "sessions"
+        )
+
+
+# ============================================================================
 # Purpose: Execute a bulk channel import plan — per-row registry writes
 #   (create_channel / update_inventory), group-membership reconciliation, and
 #   the full audit trail (per-channel, per-group-mutation, one summary).
@@ -308,7 +365,9 @@ def plan_channel_import_with_stores(
 #   AuditLogORM rows via the supplied AuditSink.
 # Standards: All-or-nothing — the caller wires every store and the sink to
 #   ONE transaction, so any raised error rolls the whole import back with its
-#   audit rows. Write-boundary rechecks over plan trust: audit diffs are
+#   audit rows; SQL adapters declare that unit of work via sql_unit_of_work,
+#   and the entry validation above refuses a wiring that splits it.
+#   Write-boundary rechecks over plan trust: audit diffs are
 #   rebuilt from what update_inventory actually replaced, group state is
 #   re-read under a row lock, and the CHANNEL_IMPORTED summary counts what was
 #   APPLIED, not what was planned — a planning tally would let the summary
@@ -426,6 +485,7 @@ def apply_channel_import(
     # reach the REAL sink only after both passes succeed, and the flush sits
     # INSIDE the boundary so a sink failure restores the stores exactly as a
     # write failure would.
+    _require_shared_sql_unit_of_work(registry, groups, audit_sink)
     buffered = _BufferedAuditSink()
     with registry.transaction(), groups.transaction():
         _require_planned_group_actions(plan, groups=groups, content_owner_id=content_owner_id)
