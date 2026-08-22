@@ -405,18 +405,22 @@ class ChannelGroupRegistry:
             undo.append((group_id, self._groups.get(group_id), written))
 
     # ========================================================================
-    # Purpose: In-memory read — every group, sorted by name.
+    # Purpose: In-memory read — every group, ACTIVE OR NOT, sorted by name.
     # Database/ORM: None (dict scan; the SQL adapter issues the SELECT).
     # Standards: Committed read under the store lock — an open boundary's
     #   uncommitted writes are never observed off-thread; the list()
     #   snapshot keeps iteration safe independent of the lock discipline.
+    #   DOCUMENTED DIVERGENCE: the SQL twin filters to ACTIVE groups; this
+    #   tier keeps no group-activity filter, so a test asserting
+    #   active-only listing must run the SQL tier.
     # Blast Radius: Read-only; groups API listing and scope selection.
     # Connections:
     #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
-    #     SQL implementation this must answer identically to.
+    #     SQL implementation (active-only), which this deliberately does
+    #     not mirror on group activity.
     # ========================================================================
     def list_groups(self) -> list[ChannelGroupEntry]:
-        """Return every group, sorted by name.
+        """Return every group, active or not, sorted by name.
 
         In-memory registry: every member is treated as active, so the full
         member set equals the active member set and this returns the same
@@ -431,11 +435,14 @@ class ChannelGroupRegistry:
     # Purpose: In-memory read — every group with FULL membership; equals
     #   list_groups here because every in-memory member counts as active.
     # Database/ORM: None (dict scan).
-    # Standards: Committed read under the store lock — see list_groups.
+    # Standards: Committed read under the store lock — see list_groups,
+    #   including its DOCUMENTED DIVERGENCE: inactive groups are returned
+    #   here while the SQL twin lists active groups only (their difference
+    #   on this tier is nil; on SQL it is full-vs-active MEMBER sets).
     # Blast Radius: Read-only; groups management authorization.
     # Connections:
     #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
-    #     SQL implementation, where full and active member sets differ.
+    #     SQL implementation (active groups, full members).
     # ========================================================================
     def list_groups_full(self) -> list[ChannelGroupEntry]:
         """Return every group with full membership, sorted by name.
@@ -625,15 +632,18 @@ class ChannelGroupRegistry:
             }
 
     # ========================================================================
-    # Purpose: In-memory read — a group's active member channel ids (every
-    #   in-memory member counts as active), or None for a missing group.
+    # Purpose: In-memory read — a group's member channel ids, or None for a
+    #   missing group.
     # Database/ORM: None (single-key dict get under the store lock).
-    # Standards: Committed read — see list_groups. The SQL counterpart
-    #   filters by YouTubeChannelORM.active; parity is on the ACTIVE set.
+    # Standards: Committed read — see list_groups. DOCUMENTED DIVERGENCE:
+    #   returns the stored member ids UNFILTERED — this tier has no channel
+    #   registry join, so every member counts as active — while the SQL
+    #   counterpart filters members by YouTubeChannelORM.active. A test
+    #   asserting active-member filtering must run the SQL tier.
     # Blast Radius: Read-only; the revenue scope selector's member source.
     # Connections:
     #   - File: backend/ums_smart_revenue/org/sql_channel_groups.py -> the
-    #     SQL implementation this must answer identically to.
+    #     SQL implementation (active members only).
     # ========================================================================
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.
