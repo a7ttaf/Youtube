@@ -2327,11 +2327,16 @@ Matches the repo-standard image in `tests/db/_postgres_helpers.py` and
 
 ```bash
 uv sync --extra dev --extra test --extra lint
+docker rm -f ums-verify 2>/dev/null || true
 docker run -d --name ums-verify \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=test_ums \
   -p 127.0.0.1:55505:5432 \
   postgres:18-alpine
+if [ $? -ne 0 ]; then
+  echo "Failed to create ums-verify container; remove stale instance and retry" >&2
+  exit 1
+fi
 ready=0
 for _ in $(seq 1 60); do
   if docker exec ums-verify pg_isready -U postgres -d test_ums >/dev/null 2>&1; then
@@ -2355,11 +2360,16 @@ exit $pytest_exit
 
 ```powershell
 uv sync --extra dev --extra test --extra lint
+docker rm -f ums-verify 2>$null
 docker run -d --name ums-verify `
   -e POSTGRES_PASSWORD=postgres `
   -e POSTGRES_DB=test_ums `
   -p 127.0.0.1:55505:5432 `
   postgres:18-alpine
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Failed to create ums-verify container; remove stale instance and retry"
+  exit 1
+}
 $ready = $false
 for ($i = 0; $i -lt 60; $i++) {
   Start-Sleep -Seconds 1
