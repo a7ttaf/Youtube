@@ -237,7 +237,7 @@ class ChannelRegistryStore(Protocol):
     #     apply_channel_import, the one boundary consumer, which wraps BOTH
     #     passes and the audit flush in this plus the group store's boundary.
     #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py -> the
-    #     delegating SQL implementation.
+    #     SAVEPOINT implementation.
     # ========================================================================
     def transaction(self) -> AbstractContextManager[None]:
         """Return a context manager making the wrapped writes all-or-nothing.
@@ -248,6 +248,12 @@ class ChannelRegistryStore(Protocol):
         is undone — writes by OTHER actors interleaved during it stand, as a
         foreign transaction's committed rows survive a SQL rollback — and the
         exception propagates unchanged.
+
+        Raises:
+            RuntimeError: when entered while this store already holds an
+                open boundary — every implementation refuses nesting (the
+                in-memory adapter per thread, the SQL adapter per store
+                instance).
         """
         ...
 

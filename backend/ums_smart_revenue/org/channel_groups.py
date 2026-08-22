@@ -317,8 +317,13 @@ class ChannelGroupRegistryStore(Protocol):
         """Return a context manager making the wrapped writes all-or-nothing.
 
         See ``ChannelRegistryStore.transaction`` for the full contract this
-        mirrors. In-memory implementations raise ``RuntimeError`` on
-        same-thread nesting.
+        mirrors.
+
+        Raises:
+            RuntimeError: on same-store nesting — every implementation
+                refuses it (the in-memory adapter per thread, the SQL
+                adapter per store instance), exactly as the registry
+                protocol documents.
         """
         ...
 
