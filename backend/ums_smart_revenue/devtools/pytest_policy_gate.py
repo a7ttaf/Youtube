@@ -1,3 +1,14 @@
+# ============================================================================
+# Purpose: Fail-closed AST policy gate for pytest — scans collected test
+#   modules and conftests for forbidden skip/xfail/skipif usage.
+# Database/ORM: None.
+# Standards: Static AST analysis, import alias resolution, deterministic paths.
+# Blast Radius: Test validation gate only — blocks CI/local runs on violations.
+# Connections:
+#   - File: AGENTS.md -> "Never skip, xfail, delete, or loosen tests".
+#   - File: backend/ums_smart_revenue/devtools/quality_gate.py -> Invokes this
+#     policy before the full pytest suite.
+# ============================================================================
 """Fail-closed policy checks for the pytest suite."""
 
 from __future__ import annotations
@@ -594,7 +605,7 @@ def _resolve_pytest_plugin_path(project_root: Path, module: str) -> Path | None:
     if not module or module.startswith("."):
         return None
     module_parts = module.split(".")
-    candidates = []
+    candidates: list[Path] = []
     for root in (project_root, project_root / "backend"):
         module_path = root.joinpath(*module_parts)
         candidates.extend((module_path.with_suffix(".py"), module_path / "__init__.py"))
