@@ -88,6 +88,18 @@ const getDigestWorker = (): Worker | null => {
   return digestWorker;
 };
 
+// ============================================================================
+// Purpose: Worker orchestration for off-main-thread display_digest compute.
+// Database/ORM: None (frontend) — spawns worker, correlates requests, handles failures.
+// Standards: Lazy worker init; on worker/postMessage failure rejects waiters and
+//   falls back to sync computeDisplayDigestFromFields on the main thread.
+// Blast Radius: Import preview/apply binding — worker path must match sync recipe
+//   (review #184, C1).
+// Connections:
+//   - File: frontend/src/lib/displayDigest.worker.ts -> onmessage handler.
+//   - File: frontend/src/lib/displayDigestCore.ts -> computeDisplayDigestFromFields.
+//   - File: frontend/src/lib/displayDigest.ts -> computeDisplayDigestAsync wrapper.
+// ============================================================================
 const computeDisplayDigestInWorker = async (plan: DisplayDigestPlanFields): Promise<string> => {
   const worker = getDigestWorker();
   if (!worker) {

@@ -59,6 +59,18 @@ const canonicalizeScalar = (value: unknown): string | null => {
   return null;
 };
 
+// ============================================================================
+// Purpose: Recursive canonical JSON serializer matching Python json.dumps parity.
+// Database/ORM: None (frontend) — pure string builder for digest inputs.
+// Standards: sort_keys=True, separators=(',', ':'), ensure_ascii=True; rejects
+//   non-finite numbers and unsupported value types with TypeError.
+// Blast Radius: Import digest trust boundary — serialization drift causes false
+//   409s or accepts mismatched plans (review #184, C1).
+// Connections:
+//   - File: backend/ums_smart_revenue/api/channels.py -> server json.dumps recipe.
+//   - File: frontend/src/lib/displayDigestCore.ts -> computeDisplayDigestFromFields.
+//   - File: Docs/12_BACKEND_API_SPEC.md -> canonical JSON contract.
+// ============================================================================
 const pythonCanonicalJson = (value: unknown): string => {
   const scalar = canonicalizeScalar(value);
   if (scalar !== null) {
