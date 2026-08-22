@@ -370,6 +370,17 @@ class ChannelRegistry:
                 (youtube_channel_id, self._channels.get(youtube_channel_id), written)
             )
 
+    # ========================================================================
+    # Purpose: In-memory read — every ACTIVE channel, sorted by id.
+    # Database/ORM: None (dict scan; the SQL adapter issues the SELECT).
+    # Standards: Committed read under the store lock — an open boundary's
+    #   uncommitted writes are never observed off-thread; the list()
+    #   snapshot keeps iteration safe independent of the lock discipline.
+    # Blast Radius: Read-only; channel API listings and import planning.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def list_channels(self) -> list[ChannelRegistryEntry]:
         """Return every ACTIVE channel, sorted by youtube_channel_id.
 
@@ -383,6 +394,17 @@ class ChannelRegistry:
                 key=lambda channel: channel.youtube_channel_id,
             )
 
+    # ========================================================================
+    # Purpose: In-memory read — the requested channels by id set, active
+    #   only unless include_inactive; unknown ids silently absent.
+    # Database/ORM: None (dict scan; the SQL adapter issues the SELECT).
+    # Standards: Committed read under the store lock; list() snapshot for
+    #   iteration safety — see list_channels.
+    # Blast Radius: Read-only; import planning's existing-channel lookup.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def list_channels_by_ids(
         self, youtube_channel_ids: set[str], *, include_inactive: bool = False
     ) -> list[ChannelRegistryEntry]:
@@ -403,11 +425,33 @@ class ChannelRegistry:
                 key=lambda channel: channel.youtube_channel_id,
             )
 
+    # ========================================================================
+    # Purpose: In-memory read — one channel by id, active or not.
+    # Database/ORM: None (single-key dict get).
+    # Standards: Committed read under the store lock — see list_channels.
+    # Blast Radius: Read-only; route 404 decisions and import per-row reads.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
         """Return the channel (active or not) by id, or None. Committed read."""
         with self._lock:
             return self._channels.get(youtube_channel_id)
 
+    # ========================================================================
+    # Purpose: In-memory write — mint one channel entry, deriving its
+    #   initial revenue_source_status from the revenue_required flag.
+    # Database/ORM: None (dict insert; the SQL adapter owns the INSERT and
+    #   its uniqueness constraint).
+    # Standards: Duplicate id raises the same typed conflict the SQL unique
+    #   key produces — parity a test could assert. Runs under the store
+    #   lock and journals the write so an open boundary can undo it.
+    # Blast Radius: Channel inventory; the bulk import's CREATE rows.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def create_channel(
         self,
         *,
@@ -440,6 +484,20 @@ class ChannelRegistry:
             self._channels[youtube_channel_id] = channel
             return channel
 
+    # ========================================================================
+    # Purpose: In-memory write — re-parent one channel's primary company
+    #   mapping, leaving every other field untouched.
+    # Database/ORM: None (dict replace; the SQL adapter adds the row lock
+    #   and the locked-month re-parenting guard, which have no in-memory
+    #   analogue and are pinned in its own tests).
+    # Standards: Missing channel raises KeyError for the route to map.
+    #   Runs under the store lock and journals the write — see
+    #   create_channel.
+    # Blast Radius: Company/sector attribution for the mapped channel.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def update_mapping(
         self, *, youtube_channel_id: str, primary_company_id: str | None
     ) -> ChannelRegistryEntry:
@@ -462,6 +520,19 @@ class ChannelRegistry:
             self._channels[youtube_channel_id] = updated
             return updated
 
+    # ========================================================================
+    # Purpose: In-memory write — stamp or clear one channel's CMS content
+    #   owner, leaving every other field untouched.
+    # Database/ORM: None (dict replace; the SQL adapter owns the row lock).
+    # Standards: Missing channel raises KeyError; the owner id is
+    #   normalized by the shared helper so both tiers store the same form.
+    #   Runs under the store lock and journals the write — see
+    #   create_channel.
+    # Blast Radius: Connector ingest targeting via content_owner_id.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #     the SQL implementation this must answer identically to.
+    # ========================================================================
     def update_content_owner(
         self, *, youtube_channel_id: str, content_owner_id: str | None
     ) -> ChannelRegistryEntry:
