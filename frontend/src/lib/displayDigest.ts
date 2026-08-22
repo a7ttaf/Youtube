@@ -26,6 +26,28 @@ const workerWaiters = new Map<
   { resolve: (digest: string) => void; reject: (error: Error) => void }
 >();
 
+const rejectAllWorkerWaiters = (error: Error): void => {
+  for (const waiter of workerWaiters.values()) {
+    waiter.reject(error);
+  }
+  workerWaiters.clear();
+};
+
+const disableDigestWorker = (): void => {
+  if (digestWorker) {
+    digestWorker.onmessage = null;
+    digestWorker.onerror = null;
+    digestWorker.onmessageerror = null;
+    digestWorker.terminate();
+  }
+  digestWorker = null;
+};
+
+const handleDigestWorkerFailure = (message: string): void => {
+  rejectAllWorkerWaiters(new Error(message));
+  disableDigestWorker();
+};
+
 const ensureDigestWorkerListener = (worker: Worker): void => {
   worker.onmessage = (event: MessageEvent<DigestWorkerResponse>) => {
     const waiter = workerWaiters.get(event.data.id);
@@ -38,6 +60,12 @@ const ensureDigestWorkerListener = (worker: Worker): void => {
       return;
     }
     waiter.resolve(event.data.digest);
+  };
+  worker.onerror = () => {
+    handleDigestWorkerFailure("display digest worker failed");
+  };
+  worker.onmessageerror = () => {
+    handleDigestWorkerFailure("display digest worker message error");
   };
 };
 
@@ -68,10 +96,15 @@ const computeDisplayDigestInWorker = async (plan: DisplayDigestPlanFields): Prom
   }
   const id = nextWorkerRequestId + 1;
   nextWorkerRequestId = id;
-  return new Promise<string>((resolve, reject) => {
-    workerWaiters.set(id, { resolve, reject });
-    worker.postMessage({ id, plan });
-  });
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      workerWaiters.set(id, { resolve, reject });
+      worker.postMessage({ id, plan });
+    });
+  } catch {
+    await yieldToMainThread();
+    return computeDisplayDigestFromFields(plan);
+  }
 };
 
 // ============================================================================
@@ -95,7 +128,9 @@ export const computeDisplayDigest = (plan: DisplayDigestPlanFields): string =>
 /** Off-main-thread variant: canonicalization + hashing run in a dedicated worker. */
 export const computeDisplayDigestAsync = async (
   plan: DisplayDigestPlanFields,
-): Promise<string> => computeDisplayDigestInWorker(plan);
+): Promise<string> => {
+  return await computeDisplayDigestInWorker(plan);
+};
 
 // ============================================================================
 // Purpose: Verify a plan's display_digest matches a client-side recomputation

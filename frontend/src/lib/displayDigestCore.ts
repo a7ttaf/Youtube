@@ -75,6 +75,19 @@ const pythonCanonicalJson = (value: unknown): string => {
   throw new TypeError("display digest canonical JSON rejects unsupported values");
 };
 
+// ============================================================================
+// Purpose: RFC 6234 SHA-256 over UTF-8 bytes for display_digest verification.
+// Database/ORM: None (frontend) — pure digest primitive; no I/O.
+// Standards: Sync implementation used by the worker, test fixtures, and the
+//   plain-HTTP fallback when Web Crypto or Workers are unavailable.
+// Blast Radius: Import preview/apply binding — a wrong digest rejects a
+//   plan the operator would otherwise trust (review #184, C1).
+// Connections:
+// - File: frontend/src/lib/displayDigest.ts -> worker orchestration + async verify.
+// - File: frontend/src/lib/displayDigest.worker.ts -> off-thread digest compute.
+// - File: backend/ums_smart_revenue/api/channels.py -> _display_digest recipe.
+// - File: Docs/12_BACKEND_API_SPEC.md -> import plan contract.
+// ============================================================================
 export const sha256Hex = (message: string): string => {
   const msg = new TextEncoder().encode(message);
   const roundConstants = new Uint32Array([
