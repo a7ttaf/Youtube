@@ -326,12 +326,13 @@ class ChannelGroupRegistry:
         # journal must neither capture nor revert another's writes
         # (PR #196 round 2, codex). `undo` holds the active journal or None.
         self._txn = threading.local()
-        # The store-wide write lock — see ChannelRegistry.__init__ for the
-        # full rationale (PR #196 round 3): boundaries hold it, write methods
-        # take it, another thread's API write serializes behind an open
-        # boundary. Re-entrant; reads stay lock-free (iterating readers
-        # take list(...) snapshots — PR #196 round 4, see ChannelRegistry).
-        self._write_lock = threading.RLock()
+        # The store-wide lock — see ChannelRegistry.__init__ for the full
+        # rationale (PR #196 rounds 3-5): a boundary holds it for its whole
+        # duration and every public method, write AND read, takes it
+        # (re-entrant), so another thread neither builds on nor OBSERVES an
+        # open boundary's uncommitted state. Iterating readers also take
+        # list(...) snapshots (round 4) as lock-independent iteration safety.
+        self._lock = threading.RLock()
 
     # ========================================================================
     # Purpose: In-memory implementation of the group store's transaction
@@ -360,7 +361,9 @@ class ChannelGroupRegistry:
         its docstring for the full semantics): an entry restores its
         pre-image only while the key still holds the exact object this
         boundary wrote, so a foreign writer landing after us keeps its value
-        — the SQL row-lock outcome (PR #196 round 2, qodo).
+        — the SQL row-lock outcome (PR #196 round 2, qodo). The boundary
+        holds the store lock, which all reads and writes take, so
+        uncommitted boundary state is never observable off-thread.
 
         Raises:
             RuntimeError: when entered while this THREAD already holds an
@@ -368,7 +371,7 @@ class ChannelGroupRegistry:
         """
         if getattr(self._txn, "undo", None) is not None:
             raise RuntimeError("ChannelGroupRegistry.transaction does not nest")
-        with self._write_lock:
+        with self._lock:
             undo: list[tuple[str, ChannelGroupEntry | None, ChannelGroupEntry]] = []
             self._txn.undo = undo
             try:
@@ -394,13 +397,25 @@ class ChannelGroupRegistry:
             undo.append((group_id, self._groups.get(group_id), written))
 
     def list_groups(self) -> list[ChannelGroupEntry]:
-        # In-memory registry: every member is treated as active. The full
-        # member set is the same as the active member set, so list_groups
-        # and list_groups_full return the same payload.
-        return sorted(list(self._groups.values()), key=lambda group: group.name)
+        """Return every group, sorted by name.
+
+        In-memory registry: every member is treated as active, so the full
+        member set equals the active member set and this returns the same
+        payload as ``list_groups_full``. Committed reads: takes the store
+        lock, so an open boundary's uncommitted writes are never observed
+        off-thread (see the lock note in ``__init__``).
+        """
+        with self._lock:
+            return sorted(list(self._groups.values()), key=lambda group: group.name)
 
     def list_groups_full(self) -> list[ChannelGroupEntry]:
-        return sorted(list(self._groups.values()), key=lambda group: group.name)
+        """Return every group with full membership, sorted by name.
+
+        Identical to ``list_groups`` in memory (every member counts as
+        active — see its docstring, including the committed-read note).
+        """
+        with self._lock:
+            return sorted(list(self._groups.values()), key=lambda group: group.name)
 
     def list_synced_groups(self, *, content_owner_id: str | None = None) -> list[ChannelGroupEntry]:
         """Return every CMS-keyed group, active or not, for sync planning.
@@ -409,67 +424,75 @@ class ChannelGroupRegistry:
         so legacy/unstamped groups stay reconcilable instead of colliding on
         the tenant-wide unique cms_group_id.
         """
-        return [
-            group
-            for group in list(self._groups.values())
-            if group.cms_group_id is not None
-            and (
-                content_owner_id is None
-                or group.content_owner_id is None
-                or group.content_owner_id == content_owner_id
-            )
-        ]
+        with self._lock:
+            return [
+                group
+                for group in list(self._groups.values())
+                if group.cms_group_id is not None
+                and (
+                    content_owner_id is None
+                    or group.content_owner_id is None
+                    or group.content_owner_id == content_owner_id
+                )
+            ]
 
     def get_group(self, group_id: str, *, for_update: bool = False) -> ChannelGroupEntry | None:
         """Return the group by id, or None.
 
-        ``for_update`` is a no-op in memory (single-threaded test registry),
-        matching get_group_by_cms_id's documented divergence; the SQL
-        implementation takes the real FOR NO KEY UPDATE row lock.
+        ``for_update`` is a no-op in memory: the store lock every method
+        takes already serializes this read against writers, matching
+        get_group_by_cms_id's documented divergence; the SQL implementation
+        takes the real FOR NO KEY UPDATE row lock.
         """
-        return self._groups.get(group_id)
+        with self._lock:
+            return self._groups.get(group_id)
 
     def get_group_by_cms_id(
         self, cms_group_id: str, *, for_update: bool = False
     ) -> ChannelGroupEntry | None:
         """Return the group carrying this CMS key, or None.
 
-        ``for_update`` is a no-op in memory (single-threaded test registry);
-        the SQL implementation row-locks the group so an archived-state check
-        at the write boundary cannot race a concurrent archive.
+        ``for_update`` is a no-op in memory (the store lock already
+        serializes this read against writers); the SQL implementation
+        row-locks the group so an archived-state check at the write
+        boundary cannot race a concurrent archive.
         """
-        for group in list(self._groups.values()):
-            if group.cms_group_id == cms_group_id:
-                return group
-        return None
+        with self._lock:
+            for group in list(self._groups.values()):
+                if group.cms_group_id == cms_group_id:
+                    return group
+            return None
 
     def list_archived_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
         """Return the subset of CMS keys whose existing group is archived."""
-        return {
-            group.cms_group_id
-            for group in list(self._groups.values())
-            if group.cms_group_id in cms_group_ids and not group.active
-        }
+        with self._lock:
+            return {
+                group.cms_group_id
+                for group in list(self._groups.values())
+                if group.cms_group_id in cms_group_ids and not group.active
+            }
 
     def list_foreign_owner_cms_group_ids(
         self, cms_group_ids: set[str], *, content_owner_id: str
     ) -> set[str]:
         """Return the subset of CMS keys stamped to a different content owner."""
-        return {
-            group.cms_group_id
-            for group in list(self._groups.values())
-            if group.cms_group_id in cms_group_ids
-            and group.content_owner_id is not None
-            and group.content_owner_id != content_owner_id
-        }
+        with self._lock:
+            return {
+                group.cms_group_id
+                for group in list(self._groups.values())
+                if group.cms_group_id in cms_group_ids
+                and group.content_owner_id is not None
+                and group.content_owner_id != content_owner_id
+            }
 
     def list_adoptable_cms_group_ids(self, cms_group_ids: set[str]) -> set[str]:
         """Return the subset of CMS keys whose existing group is owner-NULL."""
-        return {
-            group.cms_group_id
-            for group in list(self._groups.values())
-            if group.cms_group_id in cms_group_ids and group.content_owner_id is None
-        }
+        with self._lock:
+            return {
+                group.cms_group_id
+                for group in list(self._groups.values())
+                if group.cms_group_id in cms_group_ids and group.content_owner_id is None
+            }
 
     # ========================================================================
     # Purpose: In-memory implementation of the "this owner already holds it"
@@ -499,11 +522,13 @@ class ChannelGroupRegistry:
         self, cms_group_ids: set[str], *, content_owner_id: str
     ) -> set[str]:
         """Return the subset of CMS keys already stamped to this content owner."""
-        return {
-            group.cms_group_id
-            for group in list(self._groups.values())
-            if group.cms_group_id in cms_group_ids and group.content_owner_id == content_owner_id
-        }
+        with self._lock:
+            return {
+                group.cms_group_id
+                for group in list(self._groups.values())
+                if group.cms_group_id in cms_group_ids
+                and group.content_owner_id == content_owner_id
+            }
 
     def get_active_member_channels(self, group_id: str) -> tuple[str, ...] | None:
         """Return active member channel ids for a group, or None if the group is missing.
@@ -511,10 +536,11 @@ class ChannelGroupRegistry:
         In-memory implementation: every member is treated as active. The
         SQL counterpart filters by YouTubeChannelORM.active.
         """
-        group = self._groups.get(group_id)
-        if group is None:
-            return None
-        return group.channel_ids
+        with self._lock:
+            group = self._groups.get(group_id)
+            if group is None:
+                return None
+            return group.channel_ids
 
     def create_group(
         self,
@@ -525,7 +551,7 @@ class ChannelGroupRegistry:
         cms_group_id: str | None = None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        with self._write_lock:
+        with self._lock:
             # Parity with the SQL store's per-tenant unique key: a duplicate
             # CMS key must fail typed here too, not silently create a second
             # group. Checked INSIDE the lock — check-then-write races too.
@@ -554,7 +580,7 @@ class ChannelGroupRegistry:
         active: bool | None,
         content_owner_id: str | None = None,
     ) -> ChannelGroupEntry:
-        with self._write_lock:
+        with self._lock:
             group = self._require_group(group_id)
             # Parity with the SQL store: adopt-only, reassignment raises.
             if content_owner_id is not None:
@@ -580,7 +606,7 @@ class ChannelGroupRegistry:
         SETTING an owner, not erasing one. Reports the erased owner id
         alongside the cleared group, matching the SQL store's contract.
         """
-        with self._write_lock:
+        with self._lock:
             group = self._require_group(group_id)
             previous_content_owner_id = group.content_owner_id
             if previous_content_owner_id is None:
@@ -595,7 +621,7 @@ class ChannelGroupRegistry:
             )
 
     def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
-        with self._write_lock:
+        with self._lock:
             group = self._require_group(group_id)
             updated = replace(
                 group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids]))
@@ -605,7 +631,7 @@ class ChannelGroupRegistry:
             return updated
 
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
-        with self._write_lock:
+        with self._lock:
             group = self._require_group(group_id)
             updated = replace(
                 group,

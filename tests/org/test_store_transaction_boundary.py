@@ -273,6 +273,84 @@ def test_registry_boundary_is_thread_local_and_serializes_writers() -> None:
     assert survivor is not None and survivor.channel_name == "Other Thread's Channel"
 
 
+def test_registry_readers_never_observe_uncommitted_boundary_state() -> None:
+    """A reader on another thread sees committed state only, as under MVCC.
+
+    Reads take the same store lock as writes (PR #196 round 5, codex): a
+    lock-free read could observe a channel this open boundary minted and is
+    about to roll back — a dirty read SQL never shows — letting a concurrent
+    request return or plan against a phantom entry. The GIL cannot pin this
+    (it gives memory safety, not isolation). The reader STARTS while the
+    boundary is open, so it blocks on the store lock until the rollback
+    completes; the timed join inside the boundary hands a hypothetical
+    lock-free reader a generous window to run and capture the phantom, so
+    this test fails on lock-free reads instead of passing by scheduling
+    luck, while a blocked reader just waits the timeout out.
+    """
+    registry = ChannelRegistry([])
+    observed: dict[str, object] = {}
+    reader_errors: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            observed["get"] = registry.get_channel(CHANNEL_ID)
+            observed["listed"] = registry.list_channels()
+        except BaseException as exc:  # noqa: BLE001 — the test must SEE any failure
+            reader_errors.append(exc)
+
+    thread = threading.Thread(target=reader)
+    with pytest.raises(_BoomError), registry.transaction():
+        registry.create_channel(
+            youtube_channel_id=CHANNEL_ID,
+            channel_name="Uncommitted",
+            primary_company_id=None,
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+        )
+        # The boundary thread reads its OWN uncommitted write (the lock is
+        # re-entrant) — the read-your-own-writes half of the SQL parity.
+        own_read = registry.get_channel(CHANNEL_ID)
+        assert own_read is not None and own_read.channel_name == "Uncommitted"
+        thread.start()
+        thread.join(timeout=0.2)
+        raise _BoomError()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert reader_errors == []
+    assert observed["get"] is None
+    assert observed["listed"] == []
+
+
+def test_groups_readers_never_observe_uncommitted_boundary_state() -> None:
+    """Mirror of the registry reader-isolation pin, over the group store."""
+    groups = ChannelGroupRegistry()
+    observed: dict[str, object] = {}
+    reader_errors: list[BaseException] = []
+
+    def reader() -> None:
+        try:
+            observed["by_cms"] = groups.get_group_by_cms_id("cms-minted")
+            observed["listed"] = groups.list_groups()
+        except BaseException as exc:  # noqa: BLE001 — the test must SEE any failure
+            reader_errors.append(exc)
+
+    thread = threading.Thread(target=reader)
+    with pytest.raises(_BoomError), groups.transaction():
+        groups.create_group(
+            name="minted", group_type="SECTOR", channel_ids=[], cms_group_id="cms-minted"
+        )
+        thread.start()
+        thread.join(timeout=0.2)
+        raise _BoomError()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert reader_errors == []
+    assert observed["by_cms"] is None
+    assert observed["listed"] == []
+
+
 def _audit_record(event_type: str) -> AuditRecord:
     """A minimal record; only identity matters to the boundary tests."""
     return AuditRecord(

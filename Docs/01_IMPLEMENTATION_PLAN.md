@@ -496,10 +496,11 @@ on real ingestion (Phase 2) and the inventory load workflow.
   adapters keep a PER-THREAD undo JOURNAL of their own write methods with
   compare-and-restore replay (own writes undone only while the key still
   holds the object the boundary wrote; a foreign overwrite or delete stands,
-  as a committed SQL row survives a rollback), and serialize writers behind
-  a store-wide re-entrant lock — the coarse analogue of PG row locks — so a
-  concurrent thread's write can neither read nor build on state a rollback
-  retracts. `apply_channel_import` wraps its pre-flight, BOTH passes, and
+  as a committed SQL row survives a rollback), and serialize writers AND
+  readers behind a store-wide re-entrant lock — the coarse analogue of PG
+  row locks plus MVCC's no-dirty-reads — so a concurrent thread can neither
+  build on nor observe state a rollback retracts, while the boundary thread
+  reads its own writes. `apply_channel_import` wraps its pre-flight, BOTH passes, and
   the audit flush in one boundary, with audit records buffered until the
   passes succeed and the flush inside the sink's own boundary (SAVEPOINT on
   the SQL sinks, lock-serialized truncate-restore on the in-memory sink) so

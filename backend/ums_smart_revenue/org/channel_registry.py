@@ -250,20 +250,23 @@ class ChannelRegistry:
         # (PR #196 round 2, codex). The `undo` attribute holds the active
         # journal — (key, pre-image-or-None) per write — or None.
         self._txn = threading.local()
-        # The store-wide WRITE lock — the coarse in-memory analogue of the
-        # SQL tier's row locks. A transaction() boundary holds it for its
-        # whole duration and every write method takes it, so another
-        # thread's API write serializes BEHIND an open boundary and lands
-        # AFTER its rollback: it can neither read nor build upon state the
-        # rollback is about to retract (PR #196 round 3, codex). Re-entrant,
-        # so the boundary-holding thread's own writes pass through. Reads
-        # stay lock-free — single-key dict access is atomic under the GIL,
-        # and ITERATING readers first take a list(...) snapshot of the dict
-        # view (one C-level copy, no bytecode runs mid-copy), so a
-        # concurrent write can never resize the dict under a live iterator
-        # (PR #196 round 4, qodo). SQL readers do not block under MVCC
-        # either.
-        self._write_lock = threading.RLock()
+        # The store-wide lock — the coarse in-memory analogue of the SQL
+        # tier's transaction isolation. A transaction() boundary holds it
+        # for its whole duration, and every public method — writes AND
+        # reads — takes it (re-entrant, so the boundary-holding thread
+        # passes through):
+        #   - another thread's write serializes BEHIND an open boundary
+        #     and lands after its rollback, never building on state the
+        #     rollback is about to retract (PR #196 round 3, codex);
+        #   - another thread's READ serializes the same way, so an open
+        #     boundary's uncommitted writes are never observable off-thread
+        #     — the GIL gives memory safety, not isolation, and SQL's MVCC
+        #     never shows uncommitted rows (PR #196 round 5, codex). The
+        #     boundary thread reads its own writes, matching SQL.
+        # Iterating readers also take list(...) snapshots of the dict views
+        # (PR #196 round 4, qodo) — redundant under the lock, kept as
+        # iteration safety independent of the lock discipline.
+        self._lock = threading.RLock()
         for channel in channels or []:
             if channel.youtube_channel_id in self._channels:
                 raise ChannelRegistryConflictError(
@@ -314,6 +317,11 @@ class ChannelRegistry:
         ``_channels`` directly — a foreign transaction's committed write is
         not this store's write, and the journal must not see it.
 
+        The boundary holds the store lock for its whole duration, and every
+        public read and write takes that lock, so other threads neither
+        build on nor observe uncommitted boundary state; the boundary
+        thread itself reads its own writes (re-entrant lock), matching SQL.
+
         Raises:
             RuntimeError: when entered while this THREAD already holds an
                 open boundary — one enter per logical operation; nesting is
@@ -321,7 +329,7 @@ class ChannelRegistry:
         """
         if getattr(self._txn, "undo", None) is not None:
             raise RuntimeError("ChannelRegistry.transaction does not nest")
-        with self._write_lock:
+        with self._lock:
             undo: list[tuple[str, ChannelRegistryEntry | None, ChannelRegistryEntry]] = []
             self._txn.undo = undo
             try:
@@ -349,25 +357,42 @@ class ChannelRegistry:
             )
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
-        return sorted(
-            [channel for channel in list(self._channels.values()) if channel.active],
-            key=lambda channel: channel.youtube_channel_id,
-        )
+        """Return every ACTIVE channel, sorted by youtube_channel_id.
+
+        Committed reads: takes the store lock, so an open transaction()
+        boundary's uncommitted writes are never observed off-thread (see
+        the lock note in ``__init__``).
+        """
+        with self._lock:
+            return sorted(
+                [channel for channel in list(self._channels.values()) if channel.active],
+                key=lambda channel: channel.youtube_channel_id,
+            )
 
     def list_channels_by_ids(
         self, youtube_channel_ids: set[str], *, include_inactive: bool = False
     ) -> list[ChannelRegistryEntry]:
-        return sorted(
-            [
-                channel
-                for channel_id, channel in list(self._channels.items())
-                if channel_id in youtube_channel_ids and (channel.active or include_inactive)
-            ],
-            key=lambda channel: channel.youtube_channel_id,
-        )
+        """Return the requested channels sorted by youtube_channel_id.
+
+        Inactive channels are omitted unless ``include_inactive`` is set;
+        unknown ids are silently absent (the caller diffs). Committed reads
+        — see the store lock note in ``__init__``.
+        """
+        with self._lock:
+            return sorted(
+                [
+                    channel
+                    for channel_id, channel in list(self._channels.items())
+                    if channel_id in youtube_channel_ids
+                    and (channel.active or include_inactive)
+                ],
+                key=lambda channel: channel.youtube_channel_id,
+            )
 
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
-        return self._channels.get(youtube_channel_id)
+        """Return the channel (active or not) by id, or None. Committed read."""
+        with self._lock:
+            return self._channels.get(youtube_channel_id)
 
     def create_channel(
         self,
@@ -380,7 +405,7 @@ class ChannelRegistry:
         content_owner_id: str | None = None,
     ) -> ChannelRegistryEntry:
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
-        with self._write_lock:
+        with self._lock:
             if youtube_channel_id in self._channels:
                 raise ChannelRegistryConflictError(
                     f"Channel already exists: {youtube_channel_id}"
@@ -405,7 +430,7 @@ class ChannelRegistry:
         self, *, youtube_channel_id: str, primary_company_id: str | None
     ) -> ChannelRegistryEntry:
         normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
-        with self._write_lock:
+        with self._lock:
             existing = self._channels.get(youtube_channel_id)
             if existing is None:
                 raise KeyError(youtube_channel_id)
@@ -426,7 +451,7 @@ class ChannelRegistry:
     def update_content_owner(
         self, *, youtube_channel_id: str, content_owner_id: str | None
     ) -> ChannelRegistryEntry:
-        with self._write_lock:
+        with self._lock:
             existing = self._channels.get(youtube_channel_id)
             if existing is None:
                 raise KeyError(youtube_channel_id)
@@ -480,7 +505,7 @@ class ChannelRegistry:
         write actually replaced (mirrors the SQL registry's write-boundary
         re-read; in memory the current entry IS the write-boundary state).
         """
-        with self._write_lock:
+        with self._lock:
             current = self._channels.get(youtube_channel_id)
             if current is None:
                 raise ChannelRegistryValidationError(f"Unknown channel: {youtube_channel_id}")
