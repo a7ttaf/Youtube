@@ -2326,6 +2326,7 @@ Matches the repo-standard image in `tests/db/_postgres_helpers.py` and
 **POSIX shell** (inline env assignment is POSIX-only):
 
 ```bash
+uv sync --extra dev --extra test --extra lint
 docker run -d --name ums-verify \
   -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=test_ums \
@@ -2341,12 +2342,16 @@ exit $pytest_exit
 **PowerShell** (Windows dev — use `$env:` assignment, not inline prefix):
 
 ```powershell
+uv sync --extra dev --extra test --extra lint
 docker run -d --name ums-verify `
   -e POSTGRES_PASSWORD=postgres `
   -e POSTGRES_DB=test_ums `
   -p 127.0.0.1:55505:5432 `
   postgres:18-alpine
-do { Start-Sleep -Seconds 1 } until (docker exec ums-verify pg_isready -U postgres -d test_ums 2>$null)
+do {
+  Start-Sleep -Seconds 1
+  docker exec ums-verify pg_isready -U postgres -d test_ums *> $null
+} until ($LASTEXITCODE -eq 0)
 $env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:postgres@127.0.0.1:55505/test_ums"
 uv run pytest -q -rw
 $pytestExit = $LASTEXITCODE
