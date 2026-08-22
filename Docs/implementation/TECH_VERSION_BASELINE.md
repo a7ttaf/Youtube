@@ -78,5 +78,11 @@ Backend package addendum checked on: `2026-05-13` (Africa/Cairo local date)
 - PyPI pypdf release metadata: `https://pypi.org/pypi/pypdf`
 - PyPI python-pptx release metadata: `https://pypi.org/pypi/python-pptx`
 
+httpx2 migration addendum checked on: `2026-08-22` (UTC)
+
+- PyPI httpx2 release metadata: `https://pypi.org/pypi/httpx2/json` — latest stable
+  `2.12.0` (uploaded 2026-08-18); pinned in `pyproject.toml` / `uv.lock` on branch
+  `chore/httpx2-migration` (PR #194). Replaces the prior `httpx` `0.28.1` baseline row.
+
 ## Local Environment Note
 The current workstation Python is `3.12`, so tests are still run against the available local interpreter. The production runtime target is `3.14.5`, and the project metadata now expresses `>=3.14,<3.15`.
